@@ -470,7 +470,7 @@ where
             client_id,
             history_id,
             thread_id,
-            target_thread_id,
+            target,
             note,
         } => {
             let result = state
@@ -479,7 +479,7 @@ where
                     &client_id,
                     &history_id,
                     thread_id,
-                    target_thread_id,
+                    target,
                     note.as_deref(),
                     true,
                 )
@@ -493,18 +493,11 @@ where
             client_id,
             history_id,
             thread_id,
-            target_thread_id,
+            target,
         } => {
             let result = state
                 .storage
-                .set_thread_reach(
-                    &client_id,
-                    &history_id,
-                    thread_id,
-                    target_thread_id,
-                    None,
-                    false,
-                )
+                .set_thread_reach(&client_id, &history_id, thread_id, target, None, false)
                 .await?;
             state
                 .tools

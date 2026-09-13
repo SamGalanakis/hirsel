@@ -62,11 +62,15 @@ export interface ThreadRelatedItem {
   created_at: string;
 }
 export type ThreadGrantSource = { kind: "owner" } | { kind: "thread"; thread_id: number };
+/** What one grant widens a Thread's reach to: one Thread and its subtree, or
+ * the root — every Thread in the history, including ones created later. */
+export type ThreadGrantTarget = { kind: "thread"; thread_id: number; title: string } | { kind: "root" };
+/** A reach target as an op names it: a Thread ID, or the literal "root". */
+export type ReachTarget = number | "root";
 /** One durable widening of a Thread's reach beyond self + descendants. */
 export interface ThreadGrant {
   thread_id: number;
-  target_thread_id: number;
-  title: string;
+  target: ThreadGrantTarget;
   granted_by: ThreadGrantSource;
   granted_at: string;
   note: string | null;
@@ -94,8 +98,8 @@ export type ThreadServerMessage =
 export type ThreadClientMessage =
   | { type: "add_thread_related"; client_id: string; history_id: string; thread_id: number; target: RelatedTarget; title: string | null }
   | { type: "remove_thread_related"; client_id: string; history_id: string; thread_id: number; item_id: number }
-  | { type: "grant_thread_reach"; client_id: string; history_id: string; thread_id: number; target_thread_id: number; note: string | null }
-  | { type: "revoke_thread_reach"; client_id: string; history_id: string; thread_id: number; target_thread_id: number }
+  | { type: "grant_thread_reach"; client_id: string; history_id: string; thread_id: number; target: ReachTarget; note: string | null }
+  | { type: "revoke_thread_reach"; client_id: string; history_id: string; thread_id: number; target: ReachTarget }
   | { type: "create_thread"; client_id: string; history_id: string; title: string; kind: ThreadKind; parent_thread_id: number | null }
   | { type: "open_thread"; client_id: string; thread_id: number; before_id: number | null }
   | { type: "send_thread_message"; client_id: string; history_id: string; thread_id: number; body: string; attachments: string[]; mentions: number[]; artifact_ids: number[]; mode: "send" | "next_turn" }

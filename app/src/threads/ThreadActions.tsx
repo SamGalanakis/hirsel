@@ -1,6 +1,6 @@
 import { createSignal, For, Show } from "solid-js";
 import { Dynamic } from "@solidjs/web";
-import { ArrowLeft, Pin, GitBranch, Archive, Check, ChevronRight, Clock, Copy, Layers, MoreHorizontal, RotateCcw, Square, SquarePen } from "../components/ui/icons";
+import { ArrowLeft, Pin, GitBranch, Archive, Check, ChevronRight, Clock, Copy, Layers, MoreHorizontal, Radar, RotateCcw, Square, SquarePen } from "../components/ui/icons";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "../components/ui/dropdown-menu";
 import { threadActions, type ThreadActionIcon, type ThreadActionItem } from "./actions";
 import type { Thread } from "./types";
@@ -9,7 +9,7 @@ const control = "shrink-0 items-center justify-center rounded-lg text-muted-fore
  * thumb needs as an invisible pseudo-element around the same glyph, so the
  * inventory never grows a phone-sized row on the desktop. */
 const touchTarget = "relative pointer-coarse:before:absolute pointer-coarse:before:left-1/2 pointer-coarse:before:top-1/2 pointer-coarse:before:size-11 pointer-coarse:before:-translate-x-1/2 pointer-coarse:before:-translate-y-1/2 pointer-coarse:before:content-['']";
-const icons = { icon: SquarePen, pin: Pin, child: GitBranch, settle: Check, reopen: RotateCcw, read: Check, snooze: Clock, archive: Archive, copy: Copy, stop: Square, kind: Layers };
+const icons = { icon: SquarePen, pin: Pin, child: GitBranch, settle: Check, reopen: RotateCcw, read: Check, snooze: Clock, archive: Archive, copy: Copy, stop: Square, kind: Layers, reach: Radar };
 export function ThreadActionSymbol(props: { name: ThreadActionIcon }) { return <Dynamic component={icons[props.name]} class="size-4" />; }
 export function ThreadActions(props: { thread: Thread; quick?: boolean; dense?: boolean; now?: number }) {
   const actions = () => threadActions(props.thread, props.now);

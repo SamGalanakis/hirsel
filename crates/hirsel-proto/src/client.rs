@@ -88,7 +88,8 @@ pub enum ClientToHost {
         client_id: String,
         history_id: String,
         thread_id: u64,
-        target_thread_id: u64,
+        /// A Thread ID, or `"root"` for every Thread in the history.
+        target: crate::ReachTarget,
         #[serde(default)]
         note: Option<String>,
     },
@@ -96,7 +97,7 @@ pub enum ClientToHost {
         client_id: String,
         history_id: String,
         thread_id: u64,
-        target_thread_id: u64,
+        target: crate::ReachTarget,
     },
     SendThreadMessage {
         client_id: String,

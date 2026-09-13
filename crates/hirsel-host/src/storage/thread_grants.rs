@@ -1,9 +1,10 @@
 //! Durable reach. A Thread's default reach is itself and its descendants; a
-//! grant names one other Thread whose subtree it may address as well. Grants
-//! are ordinary rows: visible to the Owner, inspectable by the Thread that
-//! holds them, and removable without a release.
+//! grant names one other Thread whose subtree it may address as well, or the
+//! root, which is every Thread in the history including the ones made later.
+//! Grants are ordinary rows: visible to the Owner, inspectable by the Thread
+//! that holds them, and removable without a release.
 use super::{Storage, ThreadCaller, thread_scope, threads};
-use hirsel_proto::{Thread, ThreadGrant, ThreadGrantSource};
+use hirsel_proto::{ReachTarget, Thread, ThreadGrant, ThreadGrantSource, ThreadGrantTarget};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -23,16 +24,21 @@ const MAX_GRANTS: u64 = 100;
 pub(super) fn list(c: &Connection, thread_id: u64) -> anyhow::Result<Vec<ThreadGrant>> {
     Ok(c.prepare(
         "SELECT g.thread_id,g.target_thread_id,t.title,g.granted_by,g.granted_by_thread_id,g.granted_at,g.note
-         FROM thread_grants g JOIN threads t ON t.id=g.target_thread_id
-         WHERE g.thread_id=?1 ORDER BY g.target_thread_id",
+         FROM thread_grants g LEFT JOIN threads t ON t.id=g.target_thread_id
+         WHERE g.thread_id=?1 ORDER BY g.target_key",
     )?
     .query_map([thread_id], |r| {
         let by: String = r.get(3)?;
         let by_thread: Option<u64> = r.get(4)?;
         Ok(ThreadGrant {
             thread_id: r.get(0)?,
-            target_thread_id: r.get(1)?,
-            title: r.get(2)?,
+            target: match r.get::<_, Option<u64>>(1)? {
+                Some(thread_id) => ThreadGrantTarget::Thread {
+                    thread_id,
+                    title: r.get(2)?,
+                },
+                None => ThreadGrantTarget::Root,
+            },
             granted_by: match by_thread {
                 Some(thread_id) if by == "thread" => ThreadGrantSource::Thread { thread_id },
                 _ => ThreadGrantSource::Owner,
@@ -44,15 +50,27 @@ pub(super) fn list(c: &Connection, thread_id: u64) -> anyhow::Result<Vec<ThreadG
     .collect::<rusqlite::Result<_>>()?)
 }
 
+/// True when this Thread holds reach over everything. One root grant makes
+/// every other grant it holds redundant, so reach reads as one word.
+pub(super) fn holds_root(c: &Connection, thread_id: u64) -> anyhow::Result<bool> {
+    Ok(c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM thread_grants WHERE thread_id=?1 AND target_thread_id IS NULL)",
+        [thread_id],
+        |r| r.get(0),
+    )?)
+}
+
 /// The one line the Owner reads above the composer and the Agent reads in its
 /// own context: what this Thread can address, in the order it was granted.
 pub(super) fn reach_summary(c: &Connection, thread_id: u64) -> anyhow::Result<String> {
+    if holds_root(c, thread_id)? {
+        return Ok("everything (root)".into());
+    }
     let mut summary = String::from("self + subtree");
     for grant in list(c, thread_id)? {
-        summary.push_str(&format!(
-            " · +Thread {} '{}'",
-            grant.target_thread_id, grant.title
-        ));
+        if let ThreadGrantTarget::Thread { thread_id, title } = grant.target {
+            summary.push_str(&format!(" · +Thread {thread_id} '{title}'"));
+        }
     }
     Ok(summary)
 }
@@ -89,8 +107,15 @@ fn normalized_note(note: Option<&str>) -> anyhow::Result<Option<String>> {
 
 /// A grant only ever widens. Default reach already covers the Thread itself and
 /// everything below it, so naming one of those is a mistake, not a no-op row.
-fn validate_target(c: &Connection, thread_id: u64, target: u64) -> anyhow::Result<()> {
+/// The root is always a widening: it covers Threads that do not exist yet.
+fn validate_target(c: &Connection, thread_id: u64, target: ReachTarget) -> anyhow::Result<()> {
     threads::get(c, thread_id)?;
+    let ReachTarget::Thread {
+        thread_id: target, ..
+    } = target
+    else {
+        return Ok(());
+    };
     threads::get(c, target)?;
     anyhow::ensure!(thread_id != target, "a Thread always reaches itself");
     anyhow::ensure!(
@@ -100,10 +125,18 @@ fn validate_target(c: &Connection, thread_id: u64, target: u64) -> anyhow::Resul
     Ok(())
 }
 
+/// The stored target of one grant: a Thread ID, or NULL for the root.
+fn target_column(target: ReachTarget) -> Option<u64> {
+    match target {
+        ReachTarget::Root => None,
+        ReachTarget::Thread { thread_id } => Some(thread_id),
+    }
+}
+
 pub(super) fn grant(
     c: &Connection,
     thread_id: u64,
-    target: u64,
+    target: ReachTarget,
     source: &ThreadGrantSource,
     note: Option<&str>,
 ) -> anyhow::Result<ThreadGrants> {
@@ -113,43 +146,48 @@ pub(super) fn grant(
         ThreadGrantSource::Owner => ("owner", None),
         ThreadGrantSource::Thread { thread_id } => ("thread", Some(*thread_id)),
     };
+    let stored = target_column(target);
     let count: u64 = c.query_row(
         "SELECT count(*) FROM thread_grants WHERE thread_id=?1",
         [thread_id],
         |r| r.get(0),
     )?;
     let existing: bool = c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM thread_grants WHERE thread_id=?1 AND target_thread_id=?2)",
-        params![thread_id, target],
+        "SELECT EXISTS(SELECT 1 FROM thread_grants WHERE thread_id=?1 AND target_key=COALESCE(?2,0))",
+        params![thread_id, stored],
         |r| r.get(0),
     )?;
     anyhow::ensure!(
         existing || count < MAX_GRANTS,
         "Thread already holds {MAX_GRANTS} grants"
     );
-    let changed = c.execute(
-        "INSERT INTO thread_grants(thread_id,target_thread_id,granted_by,granted_by_thread_id,granted_at,note)
-         VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(thread_id,target_thread_id) DO NOTHING",
-        params![
-            thread_id,
-            target,
-            by,
-            by_thread,
-            chrono::Utc::now().to_rfc3339(),
-            note
-        ],
-    )?;
-    if changed > 0 {
+    if !existing {
+        c.execute(
+            "INSERT INTO thread_grants(thread_id,target_thread_id,granted_by,granted_by_thread_id,granted_at,note)
+             VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                thread_id,
+                stored,
+                by,
+                by_thread,
+                chrono::Utc::now().to_rfc3339(),
+                note
+            ],
+        )?;
         advance(c, thread_id)?;
     }
     snapshot(c, thread_id)
 }
 
-pub(super) fn revoke(c: &Connection, thread_id: u64, target: u64) -> anyhow::Result<ThreadGrants> {
+pub(super) fn revoke(
+    c: &Connection,
+    thread_id: u64,
+    target: ReachTarget,
+) -> anyhow::Result<ThreadGrants> {
     threads::get(c, thread_id)?;
     if c.execute(
-        "DELETE FROM thread_grants WHERE thread_id=?1 AND target_thread_id=?2",
-        params![thread_id, target],
+        "DELETE FROM thread_grants WHERE thread_id=?1 AND target_key=COALESCE(?2,0)",
+        params![thread_id, target_column(target)],
     )? > 0
     {
         advance(c, thread_id)?;
@@ -163,7 +201,7 @@ pub(super) fn authorize_widening(
     c: &Connection,
     caller: u64,
     thread_id: u64,
-    target: Option<u64>,
+    target: Option<ReachTarget>,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
         caller != thread_id,
@@ -173,10 +211,15 @@ pub(super) fn authorize_widening(
         thread_scope::is_ancestor(c, caller, thread_id)?,
         "only an ancestor Thread can change a Thread's reach"
     );
-    if let Some(target) = target {
-        thread_scope::authorize(c, caller, target)?;
+    match target {
+        // Root is handed on, never invented: only a root holder can widen a
+        // descendant to everything, and the refusal is typed like any other.
+        Some(ReachTarget::Root) if !holds_root(c, caller)? => {
+            Err(thread_scope::OutsideGrant::root())
+        }
+        Some(ReachTarget::Root) | None => Ok(()),
+        Some(ReachTarget::Thread { thread_id }) => thread_scope::authorize(c, caller, thread_id),
     }
-    Ok(())
 }
 
 fn replay(c: &Connection, client_id: &str, payload: &str) -> anyhow::Result<bool> {
@@ -217,7 +260,7 @@ impl Storage {
         client_id: &str,
         history_id: &str,
         thread_id: u64,
-        target_thread_id: u64,
+        target: ReachTarget,
         note: Option<&str>,
         granted: bool,
     ) -> anyhow::Result<ThreadGrants> {
@@ -230,7 +273,7 @@ impl Storage {
             "operation": if granted { "grant" } else { "revoke" },
             "history_id": history_id,
             "thread_id": thread_id,
-            "target_thread_id": target_thread_id,
+            "target": target,
             "note": note,
         }))?;
         let result = if replay(&tx, client_id, &payload)? {
@@ -240,12 +283,12 @@ impl Storage {
                 grant(
                     &tx,
                     thread_id,
-                    target_thread_id,
+                    target,
                     &ThreadGrantSource::Owner,
                     note.as_deref(),
                 )?
             } else {
-                revoke(&tx, thread_id, target_thread_id)?
+                revoke(&tx, thread_id, target)?
             };
             tx.execute(
                 "INSERT INTO thread_grant_receipts(client_id,payload) VALUES(?1,?2)",

@@ -205,7 +205,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.threads_grant",
             "threads_grant",
-            "Widen one descendant Thread's reach to a Thread you can already reach, so it may address that Thread and its subtree directly. You cannot widen yourself, and you cannot hand on reach you do not hold. Durable and visible to the Owner, who can revoke it.",
+            "Widen one descendant Thread's reach to a Thread you can already reach, so it may address that Thread and its subtree directly, or to \"root\" — every Thread in the history, including ones made later — which you can only hand on if you hold it yourself. You cannot widen yourself, and you cannot hand on reach you do not hold. Durable and visible to the Owner, who can revoke it.",
             thread_grant_schema(),
             json!({"type":"object"}),
             ["threads"],

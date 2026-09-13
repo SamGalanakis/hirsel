@@ -151,18 +151,76 @@ pub enum ThreadGrantSource {
     Thread { thread_id: u64 },
 }
 
-/// One durable widening of a Thread's reach: `thread_id` may address
-/// `target_thread_id` and everything under it, exactly as if it were its own
-/// subtree. Default reach (self + descendants) is never stored as a grant.
+/// What one grant widens a Thread's reach to: one named Thread and everything
+/// under it, or the root — every Thread in the history, including Threads
+/// created after the grant was made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ThreadGrantTarget {
+    Thread {
+        thread_id: u64,
+        /// The target's current title, so a reach list needs no second lookup.
+        title: String,
+    },
+    Root,
+}
+
+/// One durable widening of a Thread's reach: `thread_id` may address `target`
+/// and everything under it, exactly as if it were its own subtree. Default
+/// reach (self + descendants) is never stored as a grant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadGrant {
     pub thread_id: u64,
-    pub target_thread_id: u64,
-    /// The target's current title, so a reach strip needs no second lookup.
-    pub title: String,
+    pub target: ThreadGrantTarget,
     pub granted_by: ThreadGrantSource,
     pub granted_at: DateTime<Utc>,
     pub note: Option<String>,
+}
+
+/// A reach target as an op names it: a Thread ID, or the literal `"root"`.
+/// One spelling for the Owner's client ops and the agent's grant tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "ReachTargetWire", into = "ReachTargetWire")]
+pub enum ReachTarget {
+    Root,
+    Thread { thread_id: u64 },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ReachTargetWire {
+    Thread(u64),
+    Root(String),
+}
+
+impl TryFrom<ReachTargetWire> for ReachTarget {
+    type Error = String;
+    fn try_from(wire: ReachTargetWire) -> Result<Self, Self::Error> {
+        match wire {
+            ReachTargetWire::Thread(thread_id) if thread_id > 0 => Ok(Self::Thread { thread_id }),
+            ReachTargetWire::Thread(_) => Err("a Thread ID is a positive integer".into()),
+            ReachTargetWire::Root(name) if name == "root" => Ok(Self::Root),
+            ReachTargetWire::Root(_) => {
+                Err("a reach target is a Thread ID or the string \"root\"".into())
+            }
+        }
+    }
+}
+impl From<ReachTarget> for ReachTargetWire {
+    fn from(target: ReachTarget) -> Self {
+        match target {
+            ReachTarget::Root => Self::Root("root".into()),
+            ReachTarget::Thread { thread_id } => Self::Thread(thread_id),
+        }
+    }
+}
+impl std::fmt::Display for ReachTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Root => write!(f, "everything (root)"),
+            Self::Thread { thread_id } => write!(f, "Thread #{thread_id}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

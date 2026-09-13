@@ -9,9 +9,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 /// The reachable set: the caller's own subtree, plus the subtree of every
-/// Thread its durable grants name. Bound `?1` is the calling Thread.
+/// Thread its durable grants name — and, when it holds a root grant, every
+/// Thread in the history, whenever it was created. Bound `?1` is the caller.
 pub(super) const REACH_CTE: &str = "WITH RECURSIVE roots(id) AS (
-    SELECT ?1 UNION SELECT target_thread_id FROM thread_grants WHERE thread_id=?1
+    SELECT ?1
+    UNION SELECT target_thread_id FROM thread_grants WHERE thread_id=?1 AND target_thread_id IS NOT NULL
+    UNION SELECT t.id FROM threads t WHERE EXISTS(SELECT 1 FROM thread_grants WHERE thread_id=?1 AND target_thread_id IS NULL)
 ), scope(id) AS (
     SELECT id FROM roots UNION SELECT t.id FROM threads t JOIN scope s ON t.parent_thread_id=s.id
 )";
@@ -27,8 +30,14 @@ pub(crate) struct OutsideGrant {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum RefusedTarget {
-    Thread { thread_id: u64 },
-    Artifact { artifact_id: u64 },
+    Thread {
+        thread_id: u64,
+    },
+    Artifact {
+        artifact_id: u64,
+    },
+    /// Reach over everything, asked for by a Thread that does not hold it.
+    Root,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -53,6 +62,7 @@ impl std::fmt::Display for OutsideGrant {
         let target = match self.target {
             RefusedTarget::Thread { thread_id } => format!("Thread #{thread_id}"),
             RefusedTarget::Artifact { artifact_id } => format!("Artifact {artifact_id}"),
+            RefusedTarget::Root => "Everything (root)".to_string(),
         };
         match self.reason {
             RefusalReason::OutsideGrant => {
@@ -70,6 +80,13 @@ impl OutsideGrant {
     fn thread(thread_id: u64) -> anyhow::Error {
         Self {
             target: RefusedTarget::Thread { thread_id },
+            reason: RefusalReason::OutsideGrant,
+        }
+        .into()
+    }
+    pub(super) fn root() -> anyhow::Error {
+        Self {
+            target: RefusedTarget::Root,
             reason: RefusalReason::OutsideGrant,
         }
         .into()

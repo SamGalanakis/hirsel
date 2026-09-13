@@ -14,6 +14,16 @@ fn reference(args: &Value, key: &str) -> Result<ThreadRef, ToolError> {
         .transpose()
         .map(|v| v.unwrap_or_default())
 }
+/// A grant names a Thread — by ID or caller-relative path — or `"root"`.
+fn grant_target(args: &Value) -> Result<crate::storage::GrantTargetRef, ToolError> {
+    serde_json::from_value(args.get("target").cloned().ok_or("target required")?)
+        .map_err(ToolError::from)
+}
+/// Revoking names the stored target exactly: a Thread ID, or `"root"`.
+fn reach_target(args: &Value) -> Result<hirsel_proto::ReachTarget, ToolError> {
+    serde_json::from_value(args.get("target").cloned().ok_or("target required")?)
+        .map_err(ToolError::from)
+}
 fn refs(args: &Value) -> Result<Vec<u64>, ToolError> {
     serde_json::from_value(
         args.get("artifact_ids")
@@ -240,7 +250,7 @@ impl ScopedThreadTools {
             "threads_grant" => {
                 self.thread_mutation(crate::storage::ThreadMutation::Grant {
                     thread: reference(args, "thread")?,
-                    target: reference(args, "target")?,
+                    target: grant_target(args)?,
                     note: optional_string_any_allow_empty(args, &["note"])?,
                 })
                 .await
@@ -248,9 +258,7 @@ impl ScopedThreadTools {
             "threads_revoke" => {
                 self.thread_mutation(crate::storage::ThreadMutation::Revoke {
                     thread: reference(args, "thread")?,
-                    target_thread_id: args["target_thread_id"]
-                        .as_u64()
-                        .ok_or("target_thread_id must be a positive integer")?,
+                    target: reach_target(args)?,
                 })
                 .await
             }

@@ -931,7 +931,7 @@ async fn every_executor_result_matches_its_declared_output_schema() {
         "threads_context",
         vec![json!({"thread":thread,"ancestors":[],"brief":{"text":"","artifact_ids":[]},"grants":[],"reach":"self + subtree"})],
     );
-    let grants = json!([{"thread_id":2,"target_thread_id":7,"title":"Billing","granted_by":{"kind":"owner"},"granted_at":now,"note":null}]);
+    let grants = json!([{"thread_id":2,"target":{"kind":"thread","thread_id":7,"title":"Billing"},"granted_by":{"kind":"owner"},"granted_at":now,"note":null}]);
     results.insert(
         "threads_grant",
         vec![json!({"thread_id":2,"thread":thread,"revision":2,"grants":grants})],

@@ -2,13 +2,14 @@ import type { ArtifactSummary } from "./types";
 
 /** The surface a result is drawn on. One mode per kind, decided here and
  * nowhere else: no reader inspects a MIME type or a filename to guess. */
-export type ArtifactRenderMode = "solid" | "html" | "markdown" | "image" | "text";
+export type ArtifactRenderMode = "solid" | "html" | "markdown" | "openui" | "image" | "text";
 
 export function renderModeFor(artifact: Pick<ArtifactSummary, "kind">): ArtifactRenderMode {
   switch (artifact.kind) {
     case "solid": return "solid";
     case "html": return "html";
     case "markdown": return "markdown";
+    case "openui": return "openui";
     case "image": return "image";
     case "file": return "text";
   }
@@ -46,6 +47,7 @@ export function downloadIdentity(summary: ArtifactSummary): { mime: string; file
     case "solid": return { mime: "text/jsx", filename: `${summary.title}.jsx` };
     case "html": return { mime: "text/html", filename: `${summary.title}.html` };
     case "markdown": return { mime: "text/markdown", filename: `${summary.title}.md` };
+    case "openui": return { mime: "text/x-openui", filename: `${summary.title}.openui` };
     case "image": return { mime: summary.mime, filename: `${summary.title}${imageExtension(summary.mime)}` };
     case "file": return { mime: summary.mime, filename: summary.filename ?? `${summary.title}.txt` };
   }

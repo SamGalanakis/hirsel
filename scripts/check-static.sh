@@ -10,3 +10,4 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 (cd app && npm run lint)
 (cd app && npm exec -- tsc --noEmit)
+node app/scripts/openui-prompt.mjs --check

@@ -115,6 +115,36 @@ impl ScopedThreadTools {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn artifact_tools_publish_openui_as_its_own_kind() {
+        let (executor, storage, _log, _dir) = super::super::tests::test_event_executor().await;
+        let caller = storage.test_running_caller().await;
+        let executor = ScopedThreadTools {
+            tools: executor.tools,
+            caller,
+            operation_id: "fixture".into(),
+        };
+        // The body is data, not a program: the tool stores it as text and the
+        // kind alone decides that the app draws it natively.
+        let create = json!({"title":"Board","kind":"openui","content":"root = Stack([lede])\nlede = Heading(\"Live\", 2)"});
+        let created = executor
+            .publish_artifact_operation("artifacts_create", &create, "create-openui")
+            .await
+            .unwrap();
+        assert_eq!(created["kind"], "openui");
+        let id = created["id"].as_u64().unwrap();
+        let edits = json!({"artifact_id":id,"edits":[{"old_string":"lede = Heading(\"Live\", 2)","new_string":"lede = Heading(\"Settled\", 2)"}]});
+        let edited = executor
+            .publish_artifact_operation("artifacts_edit", &edits, "edit-openui")
+            .await
+            .unwrap();
+        assert_eq!(edited["kind"], "openui");
+        assert!(edited["content"].as_str().unwrap().contains("Settled"));
+        let stored = storage.artifacts(None).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].kind, hirsel_proto::ArtifactKind::OpenUi);
+    }
+
+    #[tokio::test]
     async fn artifact_tools_publish_exact_edits_and_replay_same_card() {
         let (executor, storage, log, _dir) = super::super::tests::test_event_executor().await;
         let caller = storage.test_running_caller().await;

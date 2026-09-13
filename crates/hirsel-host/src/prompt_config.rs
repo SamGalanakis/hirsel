@@ -27,6 +27,11 @@ use crate::{
 pub const AGENT_PROMPT: &str = include_str!("../../../prompts/agent.md");
 /// The bundled wake-triage fork prompt.
 pub const FORK_PROMPT: &str = include_str!("../../../prompts/fork.md");
+/// The `openui` artifact vocabulary, generated from the app's own component
+/// schemas by `app/scripts/openui-prompt.mjs`. Appended to whichever Agent
+/// prompt body is in force, because the components an artifact may use are a
+/// fact about the running app, not a preference the Owner can edit away.
+pub const OPENUI_LIBRARY_PROMPT: &str = include_str!("../../../prompts/openui-library.md");
 
 /// The Owner-editable prompt surface, backed by the hot-reloaded config store.
 ///
@@ -83,10 +88,11 @@ impl PromptConfig {
     /// body plus the host-generated configuration section.
     pub fn agent_guidance(&self) -> String {
         format!(
-            "{}{}{}",
+            "{}{}{}\n\n{}",
             self.agent_prompt().text,
             self.host_section,
-            self.skills.guidance()
+            self.skills.guidance(),
+            OPENUI_LIBRARY_PROMPT
         )
     }
 
@@ -254,7 +260,11 @@ mod tests {
         // host-generated section, never the bundled body once overridden.
         let guidance = prompts.agent_guidance();
         assert!(guidance.starts_with("You are a quieter hirsel."));
-        assert!(guidance.ends_with("## Host configuration\n"));
+        assert!(guidance.contains("## Host configuration\n"));
+        // The generated OpenUI vocabulary is a fact about the running app, so
+        // it survives an Owner prompt override and closes the guidance.
+        assert!(guidance.ends_with(OPENUI_LIBRARY_PROMPT));
+        assert!(guidance.contains("## OpenUI component library"));
 
         // Reload from disk: the override survives a fresh store.
         let reloaded = config(&dir, ProviderMode::Codex).await;

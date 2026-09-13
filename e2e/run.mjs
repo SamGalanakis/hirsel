@@ -53,10 +53,12 @@ try {
     HIRSEL_THREAD_SMOKE_ARTIFACTS: evidenceDir,
     HIRSEL_ARTIFACT_HOST_URL: host.url,
     HIRSEL_ARTIFACT_HOST_TOKEN: token,
+    HIRSEL_OPENUI_SHOTS: join(evidenceDir, "openui"),
   };
   await run("Thread smoke", process.execPath, ["e2e/thread-smoke.mjs"], hostEnvironment);
   await run("Artifact Thread smoke", process.execPath, ["e2e/artifact-thread-smoke.mjs"], hostEnvironment);
   await run("Thread showcase smoke", process.execPath, ["e2e/thread-showcase-smoke.mjs"], hostEnvironment);
+  await run("OpenUI artifact smoke", process.execPath, ["e2e/openui-artifact-smoke.mjs"], hostEnvironment);
 
   const vitePort = await unusedPort();
   const viteUrl = `http://127.0.0.1:${vitePort}`;

@@ -1,6 +1,9 @@
 import type { RelatedTarget } from "../threads/types";
 export type ThreadTarget = Extract<RelatedTarget, {kind:"thread"}>;
-export type ThreadLinkResult = { kind: "thread"; target: ThreadTarget } | { kind: "incomplete" | "invalid" };
+/** `local` is a bare `/t/<id>` — the link form of the `#id` shorthand. It names
+ * a Thread without naming a history, so only a connected client can say which
+ * history it belongs to. */
+export type ThreadLinkResult = { kind: "thread"; target: ThreadTarget } | { kind: "local"; thread_id: number } | { kind: "invalid" };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Only this app's origin (or a root-relative URL) can claim a local Thread. */
 export function parseThreadLink(input: string, origin = location.origin): ThreadLinkResult | null {
@@ -13,7 +16,7 @@ export function parseThreadLink(input: string, origin = location.origin): Thread
   const match = /^\/t\/(0|[1-9]\d*)$/.exec(url.pathname);
   if (!match || !Number.isSafeInteger(Number(match[1]))) return { kind: "invalid" };
   const histories = url.searchParams.getAll("history");
-  if (histories.length === 0) return { kind: "incomplete" };
+  if (histories.length === 0) return { kind: "local", thread_id: Number(match[1]) };
   if (histories.length !== 1 || !UUID.test(histories[0])) return { kind: "invalid" };
   return { kind: "thread", target: { kind: "thread", history_id: histories[0].toLowerCase(), thread_id: Number(match[1]) } };
 }

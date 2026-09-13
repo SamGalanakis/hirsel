@@ -1,6 +1,6 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { createOverlayPresence } from "../lib/focus";
-import { Plus, X, Search, Funnel, Check, ChevronRight, Clock } from "../components/ui/icons";
+import { Plus, X, Search, Funnel, Check, ChevronRight, Clock, PanelRight, Settings } from "../components/ui/icons";
 import { type ThreadSection } from "./model";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../components/ui/dropdown-menu";
 import type { ThreadNavigationIntent } from "./navigation";
@@ -8,18 +8,26 @@ import type { Thread } from "./types";
 import { ThreadAvatar } from "./ThreadAvatar";
 import { ThreadError } from "./ThreadError";
 import { ThreadActions } from "./ThreadActions";
+import { attentionThreads } from "./attention";
 import { ancestorsIn, pathIn, threadAncestors, threadIndex, threadTree } from "./tree";
 import { openThreadCreate } from "./create";
 import { threadRowSummary } from "./status";
-import { state } from "../store/store";
+import { openSettings, state } from "../store/store";
 import { historyId } from "../lib/history";
 import { threadState } from "./store";
 
+/** How much of the inventory is standing at this width.
+ *  `docked` — the persistent 288px column; `compact` — the 56px icon column
+ *  that stands in its place rather than leaving an empty canvas; `modal` — the
+ *  drawer over the workspace; `hidden` — phone, where the bottom bar summons it. */
+export type ThreadNavigationMode = "hidden" | "compact" | "modal" | "docked";
 /** Dense inventory geometry. One line per Thread: a fine pointer reads 28px rows,
  * a coarse pointer keeps the 44px target DESIGN.md requires on phones. */
 const ROW = "h-7 pointer-coarse:h-11";
 const control = "inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:size-11";
 const label = "px-2 pt-3 pb-1 text-meta font-medium uppercase tracking-wider text-muted-foreground";
+/** Tone for the row's one state token. */
+const metaTone = { attention: "text-status-attention", active: "text-status-active", danger: "text-destructive", muted: "text-muted-foreground" } as const;
 /** Manual expand/collapse is the Owner's own choice, so it outlives a reload;
  * the depth default only fills the gaps it leaves. */
 const expansionKey = (history: string | null) => `hirsel.thread-navigation.expanded.${history ?? "unknown"}`;
@@ -40,12 +48,22 @@ function Indicator(props: { thread: Thread; now: number }) {
     <Show when={summary().indicator === "done"}><Check class="size-2.5 text-muted-foreground" /></Show>
   </span>;
 }
-export function ThreadNavigation(props: { open: boolean; modal: boolean; intent: ThreadNavigationIntent | null; onClose: () => void; onSelect: (id: number) => void }) {
+/** A Thread's own avatar, marked done without losing its identity: the check
+ * rides the corner as an indicator, the way every other row state does. */
+function RowIcon(props: { thread: Thread; now: number }) {
+  return <span class="relative shrink-0 bg-inherit">
+    <ThreadAvatar thread={props.thread} dense />
+    <Indicator thread={props.thread} now={props.now} />
+  </span>;
+}
+export function ThreadNavigation(props: { mode: ThreadNavigationMode; intent: ThreadNavigationIntent | null; onClose: () => void; onSelect: (id: number) => void; onExpand: () => void }) {
   let dialog: HTMLDialogElement | undefined;
   let restoreTarget: HTMLElement | null = null;
   let displayedAsModal: boolean | null = null;
   let focusWasSummoned = false;
   let ownsFocus = false;
+  const open = () => props.mode === "modal" || props.mode === "docked";
+  const modal = () => props.mode === "modal";
   const [section, setSection] = createSignal<ThreadSection>("active");
   const [choices, setChoices] = createSignal<Record<string, boolean>>({});
   const [query, setQuery] = createSignal("");
@@ -54,14 +72,14 @@ export function ThreadNavigation(props: { open: boolean; modal: boolean; intent:
   document.addEventListener("focusin", trackFocus);
   onCleanup(() => { document.removeEventListener("focusin", trackFocus); dialog?.close(); });
   createEffect(() => historyId(), history => { setChoices(readExpansion(history)); });
-  createEffect(() => props.open, open => {
-    if (!open) return;
+  createEffect(() => props.mode !== "hidden", live => {
+    if (!live) return;
     setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(timer);
   });
-  createOverlayPresence(() => props.open && props.modal);
-  createEffect(() => ({ open: props.open, modal: props.modal }), next => {
+  createOverlayPresence(() => modal());
+  createEffect(() => ({ open: open(), modal: modal() }), next => {
     if (!dialog) return;
     if (!next.open) {
       if (dialog.open) dialog.close();
@@ -100,7 +118,7 @@ export function ThreadNavigation(props: { open: boolean; modal: boolean; intent:
       return () => cancelAnimationFrame(frame);
     } else if (focusWasSummoned) {
       focusWasSummoned = false;
-      if (!props.open) {
+      if (!open()) {
         const destination = restoreTarget?.isConnected ? restoreTarget : document.querySelector<HTMLElement>('[data-slot="thread-navigation-trigger"]');
         destination?.focus();
       }
@@ -129,19 +147,21 @@ export function ThreadNavigation(props: { open: boolean; modal: boolean; intent:
   /** One index for the whole list: each row's ancestry tooltip is a walk, not a rebuild. */
   const rowIndex = createMemo(() => threadIndex(threadState.threads));
   const visibleRows = createMemo(() => tree().filter(row => !search() || search()!.keep.has(row.thread.id)).map(row => ({ ...row, key: `tree:${row.thread.id}` })));
+  /** The one attention selector, shared with the overview queue and the pill. */
+  const waiting = createMemo(() => section() === "active" && !search() ? attentionThreads(threadState.threads, now()) : []);
   const sectionLabel = () => section() === "active" ? "Threads" : section() === "settled" ? "Done" : section();
   /** Pinned roots keep their own band; the rest sit under one quiet heading. */
   const listItems = createMemo(() => {
     const rows = visibleRows();
     const rooted = (row: typeof rows[number]) => row.depth === 0 && row.thread.parent_thread_id === null;
     const pinned = rows.some(row => rooted(row) && row.thread.pinned_at);
-    const items: { key: string; label?: string; row?: typeof rows[number] }[] = [];
+    const items: { key: string; label?: string; row?: typeof rows[number]; index?: number }[] = [];
     let rest = false;
-    for (const row of rows) {
+    rows.forEach((row, index) => {
       if (pinned && !items.length) items.push({ key: "label:pinned", label: "Pinned" });
       if (pinned && !rest && rooted(row) && !row.thread.pinned_at) { rest = true; items.push({ key: "label:rest", label: sectionLabel() }); }
-      items.push({ key: row.key, row });
-    }
+      items.push({ key: row.key, row, index });
+    });
     if (!pinned && rows.length && section() !== "active") items.unshift({ key: "label:rest", label: sectionLabel() });
     return items;
   });
@@ -150,6 +170,15 @@ export function ThreadNavigation(props: { open: boolean; modal: boolean; intent:
     setChoices(next);
     writeExpansion(historyId(), next);
   };
+  /** Roving tabindex: the tree is ONE tab stop and the arrows move inside it,
+   * so reaching the first Thread no longer costs a tab per row. */
+  const [rovingRow, setRovingRow] = createSignal(0);
+  const activeRow = createMemo(() => {
+    const rows = visibleRows();
+    const selected = rows.findIndex(row => row.thread.id === threadState.focusedId);
+    if (selected >= 0) return selected;
+    return Math.min(Math.max(rovingRow(), 0), Math.max(rows.length - 1, 0));
+  });
   let focusedRowIndex = 0;
   createEffect(() => visibleRows().map(row => row.key).join(","), () => {
     const frame = requestAnimationFrame(() => {
@@ -173,19 +202,36 @@ export function ThreadNavigation(props: { open: boolean; modal: boolean; intent:
       return;
     }
     const next = event.key === "ArrowDown" ? Math.min(current + 1, rows.length - 1) : event.key === "ArrowUp" ? Math.max(0, current - 1) : event.key === "Home" ? 0 : event.key === "End" ? rows.length - 1 : null;
-    if (next !== null) { event.preventDefault(); rows[next]?.focus(); }
+    if (next !== null) { event.preventDefault(); setRovingRow(next); rows[next]?.focus(); }
   };
   const dismiss = (event: Event) => { event.preventDefault(); props.onClose(); };
-  return <dialog ref={node => { dialog = node; }} id="thread-navigation" role={props.modal ? "dialog" : "complementary"} aria-modal={props.modal ? "true" : undefined} aria-label="Spaces and Tasks" data-slot="thread-drawer"
+  const describe = (thread: Thread, context: boolean) => {
+    const summary = threadRowSummary(thread, now(), state.connection === "connected");
+    return [`${thread.kind === "space" ? "Space" : "Task"} ${thread.title} #${thread.id}`, thread.parent_thread_id === null && thread.pinned_at ? "Pinned" : null, thread.read ? null : "Unread", context ? "Parent context" : null, summary.sentence || null, summary.age ? `Last activity ${summary.age} ago` : null].filter(Boolean).join(" · ");
+  };
+  return <>
+  {/* Never an empty canvas: where the column is not docked but the width can
+      still hold one, the inventory stands as a 56px strip of Thread icons. */}
+  <Show when={props.mode === "compact"}>
+    <nav data-slot="thread-compact-column" aria-label="Spaces and Tasks" class="flex w-14 shrink-0 flex-col items-center gap-1 overflow-y-auto border-r border-border py-2">
+      <button class={control} aria-label="Open Spaces and Tasks" title="Open Spaces and Tasks" data-slot="thread-compact-expand" aria-controls="thread-navigation" onClick={props.onExpand}><PanelRight class="size-4" /></button>
+      <For each={visibleRows()}>{row => <button type="button" data-compact-thread={row.thread.id} class={`relative flex size-9 shrink-0 items-center justify-center rounded-md pointer-coarse:size-11 ${threadState.focusedId === row.thread.id ? "bg-muted" : "hover:bg-muted"}`} aria-label={describe(row.thread, row.context)} aria-current={threadState.focusedId === row.thread.id ? "page" : undefined} title={pathIn(rowIndex(), row.thread.id)} onClick={() => props.onSelect(row.thread.id)}>
+        <RowIcon thread={row.thread} now={now()} />
+      </button>}</For>
+    </nav>
+  </Show>
+  <dialog ref={node => { dialog = node; }} id="thread-navigation" role={modal() ? "dialog" : "complementary"} aria-modal={modal() ? "true" : undefined} aria-label="Spaces and Tasks" data-slot="thread-drawer"
     onCancel={dismiss} onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); dismiss(event); } }}
     onPointerDown={event => { if (event.target === dialog && dialog) { const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) props.onClose(); } }}
-    class="fixed inset-y-0 left-14 m-0 h-dvh max-h-none w-[min(20rem,calc(100vw-3.5rem))] max-w-none flex-col border-0 border-r border-border bg-background p-2 text-foreground backdrop:bg-transparent open:flex workspace:static workspace:z-auto workspace:h-auto workspace:w-72 workspace:shrink-0">
+    class="fixed inset-y-0 left-0 m-0 h-dvh max-h-none w-[min(20rem,100vw)] max-w-none flex-col border-0 border-r border-border bg-background p-2 text-foreground backdrop:bg-transparent open:flex split:left-14 split:w-[min(20rem,calc(100vw-3.5rem))] rail:static rail:z-auto rail:h-auto rail:w-72 rail:shrink-0">
     <header class="mb-1 flex flex-col gap-1">
       <div data-slot="thread-drawer-identity" class="flex min-w-0 items-center gap-0.5">
         <h2 class="min-w-0 flex-1 truncate px-1 text-sm font-semibold">Spaces &amp; Tasks</h2>
         <div data-slot="thread-drawer-actions" class="flex shrink-0 items-center">
           <button class={control} aria-label="New Space or Task" title="New Space or Task" onClick={() => openThreadCreate(null)}><Plus class="size-4" /></button>
           <DropdownMenu><DropdownMenuTrigger data-thread-filter class={`${control} ${section() !== "active" ? "bg-muted text-foreground" : ""}`} aria-label={`Filter work: ${section() === "settled" ? "done" : section()}`} title={`Filter work: ${section() === "settled" ? "done" : section()}`}><Funnel class="size-4" /></DropdownMenuTrigger><DropdownMenuContent><For each={["active", "settled", "snoozed", "archived"] as const}>{name => <DropdownMenuItem role="menuitemradio" aria-checked={section() === name ? "true" : "false"} class="min-h-11 capitalize" onSelect={() => setSection(name)}><Check class={section() === name ? "size-4" : "size-4 invisible"} />{name === "settled" ? "done" : name}</DropdownMenuItem>}</For></DropdownMenuContent></DropdownMenu>
+          {/* Phone has no icon rail, so Settings is reached from this header. */}
+          <button class={`${control} split:hidden`} aria-label="Settings" title="Settings" onClick={() => openSettings()}><Settings class="size-4" /></button>
           <button class={control} aria-label="Close Spaces and Tasks" title="Close Spaces and Tasks" onClick={props.onClose}><X class="size-4" /></button>
         </div>
       </div>
@@ -197,6 +243,20 @@ export function ThreadNavigation(props: { open: boolean; modal: boolean; intent:
     </header>
 
     <ThreadError navigation />
+    {/* The Threads waiting on the Owner, named at the top of their own
+        inventory — the same selector the overview queue reads. */}
+    <Show when={waiting().length > 0}>
+      <section data-slot="thread-attention-band" aria-label={`Needs you (${waiting().length})`} class="mb-1 shrink-0 rounded-md border border-status-attention/40 bg-status-attention/5 p-1">
+        <p class={`${label} pt-1 text-status-attention`}>Needs you ({waiting().length})</p>
+        <ul class="flex flex-col">
+          <For each={waiting()}>{thread => <li><button type="button" data-attention-thread={thread.id} class={`flex ${ROW} w-full min-w-0 items-center gap-1.5 rounded-md px-1 text-left text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring`} aria-label={describe(thread, false)} onClick={() => props.onSelect(thread.id)}>
+            <RowIcon thread={thread} now={now()} />
+            <span class="min-w-0 flex-1 truncate">{thread.title}</span>
+            <span aria-hidden="true" class="shrink-0 whitespace-nowrap text-meta tabular-nums text-status-attention">{threadRowSummary(thread, now(), state.connection === "connected").age}</span>
+          </button></li>}</For>
+        </ul>
+      </section>
+    </Show>
     <nav aria-label="Thread inventory" class="min-h-0 flex-1 overflow-y-auto" onFocusIn={event => { const row = (event.target as HTMLElement).closest('[data-thread-entry]'); if (row) focusedRowIndex = visibleRows().findIndex(item => item.key === row.getAttribute('data-thread-entry')); }}>
       <ul role="tree" aria-label="Threads" class="flex flex-col">
         <For each={listItems()} keyed={item => item.key}>{entry => {
@@ -205,13 +265,14 @@ export function ThreadNavigation(props: { open: boolean; modal: boolean; intent:
             const thread = () => row().thread;
             const summary = () => threadRowSummary(thread(), now(), state.connection === "connected");
             const done = () => thread().kind === "task" && !!thread().settled_at;
-            const describe = () => [`${thread().kind === "space" ? "Space" : "Task"} ${thread().title} #${thread().id}`, thread().parent_thread_id === null && thread().pinned_at ? "Pinned" : null, thread().read ? null : "Unread", row().context ? "Parent context" : null, summary().sentence || null].filter(Boolean).join(" · ");
             return <>
               <li data-thread-entry={row().key} data-thread-row={thread().id} data-row-key={row().key} data-context={row().context ? "true" : undefined}
-                role="treeitem" tabindex="0" aria-level={row().depth + 1} aria-selected={threadState.focusedId === thread().id ? "true" : "false"} aria-expanded={row().hasChildren ? (row().expanded ? "true" : "false") : undefined}
-                aria-current={threadState.focusedId === thread().id ? "page" : undefined} aria-label={describe()} title={`${pathIn(rowIndex(), thread().id)}${summary().sentence ? ` — ${summary().sentence}` : ""}`}
+                role="treeitem" tabindex={item().index === activeRow() ? 0 : -1} aria-level={row().depth + 1} aria-selected={threadState.focusedId === thread().id ? "true" : "false"} aria-expanded={row().hasChildren ? (row().expanded ? "true" : "false") : undefined}
+                aria-current={threadState.focusedId === thread().id ? "page" : undefined} aria-label={describe(thread(), row().context)}
+                title={`${pathIn(rowIndex(), thread().id)}${summary().sentence ? ` — ${summary().sentence}` : ""}${summary().age ? ` · ${summary().age} ago` : ""}`}
                 class={`group relative flex ${ROW} shrink-0 cursor-default items-center gap-1.5 rounded-md pr-0.5 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring ${threadState.focusedId === thread().id ? "bg-muted text-foreground before:absolute before:inset-y-1 before:left-0 before:w-0.5 before:rounded-full before:bg-primary" : "bg-background text-muted-foreground hover:bg-muted"}`}
                 style={{ "padding-left": `${Math.min(row().depth, 6) * 12}px` }}
+                onFocus={() => { if (item().index !== undefined) setRovingRow(item().index!); }}
                 onClick={event => { if (!(event.target as HTMLElement).closest("button")) props.onSelect(thread().id); }}
                 onContextMenu={event => { event.preventDefault(); event.currentTarget.querySelector<HTMLButtonElement>('[data-thread-actions]')?.click(); }}
                 onKeyDown={event => {
@@ -222,20 +283,18 @@ export function ThreadNavigation(props: { open: boolean; modal: boolean; intent:
                 }}>
                 <For each={Array.from({ length: Math.min(row().depth, 6) }, (_, level) => level)}>{level => <span aria-hidden="true" data-slot="thread-branch-guide" class="pointer-events-none absolute inset-y-0 w-px bg-border/60" style={{ left: `${level * 12 + 7}px` }} />}</For>
                 <Show when={row().hasChildren} fallback={<span aria-hidden="true" class="w-4 shrink-0" />}>
-                  <button type="button" class="relative inline-flex w-4 shrink-0 items-center justify-center self-stretch rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:before:absolute pointer-coarse:before:inset-y-0 pointer-coarse:before:-inset-x-2" tabindex="-1" aria-label={`${row().expanded ? "Collapse" : "Expand"} ${thread().title}`} onClick={() => toggle(thread(), row().depth)}>
+                  <button type="button" class="relative inline-flex w-4 shrink-0 items-center justify-center self-stretch rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring pointer-coarse:before:absolute pointer-coarse:before:left-1/2 pointer-coarse:before:top-1/2 pointer-coarse:before:size-11 pointer-coarse:before:-translate-x-1/2 pointer-coarse:before:-translate-y-1/2 pointer-coarse:before:content-['']" tabindex="-1" aria-label={`${row().expanded ? "Collapse" : "Expand"} ${thread().title}`} onClick={() => toggle(thread(), row().depth)}>
                     <ChevronRight class={`size-3 transition-transform ${row().expanded ? "rotate-90" : ""}`} />
                   </button>
                 </Show>
-                <span class="relative shrink-0 bg-inherit">
-                  <Show when={!done()} fallback={<span aria-hidden="true" class="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground"><Check class="size-3.5" /></span>}>
-                    <ThreadAvatar thread={thread()} dense />
-                  </Show>
-                  <Indicator thread={thread()} now={now()} />
-                </span>
+                <RowIcon thread={thread()} now={now()} />
                 <span data-slot="thread-row-title" class={`min-w-0 flex-1 truncate ${done() ? "text-muted-foreground" : thread().read ? "text-foreground" : "font-medium text-foreground"}`}>{thread().title}</span>
                 <Show when={!thread().read}><span role="img" aria-label="Unread" title="Unread" class="size-1.5 shrink-0 rounded-full bg-primary" /></Show>
-                <Show when={summary().meta}>{meta => <span data-slot="thread-row-meta" aria-hidden="true" class={`shrink-0 whitespace-nowrap text-meta tabular-nums ${summary().indicator === "running" ? "text-status-active" : "text-muted-foreground"}`}>{meta()}</span>}</Show>
-                <span data-slot="thread-row-actions" class="absolute right-0.5 flex items-center rounded-md bg-inherit opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 pointer-coarse:static pointer-coarse:opacity-100">
+                <Show when={summary().meta}>{meta => <span data-slot="thread-row-meta" aria-hidden="true" class={`shrink-0 whitespace-nowrap text-meta tabular-nums ${metaTone[summary().tone]}`}>{meta()}</span>}</Show>
+                {/* Out of the layout until it is wanted: at rest the row's state
+                    token owns the right edge instead of sitting under an
+                    invisible menu glyph. */}
+                <span data-slot="thread-row-actions" class="absolute right-0.5 hidden items-center rounded-md bg-inherit group-hover:flex focus-within:flex pointer-coarse:static pointer-coarse:flex">
                   <ThreadActions thread={thread()} quick dense now={now()} />
                 </span>
               </li>
@@ -245,5 +304,5 @@ export function ThreadNavigation(props: { open: boolean; modal: boolean; intent:
       </ul>
       <Show when={visibleRows().length === 0}><p class="p-3 text-sm text-muted-foreground">{search() ? `No matches for “${query().trim()}”` : `No ${section() === "settled" ? "done Tasks" : `${section()} Spaces or Tasks`}`}</p></Show>
     </nav>
-  </dialog>;
+  </dialog></>;
 }

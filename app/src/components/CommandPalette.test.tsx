@@ -97,7 +97,7 @@ describe("Thread lifecycle commands", () => {
   it("offers explicit settlement without deriving completion from read", async () => {
     flush(() => setThreadState(draft => { setHistoryId("palette-history"); draft.ready = true; Object.assign(draft, { threads: [makeThread(11, { kind: "task", read: true })], focusedId: 11 }); }));
     render(() => <CommandPalette open onOpenChange={() => {}} />);
-    await waitFor(() => expect(screen.getByText("Mark task done")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Mark Task done")).toBeInTheDocument());
     expect(screen.queryByText(/Clear finished/)).toBeNull();
     flush(() => setThreadState(draft => { setHistoryId("palette-history"); draft.ready = true; Object.assign(draft, { threads: [], focusedId: 0 }); }));
   });

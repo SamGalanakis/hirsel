@@ -76,9 +76,9 @@ function TitleRow(props: { thread: Thread; historyId: string }) {
   const [draft, setDraft] = createSignal(props.thread.title);
   const open = () => { setDraft(props.thread.title); edit.setEditing(true); };
   const save = () => { if (draft().trim() && draft().trim() !== props.thread.title) edit.submit("set_title", { title: draft().trim() }); else edit.setEditing(false); };
-  return <Show when={edit.editing()} fallback={<div class="flex min-w-0 items-center gap-1">
-    <h2 class="min-w-0 flex-1 truncate text-base font-medium">{props.thread.title}</h2>
-    <button type="button" class={quiet} aria-label="Rename thread" title="Rename" onClick={open}><SquarePen class="size-3.5" /></button>
+  return <Show when={edit.editing()} fallback={<div class="flex min-w-0 items-center gap-0.5">
+    <h2 class="min-w-0 truncate text-lg font-semibold leading-tight">{props.thread.title}</h2>
+    <button type="button" class={`${quiet} shrink-0`} aria-label="Rename thread" title="Rename" onClick={open}><SquarePen class="size-3.5" /></button>
   </div>}>
     <div class="flex min-w-0 flex-col gap-1.5">
       <input class={field} aria-label="Thread title" value={draft()} disabled={edit.saving()} autofocus
@@ -103,14 +103,13 @@ function DescriptionSection(props: { thread: Thread; historyId: string }) {
   const save = () => { if (draft() !== props.thread.description) edit.submit("set_description", { description: draft() }); else edit.setEditing(false); };
   return <section class="flex flex-col gap-1.5" data-slot="thread-description">
     <Show when={edit.editing()} fallback={<>
-      <div class="flex items-start gap-1">
-        <div class="min-w-0 flex-1">
-          <Show when={props.thread.description} fallback={<p class="text-sm text-muted-foreground">No description yet — add one</p>}>
-            <Markdown>{props.thread.description}</Markdown>
-          </Show>
-        </div>
-        <button type="button" class={quiet} aria-label="Edit description" title="Edit description" onClick={open}><SquarePen class="size-3.5" /></button>
+      <div class="flex items-center gap-0.5">
+        <h3 class="text-meta font-medium uppercase tracking-wider text-muted-foreground">Description</h3>
+        <button type="button" class={`${quiet} shrink-0`} aria-label="Edit description" title="Edit description" onClick={open}><SquarePen class="size-3.5" /></button>
       </div>
+      <Show when={props.thread.description} fallback={<p class="text-sm text-muted-foreground">No description yet — add one</p>}>
+        <Markdown>{props.thread.description}</Markdown>
+      </Show>
     </>}>
       <textarea class={`${field} min-h-28 resize-y`} aria-label="Thread description" value={draft()} disabled={edit.saving()} autofocus
         onInput={event => setDraft(event.currentTarget.value)}
@@ -203,9 +202,9 @@ function RunsOnRow(props: { thread: Thread; historyId: string }) {
   };
   const open = () => { setDraft(initial()); edit.setEditing(true); };
   const summary = () => executionLabel(props.thread.execution);
-  return <Show when={edit.editing()} fallback={<div class="flex min-w-0 items-center gap-1">
-    <span class={`min-w-0 flex-1 ${summary().muted ? "text-muted-foreground" : ""}`} data-slot="thread-execution">{summary().text}</span>
-    <button type="button" class={quiet} aria-label="Change where this Thread runs" title="Change where this Thread runs" onClick={open}><SquarePen class="size-3.5" /></button>
+  return <Show when={edit.editing()} fallback={<div class="flex min-w-0 flex-wrap items-center gap-0.5">
+    <span class={`min-w-0 ${summary().muted ? "text-muted-foreground" : ""}`} data-slot="thread-execution">{summary().text}</span>
+    <button type="button" class={`${quiet} shrink-0`} aria-label="Change where this Thread runs" title="Change where this Thread runs" onClick={open}><SquarePen class="size-3.5" /></button>
   </div>}>
     <div class="flex min-w-0 flex-col gap-1" data-slot="thread-execution-editor">
       {/* The `dt` beside this editor already says "Runs on"; a second label

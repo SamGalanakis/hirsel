@@ -133,9 +133,11 @@ const headingClass: Record<number, string> = {
 
 function Heading(props: { depth: number; children: JSX.Element }) {
   // h4-h6 keep their semantics but share h3's restrained scale (DESIGN.md:
-  // no oversized section headings in conversation).
+  // no oversized section headings in conversation). A message is a fragment
+  // inside the page, never its outline: an authored `#` heading lands as an
+  // `h3` at the earliest, so a bubble cannot mint a second document `h1`.
   return (
-    <Dynamic component={`h${props.depth}`} class={headingClass[props.depth] ?? headingClass[3]}>
+    <Dynamic component={`h${Math.max(3, props.depth)}`} class={headingClass[props.depth] ?? headingClass[3]}>
       {props.children}
     </Dynamic>
   );
@@ -208,7 +210,7 @@ function ListBlock(props: { node: Extract<RootContent, { type: "list" }> }) {
     <For each={items()}>
       {(item) => (
         <li
-          class={item.checked === null || item.checked === undefined ? itemClass : `${itemClass} list-none -ml-4`}
+          class={item.checked === null || item.checked === undefined ? itemClass : `${itemClass} list-none -ms-4`}
         >
           <Show when={item.checked !== null && item.checked !== undefined}>
             <input
@@ -227,9 +229,13 @@ function ListBlock(props: { node: Extract<RootContent, { type: "list" }> }) {
   return (
     <Show
       when={props.node.ordered}
-      fallback={<ul class="ml-4 grid list-disc gap-1">{body}</ul>}
+      /* The indent is PADDING, not margin: a margin pushes the list box itself
+         sideways, so at 390px a nested list walked its content past the bubble
+         and the chat column grew a hidden horizontal scroll. Padding keeps the
+         box at the bubble's width and spends the indent inside it. */
+      fallback={<ul class="grid list-disc gap-1 ps-4">{body}</ul>}
     >
-      <ol class="ml-4 grid list-decimal gap-1" start={props.node.start ?? 1}>
+      <ol class="grid list-decimal gap-1 ps-4" start={props.node.start ?? 1}>
         {body}
       </ol>
     </Show>

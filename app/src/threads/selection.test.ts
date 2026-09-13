@@ -54,10 +54,15 @@ describe("explicit Thread selection", () => {
     flush(resetThreads); expect(location.search).toContain("123456789abd");
     hello([1]); expect(threadState.focusedId).toBeNull(); expect(frames).toEqual([]);
   });
-  it("leaves unqualified routes unaddressed even with a saved Thread",()=>{
+  it("resolves an unqualified route against the connected history and still refuses unknown IDs",()=>{
     localStorage.setItem("hirsel.last-thread.ab123456-1234-5678-9abc-123456789abc","1");
     history.replaceState(null,"","/t/1"); hello([1]);
-    expect(threadState.focusedId).toBeNull(); expect(threadState.linkError).toContain("incomplete"); expect(frames).toEqual([]);
+    expect(threadState.focusedId).toBe(1); expect(threadState.linkError).toBeNull();
+    expect(location.search).toContain("ab123456-1234-5678-9abc-123456789abc");
+  });
+  it("refuses an unqualified route to a Thread this history does not have",()=>{
+    history.replaceState(null,"","/t/9"); hello([1]);
+    expect(threadState.focusedId).toBeNull(); expect(threadState.linkError).toContain("#9 is unavailable"); expect(frames).toEqual([]);
   });
   it("waits for a fresh hello before navigating cached IDs or sending",()=>{
     hello([1,2]); flush(()=>focusThread(1)); flush(disconnectThreads); frames.length=0;

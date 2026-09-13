@@ -48,7 +48,7 @@ describe("Thread icons", () => {
     const view = render(() => <ThreadShell />);
     fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
     fireEvent.click(view.getByRole("button", { name: "Actions for Garden" }));
-    fireEvent.click(await view.findByRole("menuitem", { name: "Change space icon" }));
+    fireEvent.click(await view.findByRole("menuitem", { name: "Change Space icon" }));
     const picker = view.getByRole("dialog", { name: "Change thread icon" });
     fireEvent.click(within(picker).getByRole("button", { name: "Seedling" }));
     fireEvent.click(within(picker).getByRole("button", { name: "Save icon" }));

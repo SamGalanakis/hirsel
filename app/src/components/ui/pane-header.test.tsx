@@ -20,9 +20,9 @@ describe("PaneHeader: one slot, close parity", () => {
       />
     ));
     const title = getByText("Canvas");
-    // One title token — text-sm font-medium, no second scale.
-    expect(title.className).toContain("text-sm");
-    expect(title.className).toContain("font-medium");
+    // One title token, and it outranks the panes' text-sm body by 1.25x.
+    expect(title.className).toContain("text-lg");
+    expect(title.className).toContain("font-semibold");
 
     const close = getByLabelText("Close Canvas");
     close.click();

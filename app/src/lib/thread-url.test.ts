@@ -12,8 +12,8 @@ describe("portable Thread URLs",()=>{
  it("does not claim remote or scheme-relative links",()=>{
   for(const url of [`https://github.com/t/2?history=${history}`,`https://example.test.evil/t/2?history=${history}`,`//${location.host}/t/2?history=${history}`,`javascript:/t/2?history=${history}`]) expect(parseThreadLink(url)).toBeNull();
  });
- it("makes unqualified links incomplete and rejects malformed identities",()=>{
-  expect(parseThreadLink('/t/2')).toEqual({kind:'incomplete'});
+ it("reads an unqualified link as this history's own shorthand and rejects malformed identities",()=>{
+  expect(parseThreadLink('/t/2')).toEqual({kind:'local',thread_id:2});
   for(const path of [`/t/02?history=${history}`,`/t/-1?history=${history}`,`/t/9007199254740993?history=${history}`,`/t/2?history=old`,`/t/2?history=${history}&history=${history}`,`/t/2?history=`, `/t/2/extra?history=${history}`]) expect(parseThreadLink(path)).toEqual({kind:'invalid'});
  });
 });

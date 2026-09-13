@@ -14,7 +14,7 @@ import { createSignal, For, Show } from "solid-js";
 
 import type { Blob, SendMode } from "../../protocol";
 import { state } from "../../store/store";
-import { anyOverlayOpen } from "../../lib/focus";
+import { anyOverlayOpen, createMediaFlag } from "../../lib/focus";
 import { formatBytes } from "../../lib/format";
 import { handleSubmitKeys } from "../../lib/submitKeymap";
 import { resolveMentionIds } from "../../lib/thread-ref";
@@ -44,8 +44,17 @@ import type { DraftArtifact } from "../../artifacts/draft-context";
 
 const MAX_HEIGHT_PX = 112;
 const LONG_PRESS_MS = 450;
+/** The one place the composer's destination is written, so its accessible name
+ * and its visible placeholder can never disagree. A phone has no room for a
+ * long Thread title, so it shows the numeric reference instead. */
+export function composerPlaceholder(ariaLabel: string, shortLabel: string | undefined, narrow: boolean, limit = 44): string {
+  const name = narrow && shortLabel ? shortLabel : ariaLabel;
+  return name.length > limit ? `${name.slice(0, limit - 1).trimEnd()}…` : name;
+}
 interface Props {
   ariaLabel?: string;
+  /** The same destination in its shortest honest form, e.g. `Message #12`. */
+  shortLabel?: string;
   artifactContext?: DraftArtifact | null;
   onRemoveArtifactContext?: () => void;
   onConsumeArtifactContext?: (id: number) => void;
@@ -80,6 +89,8 @@ export function Composer(props: Props) {
   // Shared input mechanics (value signal, coarse-pointer detection, auto-grow)
   // with any future constrained compact input.
   const { value, setValue, coarse, setRef, focus, caretToEnd } = useTextInput(MAX_HEIGHT_PX, props.draftKey ?? "main");
+  /** Below `split` the destination is the numeric reference, not the title. */
+  const narrow = createMediaFlag("(max-width: 899.98px)");
   const [sending, setSending] = createSignal(false);
   const offline = () => state.connection !== "connected";
   let fileInputRef: HTMLInputElement | undefined;
@@ -360,6 +371,7 @@ export function Composer(props: Props) {
              thumbs use it. */
           class={`max-h-28 ${coarse() ? "min-h-11" : "min-h-9"} flex-1 resize-none border-0 bg-transparent px-1 py-1 leading-snug shadow-none focus-visible:border-transparent focus-visible:ring-0 dark:bg-transparent`}
           aria-label={props.ariaLabel ?? "Message Hirsel"}
+          placeholder={composerPlaceholder(props.ariaLabel ?? "Message Hirsel", props.shortLabel, narrow())}
           aria-expanded={(picker.open() ? true : undefined) ? "true" : "false"}
           aria-controls={picker.open() ? THREAD_REF_PICKER_ID : undefined}
           aria-activedescendant={

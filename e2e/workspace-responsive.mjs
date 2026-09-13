@@ -226,7 +226,7 @@ try {
   await artifactRef.waitFor({ state: "visible" });
   await artifactRef.click();
   await page.locator('[data-slot="artifact-preview"]').waitFor({ state: "visible" });
-  await page.getByRole("button", { name: "Conversation", exact: true }).click();
+  await page.getByRole("tab", { name: "Conversation", exact: true }).click();
 
   for (const width of [2048, 1440, 1024, 768, 390, 320]) await capture(page, width, "selected", true);
 
@@ -270,7 +270,7 @@ try {
   await page.getByRole("button", { name: "All artifacts", exact: true }).click();
   await page.locator(`[data-artifact-ref="${artifact.id}"]`).first().click();
   await page.locator('[data-slot="artifact-preview"]').waitFor({ state: "visible" });
-  await page.getByRole("button", { name: "Conversation", exact: true }).click();
+  await page.getByRole("tab", { name: "Conversation", exact: true }).click();
   await page.context().setOffline(true);
   for (const socket of sockets) await socket.close({ code: 1001, reason: "responsive offline check" });
   await page.waitForFunction(() => [...document.querySelectorAll('[data-slot="thread-status-primary"]')].some(node => node.textContent?.includes("Last known:")));

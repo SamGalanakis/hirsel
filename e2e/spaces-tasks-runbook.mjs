@@ -211,7 +211,7 @@ async function createItem(page, frames, title, kind, parent) {
   if (parent === null) {
     await page.getByRole("button", { name: "New Space or Task", exact: true }).click();
   } else {
-    await chooseAction(page, parent.kind === "task" ? "New child task" : "New child");
+    await chooseAction(page, parent.kind === "task" ? "New child Task" : "New child");
   }
   const create = page.locator('[data-slot="thread-create"]');
   await create.waitFor({ state: "visible" });
@@ -392,11 +392,11 @@ try {
 
   const archiveOffset = frames.length;
   const archiveSentOffset = sentFrames.length;
-  await chooseAction(page, "Archive thread");
+  await chooseAction(page, "Archive Task");
   const archivedUpsert = await waitForFrame(frames, archiveOffset, "selected archive", frame => frame.type === "thread_upsert" && frame.thread?.id === childTask.id && frame.thread.archived_at !== null);
   const archiveRequest = sentFrames.slice(archiveSentOffset).find(frame => frame.type === "thread_action" && frame.thread_id === childTask.id && frame.action === "archive");
   assert(archiveRequest, "Archive did not use the selected Thread action");
-  await page.getByRole("heading", { name: "Choose a Space or Task", exact: true }).waitFor();
+  await page.getByRole("heading", { name: "What needs you", exact: true }).waitFor();
   assert.equal(new URL(page.url()).pathname, "/", "Selected archive did not route to the overview");
   assert.equal(await page.locator("main[data-thread-id]").count(), 0, "Selected archive retained an addressed conversation");
   assert.equal(await page.evaluate(key => localStorage.getItem(key), `hirsel.last-thread.${archiveHistory}`), null, "Selected archive retained its remembered selection");
@@ -425,7 +425,7 @@ try {
   assert.deepEqual((await openThread(url, token, childTask.id)).detail.messages, historyBeforeArchive.messages, "Explicit archived selection did not retain history");
   checkpoints.archivedSelected = await capture(page, url, token, "16-archived-selected", childTask.id);
   const unarchiveOffset = frames.length;
-  await chooseAction(page, "Unarchive thread");
+  await chooseAction(page, "Unarchive Task");
   await waitForFrame(frames, unarchiveOffset, "selected unarchive", frame => frame.type === "thread_upsert" && frame.thread?.id === childTask.id && frame.thread.archived_at === null);
   assert.equal(await page.locator(`main[data-thread-id="${childTask.id}"]`).count(), 1, "Unarchive changed the selected recipient");
   assert.equal(new URL(page.url()).pathname, `/t/${childTask.id}`, "Unarchive changed the explicit Thread route");
@@ -442,13 +442,13 @@ try {
   };
 
   await selectThread(page, rootTask.id);
-  await mutate(page, frames, rootTask.id, "Mark task done", thread => thread.kind === "task" && thread.settled_at !== null);
+  await mutate(page, frames, rootTask.id, "Mark Task done", thread => thread.kind === "task" && thread.settled_at !== null);
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.locator(`main[data-thread-id="${rootTask.id}"]`).waitFor();
   await page.getByRole("button", { name: "Thread actions", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Reopen task", exact: true }).waitFor();
+  await page.getByRole("menuitem", { name: "Reopen Task", exact: true }).waitFor();
   await page.keyboard.press("Escape");
-  await mutate(page, frames, rootTask.id, "Reopen task", thread => thread.kind === "task" && thread.settled_at === null);
+  await mutate(page, frames, rootTask.id, "Reopen Task", thread => thread.kind === "task" && thread.settled_at === null);
 
   const conversionId = rootTask.id;
   await mutate(page, frames, conversionId, "Change to Space", thread => thread.kind === "space");
@@ -473,7 +473,7 @@ try {
   await page.locator(`main[data-thread-id="${nestedTask.id}"]`).getByRole("alert").getByRole("button", { name: "Dismiss", exact: true }).click();
 
   await selectThread(page, rootTask.id);
-  await mutate(page, frames, rootTask.id, "Pin thread", thread => thread.pinned_at !== null);
+  await mutate(page, frames, rootTask.id, "Pin Task", thread => thread.pinned_at !== null);
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.locator(`main[data-thread-id="${rootTask.id}"]`).waitFor();
   const rootTaskDrawer = await ensureDrawer(page);
@@ -524,7 +524,7 @@ try {
   await page.getByRole("button", { name: "Continue fixture", exact: true }).waitFor();
   assert.equal(await page.getByRole("button", { name: "Complete fixture", exact: true }).count(), 0, "Space exposed a generated completion action");
   await page.getByRole("button", { name: "Thread actions", exact: true }).click();
-  assert.equal(await page.getByRole("menuitem", { name: /Mark task done|Reopen task/ }).count(), 0, "Space exposed an Owner completion action");
+  assert.equal(await page.getByRole("menuitem", { name: /Mark Task done|Reopen Task/ }).count(), 0, "Space exposed an Owner completion action");
   await page.keyboard.press("Escape");
   const fixtureDrawer = await ensureDrawer(page);
   const spaceRow = fixtureDrawer.locator(`[data-thread-row="${rootSpace.id}"]`);

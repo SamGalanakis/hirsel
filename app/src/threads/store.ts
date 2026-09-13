@@ -39,6 +39,7 @@ interface ThreadState {
 }
 export function routeThreadId(path = location.pathname + location.search): number | null {
   const link = parseThreadLink(path);
+  if (link?.kind === "local") return link.thread_id;
   return link?.kind === "thread" && link.target.history_id === historyId() ? link.target.thread_id : null;
 }
 /** Resolve a copied link only against the authoritative connected history. */
@@ -46,15 +47,24 @@ export function followThreadLocation(authoritativeHistory: string | null = histo
   const link = parseThreadLink(location.pathname + location.search);
   if (!link) { focusThread(null, false); return; }
   if (!threadState.ready) { setThreadState(draft => { draft.focusedId = null; draft.linkError = null; }); return; }
+  /** A bare `/t/<id>` carries no history, so it means THIS one: the link form
+   * of the `#id` shorthand, resolved against the authoritative connection
+   * rather than refused. A link that names a different history still is. */
+  const target = link.kind === "thread" ? link.target
+    : link.kind === "local" && authoritativeHistory ? { kind: "thread" as const, history_id: authoritativeHistory, thread_id: link.thread_id }
+    : null;
   let problem: string | null = null;
-  if (link.kind !== "thread") problem = link.kind === "incomplete" ? "This Thread link is incomplete. Copy a new link from its Thread." : "This Thread link is invalid.";
-  else if (link.target.history_id !== authoritativeHistory) problem = "This link belongs to another Hirsel history.";
-  else if (!threadState.threads.some(thread => thread.id === link.target.thread_id)) problem = `Thread #${link.target.thread_id} is unavailable.`;
+  if (!target) problem = "This Thread link is invalid.";
+  else if (target.history_id !== authoritativeHistory) problem = "This link belongs to another Hirsel history.";
+  else if (!threadState.threads.some(thread => thread.id === target.thread_id)) problem = `Thread #${target.thread_id} is unavailable.`;
   if (problem) {
     setThreadState(draft => { draft.focusedId = null; draft.linkError = problem; draft.error = null; });
     return;
   }
-  if (link.kind === "thread") focusThread(link.target.thread_id, false, authoritativeHistory);
+  // Canonicalise the shorthand in place, so copying the address now yields a
+  // link that survives leaving this history.
+  if (link.kind === "local") history.replaceState(null, "", threadPath(target!));
+  focusThread(target!.thread_id, false, authoritativeHistory);
 }
 function rememberSelection(id: number, currentHistory = historyId()): void {
   const key = currentHistory ? `hirsel.last-thread.${currentHistory}` : null; if (key) localStorage.setItem(key, String(id));

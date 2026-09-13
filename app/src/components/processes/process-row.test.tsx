@@ -3,10 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ProcessInfo } from "../../protocol";
 import { ProcessRow } from "./ProcessRow";
 
-// Two runs of the same process may carry the same name,
-// so the row has to say WHEN it started or the list is unorderable; and the
-// disclosure mark has to describe what activating it does — these rows unfold
-// in place, they do not navigate anywhere.
+// Named rows retain their start time and unfold details in place.
 
 const AGO = (mins: number) => new Date(Date.now() - mins * 60_000).toISOString();
 
@@ -18,6 +15,8 @@ function finished(over: Partial<ProcessInfo> = {}): ProcessInfo {
     trigger_subscription_key: "review-auth",
     trigger_revision: 3,
     trigger_enabled: true,
+    active_process_id: "incarnation-1",
+    trigger_recurring: true,
     cancellable: true,
     state: "done",
     started_ts: AGO(12),
@@ -29,7 +28,7 @@ function finished(over: Partial<ProcessInfo> = {}): ProcessInfo {
 }
 
 describe("ProcessRow: registry-backed process rows", () => {
-  it("dates the row so two runs of the same process are orderable", () => {
+  it("dates the named row so its first registration is visible", () => {
     const { getByText, getAllByText } = render(() => (
       <ProcessRow process={finished()} />
     ));
@@ -59,7 +58,7 @@ describe("ProcessRow: registry-backed process rows", () => {
   it("wires cancel and trigger-disable actions", () => {
     const cancel = vi.fn();
     const disable = vi.fn();
-    const process = finished({ state: "waiting" });
+    const process = finished({ state: "running" });
     const { getByRole } = render(() => (
       <ProcessRow process={process} onCancel={cancel} onDisableTrigger={disable} />
     ));
@@ -91,4 +90,15 @@ describe("ProcessRow: registry-backed process rows", () => {
     // Same mark, rotated open — not swapped for a different icon.
     expect(container.querySelector("svg.-rotate-90")).toBeNull();
   });
+});
+
+it.each(["waiting", "done"] as const)("one-shot %s row has no run or recurring-trigger actions", (state) => {
+  const process = finished({ state, active_process_id: undefined, cancellable: false, trigger_recurring: false });
+  const { getByRole, queryByRole, getAllByText } = render(() => (
+    <ProcessRow process={process} onCancel={vi.fn()} onDisableTrigger={vi.fn()} />
+  ));
+  fireEvent.click(getByRole("button", { name: /Show details for/ }));
+  expect(getAllByText(process.name)).toHaveLength(1);
+  expect(queryByRole("button", { name: "Cancel process" })).toBeNull();
+  expect(queryByRole("button", { name: "Disable trigger" })).toBeNull();
 });

@@ -67,6 +67,8 @@ export type ProcessState =
   | "caller_departed";
 
 export interface ProcessInfo {
+  active_process_id?: string;
+  trigger_recurring: boolean;
   thread_id: number;
   id: string;
   name: string;
@@ -503,7 +505,14 @@ export interface MsgRemovedMsg {
   id: number;
 }
 
-/** v1.4: full-process upsert broadcast on any state/summary change. */
+/** Remove a named row absent from the authoritative registry projection. */
+export interface ProcessRemovedMsg {
+  type: "process_removed";
+  thread_id: number;
+  id: string;
+}
+
+/** Full named-process row broadcast on any state/summary change. */
 export interface ProcessUpsertMsg {
   type: "process_upsert";
   process: ProcessInfo;
@@ -618,6 +627,7 @@ export type ServerMessage =
   | BlobOkMsg
   | BlobUrlMsg
   | MsgRemovedMsg
+  | ProcessRemovedMsg
   | ProcessUpsertMsg
   | ProcessActionAppliedMsg
   | TurnEventMsg

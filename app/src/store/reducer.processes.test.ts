@@ -11,6 +11,8 @@ function proc(overrides: Partial<ProcessInfo> = {}): ProcessInfo {
     trigger_subscription_key: null,
     trigger_revision: null,
     trigger_enabled: null,
+    active_process_id: "incarnation-1",
+    trigger_recurring: true,
     cancellable: true,
     state: "running",
     started_ts: "2026-07-09T00:00:00Z",
@@ -58,4 +60,21 @@ describe("process_upsert", () => {
     });
     expect(s3.processes.map((p) => p.id)).toEqual(["proc-1", "proc-2"]);
   });
+});
+
+it("folds prefire, active incarnation, and finished updates into one named row", () => {
+  let state = initialState();
+  const id = "process-name:1:Do the thing";
+  for (const row of [
+    proc({ id, state: "waiting", active_process_id: undefined, cancellable: false }),
+    proc({ id, state: "running", active_process_id: "run-1" }),
+    proc({ id, state: "done", active_process_id: undefined, cancellable: false, trigger_recurring: false, last_outcome: "awake" }),
+  ]) {
+    state = reduce(state, { type: "process_upsert", payload: { type: "process_upsert", process: row } });
+    expect(state.processes).toEqual([row]);
+  }
+  state = reduce(state, { type: "process_removed", payload: { type: "process_removed", thread_id: 2, id } });
+  expect(state.processes).toHaveLength(1);
+  state = reduce(state, { type: "process_removed", payload: { type: "process_removed", thread_id: 1, id } });
+  expect(state.processes).toEqual([]);
 });

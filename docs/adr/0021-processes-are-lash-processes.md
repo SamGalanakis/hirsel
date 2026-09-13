@@ -11,3 +11,14 @@ The Processes view projects each owning Thread's Lash process registry together 
 Delivery revision (2026-09-13): a process wake or terminal completion, failure, or cancellation is solicited work for the registering Thread and bypasses ADR-0015 triage. Hirsel stages a durable receipt, appends exactly one structured conversation message, then accepts a normal turn through the existing durable, idempotent Thread queue and fencing rules. The turn receives that message as context and may remain quiet. `origin` carries process identity, typed human trigger metadata from the registration snapshot retained with the trigger delivery, outcome, raw JSON result, and any error; `body` contains only the plain result or error. The web conversation renders a compact note in the ConversationNote family. Receipt retries cannot append another message or enqueue another turn, including after the original turn finishes.
 
 Lash durably owns process registrations, events, queued wakes, and trigger subscriptions in the Thread lane's process and trigger stores. Hirsel reopens lanes that have persisted process state, resumes trigger-source polling, reconstructs the registry projection, and retries any staged message not yet appended. It does not infer that abandoned or interrupted work should restart. The Hirsel history schema is current-only; removing the old table requires the normal same-schema deployment or fresh-data handling rather than a compatibility shim.
+
+Projection revision (2026-09-13): each process name has one stable row per
+Thread, folding its subscriptions and executions. Waiting means an enabled
+subscription can fire again; a suspended execution is an active incarnation
+and renders as running. Completed one-shot timers are tombstoned with Lash
+Delete only after successful delivery, preserving their durable registration
+snapshot. Cron and interval subscriptions remain enabled between runs. Cancel
+targets the newest active incarnation; Disable targets the latest enabled
+recurring subscription with its revision fence. The row keeps the last firing
+time and completed result, and clients remove rows that disappear from the
+authoritative projection.

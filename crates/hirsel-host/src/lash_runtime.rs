@@ -90,6 +90,7 @@ mod native_worker;
 mod native_worker_protocol;
 mod plugin;
 mod process_bridge;
+mod process_projection;
 mod provider;
 mod runtime;
 mod scripted;

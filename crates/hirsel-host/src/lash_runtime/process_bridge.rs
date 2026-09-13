@@ -37,37 +37,21 @@ impl LashAgentRuntime {
             .trigger_store
             .list_subscriptions(TriggerSubscriptionFilter::for_session(&self.session_id))
             .await?;
-        let represented_subscriptions = snapshot
-            .items
-            .iter()
-            .filter_map(|item| match item.process.caused_by.as_ref() {
-                Some(lash_core::CausalRef::TriggerOccurrence {
-                    subscription_id: Some(id),
-                    ..
-                }) => Some(id.as_str()),
-                _ => None,
+        let deliveries = self
+            .trigger_store
+            .list_deliveries()
+            .await?
+            .into_iter()
+            .filter(|delivery| {
+                delivery.subscription.registrant_session_id() == Some(self.session_id.as_str())
             })
-            .collect::<HashSet<_>>();
-        let mut processes = snapshot
-            .items
-            .iter()
-            .map(|item| process_info(self.thread_id, item, &subscriptions))
             .collect::<Vec<_>>();
-        processes.extend(
-            subscriptions
-                .iter()
-                .filter(|record| {
-                    !record.tombstoned
-                        && !represented_subscriptions.contains(record.subscription_id.as_str())
-                })
-                .map(|record| subscription_process_info(self.thread_id, record)),
-        );
-        processes.sort_by(|left, right| {
-            left.started_ts
-                .cmp(&right.started_ts)
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        Ok(processes)
+        Ok(super::process_projection::process_rows(
+            self.thread_id,
+            &snapshot.items,
+            &subscriptions,
+            &deliveries,
+        ))
     }
 
     async fn reconcile_processes(&self) -> anyhow::Result<()> {
@@ -83,6 +67,14 @@ impl LashAgentRuntime {
         }
         let current = self.process_snapshot().await?;
         let mut previous = self.last_processes.lock().await;
+        for (id, old) in previous.iter() {
+            if !current.iter().any(|row| &row.id == id) {
+                self.tools.broadcast(HostToClient::ProcessRemoved {
+                    thread_id: old.thread_id,
+                    id: id.clone(),
+                });
+            }
+        }
         for process in &current {
             if previous.get(&process.id) != Some(process) {
                 self.tools.broadcast(HostToClient::ProcessUpsert {
@@ -273,6 +265,22 @@ impl LashAgentRuntime {
     }
 
     pub(super) async fn cancel_process(&self, process_id: &str) -> anyhow::Result<()> {
+        let snapshot = self
+            .core
+            .processes()
+            .session_snapshot(&self.session_id)
+            .await?;
+        anyhow::ensure!(
+            snapshot
+                .items
+                .iter()
+                .any(|item| item.process.process_id == process_id
+                    && matches!(
+                        item.process.lifecycle,
+                        lash_core::ProcessStatus::Running | lash_core::ProcessStatus::Waiting
+                    )),
+            "process is not running in this Thread"
+        );
         self.core
             .processes()
             .cancel(
@@ -299,6 +307,10 @@ impl LashAgentRuntime {
         anyhow::ensure!(
             record.revision == expected_revision,
             "trigger subscription changed"
+        );
+        anyhow::ensure!(
+            record.enabled && !record.tombstoned && super::process_projection::recurring(&record),
+            "trigger is not live and recurring"
         );
         self.trigger_store
             .execute_command(
@@ -364,77 +376,6 @@ pub(super) fn terminal_process_delivery(
     ))
 }
 
-pub(super) fn process_info(
-    thread_id: u64,
-    item: &lash_core::facade_support::ObservedWorkItem,
-    subscriptions: &[lash_core::TriggerSubscriptionRecord],
-) -> hirsel_proto::ProcessInfo {
-    let subscription = match item.process.caused_by.as_ref() {
-        Some(lash_core::CausalRef::TriggerOccurrence {
-            subscription_id: Some(id),
-            ..
-        }) => subscriptions
-            .iter()
-            .find(|record| &record.subscription_id == id),
-        _ => None,
-    };
-    let terminal = item.events.iter().rev().find(|event| {
-        matches!(
-            event.event_type.as_str(),
-            "process.completed" | "process.failed" | "process.cancelled" | "process.abandoned"
-        )
-    });
-    hirsel_proto::ProcessInfo {
-        thread_id,
-        id: item.process.process_id.clone(),
-        name: item.label.clone(),
-        trigger: subscription.map(trigger_display),
-        trigger_subscription_key: subscription.map(|record| record.subscription_key.clone()),
-        trigger_revision: subscription.map(|record| record.revision),
-        trigger_enabled: subscription.map(|record| record.enabled),
-        cancellable: true,
-        state: match item.process.lifecycle {
-            lash_core::ProcessStatus::Running => hirsel_proto::ProcessState::Running,
-            lash_core::ProcessStatus::Waiting => hirsel_proto::ProcessState::Waiting,
-            lash_core::ProcessStatus::Completed => hirsel_proto::ProcessState::Done,
-            lash_core::ProcessStatus::Failed => hirsel_proto::ProcessState::Failed,
-            lash_core::ProcessStatus::Cancelled => hirsel_proto::ProcessState::Cancelled,
-            lash_core::ProcessStatus::Abandoned => hirsel_proto::ProcessState::Abandoned,
-            lash_core::ProcessStatus::CallerDeparted => hirsel_proto::ProcessState::CallerDeparted,
-        },
-        started_ts: timestamp(item.process.created_at_ms),
-        last_event_ts: timestamp(item.process.updated_at_ms),
-        last_fired_ts: subscription.map(|_| timestamp(item.process.created_at_ms)),
-        last_outcome: terminal.map(|event| bound_json(&event.payload)),
-    }
-}
-
-pub(super) fn subscription_process_info(
-    thread_id: u64,
-    subscription: &lash_core::TriggerSubscriptionRecord,
-) -> hirsel_proto::ProcessInfo {
-    hirsel_proto::ProcessInfo {
-        thread_id,
-        id: format!("subscription:{}", subscription.subscription_id),
-        name: subscription
-            .target_label
-            .clone()
-            .or_else(|| subscription.target_identity.label.clone())
-            .or_else(|| subscription.name.clone())
-            .unwrap_or_else(|| subscription.subscription_key.clone()),
-        trigger: Some(trigger_display(subscription)),
-        trigger_subscription_key: Some(subscription.subscription_key.clone()),
-        trigger_revision: Some(subscription.revision),
-        trigger_enabled: Some(subscription.enabled),
-        cancellable: false,
-        state: hirsel_proto::ProcessState::Waiting,
-        started_ts: timestamp(subscription.created_at_ms),
-        last_event_ts: timestamp(subscription.updated_at_ms),
-        last_fired_ts: None,
-        last_outcome: None,
-    }
-}
-
 pub(super) fn trigger_display(record: &lash_core::TriggerSubscriptionRecord) -> String {
     let value = record.source.get("$lash_host_descriptor_value");
     match record.source_type.as_str() {
@@ -470,16 +411,12 @@ pub(super) fn trigger_display(record: &lash_core::TriggerSubscriptionRecord) -> 
     .unwrap_or_else(|| record.source_type.clone())
 }
 
-fn timestamp(milliseconds: u64) -> DateTime<Utc> {
+pub(super) fn timestamp(milliseconds: u64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(milliseconds.min(i64::MAX as u64) as i64)
         .unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
 }
 
-fn bound_json(value: &Value) -> String {
-    bound_text(&serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()))
-}
-
-fn terminal_result(payload: &Value) -> Value {
+pub(super) fn terminal_result(payload: &Value) -> Value {
     payload
         .get("await_output")
         .cloned()
@@ -489,7 +426,7 @@ fn terminal_result(payload: &Value) -> Value {
         .unwrap_or_else(|| payload.clone())
 }
 
-fn bound_text(value: &str) -> String {
+pub(super) fn bound_text(value: &str) -> String {
     let mut text = value.chars().take(PROCESS_RESULT_CHARS).collect::<String>();
     if text.len() < value.len() {
         text.push('…');

@@ -14,7 +14,7 @@ export function ProcessesView() {
   const groups = createMemo(() => partitionProcesses(scopedProcesses(state.processes, threadState.threads, threadState.focusedId)));
   const cancel = (process: ProcessInfo) => {
     const history = historyId();
-    if (history) getClient()?.cancelProcess(history, process.thread_id, process.id);
+    if (history && process.active_process_id) getClient()?.cancelProcess(history, process.thread_id, process.active_process_id);
   };
   const disable = (process: ProcessInfo) => {
     const history = historyId();

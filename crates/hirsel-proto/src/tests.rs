@@ -320,6 +320,8 @@ fn chat_message_without_attachments_deserializes_as_empty() {
 fn process_upsert_round_trips() {
     let ts = Utc.with_ymd_and_hms(2026, 7, 9, 12, 0, 0).unwrap();
     let process = ProcessInfo {
+        active_process_id: None,
+        trigger_recurring: true,
         thread_id: 1,
         id: "proc-1".to_string(),
         name: "watch file".to_string(),
@@ -340,7 +342,7 @@ fn process_upsert_round_trips() {
     let encoded = serde_json::to_string(&upsert).unwrap();
     assert_eq!(
         encoded,
-        r#"{"type":"process_upsert","process":{"thread_id":1,"id":"proc-1","name":"watch file","trigger":"every 30s","trigger_subscription_key":"watch-file","trigger_revision":2,"trigger_enabled":true,"cancellable":true,"state":"done","started_ts":"2026-07-09T12:00:00Z","last_event_ts":"2026-07-09T12:00:00Z","last_fired_ts":"2026-07-09T12:00:00Z","last_outcome":"ready"}}"#
+        r#"{"type":"process_upsert","process":{"thread_id":1,"id":"proc-1","trigger_recurring":true,"name":"watch file","trigger":"every 30s","trigger_subscription_key":"watch-file","trigger_revision":2,"trigger_enabled":true,"cancellable":true,"state":"done","started_ts":"2026-07-09T12:00:00Z","last_event_ts":"2026-07-09T12:00:00Z","last_fired_ts":"2026-07-09T12:00:00Z","last_outcome":"ready"}}"#
     );
     let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, upsert);

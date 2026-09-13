@@ -470,6 +470,12 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 store.upsert_turn(turn);
                 true
             }
+            HostToClient::ProcessRemoved { thread_id, id } => {
+                store
+                    .processes
+                    .retain(|process| process.thread_id != thread_id || process.id != id);
+                true
+            }
             HostToClient::ProcessUpsert { process } => {
                 store.upsert_process(process);
                 true

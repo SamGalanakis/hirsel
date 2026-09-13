@@ -18,7 +18,12 @@ pub enum ProcessState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessInfo {
     pub thread_id: u64,
+    /// Stable identity of one process name within its owning Thread.
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_process_id: Option<String>,
+    #[serde(default)]
+    pub trigger_recurring: bool,
     pub name: String,
     pub trigger: Option<String>,
     pub trigger_subscription_key: Option<String>,

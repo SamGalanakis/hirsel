@@ -39,6 +39,10 @@ pub enum HostToClient {
     ProcessUpsert {
         process: ProcessInfo,
     },
+    ProcessRemoved {
+        thread_id: u64,
+        id: String,
+    },
     ProcessActionApplied {
         client_id: String,
     },

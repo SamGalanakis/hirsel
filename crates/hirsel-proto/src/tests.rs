@@ -814,6 +814,26 @@ fn artifact_content_frames_and_optional_message_references_round_trip() {
     let file = json!({"type":"artifact_opened","client_id":"open-2","artifact":{"id":8,"title":"Notes","kind":"file","mime":"text/plain","filename":"notes.txt","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[1],"content":"plain"}});
     let frame: HostToClient = serde_json::from_value(file.clone()).unwrap();
     assert_eq!(serde_json::to_value(frame).unwrap(), file);
+    // `openui` is a tag with no data of its own: the wire word matches the
+    // stored tag exactly, because the store reassembles the kind from it.
+    let openui = json!({"type":"artifact_opened","client_id":"open-3","artifact":{"id":11,"title":"Dashboard","kind":"openui","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[3],"content":"root = Stack([lede])\nlede = Heading(\"Live\", 2)"}});
+    let frame: HostToClient = serde_json::from_value(openui.clone()).unwrap();
+    assert_eq!(serde_json::to_value(frame).unwrap(), openui);
+    assert_eq!(ArtifactKind::OpenUi.tag(), "openui");
+    assert_eq!(ArtifactKind::OpenUi.download_mime(), "text/x-openui");
+    assert_eq!(
+        ArtifactKind::from_publish_inputs("openui", None, None).unwrap(),
+        ArtifactKind::OpenUi
+    );
+    // A file published under the OpenUI media type is that kind, recognized
+    // here once rather than by every reader of a stored MIME type.
+    assert_eq!(
+        ArtifactKind::from_publish_inputs("file", Some("text/x-openui"), Some("board.openui"))
+            .unwrap(),
+        ArtifactKind::OpenUi
+    );
+    assert!(ArtifactKind::TAGS.contains(&"openui"));
+
     let image = json!({"id":9,"title":"Cat","kind":"image","mime":"image/svg+xml","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[]});
     let summary: ArtifactSummary = serde_json::from_value(image.clone()).unwrap();
     assert_eq!(

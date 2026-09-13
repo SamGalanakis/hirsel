@@ -15,6 +15,11 @@ pub enum ArtifactKind {
     Html,
     /// CommonMark/GFM source rendered as a document.
     Markdown,
+    /// OpenUI Lang v0.5 source rendered natively by the app's own component
+    /// library. Interactive, on-brand by construction, and never executed:
+    /// unparseable lines are dropped, not run.
+    #[serde(rename = "openui")]
+    OpenUi,
     /// Image content: SVG source, or base64 bytes for raster types.
     Image { mime: String },
     /// Opaque UTF-8 payload shown as text and downloaded under its own name.
@@ -27,13 +32,14 @@ pub enum ArtifactKind {
 impl ArtifactKind {
     /// Every stored tag, in declaration order. The store's CHECK is built from
     /// this list, so a new variant cannot be persisted without widening it.
-    pub const TAGS: [&'static str; 5] = ["solid", "html", "markdown", "image", "file"];
+    pub const TAGS: [&'static str; 6] = ["solid", "html", "markdown", "openui", "image", "file"];
 
     pub fn tag(&self) -> &'static str {
         match self {
             Self::Solid => "solid",
             Self::Html => "html",
             Self::Markdown => "markdown",
+            Self::OpenUi => "openui",
             Self::Image { .. } => "image",
             Self::File { .. } => "file",
         }
@@ -46,6 +52,7 @@ impl ArtifactKind {
             Self::Solid => "text/jsx",
             Self::Html => "text/html",
             Self::Markdown => "text/markdown",
+            Self::OpenUi => "text/x-openui",
             Self::Image { mime } | Self::File { mime, .. } => mime,
         }
     }
@@ -75,6 +82,7 @@ impl ArtifactKind {
             "solid" => Ok(Self::Solid),
             "html" => Ok(Self::Html),
             "markdown" => Ok(Self::Markdown),
+            "openui" => Ok(Self::OpenUi),
             "image" => Ok(Self::Image {
                 mime: essence
                     .map(str::to_string)
@@ -84,6 +92,9 @@ impl ArtifactKind {
                     })?,
             }),
             "file" => {
+                if essence == Some("text/x-openui") {
+                    return Ok(Self::OpenUi);
+                }
                 if essence == Some("text/markdown") || (essence.is_none() && markdown_name) {
                     return Ok(Self::Markdown);
                 }

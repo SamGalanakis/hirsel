@@ -1,9 +1,23 @@
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
+import { Dynamic } from "@solidjs/web";
 import type { ArtifactPresentationMode } from "./ArtifactPresentationMode";
 import { ARTIFACT_DISMISS_MESSAGE, type Artifact } from "./types";
 
-/** Opaque execution surface. The only accepted message dismisses this preview. */
-export function ArtifactPreview(props: { artifact: Artifact; mode?: ArtifactPresentationMode; onDismiss?: () => void; onReturnToComposer?: () => void }) {
+type OpenUiSurface = typeof import("../openui/OpenUiArtifact").OpenUiArtifact;
+/** The native surface arrives on demand, like the frame document does: an
+ * executable kind's preview — and the isolated tool page that smokes it —
+ * never loads the OpenUI renderer or the Thread store its controls send to. */
+function NativeOpenUi(props: { artifact: Artifact; threadId?: number | null }) {
+  const [surface, setSurface] = createSignal<OpenUiSurface | null>(null);
+  void import("../openui/OpenUiArtifact").then(module => setSurface(() => module.OpenUiArtifact));
+  return <Show when={surface()} fallback={<p role="status" class="p-6 text-sm text-muted-foreground">Preparing preview…</p>}>{Surface => <Dynamic component={Surface()} artifact={props.artifact} threadId={props.threadId} />}</Show>;
+}
+
+/** One artifact, on one surface. Every executable kind is an opaque frame whose
+ * only accepted message dismisses this preview; an `openui` body is data, so it
+ * is drawn natively in this document instead and its controls address
+ * `threadId`. */
+export function ArtifactPreview(props: { artifact: Artifact; mode?: ArtifactPresentationMode; threadId?: number | null; onDismiss?: () => void; onReturnToComposer?: () => void }) {
   const [document, setDocument] = createSignal("");
   const [error, setError] = createSignal<string | null>(null);
   const [attempt, setAttempt] = createSignal(0);
@@ -23,7 +37,7 @@ export function ArtifactPreview(props: { artifact: Artifact; mode?: ArtifactPres
     dispose(); setDocument(""); setError(null);
     // Source stays in the trusted host as inert text. Do not even load the
     // renderer or start the JSX compiler while this path is selected.
-    if (mode === "source") return;
+    if (mode === "source" || artifact.kind === "openui") return;
     void import("./document").then(({ artifactDocument }) => {
       if (current !== generation) return;
       if (artifact.kind !== "solid") { setDocument(artifactDocument(artifact)); return; }
@@ -42,7 +56,8 @@ export function ArtifactPreview(props: { artifact: Artifact; mode?: ArtifactPres
       worker.postMessage(artifact.content);
     }).catch(cause => { if (current === generation) setError(String(cause)); });
   });
-  return <Show when={(props.mode ?? "rendered") === "source"} fallback={<Show when={!error()} fallback={<div role="alert" class="space-y-4 p-6 text-sm">
+  const native = () => (props.mode ?? "rendered") !== "source" && props.artifact.kind === "openui";
+  return <Show when={(props.mode ?? "rendered") === "source"} fallback={<Show when={!native()} fallback={<NativeOpenUi artifact={props.artifact} threadId={props.threadId} />}><Show when={!error()} fallback={<div role="alert" class="space-y-4 p-6 text-sm">
     <p class="font-medium">This artifact couldn’t be displayed.</p>
     <p class="max-w-prose leading-relaxed text-muted-foreground">Try the preview again. If it still fails, ask Hirsel to repair artifact #{props.artifact.id}, “{props.artifact.title}”. Your conversation and draft are kept.</p>
     <div class="flex flex-wrap gap-2"><button class="min-h-11 rounded-lg bg-muted px-3 font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setAttempt(value => value + 1)}>Try preview again</button><Show when={props.onReturnToComposer}><button class="min-h-11 rounded-lg px-3 text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={props.onReturnToComposer}>Return to composer</button></Show></div>
@@ -51,5 +66,5 @@ export function ArtifactPreview(props: { artifact: Artifact; mode?: ArtifactPres
     <Show when={document()} fallback={<p role="status" class="p-6 text-sm text-muted-foreground">Preparing preview…</p>}>
       <iframe ref={node => { frame = node; }} title={props.artifact.title} srcdoc={document()} sandbox="allow-scripts" referrerpolicy="no-referrer" class="h-full min-h-64 w-full border-0 bg-white" />
     </Show>
-  </Show>}><pre data-slot="artifact-source" class="min-h-full overflow-auto whitespace-pre p-4 font-mono text-sm leading-relaxed text-foreground">{props.artifact.content}</pre></Show>;
+  </Show></Show>}><pre data-slot="artifact-source" class="min-h-full overflow-auto whitespace-pre p-4 font-mono text-sm leading-relaxed text-foreground">{props.artifact.content}</pre></Show>;
 }

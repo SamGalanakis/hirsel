@@ -11,6 +11,7 @@ describe("one render discriminator", () => {
       [{ kind: "solid" }, "solid"],
       [{ kind: "html" }, "html"],
       [{ kind: "markdown" }, "markdown"],
+      [{ kind: "openui" }, "openui"],
       [{ kind: "image", mime: "image/svg+xml" }, "image"],
       [{ kind: "image", mime: "image/png" }, "image"],
       [{ kind: "file", mime: "text/plain", filename: "notes.txt" }, "text"],
@@ -23,6 +24,7 @@ describe("one render discriminator", () => {
     expect(ids({ kind: "solid" })).toEqual(["preview", "source", "download", "showcase"]);
     expect(ids({ kind: "html" })).toEqual(["preview", "source", "download", "showcase"]);
     expect(ids({ kind: "markdown" })).toEqual(["preview", "source", "download", "showcase"]);
+    expect(ids({ kind: "openui" })).toEqual(["preview", "source", "download", "showcase"]);
     expect(ids({ kind: "image", mime: "image/svg+xml" })).toEqual(["preview", "source", "download", "showcase"]);
     // Plain text is already its own source, so it gets no duplicate reading.
     expect(ids({ kind: "file", mime: "text/plain", filename: null })).toEqual(["preview", "download", "showcase"]);
@@ -33,6 +35,7 @@ describe("one render discriminator", () => {
   it("derives download identity and the caption from the kind alone", () => {
     expect(downloadIdentity(summary({ kind: "solid" }))).toEqual({ mime: "text/jsx", filename: "Result.jsx" });
     expect(downloadIdentity(summary({ kind: "markdown" }))).toEqual({ mime: "text/markdown", filename: "Result.md" });
+    expect(downloadIdentity(summary({ kind: "openui" }))).toEqual({ mime: "text/x-openui", filename: "Result.openui" });
     expect(downloadIdentity(summary({ kind: "image", mime: "image/png" }))).toEqual({ mime: "image/png", filename: "Result.png" });
     expect(downloadIdentity(summary({ kind: "file", mime: "text/plain", filename: "notes.txt" }))).toEqual({ mime: "text/plain", filename: "notes.txt" });
     expect(downloadIdentity(summary({ kind: "file", mime: "text/plain", filename: null }))).toEqual({ mime: "text/plain", filename: "Result.txt" });

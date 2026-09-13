@@ -68,7 +68,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.artifacts_create",
             "artifacts_create",
-            "Explicitly publish a reusable artifact and insert its card in the current conversation. `kind` chooses how the result is opened: solid is a self-contained JSX module exporting default App (imports limited to solid-js and @solidjs/web, Solid 2); html is a self-contained document; markdown is CommonMark/GFM source; image is SVG source or base64 bytes and needs `mime`; file is opaque UTF-8 text and may carry `mime` and `filename`. A file whose mime or filename is Markdown or an image is published as that kind instead. All interaction is local: no network, backend or Hirsel tool access. Never create artifacts automatically from every output.",
+            "Explicitly publish a reusable artifact and insert its card in the current conversation. `kind` chooses how the result is opened: solid is a self-contained JSX module exporting default App (imports limited to solid-js and @solidjs/web, Solid 2); html is a self-contained document; markdown is CommonMark/GFM source; openui is OpenUI Lang v0.5 source rendered natively with Hirsel's own component library — prefer it for dashboards, tables, metrics, forms and anything the Owner interacts with, and see the OpenUI component library section of your guidance for the vocabulary; image is SVG source or base64 bytes and needs `mime`; file is opaque UTF-8 text and may carry `mime` and `filename`. A file whose mime or filename is Markdown or an image is published as that kind instead. All interaction is local: no network, backend or Hirsel tool access. Never create artifacts automatically from every output.",
             json!({"type":"object","additionalProperties":false,"required":["title","kind","content"],"properties":{"title":{"type":"string","minLength":1,"maxLength":200},"kind":{"type":"string","enum":ArtifactKind::TAGS},"content":{"type":"string","minLength":1,"maxLength":1048576},"mime":{"type":"string"},"filename":{"type":"string"}}}),
             json!({"type":"object"}),
             ["artifacts"],
@@ -77,7 +77,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.artifacts_edit",
             "artifacts_edit",
-            "Edit a saved artifact in place using exact-match replacements. Each old_string must occur exactly once. The ID stays stable and every earlier reference opens the latest content; no revision history. Publishes a card in the current Thread. Use show to read current source before editing.",
+            "Edit a saved artifact in place using exact-match replacements. Each old_string must occur exactly once. An openui artifact edits one statement line at a time: replace `id = Component(...)` with its new form. The ID stays stable and every earlier reference opens the latest content; no revision history. Publishes a card in the current Thread. Use show to read current source before editing.",
             json!({"type":"object","additionalProperties":false,"required":["artifact_id","edits"],"properties":{"artifact_id":{"type":"integer","minimum":1},"title":{"type":"string","minLength":1,"maxLength":200},"edits":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object","additionalProperties":false,"required":["old_string","new_string"],"properties":{"old_string":{"type":"string","minLength":1},"new_string":{"type":"string"}}}}}}),
             json!({"type":"object"}),
             ["artifacts"],

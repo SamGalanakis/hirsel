@@ -25,6 +25,8 @@ export function artifactDocument(artifact: Artifact, compiled?: string): string 
   if (mode === "markdown") return page(markdownDocumentBody(artifact.content));
   if (mode === "text") return page(`<pre>${text(artifact.content)}</pre>`);
   if (mode === "html") return page(artifact.content);
+  // An openui body is drawn natively in the host document, never in a frame.
+  if (mode === "openui") throw new Error("OpenUI artifacts render natively, not as a document.");
   if (!compiled) throw new Error("Solid artifact has not been compiled.");
   const execute = `${runtime}\n${errorBoundary}\ntry { const exports = {}; const module = { exports }; const require = name => { const value=globalThis.__artifactModules[name]; if(!value) throw new Error('Only solid-js and @solidjs/web imports are available.'); return value; };\n${compiled}\nif(typeof module.exports.default !== 'function') throw new Error('Export a default Solid component.'); globalThis.__artifactModules['@solidjs/web'].render(() => module.exports.default({}), document.getElementById('artifact-root')); } catch(error) { showError(error); }`;
   return `${head}<div id="artifact-root"></div><script>${script(execute)}</script></body></html>`;

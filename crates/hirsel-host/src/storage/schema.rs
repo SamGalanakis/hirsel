@@ -2,7 +2,7 @@
 use super::Storage;
 use rusqlite::Connection;
 
-const SCHEMA_VERSION: u32 = 11;
+const SCHEMA_VERSION: u32 = 13;
 
 pub(super) fn state_list(terminal: Option<bool>) -> String {
     hirsel_proto::ThreadTurnState::ALL

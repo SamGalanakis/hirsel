@@ -205,6 +205,7 @@ async fn every_kind_round_trips_and_the_store_rejects_an_unknown_tag() {
         ArtifactKind::Solid,
         ArtifactKind::Html,
         ArtifactKind::Markdown,
+        ArtifactKind::OpenUi,
         ArtifactKind::Image {
             mime: "image/svg+xml".into(),
         },

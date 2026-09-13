@@ -179,7 +179,7 @@ async fn previous_schema_version_is_refused_without_in_place_evolution() {
             .await
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        11
+        13
     );
     drop(storage);
     let path = dir.path().join("hirsel.sqlite");
@@ -212,7 +212,9 @@ async fn unknown_current_layouts_and_bad_identity_are_untouched() {
 
 #[tokio::test]
 async fn branch_specific_schema_seven_layouts_are_refused_without_modification() {
-    for version in [10, 11] {
+    // 10 is a stale version number; 13 is the current one carrying a layout
+    // that is not the current one.
+    for version in [10, 13] {
         for layout in [
             include_str!("icons-only-v7.sql"),
             include_str!("processes-only-v7.sql"),

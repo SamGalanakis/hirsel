@@ -110,6 +110,7 @@ mod tool_defs;
 mod tool_results;
 mod tool_schemas;
 mod turn;
+mod turn_ingest;
 use thread_schemas::*;
 
 #[cfg(test)]
@@ -136,6 +137,7 @@ use tool_defs::*;
 use tool_results::*;
 use tool_schemas::*;
 use turn::*;
+pub(crate) use turn_ingest::{ExecutorEvent, ExecutorTerminalOutcome, TurnIngest};
 
 pub use provider::RuntimeConfig;
 pub(crate) use provider::agent_host_section;

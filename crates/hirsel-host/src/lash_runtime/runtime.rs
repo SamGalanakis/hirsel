@@ -294,8 +294,8 @@ impl AgentRuntime {
 pub(super) fn start_scripted_runtime(
     config: RuntimeConfig,
     tools: ToolSuite,
-    broadcaster: broadcast::Sender<HostToClient>,
-    broadcast_log: BroadcastLog,
+    _broadcaster: broadcast::Sender<HostToClient>,
+    _broadcast_log: BroadcastLog,
     thread_id: u64,
     tasks: RuntimeTasks,
     capacity: Arc<tokio::sync::Semaphore>,
@@ -306,8 +306,6 @@ pub(super) fn start_scripted_runtime(
         capacity,
         config,
         tools,
-        broadcaster,
-        broadcast_log,
         state: Arc::new(Mutex::new(ScriptedQueueState::default())),
         notify: Arc::new(Notify::new()),
     });

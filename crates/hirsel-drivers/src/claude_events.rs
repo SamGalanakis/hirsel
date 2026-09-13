@@ -132,11 +132,21 @@ impl ClaudeOutput {
                 for block in content.into_iter().flatten() {
                     match block.get("type").and_then(Value::as_str) {
                         Some("text") => {
-                            if let Some(text) = block.get("text").and_then(Value::as_str) {
-                                let summary = short_line(text);
-                                if !summary.is_empty() {
-                                    events.emit(SubagentEvent::Progress { summary })?;
-                                }
+                            if let Some(text) = block.get("text").and_then(Value::as_str)
+                                && !text.is_empty()
+                            {
+                                events.emit(SubagentEvent::ProseDelta {
+                                    text: text.to_string(),
+                                })?;
+                            }
+                        }
+                        Some("thinking") => {
+                            if let Some(text) = block.get("thinking").and_then(Value::as_str)
+                                && !text.is_empty()
+                            {
+                                events.emit(SubagentEvent::ReasoningDelta {
+                                    text: text.to_string(),
+                                })?;
                             }
                         }
                         Some("tool_use") => {
@@ -170,8 +180,8 @@ impl ClaudeOutput {
             Some("stream_event") => {
                 self.check_session(value)?;
                 if let Some(text) = value.pointer("/event/delta/text").and_then(Value::as_str) {
-                    events.emit(SubagentEvent::Progress {
-                        summary: short_line(text),
+                    events.emit(SubagentEvent::ProseDelta {
+                        text: text.to_string(),
                     })?;
                 }
             }

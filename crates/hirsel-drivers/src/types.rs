@@ -128,6 +128,12 @@ pub enum SubagentEvent {
     Started {
         external_id: String,
     },
+    ProseDelta {
+        text: String,
+    },
+    ReasoningDelta {
+        text: String,
+    },
     Progress {
         summary: String,
     },

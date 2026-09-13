@@ -258,62 +258,17 @@ impl LashAgentRuntime {
                     return Err(error);
                 }
             }
-            let integrity_failure = active
-                .thread_turn_id
-                .and_then(|turn_id| self.tools.turn_timeline_integrity_failure(turn_id));
-            let state = if integrity_failure.is_some() {
-                ThreadTurnState::Failed
-            } else {
-                match output.map(|o| &o.result.outcome) {
-                    Some(lash::TurnOutcome::Finished(_)) => ThreadTurnState::Completed,
-                    Some(lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled { .. })) => {
-                        ThreadTurnState::Cancelled
-                    }
-                    _ => ThreadTurnState::Failed,
-                }
-            };
             if let Some(turn_id) = active.thread_turn_id {
-                if integrity_failure.is_none()
-                    && let Some(output) = output
-                {
-                    persist_tool_call_summaries(
-                        &self.tools,
-                        active.thread_id,
-                        turn_id,
-                        &tool_call_summaries(output),
-                    )
-                    .await?;
-                }
-                let terminal_output = if integrity_failure.is_some() {
-                    None
-                } else {
-                    output.and_then(turn_chat_payload)
-                };
-                let completion = self
-                    .tools
-                    .storage()
-                    .complete_thread_turn_with_failure(
-                        &self.history_id,
-                        turn_id,
-                        state,
-                        terminal_output,
-                        integrity_failure.as_deref(),
-                    )
-                    .await?;
-                if integrity_failure.is_some() {
-                    anyhow::ensure!(
-                        completion.turn.state == ThreadTurnState::Failed,
-                        "timeline integrity failure lost to an earlier terminal projection"
-                    );
-                    self.tools.clear_turn_timeline_integrity_failure(turn_id);
-                }
-                if let Some(activity) = completion.failure_activity {
-                    self.tools.publish_thread_activity(activity).await;
-                }
-                if let Some(message) = completion.message {
-                    self.tools.publish_thread_message(message).await;
-                }
-                self.tools.publish_thread_turn(completion.turn).await;
+                let (outcome, final_text, tool_calls) = lash_terminal_projection(output);
+                TurnIngest::complete(
+                    &self.tools,
+                    &self.history_id,
+                    turn_id,
+                    outcome,
+                    final_text,
+                    tool_calls,
+                )
+                .await?;
             }
         }
         Ok(())

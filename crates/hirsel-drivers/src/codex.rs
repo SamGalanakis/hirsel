@@ -34,7 +34,9 @@ use crate::{
 mod config;
 #[path = "codex_io.rs"]
 mod io;
-use io::{CodexToolState, codex_progress, codex_tool_event, read_codex_stdout};
+use io::{
+    CodexToolState, codex_progress, codex_timeline_event, codex_tool_event, read_codex_stdout,
+};
 pub(crate) use io::{codex_agent_message, codex_terminal_outcome};
 
 #[derive(Default)]
@@ -269,6 +271,8 @@ impl CodexSession {
             state.last_agent_message = None;
         }
         if let Some(event) = codex_tool_event(&mut state.tools, &value) {
+            let _ = self.events.emit(event);
+        } else if let Some(event) = codex_timeline_event(&value) {
             let _ = self.events.emit(event);
         } else if let Some(summary) = codex_progress(&value) {
             let _ = self.events.emit(SubagentEvent::Progress { summary });

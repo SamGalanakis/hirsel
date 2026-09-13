@@ -5,13 +5,13 @@ use hirsel_proto::{ToolCallSummary, TurnEventKind};
 #[derive(Default)]
 pub(super) struct ToolTelemetry {
     order: Vec<String>,
-    pending: HashMap<String, String>,
+    pending: HashMap<String, (String, serde_json::Value)>,
     completed: HashMap<String, ToolCallSummary>,
 }
 impl ToolTelemetry {
-    fn start(&mut self, id: &str, name: &str) {
+    fn start(&mut self, id: &str, name: &str, input: &serde_json::Value) {
         self.order.push(id.into());
-        self.pending.insert(id.into(), name.into());
+        self.pending.insert(id.into(), (name.into(), input.clone()));
     }
 
     fn complete(&mut self, id: &str, name: String, ok: bool) {
@@ -51,7 +51,7 @@ impl BridgeState {
             TurnEventKind::ToolStart {
                 id: id.into(),
                 name: name.into(),
-                summary: None,
+                summary: crate::lash_runtime::condense_args(name, input),
                 input: Some(crate::lash_runtime::bounded_turn_payload(input)),
             },
         );
@@ -62,7 +62,7 @@ impl BridgeState {
                 .await;
             return Err(error);
         }
-        telemetry.start(id, name);
+        telemetry.start(id, name, input);
         Ok(())
     }
 
@@ -70,11 +70,11 @@ impl BridgeState {
         &self,
         id: &str,
         ok: bool,
-        summary: Option<String>,
+        _summary: Option<String>,
         result: &serde_json::Value,
     ) {
         let mut telemetry = self.telemetry.lock().await;
-        let Some(name) = telemetry.pending.get(id).cloned() else {
+        let Some((name, args)) = telemetry.pending.get(id).cloned() else {
             return;
         };
         // This invocation has produced its one real result. If timeline
@@ -96,7 +96,7 @@ impl BridgeState {
                 id: id.into(),
                 name: name.clone(),
                 ok,
-                summary,
+                summary: crate::lash_runtime::condense_result_with_status(&name, &args, result, ok),
                 result: Some(crate::lash_runtime::bounded_turn_payload(result)),
             },
         );
@@ -109,6 +109,26 @@ impl BridgeState {
             return;
         }
         telemetry.complete(id, name, ok);
+        if let Err(error) = crate::lash_runtime::TurnIngest::record_tool_completion(
+            &self.tools,
+            (self.caller.thread_id, self.caller.turn_id),
+            &ToolCallSummary {
+                id: id.into(),
+                name: telemetry
+                    .completed
+                    .get(id)
+                    .expect("completion was just recorded")
+                    .name
+                    .clone(),
+                ok,
+            },
+        )
+        .await
+        {
+            self.tools
+                .fail_turn_timeline_integrity(self.caller.turn_id, &error.to_string())
+                .await;
+        }
     }
 
     pub(super) async fn finish_pending(&self) {
@@ -139,8 +159,8 @@ mod tests {
     #[test]
     fn summaries_keep_start_order_across_reverse_completion() {
         let mut telemetry = ToolTelemetry::default();
-        telemetry.start("A", "read_file");
-        telemetry.start("B", "read_file");
+        telemetry.start("A", "read_file", &serde_json::json!({}));
+        telemetry.start("B", "read_file", &serde_json::json!({}));
         telemetry.complete("B", "read_file".into(), false);
         telemetry.complete("A", "read_file".into(), true);
 

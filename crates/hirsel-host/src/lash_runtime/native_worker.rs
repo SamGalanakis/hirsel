@@ -1,5 +1,4 @@
 //! Dedicated in-process Lash standard-protocol worker for one accepted Thread turn.
-use super::bridges::{activity_from_observation, publish_ready_timeline};
 use super::*;
 use crate::{
     native_coding_tools::NativeCodingTools,
@@ -23,14 +22,6 @@ pub(super) struct NativeWorkerRunContext<'a> {
     pub(super) config: &'a RuntimeConfig,
     pub(super) tools: &'a ToolSuite,
     pub(super) capacity: Arc<tokio::sync::Semaphore>,
-    pub(super) broadcaster: broadcast::Sender<HostToClient>,
-    pub(super) broadcast_log: BroadcastLog,
-}
-
-struct NativeTerminalProjection {
-    state: ThreadTurnState,
-    output: Option<(String, Vec<hirsel_proto::ToolCallSummary>)>,
-    reason: Option<String>,
 }
 
 struct NativeWorkerExecution {
@@ -90,24 +81,16 @@ impl NativeWorkerTurn {
         let abandon_session = result.is_err();
         let session_reusable = result.is_ok();
 
-        let integrity_failure = tools.turn_timeline_integrity_failure(self.turn_id);
-        let projection = match (integrity_failure.as_ref(), result) {
-            (Some(reason), _) => NativeTerminalProjection {
-                state: ThreadTurnState::Failed,
-                output: None,
-                reason: Some(reason.clone()),
-            },
-            (None, Ok(execution)) => native_terminal_projection(&execution.output),
-            (None, Err(_error)) if cancelled => NativeTerminalProjection {
-                state: ThreadTurnState::Cancelled,
-                output: None,
-                reason: None,
-            },
-            (None, Err(error)) => NativeTerminalProjection {
-                state: ThreadTurnState::Failed,
-                output: None,
-                reason: Some(bounded_error(&error.to_string())),
-            },
+        let (outcome, final_text, tool_calls) = match result {
+            Ok(execution) => lash_terminal_projection(Some(&execution.output)),
+            Err(_error) if cancelled => (ExecutorTerminalOutcome::Cancelled, None, Vec::new()),
+            Err(error) => (
+                ExecutorTerminalOutcome::Failed {
+                    reason: bounded_error(&error.to_string()),
+                },
+                None,
+                Vec::new(),
+            ),
         };
 
         // Terminal delivery is an outbox operation. Once provider execution
@@ -139,25 +122,17 @@ impl NativeWorkerTurn {
                 delay = (delay * 2).min(Duration::from_secs(2));
                 continue;
             }
-            match tools
-                .storage()
-                .complete_thread_turn_with_failure(
-                    &request.history_id,
-                    self.turn_id,
-                    projection.state,
-                    projection.output.clone(),
-                    projection.reason.as_deref(),
-                )
-                .await
+            match TurnIngest::complete(
+                tools,
+                &request.history_id,
+                self.turn_id,
+                outcome.clone(),
+                final_text.clone(),
+                tool_calls.clone(),
+            )
+            .await
             {
-                Ok(completion) => {
-                    if integrity_failure.is_some() {
-                        anyhow::ensure!(
-                            completion.turn.state == ThreadTurnState::Failed,
-                            "timeline integrity failure lost to an earlier terminal projection"
-                        );
-                        tools.clear_turn_timeline_integrity_failure(self.turn_id);
-                    }
+                Ok(_) => {
                     if session_reusable
                         && let Err(error) = tools
                             .storage()
@@ -177,13 +152,6 @@ impl NativeWorkerTurn {
                         delay = (delay * 2).min(Duration::from_secs(2));
                         continue;
                     }
-                    if let Some(activity) = completion.failure_activity {
-                        tools.publish_thread_activity(activity).await;
-                    }
-                    if let Some(message) = completion.message {
-                        tools.publish_thread_message(message).await;
-                    }
-                    tools.publish_thread_turn(completion.turn).await;
                     return Ok(());
                 }
                 Err(error) => {
@@ -327,31 +295,23 @@ impl NativeWorkerTurn {
                 self.turn_id,
             )
             .await?;
-        let activity = tools
-            .storage()
-            .append_thread_activity(
-                request.thread_id,
-                Some(self.turn_id),
-                "execution_started",
-                &json!({
-                    "agent":"lash",
-                    "provider_id":provider.id,
-                    "model":model,
-                    "session_id":bootstrap.session_id,
-                }),
-            )
-            .await?;
-        tools.publish_thread_activity(activity).await;
-
         let instructions = applicable_repo_instructions(&cwd).await?;
         let input = native_worker_input(request, &cwd, &instructions);
         let sink = NativeTimelineSink::new(
             request.thread_id,
             self.turn_id,
             tools.clone(),
-            context.broadcaster.clone(),
-            context.broadcast_log.clone(),
+            json!({
+                "agent":"lash",
+                "provider_id":provider.id,
+                "model":model,
+                "session_id":bootstrap.session_id,
+            }),
         );
+        sink.route_event(ExecutorEvent::Started {
+            external_id: Some(bootstrap.session_id.clone()),
+        })
+        .await;
         let report = session
             .turn(input)
             .provider(provider_handle)
@@ -362,6 +322,21 @@ impl NativeWorkerTurn {
             .turn_id(turn_id)
             .stream_to(&sink)
             .await;
+        let terminal = match &report {
+            Ok(output) => {
+                lash_terminal_projection(Some(&lash::TurnOutput {
+                    result: output.clone(),
+                    activities: Vec::new(),
+                }))
+                .0
+            }
+            Err(_) if self.cancel.is_cancelled() => ExecutorTerminalOutcome::Cancelled,
+            Err(error) => ExecutorTerminalOutcome::Failed {
+                reason: bounded_error(&error.to_string()),
+            },
+        };
+        sink.route_event(ExecutorEvent::Terminal { outcome: terminal })
+            .await;
         sink.finish().await;
         let output = report?;
         Ok(NativeWorkerExecution {
@@ -371,35 +346,6 @@ impl NativeWorkerTurn {
             },
             unowned_message_watermark: bootstrap.unowned_message_watermark,
         })
-    }
-}
-
-fn native_terminal_projection(output: &lash::TurnOutput) -> NativeTerminalProjection {
-    match &output.result.outcome {
-        lash::TurnOutcome::Finished(_) => NativeTerminalProjection {
-            state: ThreadTurnState::Completed,
-            output: turn_chat_payload(output),
-            reason: None,
-        },
-        lash::TurnOutcome::Stopped(lash::TurnStop::Cancelled { .. }) => NativeTerminalProjection {
-            state: ThreadTurnState::Cancelled,
-            output: turn_chat_payload(output),
-            reason: None,
-        },
-        lash::TurnOutcome::Stopped(stop) => NativeTerminalProjection {
-            state: ThreadTurnState::Failed,
-            output: None,
-            reason: Some(bounded_error(&format!(
-                "native Lash worker stopped: {stop:?}"
-            ))),
-        },
-        lash::TurnOutcome::AgentFrameSwitch { .. } => NativeTerminalProjection {
-            state: ThreadTurnState::Failed,
-            output: None,
-            reason: Some(
-                "native Lash standard worker attempted an unsupported agent-frame switch".into(),
-            ),
-        },
     }
 }
 
@@ -571,35 +517,19 @@ async fn applicable_repo_instructions(cwd: &std::path::Path) -> anyhow::Result<S
 }
 
 struct NativeTimelineSink {
-    thread_id: u64,
     turn_id: u64,
     tools: ToolSuite,
-    broadcaster: broadcast::Sender<HostToClient>,
-    broadcast_log: BroadcastLog,
-    timeline: Mutex<TurnTimelineBridge>,
+    ingest: Mutex<TurnIngest>,
     activities: Mutex<Vec<TurnActivity>>,
     sequence: AtomicU64,
 }
 
 impl NativeTimelineSink {
-    fn new(
-        thread_id: u64,
-        turn_id: u64,
-        tools: ToolSuite,
-        broadcaster: broadcast::Sender<HostToClient>,
-        broadcast_log: BroadcastLog,
-    ) -> Self {
+    fn new(thread_id: u64, turn_id: u64, tools: ToolSuite, provenance: Value) -> Self {
         Self {
-            thread_id,
             turn_id,
             tools,
-            broadcaster,
-            broadcast_log,
-            timeline: Mutex::new(TurnTimelineBridge {
-                thread_id: Some(thread_id),
-                turn_id: Some(turn_id),
-                ..TurnTimelineBridge::default()
-            }),
+            ingest: Mutex::new(TurnIngest::new(thread_id, turn_id, provenance)),
             activities: Mutex::new(Vec::new()),
             sequence: AtomicU64::new(0),
         }
@@ -610,19 +540,22 @@ impl NativeTimelineSink {
     }
 
     async fn finish(&self) {
-        let mut timeline = self.timeline.lock().await;
-        timeline.finish_turn();
-        publish_ready_timeline(&self.tools, &mut timeline).await;
-        publish(
-            &self.broadcast_log,
-            &self.broadcaster,
-            HostToClient::AgentActivity {
-                thread_id: self.thread_id,
-                turn_id: self.turn_id,
-                state: AgentActivityState::Idle,
-                text: None,
-            },
-        );
+        let mut ingest = self.ingest.lock().await;
+        if let Err(error) = ingest.flush(&self.tools).await {
+            self.tools
+                .fail_turn_timeline_integrity(self.turn_id, &error.to_string())
+                .await;
+        }
+    }
+
+    async fn route_event(&self, event: ExecutorEvent) {
+        let mut ingest = self.ingest.lock().await;
+        if let Err(error) = ingest.accept(&self.tools, event).await {
+            let reason = format!("native worker event ingest failed: {error}");
+            self.tools
+                .fail_turn_timeline_integrity(self.turn_id, &reason)
+                .await;
+        }
     }
 
     async fn route(&self, activity: TurnActivity) {
@@ -641,21 +574,9 @@ impl NativeTimelineSink {
         let payload = RemoteSessionObservationEventPayload::TurnActivity {
             activity: Box::new(remote),
         };
-        if let Some((state, text)) = activity_from_observation(&payload) {
-            publish(
-                &self.broadcast_log,
-                &self.broadcaster,
-                HostToClient::AgentActivity {
-                    thread_id: self.thread_id,
-                    turn_id: self.turn_id,
-                    state,
-                    text,
-                },
-            );
+        if let Some(event) = host_executor_event(&payload) {
+            self.route_event(event).await;
         }
-        let mut timeline = self.timeline.lock().await;
-        timeline.observe(&payload);
-        publish_ready_timeline(&self.tools, &mut timeline).await;
     }
 }
 
@@ -757,15 +678,12 @@ mod tests {
             providers,
             prompts,
         };
-        let (broadcaster, _) = broadcast::channel(16);
         let turn = NativeWorkerTurn::new(delegated.turn_id);
         turn.run(
             NativeWorkerRunContext {
                 config: &runtime_config,
                 tools: &executor.tools,
                 capacity: Arc::new(tokio::sync::Semaphore::new(1)),
-                broadcaster,
-                broadcast_log: BroadcastLog::default(),
             },
             request,
             execution,

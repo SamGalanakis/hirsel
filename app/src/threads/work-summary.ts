@@ -66,9 +66,6 @@ export function workLabel(turn: ThreadTurn | undefined, events: TimelineEvent[],
   if (turn?.state === "running") {
     const pending = buildTimeline(events).findLast(item => item.kind === "tool" && item.status.state === "running");
     if (pending?.kind === "tool") return runningTool(pending.name);
-    const progress = activities.findLast(activity => activity.kind === "execution_progress");
-    const summary = progress && activityData(progress).summary;
-    if (typeof summary === "string" && summary.trim()) return summary.replace(/\s+/g, " ").slice(0, 120);
     if (events.at(-1)?.event.kind === "prose") return "Writing a reply";
     if (events.at(-1)?.event.kind === "reasoning") return "Thinking";
     return "Hirsel is working…";

@@ -4,10 +4,6 @@ use hirsel_drivers::{ScopedMcpLaunch, SessionHandle, SpawnSpec, SubagentDriver, 
 use hirsel_proto::ThreadTurnState;
 use tokio_util::sync::CancellationToken;
 
-fn is_scoped_bridge_tool(name: &str) -> bool {
-    name.starts_with("mcp__hirsel__")
-}
-
 fn is_execution_diagnostic(summary: &str) -> bool {
     let summary = summary.to_ascii_lowercase();
     [
@@ -15,9 +11,63 @@ fn is_execution_diagnostic(summary: &str) -> bool {
         "rate limit",
         "unparsed ",
         "unsupported codex server request",
+        "unknown call",
+        "reused id",
     ]
     .iter()
     .any(|marker| summary.contains(marker))
+}
+
+fn cli_executor_event(event: SubagentEvent) -> Option<ExecutorEvent> {
+    match event {
+        SubagentEvent::Started { external_id } => Some(ExecutorEvent::Started {
+            external_id: Some(external_id),
+        }),
+        SubagentEvent::ProseDelta { text } => Some(ExecutorEvent::Prose { text }),
+        SubagentEvent::ReasoningDelta { text } => Some(ExecutorEvent::Reasoning { text }),
+        SubagentEvent::Progress { summary } if is_execution_diagnostic(&summary) => {
+            Some(ExecutorEvent::Diagnostic { text: summary })
+        }
+        SubagentEvent::Progress { .. } => None,
+        SubagentEvent::ToolStarted {
+            call_id,
+            name,
+            args,
+        } => Some(ExecutorEvent::ToolStart {
+            id: call_id,
+            name,
+            args,
+        }),
+        SubagentEvent::ToolCompleted {
+            call_id,
+            name,
+            ok,
+            output,
+        } => Some(ExecutorEvent::ToolDone {
+            id: call_id,
+            name,
+            ok,
+            output,
+        }),
+        SubagentEvent::AssistantOutput { text } => Some(ExecutorEvent::Final { text }),
+        SubagentEvent::Terminal { outcome } => Some(ExecutorEvent::Terminal {
+            outcome: match outcome {
+                hirsel_drivers::TerminalOutcome::Done { .. } => ExecutorTerminalOutcome::Done,
+                hirsel_drivers::TerminalOutcome::Failed { reason } => {
+                    ExecutorTerminalOutcome::Failed { reason }
+                }
+                hirsel_drivers::TerminalOutcome::Interrupted => {
+                    ExecutorTerminalOutcome::Interrupted
+                }
+            },
+        }),
+    }
+}
+
+struct CliProjection {
+    outcome: ExecutorTerminalOutcome,
+    final_text: Option<String>,
+    tool_calls: Vec<ToolCallSummary>,
 }
 
 pub(super) struct CliTurn {
@@ -26,6 +76,7 @@ pub(super) struct CliTurn {
     driver: Arc<dyn SubagentDriver>,
     handle: Mutex<Option<SessionHandle>>,
 }
+
 impl CliTurn {
     pub(super) fn new(turn_id: u64, driver: Arc<dyn SubagentDriver>) -> Arc<Self> {
         Arc::new(Self {
@@ -35,6 +86,7 @@ impl CliTurn {
             handle: Mutex::new(None),
         })
     }
+
     pub(super) async fn stop(&self) {
         self.cancel.cancel();
         let handle = self.handle.lock().await.take();
@@ -42,6 +94,7 @@ impl CliTurn {
             let _ = self.driver.retire(&handle).await;
         }
     }
+
     pub(super) async fn run(
         &self,
         tools: &ToolSuite,
@@ -49,68 +102,32 @@ impl CliTurn {
         execution: crate::storage::ThreadExecution,
         capacity: Arc<tokio::sync::Semaphore>,
     ) -> anyhow::Result<()> {
-        let mut output = None;
-        let mut tool_calls = Vec::new();
-        let result = self
-            .execute(
-                tools,
-                &request,
-                execution,
-                capacity,
-                &mut output,
-                &mut tool_calls,
-            )
-            .await;
-        // Provider lifetime ends independently of terminal storage availability.
+        let projection = self.execute(tools, &request, execution, capacity).await;
         self.stop().await;
-        let integrity_failure = tools.turn_timeline_integrity_failure(self.turn_id);
-        let (state, reason) = match integrity_failure.clone() {
-            Some(reason) => (ThreadTurnState::Failed, Some(reason)),
-            None => match result {
-                Ok(TerminalOutcome::Done { .. }) => (ThreadTurnState::Completed, None),
-                Ok(TerminalOutcome::Interrupted) => (ThreadTurnState::Cancelled, None),
-                Ok(TerminalOutcome::Failed { reason }) => (ThreadTurnState::Failed, Some(reason)),
-                Err(error) => (ThreadTurnState::Failed, Some(error.to_string())),
+        let projection = match projection {
+            Ok(projection) => projection,
+            Err(error) => CliProjection {
+                outcome: ExecutorTerminalOutcome::Failed {
+                    reason: error.to_string(),
+                },
+                final_text: None,
+                tool_calls: Vec::new(),
             },
         };
-        // Do not synthesize a final assistant message from a process error/summary.
-        let output = if integrity_failure.is_some() {
-            None
-        } else {
-            output
-                .map(|text| (text, tool_calls.clone()))
-                .or_else(|| (!tool_calls.is_empty()).then_some((String::new(), tool_calls)))
-        };
+
         let mut delay = Duration::from_millis(50);
         loop {
-            match tools
-                .storage()
-                .complete_thread_turn_with_failure(
-                    &request.history_id,
-                    self.turn_id,
-                    state,
-                    output.clone(),
-                    reason.as_deref(),
-                )
-                .await
+            match TurnIngest::complete(
+                tools,
+                &request.history_id,
+                self.turn_id,
+                projection.outcome.clone(),
+                projection.final_text.clone(),
+                projection.tool_calls.clone(),
+            )
+            .await
             {
-                Ok(completion) => {
-                    if integrity_failure.is_some() {
-                        anyhow::ensure!(
-                            completion.turn.state == ThreadTurnState::Failed,
-                            "timeline integrity failure lost to an earlier terminal projection"
-                        );
-                        tools.clear_turn_timeline_integrity_failure(self.turn_id);
-                    }
-                    if let Some(activity) = completion.failure_activity {
-                        tools.publish_thread_activity(activity).await;
-                    }
-                    if let Some(message) = completion.message {
-                        tools.publish_thread_message(message).await;
-                    }
-                    tools.publish_thread_turn(completion.turn).await;
-                    return Ok(());
-                }
+                Ok(_) => return Ok(()),
                 Err(error) => {
                     if let Ok(history) = tools.storage().history_id().await {
                         anyhow::ensure!(
@@ -119,46 +136,46 @@ impl CliTurn {
                         );
                     }
                     tracing::warn!(turn_id=self.turn_id, %error, "Retrying durable CLI terminal delivery");
-                    // The history generation owns this task and aborts/drains it
-                    // on reset or shutdown. User cancellation still needs its
-                    // terminal committed, so the provider cancel flag is not a
-                    // reason to discard pending output here.
                     tokio::time::sleep(delay).await;
                     delay = (delay * 2).min(Duration::from_secs(2));
                 }
             }
         }
     }
+
     async fn recover_final_output(
         &self,
         events: &mut hirsel_drivers::EventStream,
-        output: &mut Option<String>,
-    ) {
-        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+    ) -> Option<String> {
+        tokio::time::timeout(Duration::from_secs(2), async {
             while let Some(event) = events.next().await {
                 match event {
-                    SubagentEvent::AssistantOutput { text } if output.is_none() => {
-                        *output = Some(text)
-                    }
+                    SubagentEvent::AssistantOutput { text } => return Some(text),
                     SubagentEvent::Terminal { .. } => break,
                     _ => {}
                 }
             }
+            None
         })
-        .await;
+        .await
+        .ok()
+        .flatten()
     }
+
     async fn execute(
         &self,
         tools: &ToolSuite,
         request: &OwnerTurn,
         execution: crate::storage::ThreadExecution,
         capacity: Arc<tokio::sync::Semaphore>,
-        output: &mut Option<String>,
-        tool_calls: &mut Vec<hirsel_proto::ToolCallSummary>,
-    ) -> anyhow::Result<TerminalOutcome> {
+    ) -> anyhow::Result<CliProjection> {
         let _permit = tokio::select! {
-            _=self.cancel.cancelled()=>return Ok(TerminalOutcome::Interrupted),
-            permit=capacity.acquire()=>permit?,
+            _ = self.cancel.cancelled() => return Ok(CliProjection {
+                outcome: ExecutorTerminalOutcome::Cancelled,
+                final_text: None,
+                tool_calls: Vec::new(),
+            }),
+            permit = capacity.acquire() => permit?,
         };
         let accepted = request.stored_turn(&tools.storage()).await?;
         anyhow::ensure!(
@@ -213,8 +230,8 @@ impl CliTurn {
         };
         let spec = SpawnSpec {
             agent,
-            model: Some(model),
-            variant: Some(variant),
+            model: Some(model.clone()),
+            variant: Some(variant.clone()),
             prompt,
             cwd,
             fake_fixture: tools.driver_fixture(),
@@ -225,154 +242,81 @@ impl CliTurn {
                 expected_tools: bridge.expected_tools.clone(),
             },
         };
-        let mut started_tools = HashMap::<String, (String, Value)>::new();
-        let mut completed_tools = HashSet::<String>::new();
-        let mut cli_tool_calls = Vec::<hirsel_proto::ToolCallSummary>::new();
-        let mut persisted_diagnostic = false;
-        let result=async {
-        let handle = self.driver.spawn(spec).await?;
-        *self.handle.lock().await = Some(handle.clone());
-        let mut events = self.driver.events(&handle)?;
-        loop {
-            let event = tokio::select! {
-                _=self.cancel.cancelled()=>{let _=self.driver.interrupt(&handle).await;self.recover_final_output(&mut events,output).await;return Ok(TerminalOutcome::Interrupted);},
-                _=bridge.invalidated.cancelled()=>{let _=self.driver.interrupt(&handle).await;self.recover_final_output(&mut events,output).await;return Ok(TerminalOutcome::Failed{reason:"Thread tool bridge restarted after an uncertain invocation".into()});},
-                event=events.next()=>event,
-            };
-            match event {
-                Some(SubagentEvent::AssistantOutput { text }) => {
-                    anyhow::ensure!(output.is_none(), "duplicate final CLI output");
-                    *output = Some(text);
-                }
-                Some(SubagentEvent::Terminal { outcome }) => return Ok(outcome),
-                Some(SubagentEvent::Started { external_id }) => {
-                    let activity = tools
-                        .storage()
-                        .append_thread_activity(
-                            request.thread_id,
-                            Some(self.turn_id),
-                            "execution_started",
-                            &json!({"agent":agent,"external_id":external_id}),
-                        )
-                        .await?;
-                    tools.publish_thread_activity(activity).await;
-                }
-                Some(SubagentEvent::ToolStarted {
-                    call_id,
-                    name,
-                    args,
-                }) => {
-                    if is_scoped_bridge_tool(&name) {
-                        continue;
-                    }
-                    if let Some((previous_name, previous_args)) = started_tools.get(&call_id) {
-                        anyhow::ensure!(
-                            previous_name == &name && previous_args == &args,
-                            "CLI reused a tool call id with different input"
-                        );
-                        continue;
-                    }
-                    tools
-                        .publish_turn_event(
-                            request.thread_id,
-                            self.turn_id,
-                            hirsel_proto::TurnEventKind::ToolStart {
-                                id: call_id.clone(),
-                                name: name.clone(),
-                                summary: condense_args(&name, &args),
-                                input: Some(bounded_turn_payload(&args)),
-                            },
-                        )
-                        .await?;
-                    started_tools.insert(call_id, (name, args));
-                }
-                Some(SubagentEvent::ToolCompleted {
-                    call_id,
-                    name,
-                    ok,
-                    output: tool_output,
-                }) => {
-                    if is_scoped_bridge_tool(&name) || completed_tools.contains(&call_id) {
-                        continue;
-                    }
-                    let args = match started_tools.get(&call_id) {
-                        Some((started_name, args)) => {
-                            anyhow::ensure!(
-                                started_name == &name,
-                                "CLI completed a tool call with another name"
-                            );
-                            args.clone()
+        let mut ingest = TurnIngest::new(
+            request.thread_id,
+            self.turn_id,
+            json!({"agent":agent,"model":model,"variant":variant}),
+        );
+        let result = async {
+            let handle = self.driver.spawn(spec).await?;
+            *self.handle.lock().await = Some(handle.clone());
+            let mut events = self.driver.events(&handle)?;
+            loop {
+                let event = tokio::select! {
+                    _ = self.cancel.cancelled() => {
+                        let _ = self.driver.interrupt(&handle).await;
+                        if let Some(text) = self.recover_final_output(&mut events).await {
+                            ingest.accept(tools, ExecutorEvent::Final { text }).await?;
                         }
-                        None => Value::Null,
-                    };
-                    tools
-                        .publish_turn_event(
-                            request.thread_id,
-                            self.turn_id,
-                            hirsel_proto::TurnEventKind::ToolDone {
-                                id: call_id.clone(),
-                                name: name.clone(),
-                                ok,
-                                summary: condense_result_with_status(
-                                    &name,
-                                    &args,
-                                    &tool_output,
-                                    ok,
-                                ),
-                                result: Some(bounded_turn_payload(&tool_output)),
+                        ingest.accept(tools, ExecutorEvent::Terminal {
+                            outcome: ExecutorTerminalOutcome::Cancelled,
+                        }).await?;
+                        break;
+                    },
+                    _ = bridge.invalidated.cancelled() => {
+                        let _ = self.driver.interrupt(&handle).await;
+                        if let Some(text) = self.recover_final_output(&mut events).await {
+                            ingest.accept(tools, ExecutorEvent::Final { text }).await?;
+                        }
+                        ingest.accept(tools, ExecutorEvent::Terminal {
+                            outcome: ExecutorTerminalOutcome::Failed {
+                                reason: "Thread tool bridge restarted after an uncertain invocation".into(),
                             },
-                        )
-                        .await?;
-                    let summary = hirsel_proto::ToolCallSummary {
-                        id: call_id.clone(),
-                        name,
-                        ok,
-                    };
-                    persist_tool_call_summaries(
-                        tools,
-                        request.thread_id,
-                        self.turn_id,
-                        std::slice::from_ref(&summary),
-                    )
-                    .await?;
-                    completed_tools.insert(call_id);
-                    cli_tool_calls.push(summary);
-                }
-                Some(SubagentEvent::Progress { summary }) => {
-                    if persisted_diagnostic || !is_execution_diagnostic(&summary) {
-                        continue;
+                        }).await?;
+                        break;
+                    },
+                    event = events.next() => event,
+                };
+                let Some(event) = event else {
+                    ingest.accept(tools, ExecutorEvent::Terminal {
+                        outcome: ExecutorTerminalOutcome::Failed {
+                            reason: "CLI closed without a terminal outcome".into(),
+                        },
+                    }).await?;
+                    break;
+                };
+                if let Some(event) = cli_executor_event(event) {
+                    let terminal = matches!(event, ExecutorEvent::Terminal { .. });
+                    ingest.accept(tools, event).await?;
+                    if terminal {
+                        break;
                     }
-                    let activity = tools
-                        .storage()
-                        .append_thread_activity(
-                            request.thread_id,
-                            Some(self.turn_id),
-                            "execution_progress",
-                            &json!({"summary":summary}),
-                        )
-                        .await?;
-                    tools.publish_thread_activity(activity).await;
-                    persisted_diagnostic = true;
-                }
-                None => {
-                    return Ok(TerminalOutcome::Failed {
-                        reason: "CLI closed without a terminal outcome".into(),
-                    });
                 }
             }
+            Ok::<(), anyhow::Error>(())
         }
-        }.await;
+        .await;
         bridge.finish().await;
-        let bridge_tool_calls = bridge.tool_calls().await;
-        persist_tool_call_summaries(tools, request.thread_id, self.turn_id, &bridge_tool_calls)
-            .await?;
-        cli_tool_calls.extend(
-            bridge_tool_calls
+        result?;
+        let mut tool_calls = ingest.tool_calls().to_vec();
+        let mut ids = tool_calls
+            .iter()
+            .map(|call| call.id.clone())
+            .collect::<HashSet<_>>();
+        tool_calls.extend(
+            bridge
+                .tool_calls()
+                .await
                 .into_iter()
-                .filter(|call| completed_tools.insert(call.id.clone())),
+                .filter(|call| ids.insert(call.id.clone())),
         );
-        *tool_calls = cli_tool_calls;
-        result
+        Ok(CliProjection {
+            outcome: ingest.terminal().cloned().ok_or_else(|| {
+                anyhow::anyhow!("CLI event stream ended without a terminal outcome")
+            })?,
+            final_text: ingest.final_text().map(str::to_string),
+            tool_calls,
+        })
     }
 }
 

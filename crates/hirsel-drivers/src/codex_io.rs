@@ -251,6 +251,31 @@ pub(super) fn codex_progress(value: &Value) -> Option<String> {
     }
 }
 
+pub(super) fn codex_timeline_event(value: &Value) -> Option<SubagentEvent> {
+    if value.get("method").and_then(Value::as_str) != Some("item/completed") {
+        return None;
+    }
+    let item = value.pointer("/params/item")?;
+    let text = match item.get("type").and_then(Value::as_str)? {
+        "agentMessage" | "plan" => item.get("text").and_then(Value::as_str)?.to_string(),
+        "reasoning" => ["summary", "content"]
+            .into_iter()
+            .filter_map(|key| item.get(key).and_then(Value::as_array))
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    if text.is_empty() {
+        return None;
+    }
+    Some(match item.get("type").and_then(Value::as_str) {
+        Some("reasoning") => SubagentEvent::ReasoningDelta { text },
+        _ => SubagentEvent::ProseDelta { text },
+    })
+}
+
 pub(super) fn codex_tool_event(state: &mut CodexToolState, value: &Value) -> Option<SubagentEvent> {
     let method = value.get("method").and_then(Value::as_str)?;
     let completed = match method {

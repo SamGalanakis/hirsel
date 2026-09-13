@@ -175,7 +175,7 @@ async fn fake_cli_tools_publish_and_replay_structured_events_with_bounded_progre
         .activities
         .iter()
         .filter(|activity| {
-            activity.turn_id == Some(turn_id) && activity.kind == "execution_progress"
+            activity.turn_id == Some(turn_id) && activity.kind == "execution_diagnostic"
         })
         .collect::<Vec<_>>();
     assert_eq!(progress.len(), 1);

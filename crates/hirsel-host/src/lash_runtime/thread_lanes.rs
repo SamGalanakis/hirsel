@@ -224,8 +224,6 @@ impl ThreadRuntimeRegistry {
                 let tools = self.tools.clone();
                 let config = self.config.clone();
                 let capacity = self.capacity.clone();
-                let broadcaster = self.broadcaster.clone();
-                let broadcast_log = self.broadcast_log.clone();
                 self.epoch
                     .read()
                     .expect("runtime epoch poisoned")
@@ -237,8 +235,6 @@ impl ThreadRuntimeRegistry {
                                     config: &config,
                                     tools: &tools,
                                     capacity,
-                                    broadcaster,
-                                    broadcast_log,
                                 },
                                 request,
                                 execution,

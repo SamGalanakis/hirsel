@@ -6,8 +6,6 @@ pub(super) struct ScriptedAgentRuntime {
     pub(super) capacity: Arc<tokio::sync::Semaphore>,
     pub(super) config: RuntimeConfig,
     pub(super) tools: ToolSuite,
-    pub(super) broadcaster: broadcast::Sender<HostToClient>,
-    pub(super) broadcast_log: BroadcastLog,
     pub(super) state: Arc<Mutex<ScriptedQueueState>>,
     pub(super) notify: Arc<Notify>,
 }
@@ -243,52 +241,49 @@ impl ScriptedAgentRuntime {
         if let Some(active) = self.state.lock().await.active.as_mut() {
             active.turn_id = Some(record.id);
         }
-        publish(
-            &self.broadcast_log,
-            &self.broadcaster,
-            HostToClient::AgentActivity {
-                turn_id: record.id,
-                thread_id: turn.thread_id,
-                state: AgentActivityState::Thinking,
-                text: Some("processing owner message".into()),
-            },
+        let mut ingest = TurnIngest::new(
+            turn.thread_id,
+            record.id,
+            json!({"agent":"host","model":self.config.model,"driver":"scripted"}),
         );
-        let result = self.handle_turn_inner(&turn, &cancel).await;
-        let state = if cancel.is_cancelled() {
-            hirsel_proto::ThreadTurnState::Cancelled
+        ingest
+            .accept(&self.tools, ExecutorEvent::Started { external_id: None })
+            .await?;
+        let result = self.handle_turn_inner(&turn, &cancel, &mut ingest).await;
+        let outcome = if cancel.is_cancelled() {
+            ExecutorTerminalOutcome::Cancelled
         } else if result.is_ok() {
-            hirsel_proto::ThreadTurnState::Completed
+            ExecutorTerminalOutcome::Done
         } else {
-            hirsel_proto::ThreadTurnState::Failed
-        };
-        let (record, message) = self
-            .tools
-            .storage()
-            .complete_thread_turn(
-                &turn.history_id,
-                record.id,
-                state,
-                result
+            ExecutorTerminalOutcome::Failed {
+                reason: result
                     .as_ref()
-                    .ok()
-                    .and_then(|text| text.clone())
-                    .map(|text| (text, vec![])),
+                    .expect_err("failed result has an error")
+                    .to_string(),
+            }
+        };
+        if let Some(text) = result.as_ref().ok().and_then(|text| text.clone()) {
+            ingest
+                .accept(&self.tools, ExecutorEvent::Final { text })
+                .await?;
+        }
+        ingest
+            .accept(
+                &self.tools,
+                ExecutorEvent::Terminal {
+                    outcome: outcome.clone(),
+                },
             )
             .await?;
-        if let Some(message) = message {
-            self.tools.publish_thread_message(message).await;
-        }
-        self.tools.publish_thread_turn(record.clone()).await;
-        publish(
-            &self.broadcast_log,
-            &self.broadcaster,
-            HostToClient::AgentActivity {
-                turn_id: record.id,
-                thread_id: turn.thread_id,
-                state: AgentActivityState::Idle,
-                text: None,
-            },
-        );
+        TurnIngest::complete(
+            &self.tools,
+            &turn.history_id,
+            record.id,
+            outcome,
+            ingest.final_text().map(str::to_string),
+            ingest.tool_calls().to_vec(),
+        )
+        .await?;
         result.map(|_| ())
     }
 
@@ -296,6 +291,7 @@ impl ScriptedAgentRuntime {
         &self,
         turn: &OwnerTurn,
         cancel: &lash::CancellationToken,
+        ingest: &mut TurnIngest,
     ) -> anyhow::Result<Option<String>> {
         if let Some(duration) = slow_turn_duration(&turn.body)?
             && !sleep_until_done_or_cancelled(duration, cancel).await
@@ -305,7 +301,7 @@ impl ScriptedAgentRuntime {
         if cancel.is_cancelled() {
             return Ok(None);
         }
-        self.emit_scripted_timeline(turn.thread_id).await?;
+        self.emit_scripted_timeline(ingest).await?;
         let turn_text = owner_turn_text(turn, &self.tools.storage());
         let lower = turn_text.to_lowercase();
         if self.config.driver_mode == DriverMode::Fake && lower.contains("delegate") {
@@ -359,58 +355,45 @@ impl ScriptedAgentRuntime {
         Ok(Some("I received the Owner message. This scripted Agent mode is a deterministic test double; set HIRSEL_AGENT=lash for the real RLM runtime.".into()))
     }
 
-    pub(super) async fn emit_scripted_timeline(&self, thread_id: u64) -> anyhow::Result<()> {
-        let turn_id = self
-            .state
-            .lock()
-            .await
-            .active
-            .as_ref()
-            .and_then(|a| a.turn_id);
-        let Some(turn_id) = turn_id else {
-            return Ok(());
-        };
-        self.tools
-            .publish_turn_event(
-                thread_id,
-                turn_id,
-                TurnEventKind::Prose {
+    pub(super) async fn emit_scripted_timeline(
+        &self,
+        ingest: &mut TurnIngest,
+    ) -> anyhow::Result<()> {
+        ingest
+            .accept(
+                &self.tools,
+                ExecutorEvent::Prose {
                     text: "I am checking the scripted path before replying.".to_string(),
                 },
             )
             .await?;
         tokio::time::sleep(Duration::from_millis(40)).await;
-        self.tools
-            .publish_turn_event(
-                thread_id,
-                turn_id,
-                TurnEventKind::ToolStart {
-                    id: "scripted-tool-1".to_string(),
-                    name: "scripted_double".to_string(),
-                    summary: Some("deterministic branch".to_string()),
-                    input: Some(bounded_turn_payload(&json!({"branch":"deterministic"}))),
+        ingest
+            .accept(
+                &self.tools,
+                ExecutorEvent::ToolStart {
+                    id: "scripted-tool-1".into(),
+                    name: "scripted_double".into(),
+                    args: json!({"branch":"deterministic"}),
                 },
             )
             .await?;
         tokio::time::sleep(Duration::from_millis(40)).await;
-        self.tools
-            .publish_turn_event(
-                thread_id,
-                turn_id,
-                TurnEventKind::ToolDone {
-                    id: "scripted-tool-1".to_string(),
-                    name: "scripted_double".to_string(),
+        ingest
+            .accept(
+                &self.tools,
+                ExecutorEvent::ToolDone {
+                    id: "scripted-tool-1".into(),
+                    name: "scripted_double".into(),
                     ok: true,
-                    summary: Some("ok fixture selected".to_string()),
-                    result: Some(bounded_turn_payload(&json!({"fixture":"selected"}))),
+                    output: json!({"fixture":"selected","ok":true}),
                 },
             )
             .await?;
-        self.tools
-            .publish_turn_event(
-                thread_id,
-                turn_id,
-                TurnEventKind::Prose {
+        ingest
+            .accept(
+                &self.tools,
+                ExecutorEvent::Prose {
                     text: "The scripted response is ready.".to_string(),
                 },
             )

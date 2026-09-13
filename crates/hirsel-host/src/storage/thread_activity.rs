@@ -269,7 +269,7 @@ impl Storage {
         turn_id: Option<u64>,
         kind: &str,
         data: &serde_json::Value,
-    ) -> anyhow::Result<ThreadActivity> {
+    ) -> anyhow::Result<(ThreadActivity, bool)> {
         let mut c = self.conn.lock().await;
         let tx = c.transaction()?;
         if let Some(id) = tx
@@ -290,7 +290,7 @@ impl Storage {
                 "activity replay key belongs to another turn"
             );
             tx.commit()?;
-            return Ok(activity);
+            return Ok((activity, false));
         }
         threads::get(&tx, thread_id)?;
         if let Some(id) = turn_id {
@@ -320,7 +320,7 @@ impl Storage {
             activity_row,
         )?;
         tx.commit()?;
-        Ok(activity)
+        Ok((activity, true))
     }
 }
 

@@ -1,4 +1,5 @@
-//! Claude's provider messages remain diagnostics until an actual final result.
+//! Claude's stream is translated into semantic deltas while only a completed final block is
+//! eligible to become the terminal assistant output.
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
@@ -8,6 +9,8 @@ pub(super) struct ClaudeOutput {
     session_id: Option<String>,
     assistant: Option<String>,
     started_tools: BTreeMap<String, String>,
+    streamed_prose: bool,
+    streamed_reasoning: bool,
 }
 
 impl ClaudeOutput {
@@ -20,6 +23,8 @@ impl ClaudeOutput {
             session_id: None,
             assistant: None,
             started_tools: BTreeMap::new(),
+            streamed_prose: false,
+            streamed_reasoning: false,
         }
     }
 
@@ -134,6 +139,7 @@ impl ClaudeOutput {
                         Some("text") => {
                             if let Some(text) = block.get("text").and_then(Value::as_str)
                                 && !text.is_empty()
+                                && !self.streamed_prose
                             {
                                 events.emit(SubagentEvent::ProseDelta {
                                     text: text.to_string(),
@@ -143,6 +149,7 @@ impl ClaudeOutput {
                         Some("thinking") => {
                             if let Some(text) = block.get("thinking").and_then(Value::as_str)
                                 && !text.is_empty()
+                                && !self.streamed_reasoning
                             {
                                 events.emit(SubagentEvent::ReasoningDelta {
                                     text: text.to_string(),
@@ -176,11 +183,23 @@ impl ClaudeOutput {
                         _ => {}
                     }
                 }
+                self.streamed_prose = false;
+                self.streamed_reasoning = false;
             }
             Some("stream_event") => {
                 self.check_session(value)?;
                 if let Some(text) = value.pointer("/event/delta/text").and_then(Value::as_str) {
+                    self.streamed_prose = true;
                     events.emit(SubagentEvent::ProseDelta {
+                        text: text.to_string(),
+                    })?;
+                }
+                if let Some(text) = value
+                    .pointer("/event/delta/thinking")
+                    .and_then(Value::as_str)
+                {
+                    self.streamed_reasoning = true;
+                    events.emit(SubagentEvent::ReasoningDelta {
                         text: text.to_string(),
                     })?;
                 }

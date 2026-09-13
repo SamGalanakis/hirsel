@@ -12,7 +12,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use hirsel_drivers::{AgentKind, TerminalOutcome};
+use hirsel_drivers::AgentKind;
 use hirsel_proto::{
     AgentActivityState, Blob, HostToClient, ModelSelection, ModelSnapshot, SendMode,
     SubagentModelCatalog, ToolCallSummary, TurnEventKind,
@@ -113,6 +113,8 @@ mod turn;
 mod turn_ingest;
 use thread_schemas::*;
 
+#[cfg(test)]
+mod executor_conformance_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

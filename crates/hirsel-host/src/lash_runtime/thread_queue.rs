@@ -20,7 +20,7 @@ impl LashAgentRuntime {
         client_id: &str,
         turn: hirsel_proto::ThreadTurn,
     ) -> anyhow::Result<()> {
-        let activity = self
+        let (activity, inserted) = self
             .tools
             .storage()
             .append_thread_activity_once(
@@ -32,7 +32,9 @@ impl LashAgentRuntime {
             )
             .await?;
         self.tools.publish_thread_turn(turn).await;
-        self.tools.publish_thread_activity(activity).await;
+        if inserted {
+            self.tools.publish_thread_activity(activity).await;
+        }
         Ok(())
     }
 

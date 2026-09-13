@@ -1,6 +1,7 @@
 //! The one host-owned projection of executor events into durable turn state.
 
 use super::*;
+use hirsel_proto::ThreadTurnState;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ExecutorEvent {
@@ -74,6 +75,12 @@ struct PendingText {
     text: String,
     started_at: Instant,
 }
+
+type TerminalProjection = (
+    ThreadTurnState,
+    Option<(String, Vec<ToolCallSummary>)>,
+    Option<String>,
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextKind {
@@ -299,7 +306,6 @@ impl TurnIngest {
                     "duplicate executor terminal outcome"
                 );
                 self.terminal = Some(outcome);
-                self.publish_activity(tools, AgentActivityState::Idle, None);
             }
         }
         Ok(())
@@ -339,6 +345,31 @@ impl TurnIngest {
         final_text: Option<String>,
         tool_calls: Vec<ToolCallSummary>,
     ) -> anyhow::Result<hirsel_proto::ThreadTurn> {
+        Self::complete_after_commit(
+            tools,
+            history_id,
+            turn_id,
+            outcome,
+            final_text,
+            tool_calls,
+            || async { Ok(()) },
+        )
+        .await
+    }
+
+    pub(super) async fn complete_after_commit<F, Fut>(
+        tools: &ToolSuite,
+        history_id: &str,
+        turn_id: u64,
+        outcome: ExecutorTerminalOutcome,
+        final_text: Option<String>,
+        tool_calls: Vec<ToolCallSummary>,
+        after_commit: F,
+    ) -> anyhow::Result<hirsel_proto::ThreadTurn>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<()>>,
+    {
         let integrity_failure = tools.turn_timeline_integrity_failure(turn_id);
         let (state, output, reason) = if let Some(reason) = integrity_failure.as_ref() {
             (ThreadTurnState::Failed, None, Some(reason.clone()))
@@ -362,6 +393,8 @@ impl TurnIngest {
             );
             tools.clear_turn_timeline_integrity_failure(turn_id);
         }
+        after_commit().await?;
+        Self::publish_idle(tools, completion.turn.thread_id, turn_id);
         if let Some(activity) = completion.failure_activity {
             tools.publish_thread_activity(activity).await;
         }
@@ -377,7 +410,7 @@ impl TurnIngest {
         (thread_id, turn_id): (u64, u64),
         tool: &ToolCallSummary,
     ) -> anyhow::Result<()> {
-        let activity = tools
+        let (activity, inserted) = tools
             .storage()
             .append_thread_activity_once(
                 &format!("turn:{turn_id}:tool:{}", tool.id),
@@ -387,7 +420,64 @@ impl TurnIngest {
                 &serde_json::to_value(tool)?,
             )
             .await?;
-        tools.publish_thread_activity(activity).await;
+        if inserted {
+            tools.publish_thread_activity(activity).await;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn publish_guarded_tool_start(
+        tools: &ToolSuite,
+        guard: &tokio::sync::MutexGuard<'_, rusqlite::Connection>,
+        (thread_id, turn_id): (u64, u64),
+        id: &str,
+        name: &str,
+        input: &Value,
+    ) -> anyhow::Result<()> {
+        Self::publish_guarded_timeline(
+            tools,
+            guard,
+            (thread_id, turn_id),
+            TurnEventKind::ToolStart {
+                id: id.into(),
+                name: name.into(),
+                summary: condense_args(name, input),
+                input: Some(bounded_turn_payload(input)),
+            },
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn publish_guarded_tool_done(
+        tools: &ToolSuite,
+        guard: &tokio::sync::MutexGuard<'_, rusqlite::Connection>,
+        (thread_id, turn_id): (u64, u64),
+        tool: &ToolCallSummary,
+        args: &Value,
+        result: &Value,
+    ) -> anyhow::Result<()> {
+        Self::publish_guarded_timeline(
+            tools,
+            guard,
+            (thread_id, turn_id),
+            TurnEventKind::ToolDone {
+                id: tool.id.clone(),
+                name: tool.name.clone(),
+                ok: tool.ok,
+                summary: condense_result_with_status(&tool.name, args, result, tool.ok),
+                result: Some(bounded_turn_payload(result)),
+            },
+        )?;
+        Ok(())
+    }
+
+    fn publish_guarded_timeline(
+        tools: &ToolSuite,
+        guard: &tokio::sync::MutexGuard<'_, rusqlite::Connection>,
+        (thread_id, turn_id): (u64, u64),
+        event: TurnEventKind,
+    ) -> anyhow::Result<()> {
+        tools.publish_guarded_turn_event(guard, thread_id, turn_id, event)?;
         Ok(())
     }
 
@@ -450,7 +540,7 @@ impl TurnIngest {
         data: Value,
     ) -> anyhow::Result<()> {
         let (thread_id, turn_id) = self.route()?;
-        let activity = tools
+        let (activity, inserted) = tools
             .storage()
             .append_thread_activity_once(
                 &format!("turn:{turn_id}:{kind}"),
@@ -460,7 +550,9 @@ impl TurnIngest {
                 &data,
             )
             .await?;
-        tools.publish_thread_activity(activity).await;
+        if inserted {
+            tools.publish_thread_activity(activity).await;
+        }
         Ok(())
     }
 
@@ -468,6 +560,20 @@ impl TurnIngest {
         let Ok((thread_id, turn_id)) = self.route() else {
             return;
         };
+        Self::publish_activity_for_route(tools, thread_id, turn_id, state, text);
+    }
+
+    pub(super) fn publish_idle(tools: &ToolSuite, thread_id: u64, turn_id: u64) {
+        Self::publish_activity_for_route(tools, thread_id, turn_id, AgentActivityState::Idle, None);
+    }
+
+    fn publish_activity_for_route(
+        tools: &ToolSuite,
+        thread_id: u64,
+        turn_id: u64,
+        state: AgentActivityState,
+        text: Option<String>,
+    ) {
         tools.broadcast(HostToClient::AgentActivity {
             thread_id,
             turn_id,
@@ -497,18 +603,20 @@ pub(super) fn terminal_projection(
     outcome: ExecutorTerminalOutcome,
     final_text: Option<String>,
     tool_calls: Vec<ToolCallSummary>,
-) -> (
-    ThreadTurnState,
-    Option<(String, Vec<ToolCallSummary>)>,
-    Option<String>,
-) {
+) -> TerminalProjection {
     match outcome {
         ExecutorTerminalOutcome::Done => (
             ThreadTurnState::Completed,
             final_output(final_text, tool_calls, false),
             None,
         ),
-        ExecutorTerminalOutcome::Failed { reason } => (ThreadTurnState::Failed, None, Some(reason)),
+        ExecutorTerminalOutcome::Failed { reason } => (
+            ThreadTurnState::Failed,
+            final_text
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| (text, tool_calls)),
+            Some(reason),
+        ),
         ExecutorTerminalOutcome::Interrupted => (
             ThreadTurnState::Interrupted,
             final_output(final_text, tool_calls, true),

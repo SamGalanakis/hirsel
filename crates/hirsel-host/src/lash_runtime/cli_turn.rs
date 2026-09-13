@@ -18,7 +18,7 @@ fn is_execution_diagnostic(summary: &str) -> bool {
     .any(|marker| summary.contains(marker))
 }
 
-fn cli_executor_event(event: SubagentEvent) -> Option<ExecutorEvent> {
+pub(super) fn cli_executor_event(event: SubagentEvent) -> Option<ExecutorEvent> {
     match event {
         SubagentEvent::Started { external_id } => Some(ExecutorEvent::Started {
             external_id: Some(external_id),

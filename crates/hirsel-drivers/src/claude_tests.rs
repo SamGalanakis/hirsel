@@ -701,6 +701,41 @@ send({{'type':'result','subtype':'error_during_execution','is_error':True,'error
 }
 
 #[tokio::test]
+async fn completed_assistant_blocks_do_not_repeat_streamed_deltas() {
+    let source = r#"
+first=json.loads(sys.stdin.readline()); ack(first)
+send({'type':'stream_event','event':{'type':'content_block_delta','delta':{'type':'thinking_delta','thinking':'reason'}}})
+send({'type':'stream_event','event':{'type':'content_block_delta','delta':{'type':'text_delta','text':'answer'}}})
+send({'type':'assistant','message':{'stop_reason':'end_turn','content':[{'type':'thinking','thinking':'reason'},{'type':'text','text':'answer'}]}})
+send({'type':'result','subtype':'success','is_error':False,'result':'answer'})
+"#;
+    let (_dir, task, command) = fixture(source);
+    let driver = ClaudeCodeDriver::default();
+    let handle = driver
+        .spawn_command(task, command, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let events: Vec<_> = driver.events(&handle).unwrap().collect().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SubagentEvent::ProseDelta { text } if text == "answer"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |event| matches!(event, SubagentEvent::ReasoningDelta { text } if text == "reason")
+            )
+            .count(),
+        1
+    );
+    driver.retire(&handle).await.unwrap();
+}
+
+#[tokio::test]
 async fn eof_retains_only_completed_final_output_and_replays_failure() {
     for (name, frame, expected) in [
         ("absent", "", false),

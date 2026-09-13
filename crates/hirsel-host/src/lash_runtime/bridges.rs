@@ -79,7 +79,8 @@ where
 {
     let committed = committed_turn_id(&item);
     if let Err(error) = route_observation(&item, ingest, tools).await {
-        record_ingest_failure(&item, tools, ingest, timeline_commits, error).await;
+        record_ingest_failure(&item, tools, ingest, error).await;
+        return true;
     }
     let keep =
         handle_observation_stream_item(item, tools, ingest, timeline_commits, active_turn_id).await;
@@ -121,7 +122,7 @@ where
             };
             if let Err(error) = result {
                 let wrapped = Some(Ok::<_, E>(RemoteSessionObservationStreamItem::Event(event)));
-                record_ingest_failure(&wrapped, tools, ingest, timeline_commits, error).await;
+                record_ingest_failure(&wrapped, tools, ingest, error).await;
             }
             true
         }
@@ -155,7 +156,6 @@ async fn record_ingest_failure<E>(
     item: &Option<Result<RemoteSessionObservationStreamItem, E>>,
     tools: &ToolSuite,
     ingest: &TurnIngest,
-    timeline_commits: &TimelineCommitBarrier,
     error: anyhow::Error,
 ) {
     let physical_id = match item {
@@ -163,10 +163,13 @@ async fn record_ingest_failure<E>(
         _ => None,
     };
     let reason = format!("turn event ingest failed: {error}");
-    if let Some(physical_id) = physical_id {
-        timeline_commits.fail(physical_id, reason.clone()).await;
-    }
-    if let Some(turn_id) = ingest.turn_id {
+    let turn_id = ingest.turn_id.or_else(|| {
+        physical_id
+            .as_deref()
+            .and_then(observation_thread_route)
+            .map(|(_, turn_id)| turn_id)
+    });
+    if let Some(turn_id) = turn_id {
         tools.fail_turn_timeline_integrity(turn_id, &reason).await;
     }
 }

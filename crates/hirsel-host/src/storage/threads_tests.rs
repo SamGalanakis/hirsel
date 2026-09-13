@@ -285,7 +285,7 @@ async fn persisted_turn_activity_replay_is_idempotent() {
         .unwrap()
         .0;
     let t = s.start_thread_turn(thread.id, None).await.unwrap();
-    let a = s
+    let (a, inserted) = s
         .append_thread_activity_once(
             "turn:1:tool:0",
             thread.id,
@@ -295,7 +295,8 @@ async fn persisted_turn_activity_replay_is_idempotent() {
         )
         .await
         .unwrap();
-    let again = s
+    assert!(inserted);
+    let (again, inserted) = s
         .append_thread_activity_once(
             "turn:1:tool:0",
             thread.id,
@@ -305,6 +306,7 @@ async fn persisted_turn_activity_replay_is_idempotent() {
         )
         .await
         .unwrap();
+    assert!(!inserted);
     assert_eq!(a, again);
     assert_eq!(
         s.thread_detail(thread.id, None, 100)

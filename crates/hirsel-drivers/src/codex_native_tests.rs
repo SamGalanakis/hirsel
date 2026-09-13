@@ -206,7 +206,7 @@ async fn child_traffic_cannot_change_the_root_turn_result_or_steering_target() {
         loop {
             match events.next().await.unwrap() {
                 SubagentEvent::Started { external_id } => assert_eq!(external_id, "root"),
-                SubagentEvent::Progress { summary } if summary == "root barrier" => break,
+                SubagentEvent::ProseDelta { text } if text == "root barrier" => break,
                 event => panic!("child traffic leaked: {event:?}"),
             }
         }

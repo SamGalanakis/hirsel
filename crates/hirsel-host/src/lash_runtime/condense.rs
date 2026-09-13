@@ -26,6 +26,7 @@ pub(super) fn condense_args(name: &str, payload: &Value) -> Option<String> {
     clean_summary(summary)
 }
 
+#[cfg(test)]
 pub(super) fn condense_result(name: &str, args: &Value, output: &Value) -> Option<String> {
     condense_result_with_status(name, args, output, tool_output_ok(output))
 }
@@ -259,22 +260,6 @@ pub(super) fn truncate_chars(text: &str, max_chars: usize) -> String {
         truncated.push_str("...");
         truncated
     }
-}
-
-pub(super) fn agent_activity(
-    state: AgentActivityState,
-    text: Option<String>,
-) -> (AgentActivityState, Option<String>) {
-    (state, text)
-}
-
-pub(super) fn publish(
-    broadcast_log: &BroadcastLog,
-    broadcaster: &broadcast::Sender<HostToClient>,
-    event: HostToClient,
-) {
-    broadcast_log.record(event.clone());
-    let _ = broadcaster.send(event);
 }
 
 pub(super) fn latest_line(text: &str) -> Option<String> {

@@ -1,5 +1,17 @@
 use super::*;
 
+#[cfg(test)]
+pub(super) fn scripted_host_event(event: RemoteTurnEvent) -> RemoteSessionObservationEventPayload {
+    RemoteSessionObservationEventPayload::TurnActivity {
+        activity: Box::new(lash::remote::usage::RemoteTurnActivity {
+            sequence: 1,
+            id: "executor-conformance".into(),
+            correlation_id: "executor-conformance-turn".into(),
+            event,
+        }),
+    }
+}
+
 pub(super) struct ScriptedAgentRuntime {
     pub(super) tasks: RuntimeTasks,
     pub(super) thread_id: u64,

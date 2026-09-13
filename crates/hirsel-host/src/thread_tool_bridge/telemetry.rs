@@ -1,6 +1,6 @@
 //! Host-owned pairing of calls that passed the active execution start guard.
 use super::*;
-use hirsel_proto::{ToolCallSummary, TurnEventKind};
+use hirsel_proto::ToolCallSummary;
 
 #[derive(Default)]
 pub(super) struct ToolTelemetry {
@@ -44,16 +44,13 @@ impl BridgeState {
         // cannot leave an emitted start outside the host's pending registry.
         let storage = self.tools.storage();
         let _guard = storage.execution_guard(&self.caller).await?;
-        let published = self.tools.publish_guarded_turn_event(
+        let published = crate::lash_runtime::TurnIngest::publish_guarded_tool_start(
+            &self.tools,
             &_guard,
-            self.caller.thread_id,
-            self.caller.turn_id,
-            TurnEventKind::ToolStart {
-                id: id.into(),
-                name: name.into(),
-                summary: crate::lash_runtime::condense_args(name, input),
-                input: Some(crate::lash_runtime::bounded_turn_payload(input)),
-            },
+            (self.caller.thread_id, self.caller.turn_id),
+            id,
+            name,
+            input,
         );
         drop(_guard);
         if let Err(error) = published {
@@ -88,17 +85,18 @@ impl BridgeState {
         let Ok(_guard) = storage.execution_telemetry_guard(&self.caller).await else {
             return;
         };
-        let published = self.tools.publish_guarded_turn_event(
+        let summary = ToolCallSummary {
+            id: id.into(),
+            name: name.clone(),
+            ok,
+        };
+        let published = crate::lash_runtime::TurnIngest::publish_guarded_tool_done(
+            &self.tools,
             &_guard,
-            self.caller.thread_id,
-            self.caller.turn_id,
-            TurnEventKind::ToolDone {
-                id: id.into(),
-                name: name.clone(),
-                ok,
-                summary: crate::lash_runtime::condense_result_with_status(&name, &args, result, ok),
-                result: Some(crate::lash_runtime::bounded_turn_payload(result)),
-            },
+            (self.caller.thread_id, self.caller.turn_id),
+            &summary,
+            &args,
+            result,
         );
         drop(_guard);
         if let Err(error) = published {
@@ -109,19 +107,11 @@ impl BridgeState {
             return;
         }
         telemetry.complete(id, name, ok);
+        drop(telemetry);
         if let Err(error) = crate::lash_runtime::TurnIngest::record_tool_completion(
             &self.tools,
             (self.caller.thread_id, self.caller.turn_id),
-            &ToolCallSummary {
-                id: id.into(),
-                name: telemetry
-                    .completed
-                    .get(id)
-                    .expect("completion was just recorded")
-                    .name
-                    .clone(),
-                ok,
-            },
+            &summary,
         )
         .await
         {

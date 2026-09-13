@@ -122,38 +122,30 @@ impl NativeWorkerTurn {
                 delay = (delay * 2).min(Duration::from_secs(2));
                 continue;
             }
-            match TurnIngest::complete(
+            match TurnIngest::complete_after_commit(
                 tools,
                 &request.history_id,
                 self.turn_id,
                 outcome.clone(),
                 final_text.clone(),
                 tool_calls.clone(),
-            )
-            .await
-            {
-                Ok(_) => {
-                    if session_reusable
-                        && let Err(error) = tools
+                || async {
+                    if session_reusable {
+                        tools
                             .storage()
                             .mark_native_worker_conversation_seen(
                                 request.thread_id,
                                 self.turn_id,
                                 unowned_message_watermark,
                             )
-                            .await
-                    {
-                        tracing::warn!(
-                            turn_id = self.turn_id,
-                            %error,
-                            "Retrying native worker conversation watermark"
-                        );
-                        tokio::time::sleep(delay).await;
-                        delay = (delay * 2).min(Duration::from_secs(2));
-                        continue;
+                            .await?;
                     }
-                    return Ok(());
-                }
+                    Ok(())
+                },
+            )
+            .await
+            {
+                Ok(_) => return Ok(()),
                 Err(error) => {
                     if let Ok(history) = tools.storage().history_id().await {
                         anyhow::ensure!(
@@ -561,8 +553,8 @@ impl NativeTimelineSink {
     async fn route(&self, activity: TurnActivity) {
         self.activities.lock().await.push(activity.clone());
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        let remote = match lash::remote::usage::RemoteTurnActivity::from_core(sequence, activity) {
-            Ok(remote) => remote,
+        let event = match native_executor_event(sequence, activity) {
+            Ok(event) => event,
             Err(error) => {
                 let reason = format!("native worker timeline conversion failed: {error}");
                 self.tools
@@ -571,13 +563,22 @@ impl NativeTimelineSink {
                 return;
             }
         };
-        let payload = RemoteSessionObservationEventPayload::TurnActivity {
-            activity: Box::new(remote),
-        };
-        if let Some(event) = host_executor_event(&payload) {
+        if let Some(event) = event {
             self.route_event(event).await;
         }
     }
+}
+
+pub(super) fn native_executor_event(
+    sequence: u64,
+    activity: TurnActivity,
+) -> anyhow::Result<Option<ExecutorEvent>> {
+    let remote = lash::remote::usage::RemoteTurnActivity::from_core(sequence, activity)?;
+    Ok(host_executor_event(
+        &RemoteSessionObservationEventPayload::TurnActivity {
+            activity: Box::new(remote),
+        },
+    ))
 }
 
 #[async_trait]

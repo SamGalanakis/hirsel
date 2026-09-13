@@ -707,16 +707,7 @@ impl LashAgentRuntime {
             }
         }
         if let Some(turn_id) = turn_id {
-            publish(
-                &self.broadcast_log,
-                &self.broadcaster,
-                HostToClient::AgentActivity {
-                    turn_id,
-                    thread_id,
-                    state: AgentActivityState::Idle,
-                    text: None,
-                },
-            );
+            TurnIngest::publish_idle(&self.tools, thread_id, turn_id);
         }
     }
 }

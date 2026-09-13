@@ -33,7 +33,7 @@ Each Thread executes in its own lane with its own history and accepted assignmen
 
 Agent tools resolve caller-relative references from trusted execution context. An agent can read and organize itself and its subtree, dispatch only to direct children, and report upward through its recorded requester. Ancestor identities provide navigation context, not access to ancestor, peer or unrelated project conversations. Numeric IDs cannot bypass these checks. Humans retain the full tree. These are application resource boundaries, not a global filesystem or multiuser security model.
 
-Lash, Claude and Codex remain supported execution choices. CLI processes and monitors are implementation resources with concrete Thread origins, not a second independent work inventory. Background work requires an explicit destination. Per-Thread FIFO and bounded cross-Thread concurrency preserve request identity. Archive and snooze pause automatic report-triggered execution while retaining reports for later delivery; settlement is independent.
+Lash, Claude and Codex remain supported execution choices. Host, native Lash worker and CLI turns translate into one durable executor event contract, so reconnect replay and client rendering do not depend on the backend. CLI processes and monitors are implementation resources with concrete Thread origins, not a second independent work inventory. Background work requires an explicit destination. Per-Thread FIFO and bounded cross-Thread concurrency preserve request identity. Archive and snooze pause automatic report-triggered execution while retaining reports for later delivery; settlement is independent.
 
 ## Clients
 

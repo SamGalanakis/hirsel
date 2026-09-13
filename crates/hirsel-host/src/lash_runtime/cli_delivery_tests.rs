@@ -1,5 +1,5 @@
 use super::*;
-use hirsel_drivers::{AgentKind, DriverResult, EventStream, FakeDriver};
+use hirsel_drivers::{AgentKind, DriverResult, EventStream, FakeDriver, TerminalOutcome};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 struct TerminalPeer {

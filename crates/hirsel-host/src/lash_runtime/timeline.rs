@@ -74,6 +74,9 @@ pub(super) fn host_executor_event(
         return None;
     };
     match &activity.event {
+        RemoteTurnEvent::TurnStarted { turn_id } => Some(ExecutorEvent::Started {
+            external_id: Some(turn_id.clone()),
+        }),
         RemoteTurnEvent::ModelRequestStarted { .. } => {
             Some(ExecutorEvent::Started { external_id: None })
         }
@@ -243,4 +246,22 @@ pub(super) fn turn_chat_payload(
 ) -> Option<(String, Vec<ToolCallSummary>)> {
     let (outcome, text, calls) = lash_terminal_projection(Some(output));
     super::turn_ingest::terminal_projection(outcome, text, calls).1
+}
+
+#[cfg(test)]
+pub(super) async fn materialize_thread_turn_reply(
+    tools: &ToolSuite,
+    output: &lash::TurnOutput,
+    turn_id: u64,
+    anchor: Option<u64>,
+) -> anyhow::Result<Option<u64>> {
+    let Some((text, calls)) = turn_chat_payload(output) else {
+        return Ok(None);
+    };
+    let message = tools
+        .storage()
+        .materialize_thread_reply(turn_id, text, anchor, calls)
+        .await?;
+    tools.publish_thread_message(message.clone()).await;
+    Ok(Some(message.id))
 }

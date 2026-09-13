@@ -235,7 +235,7 @@ async fn branch_specific_schema_seven_layouts_are_refused_without_modification()
             drop(conn);
             let before = std::fs::read(&path).unwrap();
             let error = Storage::open(dir.path()).await.err().unwrap();
-            assert!(error.to_string().contains(if version == 11 {
+            assert!(error.to_string().contains(if version == 10 {
                 "unsupported Hirsel history schema"
             } else {
                 "unsupported Hirsel history layout"

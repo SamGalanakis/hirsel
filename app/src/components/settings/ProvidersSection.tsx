@@ -479,8 +479,10 @@ function AddProviderForm(props: {
 
 export function ProvidersSection(): JSX.Element {
   const roster = () => state.providers;
-  const [editing, setEditing] = createSignal<string | null>(null);
-  const [adding, setAdding] = createSignal(false);
+  // One open panel at a time: editing a provider and adding one are two
+  // variants of a single mode, so neither call site has to close the other.
+  const [panel, setPanel] = createSignal<{ kind: "none" } | { kind: "edit"; id: string } | { kind: "add" }>({ kind: "none" });
+  const editingId = () => { const open = panel(); return open.kind === "edit" ? open.id : null; };
   const [confirmRemove, setConfirmRemove] = createSignal<ProviderInstance | null>(null);
 
   // The host broadcasts the whole roster after an accepted edit; that frame is
@@ -491,10 +493,7 @@ export function ProvidersSection(): JSX.Element {
     // Only a roster revision can close a form. Check the existing pending set
     // before settling it so errors/timeouts leave a continued draft open while
     // an authoritative acknowledgement still closes the write's form.
-    if (pending.any()) {
-      setEditing(null);
-      setAdding(false);
-    }
+    if (pending.any()) setPanel({ kind: "none" });
     pending.settleAll();
   });
   settleOnProtocolError(pending);
@@ -537,13 +536,10 @@ export function ProvidersSection(): JSX.Element {
             >
               <OpenAiRow
                 instance={instance}
-                editing={editing() === instance.id}
+                editing={editingId() === instance.id}
                 busy={pending.isPending(instance.id)}
-                onEdit={() => {
-                  setAdding(false);
-                  setEditing(instance.id);
-                }}
-                onCancel={() => setEditing(null)}
+                onEdit={() => setPanel({ kind: "edit", id: instance.id })}
+                onCancel={() => setPanel({ kind: "none" })}
                 onSave={(patch) =>
                   write(instance.id, () => getClient()?.updateProvider(instance.id, patch))
                 }
@@ -553,17 +549,14 @@ export function ProvidersSection(): JSX.Element {
           )}
         </For>
         <Show
-          when={adding()}
+          when={panel().kind === "add"}
           fallback={
             <div class="py-3">
               <Button
                 variant="ghost"
                 size="sm"
                 class="h-9"
-                onClick={() => {
-                  setEditing(null);
-                  setAdding(true);
-                }}
+                onClick={() => setPanel({ kind: "add" })}
               >
                 Add provider
               </Button>
@@ -572,7 +565,7 @@ export function ProvidersSection(): JSX.Element {
         >
           <AddProviderForm
             busy={pending.isPending("add")}
-            onCancel={() => setAdding(false)}
+            onCancel={() => setPanel({ kind: "none" })}
             onAdd={(instance) => write("add", () => getClient()?.addProvider(instance))}
           />
         </Show>

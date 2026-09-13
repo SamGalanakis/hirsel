@@ -113,12 +113,11 @@ describe("HirselWsClient lifecycle", () => {
     artifacts.openArtifact(4); flush();
     const request = JSON.parse(ws.sent.at(-1)!);
     ws.serverSend({ type: "error", client_id: request.client_id, detail: "Artifact could not be loaded" });
-    expect(artifacts.artifactState.error).toBe("Artifact could not be loaded");
+    expect(artifacts.artifactState.preview).toEqual({ status: "error", id: 4, message: "Artifact could not be loaded" });
     expect(threads.threadState.error).toBeNull();
     artifacts.openArtifact(4); flush();
     ws.serverSend({ type: "artifact_opened", client_id: JSON.parse(ws.sent.at(-1)!).client_id, artifact: { id: 4, title: "Plan", kind: "html", mime: "text/html", content: "Working", thread_ids: [0], created_at: "a", updated_at: "b" } });
-    expect(artifacts.artifactState.error).toBeNull();
-    expect(artifacts.artifactState.opened?.content).toBe("Working");
+    expect(artifacts.openedArtifact()?.content).toBe("Working");
     expect(threads.threadState.error).toBeNull();
     threads.sendThreadMessage("test-history", 0, "Follow up", "send", [], [], []); flush();
     const send = JSON.parse(ws.sent.at(-1)!);
@@ -196,6 +195,18 @@ describe("HirselWsClient signed blob URLs (D9)", () => {
     ws.serverSend({ type: "error", detail: "no such blob", client_id: frame.client_id });
 
     await expect(p).rejects.toThrow(/no such blob/);
+  });
+
+  it("settles a pending request only with the response kind it asked for", async () => {
+    const { client } = await load();
+    const { c, ws } = connected(client);
+
+    const upload = c.uploadBlob("shared-id", "note.txt", "text/plain", "eA==");
+    // A blob_url frame carrying an upload's client_id must not resolve it, and
+    // must leave the request in the map for its own response.
+    ws.serverSend({ type: "blob_url", client_id: "shared-id", blob_id: "b", url: "/blob/b", expires_at: 1 });
+    ws.serverSend({ type: "blob_ok", client_id: "shared-id", blob: new Blob(["x"]) });
+    await expect(upload).resolves.toBeDefined();
   });
 });
 
@@ -382,14 +393,14 @@ describe("current history boundary", () => {
     vi.useFakeTimers(); const { client } = await load();
     const threads = await import("../threads/store"); const artifacts = await import("../artifacts/store");
     const c = client.startClient("wss://host/ws", "good"); const first = FakeWebSocket.instances[0]; first.serverOpen(); first.serverSend(HELLO_OK);
-    flush(() => { threads.sendThreadMessage("test-history",4,"Saved unsent text","send",[],[], []); threads.setThreadState(draft=>{ draft.focusedId=4; draft.histories[4] = { brief: { text: "Old", artifact_ids: [] }, messages: [], turns: [], activities: [], hasMore: false, loaded: true }; }); artifacts.setArtifactState({ selectedId: 2 }); });
+    flush(() => { threads.sendThreadMessage("test-history",4,"Saved unsent text","send",[],[], []); threads.setThreadState(draft=>{ draft.focusedId=4; draft.histories[4] = { brief: { text: "Old", artifact_ids: [] }, messages: [], turns: [], activities: [], hasMore: false, loaded: true }; }); artifacts.setArtifactState({ preview: { status: "loading", id: 2 } }); });
     const upload = c.uploadBlob("upload-old","old.txt","text/plain","eA==").catch(error=>error.message);
     first.serverClose(1006); c.setAgentPrompt("Stale queued operation"); vi.advanceTimersByTime(2000);
     const next = FakeWebSocket.instances[1]; next.serverOpen(); next.serverSend({ ...HELLO_OK, history_id: "fresh-history" }); await Promise.resolve(); flush();
     expect(next.sentTypes()).not.toContain("send_thread_message"); expect(next.sentTypes()).not.toContain("set_agent_prompt");
     expect(threads.threadState.pending).toEqual([]); expect(threads.threadState.focusedId).toBeNull(); expect(threads.threadState.error).toBeNull();
     expect(threads.threadState.histories).toEqual({});
-    expect(artifacts.artifactState.selectedId).toBeNull(); expect(await upload).toContain("History was reset");
+    expect(artifacts.artifactState.preview).toEqual({ status: "idle" }); expect(await upload).toContain("History was reset");
     const { recoveredDrafts } = await import("../lib/history"); expect(recoveredDrafts().map(row=>row.text)).toContain("Saved unsent text"); c.close();
   });
 });

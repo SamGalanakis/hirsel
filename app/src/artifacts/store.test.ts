@@ -8,16 +8,15 @@ describe("artifact references", () => {
     const store = await import("./store"); const frames: ArtifactClientMessage[] = [];
     store.attachArtifactTransport(frame => frames.push(frame));
     store.setArtifactState({ summaries: [row] }); store.listArtifacts(); flush();
-    expect(store.artifactState.listing).toBe(true);
+    expect(store.artifactState.inventory).toEqual({ status: "loading" });
     store.handleArtifactMessage({ type: "error", client_id: frames.at(-1)!.client_id, detail: "list unavailable" }); flush();
-    expect(store.artifactState.listError).toBe("list unavailable");
-    expect(store.artifactState.error).toBeNull();
+    expect(store.artifactState.inventory).toEqual({ status: "error", message: "list unavailable" });
+    expect(store.artifactState.preview).toEqual({ status: "idle" });
     expect(store.artifactState.summaries).toHaveLength(1);
     store.listArtifacts(); flush();
-    expect(store.artifactState.listError).toBeNull(); expect(store.artifactState.listing).toBe(true);
+    expect(store.artifactState.inventory).toEqual({ status: "loading" });
     store.handleArtifactMessage({ type: "artifacts_listed", client_id: frames.at(-1)!.client_id, artifacts: [row] }); flush();
-    expect(store.artifactState.listing).toBe(false); expect(store.artifactState.listed).toBe(true);
-    expect(store.artifactState.listError).toBeNull(); store.disconnectArtifacts();
+    expect(store.artifactState.inventory).toEqual({ status: "ready" }); store.disconnectArtifacts();
   });
   it("shows a recoverable preview error if the connection drops during an open", async () => {
     const store = await import("./store");
@@ -25,16 +24,14 @@ describe("artifact references", () => {
     store.attachArtifactTransport(frame => frames.push(frame));
     store.openArtifact(9); flush();
     store.disconnectArtifacts(); flush();
-    expect(store.artifactState.loading).toBe(false);
-    expect(store.artifactState.opened).toBeNull();
-    expect(store.artifactState.error).toMatch(/Reconnect/);
+    expect(store.artifactState.preview).toEqual({ status: "error", id: 9, message: expect.stringMatching(/Reconnect/) });
     store.handleArtifactMessage({ type: "artifact_opened", client_id: frames[0].client_id, artifact: { ...row, content: "late" } }); flush();
-    expect(store.artifactState.opened).toBeNull();
+    expect(store.openedArtifact()).toBeNull();
     store.attachArtifactTransport(frame => frames.push(frame));
     store.openArtifact(9);
     store.handleArtifactMessage({ type: "artifact_opened", client_id: frames.at(-1)!.client_id, artifact: { ...row, content: "retried" } }); flush();
-    expect(store.artifactState.opened?.content).toBe("retried");
-    expect(store.artifactState.error).toBeNull();
+    expect(store.openedArtifact()?.content).toBe("retried");
+    expect(store.artifactState.preview.status).toBe("ready");
     store.disconnectArtifacts();
   });
   it("uses global IDs and follows latest edit while preserving selection", async () => {
@@ -44,13 +41,13 @@ describe("artifact references", () => {
     store.openArtifact(9); flush();
     const request = frames.at(-1)!;
     store.handleArtifactMessage({ type: "artifact_opened", client_id: request.client_id, artifact: { ...row, content: "old" } }); flush();
-    expect(store.artifactState.opened?.content).toBe("old");
+    expect(store.openedArtifact()?.content).toBe("old");
     store.handleArtifactMessage({ type: "artifact_upsert", artifact: { ...row, title: "Updated plan", updated_at: "c" } }); flush();
     const refresh = frames.at(-1)!;
     expect(refresh).toMatchObject({ type: "open_artifact", artifact_id: 9 });
     store.handleArtifactMessage({ type: "artifact_opened", client_id: refresh.client_id, artifact: { ...row, content: "new" } }); flush();
-    expect(store.artifactState.opened?.content).toBe("new");
-    expect(store.artifactState.selectedId).toBe(9);
+    expect(store.openedArtifact()?.content).toBe("new");
+    expect(store.previewedArtifactId()).toBe(9);
     expect(store.artifactState.summaries[0].thread_ids).toEqual([2, 5]);
     store.disconnectArtifacts();
   });
@@ -71,7 +68,7 @@ describe("artifact references", () => {
     store.handleArtifactMessage({ type: "artifact_upsert", artifact: row }); flush();
     store.handleArtifactMessage({ type: "artifact_opened", client_id: frames[1].client_id, artifact: { ...row, content: "latest" } }); flush();
     store.handleArtifactMessage({ type: "artifact_opened", client_id: frames[0].client_id, artifact: { ...row, content: "stale" } }); flush();
-    expect(store.artifactState.opened?.content).toBe("latest");
+    expect(store.openedArtifact()?.content).toBe("latest");
     store.disconnectArtifacts();
   });
   it("ignores stale opens after selecting another artifact or closing", async () => {
@@ -81,11 +78,11 @@ describe("artifact references", () => {
     store.openArtifact(9); flush(); const first = frames[0];
     store.openArtifact(10); flush();
     store.handleArtifactMessage({ type: "artifact_opened", client_id: first.client_id, artifact: { ...row, content: "old" } }); flush();
-    expect(store.artifactState.selectedId).toBe(10);
-    expect(store.artifactState.opened).toBeNull();
+    expect(store.previewedArtifactId()).toBe(10);
+    expect(store.openedArtifact()).toBeNull();
     store.closeArtifact(); flush();
     store.handleArtifactMessage({ type: "artifact_opened", client_id: frames[1].client_id, artifact: { ...row, id: 10, content: "late" } }); flush();
-    expect(store.artifactState.opened).toBeNull();
+    expect(store.artifactState.preview).toEqual({ status: "idle" });
     store.disconnectArtifacts();
   });
 });

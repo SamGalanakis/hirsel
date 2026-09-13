@@ -1,6 +1,7 @@
 import { Bot, Braces, Check, LoaderCircle, Square, Wrench, X } from "@/components/ui/icons";
 import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
 
+import { formatDuration } from "../../lib/duration";
 import type { TimelineEvent } from "../../store/types";
 import { CodeBlock } from "../markdown/CodeBlock";
 import { Markdown, renderInline } from "../Markdown";
@@ -14,18 +15,6 @@ import { buildTimeline, isStepRow, type StepRowItem, type StepStatus, type Timel
 const DELEGATION_RE = /(delegat|spawn|sub[_-]?agent|dispatch_agent|run_agent|^task$)/i;
 function isDelegationTool(name: string): boolean {
   return DELEGATION_RE.test(name);
-}
-
-/** Quiet, exact per-row duration. Sub-second in ms, then 1-decimal seconds, then
- * m/s — never more precision than the eye needs. */
-function formatDuration(ms: number): string {
-  if (ms < 0) return "";
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  const s = ms / 1000;
-  if (s < 10) return `${s.toFixed(1)}s`;
-  if (s < 60) return `${Math.round(s)}s`;
-  const m = Math.floor(s / 60);
-  return `${m}m${Math.round(s % 60)}s`;
 }
 
 /** The live reasoning block's ceiling: six lines at its own italic measure
@@ -118,18 +107,23 @@ function StatusGlyph(props: { status: StepStatus; settled?: boolean }) {
   );
 }
 
-/** The one shape every step wears: a compact bordered capsule that wraps with
- * its neighbours. Failure tints the border; the open step holds full contrast
- * so the panel below is unambiguously its. */
-const PILL = "inline-flex h-6 min-w-0 max-w-full items-center gap-1.5 rounded-full border px-2 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:h-9";
-function pillClass(state: { failed?: boolean; open?: boolean }): string {
-  if (state.failed) return `${PILL} border-destructive/40 bg-destructive/5 text-destructive hover:bg-destructive/10`;
-  if (state.open) return `${PILL} border-border bg-muted text-foreground`;
-  return `${PILL} border-border/60 bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground`;
+/** The one shape every step wears: a FLAT row, the whole width of the trace,
+ * one per line — t3code's work rows, not a capsule. The bordered pills this
+ * replaced each carried a rounded outline, a fill and a 24px height, so eight
+ * tool calls read as eight competing objects wrapping across the card instead
+ * of one scannable column of work. Chrome is now hover-only; failure tints the
+ * text, and the open step takes the quiet fill so the panel below is
+ * unambiguously its. */
+const ROW = "flex w-full min-w-0 items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left text-meta leading-tight transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring pointer-coarse:min-h-9";
+function rowClass(state: { failed?: boolean; open?: boolean }): string {
+  if (state.failed) return `${ROW} text-destructive hover:bg-destructive/10`;
+  if (state.open) return `${ROW} bg-muted text-foreground`;
+  return `${ROW} text-muted-foreground hover:bg-accent/40 hover:text-foreground`;
 }
-/** The trailing muted detail never widens the row past a glance's worth. */
-const PILL_DETAIL = "min-w-0 max-w-56 truncate";
-const PILL_TIME = "shrink-0 font-mono text-meta tabular-nums text-muted-foreground/60";
+/** The row's own summary takes whatever width is left and truncates; the timing
+ * is pinned to the right edge so a column of steps reads as a column of times. */
+const ROW_DETAIL = "min-w-0 flex-1 truncate";
+const ROW_TIME = "ml-auto shrink-0 pl-1.5 tabular-nums text-muted-foreground/70";
 
 /** One tool call as a pill: outcome, kind, name, the condensed argument summary
  * and its measured duration. It opens the shared detail panel below the row. */
@@ -148,19 +142,19 @@ function ToolPill(props: { item: ToolItem; settled?: boolean; open: boolean; onT
       <Show when={delegation()} fallback={<Wrench class="size-3 shrink-0 text-muted-foreground/70" aria-hidden="true" />}>
         <Bot class="size-3 shrink-0" aria-label="delegation" />
       </Show>
-      <span class={["shrink-0 font-mono text-meta", { "text-foreground": running() || delegation(), "font-medium": delegation() }]}>{props.item.name}</span>
-      <Show when={detail()}><span class={PILL_DETAIL}>{detail()}</span></Show>
-      <Show when={duration()}><span class={PILL_TIME}>{duration()}</span></Show>
+      <span class={["shrink-0 font-mono", { "text-foreground": running() || delegation(), "font-medium": delegation() }]}>{props.item.name}</span>
+      <Show when={detail()}><span class={ROW_DETAIL}>{detail()}</span></Show>
+      <Show when={duration()}><span class={ROW_TIME}>{duration()}</span></Show>
       <Show when={!done() && props.settled}><span class="shrink-0">No result recorded</span></Show>
     </>
   );
   return (
-    <li class="min-w-0 max-w-full" data-slot="timeline-tool" data-tool-call-id={props.item.toolId}>
+    <li class="w-full min-w-0" data-slot="timeline-tool" data-tool-call-id={props.item.toolId}>
       {/* A pill with nothing behind it is a label, not a dead affordance. */}
-      <Show when={toolPayload(props.item).length > 0} fallback={<span class={pillClass({ failed: done()?.ok === false })}>{body()}</span>}>
+      <Show when={toolPayload(props.item).length > 0} fallback={<span class={rowClass({ failed: done()?.ok === false })}>{body()}</span>}>
         <button
           type="button"
-          class={pillClass({ failed: done()?.ok === false, open: props.open })}
+          class={rowClass({ failed: done()?.ok === false, open: props.open })}
           aria-expanded={props.open ? "true" : "false"}
           aria-label={`${props.item.name} — ${props.open ? "hide" : "show"} result`}
           onClick={props.onToggle}
@@ -195,18 +189,18 @@ function CodePill(props: { item: Extract<TimelineItem, { kind: "code" }>; settle
     <>
       <StatusGlyph status={props.item.status} settled={props.settled} />
       <Braces class="size-3 shrink-0" aria-hidden="true" />
-      <span class={["shrink-0 font-mono text-meta", { "text-foreground": running() }]}>Code</span>
-      <Show when={language()}><span class="shrink-0 font-mono text-meta text-muted-foreground">{language()}</span></Show>
-      <Show when={detail()}><span class={PILL_DETAIL}>{detail()}</span></Show>
-      <Show when={duration()}><span class={PILL_TIME}>{duration()}</span></Show>
+      <span class={["shrink-0 font-mono", { "text-foreground": running() }]}>Code</span>
+      <Show when={language()}><span class="shrink-0 font-mono text-muted-foreground">{language()}</span></Show>
+      <Show when={detail()}><span class={ROW_DETAIL}>{detail()}</span></Show>
+      <Show when={duration()}><span class={ROW_TIME}>{duration()}</span></Show>
     </>
   );
   return (
-    <li class="min-w-0 max-w-full" data-slot="timeline-code" data-code-id={props.item.codeId}>
-      <Show when={props.item.code.length > 0} fallback={<span class={pillClass({ failed: done()?.ok === false })}>{body()}</span>}>
+    <li class="w-full min-w-0" data-slot="timeline-code" data-code-id={props.item.codeId}>
+      <Show when={props.item.code.length > 0} fallback={<span class={rowClass({ failed: done()?.ok === false })}>{body()}</span>}>
         <button
           type="button"
-          class={pillClass({ failed: done()?.ok === false, open: props.open })}
+          class={rowClass({ failed: done()?.ok === false, open: props.open })}
           aria-expanded={props.open ? "true" : "false"}
           aria-label={`Code — ${props.open ? "hide" : "show"} source`}
           onClick={props.onToggle}
@@ -312,7 +306,11 @@ export function Timeline(props: { events: TimelineEvent[]; live?: boolean; settl
   });
   return (
     <ul
-      class="ml-1 flex min-w-0 flex-wrap items-center gap-1 border-l border-border/60 pl-3"
+      /* One step per line, a hairline apart: t3code's work log, where the
+         column of names and the column of timings both read top to bottom.
+         The old row wrapped capsules inline, so a long run reflowed into a
+         paragraph of pills whose order was only recoverable by reading. */
+      class="ml-1 flex min-w-0 flex-col gap-px border-l border-border/60 pl-3"
       data-slot="timeline"
     >
       <For each={items()} keyed={item => item.key}>

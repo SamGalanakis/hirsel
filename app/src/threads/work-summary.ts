@@ -1,4 +1,5 @@
 import { buildTimeline, splitStreamingReply, timelineTools } from "../components/chat/timeline";
+import { formatSeconds } from "../lib/duration";
 import type { ToolCall } from "../protocol";
 import type { TimelineEvent } from "../store/types";
 import type { ThreadActivity, ThreadTurn } from "./types";
@@ -28,9 +29,7 @@ export function workDuration(turn: ThreadTurn | undefined, now: number): string 
   const end = turn.finished_at ? Date.parse(turn.finished_at) : now;
   const seconds = Math.max(0, Math.floor((end - Date.parse(turn.started_at)) / 1000));
   if (!Number.isFinite(seconds)) return "";
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  return minutes < 60 ? `${minutes}m ${seconds % 60}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+  return formatSeconds(seconds);
 }
 function runningTool(name: string): string {
   if (/(exec|bash|shell|command)/i.test(name)) return "Running a command";

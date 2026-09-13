@@ -42,7 +42,14 @@ function ReferenceImage(props: { node: Extract<PhrasingContent, {type: "imageRef
   return <Show when={src()} fallback={props.node.alt ?? ""}>{url => <img src={url()} alt={props.node.alt ?? ""} title={definition()?.title ?? undefined} loading="lazy" class="max-w-full rounded-md border border-border/60" />}</Show>;
 }
 
-const inlineCodeClass = "rounded bg-muted/70 px-1 py-0.5 font-mono text-[0.85em]";
+/** Inline code, copied from t3code's `.chat-markdown :not(pre) > code`: a
+ * hairline outline over a quiet fill at 12px, not the heavy filled block this
+ * replaced. `bg-muted/70` with `px-1 py-0.5` painted every command, path and
+ * identifier as a solid slab, so a sentence naming three files read as three
+ * buttons; the outline says "this is literal" without competing with the prose.
+ * `0.86em` lands on t3code's absolute 12px inside 14px reading type and still
+ * scales down where code appears inside meta lines. */
+const inlineCodeClass = "rounded-md border border-border/60 bg-muted/40 px-[0.35em] py-[0.1em] font-mono text-[0.86em]";
 
 /** `noRefs` suppresses Thread-citation lifting for a subtree that cannot host a
  * control — a link label, where a nested button would be invalid markup. */

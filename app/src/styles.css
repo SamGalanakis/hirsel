@@ -251,11 +251,20 @@ body {
   overflow: hidden;
 }
 
-button,
-input,
-select,
-textarea {
-  font: inherit;
+/* Form controls inherit the app's type instead of the UA's 13px Arial. It sits
+   in `base` deliberately: an UNLAYERED rule beats every Tailwind layer, so the
+   same declaration outside a layer silently overrode `text-meta` / `text-xs` on
+   every `<button>` — which is why run-card durations, pill timings and every
+   other meta line inside a control rendered at the 16px body size instead of
+   their own scale. In `base` the reset still beats the UA sheet and still loses
+   to the utility a call site actually wrote. */
+@layer base {
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
 }
 
 /* --- Quiet scrollbars, app-wide. The default chunky track is visually loud —

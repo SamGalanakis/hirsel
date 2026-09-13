@@ -43,10 +43,10 @@ function TurnTrace(props: { ref?: (node: HTMLDivElement) => void; turn?: ThreadT
  * only has to separate finished from failed from stopped at a glance. */
 function OutcomeMark(props: { outcome: RunOutcome }) {
   return <Switch>
-    <Match when={props.outcome === "running"}><LoaderCircle class={`size-3.5 shrink-0 text-status-active ${state.connection === "connected" ? "animate-spin motion-reduce:animate-none" : ""}`} aria-hidden="true" /></Match>
-    <Match when={props.outcome === "failed"}><CircleAlert class="size-3.5 shrink-0 text-destructive" aria-hidden="true" /></Match>
-    <Match when={props.outcome === "done"}><Check class="size-3.5 shrink-0 text-status-success" aria-hidden="true" /></Match>
-    <Match when={true}><Square class="size-3.5 shrink-0" aria-hidden="true" /></Match>
+    <Match when={props.outcome === "running"}><LoaderCircle class={`size-3 shrink-0 text-status-active ${state.connection === "connected" ? "animate-spin motion-reduce:animate-none" : ""}`} aria-hidden="true" /></Match>
+    <Match when={props.outcome === "failed"}><CircleAlert class="size-3 shrink-0 text-destructive" aria-hidden="true" /></Match>
+    <Match when={props.outcome === "done"}><Check class="size-3 shrink-0 text-status-success" aria-hidden="true" /></Match>
+    <Match when={true}><Square class="size-3 shrink-0" aria-hidden="true" /></Match>
   </Switch>;
 }
 
@@ -117,14 +117,14 @@ export function RunCard(props: { turn?: ThreadTurn; message?: ChatMessage; trigg
         aria-label={[runOutcomeLabel(outcome()), originLabel(), duration()].filter(Boolean).join(" · ")}
         aria-expanded={expanded() ? "true" : "false"}
         aria-controls={expanded() ? traceId() : undefined}
-        class="-mx-1 mb-1.5 flex min-h-8 w-full min-w-0 items-center gap-1.5 rounded-md px-1 text-left text-meta text-muted-foreground transition-colors hover:bg-muted/45 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:min-h-11"
+        class="-mx-1 mb-1.5 flex min-h-6 w-full min-w-0 items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-meta leading-tight text-muted-foreground tabular-nums transition-colors hover:bg-accent/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring pointer-coarse:min-h-11"
         onClick={() => props.turn && setTurnExpanded(props.turn.id, !expanded())}
       >
-        <ChevronRight class={`size-3 shrink-0 transition-transform ${expanded() ? "rotate-90" : ""}`} aria-hidden="true" />
+        <ChevronRight class={`size-3 shrink-0 text-muted-foreground/70 transition-transform ${expanded() ? "rotate-90" : ""}`} aria-hidden="true" />
         <Show when={originLabel()}>{label => <span class="min-w-0 truncate" data-slot="run-card-origin">{label()}</span>}</Show>
         <Show when={duration()}>
           <Show when={originLabel()}><span aria-hidden="true">·</span></Show>
-          <span class="shrink-0 tabular-nums">{duration()}</span>
+          <span class="shrink-0">{duration()}</span>
         </Show>
         <span class="ml-auto inline-flex shrink-0 items-center gap-1" data-slot="run-card-outcome">
           <OutcomeMark outcome={outcome()} />
@@ -140,8 +140,8 @@ export function RunCard(props: { turn?: ThreadTurn; message?: ChatMessage; trigg
     <For each={artifacts()}>{id => <ArtifactCard id={id} />}</For>
     <Show when={failed()}><div class="max-w-prose space-y-1 pt-1 text-sm">
       <p class="break-words text-destructive" data-slot="work-failure">{failureReason(props.activities) ?? "This run ended before it could finish."}</p>
-      <p class="text-muted-foreground" data-slot="work-recovery">Send a message to continue.</p>
+      <p class="text-meta text-muted-foreground" data-slot="work-recovery">Send a message to continue.</p>
     </div></Show>
-    <Show when={stopped()}><p class="pt-1 text-xs text-muted-foreground">Your conversation is kept. Send a message to continue.</p></Show>
+    <Show when={stopped()}><p class="pt-1 text-meta text-muted-foreground">Your conversation is kept. Send a message to continue.</p></Show>
   </section>;
 }

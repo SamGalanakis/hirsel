@@ -44,20 +44,28 @@ export function RichLink(props: { href: string; title?: string; label: string; c
   const copied = (value: string) => { setError(null); void copyLink(value).catch(failure => setError(failure.message)); };
   return <span data-link-kind={threadTarget() || parsed() ? "thread" : link()?.kind} class="inline">
     <a href={href()} target="_blank" rel="noopener noreferrer nofollow" title={props.title ?? href()}
-      class="rounded-sm underline decoration-dotted decoration-current/50 underline-offset-4 hover:decoration-solid hover:decoration-current focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      /* An inline reference is TEXT, at the size of the sentence it sits in —
+         t3code draws links with no decoration at rest and a faint underline
+         only under the pointer. The dotted rule at `underline-offset-4` this
+         replaced sat a full 4px below the baseline on every reference, so two
+         citations in one paragraph striped the line and read as pills rather
+         than as words. A 1px hairline at 25% keeps the affordance visible
+         without relying on colour alone; hover firms it up. */
+      class="rounded-sm underline decoration-1 decoration-current/25 underline-offset-2 transition-[text-decoration-color] hover:decoration-current/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       onClick={event => { if (localThread() && plainPrimaryClick(event)) { event.preventDefault(); focusThread(localThread()!.id); } }}>
-      <Show when={!props.imageOnly && (threadTarget() || link())}><span class="mr-1 inline-flex align-text-bottom">{/* The inline chip carries the Thread's own icon at list size: an uploaded
-            image is a 16px cover-cropped avatar, an emoji or the generated
-            initial the same box. */}<Show when={localThread()} fallback={<LinkIcon kind={threadTarget() ? "thread" : link()!.kind} />}>{thread => <ThreadAvatar thread={thread()} dense />}</Show></span></Show>
+      <Show when={!props.imageOnly && (threadTarget() || link())}><span class="mr-[0.25em] inline-flex align-text-bottom">{/* The inline mark carries the Thread's own icon at SENTENCE size: an
+            uploaded image is an em-tall cover-cropped avatar, an emoji or the
+            generated initial the same box. It used to be the 16px list avatar,
+            which out-measured the 14px prose it sat in. */}<Show when={localThread()} fallback={<LinkIcon kind={threadTarget() ? "thread" : link()!.kind} class="size-[1.05em] shrink-0" />}>{thread => <ThreadAvatar thread={thread()} inline />}</Show></span></Show>
       <Show when={bare() && target()} fallback={props.children}>{label()}</Show>
     </a>
-    <Show when={target()}><DropdownMenu><DropdownMenuTrigger aria-label={`Link actions: ${label()}`} title="Link actions" class="ml-0.5 inline-flex size-6 items-center justify-center rounded align-middle text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:size-11"><ChevronDown class="size-3" /></DropdownMenuTrigger><DropdownMenuContent>
+    <Show when={target()}><DropdownMenu><DropdownMenuTrigger aria-label={`Link actions: ${label()}`} title="Link actions" class="ml-[0.15em] inline-flex size-[1.2em] items-center justify-center rounded align-middle text-muted-foreground/60 hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:size-11"><ChevronDown class="size-[0.85em]" /></DropdownMenuTrigger><DropdownMenuContent>
       <Show when={localThread()}><DropdownMenuItem class="min-h-11" onSelect={() => focusThread(localThread()!.id)}><MessageCircle class="size-4" />Open thread</DropdownMenuItem></Show>
       <DropdownMenuItem class="min-h-11" onSelect={() => window.open(href(), "_blank", "noopener,noreferrer")}><ArrowUpRight class="size-4" />Open in new tab</DropdownMenuItem>
       <DropdownMenuItem class="min-h-11" onSelect={() => copied(href())}><Copy class="size-4" />Copy link</DropdownMenuItem>
       <Show when={threadTarget()}><DropdownMenuItem class="min-h-11" onSelect={() => copied(threadReference(threadTarget()!))}><Copy class="size-4" />Copy reference</DropdownMenuItem></Show>
       <Show when={origin}><DropdownMenuItem class="min-h-11" disabled={busy() || saved() || !canSave()} onSelect={() => void save()}><Show when={saved()} fallback={<Plus class="size-4" />}><Check class="size-4" /></Show>{saved() ? "Already in Related" : busy() ? "Saving…" : !canSave() ? "Thread unavailable" : "Add to Related"}</DropdownMenuItem></Show>
     </DropdownMenuContent></DropdownMenu></Show>
-    <Show when={error()}><span role="alert" class="ml-2 text-xs text-destructive">{error()}</span></Show>
+    <Show when={error()}><span role="alert" class="ml-2 text-meta text-destructive">{error()}</span></Show>
   </span>;
 }

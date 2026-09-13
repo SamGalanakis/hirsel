@@ -145,7 +145,7 @@ function SettingsPanel() {
       <div
         ref={(node) => { scrollRef = node; }}
         data-slot="settings-scroll"
-        class="thin-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-y-contain"
+        class="min-h-0 flex-1 overflow-y-auto overscroll-y-contain"
       >
         <div
           data-slot="settings-column"

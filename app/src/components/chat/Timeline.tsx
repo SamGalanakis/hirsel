@@ -17,10 +17,10 @@ function isDelegationTool(name: string): boolean {
   return DELEGATION_RE.test(name);
 }
 
-/** The live reasoning block's ceiling: six lines at its own italic measure
- * (`leading-relaxed` = 1.625em a line). Enough that streaming thought reads as a
- * block of text rather than a ticker, never enough for a long chain to push the
- * reply — or the composer — off screen.
+/** The live reasoning block's ceiling: six lines at the trace's own measure.
+ * Enough that streaming thought reads as a block of text rather than a ticker,
+ * never enough for a long chain to push the reply — or the composer — off
+ * screen.
  *
  * `flex-col-reverse` is what keeps the TAIL in view as the run grows: the child
  * is laid out from the bottom edge, so overflow spills off the TOP, which is the
@@ -28,7 +28,7 @@ function isDelegationTool(name: string): boolean {
 const LIVE_REASONING_BLOCK =
   "flex max-h-[9.75em] flex-col-reverse overflow-hidden";
 
-/** The reasoning run the Agent is writing right now: bare dim-italic text in the
+/** The reasoning run the Agent is writing right now: bare dim text in the
  * timeline, with none of the settled row's chrome — no disclosure chevron, no
  * glyph, no "reasoning" label, no indent. There is nothing to disclose while the
  * text is arriving, and a label plus a toggle around three lines of live thought
@@ -44,7 +44,7 @@ function StreamingReasoning(props: { text: string }) {
       data-slot="timeline-reasoning-stream"
       aria-busy="true"
     >
-      <p class="whitespace-pre-wrap text-meta italic leading-relaxed text-muted-foreground">
+      <p class="max-w-prose whitespace-pre-wrap text-xs text-muted-foreground">
         {renderInline(props.text)}
       </p>
     </li>
@@ -57,7 +57,7 @@ function StreamingReasoning(props: { text: string }) {
 function ReasoningRow(props: { text: string }) {
   return (
     <li class="my-1 w-full min-w-0" data-slot="timeline-reasoning">
-      <p class="max-w-prose whitespace-pre-wrap text-meta italic leading-relaxed text-muted-foreground">
+      <p class="max-w-prose whitespace-pre-wrap text-xs text-muted-foreground">
         {renderInline(props.text)}
       </p>
     </li>

@@ -12,6 +12,11 @@ import { threadPath } from "./tree";
 import type { ThreadKind } from "./types";
 
 const chip = "inline-flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-full border border-border px-2.5 text-meta text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:h-11 pointer-coarse:text-sm";
+/** ONE labelled-field shape for this dialog: the label above the box at meta
+ * size, the box itself at the reading size with a real border and a real focus
+ * ring. */
+const fieldLabel = "flex flex-col gap-1 text-meta font-medium uppercase tracking-wide text-muted-foreground";
+const fieldBox = "w-full min-w-0 rounded-lg border border-border bg-background px-2.5 text-sm font-normal normal-case tracking-normal text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const icon = "inline-flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:size-11";
 /** The Thread's name is the first thing the Owner wrote, unless they say otherwise. */
 export function derivedTitle(body: string): string {
@@ -88,15 +93,27 @@ export function ThreadCreate(props: { onSelect: (id: number) => void }) {
     {/* Closed, the modal holds no fields: the draft lives in this component's
         state, so nothing outside it can find a stray textarea. */}
     <Show when={open()}><div class="flex min-h-0 flex-1 flex-col gap-2 p-3">
-      <button type="button" class="inline-flex h-7 w-fit items-center gap-1.5 rounded-md px-1 text-meta text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:h-11" onClick={dismiss}><X class="size-4" />Close</button>
+      {/* The dialog says what it is before it asks for anything, and both
+          fields carry a visible label at ONE size with a visible focus ring.
+          They used to be two bare placeholder-only boxes with no title above
+          them and no ring, so an empty dialog read as a blank card and a
+          keyboard user could not see where they were. */}
+      <div class="flex items-start gap-2">
+        <h2 class="min-w-0 flex-1 text-lg font-medium text-foreground">New Space or Task</h2>
+        <button type="button" class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:size-11" aria-label="Close" title="Close" onClick={dismiss}><X class="size-4" /></button>
+      </div>
       {/* A single-line name: Enter ends it, on every pointer. The first-message
           textarea keeps its own rule, where Enter is a newline on touch. */}
-      <input aria-label="New space or task title" placeholder={derivedTitle(body()) || "Name it (optional)"} value={name()} onInput={event => setName(event.currentTarget.value)}
-        onKeyDown={event => { if (event.key !== "Enter" || event.shiftKey || event.isComposing) return; event.preventDefault(); if (ready()) void submit(); }}
-        class="h-7 w-full min-w-0 bg-transparent px-1 text-sm placeholder:text-muted-foreground focus:outline-none forced-colors:focus-visible:outline forced-colors:focus-visible:outline-1 pointer-coarse:h-11" />
-      <textarea ref={node => { textarea = node; }} aria-label="First message" placeholder="What is this about? Your first message starts it off…" value={body()} onInput={event => setBody(event.currentTarget.value)}
-        onKeyDown={event => handleSubmitKeys(event, { value: body, coarse, onSend: () => void submit() })}
-        class="min-h-24 w-full min-w-0 flex-1 resize-none bg-transparent px-1 text-base leading-relaxed placeholder:text-muted-foreground focus:outline-none forced-colors:focus-visible:outline forced-colors:focus-visible:outline-1" />
+      <label class={fieldLabel}>Name
+        <input aria-label="New space or task title" placeholder={derivedTitle(body()) || "Optional — the first message names it"} value={name()} onInput={event => setName(event.currentTarget.value)}
+          onKeyDown={event => { if (event.key !== "Enter" || event.shiftKey || event.isComposing) return; event.preventDefault(); if (ready()) void submit(); }}
+          class={`${fieldBox} h-9 pointer-coarse:h-11`} />
+      </label>
+      <label class={`${fieldLabel} min-h-0 flex-1`}>First message
+        <textarea ref={node => { textarea = node; }} aria-label="First message" placeholder="What is this about? Your first message starts it off…" value={body()} onInput={event => setBody(event.currentTarget.value)}
+          onKeyDown={event => handleSubmitKeys(event, { value: body, coarse, onSend: () => void submit() })}
+          class={`${fieldBox} min-h-24 flex-1 resize-none py-2`} />
+      </label>
       <Show when={attachments.files().length > 0}>
         <ul data-slot="create-attachments" class="flex flex-wrap gap-1.5">
           <For each={attachments.files()}>{file => <li class="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-meta text-muted-foreground">
@@ -126,8 +143,8 @@ export function ThreadCreate(props: { onSelect: (id: number) => void }) {
       <input ref={node => { fileInput = node; }} type="file" multiple class="hidden" onChange={event => { if (event.currentTarget.files) attachments.addFiles(event.currentTarget.files); event.currentTarget.value = ""; }} />
       <button type="button" class={icon} aria-label="Attach files" title="Attach files" onClick={() => fileInput?.click()}><Paperclip class="size-4" /></button>
       <div class="flex-1" />
-      <button type="button" data-slot="create-submit" class={`${icon} bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground`} aria-label={resolvedKind() === "space" ? "New Space" : "New Task"} title={resolvedKind() === "space" ? "Create the Space" : "Create the Task"}
-        disabled={!ready()} onClick={() => void submit()}><ArrowRight class="size-4" /></button>
+      <button type="button" data-slot="create-submit" class="inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg bg-primary px-3 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 pointer-coarse:min-h-11" title={resolvedKind() === "space" ? "Create the Space" : "Create the Task"}
+        disabled={!ready()} onClick={() => void submit()}>{resolvedKind() === "space" ? "Create Space" : "Create Task"}<ArrowRight class="size-4" /></button>
     </footer></Show>
   </dialog>;
 }

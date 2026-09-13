@@ -49,14 +49,18 @@
   --input: oklch(0.205 0.02 286 / 14%);
   --ring: oklch(0.54 0.12 158);
 
-  --surface: oklch(0.97 0.001 286);
-  --surface-foreground: oklch(0.45 0 0);
+  /* One step ABOVE the canvas, in the canvas's own hue family. It used to be
+     oklch(0.97 0.001 286) — darker than `--background` and two hue families
+     away, so every raised thing (agent card, dialog, sheet) read as a dent in
+     the paper instead of a card on it. */
+  --surface: oklch(0.99 0.006 190);
+  --surface-foreground: oklch(0.45 0.02 220);
 
   --status-active: oklch(0.52 0.12 221);
   --status-idle: oklch(0.55 0 0);
   --status-success: oklch(0.52 0.17 149);
   --status-danger: var(--destructive);
-  --status-attention: oklch(0.53 0.14 73);
+  --status-attention: oklch(0.5 0.14 65);
 
   /* The one raised-control elevation (selected segment). A token rather than a
      hardcoded rgb() so the lift is honest on BOTH canvases: an ink shadow on
@@ -101,8 +105,8 @@
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.84 0.1 158);
 
-  --surface: oklch(0.2 0 0);
-  --surface-foreground: oklch(0.708 0 0);
+  --surface: oklch(0.215 0.014 220);
+  --surface-foreground: oklch(0.72 0.025 175);
 
   --status-active: oklch(0.72 0.115 221);
   --status-idle: oklch(0.65 0 0);
@@ -159,16 +163,49 @@
      Nothing in the task world should re-introduce a literal px width or a
      bespoke inset. */
   --container-measure: 42rem;
+  /* The Owner's own bubble is the one thing that does NOT fill the measure: it
+     hugs right, so it needs a ceiling or a long paste spans the column and the
+     left/right conversation stops reading as two voices. A rem ceiling, not the
+     old `max-w-[85%] sm:max-w-[60%]` percentage pair — a percentage made the
+     bubble's left edge move with the viewport, so no two messages started in
+     the same place. */
+  --container-reply: 34rem;
   --spacing-gutter: 1.5rem;
   --container-frame: calc(var(--container-measure) + 2 * var(--spacing-gutter));
 
-  /* `meta` — the one named size below `text-xs` (DESIGN §3: meta is 11–12px;
-     11.5px sits inside that floor). It was a de-facto token already, written
-     out as an arbitrary `0.72rem` value at ~15 call sites — ids, timings, commands,
-     shortcuts, summaries. Named once here so the scale has a vocabulary and no
-     call site can drift below the floor. Size only — leading stays inherited,
-     exactly as the arbitrary value it replaces behaved. */
-  --text-meta: 0.72rem;
+  /* THE TYPE RAMP. Six named steps and nothing else; every step carries its
+     own leading, so a call site never writes a size without the line height
+     that belongs to it and the app cannot drift into a second rhythm. There
+     used to be seventeen distinct declared sizes here — the six Tailwind
+     defaults plus eleven arbitrary `text-[0.68rem]` / `text-[10px]` /
+     `text-[1.05rem]` one-offs — which is why two meta lines beside each other
+     could differ by half a pixel and no two headings agreed.
+
+       meta    11 / 16  — ids, timings, commands, shortcuts, badges (the floor:
+                          nothing in the app renders below 11px)
+       xs      12.5/ 18 — secondary labels, chip text, captions
+       sm      14 / 20  — body: conversation prose, list rows, controls
+       base    15 / 22  — lead: what the Owner types, the reading register
+       lg      16 / 22  — h2 inside prose, section titles
+       xl      18 / 24  — h1: the one page-level title
+       display clamp    — the instrument hero, the single fluid step
+
+     `text-2xl`/`3xl` keep their Tailwind defaults; they exist only for the
+     avatar glyph at `size-16`. */
+  --text-meta: 0.6875rem;
+  --text-meta--line-height: 1rem;
+  --text-xs: 0.78125rem;
+  --text-xs--line-height: 1.125rem;
+  --text-sm: 0.875rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.9375rem;
+  --text-base--line-height: 1.375rem;
+  --text-lg: 1rem;
+  --text-lg--line-height: 1.375rem;
+  --text-xl: 1.125rem;
+  --text-xl--line-height: 1.5rem;
+  --text-display: clamp(1.75rem, 3vw, 2.25rem);
+  --text-display--line-height: 1.12;
 }
 
 @theme inline {

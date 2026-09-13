@@ -462,7 +462,7 @@ function ExpandedPromptEditor(props: {
           disabled={props.busy()}
           value={props.draft()}
           onInput={(event) => props.setDraft(event.currentTarget.value)}
-          class="thin-scrollbar min-h-0 w-full flex-1 resize-none rounded-lg border border-border bg-surface px-3 py-2.5 font-mono text-xs leading-relaxed text-foreground outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-60"
+          class="min-h-0 w-full flex-1 resize-none rounded-lg border border-border bg-surface px-3 py-2.5 font-mono text-xs leading-relaxed text-foreground outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-60"
         />
         <PromptActions
           class="mt-3"
@@ -589,7 +589,7 @@ export function PromptEditor(props: {
           disabled={busy()}
           value={draft()}
           onInput={(event) => setDraft(event.currentTarget.value)}
-          class="thin-scrollbar w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs leading-relaxed text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-60"
+          class="w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs leading-relaxed text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-60"
         />
         <PromptActions
           class="mt-2"

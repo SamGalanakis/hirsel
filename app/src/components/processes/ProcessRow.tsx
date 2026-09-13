@@ -181,7 +181,7 @@ export function ProcessRow(props: Props) {
               <span class="text-xs font-medium text-muted-foreground">
                 Latest
               </span>
-              <span class="text-[0.78rem] text-foreground/90 wrap-break-word">{p().last_outcome}</span>
+              <span class="text-sm text-foreground/90 wrap-break-word">{p().last_outcome}</span>
             </div>
           </Show>
 

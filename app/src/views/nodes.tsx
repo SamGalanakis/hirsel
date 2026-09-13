@@ -15,6 +15,7 @@ import { type JSX } from "@solidjs/web";
 import type { ViewSpec } from "../protocol";
 import { cn } from "@/lib/utils";
 import { statusDotClass, toneBadgeClass, toneTextClass } from "./tokens";
+import { inlineCodeClass } from "../components/markdown/inline-code";
 
 // ---- Safe prop accessors (nothing here may throw on malformed input) ----
 
@@ -63,7 +64,7 @@ export const RichText: InlineText = (props) => {
     <For each={parts()}>
       {(part, i) =>
         part === "" ? null : i() % 2 === 1 ? (
-          <span class="font-mono text-[0.92em] tracking-[-0.01em]">{part}</span>
+          <code class={inlineCodeClass}>{part}</code>
         ) : (
           <>{part}</>
         )

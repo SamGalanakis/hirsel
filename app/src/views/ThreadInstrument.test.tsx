@@ -54,11 +54,12 @@ describe("ThreadInstrument — constrained vocabulary", () => {
     expect(recommended.className).toContain("text-primary");
     expect(recommended.className).not.toContain("rounded-full");
     expect(screen.getAllByText("success").length).toBeGreaterThan(0);
-    // `backtick` → a mono span (Monospace-Earns-It), and the prose around it stays text.
-    expect(screen.getByText("reopen").tagName).toBe("SPAN");
+    // `backtick` → the app's ONE inline-code treatment, shared with prose
+    // (Monospace-Earns-It); the prose around it stays text.
+    expect(screen.getByText("reopen").tagName).toBe("CODE");
     expect(screen.getByText("reopen").className).toContain("font-mono");
     const question = screen.getByRole("heading", { level: 3, name: /Which way to wire/ });
-    expect(question.className).toContain("clamp(1.75rem,3vw,2.25rem)");
+    expect(question.className).toContain("text-display");
   });
 
   it("keeps nested generated headings below the principal h3", () => {

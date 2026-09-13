@@ -111,7 +111,7 @@ function HeadingNode(node: Node): JSX.Element {
     );
   }
   return (
-    <h3 class="max-w-[32ch] text-[clamp(1.75rem,3vw,2.25rem)] font-[500] leading-[1.12] tracking-[-0.025em] text-foreground">
+    <h3 class="max-w-[32ch] text-display font-medium tracking-tight text-foreground">
       <Rich text={node.text} />
     </h3>
   );

@@ -14,6 +14,7 @@ import { mdastToString, parseMarkdown, parseStreamingMarkdown } from "./markdown
 
 import { RichLink } from "../related/RichLink";
 import { safeHref } from "./markdown/url";
+import { inlineCodeClass } from "./markdown/inline-code";
 
 const LinkDefinitions = createContext<() => Map<string, Definition>>(() => new Map());
 function definitionsIn(nodes: readonly RootContent[]): Map<string, Definition> {
@@ -42,14 +43,6 @@ function ReferenceImage(props: { node: Extract<PhrasingContent, {type: "imageRef
   return <Show when={src()} fallback={props.node.alt ?? ""}>{url => <img src={url()} alt={props.node.alt ?? ""} title={definition()?.title ?? undefined} loading="lazy" class="max-w-full rounded-md border border-border/60" />}</Show>;
 }
 
-/** Inline code, copied from t3code's `.chat-markdown :not(pre) > code`: a
- * hairline outline over a quiet fill at 12px, not the heavy filled block this
- * replaced. `bg-muted/70` with `px-1 py-0.5` painted every command, path and
- * identifier as a solid slab, so a sentence naming three files read as three
- * buttons; the outline says "this is literal" without competing with the prose.
- * `0.86em` lands on t3code's absolute 12px inside 14px reading type and still
- * scales down where code appears inside meta lines. */
-const inlineCodeClass = "rounded-md border border-border/60 bg-muted/40 px-[0.35em] py-[0.1em] font-mono text-[0.86em]";
 
 /** `noRefs` suppresses Thread-citation lifting for a subtree that cannot host a
  * control — a link label, where a nested button would be invalid markup. */
@@ -133,9 +126,9 @@ function renderPhrasing(nodes: readonly PhrasingContent[], noRefs = false): JSX.
 }
 
 const headingClass: Record<number, string> = {
-  1: "mt-1 text-[1.05rem] font-medium leading-snug text-foreground",
-  2: "mt-1 text-[0.95rem] font-medium leading-snug text-foreground",
-  3: "mt-1 text-sm font-medium leading-snug text-foreground",
+  1: "mt-1 text-lg font-medium text-foreground",
+  2: "mt-1 text-base font-medium text-foreground",
+  3: "mt-1 text-sm font-medium text-foreground",
 };
 
 function Heading(props: { depth: number; children: JSX.Element }) {
@@ -160,8 +153,11 @@ function alignClass(align: Table["align"], index: number): string {
 function TableBlock(props: { node: Table }) {
   const rows = () => props.node.children;
   return (
-    // Wide tables scroll inside their own box; the message column never widens.
-    <div class="overflow-x-auto">
+    /* Wide tables scroll inside their own box; the message column never
+       widens. `scroll-fade-x` is the app's one "there is more this way"
+       affordance (the same one the attachment row uses) — without it a table
+       cut off at 390px looked like a table that simply ended. */
+    <div class="scroll-fade-x -mx-1 overflow-x-auto px-1">
       <table class="w-max min-w-full border-collapse text-sm">
         <thead>
           <For each={rows().slice(0, 1)}>
@@ -170,7 +166,7 @@ function TableBlock(props: { node: Table }) {
                 <For each={row.children}>
                   {(cell, index) => (
                     <th
-                      class={`border-b border-border/60 px-2 py-1 font-medium text-muted-foreground ${alignClass(props.node.align, index())}`}
+                      class={`border-b border-border/60 px-2 py-1 font-medium text-muted-foreground first:ps-0 last:pe-0 ${alignClass(props.node.align, index())}`}
                     >
                       {renderPhrasing(cell.children)}
                     </th>
@@ -187,7 +183,7 @@ function TableBlock(props: { node: Table }) {
                 <For each={row.children}>
                   {(cell, index) => (
                     <td
-                      class={`border-b border-border/30 px-2 py-1 align-top ${alignClass(props.node.align, index())}`}
+                      class={`border-b border-border/30 px-2 py-1 align-top first:ps-0 last:pe-0 ${alignClass(props.node.align, index())}`}
                     >
                       {renderPhrasing(cell.children)}
                     </td>

@@ -223,7 +223,7 @@ export function ThreadNavigation(props: { mode: ThreadNavigationMode; intent: Th
   <dialog ref={node => { dialog = node; }} id="thread-navigation" role={modal() ? "dialog" : "complementary"} aria-modal={modal() ? "true" : undefined} aria-label="Spaces and Tasks" data-slot="thread-drawer"
     onCancel={dismiss} onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); dismiss(event); } }}
     onPointerDown={event => { if (event.target === dialog && dialog) { const rect = dialog.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) props.onClose(); } }}
-    class="fixed inset-y-0 left-0 m-0 h-dvh max-h-none w-[min(20rem,100vw)] max-w-none flex-col border-0 border-r border-border bg-background p-2 text-foreground backdrop:bg-transparent open:flex split:left-14 split:w-[min(20rem,calc(100vw-3.5rem))] rail:static rail:z-auto rail:h-auto rail:w-72 rail:shrink-0">
+    class="fixed inset-y-0 left-0 m-0 h-dvh max-h-none w-[min(21rem,calc(100vw-2.5rem))] max-w-none flex-col border-0 border-r border-border bg-background p-2 text-foreground backdrop:bg-background/70 open:flex split:left-14 split:w-[min(21rem,calc(100vw-3.5rem))] rail:static rail:z-auto rail:h-auto rail:w-72 rail:shrink-0">
     <header class="mb-1 flex flex-col gap-1">
       <div data-slot="thread-drawer-identity" class="flex min-w-0 items-center gap-0.5">
         <h2 class="min-w-0 flex-1 truncate px-1 text-sm font-semibold">Spaces &amp; Tasks</h2>

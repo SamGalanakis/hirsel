@@ -45,13 +45,13 @@ const ROSTER: ProviderRoster = {
 /** The tab list, in the order the rail shows it. */
 const TAB_LABELS = [
   "Appearance",
+  "Notifications",
   "Thread models",
   "Providers",
+  "Plugins",
   "Connection & devices",
-  "Notifications",
   "Guide",
   "About & debug",
-  "Plugins",
 ];
 
 beforeEach(() => {
@@ -109,18 +109,20 @@ describe("Settings: side-tab navigation", () => {
       getAllByRole("tab").find((tab) => tab.getAttribute("aria-selected") === "true")?.textContent;
 
     fireEvent.keyDown(getByRole("tab", { name: "Appearance" }), { key: "ArrowDown" });
+    expect(selected()).toBe("Notifications");
+
+    fireEvent.keyDown(getByRole("tab", { name: "Notifications" }), { key: "ArrowRight" });
     expect(selected()).toBe("Thread models");
 
-    fireEvent.keyDown(getByRole("tab", { name: "Thread models" }), { key: "ArrowRight" });
-    expect(selected()).toBe("Providers");
+    fireEvent.keyDown(getByRole("tab", { name: "Thread models" }), { key: "ArrowLeft" });
+    expect(selected()).toBe("Notifications");
 
-    fireEvent.keyDown(getByRole("tab", { name: "Providers" }), { key: "ArrowLeft" });
-    expect(selected()).toBe("Thread models");
+    // Arrowing crosses group boundaries: the groups name the list, they do not
+    // cut it into four separate ones.
+    fireEvent.keyDown(getByRole("tab", { name: "Notifications" }), { key: "End" });
+    expect(selected()).toBe("About & debug");
 
-    fireEvent.keyDown(getByRole("tab", { name: "Thread models" }), { key: "End" });
-    expect(selected()).toBe("Plugins");
-
-    fireEvent.keyDown(getByRole("tab", { name: "Plugins" }), { key: "Home" });
+    fireEvent.keyDown(getByRole("tab", { name: "About & debug" }), { key: "Home" });
     expect(selected()).toBe("Appearance");
 
     // Activation follows focus, so each of those moves swapped the panel too.

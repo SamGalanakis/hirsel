@@ -19,10 +19,16 @@ import { failureReason, mergePersistedToolCalls, toolSummary, workDuration, work
  * Both are ordinary rows of the one trace — there is no second, technical
  * surface hidden under a disclosure, and no raw protocol dump: an event log
  * nobody outside this file can read was never the Owner's to fold away. */
-function TurnTrace(props: { ref?: (node: HTMLDivElement) => void; turn?: ThreadTurn; events: TimelineEvent[]; activities: ThreadActivity[]; live?: boolean; id: string }) {
+function TurnTrace(props: { ref?: (node: HTMLElement) => void; turn?: ThreadTurn; events: TimelineEvent[]; activities: ThreadActivity[]; live?: boolean; id: string }) {
   const settled = () => Boolean(props.turn && !["queued", "running"].includes(props.turn.state));
   const records = () => props.activities.filter(activity => !ownerFacingActivity(activity) && !toolSummary(activity));
-  return <div ref={node => props.ref?.(node)} id={props.id} data-slot="run-card-trace" class="mb-2 min-w-0 text-xs text-muted-foreground">
+  /* The trace is a CONTAINED block, not loose text under the header: a quiet
+     fill and a hairline give the run's steps an edge, and one small label says
+     what the block is. Opened, it used to read as unlabelled dim italics
+     floating between the header and the reply, so nothing told the Owner where
+     the machine's account of the run started or stopped. */
+  return <section ref={node => props.ref?.(node)} id={props.id} data-slot="run-card-trace" class="mb-2 min-w-0 rounded-lg border border-border/60 bg-muted/20 px-2.5 py-2 text-xs text-muted-foreground" aria-label="Run steps">
+    <p class="mb-1.5 text-meta font-medium uppercase tracking-wide text-muted-foreground">Steps</p>
     <Show when={props.events.length > 0}>
       <Timeline events={props.events} live={props.live} settled={settled()} />
     </Show>
@@ -33,7 +39,7 @@ function TurnTrace(props: { ref?: (node: HTMLDivElement) => void; turn?: ThreadT
       <p>{activity.kind.replaceAll("_", " ")} · <time datetime={activity.ts}>{new Date(activity.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></p>
       <pre class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/25 p-2 font-mono">{JSON.stringify(activity.data, null, 2)}</pre>
     </div>}</For>
-  </div>;
+  </section>;
 }
 
 /** The one mark an outcome gets. Text carries the word beside it, so the glyph
@@ -87,7 +93,7 @@ export function RunCard(props: { turn?: ThreadTurn; message?: ChatMessage; trigg
   const failed = () => props.turn?.state === "failed" || (!props.turn && failureReason(props.activities) !== null);
   const stopped = () => props.turn?.state === "cancelled" || props.turn?.state === "interrupted";
   let header: HTMLButtonElement | undefined;
-  let trace: HTMLDivElement | undefined;
+  let trace: HTMLElement | undefined;
   let focusInTrace = false;
   /** A run that settles folds its trace away. Whoever was reading a step inside
    * it keeps a place to stand: focus lands on the header that now owns it,

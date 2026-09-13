@@ -4,6 +4,7 @@ import { draftArtifact } from "./draft-context";
 import { createEffect, onCleanup, For, Match, Show, Switch } from "solid-js";
 import { ArrowDownToLine, ArrowUpRight, FileText, X } from "../components/ui/icons";
 import { createMediaFlag, createOverlayPresence } from "../lib/focus";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../components/ui/empty";
 import { ArtifactPreview } from "./ArtifactPreview";
 import { ArtifactPresentationToggle } from "./ArtifactPresentationMode";
 import { artifactCaption, hasArtifactSource, renderModeFor } from "./render-mode";
@@ -29,7 +30,18 @@ export function ArtifactList(props: { threadId?: number; onResume?: () => void; 
     <Switch>
       <Match when={artifactState.inventory.status === "loading"}><p role="status" class="mt-4 text-sm text-muted-foreground">Loading artifacts…</p></Match>
       <Match when={inventoryError()}>{message => <div role="alert" class="mt-4 space-y-2 text-sm"><p>Couldn’t load the artifact list. Your existing results are kept.</p><button class={button} onClick={listArtifacts}>Retry loading artifacts</button><p class="break-words text-muted-foreground">{message()}</p></div>}</Match>
-      <Match when={artifactState.inventory.status === "ready" && rows().length === 0}><p class="mt-4 max-w-prose text-sm leading-relaxed text-muted-foreground">Artifacts Hirsel creates and shares will appear here.</p></Match>
+      {/* The SAME empty state the Processes list uses — one component, so an empty
+          inventory reads the same wherever the Owner meets one. This used to be a
+          bare muted paragraph nudged under the heading. */}
+      <Match when={artifactState.inventory.status === "ready" && rows().length === 0}>
+        <Empty class="border-none">
+          <EmptyHeader>
+            <EmptyMedia variant="icon"><FileText class="size-5" /></EmptyMedia>
+            <EmptyTitle>No artifacts</EmptyTitle>
+            <EmptyDescription>Artifacts Hirsel creates and shares will appear here.</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      </Match>
     </Switch>
     <Show when={rows().length > 0}>
       <ul class="mt-4 divide-y divide-border"><For each={rows()}>{artifact => <li class="py-3"><ArtifactRow artifact={artifact} />

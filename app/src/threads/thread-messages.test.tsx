@@ -18,7 +18,10 @@ describe("who is speaking", () => {
     const bubble = article.querySelector<HTMLElement>('[data-slot="owner-message"]')!;
     expect(bubble.className).toContain("bg-primary");
     expect(bubble.className).toContain("text-primary-foreground");
-    expect(bubble.className).toContain("sm:max-w-[60%]");
+    // The reply ceiling is a named rem token, not a viewport percentage: a
+    // percentage moved the bubble's left edge with the window.
+    expect(bubble.className).toContain("max-w-reply");
+    expect(bubble.className).not.toContain("%");
   });
   it("seats the Agent left on a neutral surface that hugs its own content", () => {
     const article = row("agent");
@@ -26,10 +29,10 @@ describe("who is speaking", () => {
     expect(article.className).not.toContain("flex-row-reverse");
     const bubble = article.querySelector<HTMLElement>('[data-slot="agent-message"]')!;
     expect(bubble.className).toContain("bg-surface");
-    expect(bubble.className).not.toContain("flex-1");
-    expect(bubble.className).toContain("max-w-[96%]");
-    expect(bubble.className).toContain("sm:max-w-[80%]");
-    expect(bubble.className).not.toContain("max-w-[60%]");
+    // The Agent fills the ONE reading measure — same left and right edge as
+    // the prose, the composer and every other agent card.
+    expect(bubble.className).toContain("flex-1");
+    expect(bubble.className).not.toContain("%");
   });
   it("gives neither side an avatar gutter: alignment already says who is speaking", () => {
     for (const author of ["owner", "agent"] as const) {
@@ -53,7 +56,7 @@ describe("who is speaking", () => {
     flush(() => setThreadState(draft => { draft.turnDetails = { 4: [{ seq: 1, event: { kind: "reasoning", text: "Checking" } }] }; }));
     const bubble = view.container.querySelector<HTMLElement>('[data-slot="agent-message"]')!;
     expect(bubble).toBeInTheDocument();
-    expect(bubble.className).toContain("max-w-[96%]");
+    expect(bubble.className).toContain("flex-1");
     expect(view.container.querySelector('[data-slot="turn-pending"]')).toBeNull();
     // A live run card opens on arrival: the Owner is watching it happen.
     const header = view.container.querySelector('[data-slot="run-card-header"]')!;

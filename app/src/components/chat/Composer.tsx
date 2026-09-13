@@ -249,7 +249,7 @@ export function Composer(props: Props) {
     // edges land on the conversation's two edges at every width — that shared
     // column is what makes it read as the floor of the screen rather than a
     // floating bar.
-    <div class="mx-auto w-full max-w-frame flex-shrink-0 px-3 sm:px-gutter pb-3 rail:pb-4">
+    <div class="mx-auto w-full max-w-frame flex-shrink-0 px-4 sm:px-gutter pb-3 rail:pb-4">
     {/* The same compact composer stays within the conversation's reading measure. */}
     <div
       data-slot="composer-shell"

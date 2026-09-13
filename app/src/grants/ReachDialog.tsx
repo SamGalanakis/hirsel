@@ -9,9 +9,9 @@ import { grantLabel, grantReach, holdsRoot, revokeReach, threadGrants, type Gran
 import type { ReachTarget } from "../threads/types";
 
 const remove = "inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 pointer-coarse:size-11";
-const option = "flex min-h-11 w-full items-center justify-between gap-2 rounded-md px-2 text-left text-sm transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40";
-const row = "flex min-h-9 items-center gap-2 rounded-md px-2 text-sm";
-const field = "h-9 w-full min-w-0 rounded-md border border-border bg-transparent px-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:h-11";
+const option = "flex min-h-11 w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40";
+const row = "flex min-h-9 items-start gap-2 rounded-md px-2 py-1.5 text-sm";
+const field = "h-9 w-full min-w-0 rounded-md border border-border bg-background px-2 text-sm font-normal normal-case tracking-normal text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:h-11";
 
 interface Candidate { key: string; label: string; detail: string; target: ReachTarget }
 
@@ -81,22 +81,22 @@ export function ReachDialog() {
     onPointerDown={event => { if (event.target === dialog) close(); }}
     class="m-auto max-h-[calc(100dvh-2rem)] w-[min(30rem,calc(100vw-2rem))] max-w-none flex-col overflow-y-auto rounded-xl border border-border bg-surface p-0 text-foreground shadow-raised backdrop:bg-background/70 open:flex">
     <Show when={threadReachTarget()}>{target => <div class="flex min-h-0 flex-col gap-3 p-4">
-      <h2 class="text-sm font-semibold">{reachDialogTitle(target().thread)}</h2>
-      <ul class="flex flex-col gap-0.5 font-mono text-meta">
+      <h2 class="text-lg font-medium text-foreground">{reachDialogTitle(target().thread)}</h2>
+      <ul class="flex flex-col gap-0.5 text-sm">
         <li class={`${row} text-muted-foreground`}>Itself and everything below it</li>
         <Show when={root()}>
           <li class={row}>
-            <span class="min-w-0 flex-1 truncate">Everything (root)</span>
+            <span class="min-w-0 flex-1">Everything (root)</span>
             <button type="button" class={remove} disabled={busy()} aria-label="Remove reach to everything" title="Remove this reach" onClick={() => drop("root")}><X class="size-3.5" /></button>
           </li>
         </Show>
         <For each={grants()}>{grant => <Show when={grant.target.kind === "thread" ? grant.target : null}>{thread => <li class={row}>
-          <span class="min-w-0 flex-1 truncate" title={grant.note ?? undefined}>{grantLabel(thread())}</span>
+          <span class="min-w-0 flex-1 wrap-break-word" title={grant.note ?? undefined}>{grantLabel(thread())}</span>
           <button type="button" class={remove} disabled={busy()} aria-label={`Remove reach to Thread ${thread().thread_id}`} title="Remove this reach" onClick={() => drop(thread().thread_id)}><X class="size-3.5" /></button>
         </li>}</Show>}</For>
       </ul>
       <Show when={!root()} fallback={<p class="text-meta text-muted-foreground">Root reach already covers every Thread. Remove it to grant single Threads again.</p>}>
-        <label class="flex flex-col gap-1 text-meta text-muted-foreground">
+        <label class="flex flex-col gap-1 text-meta font-medium uppercase tracking-wide text-muted-foreground">
           <span class="inline-flex items-center gap-1"><Plus class="size-3" />Add reach</span>
           <input ref={node => { search = node; }} class={field} type="search" aria-label="Add reach to another Thread" placeholder="Everything, a title, or #number" value={query()}
             onInput={event => setQuery(event.currentTarget.value)}
@@ -110,8 +110,8 @@ export function ReachDialog() {
         <ul class="max-h-56 overflow-y-auto">
           <For each={candidates()}>{candidate => <li>
             <button type="button" class={option} disabled={busy()} onClick={() => add(candidate.target)}>
-              <span class="min-w-0 truncate">{candidate.label}</span>
-              <span class="shrink-0 font-mono text-meta text-muted-foreground">{candidate.detail}</span>
+              <span class="min-w-0 wrap-break-word">{candidate.label}</span>
+              <span class="shrink-0 text-meta tabular-nums text-muted-foreground">{candidate.detail}</span>
             </button>
           </li>}</For>
         </ul>

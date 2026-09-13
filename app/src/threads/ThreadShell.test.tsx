@@ -204,7 +204,7 @@ describe("thread workspace", () => {
     // Creation is summoned, not standing: the drawer's own "+" opens the inline draft row.
     fireEvent.click(within(screen.getByRole("dialog", { name: "Spaces and Tasks" })).getByRole("button", { name: "New Space or Task" }));
     fireEvent.input(screen.getByLabelText("New space or task title"), { target: { value: "Buy milk" } });
-    fireEvent.click(screen.getByRole("button", { name: "New Space" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create Space" }));
     const frame = sent.find(f => f.type === "create_thread");
     if (!frame || frame.type !== "create_thread") throw new Error("missing create");
     expect(frame).toMatchObject({ title: "Buy milk", kind: "space", parent_thread_id: null });
@@ -445,9 +445,9 @@ describe("nested Thread workspace", () => {
     fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
     fireEvent.click(view.getByRole("button", { name: "Actions for Buy groceries" }));
     fireEvent.click(within(document.body).getByRole("menuitem", { name: "New child Task" }));
-    expect(view.queryByRole("button", { name: "New Space" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Create Space" })).toBeNull();
     fireEvent.input(view.getByLabelText("New space or task title"), { target: { value: "Review" } });
-    fireEvent.click(view.getByRole("button", { name: "New Task" }));
+    fireEvent.click(view.getByRole("button", { name: "Create Task" }));
     expect(sent.findLast(frame => frame.type === "create_thread")).toMatchObject({ type: "create_thread", kind: "task", parent_thread_id: 1, title: "Review" });
   });
   it("creates a child under the selected row even when the conversation changes", async () => {
@@ -457,7 +457,7 @@ describe("nested Thread workspace", () => {
     fireEvent.click(view.getByRole("menuitem", { name: "New child" }));
     flush(() => focusThread(0));
     fireEvent.input(view.getByLabelText("New space or task title"), { target: { value: "Review" } });
-    fireEvent.click(view.getByRole("button", { name: "New Space" }));
+    fireEvent.click(view.getByRole("button", { name: "Create Space" }));
     const frame = sent.findLast(frame => frame.type === "create_thread");
     expect(frame).toMatchObject({ kind: "space", parent_thread_id: 2, title: "Review" });
     if (frame?.type !== "create_thread") throw new Error("Missing create");

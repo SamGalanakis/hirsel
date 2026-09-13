@@ -10,16 +10,34 @@ import { For, Show } from "solid-js";
 
 import type { SettingsTab } from "../../store/store";
 
-export const SETTINGS_TABS: readonly { id: SettingsTab; label: string }[] = [
-  { id: "appearance", label: "Appearance" },
-  { id: "agents", label: "Thread models" },
-  { id: "providers", label: "Providers" },
-  { id: "connection", label: "Connection & devices" },
-  { id: "notifications", label: "Notifications" },
-  { id: "guide", label: "Guide" },
-  { id: "about", label: "About & debug" },
-  { id: "plugins", label: "Plugins" },
+/** Eight flat sections was a list to read, not a place to navigate: nothing
+ * said which of them were about the machine, which about the agents, and which
+ * about this device, so the Owner had to read all eight labels every time.
+ * They are the SAME eight sections, in four named groups. The group heading
+ * shows in the rail; on the phone strip, where there is no room for headings,
+ * the groups survive as the order and as the gaps between them. */
+export const SETTINGS_GROUPS: readonly { heading: string; tabs: readonly { id: SettingsTab; label: string }[] }[] = [
+  { heading: "Look & feel", tabs: [
+    { id: "appearance", label: "Appearance" },
+    { id: "notifications", label: "Notifications" },
+  ] },
+  { heading: "Agents", tabs: [
+    { id: "agents", label: "Thread models" },
+    { id: "providers", label: "Providers" },
+    { id: "plugins", label: "Plugins" },
+  ] },
+  { heading: "This device", tabs: [
+    { id: "connection", label: "Connection & devices" },
+  ] },
+  { heading: "Help", tabs: [
+    { id: "guide", label: "Guide" },
+    { id: "about", label: "About & debug" },
+  ] },
 ];
+
+/** The flat reading order the roving tabindex walks. */
+export const SETTINGS_TABS: readonly { id: SettingsTab; label: string }[] =
+  SETTINGS_GROUPS.flatMap((group) => group.tabs);
 
 export const settingsTabId = (tab: SettingsTab) => `settings-tab-${tab}`;
 export const settingsPanelId = (tab: SettingsTab) => `settings-panel-${tab}`;
@@ -80,39 +98,53 @@ export function SettingsTabs(props: {
       tabindex={-1}
       data-slot="settings-tabs"
       onKeyDown={onKeyDown}
-      class="thin-scrollbar sticky top-0 z-10 flex shrink-0 gap-1 overflow-x-auto bg-background pb-2 rail:top-6 rail:max-h-[calc(100dvh-6rem)] rail:w-48 rail:flex-col rail:gap-0.5 rail:overflow-x-hidden rail:overflow-y-auto rail:pb-0"
+      class="scroll-fade-x sticky top-0 z-10 flex shrink-0 snap-x snap-mandatory gap-1 overflow-x-auto bg-background pb-2 rail:top-6 rail:max-h-[calc(100dvh-6rem)] rail:w-52 rail:flex-col rail:gap-0 rail:overflow-x-hidden rail:overflow-y-auto rail:pb-0"
     >
-      <For each={SETTINGS_TABS}>
-        {(tab) => {
-          const active = () => props.active === tab.id;
-          return (
-            <button
-              type="button"
-              role="tab"
-              id={settingsTabId(tab.id)}
-              data-tab={tab.id}
-              aria-selected={(active()) ? "true" : "false"}
-              aria-controls={settingsPanelId(tab.id)}
-              // Roving tabindex: the whole list is ONE tab stop, and the arrow
-              // keys move within it.
-              tabindex={active() ? 0 : -1}
-              onClick={() => props.onSelect(tab.id)}
-              class={["relative shrink-0 whitespace-nowrap rounded-md px-2 py-2 text-left text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:min-h-11 rail:px-3", {
-                "font-medium text-foreground": active(),
-                "text-muted-foreground hover:text-foreground": !active(),
-              }]}
-
+      <For each={SETTINGS_GROUPS}>
+        {(group, groupIndex) => (
+          <>
+            <p
+              aria-hidden="true"
+              class={`hidden text-meta font-medium uppercase tracking-wide text-muted-foreground rail:block rail:px-3 rail:pb-1 ${groupIndex() === 0 ? "" : "rail:pt-4"}`}
             >
-              {tab.label}
-              <Show when={active()}>
-                <span
-                  aria-hidden="true"
-                  class="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-primary rail:inset-x-auto rail:bottom-1.5 rail:left-0 rail:top-1.5 rail:h-auto rail:w-0.5"
-                />
-              </Show>
-            </button>
-          );
-        }}
+              {group.heading}
+            </p>
+            <For each={group.tabs}>
+              {(tab) => {
+                const active = () => props.active === tab.id;
+                return (
+                  <button
+                    type="button"
+                    role="tab"
+                    id={settingsTabId(tab.id)}
+                    data-tab={tab.id}
+                    aria-selected={(active()) ? "true" : "false"}
+                    aria-controls={settingsPanelId(tab.id)}
+                    // Roving tabindex: the whole list is ONE tab stop, and the arrow
+                    // keys move within it.
+                    tabindex={active() ? 0 : -1}
+                    onClick={() => props.onSelect(tab.id)}
+                    // `snap-start` is what stops the strip resting mid-label on
+                    // the phone: a flick lands on a tab's leading edge, never
+                    // half a word.
+                    class={["relative shrink-0 snap-start whitespace-nowrap rounded-md px-2 py-2 text-left text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:min-h-11 rail:px-3", {
+                      "font-medium text-foreground": active(),
+                      "text-muted-foreground hover:text-foreground": !active(),
+                    }]}
+                  >
+                    {tab.label}
+                    <Show when={active()}>
+                      <span
+                        aria-hidden="true"
+                        class="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-primary rail:inset-x-auto rail:bottom-1.5 rail:left-0 rail:top-1.5 rail:h-auto rail:w-0.5"
+                      />
+                    </Show>
+                  </button>
+                );
+              }}
+            </For>
+          </>
+        )}
       </For>
     </div>
   );

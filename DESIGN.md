@@ -18,11 +18,25 @@ An ordinary Thread coordinates its children. The parent conversation shows conci
 
 ## Colors
 
-Tokens in `app/src/styles.css` are the only source of color. `--primary` is green (`oklch(0.48 0.12 158)` light, `oklch(0.79 0.105 158)` dark); neutrals are slate with a teal cast around hue 220; `--background`, `--card`, `--surface`, `--muted`, `--border` and `--ring` each carry a light and a dark value. Status has its own named ramp: `--status-active`, `--status-idle`, `--status-success`, `--status-danger`, `--status-attention`. The cube mark has four facet tokens. New UI reads these variables; a literal color is drift.
+Tokens in `app/src/styles.css` are the only source of color. `--primary` is green (`oklch(0.48 0.12 158)` light, `oklch(0.79 0.105 158)` dark); neutrals are slate with a teal cast around hue 220; `--background`, `--card`, `--surface`, `--muted`, `--border` and `--ring` each carry a light and a dark value. `--surface` always sits one step ABOVE `--background` in the same hue family on both canvases, so a raised thing reads as a card on the paper and never as a dent in it. Status has its own named ramp: `--status-active`, `--status-idle`, `--status-success`, `--status-danger`, `--status-attention`. The cube mark has four facet tokens. New UI reads these variables; a literal color is drift.
 
 ## Typography
 
-Type is Inter Variable over a system sans fallback, with a mono stack for IDs, commands and program text. Reading type is `text-sm` at `leading-relaxed` (14px / 22.75px) and belongs to prose alone. Everything a run says *about itself* — durations, timings, timestamps, step labels, outcome words, ids and summaries — is meta type: `--text-meta` (0.72rem), muted, `tabular-nums`, sans rather than mono, never at body size. `--text-meta` is the one named size below `text-xs` and the floor. Form controls inherit that scale from `@layer base`, not from an unlayered rule: in Tailwind v4 unlayered CSS outranks every utility layer, so a bare `button { font: inherit }` silently overrides `text-meta` on every control. Durations use one ladder app-wide (`app/src/lib/duration.ts`): sub-second in milliseconds, one decimal under ten seconds, whole seconds under a minute, then space-joined `1h 4m 12s` with zero parts dropped. Inline code is a hairline outline over a quiet fill at `0.86em`, not a filled slab; an inline reference is text at the size of its sentence, with an em-sized icon and a 1px underline at 25% — never a pill. Radii derive from `--radius` (0.625rem). Layout keeps one horizontal rhythm — a 42rem reading measure, a 1.5rem gutter and the frame derived from them — and keys width off the named breakpoints `split` (900px), `rail` (1100px) and `workspace` (1280px) rather than literal pixel values.
+Type is Inter Variable over a system sans fallback, with a mono stack for IDs, commands and program text.
+
+There is ONE type ramp, declared in `@theme` in `app/src/styles.css`; every step carries its own line height, so a call site can never write a size without the leading that belongs to it. An arbitrary `text-[…]` or `leading-[…]` at a call site is drift — the ramp gains a step or the call site picks one.
+
+| step | size / leading | what it is for |
+| --- | --- | --- |
+| `text-meta` | 11 / 16 | ids, timings, durations, step labels, outcome words, badges. The floor: nothing renders below 11px. |
+| `text-xs` | 12.5 / 18 | secondary labels, chip text, captions, the run trace |
+| `text-sm` | 14 / 20 | body — conversation prose, list rows, controls |
+| `text-base` | 15 / 22 | lead — what the Owner types, the reading register |
+| `text-lg` | 16 / 22 | `h2` in prose, dialog titles, section titles |
+| `text-xl` | 18 / 24 | `h1`, the one page-level title |
+| `text-display` | `clamp(1.75rem, 3vw, 2.25rem)` / 1.12 | the instrument hero, the single fluid step |
+
+Reading type is `text-sm` and belongs to prose alone. Everything a run says *about itself* — durations, timings, timestamps, step labels, outcome words, ids and summaries — is meta type: `text-meta`, muted, `tabular-nums`, sans rather than mono, never at body size. Form controls inherit that scale from `@layer base`, not from an unlayered rule: in Tailwind v4 unlayered CSS outranks every utility layer, so a bare `button { font: inherit }` silently overrides `text-meta` on every control. Durations use one ladder app-wide (`app/src/lib/duration.ts`): sub-second in milliseconds, one decimal under ten seconds, whole seconds under a minute, then space-joined `1h 4m 12s` with zero parts dropped. Inline code is a hairline outline over a quiet fill at `0.86em`, not a filled slab; an inline reference is text at the size of its sentence, with an em-sized icon and a 1px underline at 25% — never a pill. Radii derive from `--radius` (0.625rem). Layout keeps one horizontal rhythm — a 42rem reading measure (`--container-measure`), a 1.5rem gutter, the frame derived from them, and a 34rem `--container-reply` ceiling for the Owner's own right-hugging bubble, which is the one thing that does not fill the measure. Nothing in the conversation caps itself with a viewport percentage: a percentage moves a message's left edge with the window, so no two messages start in the same place. Width keys off the named breakpoints `split` (900px), `rail` (1100px) and `workspace` (1280px) rather than literal pixel values.
 
 ## Components
 

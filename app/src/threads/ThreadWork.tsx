@@ -11,7 +11,7 @@ import type { ThreadActivity } from "./types";
 export function ConversationNote(props: { title?: string; children: JSX.Element; expanded?: boolean }) {
   return <div data-slot="conversation-note" title={props.title} class="flex items-center gap-3 text-meta text-muted-foreground">
     <Show when={!props.expanded}><span aria-hidden="true" class="h-px flex-1 bg-border/60" /></Show>
-    <div class={props.expanded ? "min-w-0 max-w-full flex-1 rounded-lg border border-border/60 bg-muted/20 px-3 py-2" : "min-w-0 max-w-[80%] truncate text-center"}>{props.children}</div>
+    <div class={props.expanded ? "min-w-0 max-w-full flex-1 rounded-lg border border-border/60 bg-muted/20 px-3 py-2" : "min-w-0 flex-1 truncate text-center"}>{props.children}</div>
     <Show when={!props.expanded}><span aria-hidden="true" class="h-px flex-1 bg-border/60" /></Show>
   </div>;
 }

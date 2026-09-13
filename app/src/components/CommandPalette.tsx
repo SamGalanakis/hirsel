@@ -265,7 +265,7 @@ export const ShortcutHelp: Component<{
               <For each={groups()}>
                 {(g) => (
                   <div>
-                    <div class="mb-1.5 text-[0.68rem] font-medium uppercase tracking-[0.03em] text-muted-foreground">
+                    <div class="mb-1.5 text-meta font-medium uppercase tracking-wide text-muted-foreground">
                       {g.group}
                     </div>
                     <div class="flex flex-col gap-1">
@@ -313,7 +313,7 @@ function ModalPanel(props: {onClose: () => void; label: string; class: string; c
     else panel.setAttribute("open", "");
   });
   return <dialog ref={node => { panel = node; }} aria-label={props.label} aria-modal="true"
-    class={cn("fixed inset-x-0 top-[14dvh] bottom-auto mx-auto my-0 w-[calc(100%_-_2rem)] rounded-xl border border-border bg-card text-foreground shadow-lg outline-none backdrop:bg-black/50", props.class)}
+    class={cn("fixed inset-x-0 top-[14dvh] bottom-auto mx-auto my-0 w-[calc(100%_-_2rem)] rounded-xl border border-border bg-card text-foreground shadow-lg outline-none backdrop:bg-background/70", props.class)}
     onCancel={(event) => { event.preventDefault(); props.onClose(); }}
     onPointerDown={(event) => {
       if (event.target !== panel) return;

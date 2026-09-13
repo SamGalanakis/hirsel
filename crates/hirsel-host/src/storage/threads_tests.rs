@@ -285,8 +285,22 @@ async fn persisted_turn_activity_replay_is_idempotent() {
         .unwrap()
         .0;
     let t = s.start_thread_turn(thread.id, None).await.unwrap();
+    let history = s.history_id().await.unwrap();
+    assert!(
+        s.append_thread_activity_once(
+            "replaced-history",
+            "turn:1:tool:stale",
+            thread.id,
+            Some(t.id),
+            "tool_completed",
+            &json!({"name":"stale"}),
+        )
+        .await
+        .is_err()
+    );
     let a = s
         .append_thread_activity_once(
+            &history,
             "turn:1:tool:0",
             thread.id,
             Some(t.id),
@@ -297,6 +311,7 @@ async fn persisted_turn_activity_replay_is_idempotent() {
         .unwrap();
     let again = s
         .append_thread_activity_once(
+            &history,
             "turn:1:tool:0",
             thread.id,
             Some(t.id),

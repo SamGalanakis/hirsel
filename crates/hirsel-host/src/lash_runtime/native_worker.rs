@@ -1,4 +1,4 @@
-//! Dedicated in-process Lash standard-protocol worker for one accepted Thread turn.
+//! Dedicated in-process Lash RLM worker for one accepted Thread turn.
 use super::bridges::{activity_from_observation, publish_ready_timeline};
 use super::*;
 use crate::{
@@ -6,11 +6,13 @@ use crate::{
     providers::{NATIVE_WORKER_DEFAULT_MODEL, NativeWorkerProviderSnapshot},
 };
 use hirsel_proto::ThreadTurnState;
-use lash::{TurnActivity, TurnActivitySink};
+use lash::{TurnActivity, TurnActivitySink, rlm::RlmTurnBuilderExt};
 
 const NATIVE_WORKER_INSTRUCTION_BYTES: usize = 256 * 1024;
 const NATIVE_WORKER_ERROR_BYTES: usize = 4 * 1024;
 const NATIVE_WORKER_TOOL_NAMES: [&str; 4] = ["read", "edit", "write", "exec_command"];
+const NATIVE_WORKER_RLM_TOOL_NAMES: [&str; 5] =
+    ["read", "edit", "write", "exec_command", "continue_as"];
 
 pub(super) struct NativeWorkerTurn {
     pub(super) turn_id: u64,
@@ -85,6 +87,11 @@ impl NativeWorkerTurn {
             .as_ref()
             .ok()
             .and_then(|execution| execution.unowned_message_watermark);
+        let completed_tools = result
+            .as_ref()
+            .ok()
+            .map(|execution| tool_call_summaries(&execution.output))
+            .unwrap_or_default();
         let cancelled = self.cancel.is_cancelled();
         self.cleanup().await;
         let abandon_session = result.is_err();
@@ -113,6 +120,7 @@ impl NativeWorkerTurn {
         // Terminal delivery is an outbox operation. Once provider execution
         // stops, retry only storage projection; never rerun a model or tool.
         let mut delay = Duration::from_millis(50);
+        let mut tool_activities_projected = false;
         loop {
             if abandon_session
                 && let Err(error) = tools
@@ -138,6 +146,34 @@ impl NativeWorkerTurn {
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(Duration::from_secs(2));
                 continue;
+            }
+            if !tool_activities_projected {
+                match append_native_tool_completed_activities(
+                    tools,
+                    &request.history_id,
+                    request.thread_id,
+                    self.turn_id,
+                    &completed_tools,
+                )
+                .await
+                {
+                    Ok(activities) => {
+                        for activity in activities {
+                            tools.publish_thread_activity(activity).await;
+                        }
+                        tool_activities_projected = true;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            turn_id = self.turn_id,
+                            %error,
+                            "Retrying native worker tool activity delivery"
+                        );
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(Duration::from_secs(2));
+                        continue;
+                    }
+                }
             }
             match tools
                 .storage()
@@ -302,6 +338,13 @@ impl NativeWorkerTurn {
         let guidance = native_worker_guidance(&cwd, bootstrap.handoff_seed.as_deref());
         let session = core
             .session(&bootstrap.session_id)
+            .plugin_option(
+                RLM_PROTOCOL_PLUGIN_ID,
+                RlmCreateExtras {
+                    dialect: Some(AGENT_RLM_DIALECT),
+                    ..RlmCreateExtras::default()
+                },
+            )?
             .prompt_contribution(lash::prompt::PromptContribution::guidance(
                 "Hirsel native coding worker",
                 guidance,
@@ -315,7 +358,7 @@ impl NativeWorkerTurn {
             .into_iter()
             .map(|manifest| manifest.name)
             .collect::<Vec<_>>();
-        ensure_native_tool_surface(&active_tool_names)?;
+        ensure_native_rlm_surface(&active_tool_names)?;
 
         let turn_id = native_physical_turn_id(request.thread_id, self.turn_id);
         tools
@@ -354,6 +397,7 @@ impl NativeWorkerTurn {
         );
         let report = session
             .turn(input)
+            .require_finish()?
             .provider(provider_handle)
             .cancel_with_origin(
                 self.cancel.clone(),
@@ -397,10 +441,36 @@ fn native_terminal_projection(output: &lash::TurnOutput) -> NativeTerminalProjec
             state: ThreadTurnState::Failed,
             output: None,
             reason: Some(
-                "native Lash standard worker attempted an unsupported agent-frame switch".into(),
+                "native Lash RLM worker attempted an unsupported agent-frame switch".into(),
             ),
         },
     }
+}
+
+async fn append_native_tool_completed_activities(
+    tools: &ToolSuite,
+    history_id: &str,
+    thread_id: u64,
+    turn_id: u64,
+    calls: &[hirsel_proto::ToolCallSummary],
+) -> anyhow::Result<Vec<hirsel_proto::ThreadActivity>> {
+    let mut activities = Vec::new();
+    for call in calls {
+        activities.push(
+            tools
+                .storage()
+                .append_thread_activity_once(
+                    history_id,
+                    &format!("turn:{turn_id}:tool:{}", call.id),
+                    thread_id,
+                    Some(turn_id),
+                    "tool_completed",
+                    &serde_json::to_value(call)?,
+                )
+                .await?,
+        );
+    }
+    Ok(activities)
 }
 
 fn bounded_error(message: &str) -> String {
@@ -423,6 +493,19 @@ pub(super) fn ensure_native_tool_surface(names: &[String]) -> anyhow::Result<()>
     anyhow::ensure!(
         actual == expected && names.len() == expected.len(),
         "native worker tool provider exposed an unexpected tool surface: {}",
+        names.join(", ")
+    );
+    Ok(())
+}
+
+fn ensure_native_rlm_surface(names: &[String]) -> anyhow::Result<()> {
+    let actual = names.iter().map(String::as_str).collect::<HashSet<_>>();
+    let expected = NATIVE_WORKER_RLM_TOOL_NAMES
+        .into_iter()
+        .collect::<HashSet<_>>();
+    anyhow::ensure!(
+        actual == expected && names.len() == expected.len(),
+        "native worker RLM session exposed an unexpected effective tool surface: {}",
         names.join(", ")
     );
     Ok(())
@@ -495,6 +578,9 @@ fn native_worker_profile_fingerprint(
         "cwd":cwd,
         "tool_profile":tool_profile,
         "tool_names":tool_names,
+        "protocol":RLM_PROTOCOL_PLUGIN_ID,
+        "dialect":AGENT_RLM_DIALECT.language_id(),
+        "abilities":["processes", "triggers"],
     }))?;
     Ok(format!("{:x}", Sha256::digest(value)))
 }
@@ -509,8 +595,19 @@ fn native_physical_turn_id(thread_id: u64, turn_id: u64) -> String {
 
 fn native_worker_guidance(cwd: &std::path::Path, handoff: Option<&str>) -> String {
     let mut guidance = format!(
-        "You are a focused coding worker inside one Hirsel Task. Work only on the accepted assignment and return a concise summary of changed files and verification. Your accepted working directory is `{}`; it is a default base, not a filesystem sandbox. You have exactly four tools: `read`, `edit`, `write`, and `exec_command` (the model-facing binding for semantic `shell.exec`). You cannot delegate, manage Hirsel Threads, browse the web, publish artifacts, edit coordinator settings, or mark the Task Done. Use bounded reads and command output ranges when results are truncated. Do not assume a timed-out or interrupted command completed.",
+        "You are a focused coding worker inside one Hirsel Task. Work only on the accepted assignment and return a concise summary of changed files and verification. Your accepted working directory is `{}`; it is a default base, not a filesystem sandbox. You cannot delegate, manage Hirsel Threads, browse the web, publish artifacts, edit coordinator settings, or mark the Task Done. Use bounded reads and command output ranges when results are truncated. Do not assume a timed-out or interrupted command completed.",
         cwd.display()
+    );
+    guidance.push_str(
+        r#"
+
+## Acting in TypeScript
+
+Use small programs in paired `<typescript>...</typescript>` code cells. You have exactly four coding operations: `files.read`, `files.edit`, `files.write`, and `shell.exec` (`exec_command` in the activity timeline). The RLM protocol also supplies `control.continue_as` for bounded frame compaction. Complete every turn by calling `finish(<string>)`; that string becomes the final message in this Task.
+
+## Triggers and processes
+
+In the TypeScript RLM dialect, write `const p = defineProcess({name: "p", signals: {}, run: async (event: unknown) => { ...; return value; }});` (the literal name matches the binding), then use `await registerTrigger({source, target: p, inputs: {event: trigger.event}})` with a Lash trigger source such as `cron.Schedule`. A process may call the same four worker operations. Recurring processes are strictly Owner-initiated; do not create a default process."#,
     );
     if let Some(handoff) = handoff {
         guidance.push_str("\n\n## Session handoff\n\n");
@@ -669,6 +766,10 @@ impl TurnActivitySink for NativeTimelineSink {
         self.route(activity).await;
     }
 }
+
+#[cfg(test)]
+#[path = "native_worker_rlm_tests.rs"]
+mod rlm_tests;
 
 #[cfg(test)]
 mod tests {

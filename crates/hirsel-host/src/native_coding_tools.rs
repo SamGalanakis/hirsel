@@ -268,6 +268,7 @@ fn read_definition() -> ToolDefinition {
         }),
         json!({}),
     )
+    .with_tool_binding(ToolBinding::new(["files"], "read"))
 }
 
 fn edit_definition() -> ToolDefinition {
@@ -287,6 +288,7 @@ fn edit_definition() -> ToolDefinition {
         }),
         json!({ "type": "object" }),
     )
+    .with_tool_binding(ToolBinding::new(["files"], "edit"))
 }
 
 fn write_definition() -> ToolDefinition {
@@ -305,6 +307,7 @@ fn write_definition() -> ToolDefinition {
         }),
         json!({ "type": "object" }),
     )
+    .with_tool_binding(ToolBinding::new(["files"], "write"))
 }
 
 fn exec_definition() -> ToolDefinition {

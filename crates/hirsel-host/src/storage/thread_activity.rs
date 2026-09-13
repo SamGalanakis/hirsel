@@ -264,6 +264,7 @@ impl Storage {
 impl Storage {
     pub async fn append_thread_activity_once(
         &self,
+        expected_history: &str,
         key: &str,
         thread_id: u64,
         turn_id: Option<u64>,
@@ -272,6 +273,7 @@ impl Storage {
     ) -> anyhow::Result<ThreadActivity> {
         let mut c = self.conn.lock().await;
         let tx = c.transaction()?;
+        super::thread_scope::validate_history(&tx, expected_history)?;
         if let Some(id) = tx
             .query_row(
                 "SELECT activity_id FROM thread_activity_keys WHERE key=?1",

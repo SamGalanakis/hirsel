@@ -603,7 +603,7 @@ finish("registered");
     let trigger_store = Arc::new(lash_core::facade_support::InMemoryTriggerStore::default());
     let process_registry = Arc::new(lash_core::TestLocalProcessRegistry::default());
     let protocol = lash_protocol_rlm::RlmProtocolPluginFactory::new(
-        coordinator_rlm_config(),
+        hirsel_rlm_config(HirselRlmSession::Coordinator),
         Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
     );
     let core = lash::LashCore::rlm_builder(lash::TurnBudget::Unbounded, protocol)
@@ -996,14 +996,18 @@ fn tool_prose_never_names_a_dialect() {
 }
 
 #[test]
-fn coordinator_posture_is_typescript_rlm_with_processes_and_triggers() {
-    let config = coordinator_rlm_config();
-    assert_eq!(AGENT_RLM_DIALECT, RlmDialect::Typescript);
-    assert!(config.lashlang_abilities.processes);
-    assert!(config.lashlang_abilities.triggers);
+fn both_session_postures_are_typescript_rlm_with_processes_and_triggers() {
+    for session in [
+        HirselRlmSession::Coordinator,
+        HirselRlmSession::NativeWorker,
+    ] {
+        let config = hirsel_rlm_config(session);
+        assert_eq!(AGENT_RLM_DIALECT, RlmDialect::Typescript, "{session:?}");
+        assert!(config.lashlang_abilities.processes, "{session:?}");
+        assert!(config.lashlang_abilities.triggers, "{session:?}");
+    }
 
-    // ADR 0019 keeps the native worker on the standard protocol with exactly
-    // its narrow coding tools; process orchestration belongs to the coordinator.
+    // RLM changes the worker protocol, not its deliberately narrow profile.
     assert!(
         native_worker::ensure_native_tool_surface(
             &["read", "edit", "write", "exec_command"].map(str::to_string)

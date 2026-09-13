@@ -30,7 +30,18 @@ pub(super) async fn reconcile_opened_session_provider(
     Ok(())
 }
 
-pub(super) fn coordinator_rlm_config() -> lash_protocol_rlm::RlmProtocolPluginConfig {
+/// The protocol posture shared by the coordinator and native coding worker.
+/// Keeping the execution bounds and Lashlang abilities here prevents the two
+/// resident RLM session families from drifting.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum HirselRlmSession {
+    Coordinator,
+    NativeWorker,
+}
+
+pub(super) fn hirsel_rlm_config(
+    _session: HirselRlmSession,
+) -> lash_protocol_rlm::RlmProtocolPluginConfig {
     lash_protocol_rlm::RlmProtocolPluginConfig::builder()
         .instruction_limit(lash_protocol_rlm::InstructionBound::instructions(1_000_000))
         .wall_clock(lash_protocol_rlm::WallClockBound::secs(30))
@@ -113,7 +124,7 @@ impl LashAgentRuntime {
         // Execution bounds have no defaults on the plugin config: the host names
         // every one. These match the reference-host budgets — a cell may run a
         // million instructions, for thirty seconds, inside 64 MiB.
-        let rlm_config = coordinator_rlm_config();
+        let rlm_config = hirsel_rlm_config(HirselRlmSession::Coordinator);
         let rlm_factory =
             lash_protocol_rlm::RlmProtocolPluginFactory::new(rlm_config, artifact_store);
         let mut tool_definitions = hirsel_tool_definitions(&tools.subagent_model_snapshot());

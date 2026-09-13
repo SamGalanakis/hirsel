@@ -55,7 +55,7 @@ fn delayed_mutation_callbacks_keep_the_history_the_ui_displayed() {
     );
     assert!(!client.cancel_turn("history-a".into(), 5));
     assert!(client.inner.read_store().messages.is_empty());
-    assert!(client.inner.read_store().pending_creates.is_empty());
+    assert!(client.inner.read_store().pending_ops.is_empty());
     assert!(client.inner.pending_frames.lock().unwrap().is_empty());
 
     assert!(
@@ -90,7 +90,7 @@ fn delayed_mutation_callbacks_keep_the_history_the_ui_displayed() {
     );
     assert!(client.cancel_turn("history-b".into(), 5));
     assert_eq!(client.inner.read_store().pending_sends().count(), 1);
-    assert_eq!(client.inner.read_store().pending_creates.len(), 1);
+    assert_eq!(client.inner.read_store().pending_ops.len(), 3);
     let frames = client.inner.pending_frames.lock().unwrap();
     assert!(matches!(
         &frames[0],

@@ -13,7 +13,6 @@ import androidx.compose.runtime.setValue
 import dev.hirsel.core.Client
 import dev.hirsel.core.ClientObserver
 import dev.hirsel.core.ClientSnapshot
-import dev.hirsel.core.ConnectionState
 import dev.hirsel.core.LifecycleEvent
 import dev.hirsel.core.SendReceipt
 import dev.hirsel.core.ThreadRelatedTarget
@@ -38,7 +37,7 @@ sealed interface ConnectionSpec {
 sealed interface Phase {
     data object Connecting : Phase
     data class Reconnecting(val attempt: Int) : Phase
-    data object Online : Phase
+    data class Online(val deviceToken: String?) : Phase
     data class Offline(val reason: String?) : Phase
     data class Failed(val detail: String) : Phase
 }
@@ -223,8 +222,6 @@ class Connection internal constructor(
         failedSends.add(FailedSend(failCounter++, body, threadId, artifactIds.toList(), historyId))
     }
 
-    /** The device token the host issued during a successful pairing handshake. */
-    fun issuedDeviceToken(): String? = runCatching { client?.issuedDeviceToken() }.getOrNull()
 }
 
 /**
@@ -235,9 +232,16 @@ class Connection internal constructor(
 @Composable
 fun rememberConnection(spec: ConnectionSpec): Connection {
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
-    val connection = remember(spec) { openConnection(spec, mainHandler) }
+    val sessionKey = when (spec) {
+        is ConnectionSpec.Pairing -> spec.ticket to spec.irohSecretKey
+        is ConnectionSpec.Device -> spec.credential.ticket to spec.credential.irohSecretKey
+    }
+    // Pairing updates the native client's auth in place. Keying by host + iroh
+    // identity keeps that authenticated connection alive when the UI switches
+    // from Pairing to Chat with the newly persisted device token.
+    val connection = remember(sessionKey) { openConnection(spec, mainHandler) }
 
-    DisposableEffect(spec) {
+    DisposableEffect(connection) {
         val client = connection.client
         if (client != null) {
             Thread {
@@ -289,9 +293,6 @@ private fun openConnection(spec: ConnectionSpec, mainHandler: Handler): Connecti
                     conn.creatingClientId = null
                     conn.openThread(it.threadId)
                 }
-                if (snapshot.connection == ConnectionState.ONLINE && conn.phase !is Phase.Online) {
-                    conn.phase = Phase.Online
-                }
             }
         }
 
@@ -301,7 +302,7 @@ private fun openConnection(spec: ConnectionSpec, mainHandler: Handler): Connecti
                 conn.phase = when (event) {
                     is LifecycleEvent.Connecting ->
                         if (event.attempt == 0u) Phase.Connecting else Phase.Reconnecting(event.attempt.toInt() + 1)
-                    is LifecycleEvent.Online -> Phase.Online
+                    is LifecycleEvent.Online -> Phase.Online(event.deviceToken)
                     is LifecycleEvent.Offline -> Phase.Offline(event.reason)
                     is LifecycleEvent.ThreadOpened -> {
                         conn.acceptOpened(event.clientId, event.threadId)

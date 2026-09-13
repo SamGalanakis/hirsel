@@ -10,6 +10,10 @@ message ownership; reconnect refreshes opened histories while retaining the requ
 ID of any still-pending open. Message echoes reconcile by client ID and Thread ID,
 including offline retries and attachment IDs. Streams
 use durable turn IDs and sequence numbers to reject late or duplicate deltas.
+Every operation that mints a client ID is owned by one typed pending-operation map;
+success, failure and history replacement retire that same entry. Connection status
+is emitted only through lifecycle events, and the `Online` event carries the device
+token when that connection has just completed pairing.
 
 Native commands create/open Threads with an explicit kind, send owned messages,
 submit revision-bound instrument actions, settle/reopen Tasks, read/snooze/archive,
@@ -25,10 +29,10 @@ Thread. The host acknowledges an applied action with that same ID and address, a
 echoes the ID on failure. Native lifecycle events expose successful acknowledgements;
 protocol errors retain their request ID so UI shells can display a failure only in
 the action's owning context. `ThreadOpened` exposes the successful open request ID
-to native shells as well. Android retains bounded pending ownership for create,
-open, Related and action requests, then removes it on exact success, failure,
-timeout or history reset. Late correlated errors are ignored; only errors without
-a request ID remain global.
+to native shells as well. The core rejects late correlated results after their
+pending operation has settled; Android additionally retains bounded UI ownership
+for create, open, Related and action requests, then removes it on exact success,
+failure, timeout or history reset. Only errors without a request ID remain global.
 
 Explicitly saved URL and Thread references are exposed as `ClientSnapshot.related_items`,
 separate from canonical artifact references. Opening or reconnecting loads the

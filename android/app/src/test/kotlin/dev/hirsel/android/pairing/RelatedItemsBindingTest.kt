@@ -1,7 +1,7 @@
 package dev.hirsel.android.pairing
 
+import dev.hirsel.core.ChatMessage
 import dev.hirsel.core.ClientSnapshot
-import dev.hirsel.core.ConnectionState
 import dev.hirsel.core.FfiConverterTypeClientSnapshot
 import dev.hirsel.core.FfiConverterTypeLifecycleEvent
 import dev.hirsel.core.FfiConverterTypeThreadRelatedItem
@@ -32,7 +32,13 @@ class RelatedItemsBindingTest {
 
     @Test fun snapshotCarriesSavedLinksAndExplicitEmptyResetList() {
         val loaded = ClientSnapshot(
-            connection = ConnectionState.ONLINE, messages = emptyList(), threads = emptyList(),
+            messages = listOf(
+                ChatMessage.Pending(
+                    error = null, historyId = "old", threadId = 5uL,
+                    attachments = listOf("blob-1"), clientId = "send-1", body = "Draft",
+                    mentions = emptyList(), artifactIds = emptyList(), timestamp = "now",
+                ),
+            ), threads = emptyList(),
             turns = emptyList(), activities = emptyList(), briefs = emptyList(),
             relatedItems = listOf(link("Reference"), link(null).copy(
                 id = 8uL, target = ThreadRelatedTarget.Thread(historyId = "old", threadId = 0uL),
@@ -51,6 +57,7 @@ class RelatedItemsBindingTest {
 
     @Test fun commandCallbacksPreserveRequestAndHistoryIdentity() {
         val events = listOf(
+            LifecycleEvent.Online(deviceToken = "issued-token"),
             LifecycleEvent.ThreadActionApplied(clientId = "action", historyId = "A", threadId = 5uL),
             LifecycleEvent.ThreadOpened(clientId = "open", threadId = 5uL),
             LifecycleEvent.ThreadRelatedChanged(historyId = "A", threadId = 5uL, clientId = "saved"),

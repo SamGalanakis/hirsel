@@ -6,7 +6,10 @@ pub enum LifecycleEvent {
     Connecting {
         attempt: u32,
     },
-    Online,
+    Online {
+        /// Present only when this connection just redeemed a pairing code.
+        device_token: Option<String>,
+    },
     Offline {
         reason: Option<String>,
     },

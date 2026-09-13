@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::config::{ClientConfig, ConfigError};
 use crate::observer::{ClientObserver, LifecycleEvent};
-use crate::store::{ClientSnapshot, LocalStore, PendingSend};
+use crate::store::{ClientSnapshot, LocalStore, PendingOp, PendingSend};
 use crate::transport;
 
 /// Explicitly addressed Thread send arguments.
@@ -65,7 +65,7 @@ pub(crate) struct ClientInner {
     pub pending_frames: Mutex<VecDeque<ClientToHost>>,
     pub auth: RwLock<HelloAuth>,
     pub iroh_secret_key: Option<iroh::SecretKey>,
-    paired_device_token: RwLock<Option<String>>,
+    pending_pairing_token: RwLock<Option<String>>,
     observer: RwLock<Option<Arc<dyn ClientObserver>>>,
     command_tx: Mutex<Option<mpsc::UnboundedSender<Command>>>,
     task: AsyncMutex<Option<JoinHandle<()>>>,
@@ -74,7 +74,6 @@ pub(crate) struct ClientInner {
 impl ClientInner {
     pub fn set_connection(&self, state: crate::ConnectionState) {
         self.write_store().connection = state;
-        self.notify_snapshot();
     }
 
     pub fn notify_snapshot(&self) {
@@ -119,9 +118,23 @@ impl ClientInner {
         *self.auth.write().unwrap_or_else(|error| error.into_inner()) =
             HelloAuth::DeviceToken(token.clone());
         *self
-            .paired_device_token
+            .pending_pairing_token
             .write()
             .unwrap_or_else(|error| error.into_inner()) = Some(token);
+    }
+
+    pub fn pending_pairing_token(&self) -> Option<String> {
+        self.pending_pairing_token
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn clear_pending_pairing_token(&self) {
+        self.pending_pairing_token
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
     }
 }
 
@@ -143,7 +156,7 @@ impl Client {
                 pending_frames: Mutex::new(VecDeque::new()),
                 auth: RwLock::new(auth),
                 iroh_secret_key,
-                paired_device_token: RwLock::new(None),
+                pending_pairing_token: RwLock::new(None),
                 observer: RwLock::new(None),
                 command_tx: Mutex::new(None),
                 task: AsyncMutex::new(None),
@@ -221,13 +234,20 @@ impl Client {
     }
 
     pub fn retry_send(&self, client_id: String) {
-        for entry in &mut self.inner.write_store().messages {
+        let mut store = self.inner.write_store();
+        let thread_id = store.messages.iter_mut().find_map(|entry| {
             if let crate::ChatEntry::Pending(send) = entry
                 && send.client_id == client_id
             {
                 send.error = None;
+                return Some(send.thread_id);
             }
+            None
+        });
+        if let Some(thread_id) = thread_id {
+            store.track_pending(client_id.clone(), PendingOp::SendMessage { thread_id });
         }
+        drop(store);
         if let Some(sender) = self
             .inner
             .command_tx
@@ -269,9 +289,15 @@ impl Client {
         if store.history_id.as_deref() != Some(&history_id) {
             return None;
         }
-        store
-            .pending_creates
-            .push((client_id.clone(), history_id, title, kind, parent_thread_id));
+        store.track_pending(
+            client_id.clone(),
+            PendingOp::CreateThread {
+                history_id,
+                title,
+                kind,
+                parent_thread_id,
+            },
+        );
         drop(store);
         if let Some(sender) = self
             .inner
@@ -289,8 +315,7 @@ impl Client {
         let client_id = Uuid::new_v4().to_string();
         self.inner
             .write_store()
-            .requests
-            .push((client_id.clone(), thread_id));
+            .track_pending(client_id.clone(), PendingOp::OpenThread { thread_id });
         self.queue_frame(ClientToHost::OpenThread {
             client_id: client_id.clone(),
             thread_id,
@@ -320,7 +345,7 @@ impl Client {
             return None;
         }
         let client_id = Uuid::new_v4().to_string();
-        store.requests.push((client_id.clone(), thread_id));
+        store.track_pending(client_id.clone(), PendingOp::OpenThread { thread_id });
         self.queue_frame(ClientToHost::OpenThread {
             client_id: client_id.clone(),
             thread_id,
@@ -338,11 +363,18 @@ impl Client {
         data: serde_json::Value,
         expected_revision: Option<u64>,
     ) -> Option<SendReceipt> {
-        let store = self.inner.read_store();
+        let mut store = self.inner.write_store();
         if store.history_id.as_deref() != Some(&history_id) {
             return None;
         }
         let client_id = Uuid::new_v4().to_string();
+        store.track_pending(
+            client_id.clone(),
+            PendingOp::ThreadAction {
+                history_id: history_id.clone(),
+                thread_id,
+            },
+        );
         self.queue_frame(ClientToHost::ThreadAction {
             client_id: client_id.clone(),
             history_id,
@@ -366,6 +398,13 @@ impl Client {
         title: Option<String>,
     ) -> SendReceipt {
         let client_id = Uuid::new_v4().to_string();
+        self.inner.write_store().track_pending(
+            client_id.clone(),
+            PendingOp::AddThreadRelated {
+                history_id: history_id.clone(),
+                thread_id,
+            },
+        );
         self.queue_frame(ClientToHost::AddThreadRelated {
             client_id: client_id.clone(),
             history_id,
@@ -384,6 +423,13 @@ impl Client {
         item_id: u64,
     ) -> SendReceipt {
         let client_id = Uuid::new_v4().to_string();
+        self.inner.write_store().track_pending(
+            client_id.clone(),
+            PendingOp::RemoveThreadRelated {
+                history_id: history_id.clone(),
+                thread_id,
+            },
+        );
         self.queue_frame(ClientToHost::RemoveThreadRelated {
             client_id: client_id.clone(),
             history_id,
@@ -437,7 +483,7 @@ impl Client {
         data: serde_json::Value,
         expected_revision: u64,
     ) -> Option<SendReceipt> {
-        let store = self.inner.read_store();
+        let mut store = self.inner.write_store();
         if store.history_id.as_deref() != Some(expected_history.as_str())
             || store.connection != crate::ConnectionState::Online
             || !store
@@ -448,6 +494,13 @@ impl Client {
             return None;
         }
         let client_id = Uuid::new_v4().to_string();
+        store.track_pending(
+            client_id.clone(),
+            PendingOp::ThreadAction {
+                history_id: expected_history.clone(),
+                thread_id,
+            },
+        );
         self.queue_frame(ClientToHost::ThreadAction {
             client_id: client_id.clone(),
             history_id: expected_history,
@@ -505,15 +558,6 @@ impl Client {
 
     pub fn snapshot(&self) -> ClientSnapshot {
         self.inner.read_store().snapshot()
-    }
-
-    /// Returns the token issued during this client's pairing handshake.
-    pub fn paired_device_token(&self) -> Option<String> {
-        self.inner
-            .paired_device_token
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
     }
 
     /// Register or replace the observer. Passing `None` unregisters it.

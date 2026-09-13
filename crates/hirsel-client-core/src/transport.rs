@@ -16,6 +16,7 @@ use crate::ConnectionState;
 use crate::client::{ClientInner, Command, pending_to_wire, upgrade};
 use crate::config::TransportTarget;
 use crate::observer::LifecycleEvent;
+use crate::store::PendingOp;
 
 const MAX_IROH_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
@@ -28,6 +29,56 @@ enum ServerFrame {
     Message(Box<HostToClient>),
     Invalid(String),
     Ignored,
+}
+
+enum HandshakeState {
+    AwaitingPaired,
+    AwaitingHelloOk { device_token: Option<String> },
+    Online,
+}
+
+impl HandshakeState {
+    fn new(auth: &hirsel_proto::HelloAuth, pending_pairing_token: Option<String>) -> Self {
+        if matches!(auth, hirsel_proto::HelloAuth::PairingCode { .. }) {
+            Self::AwaitingPaired
+        } else {
+            Self::AwaitingHelloOk {
+                device_token: pending_pairing_token,
+            }
+        }
+    }
+
+    fn is_online(&self) -> bool {
+        matches!(self, Self::Online)
+    }
+
+    fn accept_paired(&mut self, device_token: String) -> Result<(), String> {
+        match self {
+            Self::AwaitingPaired => {
+                *self = Self::AwaitingHelloOk {
+                    device_token: Some(device_token),
+                };
+                Ok(())
+            }
+            Self::AwaitingHelloOk { .. } | Self::Online => {
+                Err("unexpected paired frame".to_string())
+            }
+        }
+    }
+
+    fn accept_hello_ok(&mut self) -> Result<Option<String>, String> {
+        match self {
+            Self::AwaitingPaired => {
+                Err("pairing handshake did not issue a device token".to_string())
+            }
+            Self::AwaitingHelloOk { device_token } => {
+                let device_token = device_token.take();
+                *self = Self::Online;
+                Ok(device_token)
+            }
+            Self::Online => Ok(None),
+        }
+    }
 }
 
 #[async_trait]
@@ -157,7 +208,8 @@ async fn run_session(
         return SessionEnd::Stop;
     };
     let auth = client.current_auth();
-    let mut awaiting_paired = matches!(auth, hirsel_proto::HelloAuth::PairingCode { .. });
+    let pending_pairing_token = client.pending_pairing_token();
+    let mut handshake = HandshakeState::new(&auth, pending_pairing_token);
     let hello = ClientToHost::Hello { auth };
     drop(client);
     if let Err(error) = channel.send(&hello).await {
@@ -167,7 +219,6 @@ async fn run_session(
         };
     }
 
-    let mut online = false;
     let mut sent_this_connection = HashSet::new();
     loop {
         tokio::select! {
@@ -176,19 +227,19 @@ async fn run_session(
                     let _ = channel.close().await;
                     return SessionEnd::Stop;
                 }
-                Some(Command::SendPending) if online => {
+                Some(Command::SendPending) if handshake.is_online() => {
                     if let Err(error) = flush_pending(inner, channel, &mut sent_this_connection).await {
                         return SessionEnd::Disconnected {
                             reason: error,
-                            became_online: online,
+                            became_online: true,
                         };
                     }
                 }
                 Some(Command::SendPending) => {}
                 Some(Command::Retry(client_id)) => {
                     sent_this_connection.remove(&client_id);
-                    if online && let Err(error) = flush_pending(inner, channel, &mut sent_this_connection).await {
-                        return SessionEnd::Disconnected { reason: error, became_online: online };
+                    if handshake.is_online() && let Err(error) = flush_pending(inner, channel, &mut sent_this_connection).await {
+                        return SessionEnd::Disconnected { reason: error, became_online: true };
                     }
                 }
             },
@@ -196,35 +247,48 @@ async fn run_session(
                 Ok(ServerFrame::Message(message)) => {
                     let message = *message;
                     if let HostToClient::Paired { device_token } = message {
-                        if !awaiting_paired {
-                            notify_protocol_error(inner, "unexpected paired frame".to_string());
-                            continue;
-                        }
-                        if let Some(client) = upgrade(inner) {
+                        if let Err(error) = handshake.accept_paired(device_token.clone()) {
+                            notify_protocol_error(inner, error);
+                        } else if let Some(client) = upgrade(inner) {
                             client.capture_paired_device_token(device_token);
                         }
-                        awaiting_paired = false;
                         continue;
                     }
                     let hello_ok = matches!(message, HostToClient::HelloOk { .. });
                     let refresh_brief = matches!(&message, HostToClient::ThreadActivity { activity } if activity.kind == "delegation_received");
-                    if hello_ok && awaiting_paired {
-                        notify_protocol_error(inner, "hello_ok arrived before paired".to_string());
-                        return SessionEnd::Disconnected {
-                            reason: "pairing handshake did not issue a device token".to_string(),
-                            became_online: false,
-                        };
-                    }
+                    let paired_device_token = if hello_ok {
+                        match handshake.accept_hello_ok() {
+                            Ok(device_token) => {
+                                if let Some(client) = upgrade(inner) {
+                                    client.set_connection(ConnectionState::Online);
+                                }
+                                device_token
+                            }
+                            Err(error) => {
+                                notify_protocol_error(inner, error.clone());
+                                return SessionEnd::Disconnected {
+                                    reason: error,
+                                    became_online: false,
+                                };
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     handle_server_message(inner, message);
                     if hello_ok {
-                        online = true;
                         sent_this_connection.clear();
                         if let Some(client) = upgrade(inner) {
-                            client.set_connection(ConnectionState::Online);
-                            client.notify_lifecycle(LifecycleEvent::Online);
+                            let delivered_pairing_token = paired_device_token.is_some();
+                            client.notify_lifecycle(LifecycleEvent::Online {
+                                device_token: paired_device_token,
+                            });
+                            if delivered_pairing_token {
+                                client.clear_pending_pairing_token();
+                            }
                         }
                     }
-                    if online && (hello_ok || refresh_brief)
+                    if handshake.is_online() && (hello_ok || refresh_brief)
                         && let Err(error) = flush_pending(inner, channel, &mut sent_this_connection).await
                     {
                         return SessionEnd::Disconnected { reason: error, became_online: true };
@@ -237,7 +301,7 @@ async fn run_session(
                 Err(error) => {
                     return SessionEnd::Disconnected {
                         reason: error,
-                        became_online: online,
+                        became_online: handshake.is_online(),
                     };
                 }
             }
@@ -260,7 +324,19 @@ async fn flush_pending(
             .unwrap_or_else(|error| error.into_inner());
         std::mem::take(&mut *pending)
     };
-    let creates = client.read_store().pending_creates.clone();
+    let creates = client
+        .read_store()
+        .pending_thread_creates()
+        .map(|(client_id, history_id, title, kind, parent_thread_id)| {
+            (
+                client_id.clone(),
+                history_id.clone(),
+                title.clone(),
+                kind,
+                parent_thread_id,
+            )
+        })
+        .collect::<Vec<_>>();
     let pending: Vec<_> = client.read_store().pending_sends().cloned().collect();
     drop(client);
 
@@ -325,9 +401,12 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                         .clear();
                 }
                 let pending_thread_ids = store
-                    .requests
-                    .iter()
-                    .map(|(_, thread_id)| *thread_id)
+                    .pending_ops
+                    .values()
+                    .filter_map(|operation| match operation {
+                        PendingOp::OpenThread { thread_id } => Some(*thread_id),
+                        _ => None,
+                    })
                     .collect::<HashSet<_>>();
                 let mut restore = store
                     .opened_threads
@@ -344,16 +423,18 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 frames.retain(|frame| {
                     !matches!(frame, hirsel_proto::ClientToHost::OpenThread { .. })
                 });
-                for (client_id, thread_id) in &store.requests {
-                    frames.push_back(hirsel_proto::ClientToHost::OpenThread {
-                        client_id: client_id.clone(),
-                        thread_id: *thread_id,
-                        before_id: None,
-                    });
+                for (client_id, operation) in &store.pending_ops {
+                    if let PendingOp::OpenThread { thread_id } = operation {
+                        frames.push_back(hirsel_proto::ClientToHost::OpenThread {
+                            client_id: client_id.clone(),
+                            thread_id: *thread_id,
+                            before_id: None,
+                        });
+                    }
                 }
                 for thread_id in restore {
                     let client_id = uuid::Uuid::new_v4().to_string();
-                    store.requests.push((client_id.clone(), thread_id));
+                    store.track_pending(client_id.clone(), PendingOp::OpenThread { thread_id });
                     frames.push_back(hirsel_proto::ClientToHost::OpenThread {
                         client_id,
                         thread_id,
@@ -405,6 +486,22 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 if store.history_id.as_deref() != Some(&history_id) {
                     return;
                 }
+                if let Some(client_id) = &client_id {
+                    let expected = matches!(
+                        store.pending_ops.get(client_id),
+                        Some(PendingOp::AddThreadRelated {
+                            history_id: pending_history,
+                            thread_id: pending_thread,
+                        } | PendingOp::RemoveThreadRelated {
+                            history_id: pending_history,
+                            thread_id: pending_thread,
+                        }) if pending_history == &history_id && *pending_thread == thread_id
+                    );
+                    if !expected {
+                        return;
+                    }
+                    store.complete_pending(client_id);
+                }
                 let changed = store.apply_thread_related(&history_id, thread_id, revision, items);
                 drop(store);
                 client.notify_lifecycle(LifecycleEvent::ThreadRelatedChanged {
@@ -415,9 +512,13 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 changed
             }
             HostToClient::ThreadCreated { client_id, thread } => {
-                store
-                    .pending_creates
-                    .retain(|(id, _, _, _, _)| *id != client_id);
+                if !matches!(
+                    store.pending_ops.get(&client_id),
+                    Some(PendingOp::CreateThread { .. })
+                ) {
+                    return;
+                }
+                store.complete_pending(&client_id);
                 store
                     .created_threads
                     .retain(|created| created.client_id != client_id);
@@ -433,6 +534,16 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 history_id,
                 thread_id,
             } => {
+                if !matches!(
+                    store.pending_ops.get(&client_id),
+                    Some(PendingOp::ThreadAction {
+                        history_id: pending_history,
+                        thread_id: pending_thread,
+                    }) if pending_history == &history_id && *pending_thread == thread_id
+                ) {
+                    return;
+                }
+                store.complete_pending(&client_id);
                 drop(store);
                 client.notify_lifecycle(LifecycleEvent::ThreadActionApplied {
                     client_id,
@@ -475,22 +586,27 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 true
             }
             HostToClient::Error { detail, client_id } => {
-                if let Some(client_id) = &client_id {
-                    store
-                        .pending_creates
-                        .retain(|(id, _, _, _, _)| id != client_id);
-                    store.requests.retain(|(id, _)| id != client_id);
+                let operation = client_id
+                    .as_deref()
+                    .and_then(|client_id| store.complete_pending(client_id));
+                let changed = if matches!(&operation, Some(PendingOp::SendMessage { .. })) {
                     for entry in &mut store.messages {
                         if let crate::ChatEntry::Pending(send) = entry
-                            && &send.client_id == client_id
+                            && Some(send.client_id.as_str()) == client_id.as_deref()
                         {
                             send.error = Some(detail.clone());
                         }
                     }
-                }
+                    true
+                } else {
+                    false
+                };
+                let surface = client_id.is_none() || operation.is_some();
                 drop(store);
-                client.notify_lifecycle(LifecycleEvent::ProtocolError { detail, client_id });
-                true
+                if surface {
+                    client.notify_lifecycle(LifecycleEvent::ProtocolError { detail, client_id });
+                }
+                changed
             }
             _ => false,
         }

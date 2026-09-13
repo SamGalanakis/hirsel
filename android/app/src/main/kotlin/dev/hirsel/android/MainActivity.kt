@@ -84,7 +84,6 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
@@ -162,6 +161,13 @@ class MainActivity : ComponentActivity() {
  * takes the `newIroh` device-token path with the same identity and therefore the
  * same pinned NodeId.
  */
+private sealed interface RootScreen {
+    data class Onboarding(val addingDevice: Boolean) : RootScreen
+    data class Pairing(val spec: ConnectionSpec.Pairing) : RootScreen
+    data object Settings : RootScreen
+    data object Chat : RootScreen
+}
+
 @Composable
 private fun HirselRoot(
     notificationThreadId: ULong?,
@@ -176,26 +182,33 @@ private fun HirselRoot(
 ) {
     val context = LocalContext.current
     val store = remember { TokenStore(context) }
-    var credential by remember { mutableStateOf(store.load()) }
-    var pairingSpec by remember { mutableStateOf<ConnectionSpec.Pairing?>(null) }
-    var showSettings by remember { mutableStateOf(false) }
-    // "Pair a new device" re-enters the scan flow even though a device is already
-    // paired; a successful pairing replaces this device's credential.
-    var addingDevice by remember { mutableStateOf(false) }
+    val initialCredential = remember { store.load() }
+    var credential by remember { mutableStateOf(initialCredential) }
+    var screen by remember {
+        mutableStateOf<RootScreen>(
+            if (initialCredential == null) RootScreen.Onboarding(addingDevice = false)
+            else RootScreen.Chat,
+        )
+    }
 
     // A live pairing session wins over any stored credential so the freshly
     // authenticated connection carries straight through into chat.
-    val activeSpec: ConnectionSpec? = pairingSpec
-        ?: credential?.let { ConnectionSpec.Device(it) }
+    val activeSpec = when (val current = screen) {
+        is RootScreen.Pairing -> current.spec
+        RootScreen.Chat, RootScreen.Settings -> credential?.let(ConnectionSpec::Device)
+        is RootScreen.Onboarding -> null
+    }
 
-    if (activeSpec == null || addingDevice) {
+    if (screen is RootScreen.Onboarding) {
+        val onboarding = screen as RootScreen.Onboarding
         PairEntry(
-            onSubmit = { pairingSpec = it; addingDevice = false },
-            onBack = if (addingDevice) ({ addingDevice = false }) else null,
+            onSubmit = { screen = RootScreen.Pairing(it) },
+            onBack = if (onboarding.addingDevice) ({ screen = RootScreen.Settings }) else null,
         )
         return
     }
 
+    checkNotNull(activeSpec)
     val connection = rememberConnection(activeSpec)
     LaunchedEffect(notificationThreadId, notificationHistoryId, connection.snapshot?.historyId, connection.phase) {
         val id = notificationThreadId
@@ -208,25 +221,19 @@ private fun HirselRoot(
     }
 
     // On a successful pairing handshake, capture + persist the issued device token.
-    if (activeSpec is ConnectionSpec.Pairing) {
+    if (screen is RootScreen.Pairing) {
+        val pairing = screen as RootScreen.Pairing
         LaunchedEffect(connection.phase) {
-            if (connection.phase is Phase.Online && credential == null) {
-                var token: String? = null
-                repeat(20) {
-                    token = connection.issuedDeviceToken()
-                    if (token != null) return@repeat
-                    delay(100)
-                }
-                token?.let {
+            (connection.phase as? Phase.Online)?.deviceToken?.let {
                     val cred = DeviceCredential(
-                        ticket = activeSpec.ticket,
+                        ticket = pairing.spec.ticket,
                         deviceToken = it,
-                        deviceLabel = activeSpec.label,
-                        irohSecretKey = activeSpec.irohSecretKey,
+                        deviceLabel = pairing.spec.label,
+                        irohSecretKey = pairing.spec.irohSecretKey,
                     )
                     store.save(cred)
                     credential = cred
-                }
+                    screen = RootScreen.Chat
             }
         }
     }
@@ -258,19 +265,25 @@ private fun HirselRoot(
     val forget = {
         store.clear()
         credential = null
-        pairingSpec = null
-        showSettings = false
+        screen = RootScreen.Onboarding(addingDevice = false)
     }
 
     val activeLabel = credential?.deviceLabel
         ?: (activeSpec as? ConnectionSpec.Pairing)?.label.orEmpty()
 
-    when {
+    when (val currentScreen = screen) {
         // While a fresh pairing is still handshaking (and no token yet), show progress.
-        activeSpec is ConnectionSpec.Pairing && credential == null ->
-            PairingProgress(phase = connection.phase, label = activeSpec.label, onCancel = { pairingSpec = null })
+        is RootScreen.Pairing ->
+            PairingProgress(
+                phase = connection.phase,
+                label = currentScreen.spec.label,
+                onCancel = {
+                    screen = if (credential == null) RootScreen.Onboarding(addingDevice = false)
+                    else RootScreen.Settings
+                },
+            )
 
-        showSettings ->
+        RootScreen.Settings ->
             SettingsScreen(
                 themeMode = themeMode,
                 onThemeModeChange = onThemeModeChange,
@@ -282,7 +295,7 @@ private fun HirselRoot(
                 identitySecret = credential?.irohSecretKey,
                 appVersion = appVersionLabel(context),
                 hostVersion = connection.snapshot?.hostVersion,
-                onBack = { showSettings = false },
+                onBack = { screen = RootScreen.Chat },
                 onRename = { newLabel ->
                     credential?.let { current ->
                         val updated = current.copy(deviceLabel = newLabel)
@@ -292,14 +305,16 @@ private fun HirselRoot(
                 },
                 onForget = forget,
                 onResetIdentity = forget,
-                onPairNew = { showSettings = false; addingDevice = true },
+                onPairNew = { screen = RootScreen.Onboarding(addingDevice = true) },
             )
 
-        else ->
+        RootScreen.Chat ->
             ChatScreen(
                 connection = connection,
-                onOpenSettings = { showSettings = true },
+                onOpenSettings = { screen = RootScreen.Settings },
             )
+
+        is RootScreen.Onboarding -> error("onboarding returns before opening a connection")
     }
 }
 

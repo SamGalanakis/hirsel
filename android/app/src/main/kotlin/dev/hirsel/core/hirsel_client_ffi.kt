@@ -713,8 +713,6 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_hirsel_client_ffi_checksum_method_client_disconnect(
     ): Int
-    external fun uniffi_hirsel_client_ffi_checksum_method_client_issued_device_token(
-    ): Int
     external fun uniffi_hirsel_client_ffi_checksum_method_client_open_related_thread(
     ): Int
     external fun uniffi_hirsel_client_ffi_checksum_method_client_open_thread(
@@ -784,8 +782,6 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_hirsel_client_ffi_fn_method_client_disconnect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun uniffi_hirsel_client_ffi_fn_method_client_issued_device_token(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
-    ): RustBuffer.ByValue
     external fun uniffi_hirsel_client_ffi_fn_method_client_open_related_thread(`ptr`: Long,`target`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun uniffi_hirsel_client_ffi_fn_method_client_open_thread(`ptr`: Long,`threadId`: Long,`beforeId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
@@ -945,9 +941,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_disconnect() != 57486) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_hirsel_client_ffi_checksum_method_client_issued_device_token() != 11286) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_client_open_related_thread() != 45094) {
@@ -1417,14 +1410,6 @@ public interface ClientInterface {
 
     fun `disconnect`()
 
-    /**
-     * Returns the device token issued by a successful pairing handshake.
-     *
-     * Pairing clients should persist this value after reaching `Online`, then
-     * use `new_iroh` for later connections.
-     */
-    fun `issuedDeviceToken`(): kotlin.String?
-
     fun `openRelatedThread`(`target`: ThreadRelatedTarget): SendReceipt?
 
     fun `openThread`(`threadId`: kotlin.ULong, `beforeId`: kotlin.ULong?): SendReceipt
@@ -1633,25 +1618,6 @@ open class Client: Disposable, AutoCloseable, ClientInterface
 }
     }
 
-
-
-
-    /**
-     * Returns the device token issued by a successful pairing handshake.
-     *
-     * Pairing clients should persist this value after reaching `Online`, then
-     * use `new_iroh` for later connections.
-     */override fun `issuedDeviceToken`(): kotlin.String? {
-            return FfiConverterOptionalString.lift(
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_hirsel_client_ffi_fn_method_client_issued_device_token(
-        it,
-        _status)
-}
-    }
-    )
-    }
 
 
     override fun `openRelatedThread`(`target`: ThreadRelatedTarget): SendReceipt? {
@@ -1975,102 +1941,7 @@ public object FfiConverterTypeBlob: FfiConverterRustBuffer<Blob> {
 
 
 
-data class ChatMessage (
-    var `error`: kotlin.String?
-    ,
-    var `threadId`: kotlin.ULong
-    ,
-    var `mentions`: List<kotlin.ULong>
-    ,
-    var `artifactIds`: List<kotlin.ULong>
-    ,
-    var `id`: kotlin.ULong?
-    ,
-    var `author`: ChatAuthor
-    ,
-    var `body`: kotlin.String
-    ,
-    var `replyTo`: kotlin.ULong?
-    ,
-    var `timestamp`: kotlin.String
-    ,
-    var `attachments`: List<Blob>
-    ,
-    var `toolCalls`: List<ToolCall>
-    ,
-    var `clientId`: kotlin.String?
-    ,
-    var `pending`: kotlin.Boolean
-
-){
-
-
-
-
-
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeChatMessage: FfiConverterRustBuffer<ChatMessage> {
-    override fun read(buf: ByteBuffer): ChatMessage {
-        return ChatMessage(
-            FfiConverterOptionalString.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterSequenceULong.read(buf),
-            FfiConverterSequenceULong.read(buf),
-            FfiConverterOptionalULong.read(buf),
-            FfiConverterTypeChatAuthor.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterOptionalULong.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterSequenceTypeBlob.read(buf),
-            FfiConverterSequenceTypeToolCall.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterBoolean.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: ChatMessage) = (
-            FfiConverterOptionalString.allocationSize(value.`error`) +
-            FfiConverterULong.allocationSize(value.`threadId`) +
-            FfiConverterSequenceULong.allocationSize(value.`mentions`) +
-            FfiConverterSequenceULong.allocationSize(value.`artifactIds`) +
-            FfiConverterOptionalULong.allocationSize(value.`id`) +
-            FfiConverterTypeChatAuthor.allocationSize(value.`author`) +
-            FfiConverterString.allocationSize(value.`body`) +
-            FfiConverterOptionalULong.allocationSize(value.`replyTo`) +
-            FfiConverterString.allocationSize(value.`timestamp`) +
-            FfiConverterSequenceTypeBlob.allocationSize(value.`attachments`) +
-            FfiConverterSequenceTypeToolCall.allocationSize(value.`toolCalls`) +
-            FfiConverterOptionalString.allocationSize(value.`clientId`) +
-            FfiConverterBoolean.allocationSize(value.`pending`)
-    )
-
-    override fun write(value: ChatMessage, buf: ByteBuffer) {
-            FfiConverterOptionalString.write(value.`error`, buf)
-            FfiConverterULong.write(value.`threadId`, buf)
-            FfiConverterSequenceULong.write(value.`mentions`, buf)
-            FfiConverterSequenceULong.write(value.`artifactIds`, buf)
-            FfiConverterOptionalULong.write(value.`id`, buf)
-            FfiConverterTypeChatAuthor.write(value.`author`, buf)
-            FfiConverterString.write(value.`body`, buf)
-            FfiConverterOptionalULong.write(value.`replyTo`, buf)
-            FfiConverterString.write(value.`timestamp`, buf)
-            FfiConverterSequenceTypeBlob.write(value.`attachments`, buf)
-            FfiConverterSequenceTypeToolCall.write(value.`toolCalls`, buf)
-            FfiConverterOptionalString.write(value.`clientId`, buf)
-            FfiConverterBoolean.write(value.`pending`, buf)
-    }
-}
-
-
-
 data class ClientSnapshot (
-    var `connection`: ConnectionState
-    ,
     var `messages`: List<ChatMessage>
     ,
     var `threads`: List<Thread>
@@ -2115,7 +1986,6 @@ data class ClientSnapshot (
 public object FfiConverterTypeClientSnapshot: FfiConverterRustBuffer<ClientSnapshot> {
     override fun read(buf: ByteBuffer): ClientSnapshot {
         return ClientSnapshot(
-            FfiConverterTypeConnectionState.read(buf),
             FfiConverterSequenceTypeChatMessage.read(buf),
             FfiConverterSequenceTypeThread.read(buf),
             FfiConverterSequenceTypeThreadTurn.read(buf),
@@ -2133,7 +2003,6 @@ public object FfiConverterTypeClientSnapshot: FfiConverterRustBuffer<ClientSnaps
     }
 
     override fun allocationSize(value: ClientSnapshot) = (
-            FfiConverterTypeConnectionState.allocationSize(value.`connection`) +
             FfiConverterSequenceTypeChatMessage.allocationSize(value.`messages`) +
             FfiConverterSequenceTypeThread.allocationSize(value.`threads`) +
             FfiConverterSequenceTypeThreadTurn.allocationSize(value.`turns`) +
@@ -2150,7 +2019,6 @@ public object FfiConverterTypeClientSnapshot: FfiConverterRustBuffer<ClientSnaps
     )
 
     override fun write(value: ClientSnapshot, buf: ByteBuffer) {
-            FfiConverterTypeConnectionState.write(value.`connection`, buf)
             FfiConverterSequenceTypeChatMessage.write(value.`messages`, buf)
             FfiConverterSequenceTypeThread.write(value.`threads`, buf)
             FfiConverterSequenceTypeThreadTurn.write(value.`turns`, buf)
@@ -2598,7 +2466,7 @@ data class ThreadTurn (
     ,
     var `agentMessageId`: kotlin.ULong?
     ,
-    var `state`: kotlin.String
+    var `state`: ThreadTurnState
     ,
     var `startedAt`: kotlin.String
     ,
@@ -2625,7 +2493,7 @@ public object FfiConverterTypeThreadTurn: FfiConverterRustBuffer<ThreadTurn> {
             FfiConverterULong.read(buf),
             FfiConverterOptionalULong.read(buf),
             FfiConverterOptionalULong.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterTypeThreadTurnState.read(buf),
             FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
         )
@@ -2638,7 +2506,7 @@ public object FfiConverterTypeThreadTurn: FfiConverterRustBuffer<ThreadTurn> {
             FfiConverterULong.allocationSize(value.`threadId`) +
             FfiConverterOptionalULong.allocationSize(value.`ownerMessageId`) +
             FfiConverterOptionalULong.allocationSize(value.`agentMessageId`) +
-            FfiConverterString.allocationSize(value.`state`) +
+            FfiConverterTypeThreadTurnState.allocationSize(value.`state`) +
             FfiConverterString.allocationSize(value.`startedAt`) +
             FfiConverterOptionalString.allocationSize(value.`finishedAt`)
     )
@@ -2650,7 +2518,7 @@ public object FfiConverterTypeThreadTurn: FfiConverterRustBuffer<ThreadTurn> {
             FfiConverterULong.write(value.`threadId`, buf)
             FfiConverterOptionalULong.write(value.`ownerMessageId`, buf)
             FfiConverterOptionalULong.write(value.`agentMessageId`, buf)
-            FfiConverterString.write(value.`state`, buf)
+            FfiConverterTypeThreadTurnState.write(value.`state`, buf)
             FfiConverterString.write(value.`startedAt`, buf)
             FfiConverterOptionalString.write(value.`finishedAt`, buf)
     }
@@ -2762,6 +2630,161 @@ public object FfiConverterTypeChatAuthor: FfiConverterRustBuffer<ChatAuthor> {
 
     override fun write(value: ChatAuthor, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+sealed class ChatMessage {
+
+    data class Confirmed(
+        val `threadId`: kotlin.ULong,
+        val `mentions`: List<kotlin.ULong>,
+        val `artifactIds`: List<kotlin.ULong>,
+        val `id`: kotlin.ULong,
+        val `author`: dev.hirsel.core.ChatAuthor,
+        val `body`: kotlin.String,
+        val `replyTo`: kotlin.ULong?,
+        val `timestamp`: kotlin.String,
+        val `attachments`: List<dev.hirsel.core.Blob>,
+        val `toolCalls`: List<dev.hirsel.core.ToolCall>,
+        val `clientId`: kotlin.String?) : ChatMessage()
+
+    {
+
+
+        companion object
+    }
+
+    data class Pending(
+        val `error`: kotlin.String?,
+        val `historyId`: kotlin.String,
+        val `threadId`: kotlin.ULong,
+        val `attachments`: List<kotlin.String>,
+        val `clientId`: kotlin.String,
+        val `body`: kotlin.String,
+        val `mentions`: List<kotlin.ULong>,
+        val `artifactIds`: List<kotlin.ULong>,
+        val `timestamp`: kotlin.String) : ChatMessage()
+
+    {
+
+
+        companion object
+    }
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeChatMessage : FfiConverterRustBuffer<ChatMessage>{
+    override fun read(buf: ByteBuffer): ChatMessage {
+        return when(buf.getInt()) {
+            1 -> ChatMessage.Confirmed(
+                FfiConverterULong.read(buf),
+                FfiConverterSequenceULong.read(buf),
+                FfiConverterSequenceULong.read(buf),
+                FfiConverterULong.read(buf),
+                FfiConverterTypeChatAuthor.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterOptionalULong.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterSequenceTypeBlob.read(buf),
+                FfiConverterSequenceTypeToolCall.read(buf),
+                FfiConverterOptionalString.read(buf),
+                )
+            2 -> ChatMessage.Pending(
+                FfiConverterOptionalString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterULong.read(buf),
+                FfiConverterSequenceString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterSequenceULong.read(buf),
+                FfiConverterSequenceULong.read(buf),
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: ChatMessage): ULong = when(value) {
+        is ChatMessage.Confirmed -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterULong.allocationSize(value.`threadId`)
+                + FfiConverterSequenceULong.allocationSize(value.`mentions`)
+                + FfiConverterSequenceULong.allocationSize(value.`artifactIds`)
+                + FfiConverterULong.allocationSize(value.`id`)
+                + FfiConverterTypeChatAuthor.allocationSize(value.`author`)
+                + FfiConverterString.allocationSize(value.`body`)
+                + FfiConverterOptionalULong.allocationSize(value.`replyTo`)
+                + FfiConverterString.allocationSize(value.`timestamp`)
+                + FfiConverterSequenceTypeBlob.allocationSize(value.`attachments`)
+                + FfiConverterSequenceTypeToolCall.allocationSize(value.`toolCalls`)
+                + FfiConverterOptionalString.allocationSize(value.`clientId`)
+            )
+        }
+        is ChatMessage.Pending -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterOptionalString.allocationSize(value.`error`)
+                + FfiConverterString.allocationSize(value.`historyId`)
+                + FfiConverterULong.allocationSize(value.`threadId`)
+                + FfiConverterSequenceString.allocationSize(value.`attachments`)
+                + FfiConverterString.allocationSize(value.`clientId`)
+                + FfiConverterString.allocationSize(value.`body`)
+                + FfiConverterSequenceULong.allocationSize(value.`mentions`)
+                + FfiConverterSequenceULong.allocationSize(value.`artifactIds`)
+                + FfiConverterString.allocationSize(value.`timestamp`)
+            )
+        }
+    }
+
+    override fun write(value: ChatMessage, buf: ByteBuffer) {
+        when(value) {
+            is ChatMessage.Confirmed -> {
+                buf.putInt(1)
+                FfiConverterULong.write(value.`threadId`, buf)
+                FfiConverterSequenceULong.write(value.`mentions`, buf)
+                FfiConverterSequenceULong.write(value.`artifactIds`, buf)
+                FfiConverterULong.write(value.`id`, buf)
+                FfiConverterTypeChatAuthor.write(value.`author`, buf)
+                FfiConverterString.write(value.`body`, buf)
+                FfiConverterOptionalULong.write(value.`replyTo`, buf)
+                FfiConverterString.write(value.`timestamp`, buf)
+                FfiConverterSequenceTypeBlob.write(value.`attachments`, buf)
+                FfiConverterSequenceTypeToolCall.write(value.`toolCalls`, buf)
+                FfiConverterOptionalString.write(value.`clientId`, buf)
+                Unit
+            }
+            is ChatMessage.Pending -> {
+                buf.putInt(2)
+                FfiConverterOptionalString.write(value.`error`, buf)
+                FfiConverterString.write(value.`historyId`, buf)
+                FfiConverterULong.write(value.`threadId`, buf)
+                FfiConverterSequenceString.write(value.`attachments`, buf)
+                FfiConverterString.write(value.`clientId`, buf)
+                FfiConverterString.write(value.`body`, buf)
+                FfiConverterSequenceULong.write(value.`mentions`, buf)
+                FfiConverterSequenceULong.write(value.`artifactIds`, buf)
+                FfiConverterString.write(value.`timestamp`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
 
@@ -2924,41 +2947,6 @@ public object FfiConverterTypeClientError : FfiConverterRustBuffer<ClientExcepti
 
 
 
-
-enum class ConnectionState {
-
-    CONNECTING,
-    ONLINE,
-    OFFLINE;
-
-
-
-
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeConnectionState: FfiConverterRustBuffer<ConnectionState> {
-    override fun read(buf: ByteBuffer) = try {
-        ConnectionState.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: ConnectionState) = 4UL
-
-    override fun write(value: ConnectionState, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
 sealed class LifecycleEvent {
 
     data class Connecting(
@@ -2970,8 +2958,14 @@ sealed class LifecycleEvent {
         companion object
     }
 
-    object Online : LifecycleEvent()
+    data class Online(
+        val `deviceToken`: kotlin.String?) : LifecycleEvent()
 
+    {
+
+
+        companion object
+    }
 
     data class Offline(
         val `reason`: kotlin.String?) : LifecycleEvent()
@@ -3043,7 +3037,9 @@ public object FfiConverterTypeLifecycleEvent : FfiConverterRustBuffer<LifecycleE
             1 -> LifecycleEvent.Connecting(
                 FfiConverterUInt.read(buf),
                 )
-            2 -> LifecycleEvent.Online
+            2 -> LifecycleEvent.Online(
+                FfiConverterOptionalString.read(buf),
+                )
             3 -> LifecycleEvent.Offline(
                 FfiConverterOptionalString.read(buf),
                 )
@@ -3081,6 +3077,7 @@ public object FfiConverterTypeLifecycleEvent : FfiConverterRustBuffer<LifecycleE
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
+                + FfiConverterOptionalString.allocationSize(value.`deviceToken`)
             )
         }
         is LifecycleEvent.Offline -> {
@@ -3135,6 +3132,7 @@ public object FfiConverterTypeLifecycleEvent : FfiConverterRustBuffer<LifecycleE
             }
             is LifecycleEvent.Online -> {
                 buf.putInt(2)
+                FfiConverterOptionalString.write(value.`deviceToken`, buf)
                 Unit
             }
             is LifecycleEvent.Offline -> {
@@ -3373,6 +3371,44 @@ public object FfiConverterTypeThreadRelatedTarget : FfiConverterRustBuffer<Threa
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class ThreadTurnState {
+
+    QUEUED,
+    RUNNING,
+    COMPLETED,
+    FAILED,
+    CANCELLED,
+    INTERRUPTED;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeThreadTurnState: FfiConverterRustBuffer<ThreadTurnState> {
+    override fun read(buf: ByteBuffer) = try {
+        ThreadTurnState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ThreadTurnState) = 4UL
+
+    override fun write(value: ThreadTurnState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 
@@ -3703,34 +3739,6 @@ public object FfiConverterSequenceTypeBlob: FfiConverterRustBuffer<List<Blob>> {
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeChatMessage: FfiConverterRustBuffer<List<ChatMessage>> {
-    override fun read(buf: ByteBuffer): List<ChatMessage> {
-        val len = buf.getInt()
-        return List<ChatMessage>(len) {
-            FfiConverterTypeChatMessage.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<ChatMessage>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeChatMessage.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<ChatMessage>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeChatMessage.write(it, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
 public object FfiConverterSequenceTypeCreatedThread: FfiConverterRustBuffer<List<CreatedThread>> {
     override fun read(buf: ByteBuffer): List<CreatedThread> {
         val len = buf.getInt()
@@ -3945,6 +3953,34 @@ public object FfiConverterSequenceTypeToolCall: FfiConverterRustBuffer<List<Tool
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeToolCall.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeChatMessage: FfiConverterRustBuffer<List<ChatMessage>> {
+    override fun read(buf: ByteBuffer): List<ChatMessage> {
+        val len = buf.getInt()
+        return List<ChatMessage>(len) {
+            FfiConverterTypeChatMessage.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ChatMessage>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeChatMessage.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ChatMessage>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeChatMessage.write(it, buf)
         }
     }
 }

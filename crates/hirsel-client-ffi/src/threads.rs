@@ -103,10 +103,34 @@ pub struct ThreadTurn {
     pub thread_id: u64,
     pub owner_message_id: Option<u64>,
     pub agent_message_id: Option<u64>,
-    pub state: String,
+    pub state: ThreadTurnState,
     pub started_at: String,
     pub finished_at: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ThreadTurnState {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+impl From<core::ThreadTurnState> for ThreadTurnState {
+    fn from(state: core::ThreadTurnState) -> Self {
+        match state {
+            core::ThreadTurnState::Queued => Self::Queued,
+            core::ThreadTurnState::Running => Self::Running,
+            core::ThreadTurnState::Completed => Self::Completed,
+            core::ThreadTurnState::Failed => Self::Failed,
+            core::ThreadTurnState::Cancelled => Self::Cancelled,
+            core::ThreadTurnState::Interrupted => Self::Interrupted,
+        }
+    }
+}
+
 impl From<core::ThreadTurn> for ThreadTurn {
     fn from(t: core::ThreadTurn) -> Self {
         Self {
@@ -116,11 +140,7 @@ impl From<core::ThreadTurn> for ThreadTurn {
             requester_turn_id: t.requester_turn_id,
             owner_message_id: t.owner_message_id,
             agent_message_id: t.agent_message_id,
-            state: serde_json::to_value(t.state)
-                .expect("turn state serializes")
-                .as_str()
-                .unwrap()
-                .to_string(),
+            state: t.state.into(),
             started_at: t.started_at.to_rfc3339(),
             finished_at: t.finished_at.map(|t| t.to_rfc3339()),
         }
@@ -214,7 +234,12 @@ mod tests {
     }
     #[test]
     fn thread_ffi_preserves_execution_timing_and_terminal_outcomes_independently() {
-        for outcome in ["completed", "failed", "cancelled", "interrupted"] {
+        for (outcome, expected) in [
+            ("completed", ThreadTurnState::Completed),
+            ("failed", ThreadTurnState::Failed),
+            ("cancelled", ThreadTurnState::Cancelled),
+            ("interrupted", ThreadTurnState::Interrupted),
+        ] {
             let wire = serde_json::json!({
                 "id": 5, "kind":"task", "parent_thread_id":2,"pinned_at":null, "title": "Groceries", "description": "Milk", "instrument": null,
                 "attention": "needs_owner", "settled_at": null, "archived_at": null,
@@ -247,7 +272,7 @@ mod tests {
                     requester_turn_id: None,
                     owner_message_id: Some(20),
                     agent_message_id: None,
-                    state: "running".into(),
+                    state: ThreadTurnState::Running,
                     started_at: "2026-09-09T10:02:00+00:00".into(),
                     finished_at: None,
                 })
@@ -261,7 +286,7 @@ mod tests {
                     requester_turn_id: None,
                     owner_message_id: Some(18),
                     agent_message_id: Some(19),
-                    state: outcome.into(),
+                    state: expected,
                     started_at: "2026-09-09T10:00:00+00:00".into(),
                     finished_at: Some("2026-09-09T10:01:00+00:00".into()),
                 })
@@ -373,11 +398,45 @@ mod tests {
                 attachments: vec![],
                 tool_calls: vec![],
             }));
-        assert_eq!(message.thread_id, 5);
-        assert_eq!(message.mentions, vec![9]);
-        assert_eq!(message.artifact_ids, vec![44]);
-        assert_eq!(message.client_id.as_deref(), Some("send-1"));
-        assert!(!message.pending);
+        assert!(matches!(
+            message,
+            crate::ChatMessage::Confirmed {
+                thread_id: 5,
+                mentions,
+                artifact_ids,
+                client_id: Some(client_id),
+                ..
+            } if mentions == vec![9] && artifact_ids == vec![44] && client_id == "send-1"
+        ));
+    }
+
+    #[test]
+    fn message_ffi_keeps_pending_attachment_ids_in_the_typed_variant() {
+        let message = crate::ChatMessage::from(core::ChatEntry::Pending(core::PendingSend {
+            error: Some("retry".into()),
+            history_id: "history-a".into(),
+            thread_id: 5,
+            attachments: vec!["blob-1".into(), "blob-2".into()],
+            client_id: "send-1".into(),
+            body: "Groceries".into(),
+            mentions: vec![9],
+            artifact_ids: vec![44],
+            timestamp: "now".into(),
+        }));
+        assert!(matches!(
+            message,
+            crate::ChatMessage::Pending {
+                error: Some(error),
+                history_id,
+                thread_id: 5,
+                attachments,
+                client_id,
+                ..
+            } if error == "retry"
+                && history_id == "history-a"
+                && attachments == vec!["blob-1", "blob-2"]
+                && client_id == "send-1"
+        ));
     }
 }
 

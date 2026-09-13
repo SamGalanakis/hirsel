@@ -8,23 +8,6 @@ use thiserror::Error;
 use tokio::runtime::Runtime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum ConnectionState {
-    Connecting,
-    Online,
-    Offline,
-}
-
-impl From<core::ConnectionState> for ConnectionState {
-    fn from(value: core::ConnectionState) -> Self {
-        match value {
-            core::ConnectionState::Connecting => Self::Connecting,
-            core::ConnectionState::Online => Self::Online,
-            core::ConnectionState::Offline => Self::Offline,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum ChatAuthor {
     Owner,
     Agent,
@@ -93,29 +76,39 @@ mod tool_call_tests {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct ChatMessage {
-    pub error: Option<String>,
-    pub thread_id: u64,
-    pub mentions: Vec<u64>,
-    pub artifact_ids: Vec<u64>,
-    pub id: Option<u64>,
-    pub author: ChatAuthor,
-    pub body: String,
-    pub reply_to: Option<u64>,
-    pub timestamp: String,
-    pub attachments: Vec<Blob>,
-    pub tool_calls: Vec<ToolCall>,
-    pub client_id: Option<String>,
-    pub pending: bool,
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum ChatMessage {
+    Confirmed {
+        thread_id: u64,
+        mentions: Vec<u64>,
+        artifact_ids: Vec<u64>,
+        id: u64,
+        author: ChatAuthor,
+        body: String,
+        reply_to: Option<u64>,
+        timestamp: String,
+        attachments: Vec<Blob>,
+        tool_calls: Vec<ToolCall>,
+        client_id: Option<String>,
+    },
+    Pending {
+        error: Option<String>,
+        history_id: String,
+        thread_id: u64,
+        attachments: Vec<String>,
+        client_id: String,
+        body: String,
+        mentions: Vec<u64>,
+        artifact_ids: Vec<u64>,
+        timestamp: String,
+    },
 }
 
 impl From<core::ChatEntry> for ChatMessage {
     fn from(value: core::ChatEntry) -> Self {
         match value {
-            core::ChatEntry::Confirmed(message) => Self {
-                error: None,
-                id: Some(message.id),
+            core::ChatEntry::Confirmed(message) => Self::Confirmed {
+                id: message.id,
                 thread_id: message.thread_id,
                 mentions: message.mentions,
                 artifact_ids: message.artifact_ids,
@@ -126,22 +119,17 @@ impl From<core::ChatEntry> for ChatMessage {
                 attachments: message.attachments.into_iter().map(Into::into).collect(),
                 tool_calls: message.tool_calls.into_iter().map(Into::into).collect(),
                 client_id: message.client_id,
-                pending: false,
             },
-            core::ChatEntry::Pending(send) => Self {
+            core::ChatEntry::Pending(send) => Self::Pending {
                 error: send.error,
-                id: None,
+                history_id: send.history_id,
                 thread_id: send.thread_id,
+                attachments: send.attachments,
                 mentions: send.mentions,
                 artifact_ids: send.artifact_ids,
-                author: ChatAuthor::Owner,
                 body: send.body,
-                reply_to: None,
                 timestamp: send.timestamp,
-                attachments: Vec::new(),
-                tool_calls: Vec::new(),
-                client_id: Some(send.client_id),
-                pending: true,
+                client_id: send.client_id,
             },
         }
     }
@@ -179,7 +167,6 @@ impl From<core::AgentActivity> for AgentActivity {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ClientSnapshot {
-    pub connection: ConnectionState,
     pub messages: Vec<ChatMessage>,
     pub threads: Vec<Thread>,
     pub turns: Vec<ThreadTurn>,
@@ -199,7 +186,6 @@ pub struct ClientSnapshot {
 impl From<core::ClientSnapshot> for ClientSnapshot {
     fn from(value: core::ClientSnapshot) -> Self {
         Self {
-            connection: value.connection.into(),
             messages: value.messages.into_iter().map(Into::into).collect(),
             threads: value.threads.into_iter().map(Into::into).collect(),
             turns: value.turns.into_iter().map(Into::into).collect(),
@@ -222,7 +208,9 @@ pub enum LifecycleEvent {
     Connecting {
         attempt: u32,
     },
-    Online,
+    Online {
+        device_token: Option<String>,
+    },
     Offline {
         reason: Option<String>,
     },
@@ -250,7 +238,7 @@ impl From<core::LifecycleEvent> for LifecycleEvent {
     fn from(value: core::LifecycleEvent) -> Self {
         match value {
             core::LifecycleEvent::Connecting { attempt } => Self::Connecting { attempt },
-            core::LifecycleEvent::Online => Self::Online,
+            core::LifecycleEvent::Online { device_token } => Self::Online { device_token },
             core::LifecycleEvent::Offline { reason } => Self::Offline { reason },
             core::LifecycleEvent::ProtocolError { detail, client_id } => {
                 Self::ProtocolError { detail, client_id }
@@ -548,14 +536,6 @@ impl Client {
 
     pub fn snapshot(&self) -> ClientSnapshot {
         self.core.snapshot().into()
-    }
-
-    /// Returns the device token issued by a successful pairing handshake.
-    ///
-    /// Pairing clients should persist this value after reaching `Online`, then
-    /// use `new_iroh` for later connections.
-    pub fn issued_device_token(&self) -> Option<String> {
-        self.core.paired_device_token()
     }
 }
 

@@ -48,6 +48,37 @@ export function ActivityEntry(props: { activity: ThreadActivity }) {
     </Show>
   </article></Show>;
 }
+/**
+ * What the old "Activity · 11s" header carried, moved to the very end of the
+ * card: a live pulse while the turn runs, else the quiet elapsed time, right
+ * aligned under everything the turn produced — work rows, prose, artifacts.
+ * It is the caller that renders it last, because the prose is the caller's.
+ */
+export function WorkTail(props: { turn?: ThreadTurn; activities: ThreadActivity[]; events: TimelineEvent[]; message?: ChatMessage }) {
+  const [now, setNow] = createSignal(Date.now());
+  const running = () => props.turn?.state === "running";
+  createEffect(() => running() && state.connection === "connected", active => {
+    if (!active) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  });
+  // A plain reply needs no stopwatch; only a turn that did visible work, or one
+  // still running, earns the tail.
+  const worked = () => running() || props.events.length > 0 || props.activities.length > 0;
+  const duration = () => workDuration(props.turn, now());
+  const label = () => workLabel(props.turn, props.events, props.activities, buildTimeline(props.events).filter(item => item.kind === "tool").length, Boolean(props.message));
+  return <Show when={props.turn && worked()}>
+    <Show when={running()} fallback={<Show when={duration()}>
+      <p class="mt-1 text-right text-meta tabular-nums text-muted-foreground/70" data-slot="work-elapsed">{duration()}</p>
+    </Show>}>
+      <p class="mt-1 flex min-h-5 items-center justify-end" role="status" data-slot="work-live">
+        <LoaderCircle class={`size-3.5 ${state.connection === "connected" ? "animate-spin motion-reduce:animate-none" : ""}`} aria-hidden="true" />
+        <span class="sr-only">{label()}</span>
+      </p>
+    </Show>
+  </Show>;
+}
 /** One exact turn/message. No global inspector and no positional association. */
 export function ThreadWork(props: { turn?: ThreadTurn; message?: ChatMessage; activities: ThreadActivity[]; events: TimelineEvent[]; live?: boolean }) {
   const [now, setNow] = createSignal(Date.now());
@@ -119,16 +150,5 @@ export function ThreadWork(props: { turn?: ThreadTurn; message?: ChatMessage; ac
       <p class="text-muted-foreground" data-slot="work-recovery">Send a message to continue.</p>
     </div></Show>
     <Show when={stopped()}><p class="pb-2">Your conversation is kept. Send a message to continue.</p></Show>
-    {/* What the header used to carry, after the content instead of above it: a
-        live pulse while the turn runs, else the quiet elapsed tail. */}
-    <Show when={running()}>
-      <p class="flex min-h-5 items-center gap-2" role="status" data-slot="work-live">
-        <LoaderCircle class={`size-3.5 ${state.connection === "connected" ? "animate-spin motion-reduce:animate-none" : ""}`} aria-hidden="true" />
-        <span class="sr-only">{label()}</span>
-      </p>
-    </Show>
-    <Show when={!running() && !notable() && duration()}>
-      <p class="text-meta tabular-nums text-muted-foreground/70" data-slot="work-elapsed">{duration()}</p>
-    </Show>
   </section></Show>;
 }

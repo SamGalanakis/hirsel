@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../protocol";
 import type { TimelineEvent } from "../store/types";
 import type { ThreadActivity, ThreadTurn } from "./types";
-import { ThreadWork } from "./ThreadWork";
+import { ThreadWork, WorkTail } from "./ThreadWork";
 
 const events: TimelineEvent[] = [
   { seq: 1, at: 1, event: { kind: "tool_done", id: "call-a", name: "read_file", ok: true, summary: "Distinct result: first file contents", result: null } },
@@ -32,10 +32,15 @@ describe("readable work outcomes", () => {
   });
   it("distinguishes queued, active and stopped work without opening diagnostics", () => {
     const [current, setCurrent] = createSignal(turn("queued"));
-    const view = render(() => <ThreadWork turn={current()} events={[{ seq: 1, event: { kind: "tool_start", id: "read", name: "read_file", summary: null, input: null } }]} activities={[]} />);
+    const events: TimelineEvent[] = [{ seq: 1, event: { kind: "tool_start", id: "read", name: "read_file", summary: null, input: null } }];
+    // The card renders the work rows and, last of all, the tail — the same
+    // pairing the conversation uses, with the prose in between.
+    const view = render(() => <><ThreadWork turn={current()} events={events} activities={[]} /><WorkTail turn={current()} events={events} activities={[]} /></>);
     expect(view.getByText("Queued")).toBeTruthy();
     flush(() => setCurrent(turn("running")));
+    // A running turn says so through the live tail, not a header label.
     expect(view.getByText("Gathering context")).toBeTruthy();
+    expect(view.container.querySelector('[data-slot="work-live"]')).toBeTruthy();
     flush(() => setCurrent(turn("cancelled")));
     expect(view.getByText("Stopped")).toBeTruthy();
     expect(view.getByText(/Your conversation is kept/).closest("details")).toBeNull();

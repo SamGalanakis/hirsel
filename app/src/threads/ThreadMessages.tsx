@@ -5,7 +5,7 @@ import { UserRound } from "../components/ui/icons";
 import { ArtifactCard } from "../artifacts/ArtifactSurface";
 import { getClient } from "../ws/client";
 import { splitStreamingReply } from "../components/chat/timeline";
-import { ActivityEntry, ThreadWork } from "./ThreadWork";
+import { ActivityEntry, ThreadWork, WorkTail } from "./ThreadWork";
 import type { ConversationEntry } from "./conversation";
 import type { ThreadHistory } from "./model";
 import { threadState } from "./store";
@@ -54,6 +54,7 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
           <Markdown>{message()?.body ?? splitStreamingReply(events()).reply}</Markdown>
           <For each={message()?.artifact_ids ?? []}>{id => <ArtifactCard id={id} />}</For>
           <Show when={message()?.attachments?.length}><ul class="mt-2 text-xs text-muted-foreground"><For each={message()?.attachments}>{blob => <li><button class="underline" onClick={() => { void getClient()?.getBlobUrl(blob.id).then(url => window.open(url, "_blank", "noopener,noreferrer")); }}>{blob.name}</button></li>}</For></ul></Show>
+          <Show when={!owner()}><WorkTail message={message()} turn={turn()} activities={activities(turn()?.id)} events={events()} /></Show>
         </div>
       </article>
     </Show>

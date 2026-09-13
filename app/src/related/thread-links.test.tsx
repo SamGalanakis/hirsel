@@ -36,11 +36,11 @@ describe("Thread rich links",()=>{
   const image=await waitFor(()=>{const node=avatar.querySelector('img');expect(node).not.toBeNull();return node!;});
   expect(image).toHaveAttribute('src','https://example.test/blob/project-image');expect(image.className).toContain('object-cover');expect(image).toHaveAttribute('alt','');
  });
- it("shows an emoji icon in the inline chip and the initial without one",()=>{
-  flush(()=>setThreadState(draft=>{draft.threads=[makeThread(1),makeThread(2,{title:"Current project",icon:{kind:"emoji",value:"\u{1F331}"}})];}));
-  mount();expect(screen.getByRole('link',{name:/Current project/}).querySelector('[data-thread-avatar="2"]')).toHaveTextContent("\u{1F331}");
+ it("shows a symbol icon in the inline chip and the monogram without one",()=>{
+  flush(()=>setThreadState(draft=>{draft.threads=[makeThread(1),makeThread(2,{title:"Current project",icon:{kind:"symbol",name:"leaf",tint:"green"}})];}));
+  mount();expect(screen.getByRole('link',{name:/Current project/}).querySelector('[data-thread-avatar="2"]')).toHaveAttribute('data-thread-symbol','leaf');
   cleanup();flush(()=>setThreadState(draft=>{draft.threads=[makeThread(1),makeThread(2,{title:"Current project"})];}));
-  mount();expect(screen.getByRole('link',{name:/Current project/}).querySelector('[data-thread-avatar="2"]')).toHaveTextContent("C");
+  mount();expect(screen.getByRole('link',{name:/Current project/}).querySelector('[data-thread-avatar="2"]')).toHaveTextContent("CP");
  });
  it("never hydrates a cached title before hello or after a history replacement",()=>{
   mount();flush(disconnectThreads);expect(screen.queryByRole('link',{name:/Current project/})).toBeNull();

@@ -15,6 +15,7 @@ mod models;
 mod process;
 mod providers;
 mod thread;
+mod thread_icon;
 mod turn;
 mod view;
 
@@ -44,6 +45,9 @@ mod tests;
 
 pub use thread::{
     ReachTarget, Thread, ThreadActivity, ThreadAttention, ThreadBrief, ThreadDetail,
-    ThreadExecutionTarget, ThreadGrant, ThreadGrantSource, ThreadGrantTarget, ThreadIcon,
-    ThreadKind, ThreadRelatedItem, ThreadRelatedTarget, ThreadTurn, ThreadTurnState,
+    ThreadExecutionTarget, ThreadGrant, ThreadGrantSource, ThreadGrantTarget, ThreadKind,
+    ThreadRelatedItem, ThreadRelatedTarget, ThreadTurn, ThreadTurnState,
+};
+pub use thread_icon::{
+    THREAD_SYMBOL_GROUPS, THREAD_SYMBOLS, ThreadIcon, ThreadTint, is_thread_symbol,
 };

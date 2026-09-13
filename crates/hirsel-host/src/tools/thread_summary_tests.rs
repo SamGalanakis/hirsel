@@ -272,7 +272,7 @@ async fn stale_pre_reset_thread_cannot_be_published_as_the_reused_current_id() {
         let connection = rusqlite::Connection::open(&database).unwrap();
         connection
             .query_row(
-                "SELECT parent_thread_id,pinned_at,title,description,instrument,attention,settled_at,archived_at,snoozed_until,read,created_at,updated_at,revision,icon,showcased_artifact_id FROM threads WHERE id=?1",
+                "SELECT parent_thread_id,pinned_at,title,description,instrument,attention,settled_at,archived_at,snoozed_until,read,created_at,updated_at,revision,icon_symbol,showcased_artifact_id FROM threads WHERE id=?1",
                 [old.id],
                 |row| {
                     (0..15)
@@ -311,7 +311,7 @@ async fn stale_pre_reset_thread_cannot_be_published_as_the_reused_current_id() {
             .chain([rusqlite::types::Value::Integer(recreated.id as i64)]);
         connection
             .execute(
-                "UPDATE threads SET parent_thread_id=?1,pinned_at=?2,title=?3,description=?4,instrument=?5,attention=?6,settled_at=?7,archived_at=?8,snoozed_until=?9,read=?10,created_at=?11,updated_at=?12,revision=?13,icon=?14,showcased_artifact_id=?15 WHERE id=?16",
+                "UPDATE threads SET parent_thread_id=?1,pinned_at=?2,title=?3,description=?4,instrument=?5,attention=?6,settled_at=?7,archived_at=?8,snoozed_until=?9,read=?10,created_at=?11,updated_at=?12,revision=?13,icon_symbol=?14,showcased_artifact_id=?15 WHERE id=?16",
                 rusqlite::params_from_iter(values),
             )
             .unwrap();

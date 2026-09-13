@@ -55,7 +55,7 @@ export function RichLink(props: { href: string; title?: string; label: string; c
       onClick={event => { if (localThread() && plainPrimaryClick(event)) { event.preventDefault(); focusThread(localThread()!.id); } }}>
       <Show when={!props.imageOnly && (threadTarget() || link())}><span class="mr-[0.25em] inline-flex align-text-bottom">{/* The inline mark carries the Thread's own icon at SENTENCE size: an
             uploaded image is an em-tall cover-cropped avatar, an emoji or the
-            generated initial the same box. It used to be the 16px list avatar,
+            monogram default the same box. It used to be the 16px list avatar,
             which out-measured the 14px prose it sat in. */}<Show when={localThread()} fallback={<LinkIcon kind={threadTarget() ? "thread" : link()!.kind} class="size-[1.05em] shrink-0" />}>{thread => <ThreadAvatar thread={thread()} inline />}</Show></span></Show>
       <Show when={bare() && target()} fallback={props.children}>{label()}</Show>
     </a>

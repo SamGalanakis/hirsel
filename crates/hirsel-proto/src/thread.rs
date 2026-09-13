@@ -1,4 +1,5 @@
 //! Durable work identity. Conversation, execution and attention are independent.
+use crate::ThreadIcon;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -16,14 +17,6 @@ pub enum ThreadAttention {
     #[default]
     Quiet,
     NeedsOwner,
-}
-
-/// A Thread's optional, durable identity mark.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ThreadIcon {
-    Emoji { value: String },
-    Image { blob_id: String },
 }
 
 /// Where a Thread's next turn runs, named the way both the Owner and the Agent
@@ -50,7 +43,7 @@ pub struct Thread {
     pub parent_thread_id: Option<u64>,
     pub pinned_at: Option<DateTime<Utc>>,
     pub title: String,
-    /// Custom emoji or retained image blob; None selects the client-generated avatar.
+    /// Vocabulary symbol or retained image blob; None selects the title monogram.
     #[serde(default)]
     pub icon: Option<ThreadIcon>,
     /// One persistent artifact presented beside this Thread conversation.

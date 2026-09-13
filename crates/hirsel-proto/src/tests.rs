@@ -8,9 +8,10 @@ use serde_json::json;
 fn thread_icons_are_explicit_closed_wire_variants() {
     for (value, icon) in [
         (
-            json!({"kind":"emoji","value":"🌱"}),
-            ThreadIcon::Emoji {
-                value: "🌱".into()
+            json!({"kind":"symbol","name":"leaf","tint":"green"}),
+            ThreadIcon::Symbol {
+                name: "leaf".into(),
+                tint: ThreadTint::Green,
             },
         ),
         (
@@ -27,10 +28,11 @@ fn thread_icons_are_explicit_closed_wire_variants() {
         assert_eq!(serde_json::to_value(icon).unwrap(), value);
     }
     for invalid in [
-        json!("🌱"),
-        json!({"kind":"emoji","value":"🌱","blob_id":"hidden"}),
-        json!({"kind":"image","blob_id":"blob-1","value":"🌱"}),
+        json!("leaf"),
+        json!({"kind":"symbol","name":"leaf","blob_id":"hidden"}),
+        json!({"kind":"image","blob_id":"blob-1","name":"leaf"}),
         json!({"kind":"image"}),
+        json!({"kind":"emoji","value":"🌱"}),
         json!({"kind":"unknown","value":"x"}),
     ] {
         assert!(serde_json::from_value::<ThreadIcon>(invalid).is_err());

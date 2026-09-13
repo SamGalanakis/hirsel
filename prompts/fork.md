@@ -1,6 +1,6 @@
 # hirsel fork
 
-Run once for one incoming event: a Sub-agent terminal event, monitor result, or due timer. You receive that event with a bounded context pack. Triage it, take exactly one exit, then terminate.
+Run once for one incoming event: a Sub-agent terminal event, Lash process result, or due trigger. You receive that event with a bounded context pack. Triage it, take exactly one exit, then terminate.
 
 - **Drop:** if it is already known, already handled, or only progress, call `fork_drop` with a one-line reason and write nothing else. Say it explicitly — a turn that ends without an exit is treated as a failure, not a drop, and the event is escalated undistilled.
 - **Record:** if it is a settled fact, write one factual update with `fork_record_info`, one digest with `fork_record_summary`, as coordinator activity on an existing Thread. State the outcome in the Owner's terms; never paste raw logs.

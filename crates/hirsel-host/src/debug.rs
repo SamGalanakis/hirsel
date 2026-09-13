@@ -22,7 +22,7 @@ use crate::{
     attachments::{decode_blob_data_b64, normalize_mime, sanitize_blob_name},
     auth::owner_bearer_matches,
     push::RecordedPush,
-    storage::{Device, MonitorCondition, MonitorRecord, PushToken},
+    storage::{Device, PushToken},
 };
 
 const PAIRING_CODE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -41,7 +41,6 @@ pub fn routes(state: AppState) -> Router {
         .route("/debug/pushes", get(recorded_pushes))
         .route("/debug/cancel-turn", post(cancel_turn))
         .route("/debug/cancel-queued", post(cancel_queued))
-        .route("/debug/create-monitor", post(create_monitor))
         .route("/debug/set-model", post(set_model))
         .route(
             "/debug/subagent-models",
@@ -128,54 +127,6 @@ struct UnregisterPushTokenRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct CreateMonitorRequest {
-    thread_id: u64,
-    cmd: String,
-    #[serde(default)]
-    every_secs: Option<u64>,
-    #[serde(flatten)]
-    condition: MonitorCondition,
-    label: String,
-}
-
-#[cfg(test)]
-mod monitor_request_tests {
-    use super::*;
-
-    #[test]
-    fn debug_monitor_request_deserializes_only_valid_conditions() {
-        let valid: CreateMonitorRequest = serde_json::from_value(serde_json::json!({
-            "thread_id": 1,
-            "cmd": "printf ready",
-            "wake_on": "regex",
-            "pattern": "ready",
-            "label": "ready"
-        }))
-        .unwrap();
-        assert_eq!(valid.condition.pattern(), Some("ready"));
-
-        for invalid in [
-            serde_json::json!({
-                "thread_id": 1,
-                "cmd": "printf ready",
-                "wake_on": "regex",
-                "pattern": "[",
-                "label": "ready"
-            }),
-            serde_json::json!({
-                "thread_id": 1,
-                "cmd": "printf ready",
-                "wake_on": "changed",
-                "pattern": "ignored",
-                "label": "ready"
-            }),
-        ] {
-            assert!(serde_json::from_value::<CreateMonitorRequest>(invalid).is_err());
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
 struct SetModelRequest {
     provider_id: String,
     model_id: String,
@@ -245,11 +196,6 @@ struct ChatResponse {
 #[derive(Debug, Serialize)]
 struct RecordedPushesResponse {
     pushes: Vec<RecordedPush>,
-}
-
-#[derive(Debug, Serialize)]
-struct CreateMonitorResponse {
-    monitor: MonitorRecord,
 }
 
 #[derive(Debug, Serialize)]
@@ -469,7 +415,7 @@ fn default_fork_origin() -> String {
 /// Inject one synthetic non-owner message into the ADR-0015 dispatch.
 ///
 /// This is the smoke lever for fork triage: it takes exactly the path a
-/// Sub-agent completion or a monitor firing takes, so a real fork runs against
+/// Sub-agent completion or a process wake takes, so a real fork runs against
 /// the live `[fork]` model and its exit is observable in the log and on the
 /// event/queue surfaces.
 async fn fork_wake(
@@ -512,22 +458,6 @@ async fn recorded_pushes(State(state): State<AppState>) -> Json<RecordedPushesRe
     Json(RecordedPushesResponse {
         pushes: state.pushes.recorded_pushes(),
     })
-}
-
-async fn create_monitor(
-    State(state): State<AppState>,
-    Json(request): Json<CreateMonitorRequest>,
-) -> Result<Json<CreateMonitorResponse>, DebugError> {
-    let monitor = state
-        .create_monitor(
-            request.thread_id,
-            request.cmd,
-            request.every_secs.unwrap_or(30),
-            request.condition,
-            request.label,
-        )
-        .await?;
-    Ok(Json(CreateMonitorResponse { monitor }))
 }
 
 async fn set_model(

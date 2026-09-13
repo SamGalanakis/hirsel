@@ -108,7 +108,7 @@ impl LashAgentRuntime {
                     )
                     .await?;
             }
-            self.notify.notify_one();
+            self.process_notify.notify_one();
         }
         if occurrence.one_shot {
             // Subscription mutation is a fenced, receipted command now: a

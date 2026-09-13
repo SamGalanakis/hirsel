@@ -85,7 +85,7 @@ export const CommandPalette: Component<{
         id: "go-processes",
         label: "Open Processes",
         hint: ["g", "p"],
-        keywords: "monitors timers background",
+        keywords: "processes triggers timers background",
         icon: <Activity class={iconClass} aria-hidden="true" />,
         run: () => goPane("processes"),
       },

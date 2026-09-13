@@ -86,6 +86,62 @@ async fn unopened_thread_receives_each_execution_transition_at_the_same_revision
 }
 
 #[tokio::test]
+async fn terminal_child_turn_emits_typed_turn_and_completion_triggers() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    let (parent, _) = state
+        .storage
+        .create_thread(
+            "trigger-parent",
+            "Parent",
+            "",
+            &json!({}),
+            ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Space,
+            None,
+        )
+        .await
+        .unwrap();
+    let (child, _) = state
+        .storage
+        .create_thread(
+            "trigger-child",
+            "Child",
+            "",
+            &json!({}),
+            ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
+            Some(parent.id),
+        )
+        .await
+        .unwrap();
+    let queued = state
+        .storage
+        .queue_thread_turn(child.id, None)
+        .await
+        .unwrap();
+    let running = state.storage.run_thread_turn(queued.id).await.unwrap();
+    let finished = state
+        .storage
+        .finish_thread_turn(running.id, ThreadTurnState::Completed, None)
+        .await
+        .unwrap();
+    state.tools.publish_thread_turn(finished).await;
+
+    let events = state.tools.recorded_thread_triggers().await;
+    assert!(events.iter().any(|event| event.source_type
+        == crate::lash_runtime::THREAD_TURN_SOURCE_TYPE
+        && event.event_type == crate::lash_runtime::THREAD_TURN_EVENT_TYPE
+        && event.thread_id == child.id));
+    assert!(events.iter().any(|event| event.source_type
+        == crate::lash_runtime::THREAD_COMPLETED_SOURCE_TYPE
+        && event.event_type == crate::lash_runtime::THREAD_COMPLETED_EVENT_TYPE
+        && event.thread_id == child.id));
+}
+
+#[tokio::test]
 async fn message_and_activity_publish_recency_without_changing_thread_lifecycle() {
     let dir = tempfile::tempdir().unwrap();
     let state = crate::build_state(crate::tests::test_config(dir.path()))

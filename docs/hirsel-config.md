@@ -13,21 +13,23 @@ address, regardless of its ephemeral source port. Hirsel does not trust
 a shared proxy therefore share one WebSocket authentication-throttle history
 unless a future trusted-proxy contract explicitly provides client identity.
 
-The Host runs addressed Thread conversations plus current subagent, monitor and fork-triage resources. There are no side-session compatibility flags or Event/Ping APIs.
+The Host runs addressed Thread conversations plus current subagent, Lash process, trigger, and fork-triage resources. The coordinator uses the TypeScript RLM dialect with process and trigger abilities. Registered processes and subscriptions live in per-Thread Lash stores; Hirsel projects them into the scoped Processes view and turns wakes and terminal results into conversation messages. There are no side-session compatibility flags or Event/Ping APIs.
 
-History lives in `hirsel.sqlite`. New stores use the complete current schema 5
+History lives in `hirsel.sqlite`. New stores use the complete current schema 7
 layout. Startup accepts that exact layout or an empty store and refuses every
 other layout before modification. Back up the data directory before replacing
 an older store. Configuration in `hirsel.toml`, auth/identity, plugins and
 project files remain independent. See `e2e/thread-protocol/runbook.md` for
 current validation and operator retention requirements.
 
-Schema 5 adds the append-only `thread_turn_events` timeline. The Host commits
+Schema 5 added the append-only `thread_turn_events` timeline. The Host commits
 each typed event before broadcasting it and `open_thread` replays events only
 for turns represented by its bounded message page (plus bounded message-less
 turns on the newest page). Existing schema 4 histories can be preserved by a
 separately reviewed offline operator that adds this initially empty table and
 advances `user_version`; old reasoning or tool payloads are never reconstructed.
+
+Schema 7 removes the obsolete host-owned probe table and adds durable receipts plus Thread authority for Lash process tools and messages. Hirsel deliberately has no compatibility migration: use the usual same-schema deployment or start with fresh history data after backing up anything that must be retained.
 
 ## The provider roster
 

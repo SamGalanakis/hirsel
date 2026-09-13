@@ -17,10 +17,6 @@ pub(super) fn condense_args(name: &str, payload: &Value) -> Option<String> {
         "threads_delegate" => labeled_scalar(payload, "title", "child"),
         "threads_send" => labeled_scalar(payload, "text", "message"),
         "threads_report" => labeled_scalar(payload, "summary", "report"),
-        "monitors_create" => labeled_first_scalar(payload, &["label", "cmd"], "monitor"),
-        "monitors_cancel" => scalar_any(payload, &["monitor_id"])
-            .map(|id| format!("monitor {}", tail_identifier(&id))),
-        "monitors_list" => None,
         _ => first_string_field(payload).map(|(key, value)| format!("{key}: {value}")),
     };
     clean_summary(summary)
@@ -43,14 +39,6 @@ pub(super) fn condense_result(name: &str, args: &Value, output: &Value) -> Optio
             .map(|templates| format!("{} templates", templates.len())),
         "threads_delegate" | "threads_send" | "threads_report" => {
             scalar_field(payload, "thread_id").map(|id| format!("thread #{id}"))
-        }
-        "monitors_create" => scalar_any(payload, &["monitor_id"])
-            .map(|id| format!("monitor {}", tail_identifier(&id))),
-        "monitors_cancel" => scalar_any(payload, &["monitor_id"])
-            .or_else(|| scalar_any(args, &["monitor_id"]))
-            .map(|id| format!("monitor {}", tail_identifier(&id))),
-        "monitors_list" => {
-            scalar_count(payload, "monitors").map(|count| format!("{count} monitors"))
         }
         _ => first_scalar_field(payload).map(|(_, value)| value),
     }
@@ -110,19 +98,8 @@ pub(super) fn failure_message(output: &Value) -> Option<String> {
         })
 }
 
-pub(super) fn scalar_count(value: &Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(Value::as_array)
-        .map(|items| items.len().to_string())
-}
-
 pub(super) fn labeled_scalar(value: &Value, key: &str, label: &str) -> Option<String> {
     scalar_field(value, key).map(|text| format!("{label}: {text}"))
-}
-
-pub(super) fn labeled_first_scalar(value: &Value, keys: &[&str], label: &str) -> Option<String> {
-    scalar_any(value, keys).map(|text| format!("{label}: {text}"))
 }
 
 pub(super) fn scalar_any(value: &Value, keys: &[&str]) -> Option<String> {

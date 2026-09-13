@@ -257,28 +257,47 @@ impl AgentRuntime {
         }
     }
 
-    pub async fn start_monitor_process(&self, record: &MonitorRecord) -> anyhow::Result<()> {
+    pub async fn process_snapshot(&self) -> anyhow::Result<Vec<hirsel_proto::ProcessInfo>> {
         match self.backend.as_ref() {
-            AgentBackend::Threaded(registry) => registry.start_monitor(record).await,
-            AgentBackend::Lash(runtime) => runtime.start_monitor_process(record).await,
-            AgentBackend::Scripted(runtime) => {
-                runtime.spawn_standalone_monitor(record.id.clone());
-                Ok(())
-            }
-            AgentBackend::Degraded(_) => Ok(()),
+            AgentBackend::Threaded(registry) => registry.process_snapshot().await,
+            AgentBackend::Lash(runtime) => runtime.process_snapshot().await,
+            AgentBackend::Scripted(_) | AgentBackend::Degraded(_) => Ok(Vec::new()),
         }
     }
 
-    pub async fn cancel_monitor_process(&self, _monitor_id: &str) -> anyhow::Result<()> {
-        Ok(())
+    pub async fn cancel_process(&self, thread_id: u64, process_id: &str) -> anyhow::Result<()> {
+        match self.backend.as_ref() {
+            AgentBackend::Threaded(registry) => {
+                registry.cancel_process(thread_id, process_id).await
+            }
+            AgentBackend::Lash(runtime) if runtime.thread_id == thread_id => {
+                runtime.cancel_process(process_id).await
+            }
+            _ => anyhow::bail!("process runtime is unavailable"),
+        }
     }
 
-    /// Deliver a standalone monitor wake.
-    ///
-    /// On the Lash backend this is a non-owner message, so ADR-0015 routes it
-    /// to a triage fork rather than the main Agent's queue; only the fork's
-    /// Escalate exit reaches the Agent. The other backends have no fork
-    /// dispatcher and keep their pre-ADR delivery.
+    pub async fn disable_process_trigger(
+        &self,
+        thread_id: u64,
+        subscription_key: &str,
+        expected_revision: u64,
+    ) -> anyhow::Result<()> {
+        match self.backend.as_ref() {
+            AgentBackend::Threaded(registry) => {
+                registry
+                    .disable_trigger(thread_id, subscription_key, expected_revision)
+                    .await
+            }
+            AgentBackend::Lash(runtime) if runtime.thread_id == thread_id => {
+                runtime
+                    .disable_trigger(subscription_key, expected_revision)
+                    .await
+            }
+            _ => anyhow::bail!("trigger runtime is unavailable"),
+        }
+    }
+
     pub async fn dispatch_fork_wake(
         &self,
         message: crate::fork_wake::WakeMessage,
@@ -288,6 +307,56 @@ impl AgentRuntime {
             AgentBackend::Lash(runtime) => Ok(runtime.fork_wake.dispatch(message)),
             _ => Ok(false),
         }
+    }
+}
+
+impl LashAgentRuntime {
+    pub(crate) fn thread_id(&self) -> u64 {
+        self.thread_id
+    }
+
+    pub(crate) async fn emit_thread_occurrence(
+        &self,
+        source_type: &str,
+        event_type: &str,
+        thread_id: u64,
+        payload: Value,
+        idempotency_key: &str,
+    ) -> anyhow::Result<()> {
+        let mut filter = TriggerSubscriptionFilter::for_session(&self.session_id);
+        filter.source_type = Some(source_type.to_string());
+        filter.enabled = Some(true);
+        for record in self.trigger_store.list_subscriptions(filter).await? {
+            let target = record
+                .source
+                .get("$lash_host_descriptor_value")
+                .and_then(|value| value.get("thread_id"))
+                .and_then(Value::as_u64);
+            if target != Some(thread_id) {
+                continue;
+            }
+            let report = self
+                .core
+                .triggers()
+                .emit(
+                    lash::triggers::TriggerOccurrenceRequest::new(
+                        source_type,
+                        record.source_key.clone(),
+                        payload.clone(),
+                        format!("{idempotency_key}:{}", record.subscription_key),
+                    )
+                    .with_source(record.source.clone()),
+                    inline_trigger_scope(format!(
+                        "thread-trigger:{event_type}:{}:{}",
+                        record.subscription_key, thread_id
+                    )),
+                )
+                .await?;
+            if !report.deliveries.is_empty() {
+                tracing::debug!(event_type, thread_id, subscription_key = %record.subscription_key, "Thread trigger delivered");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -323,7 +392,7 @@ pub(super) enum LashStartup {
     Unavailable(Arc<DegradedAgentRuntime>),
 }
 
-pub(super) struct LashAgentRuntime {
+pub(crate) struct LashAgentRuntime {
     pub(super) tasks: RuntimeTasks,
     pub(super) history_id: String,
     pub(super) thread_id: u64,
@@ -339,6 +408,9 @@ pub(super) struct LashAgentRuntime {
     pub(super) broadcaster: broadcast::Sender<HostToClient>,
     pub(super) broadcast_log: BroadcastLog,
     pub(super) notify: Arc<Notify>,
+    /// Queued-work notifications first pass through the process bridge so a
+    /// process wake cannot race the resident Agent pump.
+    pub(super) process_notify: Arc<Notify>,
     pub(super) pump_lock: Mutex<()>,
     pub(super) request_lock: Mutex<()>,
     pub(super) anchors: Arc<Mutex<TurnAnchorState>>,
@@ -358,6 +430,8 @@ pub(super) struct LashAgentRuntime {
     /// core is still being built and filled in once the runtime exists; an
     /// uninstalled handle means the wake site keeps its pre-ADR behaviour.
     pub(super) fork_wake: crate::fork_wake::ForkWakeHandle,
+    pub(super) trigger_store: Arc<dyn TriggerStore>,
+    pub(super) last_processes: Mutex<HashMap<String, hirsel_proto::ProcessInfo>>,
 }
 
 #[derive(Debug, Clone)]

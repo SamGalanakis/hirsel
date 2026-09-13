@@ -245,12 +245,13 @@ fn the_pack_carries_the_trigger_verbatim_plus_a_curated_slice() {
 fn the_pack_bounds_every_section_and_never_dumps_history() {
     let message = WakeMessage::new(
         1,
-        WakeSource::Monitor {
-            monitor_id: "mon-1".to_string(),
-            label: "ci".to_string(),
+        WakeSource::Process {
+            process_id: "proc-1".to_string(),
+            name: "ci".to_string(),
+            trigger: "cron */5 * * * *".to_string(),
         },
         "x".repeat(64 * 1024),
-        "monitor:mon-1:1",
+        "process:proc-1:1",
     );
     let context = PackContext {
         threads: (0..80)
@@ -312,7 +313,6 @@ fn the_fork_tool_surface_is_exactly_its_three_exits() {
         "threads_report",
         "threads_create",
         "shell_run",
-        "monitors_create",
         "views_show",
     ] {
         assert!(
@@ -443,12 +443,13 @@ async fn concurrent_forks_are_capped_by_the_semaphore() {
         handles.push(tokio::spawn(async move {
             fork.dispatch_now(WakeMessage::new(
                 1,
-                WakeSource::Monitor {
-                    monitor_id: format!("mon-{index}"),
-                    label: "ci".to_string(),
+                WakeSource::Process {
+                    process_id: format!("proc-{index}"),
+                    name: "ci".to_string(),
+                    trigger: "thread.Message #1".to_string(),
                 },
-                "Monitor fired.",
-                format!("monitor:mon-{index}:1"),
+                "Process finished.",
+                format!("process:proc-{index}:1"),
             ))
             .await;
         }));
@@ -510,9 +511,10 @@ async fn owner_messages_bypass_forks_entirely() {
         WakeSource::External {
             origin: "proc-1".to_string(),
         },
-        WakeSource::Monitor {
-            monitor_id: "mon-1".to_string(),
-            label: "disk".to_string(),
+        WakeSource::Process {
+            process_id: "proc-1".to_string(),
+            name: "disk".to_string(),
+            trigger: "timer every 30s".to_string(),
         },
         WakeSource::External {
             origin: "webhook".to_string(),
@@ -521,7 +523,7 @@ async fn owner_messages_bypass_forks_entirely() {
         match &source {
             // Exhaustive on purpose: adding an Owner-shaped variant must break
             // this test rather than quietly route Owner traffic into a fork.
-            WakeSource::Monitor { .. } | WakeSource::External { .. } => {}
+            WakeSource::Process { .. } | WakeSource::External { .. } => {}
         }
         assert!(handle.dispatch(WakeMessage::new(1, source, "fired", "k")));
     }

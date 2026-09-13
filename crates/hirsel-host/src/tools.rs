@@ -15,9 +15,9 @@ use crate::{
 };
 
 mod digest;
-mod monitors;
 mod session;
 pub(crate) mod shell;
+mod thread_triggers;
 
 mod threads;
 mod views;
@@ -51,6 +51,7 @@ pub struct ToolSuite {
     /// Tools contributed by enabled plugins. Empty until the plugin host
     /// registers into it, and empty forever when no plugin is installed.
     plugin_tools: crate::plugins::PluginToolRegistry,
+    thread_triggers: Arc<thread_triggers::ThreadTriggerHub>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +103,7 @@ impl ToolSuite {
             codex: Arc::new(CodexDriver::default()),
             timeline_integrity_failures: Arc::new(Mutex::new(HashMap::new())),
             plugin_tools: crate::plugins::PluginToolRegistry::default(),
+            thread_triggers: Arc::new(thread_triggers::ThreadTriggerHub::default()),
         }
     }
 
@@ -294,6 +296,7 @@ impl ToolSuite {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        self.thread_triggers.clear().await;
         self.views
             .clear_all(
                 self.storage

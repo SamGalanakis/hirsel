@@ -5,8 +5,8 @@ use chrono::{TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
 use hirsel_client_core::{
     AgentActivityState, ChatAuthor, ChatMessage, Client, ClientConfig, ClientObserver,
-    ClientSnapshot, ConnectionState, LifecycleEvent, ProcessInfo, ProcessKind, ProcessState,
-    ReconnectPolicy, SendThreadMessageRequest, Thread, ThreadAttention, ThreadKind,
+    ClientSnapshot, ConnectionState, LifecycleEvent, ProcessInfo, ProcessState, ReconnectPolicy,
+    SendThreadMessageRequest, Thread, ThreadAttention, ThreadKind,
 };
 use hirsel_proto::{ClientToHost, HelloAuth, HostToClient};
 use tokio::net::{TcpListener, TcpStream};
@@ -62,14 +62,17 @@ fn process(id: &str, state: ProcessState) -> ProcessInfo {
     ProcessInfo {
         thread_id: 5,
         id: id.into(),
-        kind: ProcessKind::Monitor,
-        label: "Research".into(),
-        agent: Some("worker".into()),
-        model: Some("test".into()),
+        name: "Research".into(),
+        trigger: Some("every 60s".into()),
+        trigger_subscription_key: Some("research".into()),
+        trigger_revision: Some(1),
+        trigger_enabled: Some(true),
+        cancellable: true,
         state,
         started_ts: Utc.timestamp_opt(1, 0).unwrap(),
         last_event_ts: Utc.timestamp_opt(2, 0).unwrap(),
-        summary: None,
+        last_fired_ts: None,
+        last_outcome: None,
     }
 }
 

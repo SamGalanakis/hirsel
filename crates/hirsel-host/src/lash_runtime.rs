@@ -21,13 +21,10 @@ use lash::{
     InputItem, PromptLayerSink, QueuedTurnDrain, TurnInput,
     observe::RemoteSessionObservationStreamItem,
     plugins::{
-        PluginError, PluginExtensionContribution, PluginFactory, PluginOptions, PluginRegistrar,
+        PluginError, PluginExtensionContribution, PluginFactory, PluginRegistrar,
         PluginSessionContext, SessionPlugin,
     },
-    process::{
-        ProcessAwaitOutput, ProcessEventAppendRequest, ProcessEventType, ProcessExecutionEnvSpec,
-        ProcessIdentity, ProcessInput, ProcessStartRequest, RecoveryContract, SessionScope,
-    },
+    process::ProcessAwaitOutput,
     provider::{ProviderHandle, ProviderOptions, ReasoningSelection},
     remote::{
         observations::{RemoteSessionCursor, RemoteSessionObservationEventPayload},
@@ -39,14 +36,8 @@ use lash::{
         StaticToolExecute, ToolBinding, ToolCall, ToolContract, ToolDefinition,
         ToolDefinitionBindingExt, ToolManifest, ToolOutcome, ToolProvider,
     },
-    triggers::LashSchema,
 };
-use lash_core::{
-    ProcessEngine, ProcessEngineRunContext, ProcessEngineValidationContext,
-    ProcessEventSemanticsSpec, ProcessOriginator, ProcessRunOutcome, ProtocolTurnOptions,
-    SessionPolicy, TriggerStore, TriggerSubscriptionFilter, TurnInputIngress,
-    plugin::ProcessEngineContributionContext,
-};
+use lash_core::{ProtocolTurnOptions, TriggerStore, TriggerSubscriptionFilter, TurnInputIngress};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, Notify, broadcast};
@@ -58,10 +49,8 @@ use crate::{
     config::{AgentMode, Config, DriverMode, ProviderMode},
     host_config::ConfigStore,
     model_selection::ModelSelectionState,
-    monitors::{output_tail, run_monitor_tick},
     prompt_config::PromptConfig,
     providers::ProviderRosterState,
-    storage::{MonitorCondition, MonitorRecord},
     tools::ToolSuite,
 };
 
@@ -70,8 +59,6 @@ use crate::{
 /// a recorded dialect pin is durable for the session's lifetime.
 const AGENT_RLM_DIALECT: RlmDialect = RlmDialect::Typescript;
 
-const HIRSEL_MONITOR_ENGINE: &str = "hirsel_monitor";
-const MONITOR_WAKE_EVENT: &str = "monitor.wake";
 /// Prefix stamped on every queued turn a triage fork escalates (ADR-0015).
 ///
 /// Escalation rides the same `enqueue_turn_input` path an Owner queued turn
@@ -80,6 +67,14 @@ const MONITOR_WAKE_EVENT: &str = "monitor.wake";
 const FORK_BRIEF_MARKER: &str = "[fork brief]";
 const TIMER_SOURCE_TYPE: &str = "timer.Schedule";
 const TIMER_EVENT_TYPE: &str = "timer.Tick";
+pub(crate) const THREAD_REPORTED_SOURCE_TYPE: &str = "thread.Reported";
+pub(crate) const THREAD_REPORTED_EVENT_TYPE: &str = "thread.Report";
+pub(crate) const THREAD_COMPLETED_SOURCE_TYPE: &str = "thread.Completed";
+pub(crate) const THREAD_COMPLETED_EVENT_TYPE: &str = "thread.Complete";
+pub(crate) const THREAD_MESSAGE_SOURCE_TYPE: &str = "thread.Messaged";
+pub(crate) const THREAD_MESSAGE_EVENT_TYPE: &str = "thread.Message";
+pub(crate) const THREAD_TURN_SOURCE_TYPE: &str = "thread.Turned";
+pub(crate) const THREAD_TURN_EVENT_TYPE: &str = "thread.Turn";
 const TIMER_MIN_RECURRING_SECS: u64 = 60;
 #[cfg(not(test))]
 const SNOOZE_TICK_INTERVAL: Duration = Duration::from_secs(1);
@@ -94,7 +89,7 @@ mod lifecycle;
 mod native_worker;
 mod native_worker_protocol;
 mod plugin;
-mod process_engines;
+mod process_bridge;
 mod provider;
 mod runtime;
 mod scripted;
@@ -127,9 +122,8 @@ pub(crate) use condense::*;
 use executor::*;
 use lifecycle::*;
 use plugin::*;
-use process_engines::*;
 use provider::*;
-use runtime::*;
+pub(crate) use runtime::*;
 use scripted::*;
 use timeline::*;
 use tool_defs::*;

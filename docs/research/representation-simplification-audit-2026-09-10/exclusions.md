@@ -18,7 +18,7 @@ Issue state is supplied by the root snapshot map, not live service reads. Reopen
 
 - Thread pin, settlement, attention, visibility, read and execution are independent dimensions (PRODUCT/ADR0016). Do not collapse valid orthogonal state just because booleans exist. Final top-level pin constraint supersedes old PRODUCT copy if final source has it.
 - Artifacts are mutable global content without versions; explicit references are access grants; backlinks must remain scoped. Shared ownership and current-content cards are intentional (ADR0017).
-- No automatic delegated-work restart; monitors are the intentional rerunnable exception (ADR0004).
+- No automatic delegated-work restart; durable Lash processes are the explicit rerunnable mechanism (ADR0004).
 - Native Rust CLI drivers and full-trust compiled in-tree plugins are settled (ADR0003/0014).
 - Protocol is transport-agnostic; native iroh and browser WSS intentionally differ (ADR0006/0011).
 - Final shipped schema4 only, direct current.sql layout and exact catalog validation. No compatibility/migrations in shipped source. History deletion allowed if necessary for a verified final model; no gratuitous deletion.
@@ -38,11 +38,9 @@ Issue state is supplied by the root snapshot map, not live service reads. Reopen
 - #22: root independently found view-only fresh catalog bypass; separate schema implementation is underway. C24/C26 and other audits must deduplicate this mechanism.
 
 - Coordinator latent-input skips: C01 nested action-id mismatch, C07 malformed Related item/envelope mismatch, C09 malformed/empty Codex frames. Do not repeat absent a real producer/race witness; dispositions in verified/. C03 reverse-receipt read failure was factually wrong (query_row ignores later rows), and duplicate mention labels do not justify relational schema churn.
-- C08 policy correction: do not restore Subagent ProcessInfo inventory; Rust monitor-only is current contract and Thread execution owns CLI work. The real false last-fired display is narrowed to latest activity wording; no new wake timestamp absent a product requirement.
 
 - Root independently accepted F06/#24 inline blob policy and F07/#25 current-root blob resolution; separate Sol implementation includes isolated browser and stopped-directory relocation/queued-image checks. F08/#26 is only truthful latest-activity display; no last_wake field or restored subagent producer.
 
-- Coordinator F09: malformed regex monitor is accepted at tool/storage boundary then compiles to false forever. Canonical owner C12 ingress; C08 storage/runner consumers. Evidence verified/F09-monitor-condition-validation.md. Distinct from F08 label; do not create a second condition finding.
 
 - Root accepted F10/#28 shell timeout stderr preservation and F11/#29 editable provider required-field validation; same bounded host-fix lane, no new protocol/schema/timing. C13 roster union and C16 policy-module/source-preference proposals rejected as nonmaterial or unsupported semantics.
 

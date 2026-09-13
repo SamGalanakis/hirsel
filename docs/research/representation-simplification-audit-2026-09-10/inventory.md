@@ -17,11 +17,10 @@ Exact owned files/definitions and verified anchors, existing tests, consumer pat
 | C05-DELEGATION-SCOPE | 13 | 4 | skip | workers/C05-DELEGATION-SCOPE.md; verified/C05-F01-disposition.md |
 | C06-ARTIFACTS | 7 | 7 | skip | workers/C06-ARTIFACTS.md; verified/C06-F1-disposition.md |
 | C07-RELATED | 3 | 4 | skip | workers/C07-RELATED.md; verified/C07-F01-disposition.md |
-| C08-PROCESS-WAKE | 19 | 1 | recommend | workers/C08-PROCESS-WAKE.md; verified/F08-monitor-activity-label.md; verified/C08-01-disposition.md |
 | C09-CODEX-DRIVER | 6 | 0 | skip | workers/C09-CODEX-DRIVER.md; verified/C09-dispositions.md |
 | C10-CLAUDE-DRIVER | 5 | 0 | skip | workers/C10-CLAUDE-DRIVER.md; verified/C10-dispositions.md |
 | C11-DRIVER-SHARED | 9 | 0 | recommend | workers/C11-DRIVER-SHARED.md; verified/F10-shell-timeout-stderr.md |
-| C12-LASH-RUNTIME | 8 | 0 | recommend | workers/C12-LASH-RUNTIME.md; verified/F09-monitor-condition-validation.md |
+| C12-LASH-RUNTIME | 8 | 0 | recommend | workers/C12-LASH-RUNTIME.md |
 | C13-CONFIG | 15 | 2 | recommend | workers/C13-CONFIG.md; verified/F11-provider-file-validation.md; verified/C13-02-disposition.md |
 | C14-PROTOCOL-CONNECTION | 27 | 66 | recommend | workers/C14-PROTOCOL-CONNECTION.md; verified/F03-view-removal-dedupe.md; verified/F04-reconnect-auth-phase.md |
 | C15-WEB-THREADS | 46 | 0 | recommend | workers/C15-WEB-THREADS.md; verified/F05-action-error-ownership.md; root #13/#12 regressions deduped |

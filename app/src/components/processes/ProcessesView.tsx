@@ -1,13 +1,27 @@
 import { Activity } from "@/components/ui/icons";
 import { createMemo, For, Show } from "solid-js";
 
-import { partitionProcesses } from "../../store/selectors";
+import { partitionProcesses, scopedProcesses } from "../../store/selectors";
 import { state } from "../../store/store";
+import { historyId } from "../../lib/history";
+import { threadState } from "../../threads/store";
+import { getClient } from "../../ws/client";
+import type { ProcessInfo } from "../../protocol";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
 import { ProcessRow } from "./ProcessRow";
 
 export function ProcessesView() {
-  const groups = createMemo(() => partitionProcesses(state.processes));
+  const groups = createMemo(() => partitionProcesses(scopedProcesses(state.processes, threadState.threads, threadState.focusedId)));
+  const cancel = (process: ProcessInfo) => {
+    const history = historyId();
+    if (history) getClient()?.cancelProcess(history, process.thread_id, process.id);
+  };
+  const disable = (process: ProcessInfo) => {
+    const history = historyId();
+    if (history && process.trigger_subscription_key && process.trigger_revision !== null) {
+      getClient()?.disableProcessTrigger(history, process.thread_id, process.trigger_subscription_key, process.trigger_revision);
+    }
+  };
 
   return (
     <Show
@@ -19,9 +33,9 @@ export function ProcessesView() {
               <EmptyMedia variant="icon">
                 <Activity />
               </EmptyMedia>
-              <EmptyTitle>No monitors</EmptyTitle>
+              <EmptyTitle>No processes</EmptyTitle>
               <EmptyDescription>
-                Monitors will appear here when the Agent creates them.
+                Lash processes for this Thread and its descendants will appear here.
               </EmptyDescription>
             </EmptyHeader>
           </Empty>
@@ -35,7 +49,7 @@ export function ProcessesView() {
               Running ({groups().running.length})
             </h2>
             <For each={groups().running}>
-              {(process) => <ProcessRow process={process} />}
+              {(process) => <ProcessRow process={process} onCancel={cancel} onDisableTrigger={disable} />}
             </For>
           </section>
         </Show>
@@ -46,7 +60,7 @@ export function ProcessesView() {
               Finished ({groups().finished.length})
             </h2>
             <For each={groups().finished}>
-              {(process) => <ProcessRow process={process} />}
+              {(process) => <ProcessRow process={process} onCancel={cancel} onDisableTrigger={disable} />}
             </For>
           </section>
         </Show>

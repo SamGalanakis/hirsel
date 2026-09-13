@@ -9,8 +9,8 @@ mod chat;
 mod common;
 mod devices;
 mod meta;
-mod monitors;
 mod plugins;
+mod process_deliveries;
 mod push_tokens;
 mod schema;
 
@@ -52,8 +52,7 @@ pub(crate) use artifacts::ArtifactDraft;
 pub use blobs::StoredBlob;
 pub use chat::HelloSnapshot;
 pub use devices::Device;
-pub(crate) use monitors::monitor_process_info;
-pub use monitors::{MonitorCondition, MonitorRecord};
+pub(crate) use process_deliveries::ProcessDelivery;
 pub use push_tokens::PushToken;
 
 #[derive(Clone)]
@@ -116,6 +115,8 @@ impl Storage {
                 DELETE FROM thread_execution_preferences;
                 DELETE FROM thread_turn_execution;
                 DELETE FROM thread_mutation_receipts;
+                DELETE FROM thread_process_authorities;
+                DELETE FROM thread_process_sessions;
                 DELETE FROM thread_execution_bindings;
                 DELETE FROM thread_reports;
                 DELETE FROM thread_delegations;
@@ -126,7 +127,7 @@ impl Storage {
                 DELETE FROM client_blobs;
                 DELETE FROM blobs;
                 DELETE FROM client_messages;
-                DELETE FROM monitors;
+                DELETE FROM process_deliveries;
                 DELETE FROM chat_messages;
                 DELETE FROM threads;
                 DELETE FROM sqlite_sequence

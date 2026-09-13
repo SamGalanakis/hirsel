@@ -689,62 +689,6 @@
       "evidence": "workers/C07-RELATED.md; verified/C07-F01-disposition.md"
     },
     {
-      "id": "C08-PROCESS-WAKE",
-      "name": "Processes, monitors, fork wake, scheduling and process snapshots",
-      "boundaries": "Exact owned_files and owned_definitions below are authoritative. Other layers are consumer reads only.",
-      "conversions": "monitor -> wake -> runtime/fork -> ProcessUpsert/attention; terminal -> process state; snapshot -> process UI",
-      "consumers_and_tests": "Verified existing tests: app/src/components/processes/process-row.test.tsx, crates/hirsel-host/src/fork_wake/tests.rs, crates/hirsel-host/src/storage/monitors/tests.rs. Consumer reads: app/src/store/reducer.ts, app/src/store/selectors.ts, app/src/store/types.ts, crates/hirsel-host/src/storage/current.sql.",
-      "status": "recommend",
-      "owned_path_count": 19,
-      "owned_files": [
-        "app/src/components/processes/ProcessRow.tsx",
-        "app/src/components/processes/ProcessesSheet.tsx",
-        "app/src/components/processes/ProcessesView.tsx",
-        "crates/hirsel-host/src/fork_wake.rs",
-        "crates/hirsel-host/src/fork_wake/dispatch.rs",
-        "crates/hirsel-host/src/fork_wake/pack.rs",
-        "crates/hirsel-host/src/fork_wake/session.rs",
-        "crates/hirsel-host/src/fork_wake/tools.rs",
-        "crates/hirsel-host/src/lash_runtime/process_engines.rs",
-        "crates/hirsel-host/src/lash_runtime/timers.rs",
-        "crates/hirsel-host/src/monitors.rs",
-        "crates/hirsel-host/src/process_run.rs",
-        "crates/hirsel-host/src/storage/monitors.rs",
-        "crates/hirsel-host/src/tools/digest.rs",
-        "crates/hirsel-host/src/tools/monitors.rs",
-        "crates/hirsel-proto/src/process.rs",
-        "app/src/components/processes/process-row.test.tsx",
-        "crates/hirsel-host/src/fork_wake/tests.rs",
-        "crates/hirsel-host/src/storage/monitors/tests.rs"
-      ],
-      "shared_file_defaults": [],
-      "owned_definitions": [
-        {
-          "path": "crates/hirsel-host/src/storage/current.sql",
-          "symbol": "monitors",
-          "owner": "C08-PROCESS-WAKE",
-          "line": 63,
-          "kind": "table"
-        }
-      ],
-      "consumer_crosswalk": [
-        "C14-PROTOCOL-CONNECTION",
-        "C25-HOST-OPS"
-      ],
-      "existing_test_paths": [
-        "app/src/components/processes/process-row.test.tsx",
-        "crates/hirsel-host/src/fork_wake/tests.rs",
-        "crates/hirsel-host/src/storage/monitors/tests.rs"
-      ],
-      "major_consumer_paths": [
-        "app/src/store/reducer.ts",
-        "app/src/store/selectors.ts",
-        "app/src/store/types.ts",
-        "crates/hirsel-host/src/storage/current.sql"
-      ],
-      "evidence": "workers/C08-PROCESS-WAKE.md; verified/F08-monitor-activity-label.md; verified/C08-01-disposition.md"
-    },
-    {
       "id": "C09-CODEX-DRIVER",
       "name": "Native Codex app-server session, request correlation and process control",
       "boundaries": "Exact owned_files and owned_definitions below are authoritative. Other layers are consumer reads only.",
@@ -893,7 +837,7 @@
         "crates/hirsel-host/src/tools/threads.rs",
         "crates/hirsel-host/src/tools/views.rs"
       ],
-      "evidence": "workers/C12-LASH-RUNTIME.md; verified/F09-monitor-condition-validation.md"
+      "evidence": "workers/C12-LASH-RUNTIME.md"
     },
     {
       "id": "C13-CONFIG",
@@ -1053,13 +997,6 @@
           "symbol": "ChatMessage",
           "owner": "C14-PROTOCOL-CONNECTION",
           "line": 25,
-          "kind": "definition"
-        },
-        {
-          "path": "app/src/protocol.ts",
-          "symbol": "ProcessKind",
-          "owner": "C14-PROTOCOL-CONNECTION",
-          "line": 44,
           "kind": "definition"
         },
         {
@@ -3008,9 +2945,6 @@
     "crates/hirsel-host/src/model_selection.rs": [
       "C13-CONFIG"
     ],
-    "crates/hirsel-host/src/monitors.rs": [
-      "C08-PROCESS-WAKE"
-    ],
     "crates/hirsel-host/src/plugins.rs": [
       "C23-PLUGINS"
     ],
@@ -3076,9 +3010,6 @@
     ],
     "crates/hirsel-host/src/storage/meta.rs": [
       "C25-HOST-OPS"
-    ],
-    "crates/hirsel-host/src/storage/monitors.rs": [
-      "C08-PROCESS-WAKE"
     ],
     "crates/hirsel-host/src/storage/plugins.rs": [
       "C23-PLUGINS"
@@ -3162,9 +3093,6 @@
       "C12-LASH-RUNTIME"
     ],
     "crates/hirsel-host/src/tools/digest.rs": [
-      "C08-PROCESS-WAKE"
-    ],
-    "crates/hirsel-host/src/tools/monitors.rs": [
       "C08-PROCESS-WAKE"
     ],
     "crates/hirsel-host/src/tools/session.rs": [
@@ -3604,9 +3532,6 @@
     ],
     "crates/hirsel-host/src/storage/devices/tests.rs": [
       "C25-HOST-OPS"
-    ],
-    "crates/hirsel-host/src/storage/monitors/tests.rs": [
-      "C08-PROCESS-WAKE"
     ],
     "crates/hirsel-host/src/storage/push_tokens/tests.rs": [
       "C25-HOST-OPS"
@@ -5150,12 +5075,6 @@
       "scope": "production"
     },
     {
-      "path": "crates/hirsel-host/src/monitors.rs",
-      "owner": "C08-PROCESS-WAKE",
-      "status": "recommend",
-      "scope": "production"
-    },
-    {
       "path": "crates/hirsel-host/src/plugins.rs",
       "owner": "C23-PLUGINS",
       "status": "skip",
@@ -5284,12 +5203,6 @@
     {
       "path": "crates/hirsel-host/src/storage/meta.rs",
       "owner": "C25-HOST-OPS",
-      "status": "recommend",
-      "scope": "production"
-    },
-    {
-      "path": "crates/hirsel-host/src/storage/monitors.rs",
-      "owner": "C08-PROCESS-WAKE",
       "status": "recommend",
       "scope": "production"
     },
@@ -5457,12 +5370,6 @@
     },
     {
       "path": "crates/hirsel-host/src/tools/digest.rs",
-      "owner": "C08-PROCESS-WAKE",
-      "status": "recommend",
-      "scope": "production"
-    },
-    {
-      "path": "crates/hirsel-host/src/tools/monitors.rs",
       "owner": "C08-PROCESS-WAKE",
       "status": "recommend",
       "scope": "production"
@@ -6344,12 +6251,6 @@
       "scope": "tests/tooling"
     },
     {
-      "path": "crates/hirsel-host/src/storage/monitors/tests.rs",
-      "owner": "C08-PROCESS-WAKE",
-      "status": "recommend",
-      "scope": "tests/tooling"
-    },
-    {
       "path": "crates/hirsel-host/src/storage/push_tokens/tests.rs",
       "owner": "C25-HOST-OPS",
       "status": "recommend",
@@ -6592,11 +6493,6 @@
       "message_attachments": {
         "owner": "C04-BLOBS",
         "line": 57,
-        "kind": "table"
-      },
-      "monitors": {
-        "owner": "C08-PROCESS-WAKE",
-        "line": 63,
         "kind": "table"
       },
       "push_tokens": {
@@ -6842,11 +6738,6 @@
       "ChatMessage": {
         "owner": "C14-PROTOCOL-CONNECTION",
         "line": 25,
-        "kind": "definition"
-      },
-      "ProcessKind": {
-        "owner": "C14-PROTOCOL-CONNECTION",
-        "line": 44,
         "kind": "definition"
       },
       "ProcessState": {
@@ -7744,42 +7635,6 @@
         "C25-HOST-OPS"
       ]
     },
-    "C08-PROCESS-WAKE": {
-      "owned_paths": [
-        "app/src/components/processes/ProcessRow.tsx",
-        "app/src/components/processes/ProcessesSheet.tsx",
-        "app/src/components/processes/ProcessesView.tsx",
-        "crates/hirsel-host/src/fork_wake.rs",
-        "crates/hirsel-host/src/fork_wake/dispatch.rs",
-        "crates/hirsel-host/src/fork_wake/pack.rs",
-        "crates/hirsel-host/src/fork_wake/session.rs",
-        "crates/hirsel-host/src/fork_wake/tools.rs",
-        "crates/hirsel-host/src/lash_runtime/process_engines.rs",
-        "crates/hirsel-host/src/lash_runtime/timers.rs",
-        "crates/hirsel-host/src/monitors.rs",
-        "crates/hirsel-host/src/process_run.rs",
-        "crates/hirsel-host/src/storage/monitors.rs",
-        "crates/hirsel-host/src/tools/digest.rs",
-        "crates/hirsel-host/src/tools/monitors.rs",
-        "crates/hirsel-proto/src/process.rs",
-        "app/src/components/processes/process-row.test.tsx",
-        "crates/hirsel-host/src/fork_wake/tests.rs",
-        "crates/hirsel-host/src/storage/monitors/tests.rs"
-      ],
-      "owned_definitions": [
-        {
-          "path": "crates/hirsel-host/src/storage/current.sql",
-          "symbol": "monitors",
-          "owner": "C08-PROCESS-WAKE",
-          "line": 63,
-          "kind": "table"
-        }
-      ],
-      "consumer_clusters": [
-        "C14-PROTOCOL-CONNECTION",
-        "C25-HOST-OPS"
-      ]
-    },
     "C09-CODEX-DRIVER": {
       "owned_paths": [
         "crates/hirsel-drivers/src/codex.rs",
@@ -7963,13 +7818,6 @@
           "symbol": "ChatMessage",
           "owner": "C14-PROTOCOL-CONNECTION",
           "line": 25,
-          "kind": "definition"
-        },
-        {
-          "path": "app/src/protocol.ts",
-          "symbol": "ProcessKind",
-          "owner": "C14-PROTOCOL-CONNECTION",
-          "line": 44,
           "kind": "definition"
         },
         {

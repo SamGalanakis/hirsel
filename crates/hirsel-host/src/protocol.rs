@@ -481,6 +481,38 @@ where
         ClientToHost::CancelQueued { client_id } => {
             state.cancel_queued_message(&client_id).await?;
         }
+        ClientToHost::CancelProcess {
+            client_id,
+            history_id,
+            thread_id,
+            process_id,
+        } => {
+            state
+                .cancel_process(&history_id, thread_id, &process_id)
+                .await?;
+            channel
+                .send(&HostToClient::ProcessActionApplied { client_id })
+                .await?;
+        }
+        ClientToHost::DisableProcessTrigger {
+            client_id,
+            history_id,
+            thread_id,
+            subscription_key,
+            expected_revision,
+        } => {
+            state
+                .disable_process_trigger(
+                    &history_id,
+                    thread_id,
+                    &subscription_key,
+                    expected_revision,
+                )
+                .await?;
+            channel
+                .send(&HostToClient::ProcessActionApplied { client_id })
+                .await?;
+        }
         ClientToHost::SetModel {
             provider_id,
             model_id,

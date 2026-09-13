@@ -27,6 +27,35 @@ async fn bound_caller(s: &Storage, turn_id: u64) -> ThreadCaller {
         .await
         .unwrap()
 }
+
+#[tokio::test]
+async fn durable_process_authority_survives_the_registering_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Storage::open(dir.path()).await.unwrap();
+    let id = thread(&s, "process-owner", None).await;
+    let session = s
+        .reconcile_agent_tool_surface(id, "surface", &["shell_run".into()])
+        .await
+        .unwrap();
+    let turn = s.start_thread_turn(id, None).await.unwrap();
+    let history = s.history_id().await.unwrap();
+    s.complete_thread_turn(&history, turn.id, ThreadTurnState::Completed, None)
+        .await
+        .unwrap();
+
+    let first = s
+        .process_caller(&session.session_id, "process-1", "scope-1")
+        .await
+        .unwrap();
+    assert_eq!(first.thread_id, id);
+    assert_eq!(first.turn_id, turn.id);
+    assert!(
+        s.process_caller("unknown-session", "process-1", "scope-1")
+            .await
+            .is_err()
+    );
+}
+
 #[tokio::test]
 async fn hierarchy_paths_paging_and_pin_do_not_grant_peer_access() {
     let dir = tempfile::tempdir().unwrap();
@@ -38,6 +67,10 @@ async fn hierarchy_paths_paging_and_pin_do_not_grant_peer_access() {
     let grand = thread(&s, "grand", Some(child)).await;
     let actor = caller(&s, a).await;
     let child_actor = caller(&s, child).await;
+    assert!(s.thread_in_scope(a, a).await.unwrap());
+    assert!(s.thread_in_scope(a, grand).await.unwrap());
+    assert!(!s.thread_in_scope(a, b).await.unwrap());
+    assert!(!s.thread_in_scope(child, a).await.unwrap());
     assert_eq!(
         s.resolve_thread(&actor, &ThreadRef::Path(format!("./{child}/{grand}")))
             .await

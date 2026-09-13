@@ -113,6 +113,19 @@ pub enum ClientToHost {
     CancelQueued {
         client_id: String,
     },
+    CancelProcess {
+        client_id: String,
+        history_id: String,
+        thread_id: u64,
+        process_id: String,
+    },
+    DisableProcessTrigger {
+        client_id: String,
+        history_id: String,
+        thread_id: u64,
+        subscription_key: String,
+        expected_revision: u64,
+    },
     SetModel {
         provider_id: String,
         model_id: String,

@@ -141,6 +141,20 @@ describe("HirselWsClient lifecycle", () => {
     ws.serverSend(HELLO_OK);
     expect(store.state.connection).toBe("connected");
   });
+
+  it("sends history-scoped process cancel and fenced trigger disable frames", async () => {
+    const { client } = await load();
+    const c = client.startClient("wss://host/ws", "good");
+    const ws = FakeWebSocket.instances[0];
+    ws.serverOpen();
+    ws.serverSend(HELLO_OK);
+
+    c.cancelProcess("test-history", 7, "proc-1");
+    c.disableProcessTrigger("test-history", 7, "nightly", 4);
+    const frames = ws.sent.map(value => JSON.parse(value));
+    expect(frames.at(-2)).toMatchObject({ type: "cancel_process", history_id: "test-history", thread_id: 7, process_id: "proc-1" });
+    expect(frames.at(-1)).toMatchObject({ type: "disable_process_trigger", history_id: "test-history", thread_id: 7, subscription_key: "nightly", expected_revision: 4 });
+  });
 });
 
 describe("HirselWsClient signed blob URLs (D9)", () => {

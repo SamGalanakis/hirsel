@@ -4,7 +4,6 @@ use super::*;
 use tokio::sync::{OnceCell, Semaphore};
 
 pub(super) struct ThreadRuntimeRegistry {
-    monitors_started: Mutex<HashSet<String>>,
     cli: Arc<Mutex<HashMap<u64, Arc<CliTurn>>>>,
     native: Arc<Mutex<HashMap<u64, Arc<NativeWorkerTurn>>>>,
     admission: Mutex<()>,
@@ -30,7 +29,6 @@ impl ThreadRuntimeRegistry {
         broadcast_log: BroadcastLog,
     ) -> Arc<Self> {
         Arc::new(Self {
-            monitors_started: Mutex::new(HashSet::new()),
             cli: Arc::new(Mutex::new(HashMap::new())),
             native: Arc::new(Mutex::new(HashMap::new())),
             admission: Mutex::new(()),
@@ -134,6 +132,7 @@ impl ThreadRuntimeRegistry {
     }
     async fn pump_pending(&self) -> anyhow::Result<()> {
         let _admission = self.admission.lock().await;
+        self.open_persisted_process_lanes().await?;
         for turn in self
             .tools
             .storage()
@@ -177,9 +176,6 @@ impl ThreadRuntimeRegistry {
                     _ => {}
                 }
             }
-        }
-        for record in self.tools.active_monitors().await? {
-            self.start_monitor_inner(&record).await?;
         }
         let requests = self.tools.storage().pending_thread_requests().await?;
         let mut seen = HashSet::new();
@@ -307,6 +303,68 @@ impl ThreadRuntimeRegistry {
         }
         Ok(())
     }
+
+    async fn open_persisted_process_lanes(&self) -> anyhow::Result<()> {
+        if self.is_scripted() {
+            return Ok(());
+        }
+        let history_id = self.epoch.read().expect("runtime epoch poisoned").0.clone();
+        for thread in self.tools.storage().hello_snapshot().await?.threads {
+            let directory = self
+                .config
+                .data_dir
+                .join("thread-runtime")
+                .join(&history_id)
+                .join(thread.id.to_string());
+            if directory.join("processes.db").exists() || directory.join("triggers.db").exists() {
+                let _ = self.lane(thread.id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn process_snapshot(&self) -> anyhow::Result<Vec<hirsel_proto::ProcessInfo>> {
+        self.open_persisted_process_lanes().await?;
+        let mut processes = Vec::new();
+        for lane in self.opened().await {
+            if let AgentBackend::Lash(runtime) = lane.as_ref() {
+                processes.extend(runtime.process_snapshot().await?);
+            }
+        }
+        processes.sort_by(|left, right| {
+            left.started_ts
+                .cmp(&right.started_ts)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(processes)
+    }
+
+    pub(super) async fn cancel_process(
+        &self,
+        thread_id: u64,
+        process_id: &str,
+    ) -> anyhow::Result<()> {
+        match self.lane(thread_id).await?.as_ref() {
+            AgentBackend::Lash(runtime) => runtime.cancel_process(process_id).await,
+            _ => anyhow::bail!("process runtime is unavailable"),
+        }
+    }
+
+    pub(super) async fn disable_trigger(
+        &self,
+        thread_id: u64,
+        subscription_key: &str,
+        expected_revision: u64,
+    ) -> anyhow::Result<()> {
+        match self.lane(thread_id).await?.as_ref() {
+            AgentBackend::Lash(runtime) => {
+                runtime
+                    .disable_trigger(subscription_key, expected_revision)
+                    .await
+            }
+            _ => anyhow::bail!("trigger runtime is unavailable"),
+        }
+    }
     pub(super) async fn reset_history(&self) -> anyhow::Result<()> {
         let _admission = self.admission.lock().await;
         let tasks = self.epoch.read().expect("runtime epoch poisoned").1.clone();
@@ -347,26 +405,9 @@ impl ThreadRuntimeRegistry {
         self.tools.storage().reset().await?;
         self.tools.reset_runtime_projections().await;
         self.lanes.lock().await.clear();
-        self.monitors_started.lock().await.clear();
         let history_id = self.tools.storage().history_id().await?;
         *self.epoch.write().expect("runtime epoch poisoned") = (history_id, RuntimeTasks::new());
         self.refresh_execution_default().await?;
-        Ok(())
-    }
-    pub(super) async fn start_monitor(&self, record: &MonitorRecord) -> anyhow::Result<()> {
-        let _admission = self.admission.lock().await;
-        self.start_monitor_inner(record).await
-    }
-    async fn start_monitor_inner(&self, record: &MonitorRecord) -> anyhow::Result<()> {
-        if self.monitors_started.lock().await.contains(&record.id) {
-            return Ok(());
-        }
-        match self.lane(record.thread_id).await?.as_ref() {
-            AgentBackend::Lash(runtime) => runtime.start_monitor_process(record).await?,
-            AgentBackend::Scripted(runtime) => runtime.spawn_standalone_monitor(record.id.clone()),
-            _ => return Ok(()),
-        }
-        self.monitors_started.lock().await.insert(record.id.clone());
         Ok(())
     }
     pub(super) async fn dispatch_fork_wake(

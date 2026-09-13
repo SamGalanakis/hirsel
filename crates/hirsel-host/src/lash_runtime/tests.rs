@@ -6,11 +6,13 @@ use crate::{
 };
 use chrono::Utc;
 use hirsel_proto::{ChatAuthor, ThreadTurnState};
+use lash::triggers::LashSchema;
 use lash_core::{
-    ProcessExecutionEnvRef, ProcessIdentity, ProcessInput, ProcessOriginator, SessionScope,
-    TriggerInputBinding, TriggerSubscriptionRecord,
+    ProcessExecutionEnvRef, ProcessIdentity, ProcessInput, ProcessOriginator, SessionPolicy,
+    SessionScope, TriggerInputBinding, TriggerSubscriptionRecord,
 };
 
+use super::process_bridge::{terminal_process_delivery, trigger_display};
 use super::timers::*;
 use super::*;
 
@@ -542,6 +544,193 @@ async fn resident_agent_retries_bare_prose_and_projects_finished_chat_text() {
     assert!(responses.lock().unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn timer_triggered_typescript_process_calls_hirsel_tool_and_delivers_message() {
+    use lash_core::{LlmOutputPart, llm::types::LlmResponse};
+
+    const DRAIN: &str = "process-e2e-drain";
+    let source = r#"<typescript>
+const timer_shell_check = defineProcess({
+  name: "timer_shell_check",
+  signals: {},
+  run: async (_event: unknown) => {
+    const output = await shell.run({ cmd: "printf primitive-ok" });
+    return output.stdout;
+  }
+});
+const source = timer.Schedule({ label: "e2e", in_secs: 1 });
+await registerTrigger({
+  source,
+  target: timer_shell_check,
+  inputs: { _event: trigger.event },
+  name: "timer shell check"
+});
+finish("registered");
+</typescript>"#;
+    let provider = lash_core::testing::TestProvider::builder()
+        .kind("hirsel-process-e2e")
+        .complete(move |_request| async move {
+            Ok(LlmResponse {
+                parts: vec![LlmOutputPart::Text {
+                    text: source.to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            })
+        })
+        .build()
+        .into_handle();
+    let (executor, storage, _log, _dir) = test_event_executor().await;
+    let route = executor.anchors.lock().await.active.clone().unwrap();
+    let session_id = storage
+        .reconcile_agent_tool_surface(
+            route.thread_id,
+            "process-e2e-surface",
+            &["shell_run".to_string()],
+        )
+        .await
+        .unwrap()
+        .session_id;
+    storage
+        .bind_thread_execution(
+            &storage.history_id().await.unwrap(),
+            &session_id,
+            DRAIN,
+            route.thread_turn_id.unwrap(),
+        )
+        .await
+        .unwrap();
+    let trigger_store = Arc::new(lash_core::facade_support::InMemoryTriggerStore::default());
+    let process_registry = Arc::new(lash_core::TestLocalProcessRegistry::default());
+    let protocol = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        coordinator_rlm_config(),
+        Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+    );
+    let core = lash::LashCore::rlm_builder(lash::TurnBudget::Unbounded, protocol)
+        .with_native_queued_work()
+        .provider(provider)
+        .model(provider_rebind_test_model("hirsel-process-e2e-model"))
+        .store_factory(Arc::new(
+            lash_core::facade_support::InMemorySessionStoreFactory::new(),
+        ))
+        .effect_host(Arc::new(lash::durability::NativeEffectHost::default()))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
+        .process_registry(process_registry)
+        .trigger_store(trigger_store.clone())
+        .tools(Arc::new(HirselToolProvider {
+            executor: executor.clone(),
+        }))
+        .plugin(Arc::new(HirselPluginFactory))
+        .commit_budget(lash::CommitBudget::bounded(1024 * 1024, 512))
+        .queued_work_batching(lash::QueuedWorkBatchingConfig::new(1))
+        .build(lash_core::testing::runtime_lease_owner())
+        .unwrap();
+    let session = core
+        .session(&session_id)
+        .plugin_option(
+            RLM_PROTOCOL_PLUGIN_ID,
+            RlmCreateExtras {
+                dialect: Some(AGENT_RLM_DIALECT),
+                ..RlmCreateExtras::default()
+            },
+        )
+        .unwrap()
+        .open()
+        .await
+        .unwrap();
+    session
+        .enqueue(lash::TurnInput::text("register the process"))
+        .id("process-e2e-input")
+        .ingress(TurnInputIngress::next_turn())
+        .send()
+        .await
+        .unwrap();
+    let registration = session
+        .queued_turn()
+        .turn_id(DRAIN)
+        .run()
+        .await
+        .unwrap()
+        .expect("registration turn");
+    assert_eq!(
+        registration.final_value(),
+        Some(&json!("registered")),
+        "registration output: {registration:#?}"
+    );
+
+    let subscriptions = trigger_store
+        .list_subscriptions(TriggerSubscriptionFilter::for_session(&session_id))
+        .await
+        .unwrap();
+    let subscription = subscriptions.first().expect("registered timer trigger");
+    let report = core
+        .triggers()
+        .emit(
+            lash::triggers::TriggerOccurrenceRequest::new(
+                TIMER_SOURCE_TYPE,
+                subscription.source_key.clone(),
+                json!({
+                    "label": "e2e",
+                    "fired_at": Utc::now().to_rfc3339(),
+                    "scheduled_at": Utc::now().to_rfc3339(),
+                    "source_key": subscription.source_key,
+                    "subscription_key": subscription.subscription_key,
+                }),
+                "process-e2e-timer",
+            )
+            .with_source(subscription.source.clone()),
+            inline_trigger_scope("process-e2e-timer"),
+        )
+        .await
+        .unwrap();
+    let process_id = report
+        .started_process_ids()
+        .first()
+        .cloned()
+        .expect("process start");
+    let item = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot = core
+                .processes()
+                .session_snapshot(&session_id)
+                .await
+                .unwrap();
+            if let Some(item) = snapshot.items.into_iter().find(|item| {
+                item.process.process_id == process_id
+                    && !matches!(
+                        item.process.lifecycle,
+                        lash_core::ProcessStatus::Running | lash_core::ProcessStatus::Waiting
+                    )
+            }) {
+                break item;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("process completes");
+    assert_eq!(
+        item.process.lifecycle,
+        lash_core::ProcessStatus::Completed,
+        "terminal process: {item:#?}"
+    );
+    let (_, mut delivery) = terminal_process_delivery(route.thread_id, &item).unwrap();
+    delivery.trigger = trigger_display(subscription);
+    storage.stage_process_delivery(&delivery).await.unwrap();
+    let delivered = storage
+        .deliver_process_message(&delivery.key)
+        .await
+        .unwrap();
+
+    assert!(delivered.newly_appended);
+    assert!(delivered.message.body.contains("timer_shell_check"));
+    assert!(delivered.message.body.contains("in 1s"));
+    assert!(delivered.message.body.contains("primitive-ok"));
+}
+
 #[test]
 fn agent_host_section_references_runtime_config_and_docs_paths() {
     let dir = tempfile::tempdir().unwrap();
@@ -806,26 +995,46 @@ fn tool_prose_never_names_a_dialect() {
     }
 }
 
+#[test]
+fn coordinator_posture_is_typescript_rlm_with_processes_and_triggers() {
+    let config = coordinator_rlm_config();
+    assert_eq!(AGENT_RLM_DIALECT, RlmDialect::Typescript);
+    assert!(config.lashlang_abilities.processes);
+    assert!(config.lashlang_abilities.triggers);
+
+    // ADR 0019 keeps the native worker on the standard protocol with exactly
+    // its narrow coding tools; process orchestration belongs to the coordinator.
+    assert!(
+        native_worker::ensure_native_tool_surface(
+            &["read", "edit", "write", "exec_command"].map(str::to_string)
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn hirsel_surface_exports_typed_thread_trigger_vocabulary() {
+    let rendered = format!("{:?}", hirsel_lashlang_surface());
+    for (source, event) in [
+        (THREAD_REPORTED_SOURCE_TYPE, THREAD_REPORTED_EVENT_TYPE),
+        (THREAD_COMPLETED_SOURCE_TYPE, THREAD_COMPLETED_EVENT_TYPE),
+        (THREAD_MESSAGE_SOURCE_TYPE, THREAD_MESSAGE_EVENT_TYPE),
+        (THREAD_TURN_SOURCE_TYPE, THREAD_TURN_EVENT_TYPE),
+    ] {
+        assert!(rendered.contains(source), "missing trigger source {source}");
+        assert!(rendered.contains(event), "missing event type {event}");
+    }
+    for field in ["thread_id", "title", "payload"] {
+        assert!(
+            rendered.contains(field),
+            "missing Thread event field {field}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn every_executor_result_matches_its_declared_output_schema() {
     let now = Utc::now();
-    let monitor = MonitorRecord {
-        thread_id: 1,
-        id: "monitor-1".to_string(),
-        cmd: "test -f done".to_string(),
-        every_secs: 30,
-        condition: MonitorCondition::parse("regex", Some("ready".to_string())).unwrap(),
-        label: "build ready".to_string(),
-        created_ts: now,
-        last_event_ts: now,
-        last_run_ts: Some(now),
-        last_output: Some("ready".to_string()),
-        summary: Some("matched".to_string()),
-        cancelled_ts: Some(now),
-    };
-    let mut changed_monitor = monitor.clone();
-    changed_monitor.id = "monitor-2".to_string();
-    changed_monitor.condition = MonitorCondition::Changed;
     let mut results = BTreeMap::<&str, Vec<Value>>::new();
     for name in ["artifacts_create", "artifacts_edit", "artifacts_show"] {
         results.insert(name, vec![json!({"id":1,"content":"result"})]);
@@ -861,18 +1070,6 @@ async fn every_executor_result_matches_its_declared_output_schema() {
         "views_list_templates",
         vec![json!([{ "id": "status", "title": "Status" }])],
     );
-    results.insert(
-        "monitors_create",
-        vec![
-            monitors_create_result(&monitor).unwrap(),
-            monitors_create_result(&changed_monitor).unwrap(),
-        ],
-    );
-    results.insert(
-        "monitors_list",
-        vec![monitors_list_result(&[monitor.clone(), changed_monitor]).unwrap()],
-    );
-    results.insert("monitors_cancel", vec![monitors_cancel_result("monitor-1")]);
     results.insert(
         "shell_run",
         vec![
@@ -952,61 +1149,6 @@ async fn every_executor_result_matches_its_declared_output_schema() {
     }
 }
 
-#[test]
-fn monitor_create_schema_and_parser_share_the_condition_contract() {
-    let definition = hirsel_tool_definitions(&crate::subagent_models::registry_catalog())
-        .into_iter()
-        .find(|definition| definition.name() == "monitors_create")
-        .unwrap();
-    let schema = jsonschema::JSONSchema::compile(definition.contract.input_schema.canonical())
-        .expect("monitor input schema compiles");
-    let base = json!({"cmd":"printf ready","label":"ready","every_secs":30});
-
-    for condition in [
-        json!({"wake_on":"changed"}),
-        json!({"wake_on":"exit_zero"}),
-        json!({"wake_on":"exit_nonzero"}),
-        json!({"wake_on":"regex","pattern":"ready"}),
-        json!({"wake_on":"regex","pattern":" "}),
-        json!({"wake_on":"regex","pattern":"\u{0}"}),
-    ] {
-        let mut input = base.clone();
-        input.as_object_mut().unwrap().extend(
-            condition
-                .as_object()
-                .unwrap()
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone())),
-        );
-        assert!(schema.is_valid(&input), "schema rejected {input}");
-        parse_monitor_condition(&input).unwrap();
-    }
-
-    for condition in [
-        json!({"wake_on":"regex"}),
-        json!({"wake_on":"regex","pattern":""}),
-        json!({"wake_on":"changed","pattern":"ignored"}),
-        json!({"wake_on":"unknown"}),
-    ] {
-        let mut input = base.clone();
-        input.as_object_mut().unwrap().extend(
-            condition
-                .as_object()
-                .unwrap()
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone())),
-        );
-        assert!(!schema.is_valid(&input), "schema accepted {input}");
-        assert!(parse_monitor_condition(&input).is_err());
-    }
-
-    let mut malformed = base;
-    malformed["wake_on"] = json!("regex");
-    malformed["pattern"] = json!("[");
-    assert!(schema.is_valid(&malformed));
-    assert!(parse_monitor_condition(&malformed).is_err());
-}
-
 fn remote_turn_activity(event: RemoteTurnEvent) -> RemoteSessionObservationEventPayload {
     RemoteSessionObservationEventPayload::TurnActivity {
         activity: Box::new(lash::remote::usage::RemoteTurnActivity {
@@ -1072,6 +1214,25 @@ fn timer_schedule_requires_exactly_one_clock_field() {
 }
 
 #[test]
+fn registered_trigger_projects_before_its_first_process_run() {
+    let registration = timer_registration(
+        serde_json::json!({
+            "label": "first run",
+            "every_secs": 60
+        }),
+        1_000,
+    );
+    let process = super::process_bridge::subscription_process_info(7, &registration);
+
+    assert_eq!(process.thread_id, 7);
+    assert_eq!(process.name, "timer-test");
+    assert_eq!(process.trigger.as_deref(), Some("every 60s"));
+    assert_eq!(process.state, hirsel_proto::ProcessState::Waiting);
+    assert!(!process.cancellable);
+    assert_eq!(process.last_fired_ts, None);
+}
+
+#[test]
 fn digest_timer_labels_select_the_scheduled_event_producer() {
     assert_eq!(
         scheduled_digest_label("digest: Morning fleet"),
@@ -1106,7 +1267,7 @@ fn timer_registration(value: Value, created_at_ms: u64) -> TriggerSubscriptionRe
         target_identity: ProcessIdentity::new("timer-test"),
         event_types: Vec::new(),
         input_template: BTreeMap::<String, TriggerInputBinding>::new(),
-        target_label: None,
+        target_label: Some("timer-test".to_string()),
         enabled: true,
         tombstoned: false,
         deleted_at_ms: None,
@@ -1213,48 +1374,6 @@ async fn plugin_tools_join_the_real_agent_tool_catalog() {
         without_plugin.fingerprint, with_plugin.fingerprint,
         "toggling a plugin rotates the tool-surface fingerprint"
     );
-}
-
-/// Lash refuses a process registration whose input is `Engine` (or `ToolCall`)
-/// unless it names a captured execution env, so every hirsel start builder for
-/// an engine row must declare one and it must survive into the registration.
-#[test]
-fn engine_start_requests_declare_a_captured_execution_env() {
-    let now = Utc::now();
-    let monitor = MonitorRecord {
-        thread_id: 1,
-        id: "monitor-1".to_string(),
-        cmd: "test -f done".to_string(),
-        every_secs: 30,
-        condition: MonitorCondition::parse("regex", Some("ready".to_string())).unwrap(),
-        label: "build ready".to_string(),
-        created_ts: now,
-        last_event_ts: now,
-        last_run_ts: None,
-        last_output: None,
-        summary: None,
-        cancelled_ts: None,
-    };
-    let policy = SessionPolicy::new(lash::TurnBudget::Unbounded);
-    let requests = [monitor_start_request(
-        &monitor,
-        "agent",
-        host_process_env_spec(policy),
-    )];
-
-    for request in requests {
-        assert!(
-            matches!(request.input, ProcessInput::Engine { .. }),
-            "start builder no longer produces an engine row"
-        );
-        let env_spec = request
-            .env_spec
-            .clone()
-            .expect("engine start declares an execution env");
-        let env_ref = env_spec.stable_ref().expect("stable execution env ref");
-        let registration = request.into_registration(Some(env_ref.clone()));
-        assert_eq!(registration.env_ref, Some(env_ref));
-    }
 }
 
 #[test]

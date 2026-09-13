@@ -3,7 +3,7 @@
 //! ADR-0015 gives a triage fork exactly three exits — drop, record, escalate —
 //! and the host enforces that as *capability*, not as instruction. A fork is
 //! opened against this provider alone, so `threads_delegate`, `threads_create`,
-//! `events_judgment`, `shell_run`, `views_*`, `monitors_*` and every plugin
+//! `events_judgment`, `shell_run`, `views_*` and every plugin
 //! tool are not "forbidden by the prompt": they do not exist in the fork's
 //! catalog, and naming one is an invalid tool call.
 //!

@@ -91,25 +91,16 @@ CREATE TABLE thread_turn_events (turn_id INTEGER NOT NULL REFERENCES thread_turn
                 position INTEGER NOT NULL,
                 PRIMARY KEY (message_id, position)
             );
-            CREATE TABLE monitors (
+            CREATE TABLE process_deliveries (
+                delivery_key TEXT PRIMARY KEY,
                 thread_id INTEGER NOT NULL REFERENCES threads(id),
-                id TEXT PRIMARY KEY,
-                cmd TEXT NOT NULL,
-                every_secs INTEGER NOT NULL,
-                wake_on TEXT NOT NULL,
-                pattern TEXT NULL,
-                label TEXT NOT NULL,
-                created_ts TEXT NOT NULL,
-                last_event_ts TEXT NOT NULL,
-                last_run_ts TEXT NULL,
-                last_output TEXT NULL,
-                summary TEXT NULL,
-                cancelled_ts TEXT NULL,
-                CHECK (
-                    (wake_on = 'regex' AND pattern IS NOT NULL AND length(CAST(pattern AS BLOB)) > 0)
-                    OR
-                    (wake_on IN ('changed', 'exit_zero', 'exit_nonzero') AND pattern IS NULL)
-                )
+                process_id TEXT NOT NULL,
+                process_name TEXT NOT NULL,
+                trigger_label TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                result TEXT NOT NULL,
+                message_id INTEGER UNIQUE REFERENCES chat_messages(id),
+                triage_dispatched INTEGER NOT NULL DEFAULT 0 CHECK(triage_dispatched IN (0,1))
             );
 
             CREATE TABLE push_tokens (
@@ -178,6 +169,13 @@ CREATE TABLE thread_execution_bindings (
     history_id TEXT NOT NULL, session_id TEXT NOT NULL, execution_id TEXT NOT NULL,
     turn_id INTEGER NOT NULL REFERENCES thread_turns(id), revoked INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(session_id,execution_id));
+CREATE TABLE thread_process_sessions (
+    history_id TEXT NOT NULL, session_id TEXT PRIMARY KEY,
+    thread_id INTEGER NOT NULL REFERENCES threads(id));
+CREATE TABLE thread_process_authorities (
+    session_id TEXT NOT NULL REFERENCES thread_process_sessions(session_id),
+    process_id TEXT NOT NULL, turn_id INTEGER NOT NULL REFERENCES thread_turns(id),
+    PRIMARY KEY(session_id,process_id));
 CREATE TABLE thread_mutation_receipts (
     turn_id INTEGER NOT NULL REFERENCES thread_turns(id),operation_id TEXT NOT NULL,payload TEXT NOT NULL,result TEXT NOT NULL,
     PRIMARY KEY(turn_id,operation_id));

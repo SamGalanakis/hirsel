@@ -652,12 +652,9 @@ fixed source.
   `app/src/protocol.ts`: tagged envelopes, required nullable fields, and
   current snapshots were mirrored without a second C14 wire defect. The loose
   `ViewSpec` is deliberate plugin/view data, not promoted as a finding.
-- A read-only cross-layer drift remains between
-  `app/src/protocol.ts:42-61`, where `ProcessKind` includes `"subagent"`, and
-  `crates/hirsel-proto/src/process.rs:6-10`, where the Rust kind is currently
-  only `Monitor`. The current host producer is monitor-only, and resolving the
-  stale UI/product surface belongs to adjacent C08 process ownership; no
-  reachable C14 wire failure was promoted.
+- The former process-kind cross-layer drift was retired with the C08 process
+  ownership cutover: the discriminator and its host-owned producer no longer
+  exist, and the wire shape now projects Lash process state directly.
 - Blob upload and signed-URL requests are tracked with timeouts and visibly
   fail (`app/src/ws/client.ts:112-166`), matching `app/PROTOCOL.md:46`. Their
   ordinary reconnect replay semantics are not specified as durable Thread

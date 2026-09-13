@@ -1,8 +1,8 @@
 import { Bot, Braces, Check, ChevronRight, LoaderCircle, Square, X } from "@/components/ui/icons";
 import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
 
-import { showAgentCode } from "../../lib/prefs";
 import type { TimelineEvent } from "../../store/types";
+import { CodeBlock } from "../markdown/CodeBlock";
 import { Markdown, renderInline } from "../Markdown";
 import { buildTimeline, type TimelineItem } from "./timeline";
 
@@ -223,89 +223,81 @@ function ToolRow(props: { item: Extract<TimelineItem, { kind: "tool" }>; settled
   );
 }
 
-/** One Agent program cell (Settings → "Show agent code"). Collapsed by default
- * to a single quiet row — the source is the exception you open, not the thing
- * you read every turn — expanding to the verbatim monospace program. Once the
- * cell completes, a failure tints the row and the well so a broken program is
- * findable without expanding it. */
-function CodeRow(props: { item: Extract<TimelineItem, { kind: "code" }>; settled?: boolean }) {
-  const [open, setOpen] = createSignal(false);
+/** How much of a long program reads before the Owner asks for the rest. Twelve
+ * lines is a screenful of intent — the imports and the first real call — without
+ * turning the transcript into a source listing. */
+const CODE_PREVIEW_LINES = 12;
+
+/**
+ * One Agent program cell, as a first-class transcript entry: a labelled block
+ * holding the verbatim source under the same highlighter fenced code gets in a
+ * message, with the tools the cell called nested underneath in the order it
+ * called them. Reading order per cell is therefore program, then its work, then
+ * whatever the Agent said about it. A failed cell tints its frame so a broken
+ * program is findable at a glance, and long programs open to their first
+ * `CODE_PREVIEW_LINES` with the rest one click away.
+ */
+function CodeEntry(props: { item: Extract<TimelineItem, { kind: "code" }>; settled?: boolean }) {
+  const [all, setAll] = createSignal(false);
   const done = () => (props.item.status.state === "done" ? props.item.status : null);
   const running = () => done() === null && !props.settled;
   const failed = () => done()?.ok === false;
-  const label = () => props.item.language || "code";
-  const hasCode = () => props.item.code.length > 0;
+  const lines = createMemo(() => props.item.code.split("\n"));
+  const long = () => lines().length > CODE_PREVIEW_LINES;
+  const source = () => (all() || !long() ? props.item.code : lines().slice(0, CODE_PREVIEW_LINES).join("\n"));
+  const language = () => props.item.language || null;
   const duration = () => {
     const ms = done()?.durationMs;
     return ms === undefined || ms === null ? "" : formatDuration(ms);
   };
 
   return (
-    <li class="flex min-w-0 flex-col gap-1" data-slot="timeline-code">
+    <li
+      class={["flex min-w-0 flex-col gap-1.5 rounded-md border px-2 py-1.5", {
+        "border-destructive/40 bg-destructive/5": failed(),
+        "border-border/60 bg-muted/20": !failed(),
+      }]}
+
+      data-slot="timeline-code"
+    >
       <div class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+        <Braces class="size-3 shrink-0" aria-hidden="true" />
+        <span class={["shrink-0 font-medium", { "text-foreground": !failed(), "text-destructive": failed() }]}>Code</span>
         <Switch>
           <Match when={!done() && props.settled}><Square class="size-3 shrink-0" aria-label="no result" /></Match>
-          <Match when={running()}>
-            <LoaderCircle
-              class="size-3 shrink-0 animate-spin text-status-active"
-              aria-label="running"
-            />
-          </Match>
-          <Match when={done()?.ok}>
-            <Check class="size-3 shrink-0 text-status-success" aria-label="ok" />
-          </Match>
-          <Match when={done()}>
-            <X class="size-3 shrink-0 text-destructive" aria-label="failed" />
-          </Match>
+          <Match when={running()}><LoaderCircle class="size-3 shrink-0 animate-spin text-status-active" aria-label="running" /></Match>
+          <Match when={done()?.ok}><Check class="size-3 shrink-0 text-status-success" aria-label="ok" /></Match>
+          <Match when={done()}><X class="size-3 shrink-0 text-destructive" aria-label="failed" /></Match>
         </Switch>
-        <Show
-          when={hasCode()}
-          fallback={
-            <span class="shrink-0 font-mono text-meta text-foreground/70">{label()}</span>
-          }
-        >
-          <button
-            type="button"
-            class="flex min-h-11 min-w-0 flex-1 items-center gap-1.5 rounded text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            aria-expanded={(open()) ? "true" : "false"}
-            aria-label={`${label()} program — ${open() ? "hide" : "show"} source`}
-            onClick={() => setOpen((v) => !v)}
-          >
-            <ChevronRight
-              class={["size-3 shrink-0 text-muted-foreground/60 transition-transform", { "rotate-90": open() }]}
-
-              aria-hidden="true"
-            />
-            <Braces class="size-3 shrink-0" aria-hidden="true" />
-            <span
-              class={["shrink-0 font-mono text-meta", { "text-foreground": running(), "text-foreground/70": !running() }]}
-
-            >
-              {label()}
-            </span>
-            <Show when={done()?.result}>
-              <span class={["min-w-0 flex-1 truncate", { "text-destructive/90": failed() }]} >
-                {done()?.result}
-              </span>
-            </Show>
-          </button>
+        <Show when={done()?.result}>
+          <span class={["min-w-0 flex-1 truncate", { "text-destructive/90": failed() }]}>{done()?.result}</span>
         </Show>
         <Show when={duration()}>
-          <span class="ml-auto shrink-0 pl-1 font-mono text-xs tabular-nums text-muted-foreground/60">
-            {duration()}
-          </span>
+          <span class="ml-auto shrink-0 pl-1 font-mono text-xs tabular-nums text-muted-foreground/60">{duration()}</span>
         </Show>
       </div>
-      <Show when={open() && hasCode()}>
-        <pre
-          class={["ml-4 max-h-96 overflow-auto whitespace-pre rounded-md bg-muted/50 px-2 py-1.5 font-mono text-meta leading-relaxed text-foreground/80", { "text-destructive/90": failed() }]}
-
+      <Show when={props.item.code.length > 0}>
+        <CodeBlock code={source()} lang={language()} />
+      </Show>
+      <Show when={long()}>
+        <button
+          type="button"
+          class="w-fit rounded px-1 py-px text-left text-meta text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          aria-expanded={all() ? "true" : "false"}
+          onClick={() => setAll(v => !v)}
         >
-          {props.item.code}
-          <Show when={props.item.truncated}>
-            <span class="text-muted-foreground/70">{"\n… truncated"}</span>
-          </Show>
-        </pre>
+          {all() ? "Show less" : `Show all ${lines().length} lines`}
+        </button>
+      </Show>
+      <Show when={props.item.truncated}>
+        <span class="px-1 text-meta text-muted-foreground/70">… truncated by the host</span>
+      </Show>
+      <Show when={props.item.children.length > 0}>
+        <ul class="ml-1 flex min-w-0 flex-col gap-1.5 border-l border-border/60 pl-2" data-slot="timeline-code-tools">
+          <For each={props.item.children} keyed={child => child.key}>
+            {child => <ToolRow item={child()} settled={props.settled} />}
+          </For>
+        </ul>
       </Show>
     </li>
   );
@@ -321,7 +313,7 @@ function CodeRow(props: { item: Extract<TimelineItem, { kind: "code" }>; settled
 export function Timeline(props: { events: TimelineEvent[]; live?: boolean; settled?: boolean }) {
   // Durations (tool_done.at − tool_start.at) come out of the fold on each row's
   // status, measured within that row's own id namespace.
-  const items = createMemo(() => buildTimeline(props.events, showAgentCode()));
+  const items = createMemo(() => buildTimeline(props.events));
   // Only the LAST item of a live turn is still being written. A reasoning run
   // there is the Agent thinking at this instant, so its height is bounded while
   // streaming. Settled reasoning stays inline at full length.
@@ -364,7 +356,7 @@ export function Timeline(props: { events: TimelineEvent[]; live?: boolean; settl
               <ToolRow item={row() as Extract<TimelineItem, { kind: "tool" }>} settled={props.settled} />
             </Match>
             <Match when={row().kind === "code"}>
-              <CodeRow item={row() as Extract<TimelineItem, { kind: "code" }>} settled={props.settled} />
+              <CodeEntry item={row() as Extract<TimelineItem, { kind: "code" }>} settled={props.settled} />
             </Match>
           </Switch>
         )}

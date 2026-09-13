@@ -16,7 +16,6 @@ import { ConversationNote } from "./ThreadWork";
 import { ThreadCreate } from "./ThreadCreate";
 import { openThreadCreate } from "./create";
 import { quietWakeTurn } from "./work-summary";
-import { showAgentCode } from "../lib/prefs";
 import { conversationEntries, type ConversationEntry } from "./conversation";
 import { emptyHistory } from "./model";
 import { BrandMark } from "../components/BrandMark";
@@ -69,7 +68,7 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
     const rows: ({ key: string; entry: ConversationEntry } | { key: string; quiet: number })[] = [];
     for (const entry of entries()) {
       const turn = entry.kind === "turn" ? entry.turn : null;
-      const quiet = turn !== null && quietWakeTurn(turn, (history()?.activities ?? []).filter(activity => activity.turn_id === turn.id), threadState.turnDetails[turn.id] ?? [], showAgentCode());
+      const quiet = turn !== null && quietWakeTurn(turn, (history()?.activities ?? []).filter(activity => activity.turn_id === turn.id), threadState.turnDetails[turn.id] ?? []);
       const last = rows[rows.length - 1];
       if (quiet && last && "quiet" in last) rows[rows.length - 1] = { key: last.key, quiet: last.quiet + 1 };
       else if (quiet) rows.push({ key: `quiet-${entry.key}`, quiet: 1 });

@@ -3,7 +3,6 @@ import { createSignal, Match, onSettled, Show, Switch } from "solid-js";
 
 import { resolveWsUrl } from "../../lib/endpoint";
 import { createFocusTrap, phoneUtilityRestoreTarget } from "../../lib/focus";
-import { showAgentCode } from "../../lib/prefs";
 import { themeMode } from "../../lib/theme";
 import { toast } from "../../lib/toast";
 import { APP_VERSION } from "../../lib/version";
@@ -93,7 +92,6 @@ function SettingsPanel() {
       `connection: ${PHASE_WORD[state.connection]}`,
       `theme: ${themeMode()}`,
       "notifications: not available (web)",
-      `show agent code: ${showAgentCode() ? "on" : "off"}`,
       `device label: ${deviceLabel() || "(unset)"}`,
       `identity: ${fingerprint()}`,
       `user agent: ${navigator.userAgent}`,

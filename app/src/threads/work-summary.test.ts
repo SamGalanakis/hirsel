@@ -10,18 +10,22 @@ const wake: TimelineEvent[] = [
 ];
 describe("quiet wake turns", () => {
   it("hides a completed turn whose only events are a trivial program", () => {
-    expect(quietWakeTurn(turn("completed"), [], wake, false)).toBe(true);
-    expect(quietWakeTurn(turn("completed"), [], [], false)).toBe(true);
+    expect(quietWakeTurn(turn("completed"), [], wake)).toBe(true);
+    expect(quietWakeTurn(turn("completed"), [], [])).toBe(true);
   });
   it("keeps every turn that still has something to show", () => {
-    expect(quietWakeTurn(turn("running"), [], wake, false)).toBe(false);
-    expect(quietWakeTurn(turn("failed"), [], wake, false)).toBe(false);
-    expect(quietWakeTurn(turn("queued"), [], wake, false)).toBe(false);
-    expect(quietWakeTurn(undefined, [], wake, false)).toBe(false);
-    // Show agent code asks for exactly these cells, so they earn their card back.
-    expect(quietWakeTurn(turn("completed"), [], wake, true)).toBe(false);
-    expect(quietWakeTurn(turn("completed"), [{ artifact_ids: [], id: 1, thread_id: 1, turn_id: 9, kind: "info", data: {}, ts: "2026-09-09T10:00:01Z" }], wake, false)).toBe(false);
-    expect(quietWakeTurn(turn("completed"), [], [...wake, { seq: 3, event: { kind: "prose", text: "Done." } }], false)).toBe(false);
-    expect(quietWakeTurn(turn("completed"), [], [{ seq: 1, event: { kind: "tool_start", id: "t1", name: "read_file", summary: null, input: null } }], false)).toBe(false);
+    expect(quietWakeTurn(turn("running"), [], wake)).toBe(false);
+    expect(quietWakeTurn(turn("failed"), [], wake)).toBe(false);
+    expect(quietWakeTurn(turn("queued"), [], wake)).toBe(false);
+    expect(quietWakeTurn(undefined, [], wake)).toBe(false);
+    // A program with anything in it beyond the bare finish is a Code entry, and
+    // a turn with a Code entry has something to show.
+    expect(quietWakeTurn(turn("completed"), [], [
+      { seq: 1, event: { kind: "code_start", id: "cell-1", language: "typescript", code: 'finish(await shell.run({ cmd: "true" }))', truncated: false } },
+      { seq: 2, event: { kind: "code_done", id: "cell-1", ok: true, summary: null } },
+    ])).toBe(false);
+    expect(quietWakeTurn(turn("completed"), [{ artifact_ids: [], id: 1, thread_id: 1, turn_id: 9, kind: "info", data: {}, ts: "2026-09-09T10:00:01Z" }], wake)).toBe(false);
+    expect(quietWakeTurn(turn("completed"), [], [...wake, { seq: 3, event: { kind: "prose", text: "Done." } }])).toBe(false);
+    expect(quietWakeTurn(turn("completed"), [], [{ seq: 1, event: { kind: "tool_start", id: "t1", name: "read_file", summary: null, input: null } }])).toBe(false);
   });
 });

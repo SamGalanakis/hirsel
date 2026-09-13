@@ -5,7 +5,6 @@ import type { ChatMessage } from "../protocol";
 import type { TimelineEvent } from "../store/types";
 import type { ThreadActivity, ThreadTurn } from "./types";
 import { ThreadWork } from "./ThreadWork";
-import { setShowAgentCode } from "../lib/prefs";
 
 const events: TimelineEvent[] = [
   { seq: 1, at: 1, event: { kind: "tool_done", id: "call-a", name: "read_file", ok: true, summary: "Distinct result: first file contents", result: null } },
@@ -137,8 +136,7 @@ it("preserves overlapping call pairing and reasoning/code positions through reve
   const [stream, setStream] = createSignal(initial);
   const [final, setFinal] = createSignal<ChatMessage>();
   const [activities, setActivities] = createSignal<ThreadActivity[]>([]);
-  flush(() => setShowAgentCode(true));
-  try {
+  {
     const view = render(() => <ThreadWork message={final()} activities={activities()} events={stream()} />);
     flush(() => setStream([...initial,
       { ...events[1], seq: 6 },
@@ -146,11 +144,14 @@ it("preserves overlapping call pairing and reasoning/code positions through reve
       { ...events[0], seq: 8 },
     ]));
     const slots = () => [...view.container.querySelectorAll('[data-slot="timeline"] > li')].map(row => {
+      if (row.getAttribute("data-slot") !== "timeline-tool") return row.getAttribute("data-slot");
       if (row.textContent?.includes("Distinct result:")) return "a/result";
       if (row.textContent?.includes("Distinct error:")) return "b/error";
       return row.getAttribute("data-slot");
     });
-    const expected = ["a/result", "timeline-reasoning", "timeline-code", "b/error", "timeline-reasoning"];
+    // call-b started inside the cell, so it reads under the Code entry; every
+    // other row keeps its position.
+    const expected = ["a/result", "timeline-reasoning", "timeline-code", "timeline-reasoning"];
     expect(slots()).toEqual(expected);
     // Only B's activity has been persisted; neither completion may move.
     flush(() => setActivities([{ ...activity, data: { id: "call-b", name: "read_file", ok: false } }]));
@@ -168,6 +169,9 @@ it("preserves overlapping call pairing and reasoning/code positions through reve
     expect(view.getAllByText("read_file")).toHaveLength(2);
     expect(view.container.querySelectorAll('[aria-label="failed"]')).toHaveLength(1);
     expect(view.container.querySelectorAll('[data-slot="timeline-tool"]')).toHaveLength(2);
+    // b is the cell's own tool row, nested under it.
+    const cell = view.container.querySelector('[data-slot="timeline-code"]') as HTMLElement;
+    expect([...cell.querySelectorAll('[data-slot="tool-result"]')].map(row => row.getAttribute("data-tool-call-id"))).toEqual(["call-b"]);
     expect(view.queryByText(/tool completed/)).toBeNull();
-  } finally { flush(() => setShowAgentCode(false)); }
+  }
 });

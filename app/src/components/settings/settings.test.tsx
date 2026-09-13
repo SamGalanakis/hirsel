@@ -72,18 +72,17 @@ describe("Settings: About & debug", () => {
     expect(copied).toContain("hirsel diagnostics");
     expect(copied).toContain("host version: 0.9.9-test");
     expect(copied).toContain("device label: (unset)");
-    expect(copied).toContain("show agent code: off");
     expect(copied).not.toContain("debug:");
   });
 
-  it("persists the local 'Show agent code' toggle", async () => {
+  it("persists the local 'Tab title badge' toggle", async () => {
     const store = await import("../../store/store");
-    store.openSettings("about");
+    store.openSettings("notifications");
     const { SettingsSheet } = await import("./SettingsSheet");
     const { getByLabelText } = render(() => <SettingsSheet />);
 
-    fireEvent.click(getByLabelText("Show agent code"));
-    expect(memLocalStorage.getItem("hirsel.showAgentCode")).toBe("1");
+    fireEvent.click(getByLabelText("Tab title badge"));
+    expect(memLocalStorage.getItem("hirsel.titleBadge")).toBe("0");
   });
 });
 
@@ -127,9 +126,9 @@ describe("Settings: DESIGN conformance of the pane chrome", () => {
     for (const tab of getAllByRole("tab")) {
       expect(tab.className).toContain(coarse);
     }
-    fireEvent.click(getByRole("tab", { name: "About & debug" }));
+    fireEvent.click(getByRole("tab", { name: "Notifications" }));
     // The switch's 20x36px track stays the visual; the button around it grows.
-    const toggle = getByLabelText("Show agent code");
+    const toggle = getByLabelText("Tab title badge");
     expect(toggle.className).toContain(coarse);
     expect(toggle.className).toContain("[@media(pointer:coarse)]:min-w-11");
     expect(toggle.querySelector(".h-5.w-9")).not.toBeNull();

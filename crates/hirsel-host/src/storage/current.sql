@@ -2,7 +2,9 @@ CREATE TABLE threads (
         id INTEGER PRIMARY KEY AUTOINCREMENT, client_id TEXT UNIQUE,
         kind TEXT NOT NULL CHECK(kind IN ('space','task')),
         parent_thread_id INTEGER REFERENCES threads(id), pinned_at TEXT,
-        title TEXT NOT NULL, icon TEXT,
+        title TEXT NOT NULL,
+        icon_symbol TEXT CHECK(icon_symbol IS NULL OR icon_symbol IN ('hammer','wrench','bug','flask','rocket','package','git-branch','terminal','book','file-text','lightbulb','graduation-cap','brain','search','users','home','building','globe','map-pin','wallet','receipt','calendar','clock','timer','mail','message-square','bell','megaphone','image','music','film','camera','star','heart','flag','tag','shield','key','zap','leaf','sun','moon','coffee','gift','puzzle')),
+        icon_tint TEXT CHECK(icon_tint IS NULL OR icon_tint IN ('neutral','red','orange','amber','green','teal','blue','violet','pink')),
         icon_blob_id TEXT REFERENCES blobs(id),
         showcased_artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL,
         description TEXT NOT NULL, instrument TEXT CHECK(instrument IS NULL OR (json_type(instrument) IN ('object','array') AND json(instrument) NOT IN ('{}','[]'))),
@@ -12,7 +14,8 @@ CREATE TABLE threads (
         CHECK(kind = 'task' OR settled_at IS NULL),
         CHECK(parent_thread_id IS NULL OR parent_thread_id != id),
         CHECK(parent_thread_id IS NULL OR pinned_at IS NULL),
-        CHECK(icon IS NULL OR icon_blob_id IS NULL));
+        CHECK(icon_symbol IS NULL OR icon_blob_id IS NULL),
+        CHECK((icon_tint IS NULL) = (icon_symbol IS NULL)));
 CREATE INDEX threads_parent ON threads(parent_thread_id,id);
 CREATE TRIGGER threads_parent_immutable
 BEFORE UPDATE OF parent_thread_id ON threads

@@ -169,7 +169,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.threads_create",
             "threads_create",
-            "Create a durable Space or Task with its own conversation. Spaces may contain Spaces or Tasks; Tasks may contain only Tasks. Set icon to a typed emoji or a PNG/JPEG/WebP blob or base64 file artifact; images are center-cropped and normalized to 256 px. Reuse client_id on retries; every created Thread is visible immediately.",
+            "Create a durable Space or Task with its own conversation. Spaces may contain Spaces or Tasks; Tasks may contain only Tasks. Set icon to a vocabulary symbol with an optional tint, or a PNG/JPEG/WebP blob or base64 file artifact; images are center-cropped and normalized to 256 px. Without an icon the client draws a monogram of the title. Reuse client_id on retries; every created Thread is visible immediately.",
             thread_create_schema(),
             thread_result_schema(),
             ["threads"],
@@ -178,7 +178,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.threads_update",
             "threads_update",
-            "Update an existing Thread title, typed emoji/image icon, showcased artifact, description, generated instrument or attention from any wake. Image icons accept an existing blob_id or accessible base64 file artifact_id and are center-cropped to 256 px. Identity and conversation are preserved. Reading or updating never completes a Task.",
+            "Update an existing Thread title, typed symbol/image icon, showcased artifact, description, generated instrument or attention from any wake. Symbol names come from the fixed vocabulary in the schema; anything else is refused. Image icons accept an existing blob_id or accessible base64 file artifact_id and are center-cropped to 256 px. Identity and conversation are preserved. Reading or updating never completes a Task.",
             thread_update_schema(),
             thread_result_schema(),
             ["threads"],

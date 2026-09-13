@@ -55,6 +55,10 @@ function threadFor(world, id) {
   if (!thread) throw new Error(`Thread #${id} does not exist`);
   return thread;
 }
+// The Host's icon vocabulary (crates/hirsel-proto/src/thread_icon.rs).
+const THREAD_SYMBOLS = ["hammer", "wrench", "bug", "flask", "rocket", "package", "git-branch", "terminal", "book", "file-text", "lightbulb", "graduation-cap", "brain", "search", "users", "home", "building", "globe", "map-pin", "wallet", "receipt", "calendar", "clock", "timer", "mail", "message-square", "bell", "megaphone", "image", "music", "film", "camera", "star", "heart", "flag", "tag", "shield", "key", "zap", "leaf", "sun", "moon", "coffee", "gift", "puzzle"];
+const THREAD_TINTS = ["neutral", "red", "orange", "amber", "green", "teal", "blue", "violet", "pink"];
+
 function updateThread(world, thread, patch) {
   Object.assign(thread, patch, { revision: thread.revision + 1, updated_at: now() });
   broadcast(world, { type: "thread_upsert", thread });
@@ -321,11 +325,11 @@ function handle(world, ws, frame) {
         if (Object.hasOwn(frame.data ?? {}, "icon")) {
           const icon = frame.data.icon;
           if (icon !== null) {
-            if (!icon || typeof icon !== "object" || !["emoji", "image"].includes(icon.kind)) throw new Error("Invalid thread icon");
-            if (icon.kind === "emoji" && (typeof icon.value !== "string" || !icon.value.trim() || /\p{Cc}|\u2028|\u2029/u.test(icon.value) || Array.from(icon.value).length > 16 || Buffer.byteLength(icon.value, "utf8") > 64)) throw new Error("Invalid thread icon");
+            if (!icon || typeof icon !== "object" || !["symbol", "image"].includes(icon.kind)) throw new Error("Invalid thread icon");
+            if (icon.kind === "symbol" && (!THREAD_SYMBOLS.includes(icon.name) || (icon.tint !== undefined && !THREAD_TINTS.includes(icon.tint)))) throw new Error("Invalid thread icon");
             if (icon.kind === "image" && (typeof icon.blob_id !== "string" || !icon.blob_id.trim())) throw new Error("Invalid thread icon");
           }
-          patch.icon = icon;
+          patch.icon = icon?.kind === "symbol" ? { kind: "symbol", name: icon.name, tint: icon.tint ?? "neutral" } : icon;
         }
         updateThread(world, thread, patch); acknowledge(); return;
       }

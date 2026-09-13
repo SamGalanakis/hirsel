@@ -1,6 +1,6 @@
 use super::{Storage, common::parse_ts};
 use chrono::{DateTime, Utc};
-use hirsel_proto::{Thread, ThreadAttention, ThreadIcon, ThreadKind};
+use hirsel_proto::{Thread, ThreadAttention, ThreadIcon, ThreadKind, ThreadTint};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,7 +24,7 @@ impl ThreadPublication {
     }
 }
 
-pub(super) const COLUMNS: &str = "id,title,description,instrument,attention,settled_at,archived_at,snoozed_until,read,created_at,updated_at,revision,parent_thread_id,pinned_at,icon,icon_blob_id,showcased_artifact_id,kind";
+pub(super) const COLUMNS: &str = "id,title,description,instrument,attention,settled_at,archived_at,snoozed_until,read,created_at,updated_at,revision,parent_thread_id,pinned_at,icon_symbol,icon_blob_id,showcased_artifact_id,kind,icon_tint";
 pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
     let parent_thread_id = r.get::<_, Option<u64>>(12)?;
     let time = |i| -> rusqlite::Result<Option<DateTime<Utc>>> {
@@ -55,7 +55,14 @@ pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
             r.get::<_, Option<String>>(14)?,
             r.get::<_, Option<String>>(15)?,
         ) {
-            (Some(value), None) => Some(ThreadIcon::Emoji { value }),
+            (Some(name), None) => Some(ThreadIcon::Symbol {
+                name,
+                tint: r
+                    .get::<_, Option<String>>(18)?
+                    .as_deref()
+                    .and_then(ThreadTint::parse)
+                    .unwrap_or_default(),
+            }),
             (None, Some(blob_id)) => Some(ThreadIcon::Image { blob_id }),
             (None, None) => None,
             (Some(_), Some(_)) => {
@@ -64,7 +71,7 @@ pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
                     rusqlite::types::Type::Text,
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "Thread has both emoji and image icons",
+                        "Thread has both symbol and image icons",
                     )
                     .into(),
                 ));

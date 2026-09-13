@@ -30,8 +30,10 @@ describe("Thread rich links",()=>{
   const {container}=render(()=><RelatedContext value={{historyId,threadId:1}}><Markdown>{"Working in #2 now."}</Markdown></RelatedContext>);
   // The agent writes the id; the sentence reads as the name, exactly once.
   expect(container.querySelectorAll('a')).toHaveLength(1);expect(container.querySelector('[data-slot="thread-chip-label"]')?.textContent).toBe('Current project');
-  // Only the avatar's own glyph sits between the prose and the name.
-  expect(container.textContent?.replace('C','')).toBe('Working in Current project now.');
+  // Only the avatar's own monogram sits between the prose and the name.
+  const monogram=container.querySelector('[data-slot="thread-avatar"]')?.textContent??'';
+  expect(monogram).toBe('CP');
+  expect(container.textContent?.replace(monogram,'')).toBe('Working in Current project now.');
   expect(screen.getByRole('link',{name:'Thread #2 · Current project'})).toHaveTextContent('Current project');
  });
  it("opens its actions from the chip itself, Open first",async()=>{
@@ -53,11 +55,11 @@ describe("Thread rich links",()=>{
   const image=await waitFor(()=>{const node=avatar.querySelector('img');expect(node).not.toBeNull();return node!;});
   expect(image).toHaveAttribute('src','https://example.test/blob/project-image');expect(image.className).toContain('object-cover');expect(image).toHaveAttribute('alt','');
  });
- it("shows an emoji icon in the inline chip and the initial without one",()=>{
-  flush(()=>setThreadState(draft=>{draft.threads=[makeThread(1),makeThread(2,{title:"Current project",icon:{kind:"emoji",value:"\u{1F331}"}})];}));
-  mount();expect(screen.getByRole('link',{name:/Current project/}).querySelector('[data-thread-avatar="2"]')).toHaveTextContent("\u{1F331}");
+ it("shows a symbol icon in the inline chip and the monogram without one",()=>{
+  flush(()=>setThreadState(draft=>{draft.threads=[makeThread(1),makeThread(2,{title:"Current project",icon:{kind:"symbol",name:"leaf",tint:"green"}})];}));
+  mount();expect(screen.getByRole('link',{name:/Current project/}).querySelector('[data-thread-avatar="2"]')).toHaveAttribute('data-thread-symbol','leaf');
   cleanup();flush(()=>setThreadState(draft=>{draft.threads=[makeThread(1),makeThread(2,{title:"Current project"})];}));
-  mount();expect(screen.getByRole('link',{name:/Current project/}).querySelector('[data-thread-avatar="2"]')).toHaveTextContent("C");
+  mount();expect(screen.getByRole('link',{name:/Current project/}).querySelector('[data-thread-avatar="2"]')).toHaveTextContent("CP");
  });
  it("never hydrates a cached title before hello or after a history replacement",()=>{
   mount();flush(disconnectThreads);expect(screen.queryByRole('link',{name:/Current project/})).toBeNull();

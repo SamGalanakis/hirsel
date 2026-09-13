@@ -1,10 +1,10 @@
 use super::*;
 fn icon_schema() -> Value {
     json!({
-        "description":"A typed emoji or image icon. Image sources are normalized to a 256 px square retained blob. Use exactly one of blob_id or artifact_id. Null restores the generated avatar; omit to preserve on update.",
+        "description":"A vocabulary symbol on a tinted tile, or an image. Image sources are normalized to a 256 px square retained blob; use exactly one of blob_id or artifact_id. Null restores the title monogram; omit to preserve on update.",
         "oneOf":[
             {"type":"null"},
-            {"type":"object","additionalProperties":false,"required":["kind","value"],"properties":{"kind":{"const":"emoji"},"value":{"type":"string","minLength":1,"maxLength":16,"description":"At most 16 Unicode code points / 64 UTF-8 bytes; no controls or line separators."}}},
+            {"type":"object","additionalProperties":false,"required":["kind","name"],"properties":{"kind":{"const":"symbol"},"name":{"type":"string","enum":hirsel_proto::THREAD_SYMBOLS.as_slice(),"description":"One curated symbol name. Anything else is refused."},"tint":{"type":"string","enum":["neutral","red","orange","amber","green","teal","blue","violet","pink"],"description":"Tile colour; defaults to neutral."}}},
             {"type":"object","additionalProperties":false,"required":["kind","blob_id"],"properties":{"kind":{"const":"image"},"blob_id":{"type":"string","minLength":1}}},
             {"type":"object","additionalProperties":false,"required":["kind","artifact_id"],"properties":{"kind":{"const":"image"},"artifact_id":{"type":"integer","minimum":1,"description":"Accessible file artifact whose content is base64-encoded PNG, JPEG, or WebP bytes."}}}
         ]

@@ -168,10 +168,10 @@ describe("dev mock Thread contract", () => {
     expect(settled.settled_at).not.toBeNull();
     await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "settled-convert", thread_id: created.id, action: "set_kind", data: { kind: "space" }, expected_revision: settled.revision }), "Reopen this Task");
     expect(settled.icon).toBeNull();
-    const withIcon = (await request({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: { kind: "emoji", value: "👩🏽‍💻" } }, expected_revision: settled.revision }, "thread_upsert")).thread as Thread;
-    expect(withIcon.icon).toEqual({ kind: "emoji", value: "👩🏽‍💻" });
-    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "action-icon-stale", thread_id: created.id, action: "set_icon", data: { icon: { kind: "emoji", value: "🌱" } }, expected_revision: settled.revision }), "changed");
-    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "action-icon-invalid", thread_id: created.id, action: "set_icon", data: { icon: { kind: "emoji", value: "x\n" } }, expected_revision: withIcon.revision }), "Invalid thread icon");
+    const withIcon = (await request({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: { kind: "symbol", name: "users", tint: "blue" } }, expected_revision: settled.revision }, "thread_upsert")).thread as Thread;
+    expect(withIcon.icon).toEqual({ kind: "symbol", name: "users", tint: "blue" });
+    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "action-icon-stale", thread_id: created.id, action: "set_icon", data: { icon: { kind: "symbol", name: "leaf", tint: "green" } }, expected_revision: settled.revision }), "changed");
+    await expectActionError(connection.ws, addressed({ type: "thread_action", client_id: "action-icon-invalid", thread_id: created.id, action: "set_icon", data: { icon: { kind: "symbol", name: "sparkles" } }, expected_revision: withIcon.revision }), "Invalid thread icon");
     const cleared = (await request({ type: "thread_action", thread_id: created.id, action: "set_icon", data: { icon: null }, expected_revision: withIcon.revision }, "thread_upsert")).thread as Thread;
     expect(cleared.icon).toBeNull();
     const renamed = (await request({ type: "thread_action", thread_id: created.id, action: "set_title", data: { title: "  Renamed runbook  " }, expected_revision: cleared.revision }, "thread_upsert")).thread as Thread;

@@ -29,7 +29,10 @@ records acceptance separately. Instruments use SQL NULL for absence; nonempty
 validated component objects and arrays remain supported. Cancellation intent
 lives on `thread_turns.cancel_requested_at`. Report receipts retain only the
 activity reference; activity ids provide ordering and the activity holds the
-report payload. There is no in-place migration: schema 7 and older layouts
+report payload. Schema 8 also binds every push token to its authenticated device, restricts
+platforms to supported values, and loads delivery targets only for unrevoked
+devices. Each agent role keeps one typed SessionProfile JSON meta row.
+There is no in-place migration: schema 7 and obsolete layouts stamped 8
 require backup and fresh-data handling before this build can start.
 
 Schema 5 added the append-only `thread_turn_events` timeline. The Host commits

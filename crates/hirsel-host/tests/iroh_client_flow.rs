@@ -91,7 +91,6 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
     let mut client_config = ClientConfig::new_iroh_pairing(
         server.ticket().to_owned(),
         pairing_code.clone(),
-        "Owner phone".to_owned(),
         persisted_identity.clone(),
     );
     client_config.reconnect = ReconnectPolicy {
@@ -140,12 +139,7 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
     client.disconnect().await;
     drop(client);
 
-    let reused = pairing_client(
-        server.ticket(),
-        pairing_code,
-        "Owner phone",
-        test_reconnect_policy(),
-    );
+    let reused = pairing_client(server.ticket(), pairing_code, test_reconnect_policy());
     assert_protocol_error(&reused, "invalid pairing code").await;
     reused.disconnect().await;
 
@@ -241,12 +235,7 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
         .mint_pairing_code("Expired phone", Duration::ZERO)
         .await
         .unwrap();
-    let expired = pairing_client(
-        server.ticket(),
-        expired_code,
-        "Expired phone",
-        test_reconnect_policy(),
-    );
+    let expired = pairing_client(server.ticket(), expired_code, test_reconnect_policy());
     assert_protocol_error(&expired, "invalid pairing code").await;
     expired.disconnect().await;
 
@@ -254,13 +243,9 @@ async fn persisted_identity_reconnects_and_rejects_invalid_reuse_or_identity() {
     server.shutdown().await;
 }
 
-fn pairing_client(ticket: &str, code: String, label: &str, reconnect: ReconnectPolicy) -> Client {
-    let mut config = ClientConfig::new_iroh_pairing(
-        ticket.to_owned(),
-        code,
-        label.to_owned(),
-        generate_iroh_identity(),
-    );
+fn pairing_client(ticket: &str, code: String, reconnect: ReconnectPolicy) -> Client {
+    let mut config =
+        ClientConfig::new_iroh_pairing(ticket.to_owned(), code, generate_iroh_identity());
     config.reconnect = reconnect;
     Client::new(config).unwrap()
 }

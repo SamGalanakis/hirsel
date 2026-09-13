@@ -50,10 +50,20 @@ impl HelloBroadcastDedupe {
                 thread_id,
                 instance_id,
                 spec,
-            } => self
-                .views
-                .remove(instance_id)
-                .is_none_or(|snapshot| snapshot.thread_id != *thread_id || snapshot.spec != *spec),
+            } => {
+                let should_send = self.views.get(instance_id).is_none_or(|snapshot| {
+                    snapshot.thread_id != *thread_id || snapshot.spec != *spec
+                });
+                self.views.insert(
+                    instance_id.clone(),
+                    ViewInstance {
+                        thread_id: *thread_id,
+                        instance_id: instance_id.clone(),
+                        spec: spec.clone(),
+                    },
+                );
+                should_send
+            }
             HostToClient::ViewRemoved { instance_id } => {
                 self.views.remove(instance_id);
                 true

@@ -13,12 +13,14 @@ Two facts force the design. First, the host binds `127.0.0.1` — a phone on mob
 **iroh for native clients, WSS for the browser.** The host runs an iroh `Endpoint` (persisted secret key → stable `NodeId`) alongside the existing axum WSS server. Both carry the identical transport-agnostic message stream; iroh is a bidirectional QUIC stream under an ALPN (e.g. `hirsel/owner/1`) with length-delimited JSON framing of the same `ClientToHost`/`HostToClient` serde frames. The native phone app (Rust `hirsel-client-core`, no wasm) uses iroh; the desktop/web client stays on WSS per [ADR-0006]. To make this reuse clean, the protocol loop in `ws.rs::handle_socket` is extracted to be transport-agnostic (drives any framed `Sink<HostToClient> + Stream<ClientToHost>`), so WSS and iroh share it verbatim.
 
 **QR pairing → per-device token.** Onboarding replaces "type the master token":
-1. The host mints a **one-time pairing code** — short TTL, single-use.
+1. The Owner gives the device a label and the host mints a **one-time pairing code** bound to
+   that label — short TTL, single-use.
 2. A QR encodes `hirsel://pair?ticket=<iroh-ticket>&code=<pairing-code>`, with both query values
    URL-encoded. The ticket contains the NodeId + relay/direct addrs; the QR never contains the
    master token.
-3. The phone scans, iroh-connects, and sends `pair_request { code, device_label, node_id }`.
-4. The host validates the code (unexpired, unused), issues a random **per-device token** stored in a `device_tokens` table (token, device_label, node_id, created_ts, last_seen_ts, revoked), and returns it.
+3. The phone scans, iroh-connects, and sends the pairing code; it cannot replace the
+   Owner-chosen label.
+4. The host validates the code (unexpired, unused), issues a random **per-device token** stored in a `device_tokens` table (token, device_label, node_id, created_ts, last_seen_ts, revoked) with the label bound at mint time, and returns it.
 5. The phone persists the token **and its own iroh `SecretKey`** (same secure store) and authenticates future connects with the token (the device token is the first frame on reconnect, replacing the static-token check on the iroh path).
 
 Device tokens are **revocable** via a host list/revoke surface (debug/admin now, desktop-shell panel later). The device's iroh `NodeId` is **pinned** to its token (a token presented from a different node is rejected) as defense-in-depth — the token alone is not bearer-portable. The QR carries a one-time code, never the master secret.

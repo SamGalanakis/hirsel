@@ -37,7 +37,7 @@ pub enum PushPlatform {
 pub enum HelloAuth {
     StaticToken(String),
     DeviceToken(String),
-    PairingCode { code: String, device_label: String },
+    PairingCode(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

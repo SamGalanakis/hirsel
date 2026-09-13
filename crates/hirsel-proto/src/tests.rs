@@ -57,17 +57,25 @@ fn client_hello_round_trips_tagged_auth() {
 #[test]
 fn pairing_auth_and_paired_response_round_trip() {
     let hello = ClientToHost::Hello {
-        auth: HelloAuth::PairingCode {
-            code: "pairing-code".to_string(),
-            device_label: "Owner phone".to_string(),
-        },
+        auth: HelloAuth::PairingCode("pairing-code".to_string()),
     };
     let encoded = serde_json::to_value(&hello).unwrap();
-    assert_eq!(encoded["auth"]["pairing_code"]["code"], "pairing-code");
+    assert_eq!(encoded["auth"]["pairing_code"], "pairing-code");
     assert_eq!(
         serde_json::from_value::<ClientToHost>(encoded).unwrap(),
         hello
     );
+
+    let legacy_client_labeled_auth = serde_json::json!({
+        "type": "hello",
+        "auth": {
+            "pairing_code": {
+                "code": "pairing-code",
+                "device_label": "client-controlled label"
+            }
+        }
+    });
+    assert!(serde_json::from_value::<ClientToHost>(legacy_client_labeled_auth).is_err());
 
     let paired = HostToClient::Paired {
         device_token: "device-token".to_string(),

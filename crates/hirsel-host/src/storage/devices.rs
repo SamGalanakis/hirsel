@@ -51,17 +51,23 @@ impl Storage {
         &self,
         token: &str,
         node_id: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<String> {
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().await;
         let record = conn
             .query_row(
-                "SELECT node_id, revoked_ts FROM device_tokens WHERE token = ?1",
+                "SELECT device_label, node_id, revoked_ts FROM device_tokens WHERE token = ?1",
                 params![token],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((pinned_node_id, revoked_ts)) = record else {
+        let Some((device_label, pinned_node_id, revoked_ts)) = record else {
             anyhow::bail!("unknown device token");
         };
         if revoked_ts.is_some() {
@@ -74,7 +80,7 @@ impl Storage {
             "UPDATE device_tokens SET last_seen_ts = ?2 WHERE token = ?1",
             params![token, now],
         )?;
-        Ok(())
+        Ok(device_label)
     }
 
     pub async fn list_devices(&self) -> anyhow::Result<Vec<Device>> {

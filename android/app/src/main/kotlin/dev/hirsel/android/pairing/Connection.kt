@@ -329,7 +329,6 @@ private fun openConnection(spec: ConnectionSpec, mainHandler: Handler): Connecti
                 Client.newIrohPairing(
                     spec.ticket,
                     spec.code,
-                    spec.label,
                     spec.irohSecretKey,
                     observer,
                 )

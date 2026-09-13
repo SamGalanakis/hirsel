@@ -89,8 +89,8 @@ where
         },
     };
 
-    let paired_token = match authenticate(&state, auth, &peer).await {
-        Ok(token) => token,
+    let authenticated = match authenticate(&state, auth, &peer).await {
+        Ok(authenticated) => authenticated,
         Err(detail) => {
             tokio::time::sleep(state.auth_throttle.record_failure(&peer)).await;
             let _ = channel
@@ -103,9 +103,14 @@ where
         }
     };
     state.auth_throttle.record_success(&peer);
-    if let Some(device_token) = paired_token
+    if let Some(label) = authenticated.device_label() {
+        tracing::debug!(device_label = label, "device authenticated");
+    }
+    if let Some(device_token) = authenticated.newly_paired_device_token()
         && channel
-            .send(&HostToClient::Paired { device_token })
+            .send(&HostToClient::Paired {
+                device_token: device_token.to_string(),
+            })
             .await
             .is_err()
     {
@@ -142,7 +147,9 @@ where
                 match frame {
                     Ok(Some(IncomingFrame::Message { frame, client_id })) => {
                         dedupe.before_request(&frame);
-                        if let Err(error) = handle_client_frame(&state, channel, frame).await {
+                        if let Err(error) =
+                            handle_client_frame(&state, channel, &authenticated, frame).await
+                        {
                             let response = HostToClient::Error {
                                 detail: error.to_string(),
                                 client_id,
@@ -254,41 +261,86 @@ async fn authenticate(
     state: &AppState,
     auth: HelloAuth,
     peer: &AuthPeer,
-) -> Result<Option<String>, String> {
+) -> Result<Authenticated, String> {
     match (auth, peer) {
         (HelloAuth::StaticToken(token), _) => {
             if owner_token_matches(&state.token, &token, state.debug_enabled) {
-                Ok(None)
+                Ok(Authenticated::Owner)
             } else {
                 Err("invalid token".to_string())
             }
         }
         (HelloAuth::DeviceToken(token), AuthPeer::Iroh(node_id)) => {
-            state
+            let label = state
                 .storage
                 .authenticate_device_token(&token, Some(node_id))
                 .await
                 .map_err(|_| "invalid device token".to_string())?;
-            Ok(None)
+            Ok(Authenticated::Device {
+                device_token: token,
+                label,
+                newly_paired: false,
+            })
         }
-        (HelloAuth::PairingCode { code, device_label }, AuthPeer::Iroh(node_id)) => {
-            let _ = state
+        (HelloAuth::PairingCode(code), AuthPeer::Iroh(node_id)) => {
+            let label = state
                 .storage
                 .redeem_pairing_code(&code)
                 .await
                 .map_err(|_| "invalid pairing code".to_string())?;
-            state
+            let device_token = state
                 .storage
-                .issue_device_token(device_label, node_id)
+                .issue_device_token(&label, node_id)
                 .await
-                .map(Some)
-                .map_err(|_| "failed to issue device token".to_string())
+                .map_err(|_| "failed to issue device token".to_string())?;
+            Ok(Authenticated::Device {
+                device_token,
+                label,
+                newly_paired: true,
+            })
         }
         (HelloAuth::DeviceToken(_), AuthPeer::WebSocket(_)) => {
             Err("device-token auth requires iroh".to_string())
         }
-        (HelloAuth::PairingCode { .. }, AuthPeer::WebSocket(_)) => {
+        (HelloAuth::PairingCode(_), AuthPeer::WebSocket(_)) => {
             Err("pairing-code auth requires iroh".to_string())
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Authenticated {
+    Owner,
+    Device {
+        device_token: String,
+        label: String,
+        newly_paired: bool,
+    },
+}
+
+impl Authenticated {
+    fn device_token(&self) -> Option<&str> {
+        match self {
+            Self::Owner => None,
+            Self::Device { device_token, .. } => Some(device_token),
+        }
+    }
+
+    fn device_label(&self) -> Option<&str> {
+        match self {
+            Self::Owner => None,
+            Self::Device { label, .. } => Some(label),
+        }
+    }
+
+    fn newly_paired_device_token(&self) -> Option<&str> {
+        match self {
+            Self::Device {
+                device_token,
+                newly_paired: true,
+                ..
+            } => Some(device_token),
+            Self::Owner | Self::Device { .. } => None,
         }
     }
 }
@@ -296,6 +348,7 @@ async fn authenticate(
 async fn handle_client_frame<C>(
     state: &AppState,
     channel: &mut C,
+    authenticated: &Authenticated,
     frame: ClientToHost,
 ) -> anyhow::Result<()>
 where
@@ -626,10 +679,22 @@ where
         }
 
         ClientToHost::RegisterPushToken { platform, token } => {
-            state.storage.register_push_token(platform, token).await?;
+            let device_token = authenticated.device_token().ok_or_else(|| {
+                anyhow::anyhow!("push registration requires device authentication")
+            })?;
+            state
+                .storage
+                .register_push_token(device_token, platform, token)
+                .await?;
         }
         ClientToHost::UnregisterPushToken { token } => {
-            state.storage.unregister_push_token(&token).await?;
+            let device_token = authenticated.device_token().ok_or_else(|| {
+                anyhow::anyhow!("push registration requires device authentication")
+            })?;
+            state
+                .storage
+                .unregister_push_token(device_token, &token)
+                .await?;
         }
 
         ClientToHost::ViewEvent {

@@ -50,11 +50,11 @@ END;
         id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id INTEGER NOT NULL REFERENCES threads(id),
         requester_thread_id INTEGER REFERENCES threads(id),
         requester_turn_id INTEGER REFERENCES thread_turns(id),
-        owner_message_id INTEGER UNIQUE, agent_message_id INTEGER, state TEXT NOT NULL CHECK(state IN ($TURN_STATES)),
+        owner_message_id INTEGER UNIQUE, agent_message_id INTEGER, state TEXT NOT NULL CHECK(state IN ('queued','running','completed','failed','cancelled','interrupted')),
         accepted_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, cancel_requested_at TEXT,
         CHECK(state != 'queued' OR started_at IS NULL),
         CHECK(state != 'running' OR started_at IS NOT NULL),
-        CHECK((state IN ($TERMINAL_TURN_STATES)) = (finished_at IS NOT NULL)),
+        CHECK((state IN ('completed','failed','cancelled','interrupted')) = (finished_at IS NOT NULL)),
         CHECK(requester_turn_id IS NULL OR requester_thread_id IS NOT NULL));
 CREATE UNIQUE INDEX thread_one_running ON thread_turns(thread_id) WHERE state='running';
         CREATE TABLE thread_activities (
@@ -108,6 +108,12 @@ CREATE TABLE thread_turn_events (turn_id INTEGER NOT NULL REFERENCES thread_turn
                 triage_dispatched INTEGER NOT NULL DEFAULT 0 CHECK(triage_dispatched IN (0,1))
             );
 
+            CREATE TABLE push_tokens (
+                token TEXT PRIMARY KEY,
+                platform TEXT NOT NULL,
+                created_ts TEXT NOT NULL,
+                last_seen_ts TEXT NOT NULL
+            );
             CREATE TABLE device_tokens (
                 token TEXT PRIMARY KEY,
                 device_label TEXT NOT NULL,
@@ -115,13 +121,6 @@ CREATE TABLE thread_turn_events (turn_id INTEGER NOT NULL REFERENCES thread_turn
                 created_ts TEXT NOT NULL,
                 last_seen_ts TEXT NOT NULL,
                 revoked_ts TEXT NULL
-            );
-            CREATE TABLE push_tokens (
-                token TEXT PRIMARY KEY,
-                device_token TEXT NOT NULL REFERENCES device_tokens(token),
-                platform TEXT NOT NULL CHECK(platform IN ('android','web','ios')),
-                created_ts TEXT NOT NULL,
-                last_seen_ts TEXT NOT NULL
             );
             CREATE TABLE meta (
                 key TEXT PRIMARY KEY,

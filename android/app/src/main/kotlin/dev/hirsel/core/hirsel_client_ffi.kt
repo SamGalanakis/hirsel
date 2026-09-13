@@ -772,7 +772,7 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh(`ticket`: RustBuffer.ByValue,`deviceToken`: RustBuffer.ByValue,`irohSecretKey`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-    external fun uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh_pairing(`ticket`: RustBuffer.ByValue,`code`: RustBuffer.ByValue,`deviceLabel`: RustBuffer.ByValue,`irohSecretKey`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh_pairing(`ticket`: RustBuffer.ByValue,`code`: RustBuffer.ByValue,`irohSecretKey`: RustBuffer.ByValue,`observer`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
     external fun uniffi_hirsel_client_ffi_fn_method_client_add_thread_related(`ptr`: Long,`historyId`: RustBuffer.ByValue,`threadId`: Long,`target`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
@@ -986,7 +986,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_hirsel_client_ffi_checksum_constructor_client_new_iroh() != 20420) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_hirsel_client_ffi_checksum_constructor_client_new_iroh_pairing() != 26849) {
+    if (lib.uniffi_hirsel_client_ffi_checksum_constructor_client_new_iroh_pairing() != 24971) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hirsel_client_ffi_checksum_method_clientobserver_on_state_changed() != 12455) {
@@ -1842,7 +1842,7 @@ open class Client: Disposable, AutoCloseable, ClientInterface
     /**
      * Creates an iroh client that redeems a one-time pairing code.
      */
-    @Throws(ClientException::class) fun `newIrohPairing`(`ticket`: kotlin.String, `code`: kotlin.String, `deviceLabel`: kotlin.String, `irohSecretKey`: kotlin.String, `observer`: ClientObserver): Client {
+    @Throws(ClientException::class) fun `newIrohPairing`(`ticket`: kotlin.String, `code`: kotlin.String, `irohSecretKey`: kotlin.String, `observer`: ClientObserver): Client {
             return FfiConverterTypeClient.lift(
     uniffiRustCallWithError(ClientException) { _status ->
     UniffiLib.uniffi_hirsel_client_ffi_fn_constructor_client_new_iroh_pairing(
@@ -1850,7 +1850,6 @@ open class Client: Disposable, AutoCloseable, ClientInterface
 
         FfiConverterString.lower(`ticket`),
         FfiConverterString.lower(`code`),
-        FfiConverterString.lower(`deviceLabel`),
         FfiConverterString.lower(`irohSecretKey`),
         FfiConverterTypeClientObserver.lower(`observer`),_status)
 }
@@ -3972,6 +3971,5 @@ public object FfiConverterSequenceTypeToolCall: FfiConverterRustBuffer<List<Tool
 }
     )
     }
-
 
 

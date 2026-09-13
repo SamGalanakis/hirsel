@@ -5,6 +5,7 @@ use anyhow::Context;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 impl Storage {
@@ -14,65 +15,21 @@ impl Storage {
         fingerprint: &str,
         tool_names: &[String],
     ) -> anyhow::Result<AgentSessionState> {
-        let mut normalized_names = tool_names.to_vec();
-        normalized_names.sort();
-        normalized_names.dedup();
-        let encoded_names = serde_json::to_string(&normalized_names)?;
-
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction()?;
         super::threads::get(&tx, thread_id)?;
-        let fingerprint_key = format!("thread:{thread_id}:tool_fingerprint");
-        let names_key = format!("thread:{thread_id}:tool_names");
-        let generation_key = format!("thread:{thread_id}:session_generation");
         let history_id: String =
             tx.query_row("SELECT value FROM meta WHERE key='history_id'", [], |r| {
                 r.get(0)
             })?;
-        let previous_fingerprint = meta_value_from_conn(&tx, &fingerprint_key)?;
-        let previous_names = meta_value_from_conn(&tx, &names_key)?
-            .map(|value| serde_json::from_str::<Vec<String>>(&value))
-            .transpose()
-            .context("decode stored Agent tool surface names")?
-            .unwrap_or_default();
-        let generation = meta_value_from_conn(&tx, &generation_key)?
-            .map(|value| value.parse::<u64>())
-            .transpose()
-            .context("decode stored Agent session generation")?;
-
-        let rotated = previous_fingerprint
-            .as_deref()
-            .is_some_and(|previous| previous != fingerprint);
-        let next_generation = if rotated {
-            Some(
-                generation
-                    .unwrap_or(0)
-                    .checked_add(1)
-                    .context("Agent session generation overflow")?,
-            )
-        } else {
-            generation
-        };
-        let added_tools = if rotated {
-            let previous_names = previous_names.into_iter().collect::<HashSet<_>>();
-            normalized_names
-                .iter()
-                .filter(|name| !previous_names.contains(*name))
-                .cloned()
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        set_meta_value(&tx, &fingerprint_key, fingerprint)?;
-        set_meta_value(&tx, &names_key, &encoded_names)?;
-        if let Some(generation) = next_generation {
-            set_meta_value(&tx, &generation_key, &generation.to_string())?;
-        }
-        let session_id = format!(
-            "thread-{history_id}-{thread_id}-g{}",
-            next_generation.unwrap_or(0)
-        );
+        let reconciled = reconcile_session_profile(
+            &tx,
+            &agent_session_profile_key(thread_id),
+            fingerprint,
+            tool_names,
+            "Agent",
+        )?;
+        let session_id = format!("thread-{history_id}-{thread_id}-g{}", reconciled.generation);
         tx.execute(
             "INSERT INTO thread_process_sessions(history_id,session_id,thread_id) VALUES(?1,?2,?3) ON CONFLICT(session_id) DO UPDATE SET history_id=excluded.history_id,thread_id=excluded.thread_id",
             params![history_id, session_id, thread_id],
@@ -81,8 +38,8 @@ impl Storage {
 
         Ok(AgentSessionState {
             session_id,
-            rotated,
-            added_tools,
+            rotated: reconciled.rotated,
+            added_tools: reconciled.added_tools,
         })
     }
 
@@ -96,69 +53,29 @@ impl Storage {
         fingerprint: &str,
         tool_names: &[String],
     ) -> anyhow::Result<AgentSessionState> {
-        let mut normalized_names = tool_names.to_vec();
-        normalized_names.sort();
-        normalized_names.dedup();
-        let encoded_names = serde_json::to_string(&normalized_names)?;
-
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction()?;
         super::threads::get(&tx, thread_id)?;
-        let fingerprint_key = format!("thread:{thread_id}:native_worker_fingerprint");
-        let names_key = format!("thread:{thread_id}:native_worker_tool_names");
-        let generation_key = format!("thread:{thread_id}:native_worker_generation");
         let history_id: String =
             tx.query_row("SELECT value FROM meta WHERE key='history_id'", [], |r| {
                 r.get(0)
             })?;
-        let previous_fingerprint = meta_value_from_conn(&tx, &fingerprint_key)?;
-        let previous_names = meta_value_from_conn(&tx, &names_key)?
-            .map(|value| serde_json::from_str::<Vec<String>>(&value))
-            .transpose()
-            .context("decode stored native worker tool names")?
-            .unwrap_or_default();
-        let generation = meta_value_from_conn(&tx, &generation_key)?
-            .map(|value| value.parse::<u64>())
-            .transpose()
-            .context("decode stored native worker session generation")?;
-        let rotated = previous_fingerprint
-            .as_deref()
-            .is_some_and(|previous| previous != fingerprint);
-        let next_generation = if rotated {
-            Some(
-                generation
-                    .unwrap_or(0)
-                    .checked_add(1)
-                    .context("native worker session generation overflow")?,
-            )
-        } else {
-            generation
-        };
-        let previous_names = previous_names.into_iter().collect::<HashSet<_>>();
-        let added_tools = if rotated {
-            normalized_names
-                .iter()
-                .filter(|name| !previous_names.contains(*name))
-                .cloned()
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        set_meta_value(&tx, &fingerprint_key, fingerprint)?;
-        set_meta_value(&tx, &names_key, &encoded_names)?;
-        if let Some(generation) = next_generation {
-            set_meta_value(&tx, &generation_key, &generation.to_string())?;
-        }
+        let reconciled = reconcile_session_profile(
+            &tx,
+            &native_worker_session_profile_key(thread_id),
+            fingerprint,
+            tool_names,
+            "native worker",
+        )?;
         tx.commit()?;
 
         Ok(AgentSessionState {
             session_id: format!(
                 "native-thread-{history_id}-{thread_id}-g{}",
-                next_generation.unwrap_or(0)
+                reconciled.generation
             ),
-            rotated,
-            added_tools,
+            rotated: reconciled.rotated,
+            added_tools: reconciled.added_tools,
         })
     }
 
@@ -263,14 +180,99 @@ impl Storage {
             "native worker session abandonment belongs to a previous history"
         );
         super::threads::get(&tx, thread_id)?;
-        set_meta_value(
-            &tx,
-            &format!("thread:{thread_id}:native_worker_fingerprint"),
-            &format!("abandoned-turn:{turn_id}"),
-        )?;
+        invalidate_native_worker_profile(&tx, thread_id, &format!("abandoned-turn:{turn_id}"))?;
         tx.commit()?;
         Ok(())
     }
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct SessionProfile {
+    fingerprint: String,
+    tool_names: Vec<String>,
+    generation: u64,
+}
+
+struct ReconciledSessionProfile {
+    generation: u64,
+    rotated: bool,
+    added_tools: Vec<String>,
+}
+
+fn agent_session_profile_key(thread_id: u64) -> String {
+    format!("thread:{thread_id}:agent_session_profile")
+}
+
+fn native_worker_session_profile_key(thread_id: u64) -> String {
+    format!("thread:{thread_id}:native_worker_session_profile")
+}
+
+fn reconcile_session_profile(
+    conn: &Connection,
+    key: &str,
+    fingerprint: &str,
+    tool_names: &[String],
+    role: &str,
+) -> anyhow::Result<ReconciledSessionProfile> {
+    let previous = meta_value_from_conn(conn, key)?
+        .map(|value| serde_json::from_str::<SessionProfile>(&value))
+        .transpose()
+        .with_context(|| format!("decode stored {role} session profile"))?;
+    let rotated = previous
+        .as_ref()
+        .is_some_and(|profile| profile.fingerprint != fingerprint);
+    let generation = if rotated {
+        previous
+            .as_ref()
+            .map_or(0, |profile| profile.generation)
+            .checked_add(1)
+            .with_context(|| format!("{role} session generation overflow"))?
+    } else {
+        previous.as_ref().map_or(0, |profile| profile.generation)
+    };
+    let mut normalized_names = tool_names.to_vec();
+    normalized_names.sort();
+    normalized_names.dedup();
+    let added_tools = if rotated {
+        let previous_names = previous
+            .as_ref()
+            .map(|profile| profile.tool_names.iter().cloned().collect::<HashSet<_>>())
+            .unwrap_or_default();
+        normalized_names
+            .iter()
+            .filter(|name| !previous_names.contains(*name))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let profile = SessionProfile {
+        fingerprint: fingerprint.to_string(),
+        tool_names: normalized_names,
+        generation,
+    };
+    set_meta_value(conn, key, &serde_json::to_string(&profile)?)?;
+    Ok(ReconciledSessionProfile {
+        generation,
+        rotated,
+        added_tools,
+    })
+}
+
+pub(super) fn invalidate_native_worker_profile(
+    conn: &Connection,
+    thread_id: u64,
+    fingerprint: &str,
+) -> anyhow::Result<()> {
+    let key = native_worker_session_profile_key(thread_id);
+    let mut profile = meta_value_from_conn(conn, &key)?
+        .map(|value| serde_json::from_str::<SessionProfile>(&value))
+        .transpose()
+        .context("decode stored native worker session profile")?
+        .unwrap_or_default();
+    profile.fingerprint = fingerprint.to_string();
+    set_meta_value(conn, &key, &serde_json::to_string(&profile)?)?;
+    Ok(())
 }
 
 fn meta_value_from_conn(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {

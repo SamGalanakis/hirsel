@@ -211,12 +211,8 @@ impl Storage {
                 // shell effect before the Host stopped. Abandon this session
                 // generation so a later follow-up cannot drive that uncertain
                 // pending input as if it were new work.
-                let key = format!("thread:{thread_id}:native_worker_fingerprint");
                 let value = format!("interrupted-turn:{id}");
-                tx.execute(
-                    "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    params![key, value],
-                )?;
+                super::meta::invalidate_native_worker_profile(&tx, thread_id, &value)?;
                 // The provider or a coding tool may already have observed this
                 // accepted input. Retire the durable request with the turn so
                 // startup cannot later dispatch it as fresh work.

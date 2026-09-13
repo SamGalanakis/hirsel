@@ -23,7 +23,7 @@ function renderHast(nodes: readonly RootContent[]): JSX.Element[] {
   return out;
 }
 
-function CopyButton(props: { text: string }) {
+export function CopyButton(props: { text: string }) {
   const [copied, setCopied] = createSignal(false);
   const copy = async () => {
     try {
@@ -53,8 +53,13 @@ function CopyButton(props: { text: string }) {
  * A fenced code block: language label, copy affordance, and highlighting that
  * lazy-loads. Plain mono text paints first and is replaced in place once the
  * highlighter chunk resolves, so nothing blocks the message.
+ *
+ * `wrap` trades the sideways scrollbar for wrapped lines — what a transcript
+ * entry wants, where a horizontal scroll would hide most of the program.
+ * `bare` drops the language label and the frame, leaving a tinted band for
+ * callers that already carry a header and must not nest another border.
  */
-export function CodeBlock(props: { code: string; lang?: string | null }) {
+export function CodeBlock(props: { code: string; lang?: string | null; wrap?: boolean; bare?: boolean }) {
   const tree = createMemo(async (): Promise<HastRoot | null> => {
     const code = props.code;
     const lang = props.lang ?? null;
@@ -63,18 +68,30 @@ export function CodeBlock(props: { code: string; lang?: string | null }) {
     return highlight(code, lang);
   });
 
+  const body = () => (
+    <code class="font-mono">
+      <Loading fallback={props.code}><Show when={tree()} fallback={props.code}>
+        {(highlighted) => <For each={highlighted().children}>{(node) => renderHast([node])}</For>}
+      </Show></Loading>
+    </code>
+  );
+
   return (
     <div class="group relative flex flex-col gap-1">
-      <div class="flex items-center justify-between gap-2 pr-0.5">
-        <span class="font-mono text-meta text-muted-foreground">{props.lang ?? "text"}</span>
+      <div class={["flex items-center gap-2 pr-0.5", props.bare ? "justify-end" : "justify-between"]}>
+        <Show when={!props.bare}>
+          <span class="font-mono text-meta text-muted-foreground">{props.lang ?? "text"}</span>
+        </Show>
         <CopyButton text={props.code} />
       </div>
-      <pre class="overflow-x-auto rounded-md border border-border/60 px-2.5 py-2 text-xs leading-5">
-        <code class="font-mono">
-          <Loading fallback={props.code}><Show when={tree()} fallback={props.code}>
-            {(highlighted) => <For each={highlighted().children}>{(node) => renderHast([node])}</For>}
-          </Show></Loading>
-        </code>
+      <pre
+        class={[
+          "px-2.5 py-2 text-xs leading-5",
+          props.bare ? "rounded-md bg-muted/30" : "rounded-md border border-border/60",
+          props.wrap ? "whitespace-pre-wrap wrap-break-word" : "overflow-x-auto",
+        ]}
+      >
+        {body()}
       </pre>
     </div>
   );

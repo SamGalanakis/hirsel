@@ -12,7 +12,11 @@ import { Markdown } from "../components/Markdown";
 import { Composer } from "../components/chat/Composer";
 import { createComposerAttachments, type AttachmentsController } from "../components/chat/useAttachments";
 import { ThreadMessage } from "./ThreadMessages";
-import { conversationEntries } from "./conversation";
+import { ConversationNote } from "./ThreadWork";
+import { ThreadCreate } from "./ThreadCreate";
+import { openThreadCreate } from "./create";
+import { quietWakeTurn } from "./work-summary";
+import { conversationEntries, type ConversationEntry } from "./conversation";
 import { emptyHistory } from "./model";
 import { BrandMark } from "../components/BrandMark";
 import { Activity, Settings, GitBranch, LayoutGrid, ArrowLeft, MessageCircle, FileText, Plus } from "../components/ui/icons";
@@ -33,8 +37,7 @@ import { getClient } from "../ws/client";
 import { ThreadNavigation } from "./ThreadNavigation";
 import { threadNavigationOpen as navigationOpen, threadNavigationIntent, openThreadNavigation, closeThreadNavigation } from "./navigation";
 import { artifactState } from "../artifacts/store";
-import { createThread, focusThread, followThreadLocation, openThread, retryThreadMessage, sendThreadMessage, threadAction, threadState } from "./store";
-import type { ThreadKind } from "./types";
+import { focusThread, followThreadLocation, openThread, retryThreadMessage, sendThreadMessage, threadAction, threadState } from "./store";
 
 const button = "inline-flex min-h-11 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
 const iconButton = "inline-flex size-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-pressed:bg-muted aria-pressed:text-foreground";
@@ -58,6 +61,21 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
   const history = () => threadState.histories[props.id];
   const messages = () => history()?.messages ?? [];
   const entries = createMemo(() => conversationEntries(history() ?? emptyHistory()));
+  /** A wake that produced nothing to read is not a card. Consecutive ones fold
+   * into one quiet note so a Space driven by child reports reads as a
+   * conversation rather than a stack of empty activity boxes. */
+  const rendered = createMemo(() => {
+    const rows: ({ key: string; entry: ConversationEntry } | { key: string; quiet: number })[] = [];
+    for (const entry of entries()) {
+      const turn = entry.kind === "turn" ? entry.turn : null;
+      const quiet = turn !== null && quietWakeTurn(turn, (history()?.activities ?? []).filter(activity => activity.turn_id === turn.id), threadState.turnDetails[turn.id] ?? []);
+      const last = rows[rows.length - 1];
+      if (quiet && last && "quiet" in last) rows[rows.length - 1] = { key: last.key, quiet: last.quiet + 1 };
+      else if (quiet) rows.push({ key: `quiet-${entry.key}`, quiet: 1 });
+      else rows.push({ key: entry.key, entry });
+    }
+    return rows;
+  });
   const pending = () => threadState.pending.filter(p => p.threadId === props.id);
   const thinking = () => history()?.turns.some(t => t.state === "running" || t.state === "queued") ?? false;
   const [loading, setLoading] = createSignal(false);
@@ -115,7 +133,7 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
         <Show when={history()?.hasMore}><button class={button} disabled={loading()} onClick={() => void earlier()}>{loading() ? "Loading…" : "Load earlier messages"}</button></Show>
         <Show when={!history()?.loaded && !(threadState.error?.operation === "load" && threadState.error.threadId === props.id)}><p role="status" class="text-sm text-muted-foreground">Loading conversation…</p></Show>
         <Show when={history()?.loaded && messages().length === 0 && pending().length === 0 && !thinking()}><p class="text-sm text-muted-foreground">Start the conversation for this thread.</p></Show>
-        <For each={entries()} keyed={entry => entry.key}>{entry => <ThreadMessage entry={entry()} history={history() ?? emptyHistory()} threadId={props.id} />}</For>
+        <For each={rendered()} keyed={row => row.key}>{row => <Show when={"entry" in row() ? row() as { entry: ConversationEntry } : undefined} fallback={<ConversationNote title="Turns that woke this Thread and left nothing to show">{(row() as { quiet: number }).quiet} quiet {(row() as { quiet: number }).quiet === 1 ? "wake" : "wakes"}</ConversationNote>}>{owned => <ThreadMessage entry={owned().entry} history={history() ?? emptyHistory()} threadId={props.id} />}</Show>}</For>
         <For each={pending()} keyed={message => message.clientId}>{message => <PendingMessageRow message={message()} />}</For>
 
       </div>
@@ -147,31 +165,17 @@ function PendingMessageRow(props: { message: (typeof threadState.pending)[number
       document.querySelector<HTMLTextAreaElement>(`main[data-thread-id="${threadId}"] [data-composer="main"]`)?.focus();
     });
   });
-  return <article class={`ml-6 rounded-xl bg-muted/65 px-4 py-3 ${props.message.failed ? "" : "opacity-70"}`}><Markdown>{props.message.body}</Markdown><For each={props.message.artifactIds}>{id => <ArtifactCard id={id} />}</For><span class="text-xs">{props.message.failed ? "Failed to send" : state.connection === "connected" ? "Sending…" : "Waiting for connection…"}</span><Show when={props.message.failed}><button class={button} ref={node => { retryButton = node; }} onFocus={() => { ownsFocus = true; }} onClick={() => retryThreadMessage(props.message.clientId)}>Retry</button></Show></article>;
+  return <article data-author="owner" class={`ml-auto max-w-[85%] rounded-xl rounded-br-sm bg-primary px-3.5 py-2.5 text-primary-foreground [&_code]:bg-current/10 sm:max-w-[60%] ${props.message.failed ? "" : "opacity-70"}`}><Markdown>{props.message.body}</Markdown><For each={props.message.artifactIds}>{id => <ArtifactCard id={id} />}</For><span class="text-xs">{props.message.failed ? "Failed to send" : state.connection === "connected" ? "Sending…" : "Waiting for connection…"}</span><Show when={props.message.failed}><button class={button} ref={node => { retryButton = node; }} onFocus={() => { ownsFocus = true; }} onClick={() => retryThreadMessage(props.message.clientId)}>Retry</button></Show></article>;
 }
 
 function ThreadStart(props: { globalArtifacts: boolean; onSelect: (id: number) => void }) {
-  const [title, setTitle] = createSignal("");
-  const [creating, setCreating] = createSignal(false);
-  const [error, setError] = createSignal("");
-  const create = async (event: SubmitEvent) => {
-    event.preventDefault(); if (!title().trim() || creating()) return;
-    setCreating(true); setError("");
-    const expectedHistory = historyId();
-    if (!expectedHistory) { setError("History is unavailable. Reconnect and try again."); setCreating(false); return; }
-    const kind = ((event.submitter as HTMLButtonElement | null)?.value ?? "space") as ThreadKind;
-    try { const thread = await createThread(expectedHistory, title().trim(), kind, null); setTitle(""); props.onSelect(thread.id); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
-    finally { setCreating(false); }
-  };
   return <main data-slot="thread-empty" class="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-5 sm:p-8">
     <Show when={props.globalArtifacts} fallback={<div class="m-auto w-full max-w-md space-y-4">
       <Show when={threadState.linkError} fallback={<>
       <h1 class="text-lg font-medium">{threadState.focusedId !== null ? `Thread #${threadState.focusedId} is unavailable` : threadState.threads.length ? "Choose a Space or Task" : "Start with a Space or Task"}</h1>
       <p class="text-sm text-muted-foreground">{threadState.threads.length ? "Open a conversation, or create a new place or finishable task." : "Spaces hold ongoing context. Tasks hold work you can mark done."}</p>
       <Show when={threadState.threads.length > 0}><button class={button} onClick={() => openThreadNavigation()}>Browse Spaces & Tasks</button></Show>
-      <form class="space-y-2" onSubmit={event => void create(event)}><input aria-label="First space or task title" placeholder="Name this Space or Task" value={title()} onInput={event => setTitle(event.currentTarget.value)} class="h-11 w-full min-w-0 rounded-lg border border-border bg-transparent px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" /><div class="grid grid-cols-2 gap-2"><button type="submit" value="space" class={button} disabled={!title().trim() || creating() || state.connection !== "connected"}>New Space</button><button type="submit" value="task" class={button} disabled={!title().trim() || creating() || state.connection !== "connected"}>New Task</button></div></form>
-      <Show when={error()}><p role="alert" class="text-sm text-destructive">{error()}</p></Show>
+      <button class={`${button} bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground`} disabled={state.connection !== "connected"} onClick={() => openThreadCreate(null)}><Plus class="size-4" />Start a Space or Task</button>
       </>}><h1 class="text-lg font-medium">{threadState.linkError}</h1><p class="text-sm text-muted-foreground">Your drafts are kept. Choose a conversation from this history to continue.</p><button class={button} onClick={() => { focusThread(null); openThreadNavigation(); }}>Return to Spaces &amp; Tasks</button></Show>
     </div>}><ArtifactList /></Show>
   </main>;
@@ -225,7 +229,7 @@ export function ThreadShell() {
       <button class={iconButton} aria-label="Thread overview" title="Thread overview" aria-pressed={threadState.focusedId === null && !globalArtifacts() ? "true" : "false"} onClick={() => { setGlobalArtifacts(false); focusThread(null); }}><BrandMark size={23} /></button>
       <button class={`${iconButton} relative`} aria-label="Spaces and Tasks" aria-describedby={attentionCount() > 0 ? "thread-attention-summary" : undefined} title={attentionCount() > 0 ? `Spaces & Tasks · ${attentionCount()} need you` : "Spaces & Tasks"} data-slot="thread-navigation-trigger" aria-controls="thread-navigation" aria-expanded={navigationVisible() ? "true" : "false"} aria-pressed={threadState.focusedId !== null && !globalArtifacts() ? "true" : "false"} onClick={() => navigationVisible() ? closeNavigation() : openNavigation()}><GitBranch class="size-5" /><Show when={attentionCount() > 0}><span aria-hidden="true" class="absolute right-2 top-2 size-1.5 rounded-full bg-status-attention" /><span id="thread-attention-summary" class="sr-only">{attentionCount()} {attentionCount() === 1 ? "item needs" : "items need"} your attention</span></Show></button>
       <Show when={threadState.focusedId !== null && !globalArtifacts()}><svg class="pointer-events-none absolute top-[58px] left-12 h-8 w-4 text-border" viewBox="0 0 16 32" fill="none" aria-hidden="true" data-slot="thread-connector"><path d="M0 24h4c8 0 12-4 12-12V0" stroke="currentColor" /></svg></Show>
-      <button class={iconButton} aria-label="New Space or Task" title="New Space or Task" onClick={() => { const history = historyId(); if (history) openNavigation({ kind: "create", historyId: history, parentId: null }); }}><Plus class="size-5" /></button>
+      <button class={iconButton} aria-label="New Space or Task" title="New Space or Task" onClick={() => openThreadCreate(null)}><Plus class="size-5" /></button>
       <button class={iconButton} aria-label="All artifacts" title="All artifacts" aria-pressed={globalArtifacts() ? "true" : "false"} onClick={() => setGlobalArtifacts(value => !value)}><LayoutGrid class="size-5" /></button>
       <button class={iconButton} aria-label="Processes" title="Processes" onClick={openProcesses}><Activity class="size-5" /></button>
       <div class="flex-1" />
@@ -233,6 +237,7 @@ export function ThreadShell() {
     </nav>
     <ThreadIconPicker />
     <ThreadNavigation open={navigationVisible()} modal={!wideWorkspace()} intent={threadNavigationIntent()} onClose={closeNavigation} onSelect={selectThread} />
+    <ThreadCreate onSelect={selectThread} />
     <div class="flex min-h-0 min-w-0 flex-1 flex-col">
       <Show when={recoveredDrafts().length > 0}><details class="px-3 py-2 text-sm"><summary class="cursor-pointer text-muted-foreground">Saved drafts from another history</summary><p class="py-2">Copy any text you want to keep into a new conversation.</p><For each={recoveredDrafts()}>{draft => <pre class="max-h-40 overflow-auto whitespace-pre-wrap rounded border border-border p-2 text-xs">{draft.text}</pre>}</For></details></Show>
       <Show when={state.connection !== "connected"}><div class="flex shrink-0 justify-end px-3 pt-2"><ConnectionPill /></div></Show>

@@ -7,8 +7,9 @@ import { ThreadShell } from "./ThreadShell";
 import { makeThread } from "./fixtures";
 import { installGlobalKeymap } from "../lib/keymap";
 import { closeThreadNavigation } from "./navigation";
+import { closeThreadCreate } from "./create";
 import { attachThreadTransport, disconnectThreads, focusThread, handleThreadMessage, openThread, sendThreadMessage, setThreadState, threadState } from "./store";
-import type { ThreadClientMessage } from "./types";
+import type { ThreadClientMessage, ThreadTurn } from "./types";
 vi.mock("../ws/client", () => ({ getClient: () => ({ cancelTurn: vi.fn() }), makeClientId: () => crypto.randomUUID() }));
 const sent: ThreadClientMessage[] = [];
 function responsiveMedia(initialWidth: number) {
@@ -39,6 +40,7 @@ beforeEach(() => {
   flush(() => dispatch({ type: "connection_status", status: "connected" }));
   flush(() => setHistoryId("test-history"));
   flush(() => closeThreadNavigation());
+  flush(() => closeThreadCreate());
   const storage = new Map<string, string>();
   vi.stubGlobal("localStorage", { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
   flush(() => setThreadState(draft => { Object.assign(draft, { ready: true, linkError: null, threads: [makeThread(0, { title: "Hirsel", read: true }), makeThread(1, { kind: "task", read: true }), makeThread(2, { title: "Holiday", read: true })], histories: {}, turnDetails: {}, pending: [], focusedId: 1, error: null }); }));
@@ -152,14 +154,17 @@ describe("thread workspace", () => {
   it("gives creation and browsing one deterministic initial focus owner", async () => {
     const view = render(() => <ThreadShell />);
     fireEvent.click(view.getByRole("button", { name: "New Space or Task" }));
-    const title = view.getByLabelText("New space or task title");
+    // Creation opens as a modal whose first field is the brief, so typing starts there.
+    const draft = view.getByLabelText("First message");
     await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-    expect(document.activeElement).toBe(title);
-    fireEvent.input(title, { target: { value: "Immediate typing" } });
-    fireEvent.click(view.getByRole("button", { name: "Close Spaces and Tasks" }));
+    expect(document.activeElement).toBe(draft);
+    fireEvent.input(draft, { target: { value: "Immediate typing" } });
+    fireEvent.keyDown(draft, { key: "Escape" });
     fireEvent.click(view.getByRole("button", { name: "Spaces and Tasks" }));
     await waitFor(() => expect(document.activeElement).toBe(view.container.querySelector('[data-thread-row="1"]')));
-    expect(title).toHaveValue("Immediate typing");
+    // Escape dismissed the modal without discarding what the Owner had written.
+    fireEvent.click(within(view.getByRole("dialog", { name: "Spaces and Tasks" })).getByRole("button", { name: "New Space or Task" }));
+    expect(view.getByLabelText("First message")).toHaveValue("Immediate typing");
   });
   it("keeps attention visible on the closed rail and refreshes when a snooze expires", () => {
     vi.useFakeTimers(); const now = Date.parse("2026-09-10T10:00:00Z"); vi.setSystemTime(now);
@@ -189,6 +194,8 @@ describe("thread workspace", () => {
   it("creates through the correlated host contract and focuses its visible row", async () => {
     const screen = render(() => <ThreadShell />);
     fireEvent.click(screen.getByRole("button", { name: "Spaces and Tasks" }));
+    // Creation is summoned, not standing: the drawer's own "+" opens the inline draft row.
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Spaces and Tasks" })).getByRole("button", { name: "New Space or Task" }));
     fireEvent.input(screen.getByLabelText("New space or task title"), { target: { value: "Buy milk" } });
     fireEvent.click(screen.getByRole("button", { name: "New Space" }));
     const frame = sent.find(f => f.type === "create_thread");
@@ -233,12 +240,28 @@ describe("thread workspace", () => {
       ],
     }; }));
     const screen = render(() => <ThreadShell />);
-    expect(screen.getByText("Your shopping list is ready.").closest("details")).toBeNull();
+    // A routine note is one centred muted line, not a third speaking bubble.
+    const note = screen.getByText(/Your shopping list is ready\./);
+    expect(note.closest("details")).toBeNull();
+    expect(note.closest('[data-slot="conversation-note"]')).toBeInTheDocument();
     expect(screen.queryByText(/"message": "Execution diagnostics"/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Turn options" }));
     fireEvent.click(within(document.body).getByRole("menuitem", { name: "Technical details" }));
     expect(screen.getByText(/"message": "Execution diagnostics"/).closest('[role="region"]')).toHaveAttribute("data-slot", "work-diagnostics");
     expect(screen.getByRole("textbox", { name: "Message Buy groceries" })).toBeInTheDocument();
+  });
+  it("folds wakes that produced nothing into one quiet note instead of empty cards", () => {
+    const wake = (id: number): ThreadTurn => ({ id, thread_id: 1, requester_thread_id: null, requester_turn_id: null, owner_message_id: null, agent_message_id: null, state: "completed", started_at: "2026-09-09T10:00:00Z", finished_at: "2026-09-09T10:00:07Z" });
+    const events = [{ seq: 1, event: { kind: "code_start", id: "cell", language: "typescript", code: 'finish("")', truncated: false } }, { seq: 2, event: { kind: "code_done", id: "cell", ok: true, summary: null } }] as const;
+    flush(() => setThreadState(draft => {
+      draft.histories[1] = { brief: { text: "", artifact_ids: [] }, messages: [], activities: [], loaded: true, hasMore: false, turns: [wake(91), wake(92)] };
+      draft.turnDetails[91] = [...events]; draft.turnDetails[92] = [...events];
+    }));
+    const screen = render(() => <ThreadShell />);
+    expect(screen.container.querySelector('[data-slot="thread-work"]')).toBeNull();
+    const note = screen.getByText(/2 quiet wakes/);
+    expect(note.closest('[data-slot="conversation-note"]')).toBeInTheDocument();
+    expect(threadState.histories[1].turns).toHaveLength(2);
   });
   it("keeps retained zero ordinary and the overview unaddressed", () => {
     flush(() => focusThread(0));
@@ -292,10 +315,16 @@ describe("thread workspace", () => {
     flush(() => setThreadState(draft => { draft.threads[1].running_turn = draft.histories[1].turns[0]; }));
     const screen = render(() => <ThreadShell />);
     fireEvent.click(screen.getByRole("button", { name: "Spaces and Tasks" }));
-    const row = within(screen.container.querySelector<HTMLElement>('[data-thread-row="1"]')!);
+    const element = screen.container.querySelector<HTMLElement>('[data-thread-row="1"]')!;
+    const row = within(element);
     expect(row.getByRole("img", { name: "Unread" })).toBeInTheDocument();
-    expect(row.getByText("Needs you")).toBeInTheDocument();
-    expect(row.getByText(/Working/)).toBeInTheDocument();
+    // The dense row states attention and execution in one accessible sentence,
+    // shows attention as the leading indicator and the elapsed time as its measure.
+    expect(element.getAttribute("aria-label")).toContain("Needs you");
+    expect(element.getAttribute("aria-label")).toContain("Working");
+    expect(element.getAttribute("title")).toContain("Working");
+    expect(element.querySelector('[data-slot="thread-row-indicator"]')).toHaveAttribute("data-indicator", "attention");
+    expect(element.querySelector('[data-slot="thread-row-meta"]')?.textContent).toMatch(/^\d+[mhd]/);
     for (const [section, id] of [["done", 2], ["snoozed", 3], ["archived", 4]] as const) {
       fireEvent.click(screen.getByRole("button", { name: /Filter work:/ }));
       fireEvent.click(screen.getByRole("menuitemradio", { name: section }));
@@ -470,8 +499,13 @@ describe("nested Thread workspace", () => {
     const view = render(() => <ThreadShell />);
     const card = view.container.querySelector('[data-activity-id="33"]')!;
     expect(card).toHaveTextContent("#2 Holiday");
-    expect(card).toHaveTextContent("completed");
-    expect(card).toHaveTextContent("Turn 90");
+    // The default outcome and the internal turn number are diagnostics, not header text.
+    expect(card.textContent).not.toContain("completed");
+    expect(card.textContent).not.toContain("Turn 90");
+    expect(card.querySelector("p")).toHaveAttribute("title", "Turn 90 · completed");
+    flush(() => handleThreadMessage({ type: "thread_activity", activity: { ...report, id: 34, data: { ...report.data, status: "failed", child_turn_id: 91 } } }));
+    // An outcome that is not the default still earns its word.
+    expect(view.container.querySelector('[data-activity-id="34"]')?.textContent).toContain("failed");
     expect(card).toHaveTextContent("Review complete. Two issues fixed.");
     expect(view.container.querySelectorAll('[data-activity-id="33"]')).toHaveLength(1);
     expect(card.querySelector('[data-slot="work-details"]')).toBeNull();

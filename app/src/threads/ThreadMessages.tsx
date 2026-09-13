@@ -5,7 +5,7 @@ import { UserRound } from "../components/ui/icons";
 import { ArtifactCard } from "../artifacts/ArtifactSurface";
 import { getClient } from "../ws/client";
 import { splitStreamingReply } from "../components/chat/timeline";
-import { ActivityEntry, ThreadWork } from "./ThreadWork";
+import { ActivityEntry, ThreadWork, WorkTail } from "./ThreadWork";
 import type { ConversationEntry } from "./conversation";
 import type { ThreadHistory } from "./model";
 import { threadState } from "./store";
@@ -43,13 +43,18 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
   const events = () => turn() === undefined ? [] : threadState.turnDetails[turn()!.id] ?? [];
   return <>
     <Show when={props.entry.kind !== "activity"}>
-      <article ref={node => { releaseFocus = preserveMovedFocus(node); }} data-message-id={message()?.id} data-execution-turn={!message() ? turn()?.id : undefined} aria-label={owner() ? "You" : "Hirsel"} class={["flex items-start gap-3", owner() ? "flex-row-reverse" : ""]}>
+      {/* Who is speaking is readable before a word is: the Owner sits right in
+          the filled emphasis pair (a near-white fill on the dark theme, the
+          accent on the light one) at conversational width, the Agent sits left
+          on a neutral surface that keeps the measure for its work and results. */}
+      <article ref={node => { releaseFocus = preserveMovedFocus(node); }} data-message-id={message()?.id} data-execution-turn={!message() ? turn()?.id : undefined} data-author={owner() ? "owner" : "agent"} aria-label={owner() ? "You" : "Hirsel"} class={["flex items-start gap-2 sm:gap-3", owner() ? "flex-row-reverse" : ""]}>
         <span class="grid size-8 shrink-0 place-items-center rounded-full bg-muted/45" aria-hidden="true"><Show when={owner()} fallback={<BrandMark size={22} />}><UserRound class="size-4 text-muted-foreground" /></Show></span>
-        <div class={owner() ? "min-w-0 max-w-[85%] rounded-xl bg-muted/65 px-4 py-3" : "min-w-0 flex-1 pt-1"}>
+        <div data-slot={owner() ? "owner-message" : "agent-message"} class={owner() ? "min-w-0 max-w-[85%] rounded-xl rounded-br-sm bg-primary px-3.5 py-2.5 text-primary-foreground [&_code]:bg-current/10 sm:max-w-[60%]" : "min-w-0 flex-1 rounded-xl rounded-bl-sm border border-border/60 bg-surface px-3.5 py-2.5"}>
           <Show when={!owner()}><ThreadWork message={message()} turn={turn()} activities={activities(turn()?.id)} events={events()} live={turn()?.state === "running"} /></Show>
           <Markdown>{message()?.body ?? splitStreamingReply(events()).reply}</Markdown>
           <For each={message()?.artifact_ids ?? []}>{id => <ArtifactCard id={id} />}</For>
           <Show when={message()?.attachments?.length}><ul class="mt-2 text-xs text-muted-foreground"><For each={message()?.attachments}>{blob => <li><button class="underline" onClick={() => { void getClient()?.getBlobUrl(blob.id).then(url => window.open(url, "_blank", "noopener,noreferrer")); }}>{blob.name}</button></li>}</For></ul></Show>
+          <Show when={!owner()}><WorkTail message={message()} turn={turn()} activities={activities(turn()?.id)} events={events()} /></Show>
         </div>
       </article>
     </Show>

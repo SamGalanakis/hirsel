@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { elapsedTime, showThreadTurnStatus, threadStatus } from "./status";
+import { elapsedTime, showThreadTurnStatus, threadRowSummary, threadStatus } from "./status";
 import { makeThread } from "./fixtures";
 import type { ThreadTurn } from "./types";
 const now = Date.parse("2026-09-09T12:12:00Z");
@@ -34,5 +34,21 @@ describe("authoritative Thread row status", () => {
     expect(showThreadTurnStatus(makeThread(1, { kind: "space" }), "completed")).toBe(false);
     expect(showThreadTurnStatus(makeThread(1, { kind: "task" }), "completed")).toBe(true);
     expect(showThreadTurnStatus(makeThread(1, { kind: "space" }), "failed")).toBe(true);
+  });
+});
+describe("dense row summary", () => {
+  it("prefers the owner's attention over live work and keeps the full sentence", () => {
+    const thread = makeThread(1, { running_turn: turn, queued_turn_count: 2, attention: "needs_owner" });
+    expect(threadRowSummary(thread, now, true)).toEqual({ indicator: "attention", meta: "12m", sentence: "Needs you · Working 12m · 2 queued" });
+  });
+  it("measures running work, then the queue, then the relative time", () => {
+    expect(threadRowSummary(makeThread(1, { running_turn: turn }), now, true)).toMatchObject({ indicator: "running", meta: "12m" });
+    expect(threadRowSummary(makeThread(1, { queued_turn_count: 2 }), now, true)).toMatchObject({ indicator: "queued", meta: "2 queued" });
+    expect(threadRowSummary(makeThread(1, { last_finished_turn: { ...turn, state: "completed", finished_at: "2026-09-09T12:07:00Z" } }), now, true)).toMatchObject({ indicator: "none", meta: "5m" });
+  });
+  it("marks a done Task and says nothing for quiet idle work", () => {
+    expect(threadRowSummary(makeThread(1, { kind: "task", settled_at: "2026-09-09T11:00:00Z" }), now, true)).toMatchObject({ indicator: "done", sentence: "Done" });
+    expect(threadRowSummary(makeThread(1, {}), now, true).indicator).toBe("none");
+    expect(threadRowSummary(makeThread(1, {}), now, false).meta).toBeNull();
   });
 });

@@ -7,9 +7,9 @@ const tones = [
   "bg-violet-100 text-violet-900 dark:bg-violet-950 dark:text-violet-200",
 ];
 export interface ThreadAvatarIdentity { id: number; kind: "space" | "task"; title: string; icon?: string | null }
-export function ThreadAvatar(props: { thread: ThreadAvatarIdentity; small?: boolean }) {
+export function ThreadAvatar(props: { thread: ThreadAvatarIdentity; small?: boolean; dense?: boolean }) {
   return <span aria-hidden="true" data-slot="thread-avatar" data-thread-avatar={props.thread.id}
-    data-thread-kind={props.thread.kind} class={`inline-flex shrink-0 select-none items-center justify-center overflow-hidden align-middle font-medium leading-none ${props.thread.kind === "space" ? "rounded-md" : "rounded-full"} ${props.small ? "size-5 text-xs" : "size-7 text-sm"} ${tones[Math.abs(props.thread.id) % tones.length]}`}>
+    data-thread-kind={props.thread.kind} class={`inline-flex shrink-0 select-none items-center justify-center overflow-hidden align-middle font-medium leading-none ${props.thread.kind === "space" ? "rounded-md" : "rounded-full"} ${props.dense ? "size-4 text-meta" : props.small ? "size-5 text-xs" : "size-7 text-sm"} ${tones[Math.abs(props.thread.id) % tones.length]}`}>
     {props.thread.icon ?? (Array.from(props.thread.title.trim())[0]?.toLocaleUpperCase() || "#")}
   </span>;
 }

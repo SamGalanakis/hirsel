@@ -1,4 +1,4 @@
-import { buildTimeline, type TimelineItem } from "../components/chat/timeline";
+import { buildTimeline, splitStreamingReply, timelineTools, type TimelineItem } from "../components/chat/timeline";
 import type { ToolCall } from "../protocol";
 import type { TimelineEvent } from "../store/types";
 import type { ThreadActivity, ThreadTurn } from "./types";
@@ -13,8 +13,7 @@ export function toolSummary(activity: ThreadActivity): ToolCall | null {
 /** Complete exact started rows when reconnect retained only their durable
  * outcomes. The canonical call ID is the sole join key. */
 export function mergePersistedToolCalls(events: TimelineEvent[], calls: ToolCall[]): TimelineEvent[] {
-  const items = buildTimeline(events);
-  const presentById = new Map(items.flatMap(item => item.kind === "tool" ? [[item.toolId, item] as const] : []));
+  const presentById = new Map(timelineTools(buildTimeline(events)).map(item => [item.toolId, item] as const));
   let seq = Math.max(0, ...events.map(event => event.seq));
   const completions: TimelineEvent[] = [];
   for (const call of calls) {
@@ -26,7 +25,7 @@ export function mergePersistedToolCalls(events: TimelineEvent[], calls: ToolCall
 }
 /** Keep durable-only calls once; rich rows win when the same ID is present. */
 export function remainingTools(calls: ToolCall[], items: TimelineItem[]): ToolCall[] {
-  const present = new Set(items.flatMap(item => item.kind === "tool" ? [item.toolId] : []));
+  const present = new Set(timelineTools(items).map(item => item.toolId));
   const emitted = new Set<string>();
   return calls.filter(call => {
     if (present.has(call.id) || emitted.has(call.id)) return false;
@@ -64,8 +63,8 @@ export function workLabel(turn: ThreadTurn | undefined, events: TimelineEvent[],
   if (turn?.state === "cancelled") return "Stopped";
   if (turn?.state === "interrupted") return "Interrupted";
   if (turn?.state === "running") {
-    const pending = buildTimeline(events).findLast(item => item.kind === "tool" && item.status.state === "running");
-    if (pending?.kind === "tool") return runningTool(pending.name);
+    const pending = timelineTools(buildTimeline(events)).findLast(item => item.status.state === "running");
+    if (pending) return runningTool(pending.name);
     if (events.at(-1)?.event.kind === "prose") return "Writing a reply";
     if (events.at(-1)?.event.kind === "reasoning") return "Thinking";
     return "Hirsel is working…";
@@ -73,4 +72,17 @@ export function workLabel(turn: ThreadTurn | undefined, events: TimelineEvent[],
   if (count) return `Used ${count} ${count === 1 ? "tool" : "tools"}`;
   if (turn?.state === "completed" && !hasReply) return "Finished without a reply";
   return "Activity";
+}
+
+/** A completed turn that woke the Thread and produced nothing a reader can see:
+ * no reply, no reasoning or tool rows, no artifacts, no recorded activity — at
+ * most the trivial program the wake ran. It gets no card; the conversation folds
+ * consecutive ones into a single quiet note. Live and unfinished turns always
+ * keep their card; any program with real work in it is a Code entry and keeps
+ * its card too. */
+export function quietWakeTurn(turn: ThreadTurn | undefined, activities: ThreadActivity[], events: TimelineEvent[]): boolean {
+  if (!turn || turn.state !== "completed" || activities.length > 0) return false;
+  const split = splitStreamingReply(events);
+  if (split.reply.trim()) return false;
+  return buildTimeline(split.activity).length === 0;
 }

@@ -1,7 +1,7 @@
 import { historyId } from "../lib/history";
 import { threadUrl, threadReference } from "../lib/thread-url";
 import { openThreadIconPicker } from "./icon-picker";
-import { openThreadNavigation } from "./navigation";
+import { openThreadCreate } from "./create";
 import { threadAction } from "./store";
 import { getClient } from "../ws/client";
 import { toast } from "../lib/toast";
@@ -13,7 +13,7 @@ export function threadActions(thread: Thread, now = Date.now()): ThreadActionIte
   const referenceHistory = historyId();
   const actions: ThreadActionItem[] = [
     { id: "icon", label: `Change ${thread.kind} icon`, icon: "icon", run: () => openThreadIconPicker(thread) },
-    { id: "child", label: thread.kind === "task" ? "New child task" : "New child", icon: "child", run: () => { if (referenceHistory) openThreadNavigation({ kind: "create", historyId: referenceHistory, parentId: thread.id }); } },
+    { id: "child", label: thread.kind === "task" ? "New child task" : "New child", icon: "child", run: () => openThreadCreate(thread.id) },
   ];
   if (thread.parent_thread_id === null) actions.splice(1, 0, { id: "pin", label: thread.pinned_at ? "Unpin thread" : "Pin thread", icon: "pin", run: () => { if (referenceHistory) threadAction(referenceHistory, thread.id, thread.pinned_at ? "unpin" : "pin", {}, thread.revision); } });
   if (thread.kind === "task") actions.push({ id: "settle", label: thread.settled_at ? "Reopen task" : "Mark task done", icon: thread.settled_at ? "reopen" : "settle", run: () => { if (referenceHistory) threadAction(referenceHistory, thread.id, thread.settled_at ? "reopen" : "settle"); } });

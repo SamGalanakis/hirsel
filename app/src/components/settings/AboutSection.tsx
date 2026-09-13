@@ -1,11 +1,10 @@
-// Settings → About & debug: the app/host versions, the local "Show agent code"
-// preference, and the copyable diagnostics blob.
+// Settings → About & debug: the app/host versions and the copyable diagnostics
+// blob.
 import { Copy } from "@/components/ui/icons";
 import type { JSX } from "@solidjs/web";
-import { setShowAgentCode, showAgentCode } from "../../lib/prefs";
 import { APP_VERSION } from "../../lib/version";
 import { state } from "../../store/store";
-import { Group, Field, Toggle } from "./rows";
+import { Group, Field } from "./rows";
 
 export function AboutSection(props: {
   onCopyDiagnostics: () => void;
@@ -22,17 +21,6 @@ export function AboutSection(props: {
           <span class="font-mono text-xs text-muted-foreground">
             {state.hostVersion ?? (state.connection === "connected" ? "Not reported" : "—")}
           </span>
-        </div>
-        <div class="flex items-center gap-3 py-3">
-          <Field
-            title="Show agent code"
-            subtitle="Render the Agent's own program for each turn step in the timeline."
-          />
-          <Toggle
-            ariaLabel="Show agent code"
-            checked={showAgentCode()}
-            onChange={setShowAgentCode}
-          />
         </div>
         <button
           type="button"

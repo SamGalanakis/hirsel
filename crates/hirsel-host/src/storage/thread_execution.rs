@@ -27,6 +27,93 @@ pub(crate) enum ThreadExecution {
         tool_profile: String,
     },
 }
+/// The stored preference as the public, key-free identity of a backend.
+/// Absent means the Thread inherits the configured default coordinator.
+pub(super) fn preference(
+    c: &Connection,
+    thread_id: u64,
+) -> anyhow::Result<Option<hirsel_proto::ThreadExecutionTarget>> {
+    let stored: Option<String> = c
+        .query_row(
+            "SELECT config FROM thread_execution_preferences WHERE thread_id=?1",
+            [thread_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(stored
+        .map(|s| serde_json::from_str::<ThreadExecution>(&s))
+        .transpose()?
+        .map(public_target))
+}
+
+pub(crate) fn public_target(execution: ThreadExecution) -> hirsel_proto::ThreadExecutionTarget {
+    match execution {
+        ThreadExecution::Host { provider_id, model } => hirsel_proto::ThreadExecutionTarget::Host {
+            provider_id,
+            model: model.id,
+        },
+        ThreadExecution::Cli {
+            agent,
+            model,
+            variant,
+            ..
+        } => hirsel_proto::ThreadExecutionTarget::Cli {
+            agent: match agent {
+                hirsel_drivers::AgentKind::Claude => "claude".to_string(),
+                hirsel_drivers::AgentKind::Codex => "codex".to_string(),
+            },
+            model,
+            variant,
+        },
+        ThreadExecution::LashWorker {
+            provider,
+            model,
+            variant,
+            ..
+        } => hirsel_proto::ThreadExecutionTarget::Lash {
+            provider_id: provider.id,
+            model,
+            variant,
+        },
+    }
+}
+
+impl Storage {
+    /// Check the revision and write the Owner's backend choice. It applies to
+    /// the NEXT turn: a running turn already captured what it runs on.
+    pub(crate) async fn set_addressed_thread_execution(
+        &self,
+        expected_history: &str,
+        id: u64,
+        execution: Option<&ThreadExecution>,
+        expected_revision: u64,
+    ) -> anyhow::Result<hirsel_proto::Thread> {
+        let c = self.conn.lock().await;
+        thread_scope::validate_history(&c, expected_history)?;
+        let current = super::threads::get(&c, id)?;
+        anyhow::ensure!(
+            current.revision == expected_revision,
+            "thread changed; reload before updating where it runs"
+        );
+        match execution {
+            Some(execution) => {
+                c.execute("INSERT INTO thread_execution_preferences(thread_id,config) VALUES(?1,?2) ON CONFLICT(thread_id) DO UPDATE SET config=excluded.config",params![id,serde_json::to_string(execution)?])?;
+            }
+            None => {
+                c.execute(
+                    "DELETE FROM thread_execution_preferences WHERE thread_id=?1",
+                    [id],
+                )?;
+            }
+        }
+        c.execute(
+            "UPDATE threads SET updated_at=?2,revision=revision+1 WHERE id=?1",
+            params![id, chrono::Utc::now().to_rfc3339()],
+        )?;
+        super::threads::get(&c, id)
+    }
+}
+
 pub(super) fn capture(
     c: &Connection,
     thread_id: u64,

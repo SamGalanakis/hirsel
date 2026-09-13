@@ -73,6 +73,7 @@ pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
         },
         showcased_artifact_id: r.get(16)?,
         description: r.get(2)?,
+        execution: None,
         instrument: serde_json::from_str(&r.get::<_, String>(3)?).map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
         })?,
@@ -203,6 +204,26 @@ fn create_in_transaction(
     Ok((get(tx, tx.last_insert_rowid() as u64)?, true))
 }
 
+/// The Owner and the Agent share one bound for a Thread's own text, so an
+/// Owner edit can never fail on something an Agent was allowed to write.
+pub(crate) const MAX_THREAD_TITLE_CHARS: usize = 200;
+pub(crate) const MAX_THREAD_DESCRIPTION_CHARS: usize = 20_000;
+pub(crate) fn validate_thread_title(title: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!title.trim().is_empty(), "thread title must not be empty");
+    anyhow::ensure!(
+        title.chars().count() <= MAX_THREAD_TITLE_CHARS,
+        "thread title must be at most {MAX_THREAD_TITLE_CHARS} characters"
+    );
+    Ok(())
+}
+pub(crate) fn validate_thread_description(description: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        description.chars().count() <= MAX_THREAD_DESCRIPTION_CHARS,
+        "thread description must be at most {MAX_THREAD_DESCRIPTION_CHARS} characters"
+    );
+    Ok(())
+}
+
 impl Storage {
     pub(crate) async fn current_thread_publication(
         &self,
@@ -275,7 +296,8 @@ impl Storage {
     ) -> anyhow::Result<(Thread, bool)> {
         validate_instrument(instrument)?;
         anyhow::ensure!(!client_id.is_empty(), "client_id must not be empty");
-        anyhow::ensure!(!title.trim().is_empty(), "thread title must not be empty");
+        validate_thread_title(title)?;
+        validate_thread_description(description)?;
         let mut c = self.conn.lock().await;
         let tx = c.transaction()?;
         let result = create_in_transaction(
@@ -305,7 +327,8 @@ impl Storage {
     ) -> anyhow::Result<(Thread, bool)> {
         validate_instrument(instrument)?;
         anyhow::ensure!(!client_id.is_empty(), "client_id must not be empty");
-        anyhow::ensure!(!title.trim().is_empty(), "thread title must not be empty");
+        validate_thread_title(title)?;
+        validate_thread_description(description)?;
         let mut c = self.conn.lock().await;
         let tx = c.transaction()?;
         super::thread_scope::validate_history(&tx, expected_history)?;
@@ -334,11 +357,43 @@ impl Storage {
             validate_instrument(instrument)?;
         }
         if let Some(title) = title {
-            anyhow::ensure!(!title.trim().is_empty(), "thread title must not be empty");
+            validate_thread_title(title)?;
+        }
+        if let Some(description) = description {
+            validate_thread_description(description)?;
         }
         let c = self.conn.lock().await;
         get(&c, id)?;
         c.execute("UPDATE threads SET title=COALESCE(?2,title),description=COALESCE(?3,description),instrument=COALESCE(?4,instrument),attention=COALESCE(?5,attention),updated_at=?6,revision=revision+1,read=0 WHERE id=?1",params![id,title,description,instrument.map(serde_json::to_string).transpose()?,needs.map(attention),Utc::now().to_rfc3339()])?;
+        get(&c, id)
+    }
+    /// The Owner's own title/description edit: revision-fenced exactly like an
+    /// icon edit, and never marking the Thread unread — the Owner wrote it.
+    pub(crate) async fn update_addressed_thread_text(
+        &self,
+        expected_history: &str,
+        id: u64,
+        title: Option<&str>,
+        description: Option<&str>,
+        expected_revision: u64,
+    ) -> anyhow::Result<Thread> {
+        if let Some(title) = title {
+            validate_thread_title(title)?;
+        }
+        if let Some(description) = description {
+            validate_thread_description(description)?;
+        }
+        let c = self.conn.lock().await;
+        super::thread_scope::validate_history(&c, expected_history)?;
+        let current = get(&c, id)?;
+        anyhow::ensure!(
+            current.revision == expected_revision,
+            "thread changed; reload before updating it"
+        );
+        c.execute(
+            "UPDATE threads SET title=COALESCE(?2,title),description=COALESCE(?3,description),updated_at=?4,revision=revision+1 WHERE id=?1",
+            params![id, title.map(str::trim), description, Utc::now().to_rfc3339()],
+        )?;
         get(&c, id)
     }
     async fn set_thread_field(

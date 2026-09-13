@@ -122,7 +122,7 @@ mod upgrade_tests;
 #[cfg(test)]
 use bridges::*;
 pub(crate) use condense::*;
-use executor::*;
+pub(crate) use executor::*;
 use lifecycle::*;
 use plugin::*;
 use provider::*;

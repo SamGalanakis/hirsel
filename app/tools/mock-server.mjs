@@ -19,7 +19,7 @@ const broadcast = (world, frame) => {
   if (id !== null) broadcast(world, { type: "thread_upsert", thread: threadFor(world, id) });
 };
 function makeThread(id, title, kind, parent_thread_id = null) {
-  return { id, kind, title, icon: null, showcased_artifact_id: null, parent_thread_id, pinned_at: null, description: "", instrument: null, attention: "quiet", settled_at: null, archived_at: null, snoozed_until: null, read: false, created_at: now(), updated_at: now(), revision: 1 };
+  return { id, kind, title, icon: null, showcased_artifact_id: null, parent_thread_id, pinned_at: null, description: "", execution: null, instrument: null, attention: "quiet", settled_at: null, archived_at: null, snoozed_until: null, read: false, created_at: now(), updated_at: now(), revision: 1 };
 }
 function worldFor(token) {
   if (!tenants.has(token)) {
@@ -227,7 +227,7 @@ function handle(world, ws, frame) {
       const thread = threadFor(world, frame.thread_id);
       const acknowledge = () => send(ws, { type: "thread_action_applied", client_id: frame.client_id, history_id: frame.history_id, thread_id: frame.thread_id });
       if (frame.action === "pin" && thread.parent_thread_id !== null) throw new Error("Only top-level threads can be pinned");
-      if (["pin", "unpin", "set_icon", "set_showcase", "set_kind"].includes(frame.action) && frame.expected_revision !== thread.revision) throw new Error("Thread changed; retry with its current revision");
+      if (["pin", "unpin", "set_icon", "set_showcase", "set_kind", "set_title", "set_description", "set_execution"].includes(frame.action) && frame.expected_revision !== thread.revision) throw new Error("Thread changed; retry with its current revision");
       if (frame.action === "set_kind") {
         const kind = frame.data?.kind;
         if (!["space", "task"].includes(kind) || Object.keys(frame.data ?? {}).length !== 1) throw new Error("kind is required and must be space or task");
@@ -252,6 +252,29 @@ function handle(world, ws, frame) {
           broadcast(world, { type: "artifact_upsert", artifact: artifactSummary(world, artifact) });
         }
         acknowledge(); return;
+      }
+      if (frame.action === "set_title") {
+        const title = frame.data?.title;
+        if (typeof title !== "string" || !title.trim() || Object.keys(frame.data ?? {}).length !== 1) throw new Error("title is required");
+        if (Array.from(title.trim()).length > 200) throw new Error("Keep the title to 200 characters or fewer");
+        updateThread(world, thread, { title: title.trim() }); acknowledge(); return;
+      }
+      if (frame.action === "set_description") {
+        const description = frame.data?.description;
+        if (typeof description !== "string" || Object.keys(frame.data ?? {}).length !== 1) throw new Error("description is required");
+        if (Array.from(description).length > 20000) throw new Error("Keep the description to 20,000 characters or fewer");
+        updateThread(world, thread, { description }); acknowledge(); return;
+      }
+      if (frame.action === "set_execution") {
+        if (!Object.hasOwn(frame.data ?? {}, "execution") || Object.keys(frame.data ?? {}).length !== 1) throw new Error("execution is required");
+        const execution = frame.data.execution;
+        if (execution !== null) {
+          const shapes = { host: ["provider_id", "model"], cli: ["agent", "model", "variant"], lash: ["provider_id", "model", "variant"] };
+          const fields = shapes[execution?.kind];
+          if (!fields || Object.keys(execution).length !== fields.length + 1 || fields.some(name => typeof execution[name] !== "string" || !execution[name])) throw new Error("Invalid execution target");
+          if (execution.kind === "cli" && !["claude", "codex"].includes(execution.agent)) throw new Error("Unknown agent");
+        }
+        updateThread(world, thread, { execution }); acknowledge(); return;
       }
       if (frame.action === "set_icon") {
         const patch = {};

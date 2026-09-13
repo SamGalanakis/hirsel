@@ -4,6 +4,7 @@ pub mod blob_route;
 pub mod boot_provider;
 pub mod config;
 pub mod debug;
+mod execution_selection;
 pub mod fork_wake;
 pub mod health;
 pub mod host_config;

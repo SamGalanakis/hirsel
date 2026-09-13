@@ -152,6 +152,101 @@ impl AppState {
                     .await?
             }
 
+            "set_title" => {
+                let object = data
+                    .as_object()
+                    .ok_or_else(|| anyhow::anyhow!("set_title data must be an object"))?;
+                anyhow::ensure!(
+                    object.len() == 1 && object.contains_key("title"),
+                    "set_title requires only title"
+                );
+                let title = object["title"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("title must be a string"))?;
+                let revision = expected_revision.ok_or_else(|| {
+                    anyhow::anyhow!("expected_revision is required for set_title")
+                })?;
+                self.storage
+                    .update_addressed_thread_text(expected_history, id, Some(title), None, revision)
+                    .await?
+            }
+
+            "set_description" => {
+                let object = data
+                    .as_object()
+                    .ok_or_else(|| anyhow::anyhow!("set_description data must be an object"))?;
+                anyhow::ensure!(
+                    object.len() == 1 && object.contains_key("description"),
+                    "set_description requires only description"
+                );
+                let description = object["description"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("description must be a string"))?;
+                let revision = expected_revision.ok_or_else(|| {
+                    anyhow::anyhow!("expected_revision is required for set_description")
+                })?;
+                self.storage
+                    .update_addressed_thread_text(
+                        expected_history,
+                        id,
+                        None,
+                        Some(description),
+                        revision,
+                    )
+                    .await?
+            }
+
+            "set_execution" => {
+                let object = data
+                    .as_object()
+                    .ok_or_else(|| anyhow::anyhow!("set_execution data must be an object"))?;
+                anyhow::ensure!(
+                    object.len() == 1 && object.contains_key("execution"),
+                    "set_execution requires only execution"
+                );
+                let revision = expected_revision.ok_or_else(|| {
+                    anyhow::anyhow!("expected_revision is required for set_execution")
+                })?;
+                // The Owner names a backend exactly as `threads.delegate` does,
+                // and is refused for exactly the same reasons.
+                let requested: Option<hirsel_proto::ThreadExecutionTarget> = match &object["execution"]
+                {
+                    serde_json::Value::Null => None,
+                    value => Some(serde_json::from_value(value.clone())?),
+                };
+                let execution = match &requested {
+                    Some(target) => Some(
+                        crate::execution_selection::resolve_execution(
+                            &self.tools,
+                            crate::execution_selection::selectors_from_target(target),
+                        )
+                        .await
+                        .map_err(|error| anyhow::anyhow!(error))?,
+                    ),
+                    None => None,
+                };
+                // The coordinator's provider and model are one Settings-wide
+                // choice, not a per-Thread one: naming a different pair here
+                // would silently run somewhere else.
+                if let (Some(hirsel_proto::ThreadExecutionTarget::Host { .. }), Some(resolved)) =
+                    (&requested, execution.as_ref())
+                {
+                    let effective = crate::storage::public_execution_target(resolved.clone());
+                    anyhow::ensure!(
+                        Some(&effective) == requested.as_ref(),
+                        "the coordinator's provider and model are set in Settings; this Thread would run on a different one"
+                    );
+                }
+                self.storage
+                    .set_addressed_thread_execution(
+                        expected_history,
+                        id,
+                        execution.as_ref(),
+                        revision,
+                    )
+                    .await?
+            }
+
             "set_showcase" => {
                 let object = data
                     .as_object()

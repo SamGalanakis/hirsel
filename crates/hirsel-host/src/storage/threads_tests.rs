@@ -779,3 +779,241 @@ async fn generated_completion_and_task_to_space_conversion_commit_atomically() {
         }
     }
 }
+
+#[tokio::test]
+async fn owner_title_and_description_edits_are_revision_fenced_and_broadcast() {
+    use hirsel_proto::HostToClient;
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    let history = state.storage.history_id().await.unwrap();
+    let thread = state
+        .storage
+        .create_thread(
+            "info",
+            "Original title",
+            "Original description",
+            &json!({}),
+            ThreadAttention::Quiet,
+            ThreadKind::Space,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    let id = thread.id;
+    let before = state.storage.thread(id).await.unwrap().unwrap();
+
+    // Every rejection leaves the Thread exactly as it was.
+    for (action, data, expected) in [
+        ("set_title", json!({"title":"Renamed"}), None),
+        (
+            "set_title",
+            json!({"title":"Renamed"}),
+            Some(before.revision + 7),
+        ),
+        ("set_title", json!({"title":"   "}), Some(before.revision)),
+        ("set_title", json!({"title":42}), Some(before.revision)),
+        (
+            "set_title",
+            json!({"title":"x".repeat(201)}),
+            Some(before.revision),
+        ),
+        (
+            "set_title",
+            json!({"title":"Renamed","description":"also"}),
+            Some(before.revision),
+        ),
+        ("set_title", json!({}), Some(before.revision)),
+        (
+            "set_description",
+            json!({"description":"New"}),
+            Some(before.revision + 7),
+        ),
+        (
+            "set_description",
+            json!({"description":null}),
+            Some(before.revision),
+        ),
+        (
+            "set_description",
+            json!({"description":"x".repeat(20_001)}),
+            Some(before.revision),
+        ),
+    ] {
+        assert!(
+            state
+                .handle_addressed_thread_action(&history, id, action.into(), data, expected)
+                .await
+                .is_err(),
+            "{action} should have been rejected"
+        );
+        assert_eq!(state.storage.thread(id).await.unwrap().unwrap(), before);
+    }
+
+    let renamed = state
+        .handle_addressed_thread_action(
+            &history,
+            id,
+            "set_title".into(),
+            json!({"title":"  Renamed  "}),
+            Some(before.revision),
+        )
+        .await
+        .unwrap();
+    assert_eq!(renamed.title, "Renamed");
+    assert_eq!(renamed.description, "Original description");
+    assert_eq!(renamed.revision, before.revision + 1);
+    // The Owner's own edit is not news to the Owner.
+    assert!(renamed.read == before.read);
+    assert_eq!(renamed.last_activity_at, before.last_activity_at);
+    assert!(state.broadcast_log.recent().iter().any(
+        |frame| matches!(frame, HostToClient::ThreadUpsert { thread } if thread.id == id && thread.title == "Renamed")
+    ));
+
+    // An empty description is a real value, not an omission.
+    let cleared = state
+        .handle_addressed_thread_action(
+            &history,
+            id,
+            "set_description".into(),
+            json!({"description":""}),
+            Some(renamed.revision),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleared.description, "");
+    assert_eq!(cleared.title, "Renamed");
+    assert_eq!(cleared.revision, renamed.revision + 1);
+
+    let described = state
+        .handle_addressed_thread_action(
+            &history,
+            id,
+            "set_description".into(),
+            json!({"description":"## Scope\n\nWhat this Space is for."}),
+            Some(cleared.revision),
+        )
+        .await
+        .unwrap();
+    assert_eq!(described.description, "## Scope\n\nWhat this Space is for.");
+    assert_eq!(described.revision, cleared.revision + 1);
+}
+
+/// The Owner names a backend exactly the way `threads.delegate` does, so the
+/// same catalog refuses the same things. It takes effect on the next turn.
+#[tokio::test]
+async fn owner_execution_choice_is_catalog_validated_fenced_and_clearable() {
+    use hirsel_proto::{HostToClient, ThreadExecutionTarget};
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    let history = state.storage.history_id().await.unwrap();
+    let thread = state
+        .storage
+        .create_thread(
+            "runs-on",
+            "Where it runs",
+            "",
+            &json!({}),
+            ThreadAttention::Quiet,
+            ThreadKind::Task,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    let id = thread.id;
+    // Nothing chosen means the Thread inherits the configured coordinator.
+    assert_eq!(
+        state.storage.thread(id).await.unwrap().unwrap().execution,
+        None
+    );
+
+    let catalog = state.tools.subagent_model_snapshot();
+    let claude = catalog
+        .providers
+        .iter()
+        .find(|provider| provider.provider == "claude")
+        .expect("claude agent in the catalog");
+    let model = claude
+        .models
+        .iter()
+        .find(|model| model.enabled && !model.enabled_variants.is_empty())
+        .expect("an enabled claude model with an enabled variant");
+    let target = ThreadExecutionTarget::Cli {
+        agent: "claude".into(),
+        model: model.id.clone(),
+        variant: model.enabled_variants[0].clone(),
+    };
+    let before = state.storage.thread(id).await.unwrap().unwrap();
+
+    for (data, expected) in [
+        (json!({"execution": target}), None),
+        (json!({"execution": target}), Some(before.revision + 7)),
+        (
+            json!({"execution": {"kind":"cli","agent":"claude","model":"no-such-model","variant":"default"}}),
+            Some(before.revision),
+        ),
+        (
+            json!({"execution": {"kind":"cli","agent":"nonesuch","model": model.id,"variant":"default"}}),
+            Some(before.revision),
+        ),
+        (
+            json!({"execution": {"kind":"cli","agent":"claude"}}),
+            Some(before.revision),
+        ),
+        (json!({}), Some(before.revision)),
+        (
+            json!({"execution": target, "title":"unexpected"}),
+            Some(before.revision),
+        ),
+    ] {
+        assert!(
+            state
+                .handle_addressed_thread_action(
+                    &history,
+                    id,
+                    "set_execution".into(),
+                    data,
+                    expected
+                )
+                .await
+                .is_err(),
+            "rejected request changed the Thread"
+        );
+        assert_eq!(state.storage.thread(id).await.unwrap().unwrap(), before);
+    }
+
+    let chosen = state
+        .handle_addressed_thread_action(
+            &history,
+            id,
+            "set_execution".into(),
+            json!({ "execution": target }),
+            Some(before.revision),
+        )
+        .await
+        .unwrap();
+    assert_eq!(chosen.execution, Some(target.clone()));
+    assert_eq!(chosen.revision, before.revision + 1);
+    assert_eq!(chosen.title, before.title);
+    assert!(state.broadcast_log.recent().iter().any(
+        |frame| matches!(frame, HostToClient::ThreadUpsert { thread } if thread.id == id && thread.execution == Some(target.clone()))
+    ));
+
+    let cleared = state
+        .handle_addressed_thread_action(
+            &history,
+            id,
+            "set_execution".into(),
+            json!({ "execution": null }),
+            Some(chosen.revision),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleared.execution, None);
+    assert_eq!(cleared.revision, chosen.revision + 1);
+}

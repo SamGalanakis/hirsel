@@ -15,6 +15,7 @@ fn thread(revision: u64) -> Thread {
         id: 5,
         title: "Groceries".into(),
         description: "Buy milk".into(),
+        execution: None,
         instrument: serde_json::json!({"type":"text","text":"Milk"}),
         attention: ThreadAttention::Quiet,
         settled_at: None,

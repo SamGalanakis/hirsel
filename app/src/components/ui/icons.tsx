@@ -299,6 +299,12 @@ export const CircleAlert = (props: IconProps) => <Icon {...props} nodes={[
   ["line", { x1: "12", x2: "12.01", y1: "16", y2: "16" }]
 ]} />;
 
+export const Info = (props: IconProps) => <Icon {...props} nodes={[
+  ["circle", { cx: "12", cy: "12", r: "10" }],
+  ["path", { d: "M12 16v-4" }],
+  ["path", { d: "M12 8h.01" }]
+]} />;
+
 export const Funnel = (props: IconProps) => <Icon {...props} nodes={[["path", { d: "M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z" }]]} />;
 
 export const Pin = (props: IconProps) => <Icon {...props} nodes={[

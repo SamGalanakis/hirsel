@@ -26,6 +26,29 @@ pub enum ThreadIcon {
     Image { blob_id: String },
 }
 
+/// Where a Thread's next turn runs, named the way both the Owner and the Agent
+/// name it: an agent plus the selectors that agent understands. Deliberately
+/// key-free and path-free — it is the public identity of a backend, not its
+/// captured configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ThreadExecutionTarget {
+    Host {
+        provider_id: String,
+        model: String,
+    },
+    Cli {
+        agent: String,
+        model: String,
+        variant: String,
+    },
+    Lash {
+        provider_id: String,
+        model: String,
+        variant: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Thread {
     pub id: u64,
@@ -40,6 +63,10 @@ pub struct Thread {
     #[serde(default)]
     pub showcased_artifact_id: Option<u64>,
     pub description: String,
+    /// The Owner's chosen backend for the next turn. None inherits the
+    /// configured default coordinator; a running turn keeps what it captured.
+    #[serde(default)]
+    pub execution: Option<ThreadExecutionTarget>,
     pub instrument: serde_json::Value,
     pub attention: ThreadAttention,
     pub settled_at: Option<DateTime<Utc>>,

@@ -19,13 +19,13 @@ import { quietWakeTurn } from "./work-summary";
 import { conversationEntries, type ConversationEntry } from "./conversation";
 import { emptyHistory } from "./model";
 import { BrandMark } from "../components/BrandMark";
-import { Activity, Settings, GitBranch, LayoutGrid, ArrowLeft, MessageCircle, FileText, Plus } from "../components/ui/icons";
+import { Activity, Settings, GitBranch, Info, LayoutGrid, ArrowLeft, MessageCircle, FileText, Plus } from "../components/ui/icons";
 import { ThreadLink } from "./ThreadRef";
-import { ThreadStatus } from "./ThreadStatus";
 import { threadAncestors } from "./tree";
 import { ThreadError } from "./ThreadError";
 import { ThreadAvatar } from "./ThreadAvatar";
 import { ThreadIconPicker } from "./ThreadIconPicker";
+import { ThreadInfo } from "./ThreadInfo";
 import { ThreadActions } from "./ThreadActions";
 import { SettingsSheet } from "../components/settings/SettingsSheet";
 import { ProcessesSheet } from "../components/processes/ProcessesSheet";
@@ -51,11 +51,10 @@ function writeDesktopNavigationPreference(open: boolean): void {
   catch { /* The current session still responds when storage is unavailable. */ }
 }
 function ThreadConversation(props: { id: number; historyId: string; attachments: AttachmentsController; globalArtifacts: boolean; onConversation: () => void; onBrowse: () => void }) {
-  const [now, setNow] = createSignal(Date.now());
-  const statusTimer = setInterval(() => setNow(Date.now()), 30_000);
-  onCleanup(() => clearInterval(statusTimer));
-  const [relatedView, setRelatedView] = createSignal(false);
-  const showRelated = () => relatedView() || props.globalArtifacts;
+  const [pane, setPane] = createSignal<"conversation" | "related" | "info">("conversation");
+  const showRelated = () => pane() === "related" || props.globalArtifacts;
+  /** The Thread's own facts, in the frame, in place of the conversation. */
+  const showInfo = () => pane() === "info" && !props.globalArtifacts;
   const attachments = props.attachments;
   const current = () => threadState.threads.find(t => t.id === props.id);
   const history = () => threadState.histories[props.id];
@@ -112,8 +111,9 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
         <h1 class="min-w-0 flex-1 text-sm font-medium"><button class="block min-h-11 w-full truncate rounded-lg px-1 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={current()?.title ?? "Loading thread…"} title="Show full name in Spaces and Tasks" aria-controls="thread-navigation" onClick={() => openThreadNavigation()}><span class="flex min-w-0 items-center gap-1.5"><span class="shrink-0 whitespace-nowrap text-xs tabular-nums text-muted-foreground">#{props.id}</span><span class="truncate">{current()?.title ?? "Loading thread…"}</span></span></button></h1>
         <Show when={current()?.attention === "needs_owner"}><span class="size-2 shrink-0 rounded-full bg-status-attention" role="status" aria-label="Needs you" title="Needs you" /></Show>
         <Show when={current()}>{thread => <span class="hidden text-xs capitalize text-muted-foreground sm:inline">{thread().kind}{thread().kind === "task" && thread().settled_at ? " · Done" : ""}</span>}</Show>
-        <button class={iconButton} aria-label="Conversation" title="Conversation" aria-pressed={!showRelated() ? "true" : "false"} onClick={() => { setRelatedView(false); props.onConversation(); }}><MessageCircle class="size-4" /></button>
-        <button class={`${iconButton} relative`} aria-label="Related" title="Related links and artifacts" aria-pressed={relatedView() && !props.globalArtifacts ? "true" : "false"} onClick={() => { props.onConversation(); setRelatedView(true); }}><FileText class="size-4" /><Show when={relatedCount() > 0}><span aria-hidden="true" class="absolute top-0.5 right-0.5 grid min-w-3.5 place-items-center rounded-full bg-muted px-0.5 text-[10px] tabular-nums">{relatedCount()}</span></Show></button>
+        <button class={iconButton} aria-label="Conversation" title="Conversation" aria-pressed={!showRelated() && !showInfo() ? "true" : "false"} onClick={() => { setPane("conversation"); props.onConversation(); }}><MessageCircle class="size-4" /></button>
+        <button class={iconButton} aria-label="Info" title="About this Thread" aria-pressed={showInfo() ? "true" : "false"} onClick={() => { props.onConversation(); setPane("info"); }}><Info class="size-4" /></button>
+        <button class={`${iconButton} relative`} aria-label="Related" title="Related links and artifacts" aria-pressed={pane() === "related" && !props.globalArtifacts ? "true" : "false"} onClick={() => { props.onConversation(); setPane("related"); }}><FileText class="size-4" /><Show when={relatedCount() > 0}><span aria-hidden="true" class="absolute top-0.5 right-0.5 grid min-w-3.5 place-items-center rounded-full bg-muted px-0.5 text-[10px] tabular-nums">{relatedCount()}</span></Show></button>
         <ShowcaseButton threadId={props.id} />
         <CanvasButton />
         <Show when={current()}>
@@ -122,11 +122,9 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
       </header>
     <div ref={node => { scroller = node; }} class="min-h-0 flex-1 overflow-y-auto px-3 py-6 sm:px-gutter" data-slot="thread-scroll" onScroll={() => { if (scroller) following = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80; }}>
       <Show when={!showRelated()} fallback={<Show when={props.globalArtifacts} fallback={<RelatedList origin={origin} />}><ArtifactList onResume={props.onConversation} /></Show>}>
+      <Show when={showInfo() && current()} fallback={
       <div class="mx-auto flex w-full max-w-measure flex-col gap-6">
         <Show when={current()?.parent_thread_id !== null && current()?.parent_thread_id !== undefined}><nav aria-label="Thread ancestry" class="flex flex-wrap items-center gap-1 text-xs text-muted-foreground"><For each={threadAncestors(threadState.threads, props.id)}>{parent => <><ThreadLink id={parent.id} /><span aria-hidden="true">/</span></>}</For><span class="break-words">#{props.id} {current()?.title}</span></nav></Show>
-        <Show when={threadState.threads.some(thread => thread.parent_thread_id === props.id)}><details data-slot="child-threads" class="text-sm"><summary class="min-h-11 w-fit cursor-pointer rounded py-3 text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Child threads · {threadState.threads.filter(thread => thread.parent_thread_id === props.id).length}</summary><ul class="space-y-1"><For each={threadState.threads.filter(thread => thread.parent_thread_id === props.id)}>{child => <li class="flex flex-wrap items-center gap-2"><ThreadLink id={child.id} /><ThreadStatus thread={child} now={now()} /></li>}</For></ul></details></Show>
-        <Show when={history()?.brief.text || history()?.brief.artifact_ids.length}><details data-slot="thread-brief" class="text-sm"><summary class="min-h-11 w-fit cursor-pointer rounded py-3 text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Current brief</summary><div class="space-y-2 pb-2"><Markdown>{history()?.brief.text ?? ""}</Markdown><For each={history()?.brief.artifact_ids ?? []}>{id => <ArtifactCard id={id} />}</For></div></details></Show>
-        <Show when={current()?.description}><p class="text-sm text-muted-foreground">{current()?.description}</p></Show>
         <Show when={current()?.instrument && Object.keys(current()!.instrument!).length > 0}>
           <Show when={current()?.revision} keyed>{revision => <ThreadInstrument ui={current()?.instrument ?? undefined} allowSettlement={current()?.kind === "task"} onAction={(action, data) => threadAction(props.historyId, props.id, action, data, revision)} />}</Show>
         </Show>
@@ -136,7 +134,7 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
         <For each={rendered()} keyed={row => row.key}>{row => <Show when={"entry" in row() ? row() as { entry: ConversationEntry } : undefined} fallback={<ConversationNote title="Turns that woke this Thread and left nothing to show">{(row() as { quiet: number }).quiet} quiet {(row() as { quiet: number }).quiet === 1 ? "wake" : "wakes"}</ConversationNote>}>{owned => <ThreadMessage entry={owned().entry} history={history() ?? emptyHistory()} threadId={props.id} />}</Show>}</For>
         <For each={pending()} keyed={message => message.clientId}>{message => <PendingMessageRow message={message()} />}</For>
 
-      </div>
+      </div>}>{thread => <ThreadInfo thread={thread()} historyId={props.historyId} onRelated={() => setPane("related")} />}</Show>
       </Show>
     </div>
     <ThreadError threadId={props.id} />

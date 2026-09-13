@@ -534,15 +534,15 @@ it("keeps current brief reachable beyond the visible history page without moving
     messages: [{ id: 100, thread_id: 1, author: "owner", body: "Latest conversation", ref: null, ts: "2026-09-10T10:00:00Z" }], turns: [], turn_timelines: [], activities: [assignment],
   } }));
   expect(view.container.querySelector('[data-activity-id="10"]')).toBeNull();
-  expect(view.container.querySelector('[data-slot="thread-brief"]')).toBeInTheDocument();
-  fireEvent.click(view.getByText("Current brief", { exact: true }));
-  const brief = view.container.querySelector('[data-slot="thread-brief"]')!;
-  expect(brief).toHaveTextContent("Review only the keyboard flow.");
-  expect(brief.querySelector('[data-artifact-ref="44"]')).toBeInTheDocument();
   expect(view.getByText("Latest conversation")).toBeInTheDocument();
+  // The brief is a fact about the Thread, so it lives in the Info pane.
+  fireEvent.click(view.getByRole("button", { name: "Info" }));
+  const brief = () => view.container.querySelector('[data-fact="Current brief"]')!;
+  expect(brief()).toHaveTextContent("Review only the keyboard flow.");
+  expect(brief().querySelector('[data-artifact-ref="44"]')).toBeInTheDocument();
   expect(threadState.histories[1].activities[0].ts).toBe(assignment.ts);
   flush(() => handleThreadMessage({ type: "thread_activity", activity: { ...assignment, id: 11, data: { ...assignment.data, brief: "Now review the phone flow." }, ts: "2026-09-10T10:01:00Z" } }));
-  expect(brief).toHaveTextContent("Now review the phone flow.");
+  expect(brief()).toHaveTextContent("Now review the phone flow.");
   expect(threadState.histories[1].activities[0].data).toEqual(assignment.data);
 });
 

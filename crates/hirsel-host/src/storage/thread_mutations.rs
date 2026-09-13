@@ -156,7 +156,10 @@ impl Storage {
                     super::thread_icons::validate_icon(icon.as_ref())?;
                 }
                 if let Some(title) = title {
-                    anyhow::ensure!(!title.trim().is_empty(), "title must not be empty");
+                    threads::validate_thread_title(title)?;
+                }
+                if let Some(description) = description {
+                    threads::validate_thread_description(description)?;
                 }
                 if let Some(instrument) = instrument {
                     threads::validate_instrument(instrument)?;

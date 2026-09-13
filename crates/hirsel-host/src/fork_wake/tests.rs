@@ -131,6 +131,7 @@ fn event(id: u64, name: &str, description: &str) -> hirsel_proto::Thread {
         id,
         title: name.into(),
         description: description.into(),
+        execution: None,
         instrument: serde_json::Value::Null,
         attention: hirsel_proto::ThreadAttention::NeedsOwner,
         settled_at: None,

@@ -3,6 +3,12 @@ export type ThreadKind = "space" | "task";
 export type ThreadIcon =
   | { kind: "emoji"; value: string }
   | { kind: "image"; blob_id: string };
+/** Where the Owner chose this Thread's next turn to run. Absent or null means
+ * it inherits the configured default coordinator. */
+export type ThreadExecutionTarget =
+  | { kind: "host"; provider_id: string; model: string }
+  | { kind: "cli"; agent: string; model: string; variant: string }
+  | { kind: "lash"; provider_id: string; model: string; variant: string };
 export interface Thread {
   id: number;
   kind: ThreadKind;
@@ -12,6 +18,7 @@ export interface Thread {
   icon: ThreadIcon | null;
   showcased_artifact_id: number | null;
   description: string;
+  execution?: ThreadExecutionTarget | null;
   instrument: ViewSpec | ViewSpec[] | null;
   attention: "quiet" | "needs_owner";
   settled_at: string | null;

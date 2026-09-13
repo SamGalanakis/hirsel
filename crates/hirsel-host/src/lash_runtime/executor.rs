@@ -168,7 +168,7 @@ pub(super) fn optional_path(args: &Value, key: &str) -> Result<Option<PathBuf>, 
         .transpose()
 }
 
-pub(super) fn parse_agent_kind(value: &str) -> Result<AgentKind, String> {
+pub(crate) fn parse_agent_kind(value: &str) -> Result<AgentKind, String> {
     match value {
         "claude" => Ok(AgentKind::Claude),
         "codex" => Ok(AgentKind::Codex),

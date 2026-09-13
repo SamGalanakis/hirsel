@@ -511,101 +511,20 @@ impl ScopedThreadTools {
                 crate::storage::ThreadExecution::LashWorker { .. }
             )
             .then_some(effective)
-        } else if input.agent.as_deref() == Some("host") {
-            if input.provider_id.is_some()
-                || input.model.is_some()
-                || input.variant.is_some()
-                || input.cwd.is_some()
-            {
-                return Err(
-                    "host delegation uses configured provider/model; worker selectors do not apply"
-                        .into(),
-                );
-            }
-            Some(
-                self.tools
-                    .storage()
-                    .host_execution_default()
-                    .await
-                    .map_err(|e| e.to_string())?,
-            )
-        } else if input.agent.as_deref() == Some("lash") {
-            // The Owner's row is the gate. The delegation schema already drops
-            // the branch while the worker is off, so this refusal is for a
-            // stale tool surface, not the ordinary path.
-            let native_worker = self.tools.subagent_model_snapshot().native_worker;
-            if !native_worker.enabled {
-                return Err(
-                    "the native Lash worker is turned off in Settings; enable it to delegate with agent `lash`"
-                        .into(),
-                );
-            }
-            let provider = self
-                .tools
-                .capture_native_worker_provider(input.provider_id.as_deref())
-                .map_err(|e| e.to_string())?;
-            let model = match input.model {
-                Some(model) => {
-                    crate::model_selection::validate_free_text(&model)
-                        .map_err(|e| e.to_string())?
-                        .id
-                }
-                // The Owner's model override is the default for this route;
-                // an explicit `model` above still wins.
-                None if provider.id == crate::providers::NATIVE_WORKER_DEFAULT_PROVIDER_ID => {
-                    native_worker.model.clone()
-                }
-                None => {
-                    return Err(format!(
-                        "native Lash worker provider `{}` requires an explicit model",
-                        provider.id
-                    ));
-                }
-            };
-            let variant = input.variant.unwrap_or_else(|| "default".to_string());
-            if variant != "default" {
-                return Err(format!(
-                    "native Lash worker variant `{variant}` is unsupported; available variants: default"
-                ));
-            }
-            let cwd = input
-                .cwd
-                .unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?);
-            let cwd = std::fs::canonicalize(cwd)
-                .map_err(|e| format!("invalid execution directory: {e}"))?;
-            if !cwd.is_dir() {
-                return Err(format!(
-                    "invalid execution directory: `{}` is not a directory",
-                    cwd.display()
-                ));
-            }
-            Some(crate::storage::ThreadExecution::LashWorker {
-                provider,
-                model,
-                variant,
-                cwd,
-                tool_profile: crate::storage::NATIVE_CODING_TOOL_PROFILE.to_string(),
-            })
         } else {
-            if input.provider_id.is_some() {
-                return Err("provider_id applies only to agent `lash`".into());
-            }
-            let agent = parse_agent_kind(input.agent.as_deref().unwrap_or("claude"))?;
-            let selected = self
-                .tools
-                .resolve_thread_cli_model(agent, input.model.as_deref(), input.variant.as_deref())
-                .map_err(|e| e.to_string())?;
-            let cwd = input
-                .cwd
-                .unwrap_or(std::env::current_dir().map_err(|e| e.to_string())?);
-            let cwd = std::fs::canonicalize(cwd)
-                .map_err(|e| format!("invalid execution directory: {e}"))?;
-            Some(crate::storage::ThreadExecution::Cli {
-                agent,
-                model: selected.model_id,
-                variant: selected.variant,
-                cwd,
-            })
+            Some(
+                crate::execution_selection::resolve_execution(
+                    &self.tools,
+                    crate::execution_selection::ExecutionSelectors {
+                        agent: input.agent,
+                        provider_id: input.provider_id,
+                        model: input.model,
+                        variant: input.variant,
+                        cwd: input.cwd,
+                    },
+                )
+                .await?,
+            )
         };
         let native_worker = matches!(
             &execution,

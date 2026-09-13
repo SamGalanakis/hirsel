@@ -47,6 +47,7 @@ pub(super) fn populate(conn: &Connection, thread: &mut Thread) -> anyhow::Result
         .map(|id| thread_activity::get(conn, id))
         .transpose()?;
     thread.last_activity_at = parse_ts(&activity)?;
+    thread.execution = super::thread_execution::preference(conn, thread.id)?;
     Ok(())
 }
 

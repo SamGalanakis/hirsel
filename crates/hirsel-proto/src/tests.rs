@@ -1022,3 +1022,34 @@ fn publish_inputs_map_onto_one_render_discriminator() {
         );
     }
 }
+
+#[test]
+fn reach_grants_round_trip_a_named_thread_and_the_root() {
+    for value in [
+        json!({"type":"grant_thread_reach","client_id":"g1","history_id":"history-a","thread_id":4,"target":8,"note":"invoice work"}),
+        json!({"type":"grant_thread_reach","client_id":"g2","history_id":"history-a","thread_id":4,"target":"root","note":null}),
+        json!({"type":"revoke_thread_reach","client_id":"r1","history_id":"history-a","thread_id":4,"target":8}),
+        json!({"type":"revoke_thread_reach","client_id":"r2","history_id":"history-a","thread_id":4,"target":"root"}),
+    ] {
+        let command: ClientToHost = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(command).unwrap(), value);
+    }
+    // Only a Thread ID or the exact literal is a reach target.
+    for bad in [json!("everything"), json!(0), json!({"kind":"root"})] {
+        assert!(serde_json::from_value::<ReachTarget>(bad).is_err());
+    }
+
+    let value = json!({"type":"thread_grants_changed","client_id":null,"history_id":"history-a","thread_id":4,"revision":3,"grants":[
+        {"thread_id":4,"target":{"kind":"thread","thread_id":8,"title":"Billing"},"granted_by":{"kind":"owner"},"granted_at":"2026-09-13T10:00:00Z","note":null},
+        {"thread_id":4,"target":{"kind":"root"},"granted_by":{"kind":"thread","thread_id":2},"granted_at":"2026-09-13T10:01:00Z","note":"stands in for me"}
+    ]});
+    let snapshot: HostToClient = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(snapshot).unwrap(), value);
+    // The Thread variant is closed: no missing title, no extra fields.
+    for bad in [
+        json!({"kind":"thread","thread_id":8}),
+        json!({"kind":"thread","thread_id":8,"title":"Billing","extra":1}),
+    ] {
+        assert!(serde_json::from_value::<ThreadGrantTarget>(bad).is_err());
+    }
+}

@@ -1,9 +1,25 @@
 //! Agent Thread writes validate the execution and replay input inside the write transaction.
 use super::{Storage, ThreadCaller, ThreadRef, thread_scope, threads};
-use hirsel_proto::{ThreadAttention, ThreadIcon, ThreadKind};
+use hirsel_proto::{ReachTarget, ThreadAttention, ThreadIcon, ThreadKind};
 use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
+
+/// The literal `"root"` a tool writes where a Thread reference would go.
+#[derive(Debug, Clone, Copy, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RootLiteral {
+    Root,
+}
+
+/// A grant target as a tool names it: `"root"`, or any Thread reference. Root
+/// is tried first, so the string can never be read as a Thread path.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub(crate) enum GrantTargetRef {
+    Root(RootLiteral),
+    Thread(ThreadRef),
+}
 
 #[derive(Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -54,17 +70,18 @@ pub(crate) enum ThreadMutation {
         kind: String,
         data: Value,
     },
-    /// Widen a descendant's reach to one Thread the caller can already reach.
+    /// Widen a descendant's reach to one Thread the caller can already reach,
+    /// or to everything, which only a root holder can hand on.
     Grant {
         thread: ThreadRef,
-        target: ThreadRef,
+        target: GrantTargetRef,
         note: Option<String>,
     },
     /// Narrow a descendant's reach. Narrowing needs no reach of its own: an
     /// ancestor may always remove a grant, including one the Owner made.
     Revoke {
         thread: ThreadRef,
-        target_thread_id: u64,
+        target: ReachTarget,
     },
 }
 impl Storage {
@@ -220,7 +237,12 @@ impl Storage {
                 // Both ends resolve against the caller's own reach first: a
                 // Thread can only hand on what it already holds.
                 let id = thread_scope::resolve(&tx, caller.thread_id, thread)?;
-                let target = thread_scope::resolve(&tx, caller.thread_id, target)?;
+                let target = match target {
+                    GrantTargetRef::Root(_) => ReachTarget::Root,
+                    GrantTargetRef::Thread(reference) => ReachTarget::Thread {
+                        thread_id: thread_scope::resolve(&tx, caller.thread_id, reference)?,
+                    },
+                };
                 super::thread_grants::authorize_widening(&tx, caller.thread_id, id, Some(target))?;
                 serde_json::to_value(super::thread_grants::grant(
                     &tx,
@@ -232,13 +254,10 @@ impl Storage {
                     note.as_deref(),
                 )?)?
             }
-            ThreadMutation::Revoke {
-                thread,
-                target_thread_id,
-            } => {
+            ThreadMutation::Revoke { thread, target } => {
                 let id = thread_scope::resolve(&tx, caller.thread_id, thread)?;
                 super::thread_grants::authorize_widening(&tx, caller.thread_id, id, None)?;
-                serde_json::to_value(super::thread_grants::revoke(&tx, id, *target_thread_id)?)?
+                serde_json::to_value(super::thread_grants::revoke(&tx, id, *target)?)?
             }
         };
         if let Some(id) = result.get("thread_id").and_then(Value::as_u64) {

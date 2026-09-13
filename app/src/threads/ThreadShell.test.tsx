@@ -816,7 +816,6 @@ describe("panes and Back", () => {
     expect(composer(view)).toBeInTheDocument();
     fireEvent.click(view.getByRole("tab", { name: "Info" }));
     expect(composer(view)).toBeNull();
-    expect(view.container.querySelector('[data-slot="reach-strip"]')).toBeNull();
     fireEvent.click(view.getByRole("tab", { name: "Related" }));
     expect(composer(view)).toBeNull();
     fireEvent.click(view.getByRole("tab", { name: "Conversation" }));

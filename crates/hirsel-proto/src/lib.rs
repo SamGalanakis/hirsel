@@ -43,7 +43,7 @@ pub const IROH_OWNER_ALPN: &[u8] = b"hirsel/owner/1";
 mod tests;
 
 pub use thread::{
-    Thread, ThreadActivity, ThreadAttention, ThreadBrief, ThreadDetail, ThreadExecutionTarget,
-    ThreadGrant, ThreadGrantSource, ThreadIcon, ThreadKind, ThreadRelatedItem, ThreadRelatedTarget,
-    ThreadTurn, ThreadTurnState,
+    ReachTarget, Thread, ThreadActivity, ThreadAttention, ThreadBrief, ThreadDetail,
+    ThreadExecutionTarget, ThreadGrant, ThreadGrantSource, ThreadGrantTarget, ThreadIcon,
+    ThreadKind, ThreadRelatedItem, ThreadRelatedTarget, ThreadTurn, ThreadTurnState,
 };

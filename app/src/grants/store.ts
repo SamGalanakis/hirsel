@@ -1,7 +1,7 @@
 import { createStore } from "solid-js";
 import { historyId } from "../lib/history";
 import type { ServerMessage } from "../protocol";
-import type { ThreadClientMessage, ThreadGrant } from "../threads/types";
+import type { ReachTarget, ThreadClientMessage, ThreadGrant } from "../threads/types";
 
 export interface GrantOrigin { readonly historyId: string; readonly threadId: number }
 interface ReachList { grants: ThreadGrant[]; revision: number; loaded: boolean }
@@ -24,10 +24,15 @@ export function resetGrants(): void {
   for (const id of pending.keys()) finish(id, "History changed. Open the Thread again.");
   setGrantState(draft => { draft.lists = {}; });
 }
+/** True when this Thread holds reach over everything, now and later. */
+export function holdsRoot(threadId: number): boolean {
+  return threadGrants(threadId).some(grant => grant.target.kind === "root");
+}
 /** What a Thread can address, in the one line the Agent reads in its own context. */
 export function reachSummary(threadId: number): string {
+  if (holdsRoot(threadId)) return "everything (root)";
   const grants = grantState.lists[threadId]?.grants ?? [];
-  return ["self + subtree", ...grants.map(grant => `+Thread ${grant.target_thread_id} '${grant.title}'`)].join(" · ");
+  return ["self + subtree", ...grants.flatMap(grant => grant.target.kind === "thread" ? [`+Thread ${grant.target.thread_id} '${grant.target.title}'`] : [])].join(" · ");
 }
 export function threadGrants(threadId: number): ThreadGrant[] { return grantState.lists[threadId]?.grants ?? []; }
 function request(origin: GrantOrigin, frame: Extract<ThreadClientMessage, {client_id: string}>): Promise<void> {
@@ -38,11 +43,11 @@ function request(origin: GrantOrigin, frame: Extract<ThreadClientMessage, {clien
     transport(frame);
   });
 }
-export async function grantReach(origin: GrantOrigin, targetThreadId: number, note: string | null): Promise<void> {
-  await request(origin, { type: "grant_thread_reach", client_id: crypto.randomUUID(), history_id: origin.historyId, thread_id: origin.threadId, target_thread_id: targetThreadId, note });
+export async function grantReach(origin: GrantOrigin, target: ReachTarget, note: string | null): Promise<void> {
+  await request(origin, { type: "grant_thread_reach", client_id: crypto.randomUUID(), history_id: origin.historyId, thread_id: origin.threadId, target, note });
 }
-export async function revokeReach(origin: GrantOrigin, targetThreadId: number): Promise<void> {
-  await request(origin, { type: "revoke_thread_reach", client_id: crypto.randomUUID(), history_id: origin.historyId, thread_id: origin.threadId, target_thread_id: targetThreadId });
+export async function revokeReach(origin: GrantOrigin, target: ReachTarget): Promise<void> {
+  await request(origin, { type: "revoke_thread_reach", client_id: crypto.randomUUID(), history_id: origin.historyId, thread_id: origin.threadId, target });
 }
 /** Reach snapshots order only against prior reach snapshots: Thread metadata
  * may already be newer and must not roll a grant list back. */

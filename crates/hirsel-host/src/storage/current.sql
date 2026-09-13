@@ -214,15 +214,20 @@ CREATE TABLE thread_related_receipts (
 
 CREATE TABLE thread_grants (
     thread_id INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-    target_thread_id INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    -- NULL is the root: every Thread in the history, including Threads made
+    -- after the grant. A named Thread carries its subtree, as it always did.
+    target_thread_id INTEGER REFERENCES threads(id) ON DELETE CASCADE,
+    -- One grant per target per Thread, root included: a NULL target would not
+    -- collide under a plain key, so identity is the coalesced key instead.
+    target_key INTEGER NOT NULL GENERATED ALWAYS AS (COALESCE(target_thread_id,0)) VIRTUAL,
     granted_by TEXT NOT NULL CHECK(granted_by IN ('owner','thread')),
     granted_by_thread_id INTEGER REFERENCES threads(id) ON DELETE CASCADE,
     granted_at TEXT NOT NULL,
     note TEXT,
-    PRIMARY KEY(thread_id,target_thread_id),
     CHECK(thread_id != target_thread_id),
     CHECK((granted_by='thread') = (granted_by_thread_id IS NOT NULL))
 );
+CREATE UNIQUE INDEX thread_grants_key ON thread_grants(thread_id,target_key);
 CREATE INDEX thread_grants_target ON thread_grants(target_thread_id,thread_id);
 CREATE TABLE thread_grant_receipts (
     client_id TEXT PRIMARY KEY,

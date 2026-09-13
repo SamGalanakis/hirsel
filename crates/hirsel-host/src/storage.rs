@@ -34,7 +34,7 @@ pub(crate) use thread_icons::{parse_agent_icon, parse_icon};
 pub(crate) use threads::ThreadPublication;
 mod thread_mutations;
 mod thread_read;
-pub(crate) use thread_mutations::{RelatedTargetInput, ThreadMutation};
+pub(crate) use thread_mutations::{GrantTargetRef, RelatedTargetInput, ThreadMutation};
 mod thread_delegation;
 pub(crate) use thread_delegation::Delegation;
 pub(crate) use thread_scope::{OutsideGrant, ThreadCaller, ThreadRef};

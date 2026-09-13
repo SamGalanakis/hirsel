@@ -87,19 +87,20 @@ Human acceptance validates existing IDs using human-global authority and atomica
 
 ## Reach and grants
 
-A Thread's reach is itself and its descendants, widened by explicit grants. `ThreadDetail.grants` is a required complete list of `{thread_id, target_thread_id, title, granted_by, granted_at, note}`; `granted_by` is `{kind:"owner"}` or `{kind:"thread", thread_id}`. A grant makes the named Thread **and its whole subtree** addressable, exactly like the default subtree. Reach is one-way, a grant restating the default reach is rejected rather than stored, and reach never reparents a Thread or changes human visibility.
+A Thread's reach is itself and its descendants, widened by explicit grants. `ThreadDetail.grants` is a required complete list of `{thread_id, target, granted_by, granted_at, note}`; `target` is `{kind:"thread", thread_id, title}` or `{kind:"root"}`, and `granted_by` is `{kind:"owner"}` or `{kind:"thread", thread_id}`. A Thread grant makes the named Thread **and its whole subtree** addressable, exactly like the default subtree; a root grant makes every Thread in the history addressable, including Threads created after the grant, and a Thread holds at most one. Reach is one-way, a grant restating the default reach is rejected rather than stored, and reach never reparents a Thread or changes human visibility.
 
-Human `grant_thread_reach {client_id, history_id, thread_id, target_thread_id, note}` and `revoke_thread_reach {client_id, history_id, thread_id, target_thread_id}` are the Owner's edits. Agents use the `threads.grant`/`threads.revoke` tools, which are themselves fenced: only a strict ancestor may widen a Thread, only with reach it already holds, and never itself. Narrowing needs no reach of its own, so an ancestor may remove a grant the Owner made.
+Human `grant_thread_reach {client_id, history_id, thread_id, target, note}` and `revoke_thread_reach {client_id, history_id, thread_id, target}` are the Owner's edits, where `target` is a Thread ID or the literal `"root"`. Agents use the `threads.grant`/`threads.revoke` tools, which name the target the same way (plus caller-relative paths) and are themselves fenced: only a strict ancestor may widen a Thread, only with reach it already holds — root included — and never itself. Narrowing needs no reach of its own, so an ancestor may remove a grant the Owner made.
 
 `thread_grants_changed {client_id: string|null, history_id, thread_id, revision, grants}` carries the complete current list. Durable mutation receipts acknowledge retries with the current list. Clients reject a different history and revisions older than the last applied **reach snapshot**, independently of newer unrelated Thread metadata revisions; equal revisions are accepted. Reconnect/open reloads this snapshot from `thread_opened`.
 
-Naming an unreachable Thread or artifact is never an error and never a lie. The tool result is `{refused: true, reason, target, tool, grant_summary, detail}`, where `reason` is `outside_grant` or `owner_fence` and `target` is `{kind:"thread", thread_id}` or `{kind:"artifact", artifact_id}`. Each refusal writes exactly one durable `refusal` Thread activity, never deduplicated, rendered in conversation as a note. `owner_fence` covers the one fence a grant cannot open: a Thread never addresses its own ancestors with work, it reports to its requester.
+Naming an unreachable Thread or artifact is never an error and never a lie. The tool result is `{refused: true, reason, target, tool, grant_summary, detail}`, where `reason` is `outside_grant` or `owner_fence` and `target` is `{kind:"thread", thread_id}`, `{kind:"artifact", artifact_id}` or `{kind:"root"}`. `grant_summary` reads `everything (root)` for a root holder. Each refusal writes exactly one durable `refusal` Thread activity, never deduplicated, rendered in conversation as a note. `owner_fence` covers the one fence a grant cannot open: a Thread never addresses its own ancestors with work, it reports to its requester.
 
 Copy thread link emits an absolute same-origin `/t/{id}?history={uuid}` HTTP(S) URL. Copy reference emits ordinary Markdown `[Thread #id](URL)`. Local `#id` shorthand resolves only in its message's current history. Conversation Markdown links, including reference-style links, use one native anchor renderer with adjacent Open, Copy and explicit Add to Related actions. Local Thread URLs resolve only at the app origin; lookalikes are external links. Related combines saved references with the canonical artifact inventory; artifact preview Markdown remains inert inside its isolated frame.
 
-The Host uses one canonical storage schema 9: emoji/image Thread icons with the
+The Host uses one canonical storage schema 11: emoji/image Thread icons with the
 `threads.icon_blob_id` foreign key, Lash process delivery receipts and Thread
-authority, durable `thread_grants` reach, and no `monitors` table. Only the exact
+authority, durable `thread_grants` reach whose NULL `target_thread_id` is the
+root, and no `monitors` table. Only the exact
 layout or an empty store is accepted; older and branch-specific layouts are
 refused without modification.
 

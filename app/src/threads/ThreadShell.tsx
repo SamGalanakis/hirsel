@@ -1,5 +1,5 @@
 import { ShowcaseButton, ShowcaseSurface } from "../artifacts/ShowcaseSurface";
-import { ReachStrip } from "../grants/ReachStrip";
+import { ReachDialog } from "../grants/ReachDialog";
 import { RelatedContext } from "../related/context";
 import { RelatedList } from "../related/RelatedList";
 import { relatedState } from "../related/store";
@@ -186,7 +186,6 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
       </Show>
     </div>
     <ThreadError threadId={props.id} />
-    <Show when={!showRelated() && !showInfo()}><ReachStrip origin={origin} /></Show>
     <Show when={writable()}>
     <Composer artifactContext={draftArtifact(props.id)} onRemoveArtifactContext={() => stageDraftArtifact(props.id, null)} onConsumeArtifactContext={id => consumeDraftArtifact(props.id, id)} ariaLabel={`Message ${current()?.title ?? "this Thread"}`} shortLabel={`Message #${props.id}`} draftKey={`${historyId()}:thread-${props.id}`} attachments={attachments} thinking={thinking()} focused threads={threadState.threads}
       onSend={(body, mode, blobs, mentions, artifactIds) => {
@@ -367,6 +366,7 @@ export function ThreadShell() {
       <button class={`${iconButton} hidden split:inline-flex`} aria-label="Settings" title="Settings" onClick={() => openSettings()}><Settings class="size-5" /></button>
     </nav>
     <ThreadIconPicker />
+    <ReachDialog />
     <ThreadNavigation mode={navigationMode()} intent={threadNavigationIntent()} onClose={closeNavigation} onSelect={selectThread} onExpand={() => openNavigation()} />
     <ThreadCreate onSelect={selectThread} />
     <div class="flex min-h-0 min-w-0 flex-1 flex-col">

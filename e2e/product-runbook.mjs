@@ -147,7 +147,7 @@ async function domSnapshot(page) {
         activityId: element.getAttribute("data-activity-id"),
         role: element.getAttribute("aria-label"),
         text: element.textContent?.trim() ?? "",
-        messageText: element.querySelector(':scope > div > [data-testid="markdown"]')?.textContent?.trim() ?? null,
+        messageText: element.querySelector(':scope > div > [data-testid="markdown"], :scope > div > [data-slot="run-card"] > [data-testid="markdown"]')?.textContent?.trim() ?? null,
         visible: visible(element),
         workDetails: [...element.querySelectorAll('[data-slot="work-details"]')].map(details => ({
           open: details.open,
@@ -294,7 +294,19 @@ function timelineProjection(dom) {
   }));
 }
 
+/** A finished run rests as a collapsed card; its trace is what these oracles
+ * read, so every card is opened before the DOM is projected. */
+async function expandRunCards(page) {
+  const headers = page.locator('[data-slot="run-card-header"][aria-expanded="false"]');
+  for (let index = 0; index < await headers.count(); index += 1) {
+    const header = headers.nth(0);
+    if (await header.count() === 0) break;
+    await header.click();
+  }
+}
+
 async function expandInlineTools(page, callIds) {
+  await expandRunCards(page);
   for (const callId of callIds) {
     const row = page.locator(`[data-slot="timeline-tool"][data-tool-call-id="${callId}"]`).first();
     await row.waitFor({ state: "visible", timeout: 10_000 });
@@ -353,6 +365,7 @@ function toolPair(frames, turnId, namePattern) {
 }
 
 async function requireInlineTool(page, callId, expectedText) {
+  await expandRunCards(page);
   const row = page.locator(`[data-slot="timeline-tool"][data-tool-call-id="${callId}"]`).first();
   await row.waitFor({ state: "visible", timeout: 10_000 });
   const hiddenByTurn = await row.evaluate(element => Boolean(element.closest('details[data-slot="work-details"]')));

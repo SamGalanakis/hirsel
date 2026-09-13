@@ -4,7 +4,8 @@ import { Clock, LoaderCircle, MessagesSquare } from "../components/ui/icons";
 import { ArtifactCard } from "../artifacts/ArtifactSurface";
 import { getClient } from "../ws/client";
 import { buildTimeline, splitStreamingReply } from "../components/chat/timeline";
-import { ActivityEntry, ConversationNote, ThreadWork, WorkTail } from "./ThreadWork";
+import { ActivityEntry, ConversationNote } from "./ThreadWork";
+import { RunCard } from "./RunCard";
 import type { ChatMessage, ProcessOrigin, TriggerLabel } from "../protocol";
 import type { ConversationEntry } from "./conversation";
 import type { ThreadHistory } from "./model";
@@ -44,6 +45,10 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
   const activity = () => (props.entry as Extract<ConversationEntry, {kind:"activity"}>).activity;
   const activities = (id: number | undefined) => id === undefined ? [] : props.history.activities.filter(activity => activity.turn_id === id);
   const events = () => turn() === undefined ? [] : threadState.turnDetails[turn()!.id] ?? [];
+  /** The exact message that asked for this turn, joined by ID — it is what the
+   * card's header names as the run's origin. */
+  const trigger = () => { const id = turn()?.owner_message_id; return id === null || id === undefined ? undefined : props.history.messages.find(row => row.id === id); };
+  const thread = () => threadState.threads.find(row => row.id === props.threadId);
   const split = () => splitStreamingReply(events());
   /** A turn that has started but said nothing yet is not a card: an empty box
    * claims the Agent produced something. Until the first reasoning line, pill or
@@ -71,11 +76,13 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
         </Show>
         <Show when={!pending()}>
         <div data-slot={owner() ? "owner-message" : "agent-message"} class={owner() ? "min-w-0 max-w-[85%] rounded-xl rounded-br-sm bg-primary px-3.5 py-2.5 text-primary-foreground [&_code]:bg-current/10 sm:max-w-[60%]" : "min-w-0 max-w-[96%] rounded-xl rounded-bl-sm border border-border/60 bg-surface px-3.5 py-2.5 sm:max-w-[80%]"}>
-          <Show when={!owner()}><ThreadWork message={message()} turn={turn()} activities={activities(turn()?.id)} events={events()} live={turn()?.state === "running"} /></Show>
-          <Markdown>{message()?.body ?? split().reply}</Markdown>
-          <For each={message()?.artifact_ids ?? []}>{id => <ArtifactCard id={id} />}</For>
+          {/* The Agent side is one run card: what started the turn, where it
+              ran, its trace, its reply and whatever it published. The Owner
+              side is the message itself, which is all there is to say. */}
+          <Show when={!owner()} fallback={<><Markdown>{message()?.body ?? ""}</Markdown><For each={message()?.artifact_ids ?? []}>{id => <ArtifactCard id={id} />}</For></>}>
+            <RunCard turn={turn()} message={message()} trigger={trigger()} thread={thread()} activities={activities(turn()?.id)} events={events()} live={turn()?.state === "running"} />
+          </Show>
           <Show when={message()?.attachments?.length}><ul class="mt-2 text-xs text-muted-foreground"><For each={message()?.attachments}>{blob => <li><button class="underline" onClick={() => { void getClient()?.getBlobUrl(blob.id).then(url => window.open(url, "_blank", "noopener,noreferrer")); }}>{blob.name}</button></li>}</For></ul></Show>
-          <Show when={!owner()}><WorkTail message={message()} turn={turn()} activities={activities(turn()?.id)} events={events()} /></Show>
         </div>
         </Show>
       </article>

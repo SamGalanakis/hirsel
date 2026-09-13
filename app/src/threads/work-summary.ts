@@ -1,4 +1,4 @@
-import { buildTimeline, splitStreamingReply, timelineTools, type TimelineItem } from "../components/chat/timeline";
+import { buildTimeline, splitStreamingReply, timelineTools } from "../components/chat/timeline";
 import type { ToolCall } from "../protocol";
 import type { TimelineEvent } from "../store/types";
 import type { ThreadActivity, ThreadTurn } from "./types";
@@ -22,16 +22,6 @@ export function mergePersistedToolCalls(events: TimelineEvent[], calls: ToolCall
     completions.push({ seq: ++seq, event: { kind: "tool_done", id: call.id, name: call.name, ok: call.ok, summary: null, result: null } });
   }
   return completions.length > 0 ? [...events, ...completions] : events;
-}
-/** Keep durable-only calls once; rich rows win when the same ID is present. */
-export function remainingTools(calls: ToolCall[], items: TimelineItem[]): ToolCall[] {
-  const present = new Set(timelineTools(items).map(item => item.toolId));
-  const emitted = new Set<string>();
-  return calls.filter(call => {
-    if (present.has(call.id) || emitted.has(call.id)) return false;
-    emitted.add(call.id);
-    return true;
-  });
 }
 export function workDuration(turn: ThreadTurn | undefined, now: number): string {
   if (!turn?.started_at) return "";

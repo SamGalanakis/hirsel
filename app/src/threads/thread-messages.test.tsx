@@ -48,14 +48,18 @@ describe("who is speaking", () => {
     expect(spinner.querySelector(".animate-spin")).toBeInTheDocument();
     expect(spinner.textContent).toContain("Hirsel is working");
     expect(view.container.querySelector('[data-slot="agent-message"]')).toBeNull();
-    expect(view.container.querySelector('[data-slot="thread-work"]')).toBeNull();
+    expect(view.container.querySelector('[data-slot="run-card"]')).toBeNull();
     // The first word the Agent produces brings the card, left-anchored as usual.
     flush(() => setThreadState(draft => { draft.turnDetails = { 4: [{ seq: 1, event: { kind: "reasoning", text: "Checking" } }] }; }));
     const bubble = view.container.querySelector<HTMLElement>('[data-slot="agent-message"]')!;
     expect(bubble).toBeInTheDocument();
     expect(bubble.className).toContain("max-w-[96%]");
     expect(view.container.querySelector('[data-slot="turn-pending"]')).toBeNull();
-    expect(view.container.querySelector('[data-slot="work-live"]')).toBeInTheDocument();
+    // A live run card opens on arrival: the Owner is watching it happen.
+    const header = view.container.querySelector('[data-slot="run-card-header"]')!;
+    expect(header).toHaveAttribute("aria-expanded", "true");
+    expect(header.textContent).toContain("Running");
+    expect(view.container.querySelector('[data-slot="run-card-trace"]')).toBeInTheDocument();
   });
   it("renders a routine note as one centred line owned by neither party", () => {
     const activity: ThreadActivity = { artifact_ids: [], id: 7, thread_id: 1, turn_id: null, kind: "summary", ts: "2026-09-09T10:00:00Z", data: { content_md: "Created routine Morning review" } };
@@ -72,7 +76,7 @@ describe("who is speaking", () => {
 it("renders stopped queued work without an execution duration or running avatar", () => {
   const turn: ThreadTurn = { id: 44, thread_id: 1, requester_thread_id: null, requester_turn_id: null, owner_message_id: null, agent_message_id: null, state: "cancelled", accepted_at: "2026-09-09T09:00:00Z", started_at: null, finished_at: "2026-09-09T10:00:00Z" };
   const view = render(() => <ThreadMessage entry={{ key: "turn-44", kind: "turn", turn }} history={emptyHistory()} threadId={1} />);
-  expect(view.getByText("Stopped")).toBeInTheDocument();
+  expect(view.getByRole("button", { name: /Cancelled/ })).toBeInTheDocument();
   expect(view.container.querySelector(".animate-spin")).toBeNull();
   expect(view.container.textContent).not.toContain("1h");
 });

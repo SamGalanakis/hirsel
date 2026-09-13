@@ -25,6 +25,12 @@ interface ThreadState {
   /** The one live-and-replayed timeline projection, keyed by durable turn ID. */
   turnDetails: Record<number, TimelineEvent[]>;
   removedMessageIds: Record<number, true>;
+  /** Which run cards the Owner has opened or closed by hand, keyed by durable
+   * turn ID. Session-lived on purpose: a trace the Owner opened to read stays
+   * open while they are in this conversation and claims nothing after a
+   * reload. Absent means the card follows its default (open while the turn is
+   * running, closed once it has finished). */
+  expandedTurns: Record<number, boolean>;
   pending: PendingMessage[];
   focusedId: number | null;
   error: ThreadFailure | null;
@@ -66,8 +72,12 @@ function restoredSelection(threads: Thread[], currentHistory = historyId()): num
   return thread ? id : null;
 }
 export const [threadState, setThreadState] = createStore<ThreadState>({
-  threads: [], histories: {}, turnDetails: {}, removedMessageIds: {}, pending: [], focusedId: null, error: null, linkError: null, ready: false,
+  threads: [], histories: {}, turnDetails: {}, removedMessageIds: {}, expandedTurns: {}, pending: [], focusedId: null, error: null, linkError: null, ready: false,
 });
+/** The Owner's explicit open/close of one run card's trace. */
+export function setTurnExpanded(turnId: number, expanded: boolean): void {
+  setThreadState(draft => { draft.expandedTurns[turnId] = expanded; });
+}
 let historyGeneration = 0;
 let selectionGeneration = 0;
 let sendFrame: ((frame: ThreadClientMessage) => void) | null = null;
@@ -352,6 +362,6 @@ export function resetThreads(): void {
   selectionGeneration++;
   preservePendingDrafts(threadState.pending);
   disconnectThreads();
-  setThreadState(draft => { Object.assign(draft, { threads: [], histories: {}, turnDetails: {}, removedMessageIds: {}, pending: [], focusedId: null, error: null, linkError: null, ready: false }); });
+  setThreadState(draft => { Object.assign(draft, { threads: [], histories: {}, turnDetails: {}, removedMessageIds: {}, expandedTurns: {}, pending: [], focusedId: null, error: null, linkError: null, ready: false }); });
   // Keep an incoming qualified destination until the next hello validates its history.
 }

@@ -34,6 +34,19 @@ describe("authoritative conversation chronology", () => {
   });
 });
 
+it("drops the Host's artifact receipt only when the run card that follows carries the same artifact", () => {
+  const receipt = (ids: number[]): ChatMessage => ({ ...message(2, "agent"), body: "Artifact: Weekly plan", artifact_ids: ids });
+  const reply: ChatMessage = { ...message(3, "agent"), artifact_ids: [44] };
+  const history = { ...emptyHistory(), messages: [message(1, "owner"), receipt([44]), reply], turns: [turn(10, 1, 3)] };
+  expect(conversationEntries(history).map(row => row.key)).toEqual(["message-1", "turn-10"]);
+  // An artifact no run card claims keeps its own entry: nothing else shows it.
+  const unclaimed = { ...history, messages: [message(1, "owner"), receipt([45]), reply] };
+  expect(conversationEntries(unclaimed).map(row => row.key)).toEqual(["message-1", "message-2", "turn-10"]);
+  // Prose the Agent wrote is never a receipt, whatever it carries.
+  const spoken = { ...history, messages: [message(1, "owner"), { ...receipt([44]), body: "Here is the plan" }, reply] };
+  expect(conversationEntries(spoken).map(row => row.key)).toEqual(["message-1", "message-2", "turn-10"]);
+});
+
 it("orders sub-millisecond facts without losing timezone or page-floor precision", () => {
   const messages = [{ ...message(2,"agent"), ts:"2026-09-09T22:00:00.000900Z" }];
   const activity = { artifact_ids: [], id:1,thread_id:1,turn_id:null,kind:"session_rotated",data:{},ts:"2026-09-10T00:00:00.000100+02:00" };

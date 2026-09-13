@@ -43,5 +43,17 @@ export function conversationEntries(history: ThreadHistory): ConversationEntry[]
     if (!inPage(activity.ts) || (activity.turn_id !== null && !visibleTurns.has(activity.turn_id))) continue;
     if (ownerFacingActivity(activity) || activity.turn_id === null) positioned.push({ entry: { key: `activity-${activity.id}`, kind: "activity", activity }, time: instant(activity.ts), order: 2 });
   }
-  return positioned.sort((a,b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : a.order - b.order || Number(a.entry.key.split("-").at(-1)) - Number(b.entry.key.split("-").at(-1)))).map(row => row.entry);
+  const ordered = positioned.sort((a,b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : a.order - b.order || Number(a.entry.key.split("-").at(-1)) - Number(b.entry.key.split("-").at(-1)))).map(row => row.entry);
+  return ordered.filter((entry, index) => !duplicateArtifactReceipt(entry, ordered.slice(index + 1)));
+}
+/** The Host publishes an artifact twice: as its own `Artifact: {title}` agent
+ * message, and again attached to the final reply of the turn that published it.
+ * The second is the run card's, so the receipt is dropped — but only on the
+ * exact artifact IDs, and only when a later run card in the same page carries
+ * every one of them. No timestamp associates the receipt with a turn. */
+function duplicateArtifactReceipt(entry: ConversationEntry, later: ConversationEntry[]): boolean {
+  if (entry.kind !== "message" || entry.turn || entry.message.author !== "agent") return false;
+  const ids = entry.message.artifact_ids ?? [];
+  if (ids.length === 0 || !/^Artifact: /.test(entry.message.body)) return false;
+  return later.some(row => row.kind === "message" && row.turn !== undefined && ids.every(id => (row.message.artifact_ids ?? []).includes(id)));
 }

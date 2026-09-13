@@ -223,9 +223,9 @@ describe("thread workspace", () => {
   it("shows informational activity content within its owning thread without creating work", () => {
     flush(() => handleThreadMessage({ type: "thread_activity", activity: { artifact_ids: [], id: 9, thread_id: 1, turn_id: null, kind: "plugin.build_finished", data: { plugin: "build", payload: { message: "All checks passed." } }, ts: "2026-09-09T10:00:00Z" } }));
     const screen = render(() => <ThreadShell />);
-    fireEvent.click(screen.getByRole("button", { name: "Turn options" }));
-    fireEvent.click(within(document.body).getByRole("menuitem", { name: "Technical details" }));
-    expect(screen.getByText(/"message": "All checks passed\."/)).toBeInTheDocument();
+    // Activity with no turn to own it keeps its raw record in the card's own
+    // Technical details, not in a separate inspector.
+    expect(screen.getByText(/"message": "All checks passed\."/).closest('[data-slot="work-diagnostics"]')).toBeInTheDocument();
     expect(threadState.threads).toHaveLength(3);
     expect(threadState.threads.find(t => t.id === 1)?.settled_at).toBeNull();
     flush(() => focusThread(2));
@@ -244,10 +244,12 @@ describe("thread workspace", () => {
     const note = screen.getByText(/Your shopping list is ready\./);
     expect(note.closest("details")).toBeNull();
     expect(note.closest('[data-slot="conversation-note"]')).toBeInTheDocument();
-    expect(screen.queryByText(/"message": "Execution diagnostics"/)).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Turn options" }));
-    fireEvent.click(within(document.body).getByRole("menuitem", { name: "Technical details" }));
-    expect(screen.getByText(/"message": "Execution diagnostics"/).closest('[role="region"]')).toHaveAttribute("data-slot", "work-diagnostics");
+    // Raw event data stays behind a closed disclosure until it is asked for.
+    const diagnostics = screen.getByText(/"message": "Execution diagnostics"/);
+    expect(diagnostics.closest('[role="region"]')).toHaveAttribute("data-slot", "work-diagnostics");
+    const disclosure = diagnostics.closest("details")!;
+    expect(disclosure.open).toBe(false);
+    fireEvent.click(within(disclosure).getByText("Technical details"));
     expect(screen.getByRole("textbox", { name: "Message Buy groceries" })).toBeInTheDocument();
   });
   it("folds wakes that produced nothing into one quiet note instead of empty cards", () => {
@@ -351,6 +353,7 @@ describe("thread workspace", () => {
 it("preserves the exact inline tool rows across message/activity updates", async () => {
   flush(() => setThreadState(draft => { draft.histories[1] = { brief: { text: "", artifact_ids: [] }, messages: [{ id:1,thread_id:1,author:"agent",body:"Answer",ref:null,ts:"2026-09-09T10:00:00Z",tool_calls:[{id:"call-a",name:"read_file",ok:true},{id:"call-b",name:"read_file",ok:true}] }], turns:[{ requester_thread_id: null, requester_turn_id: null,id:1,thread_id:1,owner_message_id:null,agent_message_id:1,state:"completed",accepted_at: "2026-09-09T09:59:00Z", started_at:"2026-09-09T09:59:00Z",finished_at:"2026-09-09T10:00:00Z"}],activities:[],loaded:true,hasMore:false }; }));
   const view=render(()=> <ThreadShell />);
+  fireEvent.click(view.container.querySelector<HTMLButtonElement>('[data-message-id="1"] [data-slot="run-card-header"]')!);
   const first=view.container.querySelector('[data-message-id="1"] [data-tool-call-id="call-a"]')!;
   flush(()=>handleThreadMessage({type:"thread_activity",activity:{ artifact_ids: [],id:1,thread_id:1,turn_id:1,kind:"tool_completed",data:{id:"call-a",name:"read_file",ok:true},ts:"2026-09-09T10:00:01Z"}}));
   flush(()=>handleThreadMessage({type:"msg",message:{id:2,thread_id:1,author:"owner",body:"Next",ref:null,ts:"2026-09-09T10:00:02Z"}}));
@@ -379,6 +382,10 @@ it("renders the exact persisted timeline from a fresh open_thread snapshot", asy
   await opening;
   const view = render(() => <ThreadShell />);
   const article = view.container.querySelector('[data-message-id="71"]')!;
+  // A run the Owner did not watch opens from its header.
+  const header = within(article as HTMLElement).getByRole("button", { name: /Owner message/ });
+  expect(header).toHaveAttribute("aria-expanded", "false");
+  fireEvent.click(header);
   expect(article.querySelectorAll('[data-slot="timeline"] > li')).toHaveLength(2);
   expect(article.textContent).toContain("Checking storage first.");
   expect(article.textContent).toContain("Inspection complete");
@@ -387,7 +394,7 @@ it("renders the exact persisted timeline from a fresh open_thread snapshot", asy
   expect(article.textContent).toContain('"stdout": "durable"');
 });
 
-it("keeps the same expanded tool result and focus when the live turn becomes its final message", async () => {
+it("folds a settling run onto its header and keeps the same trace reachable there", async () => {
   const turn = { requester_thread_id: null, requester_turn_id: null, id: 91, thread_id: 1, owner_message_id: 90, agent_message_id: null, state: "running" as const, accepted_at: "2026-09-09T10:00:00Z", started_at: "2026-09-09T10:00:00Z", finished_at: null };
   flush(() => {
     handleThreadMessage({ type: "msg", message: { id: 90, thread_id: 1, author: "owner", body: "Check this file", ref: null, ts: turn.started_at } });
@@ -403,14 +410,21 @@ it("keeps the same expanded tool result and focus when the live turn becomes its
   flush(() => handleThreadMessage({ type: "msg", message: { id: 92, thread_id: 1, author: "owner", body: "Then check the next file", ref: null, ts: "2026-09-09T10:00:01Z" } }));
   flush(() => handleThreadMessage({ type: "msg", message: { id: 93, thread_id: 1, author: "agent", body: "File checked", ref: 90, ts: "2026-09-09T10:00:02Z", tool_calls: [{ id: "call-a", name: "read_file", ok: true }] } }));
   flush(() => handleThreadMessage({ type: "thread_turn", turn: { ...turn, agent_message_id: 93, state: "completed", finished_at: "2026-09-09T10:00:02Z" } }));
-  expect(view.getByRole("button", { name: "read_file — hide result" })).toBe(result);
-  await waitFor(() => expect(document.activeElement).toBe(result));
-  expect(view.container.querySelector('[data-slot="tool-result"]')?.textContent).toBe("Result\nExact file contents");
+  // The run is over: its trace folds into the card header, which takes the
+  // focus that was inside it rather than dropping it on the document.
+  const card = view.container.querySelector('[data-message-id="93"]')!;
+  const header = within(card as HTMLElement).getByRole("button", { name: /Owner message/ });
+  await waitFor(() => expect(document.activeElement).toBe(header));
+  expect(result.isConnected).toBe(false);
+  expect(header).toHaveAttribute("aria-expanded", "false");
   expect(view.getAllByText("File checked")).toHaveLength(1);
+  fireEvent.click(header);
   const timeline = view.container.querySelector('[data-message-id="93"] [data-slot="timeline"]')!;
   const reply = view.getByText("File checked");
-  expect([...timeline.children].map(row => row.getAttribute("data-slot"))).toEqual(["timeline-reasoning", "timeline-tool", "timeline-detail"]);
+  expect([...timeline.children].map(row => row.getAttribute("data-slot"))).toEqual(["timeline-reasoning", "timeline-tool"]);
   expect(timeline.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  fireEvent.click(within(card as HTMLElement).getByRole("button", { name: "read_file — show result" }));
+  expect(view.container.querySelector('[data-slot="tool-result"]')?.textContent).toBe("Result\nExact file contents");
 });
 
 describe("nested Thread workspace", () => {

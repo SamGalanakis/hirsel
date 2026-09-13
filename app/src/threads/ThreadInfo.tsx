@@ -3,7 +3,7 @@ import { type JSX } from "@solidjs/web";
 import { ArtifactCard } from "../artifacts/ArtifactSurface";
 import { Markdown } from "../components/Markdown";
 import { AgentModelRows, agentModelView, agentProviders, providerLabel } from "../components/settings/agent-config";
-import { titleCase } from "../components/settings/prefs";
+import { executionLabel } from "./execution-label";
 import { Select } from "../components/settings/rows";
 import { SquarePen } from "../components/ui/icons";
 import { formatRelativeTime } from "../lib/format";
@@ -69,21 +69,6 @@ function Failure(props: { threadId: number }) {
 function absolute(ts: string): string {
   const parsed = Date.parse(ts);
   return Number.isFinite(parsed) ? new Date(parsed).toISOString().replace("T", " ").replace(/\..*/, " UTC") : ts;
-}
-
-/** What the "Runs on" row says, for each shape the Host sends. */
-export function executionLabel(execution: ThreadExecutionTarget | null | undefined): { text: string; muted: boolean } {
-  if (!execution) {
-    const coordinator = [providerLabel(state.model?.provider_id), state.model?.current.id].filter(Boolean).join(" · ");
-    return { text: coordinator ? `Default coordinator · ${coordinator}` : "Default coordinator", muted: true };
-  }
-  if (execution.kind === "host") return { text: ["Coordinator", providerLabel(execution.provider_id) || execution.provider_id, execution.model].join(" · "), muted: false };
-  if (execution.kind === "lash") {
-    const worker = state.subagentModels?.native_worker.label ?? "Native worker";
-    return { text: [worker, providerLabel(execution.provider_id) || execution.provider_id, execution.model, titleCase(execution.variant)].join(" · "), muted: false };
-  }
-  const group = state.subagentModels?.providers.find(provider => provider.provider === execution.agent);
-  return { text: [group?.label ?? titleCase(execution.agent), execution.model, titleCase(execution.variant)].join(" · "), muted: false };
 }
 
 function TitleRow(props: { thread: Thread; historyId: string }) {

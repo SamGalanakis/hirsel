@@ -4,19 +4,49 @@ import { createStore } from "solid-js";
 import type { ServerMessage } from "../protocol";
 import type { Artifact, ArtifactClientMessage, ArtifactSummary } from "./types";
 
-const [artifactState, updateArtifacts] = createStore({
-  summaries: [] as ArtifactSummary[],
-  opened: null as Artifact | null,
-  selectedId: null as number | null,
-  loading: false,
-  error: null as string | null,
-  listing: false,
-  listed: false,
-  listError: null as string | null,
+/** The preview is one lifecycle, so it is one value: every writer replaces the
+ * whole variant and the surface renders exactly one branch. The selected id is
+ * carried by the variant rather than stored beside it, so a dropped connection
+ * cannot leave a selection with nothing to render. */
+export type ArtifactPreview =
+  | { status: "idle" }
+  | { status: "loading"; id: number }
+  | { status: "ready"; id: number; artifact: Artifact }
+  | { status: "error"; id: number; message: string };
+/** The inventory lifecycle, likewise: a spinner and a retry banner are two
+ * variants of one value and can never render together. `ready` is what tells
+ * the empty state apart from "not fetched yet". */
+export type ArtifactInventory =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready" }
+  | { status: "error"; message: string };
+export interface ArtifactState {
+  summaries: ArtifactSummary[];
+  preview: ArtifactPreview;
+  inventory: ArtifactInventory;
+}
+
+const [artifactState, updateArtifacts] = createStore<ArtifactState>({
+  summaries: [],
+  preview: { status: "idle" },
+  inventory: { status: "idle" },
 });
 export { artifactState };
-export function setArtifactState(patch: Partial<typeof artifactState>) {
+export function setArtifactState(patch: Partial<ArtifactState>) {
   updateArtifacts(draft => { Object.assign(draft, patch); });
+}
+/** The artifact the preview is about, in every non-idle variant. */
+export function previewedArtifactId(): number | null {
+  return artifactState.preview.status === "idle" ? null : artifactState.preview.id;
+}
+/** The inventory’s failure message, when that is the variant it is in. */
+export function inventoryError(): string | null {
+  return artifactState.inventory.status === "error" ? artifactState.inventory.message : null;
+}
+/** The loaded artifact, or null while loading, failed or closed. */
+export function openedArtifact(): Artifact | null {
+  return artifactState.preview.status === "ready" ? artifactState.preview.artifact : null;
 }
 let latestOpenRequest: string | null = null;
 let latestListRequest: string | null = null;
@@ -31,13 +61,14 @@ function finish(id: string) {
 export function attachArtifactTransport(send: (frame: ArtifactClientMessage) => void) { transport = send; attachShowcaseTransport(send); }
 export function disconnectArtifacts() {
   transport = null; disconnectShowcase();
-  if (artifactState.selectedId !== null && artifactState.loading) setArtifactState({ error: "Reconnect to load this artifact." });
   for (const id of requests.keys()) finish(id);
-  setArtifactState({ loading: false, listing: false, listError: "Reconnect to load artifacts." });
+  const preview = artifactState.preview;
+  if (preview.status === "loading") setArtifactState({ preview: { status: "error", id: preview.id, message: "Reconnect to load this artifact." } });
+  setArtifactState({ inventory: { status: "error", message: "Reconnect to load artifacts." } });
 }
 function requestFailed(artifactId: number | undefined, detail: string) {
-  if (artifactId === undefined) setArtifactState({ listing: false, listError: detail });
-  else if (artifactState.selectedId === artifactId) setArtifactState({ loading: false, error: detail });
+  if (artifactId === undefined) setArtifactState({ inventory: { status: "error", message: detail } });
+  else if (previewedArtifactId() === artifactId) setArtifactState({ preview: { status: "error", id: artifactId, message: detail } });
 }
 function send(frame: ArtifactClientMessage, artifactId?: number) {
   if (!transport) { requestFailed(artifactId, "Reconnect to load artifacts."); return; }
@@ -50,16 +81,16 @@ function send(frame: ArtifactClientMessage, artifactId?: number) {
 export function listArtifacts() {
   if (latestListRequest) finish(latestListRequest);
   latestListRequest = crypto.randomUUID();
-  setArtifactState({ listing: true, listError: null });
+  setArtifactState({ inventory: { status: "loading" } });
   send({ type: "list_artifacts", client_id: latestListRequest });
 }
 export function openArtifact(id: number) {
-  setArtifactState({ selectedId: id, loading: true, error: null, opened: null });
+  setArtifactState({ preview: { status: "loading", id } });
   if (latestOpenRequest) finish(latestOpenRequest);
   latestOpenRequest = crypto.randomUUID();
   send({ type: "open_artifact", client_id: latestOpenRequest, artifact_id: id }, id);
 }
-export function closeArtifact() { setArtifactState({ selectedId: null, opened: null, loading: false, error: null }); }
+export function closeArtifact() { setArtifactState({ preview: { status: "idle" } }); }
 function mergeSummary(rows: ArtifactSummary[], artifact: ArtifactSummary) {
   const prior = rows.find(row => row.id === artifact.id);
   if (prior) {
@@ -90,25 +121,30 @@ export function handleArtifactMessage(message: ServerMessage) {
   handleShowcaseMessage(message);
   updateArtifacts(() => {
   switch (message.type) {
-    case "hello_ok": listArtifacts(); if (artifactState.selectedId !== null) openArtifact(artifactState.selectedId); break;
+    case "hello_ok": {
+      listArtifacts();
+      const selected = previewedArtifactId();
+      if (selected !== null) openArtifact(selected);
+      break;
+    }
     case "artifacts_listed":
       if (!finish(message.client_id)) break;
       updateArtifacts(draft => {
         for (const artifact of message.artifacts) mergeSummary(draft.summaries, artifact);
         sortSummaries(draft.summaries);
-        draft.listing = false; draft.listed = true; draft.listError = null;
+        draft.inventory = { status: "ready" };
       });
       break;
     case "artifact_opened": {
       const pending = finish(message.client_id);
-      if (pending?.artifactId !== message.artifact.id || artifactState.selectedId !== message.artifact.id) break;
+      if (pending?.artifactId !== message.artifact.id || previewedArtifactId() !== message.artifact.id) break;
       upsert(message.artifact);
-      setArtifactState({ opened: message.artifact, loading: false, error: null });
+      setArtifactState({ preview: { status: "ready", id: message.artifact.id, artifact: message.artifact } });
       break;
     }
     case "artifact_upsert":
       upsert(message.artifact);
-      if (artifactState.selectedId === message.artifact.id) openArtifact(message.artifact.id);
+      if (previewedArtifactId() === message.artifact.id) openArtifact(message.artifact.id);
       break;
     case "error":
       if (message.client_id) { const request = finish(message.client_id); if (request) requestFailed(request.artifactId, message.detail); }
@@ -120,5 +156,5 @@ export function handleArtifactMessage(message: ServerMessage) {
 export function resetArtifacts(): void {
   resetDraftArtifacts(); resetShowcase();
   disconnectArtifacts(); latestOpenRequest = null; latestListRequest = null;
-  setArtifactState({ summaries: [], opened: null, selectedId: null, loading: false, error: null, listing: false, listed: false, listError: null });
+  setArtifactState({ summaries: [], preview: { status: "idle" }, inventory: { status: "idle" } });
 }

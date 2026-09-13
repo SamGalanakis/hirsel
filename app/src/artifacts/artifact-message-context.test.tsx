@@ -19,7 +19,7 @@ beforeEach(() => {
   frames.length = 0; artifactFrames.length = 0;
   const storage = new Map<string,string>();
   vi.stubGlobal("localStorage", { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key,value), removeItem: (key: string) => storage.delete(key), key: (i:number) => [...storage.keys()][i] ?? null, get length() { return storage.size; } });
-  flush(() => { resetArtifacts(); resetDraftArtifacts(); setHistoryId("artifact-context-history"); closeThreadNavigation(); dispatch({type:"connection_status",status:"connected"}); setThreadState(draft => { Object.assign(draft, { ready:true, threads:[makeThread(1,{title:"A",read:true}),makeThread(2,{title:"B",read:true})], histories:{1:{...emptyHistory(),loaded:true},2:{...emptyHistory(),loaded:true}}, focusedId:1,pending:[],error:null }); }); setArtifactState({summaries:[artifact(44,"Review findings"),artifact(55,"Release notes")],listed:true}); });
+  flush(() => { resetArtifacts(); resetDraftArtifacts(); setHistoryId("artifact-context-history"); closeThreadNavigation(); dispatch({type:"connection_status",status:"connected"}); setThreadState(draft => { Object.assign(draft, { ready:true, threads:[makeThread(1,{title:"A",read:true}),makeThread(2,{title:"B",read:true})], histories:{1:{...emptyHistory(),loaded:true},2:{...emptyHistory(),loaded:true}}, focusedId:1,pending:[],error:null }); }); setArtifactState({summaries:[artifact(44,"Review findings"),artifact(55,"Release notes")],inventory:{status:"ready"}}); });
   attachThreadTransport(frame => frames.push(frame));attachArtifactTransport(frame => artifactFrames.push(frame));
 });
 afterEach(() => { flush(() => { closeArtifact(); resetArtifacts(); }); disconnectThreads(); vi.unstubAllGlobals(); });

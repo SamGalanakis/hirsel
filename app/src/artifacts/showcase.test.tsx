@@ -30,7 +30,7 @@ describe("persistent Thread showcase", () => {
     flush(() => setThreadState(draft => { draft.focusedId = 2; }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Showcase in this thread" }));
     expect(actions).toContainEqual(expect.objectContaining({ type: "thread_action", history_id: "history-a", thread_id: 1, action: "set_showcase", expected_revision: 1, data: { artifact_id: 4 } }));
-    expect(artifactState.selectedId).toBeNull();
+    expect(artifactState.preview).toEqual({ status: "idle" });
   });
   it("rejects stale menu revisions and reused IDs in a new history", async () => {
     const view = render(() => <RelatedContext value={{ historyId: "history-a", threadId: 1 }}><ArtifactCard id={4} /></RelatedContext>);

@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@solidjs/te
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { flush } from "solid-js";
 import { ArtifactCard, ArtifactList, ArtifactSurface } from "./ArtifactSurface";
-import { artifactState, attachArtifactTransport, closeArtifact, disconnectArtifacts, setArtifactState, handleArtifactMessage, listArtifacts } from "./store";
+import { attachArtifactTransport, closeArtifact, disconnectArtifacts, openArtifact, previewedArtifactId, setArtifactState, handleArtifactMessage, listArtifacts } from "./store";
 import { setThreadState, threadState } from "../threads/store";
 import { makeThread } from "../threads/fixtures";
 import type { ArtifactSummary } from "./types";
@@ -15,7 +15,7 @@ describe("artifact navigation", () => {
     const send = vi.fn(); attachArtifactTransport(send);
     render(() => <ArtifactCard id={4} />);
     fireEvent.click(screen.getByRole("button", { name: /Architecture/ })); flush();
-    expect(artifactState.selectedId).toBe(4);
+    expect(previewedArtifactId()).toBe(4);
     expect(threadState.focusedId).toBe(5);
     expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: "open_artifact", artifact_id: 4 }));
   });
@@ -39,13 +39,15 @@ describe("artifact navigation", () => {
     expect(screen.getByRole("button", { name: "General" })).toBeTruthy();
   });
   it("distinguishes unavailable inventory from an empty result and offers a read-only retry", () => {
-    setArtifactState({ summaries: [], listing: true, listed: false, listError: null });
+    setArtifactState({ summaries: [], inventory: { status: "loading" } });
     const send = vi.fn(); attachArtifactTransport(send);
     render(() => <ArtifactList />);
     expect(screen.getByRole("status")).toHaveTextContent("Loading artifacts");
     expect(screen.queryByText(/Artifacts Hirsel creates/)).toBeNull();
-    setArtifactState({ listing: false, listError: "Storage unavailable" }); flush();
+    setArtifactState({ inventory: { status: "error", message: "Storage unavailable" } }); flush();
     expect(screen.getByRole("alert")).toHaveTextContent("Couldn’t load the artifact list");
+    // One lifecycle, one branch: the spinner cannot stand beside the retry banner.
+    expect(screen.queryByRole("status")).toBeNull();
     expect(screen.queryByText(/Artifacts Hirsel creates/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Retry loading artifacts" }));
     expect(send).toHaveBeenCalledWith(expect.objectContaining({ type: "list_artifacts" }));
@@ -70,7 +72,7 @@ describe("artifact presentation", () => {
     ...artifact, id, kind: "html" as const, mime: "text/html", content: "<p>Rendered</p>", ...patch,
   });
   it("defaults to Rendered, keeps Source through same-artifact refresh, and resets for a different artifact or reopened viewer", async () => {
-    setArtifactState({ selectedId: 4, opened: opened(4), loading: false });
+    setArtifactState({ preview: { status: "ready", id: 4, artifact: opened(4) } });
     const view = render(() => <ArtifactSurface />);
     let panel = view.getByRole("complementary", { name: "Artifact preview" });
     const source = within(panel).getByRole("button", { name: "Source" });
@@ -81,15 +83,29 @@ describe("artifact presentation", () => {
     source.focus(); fireEvent.click(source);
     expect(document.activeElement).toBe(source);
     expect(panel.querySelector('[data-slot="artifact-source"]')).toHaveTextContent("<p>Rendered</p>");
-    flush(() => setArtifactState({ opened: opened(4, { content: "  <em>Updated</em>\n" }) }));
+    flush(() => setArtifactState({ preview: { status: "ready", id: 4, artifact: opened(4, { content: "  <em>Updated</em>\n" }) } }));
     expect(source).toHaveAttribute("aria-pressed", "true");
     expect(panel.querySelector('[data-slot="artifact-source"]')?.textContent).toBe("  <em>Updated</em>\n");
 
-    flush(() => setArtifactState({ selectedId: 5, opened: opened(5, { mime: "text/markdown", kind: "file", filename: "notes.md", content: "# Notes" }) }));
+    flush(() => setArtifactState({ preview: { status: "ready", id: 5, artifact: opened(5, { mime: "text/markdown", kind: "file", filename: "notes.md", content: "# Notes" }) } }));
     expect(within(panel).getByRole("button", { name: "Rendered" })).toHaveAttribute("aria-pressed", "true");
     flush(closeArtifact);
-    flush(() => setArtifactState({ selectedId: 5, opened: opened(5, { mime: "text/markdown", kind: "file", filename: "notes.md", content: "# Notes" }) }));
+    flush(() => setArtifactState({ preview: { status: "ready", id: 5, artifact: opened(5, { mime: "text/markdown", kind: "file", filename: "notes.md", content: "# Notes" }) } }));
     panel = view.getByRole("complementary", { name: "Artifact preview" });
     expect(within(panel).getByRole("button", { name: "Rendered" })).toHaveAttribute("aria-pressed", "true");
+  });
+  it("keeps a retry in reach when the connection drops mid-open instead of blanking the panel", () => {
+    setArtifactState({ summaries: [{ ...artifact, thread_ids: [...artifact.thread_ids] }] });
+    const send = vi.fn(); attachArtifactTransport(send);
+    render(() => <ArtifactSurface />);
+    flush(() => openArtifact(4));
+    expect(screen.getByRole("status")).toHaveTextContent("Loading artifact");
+    flush(disconnectArtifacts);
+    const panel = screen.getByRole("complementary", { name: "Artifact preview" });
+    expect(within(panel).getByRole("alert")).toHaveTextContent("Reconnect to load this artifact.");
+    const retry = within(panel).getByRole("button", { name: "Try again" });
+    attachArtifactTransport(send);
+    fireEvent.click(retry); flush();
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ type: "open_artifact", artifact_id: 4 }));
   });
 });

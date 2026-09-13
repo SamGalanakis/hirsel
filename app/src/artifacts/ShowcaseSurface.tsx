@@ -11,7 +11,7 @@ import type { RelatedOrigin } from "../related/store";
 import { ArtifactPreview } from "./ArtifactPreview";
 import { ArtifactPresentationToggle, hasArtifactPresentationModes, type ArtifactPresentationMode } from "./ArtifactPresentationMode";
 import { downloadArtifact } from "./download";
-import { artifactState, listArtifacts } from "./store";
+import { artifactState, inventoryError, listArtifacts } from "./store";
 import { captureShowcaseOrigin, phoneShowcase, setPhoneShowcase, setShowcasePicker, setThreadShowcase, showcasePicker, type ShowcaseOrigin } from "./showcase-actions";
 import { refreshShowcase, selectShowcase, showcaseState } from "./showcase-store";
 
@@ -45,7 +45,7 @@ export function ShowcaseSurface() {
 function ThreadShowcase(props: { origin: RelatedOrigin }) {
   const current = () => threadState.threads.find(thread => thread.id === props.origin.threadId);
   const phone = createMediaFlag("(max-width: 1023px)");
-  const visible = () => current()?.showcased_artifact_id != null && artifactState.selectedId === null && (!phone() || (phoneShowcase()?.historyId === props.origin.historyId && phoneShowcase()?.threadId === props.origin.threadId));
+  const visible = () => current()?.showcased_artifact_id != null && artifactState.preview.status === "idle" && (!phone() || (phoneShowcase()?.historyId === props.origin.historyId && phoneShowcase()?.threadId === props.origin.threadId));
   let dialog: HTMLDialogElement | undefined;
   let restore: HTMLElement | null = null;
   let target: ShowcaseOrigin | null = null;
@@ -113,8 +113,8 @@ function ShowcasePicker() {
   return <dialog ref={node => { dialog = node; }} aria-label="Choose showcase" onCancel={event => { event.preventDefault(); close(); }} class="m-auto max-h-[calc(100dvh-2rem)] w-[min(30rem,calc(100vw-2rem))] overflow-y-auto rounded-xl border border-border bg-background p-5 text-foreground backdrop:bg-black/30">
     <header class="flex items-start gap-2"><div class="min-w-0 flex-1"><h2 class="font-semibold">Choose showcase</h2><p class="mt-1 truncate text-sm text-muted-foreground">{showcasePicker()?.title}</p></div><button class={button} aria-label="Cancel showcase selection" onClick={close}><X class="size-4" /></button></header>
     <label class="mt-4 block text-sm">Find an artifact<input autofocus type="search" value={search()} onInput={event => setSearch(event.currentTarget.value)} class="mt-2 min-h-11 w-full rounded-lg border border-border bg-transparent px-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" /></label>
-    <Show when={error() || artifactState.listError}><p role="alert" class="mt-3 text-sm text-status-danger">{error() ?? artifactState.listError}</p><Show when={artifactState.listError}><button class={button} onClick={listArtifacts}>Retry loading artifacts</button></Show></Show>
-    <Show when={artifactState.listing}><p role="status" class="py-3 text-sm text-muted-foreground">Loading artifacts…</p></Show>
-    <ul class="mt-3 divide-y divide-border"><For each={artifactState.summaries.filter(artifact => `${artifact.title} ${artifact.filename ?? ""}`.toLowerCase().includes(search().toLowerCase()))} fallback={<li class="py-4 text-sm text-muted-foreground">{artifactState.listing ? "" : "No matching artifacts."}</li>}>{artifact => <li><button class={`${button} w-full justify-start py-3 text-left`} aria-label={`Choose ${artifact.title} as showcase`} data-artifact-id={artifact.id} disabled={state.connection !== "connected"} onClick={() => choose(artifact.id)}><span class="min-w-0"><span class="block break-words font-medium text-foreground">{artifact.title}</span><span class="text-xs">{artifact.filename ?? artifact.kind}</span></span></button></li>}</For></ul>
+    <Show when={error() || inventoryError()}><p role="alert" class="mt-3 text-sm text-status-danger">{error() ?? inventoryError()}</p><Show when={inventoryError()}><button class={button} onClick={listArtifacts}>Retry loading artifacts</button></Show></Show>
+    <Show when={artifactState.inventory.status === "loading"}><p role="status" class="py-3 text-sm text-muted-foreground">Loading artifacts…</p></Show>
+    <ul class="mt-3 divide-y divide-border"><For each={artifactState.summaries.filter(artifact => `${artifact.title} ${artifact.filename ?? ""}`.toLowerCase().includes(search().toLowerCase()))} fallback={<li class="py-4 text-sm text-muted-foreground">{artifactState.inventory.status === "loading" ? "" : "No matching artifacts."}</li>}>{artifact => <li><button class={`${button} w-full justify-start py-3 text-left`} aria-label={`Choose ${artifact.title} as showcase`} data-artifact-id={artifact.id} disabled={state.connection !== "connected"} onClick={() => choose(artifact.id)}><span class="min-w-0"><span class="block break-words font-medium text-foreground">{artifact.title}</span><span class="text-xs">{artifact.filename ?? artifact.kind}</span></span></button></li>}</For></ul>
   </dialog>;
 }

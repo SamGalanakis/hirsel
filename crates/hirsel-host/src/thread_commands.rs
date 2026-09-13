@@ -121,6 +121,29 @@ impl AppState {
             inserted,
         })
     }
+    /// An archive touches a whole subtree: every affected Thread is published
+    /// so each client's tree moves them under the archived filter live, and
+    /// the one activity row is published with them. The root is returned for
+    /// the action's ordinary reply.
+    async fn publish_archive(
+        &self,
+        expected_history: &str,
+        outcome: crate::storage::ArchiveOutcome,
+        root: u64,
+    ) -> anyhow::Result<Thread> {
+        self.tools.publish_thread_activity(outcome.activity).await;
+        let mut root_thread = None;
+        for thread in outcome.threads {
+            // The root is published once, by this action's common tail.
+            if thread.id == root {
+                root_thread = Some(thread);
+                continue;
+            }
+            self.tools.publish_thread(expected_history, thread).await;
+        }
+        root_thread.ok_or_else(|| anyhow::anyhow!("archive did not report its own Thread"))
+    }
+
     pub async fn handle_addressed_thread_action(
         &self,
         expected_history: &str,
@@ -294,17 +317,13 @@ impl AppState {
                     .mark_addressed_thread_read(expected_history, id)
                     .await?
             }
-            "archive" => {
+            "archive" | "unarchive" => {
                 validate_empty_lifecycle_data(&action, &data)?;
-                self.storage
-                    .archive_addressed_thread(expected_history, id, true)
-                    .await?
-            }
-            "unarchive" => {
-                validate_empty_lifecycle_data(&action, &data)?;
-                self.storage
-                    .archive_addressed_thread(expected_history, id, false)
-                    .await?
+                let outcome = self
+                    .storage
+                    .archive_addressed_thread(expected_history, id, action == "archive")
+                    .await?;
+                self.publish_archive(expected_history, outcome, id).await?
             }
             "snooze" => {
                 let until = validate_snooze_lifecycle_data(&data)?;

@@ -78,3 +78,14 @@ it("renders a refusal as one readable owner-facing note naming the target and th
   const artifact = { ...refusal, id: 53, data: { ...refusal.data, tool: "artifacts_show", target: { kind: "artifact", artifact_id: 9 } } };
   expect(activityText(artifact)).toBe("Refused: artifacts.show Artifact 9 — outside grant");
 });
+
+it("names what an archive removed from the active tree, who did it, and the work it cancelled", async () => {
+  const { activityText, ownerFacingActivity } = await import("./conversation");
+  const archived = { artifact_ids: [], id: 61, thread_id: 1, turn_id: 7, kind: "archived", data: { archived: true, actor: "agent", thread_id: 3, thread_kind: "task", title: "scratch", thread_count: 1, cancelled_turns: 0 }, ts: ts(5) };
+  expect(ownerFacingActivity(archived)).toBe(true);
+  expect(activityText(archived)).toBe("Agent archived Task #3 “scratch”");
+  const subtree = { ...archived, id: 62, data: { ...archived.data, actor: "owner", thread_kind: "space", thread_count: 3, cancelled_turns: 1 } };
+  expect(activityText(subtree)).toBe("Owner archived Space #3 “scratch” and its 2 nested Threads; 1 running or queued turn cancelled");
+  const restored = { ...archived, id: 63, data: { ...archived.data, archived: false } };
+  expect(activityText(restored)).toBe("Agent unarchived Task #3 “scratch”");
+});

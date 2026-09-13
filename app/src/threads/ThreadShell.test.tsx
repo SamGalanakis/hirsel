@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ThreadShell } from "./ThreadShell";
 import { makeThread } from "./fixtures";
 import { installGlobalKeymap } from "../lib/keymap";
-import { closeThreadNavigation } from "./navigation";
+import { closeThreadNavigation, recordThreadVisit } from "./navigation";
 import { closeThreadCreate } from "./create";
 import { attachThreadTransport, disconnectThreads, focusThread, handleThreadMessage, openThread, sendThreadMessage, setThreadState, threadState } from "./store";
 import type { ThreadClientMessage, ThreadTurn } from "./types";
@@ -46,6 +46,7 @@ beforeEach(() => {
   flush(() => dispatch({ type: "connection_status", status: "connected" }));
   flush(() => setHistoryId("test-history"));
   flush(() => closeThreadNavigation());
+  flush(() => recordThreadVisit(null));
   flush(() => closeThreadCreate());
   const storage = new Map<string, string>();
   vi.stubGlobal("localStorage", { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
@@ -806,4 +807,91 @@ it("keeps typed instrument field values across an unrelated revision bump and su
   const action = sent.find(frame => frame.type === "thread_action") as { data: Record<string, unknown>; expected_revision: number } | undefined;
   expect(action?.data).toEqual({ confirmation: "ready" });
   expect(action?.expected_revision).toBe(2);
+});
+
+describe("panes and Back", () => {
+  const composer = (view: { container: HTMLElement }) => view.container.querySelector('[data-composer="main"]');
+  it("writes only in the conversation: Info and Related end at their content", () => {
+    responsiveMedia(1440);
+    const view = render(() => <ThreadShell />);
+    expect(composer(view)).toBeInTheDocument();
+    fireEvent.click(view.getByRole("tab", { name: "Info" }));
+    expect(composer(view)).toBeNull();
+    expect(view.container.querySelector('[data-slot="reach-strip"]')).toBeNull();
+    fireEvent.click(view.getByRole("tab", { name: "Related" }));
+    expect(composer(view)).toBeNull();
+    fireEvent.click(view.getByRole("tab", { name: "Conversation" }));
+    expect(composer(view)).toBeInTheDocument();
+  });
+  it("keeps the addressed draft across a pane round trip", () => {
+    responsiveMedia(1440);
+    const view = render(() => <ThreadShell />);
+    fireEvent.input(composer(view)!, { target: { value: "Ship the release notes" } });
+    fireEvent.click(view.getByRole("tab", { name: "Info" }));
+    expect(composer(view)).toBeNull();
+    fireEvent.click(view.getByRole("tab", { name: "Conversation" }));
+    expect((composer(view) as HTMLTextAreaElement).value).toBe("Ship the release notes");
+  });
+  it("returns Back from Info to the conversation rather than opening the inventory", () => {
+    responsiveMedia(1440);
+    const view = render(() => <ThreadShell />);
+    fireEvent.click(view.getByRole("tab", { name: "Info" }));
+    const back = view.getByRole("button", { name: "Back" });
+    expect(back).toHaveAttribute("title", "Back to conversation");
+    fireEvent.click(back);
+    expect(view.getByRole("tab", { name: "Conversation" })).toHaveAttribute("aria-selected", "true");
+    expect(composer(view)).toBeInTheDocument();
+    expect(threadState.focusedId).toBe(1);
+  });
+  it("goes Back from the first conversation of the session to the overview, docked column and all", () => {
+    responsiveMedia(1440);
+    const view = render(() => <ThreadShell />);
+    expect(view.getByRole("complementary", { name: "Spaces and Tasks" })).toBeVisible();
+    const back = view.getByRole("button", { name: "Back" });
+    expect(back).toHaveAttribute("title", "Back to overview");
+    fireEvent.click(back);
+    expect(threadState.focusedId).toBeNull();
+    expect(view.getByRole("heading", { name: "What needs you" })).toBeInTheDocument();
+  });
+  it("goes Back to the Thread this session came from", () => {
+    responsiveMedia(1440);
+    const view = render(() => <ThreadShell />);
+    fireEvent.click(view.container.querySelector('[data-thread-row="2"]')!);
+    expect(threadState.focusedId).toBe(2);
+    const back = view.getByRole("button", { name: "Back" });
+    expect(back).toHaveAttribute("title", "Back to #1");
+    fireEvent.click(back);
+    expect(threadState.focusedId).toBe(1);
+    expect(view.getByRole("button", { name: "Back" })).toHaveAttribute("title", "Back to overview");
+  });
+});
+
+describe("creating with the keyboard", () => {
+  const openCreate = (view: { getByRole: (role: string, options: { name: string }) => HTMLElement }) =>
+    fireEvent.click(view.getByRole("button", { name: "New Space or Task" }));
+  it("creates the Thread when Enter ends the name", () => {
+    const view = render(() => <ThreadShell />);
+    openCreate(view);
+    const title = view.getByLabelText("New space or task title");
+    fireEvent.input(title, { target: { value: "Buy milk" } });
+    fireEvent.keyDown(title, { key: "Enter" });
+    expect(sent.filter(frame => frame.type === "create_thread")).toContainEqual(
+      expect.objectContaining({ type: "create_thread", title: "Buy milk", kind: "space", parent_thread_id: null }));
+  });
+  it("does not create from an empty name and an empty first message", () => {
+    const view = render(() => <ThreadShell />);
+    openCreate(view);
+    const title = view.getByLabelText("New space or task title");
+    fireEvent.keyDown(title, { key: "Enter" });
+    expect(sent.filter(frame => frame.type === "create_thread")).toHaveLength(0);
+    expect(view.getByLabelText("New space or task title")).toBeInTheDocument();
+  });
+  it("names the Thread from the first message when Enter ends an empty name", () => {
+    const view = render(() => <ThreadShell />);
+    openCreate(view);
+    fireEvent.input(view.getByLabelText("First message"), { target: { value: "Plan the offsite" } });
+    fireEvent.keyDown(view.getByLabelText("New space or task title"), { key: "Enter" });
+    expect(sent.filter(frame => frame.type === "create_thread")).toContainEqual(
+      expect.objectContaining({ type: "create_thread", title: "Plan the offsite" }));
+  });
 });

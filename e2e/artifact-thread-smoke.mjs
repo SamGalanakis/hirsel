@@ -35,6 +35,10 @@ try{for(const viewport of [{width:1440,height:900},{width:390,height:844}]){
  assert.equal(await page.locator('textarea').inputValue(),'Keep this conversation draft');
  await page.getByRole('tab',{name:'Related',exact:true}).click();await page.getByRole('button',{name:/Updated shared counter/}).waitFor();
  assert.equal(new URL(page.url()).pathname,`/t/${a.id}`);
+ // Related ends at its content: no composer, and Back returns to the conversation with the draft intact.
+ assert.equal(await page.locator('textarea').count(),0);
+ await page.getByRole('button',{name:'Back',exact:true}).click();
+ assert.equal(await page.locator('textarea').inputValue(),'Keep this conversation draft');
  assert.match(await page.locator('textarea').getAttribute('aria-label'),new RegExp(a.title));
  await publish(b.id,artifact.id,undefined);
  await page.getByRole('button',{name:'All artifacts',exact:true}).click();

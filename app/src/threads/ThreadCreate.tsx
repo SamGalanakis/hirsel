@@ -77,6 +77,9 @@ export function ThreadCreate(props: { onSelect: (id: number) => void }) {
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setCreating(false); }
   };
+  /** The same condition the create control carries, so Enter and the button
+   * agree about when the Thread can be made. */
+  const ready = () => Boolean(title()) && !creating() && state.connection === "connected";
   const parents = createMemo(() => threadState.threads.filter(thread => !thread.archived_at).slice(0, 50));
   return <dialog ref={node => { dialog = node; }} aria-label="New Space or Task" data-slot="thread-create"
     onCancel={dismiss} onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); dismiss(event); } }}
@@ -86,7 +89,10 @@ export function ThreadCreate(props: { onSelect: (id: number) => void }) {
         state, so nothing outside it can find a stray textarea. */}
     <Show when={open()}><div class="flex min-h-0 flex-1 flex-col gap-2 p-3">
       <button type="button" class="inline-flex h-7 w-fit items-center gap-1.5 rounded-md px-1 text-meta text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:h-11" onClick={dismiss}><X class="size-4" />Close</button>
+      {/* A single-line name: Enter ends it, on every pointer. The first-message
+          textarea keeps its own rule, where Enter is a newline on touch. */}
       <input aria-label="New space or task title" placeholder={derivedTitle(body()) || "Name it (optional)"} value={name()} onInput={event => setName(event.currentTarget.value)}
+        onKeyDown={event => { if (event.key !== "Enter" || event.shiftKey || event.isComposing) return; event.preventDefault(); if (ready()) void submit(); }}
         class="h-7 w-full min-w-0 bg-transparent px-1 text-sm placeholder:text-muted-foreground focus:outline-none forced-colors:focus-visible:outline forced-colors:focus-visible:outline-1 pointer-coarse:h-11" />
       <textarea ref={node => { textarea = node; }} aria-label="First message" placeholder="What is this about? Your first message starts it off…" value={body()} onInput={event => setBody(event.currentTarget.value)}
         onKeyDown={event => handleSubmitKeys(event, { value: body, coarse, onSend: () => void submit() })}
@@ -121,7 +127,7 @@ export function ThreadCreate(props: { onSelect: (id: number) => void }) {
       <button type="button" class={icon} aria-label="Attach files" title="Attach files" onClick={() => fileInput?.click()}><Paperclip class="size-4" /></button>
       <div class="flex-1" />
       <button type="button" data-slot="create-submit" class={`${icon} bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground`} aria-label={resolvedKind() === "space" ? "New Space" : "New Task"} title={resolvedKind() === "space" ? "Create the Space" : "Create the Task"}
-        disabled={!title() || creating() || state.connection !== "connected"} onClick={() => void submit()}><ArrowRight class="size-4" /></button>
+        disabled={!ready()} onClick={() => void submit()}><ArrowRight class="size-4" /></button>
     </footer></Show>
   </dialog>;
 }

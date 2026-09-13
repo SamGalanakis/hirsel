@@ -124,7 +124,7 @@ describe("thread info pane", () => {
   it("names where the next turn runs and lets the Owner move it", () => {
     const view = openInfo();
     const runsOn = () => view.container.querySelector<HTMLElement>('[data-fact="Runs on"]')!;
-    expect(runsOn()).toHaveTextContent("Default Native · anthropic · claude-opus-4-7");
+    expect(runsOn()).toHaveTextContent("Native · anthropic · claude-opus-4-7");
 
     fireEvent.click(view.getByRole("button", { name: "Change where this Thread runs" }));
     fireEvent.change(view.getByLabelText("Where this Thread runs"), { target: { value: "cli:claude" } });
@@ -144,14 +144,16 @@ describe("thread info pane", () => {
     flush(() => handleThreadMessage({ type: "thread_upsert", thread: space({ revision: 4, execution: { kind: "cli", agent: "claude", model: "claude-opus-4-7", variant: "high" } }) }));
     expect(runsOn()).toHaveTextContent("Claude Code · claude-opus-4-7 · High");
 
-    // Back to the default coordinator is one choice, not a special case.
+    // "Default Native" is not one of the backends: Native is a provider and a
+    // model, chosen explicitly. Here no Native provider is configured at all.
     fireEvent.click(view.getByRole("button", { name: "Change where this Thread runs" }));
-    fireEvent.change(view.getByLabelText("Where this Thread runs"), { target: { value: "default" } });
-    fireEvent.click(view.getByRole("button", { name: "Save where this Thread runs" }));
-    expect(sent.at(-1)).toMatchObject({ action: "set_execution", expected_revision: 4, data: { execution: null } });
-    flush(() => handleThreadMessage({ type: "thread_upsert", thread: space({ revision: 5, execution: null }) }));
+    expect([...(view.getByLabelText("Where this Thread runs") as HTMLSelectElement).options].map(option => option.value)).toEqual(["cli:claude"]);
+    fireEvent.click(view.getByRole("button", { name: "Cancel execution change" }));
     expect(view.queryByLabelText("Where this Thread runs")).toBeNull();
-    expect(runsOn()).toHaveTextContent("Default Native");
+    // A Thread that never chose still reads as the resolved default, in the
+    // same Native sentence an explicit choice would use.
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: space({ revision: 5, execution: null }) }));
+    expect(runsOn()).toHaveTextContent("Native · anthropic · claude-opus-4-7");
   });
 
   it("names the row once and reads every backend shape in full", () => {
@@ -177,8 +179,10 @@ describe("thread info pane", () => {
 
     fireEvent.click(view.getByRole("button", { name: "Change where this Thread runs" }));
     const backend = view.getByLabelText("Where this Thread runs") as HTMLSelectElement;
-    expect([...backend.options].map(option => option.value)).toEqual(["default", "native", "cli:claude"]);
-    fireEvent.change(backend, { target: { value: "native" } });
+    expect([...backend.options].map(option => option.value)).toEqual(["native", "cli:claude"]);
+    // With no explicit choice the editor already opens on Native, prefilled
+    // with the installation's default provider and model.
+    expect(backend).toHaveValue("native");
 
     // Only agent-selectable instances run Native: claude is Sub-agents only.
     const provider = view.getByLabelText("Native provider") as HTMLSelectElement;
@@ -217,8 +221,7 @@ describe("thread info pane", () => {
     flush(() => dispatch({ type: "subagent_models_changed", catalog: { ...CATALOG, providers: [] } }));
     const view = openInfo();
     fireEvent.click(view.getByRole("button", { name: "Change where this Thread runs" }));
-    const select = view.getByLabelText("Where this Thread runs") as HTMLSelectElement;
-    expect([...select.options].map(option => option.value)).toEqual(["default"]);
+    expect(view.queryByLabelText("Where this Thread runs")).toBeNull();
     expect(view.container.querySelector<HTMLElement>('[data-slot="thread-execution-editor"]')!).toHaveTextContent("No other backend is available");
   });
 });

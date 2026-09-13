@@ -123,7 +123,7 @@ function DescriptionSection(props: { thread: Thread; historyId: string }) {
   </section>;
 }
 
-type Backend = "default" | "native" | `cli:${string}`;
+type Backend = "native" | `cli:${string}`;
 
 /** The model id a freshly chosen Native provider starts on. A free-text
  * endpoint has nothing to pick from, so it opens on the provider's own default
@@ -131,6 +131,14 @@ type Backend = "default" | "native" | `cli:${string}`;
 function nativeSeedModel(providerId: string): string {
   const provider = state.providers?.instances.find(instance => instance.id === providerId);
   return provider?.selection?.mode === "free_text" ? provider.default_model ?? "" : "";
+}
+/** Native opens on what this installation already runs: the Settings default
+ * model when the provider is the default one, otherwise whatever that provider
+ * starts on. The Owner picks a provider and a model, never "the default" — the
+ * choice they save is always explicit. */
+function nativeStartModel(providerId: string): string {
+  if (providerId && state.model?.provider_id === providerId && state.model.current.id) return state.model.current.id;
+  return nativeSeedModel(providerId);
 }
 
 /** Where the next turn runs. The choices are the delegation catalog's own — the
@@ -148,21 +156,24 @@ function RunsOnRow(props: { thread: Thread; historyId: string }) {
     const configured = state.model?.provider_id;
     return (configured && nativeProviders().some(instance => instance.id === configured) ? configured : nativeProviders()[0]?.id) ?? "";
   };
+  const options = createMemo(() => [
+    ...(nativeProviders().length > 0 ? [{ value: "native" as Backend, label: "Native" }] : []),
+    ...(catalog()?.providers ?? []).map(group => ({ value: `cli:${group.provider}` as Backend, label: group.label })),
+  ]);
   const initial = (): { backend: Backend; model: string; variant: string; providerId: string } => {
     const execution = props.thread.execution;
     if (execution?.kind === "cli") return { backend: `cli:${execution.agent}`, model: execution.model, variant: execution.variant, providerId: "" };
     if (execution?.kind === "native") return { backend: "native", model: execution.model, variant: "default", providerId: execution.provider_id };
-    return { backend: "default", model: "", variant: "", providerId: defaultProviderId("default") };
+    // A Thread that never chose opens on the installation's own default, spelt
+    // out: the Native provider and model it already runs on, prefilled.
+    const backend = options()[0]?.value ?? "native";
+    const providerId = defaultProviderId(backend);
+    return { backend, model: backend === "native" ? nativeStartModel(providerId) : "", variant: "", providerId };
   };
   const [draft, setDraft] = createSignal(initial());
   // The model rows are the Settings ones; they mark themselves pending on every
   // change, and here the change is local, so settle immediately.
   const pending = createPendingKeys();
-  const options = createMemo(() => [
-    { value: "default" as Backend, label: "Default Native" },
-    ...(nativeProviders().length > 0 ? [{ value: "native" as Backend, label: "Native" }] : []),
-    ...(catalog()?.providers ?? []).map(group => ({ value: `cli:${group.provider}` as Backend, label: group.label })),
-  ]);
   // The Native session's model question in whichever shape its provider takes —
   // the Settings main-agent view, asked of the draft instead of the store.
   const nativeModel = createMemo(() => agentModelView("main", draft().providerId, draft().providerId, { id: draft().model, variant: draft().variant || "default" }, [], false));
@@ -180,13 +191,12 @@ function RunsOnRow(props: { thread: Thread; historyId: string }) {
   };
   const target = (): ThreadExecutionTarget | null => {
     const { backend, providerId } = draft();
-    if (backend === "default") return null;
     if (backend === "native") return { kind: "native", provider_id: providerId, model: nativeModel().current.id.trim() };
     return { kind: "cli", agent: backend.slice(4), model: current().id, variant: current().variant };
   };
   const ready = () => {
     const chosen = target();
-    if (!chosen) return true;
+    if (!chosen) return false;
     if (chosen.kind === "native") return Boolean(chosen.provider_id && chosen.model);
     return Boolean(chosen.model && chosen.variant);
   };
@@ -199,18 +209,18 @@ function RunsOnRow(props: { thread: Thread; historyId: string }) {
     <div class="flex min-w-0 flex-col gap-1" data-slot="thread-execution-editor">
       {/* The `dt` beside this editor already says "Runs on"; a second label
           inside it only repeats the row's own name. */}
-      <div class="py-1">
+      <Show when={options().length > 0}><div class="py-1">
         <Select ariaLabel="Where this Thread runs" class="w-full" value={draft().backend}
           options={options()} onChange={value => {
             const backend = value as Backend;
             const providerId = defaultProviderId(backend);
-            setDraft({ backend, providerId, model: backend === "native" ? nativeSeedModel(providerId) : "", variant: "" });
+            setDraft({ backend, providerId, model: backend === "native" ? nativeStartModel(providerId) : "", variant: "" });
           }} />
-      </div>
-      {/* A select with one choice is a dead control unless it says why it is
-          alone: the other backends are Native and the CLI agents this host can
-          see, both configured in Settings, not here. */}
-      <Show when={options().length === 1}>
+      </div></Show>
+      {/* A select with one choice — or none — is a dead control unless it says
+          why it is alone: the backends are Native and the CLI agents this host
+          can see, both configured in Settings, not here. */}
+      <Show when={options().length <= 1}>
         <p class="text-meta text-muted-foreground">No other backend is available. Native appears here once a provider is configured, and the Claude and Codex CLI agents once this host can see them.</p>
       </Show>
       <Show when={draft().backend === "native"}>
@@ -218,7 +228,7 @@ function RunsOnRow(props: { thread: Thread; historyId: string }) {
           <span class="text-sm">Provider</span>
           <Select ariaLabel="Native provider" class="w-[10.5rem] shrink-0" value={draft().providerId}
             options={nativeProviders().map(instance => ({ value: instance.id, label: instance.label }))}
-            onChange={providerId => setDraft(previous => ({ ...previous, providerId, model: nativeSeedModel(providerId), variant: "" }))} />
+            onChange={providerId => setDraft(previous => ({ ...previous, providerId, model: nativeStartModel(providerId), variant: "" }))} />
         </div>
         <div class="divide-y divide-border">
           <AgentModelRows name="This Thread" freeText={nativeModel().freeText} current={nativeModel().current} available={nativeModel().available}
@@ -227,7 +237,7 @@ function RunsOnRow(props: { thread: Thread; historyId: string }) {
             onFreeText={model => { setDraft(previous => ({ ...previous, model })); pending.settleAll(); }} />
         </div>
       </Show>
-      <Show when={draft().backend !== "default" && draft().backend !== "native"}>
+      <Show when={draft().backend.startsWith("cli:")}>
         <div class="divide-y divide-border">
           <AgentModelRows name="This Thread" freeText={false} current={current()}
             available={available()} pending={pending} modelKey="thread-model" variantKey="thread-variant"

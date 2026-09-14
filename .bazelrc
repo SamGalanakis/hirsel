@@ -1,0 +1,45 @@
+# Where the pool lives, which certificate reaches it, which runtime image it
+# pins, and where this host keeps its caches are deployment facts, not
+# repository facts: they move when the pool is redeployed or the executor is
+# repinned, and they differ between a development host and a CI runner. None
+# of them is committed here.
+#
+# Locally, kiln writes them to .kiln.bazelrc on every fork and golden refresh,
+# from the installed executor manifest. The file is gitignored and this import
+# is `try-`: a checkout without it still builds, it just has no shared
+# executor, and `scripts/hermetic-build.sh --shared` says so rather than
+# failing obscurely. In CI they are `build-cache` environment secrets, written
+# by the build-infra repository and read by
+# `.github/actions/bazel-shared-cache`.
+try-import %workspace%/.kiln.bazelrc
+
+startup --host_jvm_args=-Xmx4g
+common --enable_platform_specific_config
+common --lockfile_mode=error
+
+# What the pool is asked FOR is a repository fact and stays here.
+# Rust compile and link actions are large and mostly single-invocation: on
+# one core the workspace test binaries take 20-30 minutes each and sit on the
+# serial tail of the graph. Four cores per action lets rustc parallelise
+# codegen and linking. Pool capacity at four cores an action: the development
+# host advertises 24 CPUs and caps itself at six tasks in flight, the Hetzner
+# ccx33 worker advertises 8 and caps at two, so eight of these actions run at
+# once across the pool.
+build:shared --remote_default_exec_properties=cpu_count=4
+build:shared --remote_default_exec_properties=memory_kb=4194304
+build:shared --remote_local_fallback=false
+build:shared --remote_upload_local_results=true
+test:shared --test_output=errors
+test --cache_test_results=yes
+
+# Local execution remains available for CI, bootstrap, and reproduction.
+build:local --spawn_strategy=local
+test:local --test_output=errors
+
+build --incompatible_strict_action_env
+build --jobs=8
+build --loading_phase_threads=4
+build --local_resources=cpu=8
+build --local_resources=memory=32768
+build --announce_rc
+build --show_timestamps

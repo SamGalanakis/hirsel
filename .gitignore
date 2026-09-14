@@ -90,3 +90,7 @@ e2e/reports/
 
 # Local Impeccable verification captures
 .impeccable/review/
+
+# Bazel
+.kiln.bazelrc
+/bazel-*

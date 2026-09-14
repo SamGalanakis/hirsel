@@ -1,0 +1,6 @@
+# Clippy resolves its configuration by walking up from each crate's manifest
+# directory to the first `clippy.toml`. Cargo finds this file for every
+# workspace member; the Bazel clippy aspect in `tools/bazel/clippy.bzl` selects
+# the same nearest declared config per target, so both tools lint with one
+# configuration. Keep it here even while it carries no overrides: a crate-local
+# `clippy.toml` added later must be declared in that aspect's `_configs` list.

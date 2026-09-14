@@ -1,0 +1,90 @@
+load("//tools/bazel:clippy.bzl", "hirsel_rust_clippy")
+load(
+    "//tools/bazel:workspace_targets.bzl",
+    "WORKSPACE_BAZEL_TEST_TARGETS",
+    "WORKSPACE_CLIPPY_TARGETS",
+    "WORKSPACE_COMPILE_TARGETS",
+    "WORKSPACE_RUST_SOURCE_TARGETS",
+    "WORKSPACE_TEST_TARGETS",
+)
+
+exports_files([
+    "Cargo.lock",
+    "Cargo.toml",
+    "clippy.toml",
+])
+
+filegroup(
+    name = "cargo_metadata",
+    srcs = [
+        "Cargo.lock",
+        "Cargo.toml",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# `crates/hirsel-host/src/prompt_config.rs` embeds these with `include_str!`
+# across the package boundary, so they are compile inputs of that crate.
+filegroup(
+    name = "prompt_files",
+    srcs = glob(["prompts/**"]),
+    visibility = ["//visibility:public"],
+)
+
+# Resolved from `CARGO_MANIFEST_DIR` at run time by
+# `crates/hirsel-host/src/templates.rs`, so the host's tests need them in
+# runfiles as well as on the compile inputs.
+filegroup(
+    name = "template_files",
+    srcs = glob(["templates/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "hirsel_config_doc",
+    srcs = ["docs/hirsel-config.md"],
+    visibility = ["//visibility:public"],
+)
+
+# The generated suite is the complete deterministic/default-feature test
+# partition. Cargo-owned labels carry `manual`, so `bazel test //...` and this
+# focused aggregate execute the same safe set.
+test_suite(
+    name = "workspace_tests",
+    tests = WORKSPACE_BAZEL_TEST_TARGETS,
+)
+
+# Runtime inputs for the few tests whose asserted contract spans package
+# boundaries. Keeping them narrow preserves action invalidation granularity.
+filegroup(
+    name = "workspace_rust_sources",
+    srcs = WORKSPACE_RUST_SOURCE_TARGETS,
+    testonly = True,
+    visibility = ["//visibility:public"],
+)
+
+# Build these labels to compile the complete Cargo --workspace --all-targets
+# shape without executing Cargo-owned test gates.
+filegroup(
+    name = "workspace_compile",
+    srcs = WORKSPACE_COMPILE_TARGETS,
+    testonly = True,
+)
+
+# The `cargo clippy --workspace --all-targets` shape as cached Bazel actions:
+# one clippy action per first-party crate target, with the workspace lint table
+# and the nearest `clippy.toml` applied exactly as Cargo applies them.
+hirsel_rust_clippy(
+    name = "workspace_clippy",
+    testonly = True,
+    deps = WORKSPACE_CLIPPY_TARGETS,
+)
+
+# This target keeps the complete Bazel and Cargo-owned test label set queryable.
+# The executable default is `workspace_tests`; the excluded labels stay with
+# Cargo nextest, each with its reason in tools/bazel/target-inventory.json.
+filegroup(
+    name = "workspace_test_inventory",
+    srcs = WORKSPACE_TEST_TARGETS,
+    testonly = True,
+)

@@ -1,0 +1,1 @@
+(package(hirsel-host) & kind(test) & binary(iroh_client_flow)) + (package(hirsel-host) & kind(test) & binary(nested_runtime))

@@ -1,0 +1,211 @@
+{
+  "cargo_only_target_count": 1,
+  "cargo_package_count": 7,
+  "cargo_target_count": 14,
+  "generated_label_count": 22,
+  "packages": [
+    {
+      "declared_features": [],
+      "manifest": "crates/hirsel-client-core/Cargo.toml",
+      "package": "hirsel-client-core",
+      "resolved_features": [],
+      "targets": [
+        {
+          "cargo": "hirsel_client_core",
+          "kind": "lib",
+          "label": "//crates/hirsel-client-core:hirsel-client-core"
+        },
+        {
+          "cargo": "hirsel_client_core",
+          "kind": "unit-test",
+          "label": "//crates/hirsel-client-core:hirsel-client-core__unit_test",
+          "tags": []
+        },
+        {
+          "cargo": "client_flow",
+          "kind": "test",
+          "label": "//crates/hirsel-client-core:client_flow__test",
+          "tags": []
+        }
+      ]
+    },
+    {
+      "declared_features": [
+        "bindgen-cli"
+      ],
+      "manifest": "crates/hirsel-client-ffi/Cargo.toml",
+      "package": "hirsel-client-ffi",
+      "resolved_features": [],
+      "targets": [
+        {
+          "cargo": "hirsel_client_ffi",
+          "kind": "lib",
+          "label": "//crates/hirsel-client-ffi:hirsel-client-ffi"
+        },
+        {
+          "cargo": "hirsel_client_ffi",
+          "kind": "unit-test",
+          "label": "//crates/hirsel-client-ffi:hirsel-client-ffi__unit_test",
+          "tags": []
+        },
+        {
+          "cargo": "uniffi-bindgen",
+          "cargo_only": "required features are outside the resolved default workspace graph",
+          "kind": "bin",
+          "label": null,
+          "required_features": [
+            "bindgen-cli"
+          ],
+          "tags": [
+            "cargo-feature-gate",
+            "manual"
+          ]
+        }
+      ]
+    },
+    {
+      "declared_features": [],
+      "manifest": "crates/hirsel-drivers/Cargo.toml",
+      "package": "hirsel-drivers",
+      "resolved_features": [],
+      "targets": [
+        {
+          "cargo": "hirsel_drivers",
+          "kind": "lib",
+          "label": "//crates/hirsel-drivers:hirsel-drivers"
+        },
+        {
+          "cargo": "hirsel_drivers",
+          "kind": "unit-test",
+          "label": "//crates/hirsel-drivers:hirsel-drivers__unit_test",
+          "tags": []
+        }
+      ]
+    },
+    {
+      "declared_features": [],
+      "manifest": "crates/hirsel-host/Cargo.toml",
+      "package": "hirsel-host",
+      "resolved_features": [],
+      "targets": [
+        {
+          "clippy_exempt": "cargo_build_script exposes no CrateInfo for the clippy aspect",
+          "kind": "custom-build",
+          "label": "//crates/hirsel-host:build_script"
+        },
+        {
+          "cargo": "hirsel_host",
+          "kind": "lib",
+          "label": "//crates/hirsel-host:hirsel-host"
+        },
+        {
+          "cargo": "hirsel_host",
+          "kind": "unit-test",
+          "label": "//crates/hirsel-host:hirsel-host__unit_test",
+          "tags": []
+        },
+        {
+          "cargo": "hirsel-host",
+          "kind": "bin",
+          "label": "//crates/hirsel-host:hirsel-host__bin",
+          "tags": []
+        },
+        {
+          "cargo": "hirsel-host",
+          "kind": "bin-unit-test",
+          "label": "//crates/hirsel-host:hirsel-host__bin__unit_test",
+          "tags": []
+        },
+        {
+          "cargo": "hirsel-pair",
+          "kind": "bin",
+          "label": "//crates/hirsel-host:hirsel-pair__bin",
+          "tags": []
+        },
+        {
+          "cargo": "hirsel-pair",
+          "kind": "bin-unit-test",
+          "label": "//crates/hirsel-host:hirsel-pair__bin__unit_test",
+          "tags": []
+        },
+        {
+          "cargo": "iroh_client_flow",
+          "cargo_only": "every case is `#[ignore]`d behind the public n0 relay, so the partition would cache an empty run as proof",
+          "kind": "test",
+          "label": "//crates/hirsel-host:iroh_client_flow__test",
+          "tags": [
+            "cargo-network-gate",
+            "manual"
+          ]
+        },
+        {
+          "cargo": "nested_runtime",
+          "cargo_only": "spawns a real hirsel-host binary against a loopback port with a Python agent peer installed on a rewritten PATH, and reads another package's sources from the repository root",
+          "kind": "test",
+          "label": "//crates/hirsel-host:nested_runtime__test",
+          "tags": [
+            "cargo-live-host",
+            "manual"
+          ]
+        }
+      ]
+    },
+    {
+      "declared_features": [],
+      "manifest": "crates/hirsel-plugin-api/Cargo.toml",
+      "package": "hirsel-plugin-api",
+      "resolved_features": [],
+      "targets": [
+        {
+          "cargo": "hirsel_plugin_api",
+          "kind": "lib",
+          "label": "//crates/hirsel-plugin-api:hirsel-plugin-api"
+        },
+        {
+          "cargo": "hirsel_plugin_api",
+          "kind": "unit-test",
+          "label": "//crates/hirsel-plugin-api:hirsel-plugin-api__unit_test",
+          "tags": []
+        }
+      ]
+    },
+    {
+      "declared_features": [],
+      "manifest": "crates/hirsel-plugins/Cargo.toml",
+      "package": "hirsel-plugins",
+      "resolved_features": [],
+      "targets": [
+        {
+          "cargo": "hirsel_plugins",
+          "kind": "lib",
+          "label": "//crates/hirsel-plugins:hirsel-plugins"
+        },
+        {
+          "cargo": "hirsel_plugins",
+          "kind": "unit-test",
+          "label": "//crates/hirsel-plugins:hirsel-plugins__unit_test",
+          "tags": []
+        }
+      ]
+    },
+    {
+      "declared_features": [],
+      "manifest": "crates/hirsel-proto/Cargo.toml",
+      "package": "hirsel-proto",
+      "resolved_features": [],
+      "targets": [
+        {
+          "cargo": "hirsel_proto",
+          "kind": "lib",
+          "label": "//crates/hirsel-proto:hirsel-proto"
+        },
+        {
+          "cargo": "hirsel_proto",
+          "kind": "unit-test",
+          "label": "//crates/hirsel-proto:hirsel-proto__unit_test",
+          "tags": []
+        }
+      ]
+    }
+  ]
+}

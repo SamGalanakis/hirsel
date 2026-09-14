@@ -216,12 +216,13 @@
      Nothing in the task world should re-introduce a literal px width or a
      bespoke inset. */
   --container-measure: 42rem;
-  /* The Owner's own bubble is the one thing that does NOT fill the measure: it
-     hugs right, so it needs a ceiling or a long paste spans the column and the
-     left/right conversation stops reading as two voices. A rem ceiling, not the
-     old `max-w-[85%] sm:max-w-[60%]` percentage pair — a percentage made the
-     bubble's left edge move with the viewport, so no two messages started in
-     the same place. */
+  /* A speech bubble is the one thing that does NOT fill the measure: it hugs
+     its own side, so it needs a ceiling or a long paste spans the column and the
+     left/right conversation stops reading as two voices. Both the Owner's right
+     bubble and the Agent's left bubble wear it, so the two mirror each other. A
+     rem ceiling, not the old `max-w-[85%] sm:max-w-[60%]` percentage pair — a
+     percentage made the bubble's edge move with the viewport, so no two messages
+     started in the same place. */
   --container-reply: 34rem;
   --spacing-gutter: 1.5rem;
   --container-frame: calc(var(--container-measure) + 2 * var(--spacing-gutter));

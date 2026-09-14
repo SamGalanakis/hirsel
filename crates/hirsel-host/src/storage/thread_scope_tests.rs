@@ -57,7 +57,7 @@ async fn durable_process_authority_survives_the_registering_turn() {
 }
 
 #[tokio::test]
-async fn hierarchy_paths_paging_and_pin_do_not_grant_peer_access() {
+async fn hierarchy_paging_and_pin_do_not_grant_peer_access() {
     let dir = tempfile::tempdir().unwrap();
     let s = Storage::open(dir.path()).await.unwrap();
     assert!(s.thread_snapshot().await.unwrap().is_empty());
@@ -72,16 +72,18 @@ async fn hierarchy_paths_paging_and_pin_do_not_grant_peer_access() {
     assert!(!s.thread_in_scope(a, b).await.unwrap());
     assert!(!s.thread_in_scope(child, a).await.unwrap());
     assert_eq!(
-        s.resolve_thread(&actor, &ThreadRef::Path(format!("./{child}/{grand}")))
+        s.resolve_thread(&actor, &ThreadRef::Id(grand))
             .await
             .unwrap(),
         grand
     );
+    // 0 names the top of the tree and no grant widens to it except the root
+    // grant; an unparsable string is just an invalid reference.
     for reference in [
         ThreadRef::Id(b),
-        ThreadRef::Path("..".into()),
-        ThreadRef::Path(format!("./{grand}")),
-        ThreadRef::Path("./+1".into()),
+        ThreadRef::Id(0),
+        ThreadRef::Dot("..".into()),
+        ThreadRef::Dot("./+1".into()),
     ] {
         assert!(s.resolve_thread(&actor, &reference).await.is_err());
     }

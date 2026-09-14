@@ -103,15 +103,20 @@ impl OutsideGrant {
     }
 }
 
+/// Where a tool points: the caller itself (`.`), or any Thread by id — and
+/// `0`, which is the one address that is no Thread at all: the top of the
+/// tree. One encoding, no path algebra; anything outside reach is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub(crate) enum ThreadRef {
+    /// `0` is the root address; Thread ids start at 1.
     Id(u64),
-    Path(String),
+    /// The literal `.`. Any other string is an invalid reference.
+    Dot(String),
 }
 impl Default for ThreadRef {
     fn default() -> Self {
-        Self::Path(".".into())
+        Self::Dot(".".into())
     }
 }
 
@@ -217,38 +222,34 @@ pub(super) fn validate_caller(c: &Connection, caller: &ThreadCaller) -> anyhow::
 pub(super) fn resolve(c: &Connection, caller: u64, reference: &ThreadRef) -> anyhow::Result<u64> {
     let target = match reference {
         ThreadRef::Id(id) => *id,
-        ThreadRef::Path(path) if path == "." => caller,
-        ThreadRef::Path(path) => {
-            let suffix = path
-                .strip_prefix("./")
-                .ok_or_else(|| anyhow::anyhow!("invalid Thread path"))?;
-            let parts: Vec<_> = suffix.split('/').collect();
-            anyhow::ensure!(
-                !parts.is_empty() && parts.len() <= 64,
-                "invalid Thread path"
-            );
-            let mut parent = caller;
-            for part in parts {
-                anyhow::ensure!(
-                    !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()),
-                    "invalid Thread path"
-                );
-                let id: u64 = part.parse()?;
-                let valid: bool = c.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM threads WHERE id=?1 AND parent_thread_id=?2)",
-                    params![id, parent],
-                    |r| r.get(0),
-                )?;
-                if !valid {
-                    return Err(OutsideGrant::thread(id));
-                }
-                parent = id;
-            }
-            parent
+        ThreadRef::Dot(path) => {
+            anyhow::ensure!(path == ".", "invalid Thread reference");
+            caller
         }
     };
+    // 0 names the top of the tree, where a creation hangs on no Thread and
+    // ancestors become peers. The only reach that opens it is the root grant
+    // — without one, the refusal is typed like any other.
+    if target == 0 {
+        anyhow::ensure!(
+            super::thread_grants::holds_root(c, caller)?,
+            OutsideGrant::root()
+        );
+        return Ok(0);
+    }
     authorize(c, caller, target)?;
     Ok(target)
+}
+
+/// The subtree a listing hangs under: a Thread, or — for the root address —
+/// no Thread at all, which lists the top level.
+pub(super) fn resolve_under(
+    c: &Connection,
+    caller: u64,
+    reference: &ThreadRef,
+) -> anyhow::Result<Option<u64>> {
+    let target = resolve(c, caller, reference)?;
+    Ok((target != 0).then_some(target))
 }
 
 pub(super) fn authorize_artifact(
@@ -338,8 +339,10 @@ impl Storage {
         );
         let c = self.conn.lock().await;
         validate_caller(&c, caller)?;
-        let under = resolve(&c, caller.thread_id, under)?;
-        let mut ids = c.prepare("WITH RECURSIVE descendants(id,depth) AS (SELECT id,1 FROM threads WHERE parent_thread_id=?1 UNION ALL SELECT t.id,d.depth+1 FROM threads t JOIN descendants d ON t.parent_thread_id=d.id WHERE d.depth<?2) SELECT id FROM descendants WHERE (?3 IS NULL OR id>?3) ORDER BY id LIMIT ?4")?
+        // The root address (None) lists the top level; any Thread lists what
+        // hangs below it.
+        let under = resolve_under(&c, caller.thread_id, under)?;
+        let mut ids = c.prepare("WITH RECURSIVE descendants(id,depth) AS (SELECT id,1 FROM threads WHERE (?1 IS NULL AND parent_thread_id IS NULL) OR parent_thread_id=?1 UNION ALL SELECT t.id,d.depth+1 FROM threads t JOIN descendants d ON t.parent_thread_id=d.id WHERE d.depth<?2) SELECT id FROM descendants WHERE (?3 IS NULL OR id>?3) ORDER BY id LIMIT ?4")?
             .query_map(params![under,depth,after_id,limit+1], |r|r.get::<_,u64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let more = ids.len() > limit as usize;
         ids.truncate(limit as usize);

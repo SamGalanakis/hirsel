@@ -20,7 +20,7 @@ const OPEN_LABEL: Record<string, string> = { solid: "Open interactive artifact",
 function previewError(): { id: number; message: string } | null { return artifactState.preview.status === "error" ? artifactState.preview : null; }
 export function ArtifactCard(props: { id: number }) {
   const artifact = () => artifactState.summaries.find(row => row.id === props.id);
-  return <div class="mt-3 flex w-full max-w-sm items-center rounded-lg border border-border"><button type="button" data-artifact-ref={props.id} title={(() => { const summary = artifact(); return summary ? OPEN_LABEL[renderModeFor(summary)] : "Open artifact"; })()} class={`${button} flex min-w-0 flex-1 items-center gap-3 text-left`} onClick={() => previewArtifact(props.id, artifact()?.title ?? `Artifact #${props.id}`)}>
+  return <div data-slot="artifact-card" class="mt-3 flex w-full max-w-sm items-center rounded-lg border border-border"><button type="button" data-artifact-ref={props.id} title={(() => { const summary = artifact(); return summary ? OPEN_LABEL[renderModeFor(summary)] : "Open artifact"; })()} class={`${button} flex min-w-0 flex-1 items-center gap-3 text-left`} onClick={() => previewArtifact(props.id, artifact()?.title ?? `Artifact #${props.id}`)}>
     <FileText class="size-4 shrink-0" /><span class="min-w-0 flex-1 truncate font-medium">{artifact()?.title ?? `Artifact #${props.id}`}</span><ArrowUpRight class="size-4 shrink-0" />
   </button><ArtifactOpenWith artifactId={props.id} /></div>;
 }

@@ -184,6 +184,9 @@ impl Storage {
                 super::thread_icons::validate_icon(icon.as_ref())?;
                 threads::validate_instrument(instrument.as_ref())?;
                 let parent = thread_scope::resolve(&tx, caller.thread_id, parent)?;
+                // 0 is the top of the tree, not a row: a Thread created there
+                // hangs on no Thread at all, exactly like one the Owner makes.
+                let parent = (parent != 0).then_some(parent);
                 let key = format!("agent:{}:{operation_id}:{client_id}", caller.turn_id);
                 let (symbol, tint, blob_id) = icon_columns(icon.as_ref());
                 tx.execute("INSERT INTO threads(client_id,kind,parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision,icon_symbol,icon_tint,icon_blob_id) VALUES(?1,?2,?3,?4,?5,?6,?7,0,?8,?8,1,?9,?10,?11)",params![key,threads::kind_name(*kind),parent,title.trim(),description,instrument.as_ref().map(serde_json::to_string).transpose()?,threads::attention(*attention),now,symbol,tint,blob_id])?;

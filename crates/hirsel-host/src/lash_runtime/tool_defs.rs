@@ -169,7 +169,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.threads_create",
             "threads_create",
-            "Create a durable Space or Task with its own conversation. Spaces may contain Spaces or Tasks; Tasks may contain only Tasks. Set icon to a vocabulary symbol with an optional tint, or a PNG/JPEG/WebP blob or base64 file artifact; images are center-cropped and normalized to 256 px. Without an icon the client draws a monogram of the title. Reuse client_id on retries; every created Thread is visible immediately.",
+            "Create a durable Space or Task with its own conversation. Spaces may contain Spaces or Tasks; Tasks may contain only Tasks. Where it hangs: self (.), a Thread ID within reach, or 0 for the top of the tree — which takes root reach. Set icon to a vocabulary symbol with an optional tint, or a PNG/JPEG/WebP blob or base64 file artifact; images are center-cropped and normalized to 256 px. Without an icon the client draws a monogram of the title. Reuse client_id on retries; every created Thread is visible immediately.",
             thread_create_schema(),
             thread_result_schema(),
             ["threads"],
@@ -187,7 +187,7 @@ pub(super) fn hirsel_tool_definitions(
         tool_definition(
             "hirsel.threads_list",
             "threads_list",
-            "List authorized descendants, direct children by default. Lifecycle is independent of hierarchy.",
+            "List authorized descendants, direct children by default. `under: 0` stands at the top of the tree and lists every root-level Thread — that takes root reach. Lifecycle is independent of hierarchy.",
             thread_list_schema(),
             json!({"type":"object","required":["threads"],"properties":{"threads":{"type":"array","items":{"type":"object"}}}}),
             ["threads"],

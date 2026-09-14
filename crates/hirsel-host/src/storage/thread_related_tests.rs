@@ -312,7 +312,7 @@ async fn related_thread_targets_are_typed_scoped_and_never_grant_foreign_context
         .unwrap()["thread_id"]
         .as_u64()
         .unwrap();
-    let mutation = reference(ThreadRef::default(), ThreadRef::Path(format!("./{child}")));
+    let mutation = reference(ThreadRef::default(), ThreadRef::Id(child));
     let first = s
         .mutate_scoped_thread(&c, "reference", &mutation)
         .await

@@ -40,6 +40,17 @@ describe("the run card", () => {
     fireEvent.click(header);
     expect(view.container.querySelector('[data-slot="run-card-trace"]')).toBeNull();
   });
+  it("puts the run's faint clock line below the reply and wears no green tick", () => {
+    const view = render(() => <RunCard turn={turn("completed")} message={message} events={[]} activities={[]} />);
+    const reply = view.getByText("Finished");
+    const clock = view.getByRole("button", { name: /done/ });
+    // The metadata trails the reply it belongs to; it never heads the card.
+    expect(reply.compareDocumentPosition(clock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(clock.className).toContain("text-meta");
+    // A settled run that replied says nothing with a mark: the reply is the proof.
+    expect(clock.querySelector('[data-slot="run-card-outcome"] svg')).toBeNull();
+    expect(clock.textContent).not.toContain("done");
+  });
   it("opens a running run by default and keeps the Owner's close through the turn", () => {
     const [current, setCurrent] = createSignal(turn("running"));
     const view = render(() => <RunCard turn={current()} events={events} activities={[]} live />);

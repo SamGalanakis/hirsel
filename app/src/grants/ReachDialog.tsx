@@ -116,8 +116,12 @@ export function ReachDialog() {
               {/* Root is a destination like any Thread in this list, so it
                   carries a tile like any Thread: the rows line up. */}
               <Show when={typeof candidate.target === "number" ? threadState.threads.find(thread => thread.id === candidate.target) : null} fallback={<NeutralTile><Radar class="size-3" /></NeutralTile>}>{found => <ThreadAvatar thread={found()} dense />}</Show>
-              <span class="min-w-0 flex-1 wrap-break-word">{candidate.label}</span>
-              <span class="shrink-0 text-meta tabular-nums text-muted-foreground">{candidate.detail}</span>
+              {/* One line per offer: the name truncates from the right, the
+                  detail is capped and truncates from the left of its own slot.
+                  A long detail used to squeeze the name to a two-character
+                  column that stacked its letters vertically. */}
+              <span class="min-w-0 flex-1 truncate" title={candidate.label}>{candidate.label}</span>
+              <span class="min-w-0 shrink-0 max-w-[50%] truncate text-meta tabular-nums text-muted-foreground" title={candidate.detail}>{candidate.detail}</span>
             </button>
           </li>}</For>
         </ul>

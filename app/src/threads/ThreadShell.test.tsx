@@ -434,7 +434,8 @@ it("folds a settling run onto its header and keeps the same trace reachable ther
   const timeline = view.container.querySelector('[data-message-id="93"] [data-slot="timeline"]')!;
   const reply = view.getByText("File checked");
   expect([...timeline.children].map(row => row.getAttribute("data-slot"))).toEqual(["timeline-reasoning", "timeline-tool"]);
-  expect(timeline.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  // The reply reads first; its trace opens BELOW it, under the faint clock line.
+  expect(timeline.compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
   fireEvent.click(within(card as HTMLElement).getByRole("button", { name: "read_file — show result" }));
   expect(view.container.querySelector('[data-slot="tool-result"]')?.textContent).toBe("Result\nExact file contents");
 });

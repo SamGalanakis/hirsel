@@ -58,15 +58,13 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
   return <>
     <Show when={process()}>{delivery => <ProcessNote message={delivery()} origin={delivery().origin!} />}</Show>
     <Show when={props.entry.kind !== "activity" && !process()}>
-      {/* Who is speaking is readable before a word is: the Owner sits right in
-          the filled emphasis pair (a near-white fill on the dark theme, the
-          accent on the light one) at conversational width, the Agent sits left
-          on a neutral surface that hugs its own content, so the two never share an
-          edge and the column reads left against right. Alignment carries the
-          speaker on its own, so neither side spends a 56px avatar gutter saying
-          again what the fill and the edge already said: both sit on the one
-          gutter the scroller gives every row. Wide work rows and code scroll
-          inside the card, never the page. */}
+      {/* Who is speaking is readable before a word is: the Owner sits right and
+          the Agent sits left, each in its own bubble hugging conversational
+          width, so the two never share an edge and the column reads left against
+          right. Alignment carries the speaker on its own, so neither side spends
+          a 56px avatar gutter saying again what the fill and the edge already
+          said: both sit on the one gutter the scroller gives every row. Wide work
+          rows and code scroll inside the bubble, never the page. */}
       <article ref={node => { releaseFocus = preserveMovedFocus(node); }} data-message-id={message()?.id} data-execution-turn={!message() ? turn()?.id : undefined} data-author={owner() ? "owner" : "agent"} aria-label={owner() ? "You" : "Hirsel"} class={["flex", owner() ? "flex-row-reverse" : ""]}>
         <Show when={pending()}>
           <p data-slot="turn-pending" role="status" class="flex min-h-5 items-center text-muted-foreground">
@@ -75,7 +73,7 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
           </p>
         </Show>
         <Show when={!pending()}>
-        <div data-slot={owner() ? "owner-message" : "agent-message"} class={owner() ? "min-w-0 max-w-reply rounded-xl rounded-br-sm bg-primary px-3.5 py-2.5 text-primary-foreground [&_code]:border-current/15 [&_code]:bg-current/10" : "min-w-0 flex-1 rounded-xl rounded-bl-sm border border-border/60 bg-surface px-3.5 py-2.5"}>
+        <div data-slot={owner() ? "owner-message" : "agent-message"} class={owner() ? "min-w-0 max-w-reply rounded-xl rounded-br-sm bg-primary px-3.5 py-2.5 text-primary-foreground [&_code]:border-current/15 [&_code]:bg-current/10 [&_[data-slot=artifact-card]]:border-current/30 [&_[data-slot=artifact-card]_button]:text-primary-foreground [&_[data-slot=artifact-card]_button:hover]:bg-current/10" : "min-w-0 max-w-reply rounded-xl rounded-bl-sm border border-border/60 bg-surface px-3.5 py-2.5"}>
           {/* The Agent side is one run card: what started the turn, where it
               ran, its trace, its reply and whatever it published. The Owner
               side is the message itself, which is all there is to say. */}

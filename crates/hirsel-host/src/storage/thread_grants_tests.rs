@@ -439,6 +439,94 @@ async fn a_root_grant_reaches_threads_that_did_not_exist_when_it_was_made() {
 }
 
 #[tokio::test]
+async fn root_reach_lets_the_agent_create_and_list_at_the_top_of_the_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    let s = &state.storage;
+    let history = s.history_id().await.unwrap();
+    let billing = thread(s, "billing", None).await;
+    let worker = thread(s, "worker", None).await;
+    let actor = caller(s, worker).await;
+    let mut tools = ScopedThreadTools {
+        tools: state.tools.clone(),
+        caller: actor.clone(),
+        operation_id: "create-at-root-unheld".into(),
+    };
+
+    // Without root reach, the top of the tree is refused in the open with the
+    // same typed root target a grant refusal wears.
+    let refused = tools
+        .execute(
+            "threads_create",
+            &json!({"client_id":"c1","kind":"space","title":"Root space","parent":0}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused["reason"], json!("outside_grant"));
+    assert_eq!(refused["target"], json!({"kind":"root"}));
+
+    s.set_thread_reach(
+        "owner-root",
+        &history,
+        worker,
+        ReachTarget::Root,
+        None,
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Now the top of the tree is a place: the created Thread hangs on none.
+    tools.operation_id = "create-at-root".into();
+    let created = tools
+        .execute(
+            "threads_create",
+            &json!({"client_id":"c2","kind":"space","title":"Root space","parent":0}),
+        )
+        .await
+        .unwrap();
+    let created_id = created["thread_id"].as_u64().unwrap();
+    let created_thread = s.thread(created_id).await.unwrap().unwrap();
+    assert_eq!(created_thread.parent_thread_id, None);
+    // The root address resolves, and the top level lists everyone standing on it.
+    assert_eq!(
+        s.resolve_thread(&actor, &ThreadRef::Id(0)).await.unwrap(),
+        0
+    );
+    let page = s
+        .scoped_thread_list(&actor, &ThreadRef::Id(0), 1, None, 50)
+        .await
+        .unwrap();
+    let ids: Vec<u64> = page.threads.iter().map(|row| row.id).collect();
+    assert!(ids.contains(&billing));
+    assert!(ids.contains(&created_id));
+
+    // Narrowing reach closes the place again.
+    s.set_thread_reach(
+        "owner-unroot",
+        &history,
+        worker,
+        ReachTarget::Root,
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    tools.operation_id = "create-at-root-revoked".into();
+    let refused = tools
+        .execute(
+            "threads_create",
+            &json!({"client_id":"c3","kind":"space","title":"Root space","parent":0}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused["reason"], json!("outside_grant"));
+    assert_eq!(refused["target"], json!({"kind":"root"}));
+}
+
+#[tokio::test]
 async fn only_a_root_holder_hands_root_on_and_the_refusal_says_so() {
     let dir = tempfile::tempdir().unwrap();
     let state = crate::build_state(crate::tests::test_config(dir.path()))

@@ -4,7 +4,7 @@ import { Timeline } from "../components/chat/Timeline";
 import { buildTimeline, splitStreamingReply } from "../components/chat/timeline";
 import { Markdown } from "../components/Markdown";
 import { CubeSpinner } from "../components/CubeSpinner";
-import { Check, ChevronRight, CircleAlert, Square } from "../components/ui/icons";
+import { ChevronRight, CircleAlert } from "../components/ui/icons";
 import { SectionLabel } from "../components/ui/section-label";
 import type { ChatMessage } from "../protocol";
 import { state } from "../store/store";
@@ -48,14 +48,15 @@ function TurnTrace(props: { ref?: (node: HTMLElement) => void; turn?: ThreadTurn
   </section>;
 }
 
-/** The one mark an outcome gets. Text carries the word beside it, so the glyph
- * only has to separate finished from failed from stopped at a glance. */
+/** The one mark an outcome gets. A finished run needs no mark at all — the
+ * reply is the evidence, and a green tick repeated that fact louder than the
+ * words beside it. Only a run still working (the tumbling cube) or one that
+ * failed (a quiet alert) says anything here. */
 function OutcomeMark(props: { outcome: RunOutcome }) {
   return <Switch>
     <Match when={props.outcome === "running"}><CubeSpinner paused={state.connection !== "connected"} /></Match>
     <Match when={props.outcome === "failed"}><CircleAlert class="size-3.5 shrink-0 text-destructive" aria-hidden="true" /></Match>
-    <Match when={props.outcome === "done"}><Check class="size-3.5 shrink-0 text-status-success" aria-hidden="true" /></Match>
-    <Match when={true}><Square class="size-3.5 shrink-0" aria-hidden="true" /></Match>
+    <Match when={true}>{null}</Match>
   </Switch>;
 }
 
@@ -113,43 +114,14 @@ export function RunCard(props: { turn?: ThreadTurn; message?: ChatMessage; trigg
     header?.focus({ preventScroll: true });
   });
   const label = () => workLabel(props.turn, events(), props.activities, buildTimeline(events()).filter(item => item.kind === "tool").length, Boolean(props.message));
+  /** The run's faint footer clock: when the reply landed, not the receipt the
+   * header used to shout from above it. */
+  const timeLabel = () => props.message ? new Date(props.message.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
   return <section class="min-w-0" data-slot="run-card" onFocusIn={event => { focusInTrace = trace !== undefined && event.target instanceof Node && trace.contains(event.target); }} data-turn-id={props.turn?.id} data-outcome={props.turn ? outcome() : undefined}>
-    <Show when={props.turn}>
-      {/* Dense one-line identity: what started the run when that is worth
-          saying, how long it took, how it ended — and the one control that
-          opens its trace. The spoken name keeps the outcome word the quiet
-          line drops, so a header showing only a mark still announces itself. */}
-      <button
-        type="button"
-        ref={node => { header = node; }}
-        data-slot="run-card-header"
-        aria-label={[runOutcomeLabel(outcome()), originLabel(), duration()].filter(Boolean).join(" · ")}
-        aria-expanded={expanded() ? "true" : "false"}
-        aria-controls={expanded() ? traceId() : undefined}
-        class="-mx-1 mb-1.5 flex min-h-6 w-full min-w-0 items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-meta text-muted-foreground tabular-nums transition-colors hover:bg-accent/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring pointer-coarse:min-h-11"
-        onClick={() => props.turn && setTurnExpanded(props.turn.id, !expanded())}
-      >
-        <ChevronRight class={`size-3 shrink-0 transition-transform ${expanded() ? "rotate-90" : ""}`} aria-hidden="true" />
-        {/* One fixed slot for the run's state, always the same 14px square: the
-            tumbling cube while it works, the outcome mark once it is over. The
-            elapsed time sits immediately after it and never moves, so a run
-            settling does not shuffle the line the Owner is reading. */}
-        <span class="inline-flex size-3.5 shrink-0 items-center justify-center" data-slot="run-card-outcome"><OutcomeMark outcome={outcome()} /></span>
-        <Show when={duration()}>
-          <span class="shrink-0 tabular-nums">{duration()}</span>
-        </Show>
-        {/* Everything that is not the live state trails at the far edge, and a
-            running turn says none of it: chevron, cube, elapsed, nothing else. */}
-        <span class="ml-auto inline-flex min-w-0 items-center gap-1.5">
-          <Show when={!running() && originLabel()}>{label => <span class="min-w-0 truncate" data-slot="run-card-origin">{label()}</span>}</Show>
-          <Show when={outcomeWord()}>{word => <span class="shrink-0">{word()}</span>}</Show>
-        </span>
-      </button>
-      <Show when={running()}><p class="sr-only" role="status">{label()}</p></Show>
-    </Show>
-    <Show when={expanded()}>
-      <TurnTrace ref={node => { trace = node; }} turn={props.turn} events={events()} activities={props.activities} live={props.live} id={traceId()} />
-    </Show>
+    {/* The reply reads first, then its artifacts, then the failure or stop that
+        explains an empty turn, and only then the faint clock line that owns the
+        trace disclosure. The order is the reading order: words, evidence,
+        explanation, provenance. */}
     <Show when={body()}><Markdown>{body()}</Markdown></Show>
     <For each={artifacts()}>{id => <ArtifactCard id={id} />}</For>
     <Show when={failed()}><div class="max-w-prose space-y-1 pt-1 text-sm">
@@ -157,5 +129,38 @@ export function RunCard(props: { turn?: ThreadTurn; message?: ChatMessage; trigg
       <p class="text-meta text-muted-foreground" data-slot="work-recovery">Send a message to continue.</p>
     </div></Show>
     <Show when={stopped()}><p class="pt-1 text-meta text-muted-foreground">Your conversation is kept. Send a message to continue.</p></Show>
+    <Show when={props.turn}>
+      {/* The run's quiet footer: when it replied and how long it took, with the
+          one control that opens its trace sitting at the far edge. It used to
+          be a loud header ABOVE the reply — a chevron, a green tick and a time
+          that announced a finished run before the Owner read a word of it. A
+          settled run that replied needs none of that: the reply is the proof. */}
+      <button
+        type="button"
+        ref={node => { header = node; }}
+        data-slot="run-card-header"
+        aria-label={[runOutcomeLabel(outcome()), originLabel(), duration()].filter(Boolean).join(" · ")}
+        aria-expanded={expanded() ? "true" : "false"}
+        aria-controls={expanded() ? traceId() : undefined}
+        class="mt-2 flex min-h-6 w-full min-w-0 items-center gap-1.5 rounded-md text-left text-meta text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring pointer-coarse:min-h-11"
+        onClick={() => props.turn && setTurnExpanded(props.turn.id, !expanded())}
+      >
+        <span class="inline-flex size-3.5 shrink-0 items-center justify-center" data-slot="run-card-outcome"><OutcomeMark outcome={outcome()} /></span>
+        <Show when={timeLabel()}>{time => <span class="shrink-0 tabular-nums">{time()}</span>}</Show>
+        <Show when={timeLabel() && duration()}>{null}<span aria-hidden="true">·</span></Show>
+        <Show when={duration()}>{elapsed => <span class="shrink-0 tabular-nums">{elapsed()}</span>}</Show>
+        <Show when={!running() && originLabel()}>{label => <><span aria-hidden="true">·</span><span class="min-w-0 truncate" data-slot="run-card-origin">{label()}</span></>}</Show>
+        <Show when={outcomeWord()}>{word => <><span aria-hidden="true">·</span><span class="shrink-0">{word()}</span></>}</Show>
+        {/* A run whose trace holds nothing has no dead disclosure: the chevron
+            appears only when there is work to open. */}
+        <Show when={hasTrace(events(), props.activities)}>
+          <ChevronRight class={`ml-auto size-3 shrink-0 transition-transform ${expanded() ? "rotate-90" : ""}`} aria-hidden="true" />
+        </Show>
+      </button>
+      <Show when={running()}><p class="sr-only" role="status">{label()}</p></Show>
+    </Show>
+    <Show when={expanded()}>
+      <TurnTrace ref={node => { trace = node; }} turn={props.turn} events={events()} activities={props.activities} live={props.live} id={traceId()} />
+    </Show>
   </section>;
 }

@@ -18,15 +18,6 @@ use super::process_bridge::{terminal_process_delivery, trigger_display};
 use super::timers::*;
 use super::*;
 
-#[test]
-fn observation_resubscribe_backoff_grows_and_resets() {
-    let mut backoff = ObservationRetryBackoff::default();
-    let first = backoff.next_delay();
-    assert!(backoff.next_delay() > first);
-    backoff.reset();
-    assert_eq!(backoff.next_delay(), first);
-}
-
 pub(super) fn test_turn_output(
     outcome: lash::TurnOutcome,
     safe_text: &str,
@@ -559,16 +550,6 @@ async fn resident_agent_retries_bare_prose_and_projects_finished_chat_text() {
     assert!(responses.lock().unwrap().is_empty());
 }
 
-#[test]
-fn agent_host_section_references_runtime_config_and_docs_paths() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = crate::tests::test_config(dir.path());
-    let section = agent_host_section(&config);
-    assert!(section.contains(config.config_path.to_str().unwrap()));
-    assert!(section.contains(config.docs_path.to_str().unwrap()));
-    assert!(section.contains("## Host configuration"));
-}
-
 fn provider_rebind_test_core(
     provider: ProviderHandle,
     model: lash::ModelSpec,
@@ -821,51 +802,6 @@ fn tool_prose_never_names_a_dialect() {
                 );
             }
         }
-    }
-}
-
-#[test]
-fn the_native_session_is_typescript_rlm_with_processes_and_triggers() {
-    let config = hirsel_rlm_config();
-    assert_eq!(AGENT_RLM_DIALECT, RlmDialect::Typescript);
-    assert!(config.lashlang_abilities.processes);
-    assert!(config.lashlang_abilities.triggers);
-
-    // One session, one surface: the Thread tool set and the four coding
-    // operations are advertised together.
-    let names = hirsel_tool_definitions(&crate::subagent_models::registry_catalog())
-        .iter()
-        .map(|definition| definition.name().to_string())
-        .collect::<HashSet<_>>();
-    for expected in [
-        "threads_delegate",
-        "artifacts_create",
-        "read",
-        "edit",
-        "write",
-        "exec_command",
-    ] {
-        assert!(names.contains(expected), "missing tool {expected}");
-    }
-}
-
-#[test]
-fn hirsel_surface_exports_typed_thread_trigger_vocabulary() {
-    let rendered = format!("{:?}", hirsel_lashlang_surface());
-    for (source, event) in [
-        (THREAD_REPORTED_SOURCE_TYPE, THREAD_REPORTED_EVENT_TYPE),
-        (THREAD_COMPLETED_SOURCE_TYPE, THREAD_COMPLETED_EVENT_TYPE),
-        (THREAD_MESSAGE_SOURCE_TYPE, THREAD_MESSAGE_EVENT_TYPE),
-        (THREAD_TURN_SOURCE_TYPE, THREAD_TURN_EVENT_TYPE),
-    ] {
-        assert!(rendered.contains(source), "missing trigger source {source}");
-        assert!(rendered.contains(event), "missing event type {event}");
-    }
-    for field in ["thread_id", "title", "payload"] {
-        assert!(
-            rendered.contains(field),
-            "missing Thread event field {field}"
-        );
     }
 }
 

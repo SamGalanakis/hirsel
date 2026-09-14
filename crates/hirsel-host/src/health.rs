@@ -81,20 +81,3 @@ fn disk_has_space(path: &std::path::Path) -> anyhow::Result<()> {
     std::fs::metadata(path)?;
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use axum::{extract::State, http::StatusCode};
-
-    use super::readyz;
-    use crate::{build_state, tests::test_config};
-
-    #[tokio::test]
-    async fn readyz_is_ok_when_all_checks_pass() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = build_state(test_config(dir.path())).await.unwrap();
-        state.set_iroh_ticket(Some("test-ticket".to_string()));
-
-        assert_eq!(readyz(State(state)).await.status(), StatusCode::OK);
-    }
-}

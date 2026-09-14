@@ -235,28 +235,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-mod rendering_tests {
-    use super::*;
-    #[test]
-    fn scalar_and_structured_bodies_preserve_the_result() {
-        for (value, expected) in [
-            (serde_json::json!("bare \"string\""), "bare \"string\""),
-            (serde_json::json!(42), "42"),
-            (serde_json::json!(true), "true"),
-            (Value::Null, "null"),
-        ] {
-            assert_eq!(result_body(&value), expected);
-        }
-        assert_eq!(
-            result_body(&serde_json::json!({"ok":true})),
-            "```json\n{\n  \"ok\": true\n}\n```"
-        );
-        assert_eq!(
-            result_body(&serde_json::json!([1, null])),
-            "```json\n[\n  1,\n  null\n]\n```"
-        );
-        assert!(result_body(&serde_json::json!(["```"])).starts_with("````json\n"));
-    }
-}

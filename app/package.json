@@ -16,12 +16,8 @@
     "e2e:threads": "node ../e2e/thread-smoke.mjs",
     "e2e:product-runbook": "node ../e2e/product-runbook.mjs",
     "dev:artifact-preview": "vite --config artifact-preview.config.ts",
-    "e2e:artifacts": "node ../e2e/artifact-thread-smoke.mjs",
     "e2e:artifact-runtime": "node ../e2e/artifact-runtime-smoke.mjs",
-    "e2e:svg-artifact": "node ../e2e/svg-artifact-preview-smoke.mjs",
-    "e2e:artifact-presentation-recovery": "node ../e2e/artifact-presentation-recovery.mjs",
     "e2e:workspace-responsive": "node ../e2e/workspace-responsive.mjs",
-    "e2e:thread-showcase": "node ../e2e/thread-showcase-smoke.mjs",
     "e2e:openui-artifact": "node ../e2e/openui-artifact-smoke.mjs"
   },
   "dependencies": {

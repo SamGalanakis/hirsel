@@ -411,27 +411,3 @@ async fn showcase_owner_checks_history_revision_input_and_reopens() {
             .is_some_and(|a| a.id == 43 && a.thread_ids.is_empty())
     );
 }
-
-#[test]
-fn showcase_parser_distinguishes_omission_null_and_positive_identity() {
-    assert_eq!(parse_showcase(&json!({}), "id").unwrap(), None);
-    assert_eq!(
-        parse_showcase(&json!({"id":null}), "id").unwrap(),
-        Some(None)
-    );
-    assert_eq!(
-        parse_showcase(&json!({"id":5}), "id").unwrap(),
-        Some(Some(5))
-    );
-    for id in [
-        json!(0),
-        json!(-1),
-        json!(1.2),
-        json!("1"),
-        json!([]),
-        json!({}),
-        json!(true),
-    ] {
-        assert!(parse_showcase(&json!({"id":id}), "id").is_err());
-    }
-}

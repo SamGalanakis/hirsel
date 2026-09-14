@@ -86,6 +86,7 @@ GoogleService-Info.plist
 
 # Local report/critique output
 e2e/reports/
+e2e/protocol-compatibility/
 .impeccable/critique/
 
 # Local Impeccable verification captures

@@ -119,8 +119,6 @@ mod thread_tests;
 #[cfg(test)]
 mod upgrade_tests;
 
-#[cfg(test)]
-use bridges::*;
 pub(crate) use condense::*;
 pub(crate) use executor::*;
 use lifecycle::*;

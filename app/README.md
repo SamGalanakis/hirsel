@@ -61,7 +61,7 @@ Artifact verification uses isolated fixtures, never the live host:
 npm run dev:artifact-preview
 HIRSEL_ARTIFACT_TEST_URL=http://127.0.0.1:48594 npm run e2e:artifact-runtime
 # A scripted host with a temporary data directory and the production web build:
-HIRSEL_ARTIFACT_HOST_URL=http://127.0.0.1:PORT npm run e2e:artifacts
+HIRSEL_ARTIFACT_HOST_URL=http://127.0.0.1:PORT npm run e2e:openui-artifact
 ```
 
 Conversation URLs use the CommonMark/GFM link renderer, including reference-style links. GitHub pull requests, issues and repository URLs and Linear issue URLs have local type icons and compact URL-derived labels; authored labels remain unchanged. Native anchors preserve browser modifiers and context menus, while an adjacent keyboard/touch menu offers Open in new tab, Copy link and explicit Add to Related. Recognition makes no metadata/favicon request and creates no artifact or saved association. Saved links support add/remove and authoritative history-scoped snapshots. Related and preview navigation keep the current Thread and draft.

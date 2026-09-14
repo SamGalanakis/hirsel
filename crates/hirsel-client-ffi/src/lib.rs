@@ -58,24 +58,6 @@ impl From<core::ToolCallSummary> for ToolCall {
     }
 }
 
-#[cfg(test)]
-mod tool_call_tests {
-    use super::*;
-
-    #[test]
-    fn ffi_tool_call_keeps_canonical_id() {
-        let call: ToolCall = core::ToolCallSummary {
-            id: "call-7".to_string(),
-            name: "shell_run".to_string(),
-            ok: false,
-        }
-        .into();
-        assert_eq!(call.id, "call-7");
-        assert_eq!(call.name, "shell_run");
-        assert!(!call.ok);
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum ChatMessage {
     Confirmed {

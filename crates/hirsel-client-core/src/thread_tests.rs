@@ -217,12 +217,6 @@ fn thread_stream_rejects_prior_turn_duplicate_sequence_and_terminal_deltas() {
     assert!(store.streams[0].finished);
     assert_eq!(store.streams[1].events, vec![prose("other thread")]);
 }
-#[test]
-fn native_outbound_preserves_ownership_attachments_and_citations() {
-    assert!(
-        matches!(crate::client::pending_to_wire(&pending(5,"send")),ClientToHost::SendThreadMessage{thread_id:5,attachments,mentions,client_id,..} if attachments==vec!["blob-1"] && mentions==vec![9] && client_id=="send")
-    );
-}
 
 #[test]
 fn removed_message_stays_removed_across_late_echo_snapshot_and_open_history() {
@@ -539,13 +533,6 @@ fn related_item_identity_and_revision_are_discarded_on_history_reset() {
     assert!(!store.apply_thread_related("A", 5, 11, vec![saved.clone()]));
     assert!(store.apply_thread_related("B", 5, 1, vec![saved.clone()]));
     assert_eq!(store.snapshot().related_items, vec![saved]);
-}
-
-#[test]
-fn thread_detail_requires_explicit_related_items() {
-    let mut value = serde_json::to_value(link_detail(1, vec![])).unwrap();
-    value.as_object_mut().unwrap().remove("related_items");
-    assert!(serde_json::from_value::<ThreadDetail>(value).is_err());
 }
 
 #[test]

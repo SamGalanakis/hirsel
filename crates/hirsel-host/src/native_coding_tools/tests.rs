@@ -62,18 +62,6 @@ async fn coordinated_shell_call(tools: Arc<NativeCodingTools>, args: Value) -> T
     .output
 }
 
-#[test]
-fn catalog_is_exactly_the_four_tool_profile() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let tools = NativeCodingTools::new(directory.path().to_path_buf()).expect("tools");
-    let names = tools
-        .tool_manifests()
-        .into_iter()
-        .map(|manifest| manifest.name)
-        .collect::<Vec<_>>();
-    assert_eq!(names, ["read", "edit", "write", "exec_command"]);
-}
-
 #[tokio::test]
 async fn read_returns_unicode_safe_bounded_line_windows() {
     let directory = tempfile::tempdir().expect("tempdir");

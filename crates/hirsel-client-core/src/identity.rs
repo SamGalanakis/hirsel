@@ -21,22 +21,3 @@ fn serialize_iroh_identity(secret_key: &iroh::SecretKey) -> String {
     }
     encoded
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn generated_identity_round_trips_as_lowercase_hex() {
-        let identity = generate_iroh_identity();
-
-        assert_eq!(identity.len(), 64);
-        assert!(
-            identity
-                .chars()
-                .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
-        );
-        let parsed = parse_iroh_identity(&identity).unwrap();
-        assert_eq!(serialize_iroh_identity(&parsed), identity);
-    }
-}

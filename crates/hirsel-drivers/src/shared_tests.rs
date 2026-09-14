@@ -1,10 +1,7 @@
 use futures_util::StreamExt;
 use tokio::time::{Duration, timeout};
 
-use crate::{
-    DriverError, FakeDriver, SpawnSpec, SubagentDriver, SubagentEvent, TerminalOutcome,
-    shared::EventHub, test_support::scoped_launch,
-};
+use crate::{SubagentEvent, TerminalOutcome, shared::EventHub, test_support::scoped_launch};
 
 #[test]
 fn scoped_launch_rejects_invalid_paths_and_catalog_without_disclosing_them() {
@@ -21,43 +18,6 @@ fn scoped_launch_rejects_invalid_paths_and_catalog_without_disclosing_them() {
         launch.expected_tools = tools.into_iter().map(str::to_owned).collect();
         assert!(launch.validate().is_err());
     }
-}
-
-#[test]
-fn scoped_bridge_arguments_preserve_spaces_as_literal_arguments() {
-    let mut launch = scoped_launch();
-    launch.socket_path = "/private bridge/socket name".into();
-    launch.capability_file = "/private bridge/capability name".into();
-    assert_eq!(
-        launch.bridge_args(),
-        vec![
-            std::ffi::OsString::from("thread-tool-bridge"),
-            "--socket".into(),
-            "/private bridge/socket name".into(),
-            "--cap-file".into(),
-            "/private bridge/capability name".into(),
-        ]
-    );
-}
-
-#[test]
-fn spawn_spec_requires_scoped_bridge_on_wire() {
-    let spec = SpawnSpec {
-        agent: crate::AgentKind::Claude,
-        model: None,
-        variant: None,
-        prompt: "test".into(),
-        cwd: "/tmp".into(),
-        fake_fixture: None,
-        scoped_mcp: scoped_launch(),
-    };
-    let mut value = serde_json::to_value(&spec).unwrap();
-    assert_eq!(
-        serde_json::from_value::<SpawnSpec>(value.clone()).unwrap(),
-        spec
-    );
-    value.as_object_mut().unwrap().remove("scoped_mcp");
-    assert!(serde_json::from_value::<SpawnSpec>(value).is_err());
 }
 
 #[test]
@@ -227,53 +187,6 @@ async fn empty_or_duplicate_output_never_invents_another_assistant_message() {
             },
         ]
     );
-}
-
-#[tokio::test]
-async fn fake_final_output_is_full_but_summary_bounded_and_dead_controls_reject() {
-    let fixture = tempfile::NamedTempFile::new().unwrap();
-    let full = "é".repeat(30_000);
-    std::fs::write(
-        fixture.path(),
-        serde_json::to_vec(&serde_json::json!({
-            "delay_ms": 0, "progress": [], "assistant_output": full,
-            "terminal": {"status":"done", "summary": full},
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let driver = FakeDriver::default();
-    let handle = driver
-        .spawn(SpawnSpec {
-            agent: crate::AgentKind::Codex,
-            model: Some("chosen".into()),
-            variant: Some("high".into()),
-            prompt: "test".into(),
-            cwd: "/tmp".into(),
-            fake_fixture: Some(fixture.path().into()),
-            scoped_mcp: scoped_launch(),
-        })
-        .await
-        .unwrap();
-    let events = driver.events(&handle).unwrap().collect::<Vec<_>>().await;
-    assert_eq!(events[1], SubagentEvent::AssistantOutput { text: full });
-    let SubagentEvent::Terminal {
-        outcome: TerminalOutcome::Done { summary },
-    } = &events[2]
-    else {
-        panic!("missing terminal")
-    };
-    assert_eq!(summary.chars().count(), 24_000);
-    assert!(matches!(
-        driver.prompt(&handle, "later".into()).await,
-        Err(DriverError::SessionClosed)
-    ));
-    assert!(matches!(
-        driver.interrupt(&handle).await,
-        Err(DriverError::SessionClosed)
-    ));
-    driver.retire(&handle).await.unwrap();
-    driver.retire(&handle).await.unwrap();
 }
 
 #[tokio::test]

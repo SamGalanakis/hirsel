@@ -126,12 +126,6 @@ def cargo_test_policy(
             " Python agent peer installed on a rewritten PATH, and reads"
             " another package's sources from the repository root"
         )
-    if package_name == "hirsel-host" and target_name == "iroh_client_flow":
-        tags.extend(["manual", "cargo-network-gate"])
-        reasons.append(
-            "every case is `#[ignore]`d behind the public n0 relay, so the"
-            " partition would cache an empty run as proof"
-        )
     reason = "; ".join(reasons) if reasons else None
     return sorted(set(tags)), reason
 

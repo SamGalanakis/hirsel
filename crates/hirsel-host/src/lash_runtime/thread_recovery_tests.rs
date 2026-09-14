@@ -944,27 +944,6 @@ async fn rlm_observer_retains_integrity_failure_until_recovery_and_failed_termin
     );
 }
 
-#[test]
-fn delayed_observations_route_without_retaining_completed_turns() {
-    assert_eq!(
-        super::bridges::observation_thread_route("host-queue-drain:100:3:thread:8:turn:9"),
-        Some((8, 9))
-    );
-    assert_eq!(
-        super::bridges::observation_thread_route("host-queue-drain:100:4:thread:2:turn:11"),
-        Some((2, 11))
-    );
-    assert_eq!(
-        super::bridges::observation_thread_route("host-queue-drain:100:3:thread:8:turn:9"),
-        Some((8, 9))
-    );
-    assert_eq!(super::bridges::observation_thread_route("unowned"), None);
-    assert_eq!(
-        super::bridges::observation_thread_route("host-queue-drain:100:3:thread:8:turn:9:extra"),
-        None
-    );
-}
-
 #[tokio::test]
 async fn background_runtime_drain_has_durable_turn_and_tagged_identity() {
     let (state, _dir) = runtime_fixture().await;

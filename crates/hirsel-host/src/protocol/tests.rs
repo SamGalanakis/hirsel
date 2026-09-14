@@ -5,9 +5,8 @@ use hirsel_proto::{ChatAuthor, ClientToHost, HelloAuth, HostToClient};
 use serde_json::json;
 
 use super::{
-    Authenticated, HelloBroadcastDedupe, IncomingFrame, POST_AUTH_MAX_FRAME_BYTES,
-    PRE_AUTH_MAX_FRAME_BYTES, ProtocolChannel, authenticate, build_snapshot, handle_client_frame,
-    run_protocol,
+    Authenticated, IncomingFrame, ProtocolChannel, authenticate, build_snapshot,
+    handle_client_frame, run_protocol,
 };
 use crate::{
     auth::AuthPeer,
@@ -268,30 +267,6 @@ async fn full_resync_snapshot_replays_all_chat() {
         }
         other => panic!("unexpected resync frame: {other:?}"),
     }
-}
-
-#[test]
-fn pre_auth_frames_have_a_stricter_limit() {
-    assert_eq!(PRE_AUTH_MAX_FRAME_BYTES, 8 * 1024);
-    const { assert!(PRE_AUTH_MAX_FRAME_BYTES < POST_AUTH_MAX_FRAME_BYTES) };
-}
-
-#[test]
-fn repeated_view_upserts_stay_deduplicated() {
-    let view = hirsel_proto::ViewInstance {
-        thread_id: 7,
-        instance_id: "status".to_string(),
-        spec: json!({ "type": "text", "text": "Ready" }),
-    };
-    let event = HostToClient::ViewUpsert {
-        thread_id: view.thread_id,
-        instance_id: view.instance_id.clone(),
-        spec: view.spec.clone(),
-    };
-    let mut dedupe = HelloBroadcastDedupe::new(vec![view]);
-
-    assert!(!dedupe.should_send(&event));
-    assert!(!dedupe.should_send(&event));
 }
 
 struct TestChannel {

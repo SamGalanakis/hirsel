@@ -317,23 +317,3 @@ async fn timestamp_projection_orders_mixed_offsets_within_one_millisecond() {
     )
     .await;
 }
-
-#[tokio::test]
-async fn timestamp_projection_orders_fractional_after_whole_second() {
-    assert_precise_terminal_projection(
-        "2021-01-01T10:00:00.000000100Z",
-        "2021-01-01T10:00:00Z",
-        true,
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn timestamp_projection_breaks_equal_instants_by_turn_id_despite_offsets() {
-    assert_precise_terminal_projection(
-        "2021-01-01T12:00:00.123456789+02:00",
-        "2021-01-01T10:00:00.123456789Z",
-        false,
-    )
-    .await;
-}

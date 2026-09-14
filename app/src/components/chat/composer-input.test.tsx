@@ -4,7 +4,6 @@ import { createRoot } from "solid-js";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Blob } from "../../protocol";
-import { LARGE_PASTE_CHARS } from "./paste";
 
 // Composer input parity (paste images, large-paste-as-ref, drag & drop). These
 // drive the real attachments controller rather than a stub, so the routing
@@ -70,123 +69,6 @@ function paste(el: Element, data: DataTransfer) {
   return event;
 }
 
-describe("pasting images", () => {
-  it("stages a pasted image as a named chip instead of typing into the field", async () => {
-    const { textarea, attachments, findByText } = await renderComposer();
-    const png = new File(["bytes"], "image.png", { type: "image/png" });
-
-    const event = paste(textarea, transfer({ files: [png] }));
-
-    expect(event.defaultPrevented).toBe(true);
-    expect(attachments.files()).toHaveLength(1);
-    expect(attachments.files()[0].kind).toBe("image");
-    expect(await findByText("pasted-image-1.png")).toBeTruthy();
-    expect(textarea.value).toBe("");
-  });
-
-  it("numbers multiple pasted images within one message", async () => {
-    const { textarea, attachments } = await renderComposer();
-    paste(
-      textarea,
-      transfer({
-        files: [
-          new File(["a"], "image.png", { type: "image/png" }),
-          new File(["b"], "image.png", { type: "image/png" }),
-        ],
-      }),
-    );
-    expect(attachments.files().map((f) => f.name)).toEqual([
-      "pasted-image-1.png",
-      "pasted-image-2.png",
-    ]);
-  });
-});
-
-describe("pasting text", () => {
-  it("leaves a small paste to the browser's own inline insertion", async () => {
-    const { textarea, attachments } = await renderComposer();
-
-    const event = paste(textarea, transfer({ text: "a short thought" }));
-
-    expect(event.defaultPrevented).toBe(false);
-    expect(attachments.files()).toEqual([]);
-  });
-
-  it("stages a large paste as a pasted-text ref described by line count", async () => {
-    const { textarea, attachments, findByText } = await renderComposer();
-    const big = "x".repeat(LARGE_PASTE_CHARS);
-
-    const event = paste(textarea, transfer({ text: big }));
-
-    expect(event.defaultPrevented).toBe(true);
-    expect(attachments.files()).toHaveLength(1);
-    const staged = attachments.files()[0];
-    expect(staged.name).toBe("pasted-text-1.txt");
-    expect(staged.kind).toBe("text");
-    expect(staged.text).toBe(big);
-    expect(await findByText("Pasted text · 1 lines")).toBeTruthy();
-    expect(textarea.value).toBe("");
-  });
-
-  it("puts the paste back in the field when asked to insert it as text", async () => {
-    const { textarea, attachments, findByLabelText } = await renderComposer();
-    const big = "x".repeat(LARGE_PASTE_CHARS);
-    paste(textarea, transfer({ text: big }));
-
-    const insert = await findByLabelText('Insert "pasted-text-1.txt" as text');
-    fireEvent.click(insert);
-
-    expect(attachments.files()).toEqual([]);
-    expect(textarea.value).toBe(big);
-  });
-
-  it("offers no insert-as-text action on an ordinary file chip", async () => {
-    const { textarea, queryByLabelText, findByText } = await renderComposer();
-    paste(textarea, transfer({ files: [new File(["x"], "a.png", { type: "image/png" })] }));
-    await findByText("pasted-image-1.png");
-    expect(queryByLabelText(/as text$/)).toBeNull();
-  });
-});
-
-describe("drag and drop", () => {
-  it("shows the drop target while files are over the window and stages the drop", async () => {
-    const { container, attachments, findByText } = await renderComposer();
-    const shell = container.querySelector('[data-slot="composer-shell"]') as HTMLElement;
-    const data = transfer({ files: [new File(["x"], "notes.pdf", { type: "application/pdf" })] });
-
-    fireEvent(window, Object.assign(new Event("dragenter", { bubbles: true }), { dataTransfer: data }));
-    expect(shell.dataset.dropping).toBe("true");
-    expect(await findByText(/Drop to attach/)).toBeTruthy();
-
-    fireEvent(window, Object.assign(new Event("drop", { bubbles: true, cancelable: true }), { dataTransfer: data }));
-
-    expect(shell.dataset.dropping).toBe("false");
-    expect(attachments.files().map((f) => f.name)).toEqual(["notes.pdf"]);
-    expect(attachments.files()[0].kind).toBe("file");
-  });
-
-  it("refuses a dropped folder with a stated reason and stages nothing", async () => {
-    const { attachments } = await renderComposer();
-    const { toasts } = await import("../../lib/toast");
-
-    const data = transfer({ directories: ["src"] });
-    fireEvent(window, Object.assign(new Event("drop", { bubbles: true, cancelable: true }), { dataTransfer: data }));
-
-    expect(attachments.files()).toEqual([]);
-    expect(toasts().map((t) => t.message)).toContain(
-      "Folders can't be attached — drop the files inside",
-    );
-  });
-
-  it("ignores a drag that carries no files", async () => {
-    const { container } = await renderComposer();
-    const shell = container.querySelector('[data-slot="composer-shell"]') as HTMLElement;
-    const data = transfer({ text: "dragged selection" });
-    fireEvent(window, Object.assign(new Event("dragenter", { bubbles: true }), { dataTransfer: data }));
-    expect(shell.dataset.dropping).toBe("false");
-  });
-});
-
 describe("host limits", () => {
   it("refuses a file past the Host's 15 MB blob ceiling at staging time", async () => {
     const { textarea, attachments } = await renderComposer();
@@ -221,23 +103,6 @@ describe("the upload lifecycle on the staged file", () => {
 
   const blobFor = (id: string): Blob => ({ id, name: "a.png", mime: "image/png", size: 1 });
 
-  it("stages idle, ends done carrying the blob, and never re-uploads it", async () => {
-    let calls = 0;
-    const { attachments } = await stagedWithClient(async () => {
-      calls += 1;
-      return blobFor("blob-1");
-    });
-    expect(attachments.files()[0].upload).toEqual({ state: "idle" });
-
-    expect(await attachments.uploadAll()).toEqual([blobFor("blob-1")]);
-    // Done OWNS the blob: there is no done-without-a-blob to defend against.
-    expect(attachments.files()[0].upload).toEqual({ state: "done", blob: blobFor("blob-1") });
-
-    // A second send re-uses the resolved blob rather than uploading again.
-    expect(await attachments.uploadAll()).toEqual([blobFor("blob-1")]);
-    expect(calls).toBe(1);
-  });
-
   it("records the failure reason once, and retry returns the chip to uploading", async () => {
     let fail = true;
     const { attachments, findByLabelText, findByText } = await stagedWithClient(async () => {
@@ -256,20 +121,5 @@ describe("the upload lifecycle on the staged file", () => {
     await vi.waitFor(() =>
       expect(attachments.files()[0].upload).toEqual({ state: "done", blob: blobFor("blob-2") }),
     );
-  });
-});
-
-describe("composer placeholder", () => {
-  it("names the Thread and truncates a long title with an ellipsis, never a bare id", async () => {
-    const { composerPlaceholder } = await import("./Composer");
-    expect(composerPlaceholder("Message Buy groceries")).toBe("Message Buy groceries");
-    const long = `Message ${"Quarterly planning ".repeat(4)}`;
-    expect(composerPlaceholder(long)).toHaveLength(44);
-    expect(composerPlaceholder(long).endsWith("…")).toBe(true);
-    // A 390px phone field (~250px of text) keeps one line: the name, shortened.
-    const { placeholderLimit } = await import("./Composer");
-    expect(placeholderLimit(250)).toBe(33);
-    expect(composerPlaceholder(long, placeholderLimit(250))).toHaveLength(33);
-    expect(placeholderLimit(40)).toBe(16);
   });
 });

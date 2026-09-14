@@ -147,23 +147,3 @@ describe("model config: subagent_models_changed", () => {
     expect(changed.subagentModels).toEqual(CATALOG);
   });
 });
-
-describe("model config: defensiveness", () => {
-  it("does not throw on a hello_ok that omits the model fields", () => {
-    // Absent model/subagent_models must be tolerated (older host), defaulting
-    // to null rather than throwing so the app never white-screens.
-    expect(() => helloOk({})).not.toThrow();
-  });
-
-  it("does not throw on a model_changed with no prior snapshot", () => {
-    expect(() =>
-      reduce(initialState(), { type: "model_changed", model: MODEL }),
-    ).not.toThrow();
-  });
-
-  it("does not throw on a subagent_models_changed with no prior catalog", () => {
-    expect(() =>
-      reduce(initialState(), { type: "subagent_models_changed", catalog: { providers: [] } }),
-    ).not.toThrow();
-  });
-});

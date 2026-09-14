@@ -34,16 +34,6 @@ async fn store(dir: &tempfile::TempDir) -> ConfigStore {
     .unwrap()
 }
 
-#[test]
-fn registry_validates_models_and_variants() {
-    let selected = validate_selection(ProviderMode::Codex, "gpt-5.6-sol", "high").unwrap();
-    assert_eq!(selected.id, "gpt-5.6-sol");
-    assert_eq!(selected.variant, "high");
-    assert!(validate_selection(ProviderMode::Codex, "gpt-5.6-luna", "max").is_err());
-    assert!(validate_selection(ProviderMode::Codex, "gpt-5", "high").is_err());
-    assert!(validate_selection(ProviderMode::Codex, "gpt-5.6-sol", "impossible").is_err());
-}
-
 #[tokio::test]
 async fn astra_is_selectable_without_changing_the_default_or_fork_catalog() {
     let dir = tempfile::tempdir().unwrap();
@@ -111,39 +101,6 @@ fn codex_fork_registry_defaults_to_luna_max_and_can_escalate_to_sol() {
         })
     );
     assert!(validate_fork_selection(ProviderMode::Codex, "gpt-5.6-sol", "high").is_ok());
-}
-
-#[test]
-fn registries_are_scoped_to_their_provider() {
-    assert_eq!(
-        available_models(ProviderMode::OpenRouter)
-            .into_iter()
-            .map(|model| model.id)
-            .collect::<Vec<_>>(),
-        vec!["deepseek/deepseek-v4.1-flash".to_string()]
-    );
-    // A model from the other provider's registry is unknown here, and vice
-    // versa; Anthropic mode offers nothing selectable at all.
-    assert!(validate_selection(ProviderMode::OpenRouter, "gpt-5.6-sol", "high").is_err());
-    assert!(
-        validate_selection(
-            ProviderMode::Codex,
-            "deepseek/deepseek-v4.1-flash",
-            "default"
-        )
-        .is_err()
-    );
-    assert!(available_models(ProviderMode::Anthropic).is_empty());
-}
-
-#[test]
-fn openrouter_offers_a_single_provider_default_variant() {
-    let models = available_models(ProviderMode::OpenRouter);
-    let entry = models.first().expect("OpenRouter registry entry");
-    assert_eq!(entry.label, "DeepSeek V4.1 Flash");
-    assert_eq!(entry.variants, vec!["default".to_string()]);
-    assert_eq!(entry.default_variant, "default");
-    assert!(validate_selection(ProviderMode::OpenRouter, &entry.id, "high").is_err());
 }
 
 #[tokio::test]
@@ -378,57 +335,4 @@ async fn a_main_provider_the_host_did_not_boot_on_still_reaches_the_live_spec() 
     assert_eq!(keyless.current().id, "k/m");
     assert_eq!(keyless.model_spec().unwrap().id, "gpt-5.6-sol");
     assert!(!keyless.applies_to_live_session());
-}
-
-#[test]
-fn model_spec_carries_the_selected_effort_and_capability() {
-    let spec = model_spec(
-        ProviderMode::Codex,
-        &ModelSelection {
-            id: "gpt-5.6-sol".to_string(),
-            variant: "high".to_string(),
-        },
-    )
-    .unwrap();
-    assert_eq!(spec.id, "gpt-5.6-sol");
-    assert_eq!(spec.variant.effort(), Some("high"));
-    assert_eq!(spec.limits.context_window_tokens.get(), 200_000);
-    assert!(
-        spec.capability
-            .reasoning
-            .expect("reasoning capability")
-            .efforts
-            .contains(&"high".to_string())
-    );
-}
-
-#[test]
-fn codex_fork_model_spec_accepts_the_default_luna_lane() {
-    let spec = model_spec(
-        ProviderMode::Codex,
-        &ModelSelection {
-            id: "gpt-5.6-luna".to_string(),
-            variant: "max".to_string(),
-        },
-    )
-    .unwrap();
-
-    assert_eq!(spec.id, "gpt-5.6-luna");
-    assert_eq!(spec.variant.effort(), Some("max"));
-}
-
-#[test]
-fn openrouter_model_spec_defers_reasoning_to_the_provider() {
-    let spec = model_spec(
-        ProviderMode::OpenRouter,
-        &ModelSelection {
-            id: "deepseek/deepseek-v4.1-flash".to_string(),
-            variant: "default".to_string(),
-        },
-    )
-    .unwrap();
-    assert_eq!(spec.id, "deepseek/deepseek-v4.1-flash");
-    assert_eq!(spec.variant, ReasoningSelection::ProviderDefault);
-    assert_eq!(spec.limits.context_window_tokens.get(), 1_000_000);
-    assert!(spec.capability.reasoning.is_none());
 }

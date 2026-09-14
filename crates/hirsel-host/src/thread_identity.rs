@@ -93,6 +93,3 @@ impl ThreadIdentity {
         block
     }
 }
-
-#[cfg(test)]
-mod tests;

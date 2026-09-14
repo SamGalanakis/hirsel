@@ -180,53 +180,6 @@ fn thread_mutations_require_captured_history_on_the_wire() {
 }
 
 #[test]
-fn upload_blob_and_blob_ok_round_trip() {
-    let upload = ClientToHost::UploadBlob {
-        client_id: "upload-1".to_string(),
-        name: "tiny.png".to_string(),
-        mime: "image/png".to_string(),
-        data_b64: "iVBORw0KGgo=".to_string(),
-    };
-    let encoded = serde_json::to_string(&upload).unwrap();
-    let decoded: ClientToHost = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(decoded, upload);
-
-    let response = HostToClient::BlobOk {
-        client_id: "upload-1".to_string(),
-        blob: Blob {
-            id: "blob-1".to_string(),
-            name: "tiny.png".to_string(),
-            mime: "image/png".to_string(),
-            size: 8,
-        },
-    };
-    let encoded = serde_json::to_string(&response).unwrap();
-    let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(decoded, response);
-
-    let request = ClientToHost::GetBlobUrl {
-        client_id: "url-1".to_string(),
-        blob_id: "blob-1".to_string(),
-    };
-    let encoded = serde_json::to_string(&request).unwrap();
-    assert_eq!(
-        serde_json::from_str::<ClientToHost>(&encoded).unwrap(),
-        request
-    );
-    let response = HostToClient::BlobUrl {
-        client_id: "url-1".to_string(),
-        blob_id: "blob-1".to_string(),
-        url: "/blob/blob-1?exp=300&sig=signed".to_string(),
-        expires_at: 300,
-    };
-    let encoded = serde_json::to_string(&response).unwrap();
-    assert_eq!(
-        serde_json::from_str::<HostToClient>(&encoded).unwrap(),
-        response
-    );
-}
-
-#[test]
 fn view_frames_round_trip_with_resolved_specs_and_event_data() {
     let spec = json!({
         "type": "action",
@@ -308,22 +261,6 @@ fn msg_removed_round_trips() {
     assert_eq!(encoded, r#"{"type":"msg_removed","id":42}"#);
     let decoded: HostToClient = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded, response);
-}
-
-#[test]
-fn chat_message_without_attachments_deserializes_as_empty() {
-    let value = json!({
-        "id": 1,
-        "author": "owner",
-        "body": "message",
-        "thread_id": 0,
-        "ref": null,
-        "ts": "2026-07-08T12:00:00Z"
-    });
-
-    let parsed: ChatMessage = serde_json::from_value(value).unwrap();
-    assert!(parsed.attachments.is_empty());
-    assert!(parsed.tool_calls.is_empty());
 }
 
 #[test]

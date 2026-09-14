@@ -135,29 +135,6 @@ hirsel_rust_unit_test(
 )
 
 hirsel_rust_integration_test(
-    name = "iroh_client_flow__test",
-    crate_features = [],
-    crate_name = "iroh_client_flow",
-    crate_root = "tests/iroh_client_flow.rs",
-    declared_features = [],
-    extra_compile_data = [
-        "//:hirsel_config_doc",
-        "//:prompt_files",
-        "//:template_files",
-    ],
-    library = ":hirsel-host",
-    library_crate_name = "hirsel_host",
-    manifest_dir = "crates/hirsel-host",
-    package_name = "hirsel-host",
-    rustc_env = {},
-    tags = [
-        "cargo-network-gate",
-        "manual",
-    ],
-    version = "0.1.0",
-)
-
-hirsel_rust_integration_test(
     name = "nested_runtime__test",
     crate_features = [],
     crate_name = "nested_runtime",

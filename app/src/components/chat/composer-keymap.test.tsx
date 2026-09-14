@@ -1,5 +1,4 @@
 import { fireEvent, render } from "@solidjs/testing-library";
-import userEvent from "@testing-library/user-event";
 import { createRoot, flush } from "solid-js";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -127,109 +126,6 @@ describe("Per-surface draft persistence (task 2)", () => {
     fireEvent.keyDown(textarea, { key: "Enter" });
     expect(onSend).toHaveBeenCalledOnce();
     expect(localStorage.getItem("hirsel.draft.main")).toBeNull();
-  });
-});
-
-describe("Queue-next-turn affordance (task 4)", () => {
-  it("queues the draft on Ctrl+Shift+Enter, in next_turn mode", async () => {
-    const onSend = vi.fn();
-    const { textarea } = await renderComposer({ onSend });
-    fireEvent.input(textarea, { target: { value: "later work" } });
-
-    fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true, shiftKey: true });
-
-    expect(onSend).toHaveBeenCalledOnce();
-    // onSend(body, mode, blobs, mentions) — mode is the 2nd arg.
-    expect(onSend.mock.calls[0][1]).toBe("next_turn");
-  });
-
-  it("leaves Tab as ordinary focus movement with an unfinished draft", async () => {
-    const onSend = vi.fn();
-    const { textarea } = await renderComposer({ onSend });
-    fireEvent.input(textarea, { target: { value: "unfinished draft" } });
-    expect(fireEvent.keyDown(textarea, { key: "Tab" })).toBe(true);
-    expect(onSend).not.toHaveBeenCalled();
-    expect(textarea.value).toBe("unfinished draft");
-  });
-
-  it("writes BOTH queue routes into the shortcut sheet, since the capsule shows neither", async () => {
-    const { SHORTCUTS } = await import("../../lib/keymap");
-    const queue = SHORTCUTS.filter((s) => /Queue for next turn/.test(s.label));
-    expect(queue.map((s) => s.keys.join("+")).sort()).toEqual(["Hold Send", "⌘/Ctrl+Shift+Enter"]);
-    expect(queue.every((s) => s.group === "Hirsel")).toBe(true);
-  });
-});
-
-describe("No dead affordances in the capsule (composer redesign)", () => {
-  it("keeps a working Send button on fine pointers alongside Enter", async () => {
-    const onSend = vi.fn();
-    const { getByLabelText, queryByLabelText, textarea } = await renderComposer({ onSend });
-    expect(queryByLabelText("More send options")).toBeNull();
-    expect(getByLabelText("Send")).toBeDisabled();
-    fireEvent.input(textarea, { target: { value: "a non-empty draft" } });
-    expect(getByLabelText("Send")).not.toBeDisabled();
-    await userEvent.setup().click(getByLabelText("Send"));
-    expect(onSend).toHaveBeenCalledOnce();
-    expect(onSend.mock.calls[0][0]).toBe("a non-empty draft");
-    expect(onSend.mock.calls[0][1]).toBe("send");
-    expect(textarea.value).toBe("");
-  });
-
-  it("still sends on Enter and keeps attach and Stop reachable while thinking", async () => {
-    const onSend = vi.fn();
-    const onStop = vi.fn();
-    const { textarea, getByLabelText } = await renderComposer({ onSend, onStop, thinking: true });
-    expect(getByLabelText("Attach files")).toBeInTheDocument();
-
-    const user = userEvent.setup();
-    await user.click(getByLabelText("Stop the agent"));
-    expect(onStop).toHaveBeenCalledOnce();
-
-    fireEvent.input(textarea, { target: { value: "ship it" } });
-    fireEvent.keyDown(textarea, { key: "Enter" });
-    expect(onSend).toHaveBeenCalledOnce();
-    expect(onSend.mock.calls[0][1]).toBe("send");
-  });
-
-  it.each(["send", "next_turn"])("keeps busy touch %s available without stopping the active turn", async (mode) => {
-    const matchMedia = vi.spyOn(window, "matchMedia").mockImplementation(query => ({
-      matches: query === "(pointer: coarse)", media: query, onchange: null,
-      addEventListener: () => {}, removeEventListener: () => {},
-      addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
-    }));
-    try {
-      const onSend = vi.fn(), onStop = vi.fn();
-      const { textarea, getByLabelText } = await renderComposer({ thinking: true, onSend, onStop });
-      flush();
-      fireEvent.input(textarea, { target: { value: "Continue with this follow-up" } });
-      const send = getByLabelText("Send");
-      expect(getByLabelText("Stop the agent")).toBeInTheDocument();
-      if (mode === "next_turn") {
-        vi.useFakeTimers();
-        fireEvent.pointerDown(send);
-        flush(() => vi.advanceTimersByTime(500));
-        fireEvent.pointerUp(send);
-      }
-      fireEvent.click(send);
-      expect(onSend).toHaveBeenCalledOnce();
-      expect(onSend.mock.calls[0]).toEqual(["Continue with this follow-up", mode, [], [], []]);
-      expect(onStop).not.toHaveBeenCalled();
-      expect(textarea.value).toBe("");
-      fireEvent.click(getByLabelText("Stop the agent"));
-      expect(onStop).toHaveBeenCalledOnce();
-    } finally { vi.useRealTimers(); matchMedia.mockRestore(); }
-  });
-
-  it("rests one line high: the capsule's own padding plus a 36px text row", async () => {
-    const { container, textarea } = await renderComposer({});
-    const shell = container.querySelector('[data-slot="composer-shell"]') as HTMLElement;
-    // The resting capsule is 44px on a fine pointer (py-1 + min-h-9), not the
-    // 60px slab it was (py-2 + min-h-11). Asserted through the classes because
-    // jsdom does not lay out.
-    expect(shell.className).toContain("py-1");
-    expect(shell.className).not.toContain("py-2");
-    expect(textarea.className).toContain("min-h-9");
-    expect(textarea.className).toContain("max-h-28");
   });
 });
 

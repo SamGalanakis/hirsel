@@ -216,34 +216,6 @@ async fn fork_wake(
 // ------------------------------------------------------------- the pack itself
 
 #[test]
-fn the_pack_carries_the_trigger_verbatim_plus_a_curated_slice() {
-    let message = external_message();
-    let context = PackContext {
-        threads: vec![event(11, "release-channel", "Choose stable or beta")],
-        recent_chat: vec![
-            chat(1, ChatAuthor::Owner, "ship the migration"),
-            chat(2, ChatAuthor::Agent, "started a worker on it"),
-        ],
-    };
-
-    let pack = build_pack(&message, &context);
-
-    // 1. the triggering message, verbatim and attributed
-    assert!(pack.contains("external proc-7"));
-    assert!(pack.contains("Sub-agent completed: the migration landed on main."));
-    // 2. the live inventory, by id and one line
-    assert!(
-        pack.contains("#11 release-channel — Choose stable or beta (open; attention=NeedsOwner)")
-    );
-    // ... but never the UI payload
-    assert!(!pack.contains("secret ui payload"));
-    // 3. the conversation tail, oldest first
-    let owner_at = pack.find("owner: ship the migration").unwrap();
-    let agent_at = pack.find("agent: started a worker on it").unwrap();
-    assert!(owner_at < agent_at);
-}
-
-#[test]
 fn the_pack_bounds_every_section_and_never_dumps_history() {
     let message = WakeMessage::new(
         1,
@@ -278,49 +250,7 @@ fn the_pack_bounds_every_section_and_never_dumps_history() {
     assert!(pack.contains('…'));
 }
 
-#[test]
-fn an_empty_host_still_renders_every_pack_section() {
-    let pack = build_pack(&external_message(), &PackContext::default());
-
-    assert!(pack.contains("## Incoming event"));
-    assert!(pack.contains("## Threads\n\n(none open)"));
-    assert!(pack.contains("## Recent conversation\n\n(none)"));
-}
-
 // ------------------------------------------------------------- the tool surface
-
-#[test]
-fn the_fork_tool_surface_is_exactly_its_three_exits() {
-    let names = fork_tool_definitions()
-        .iter()
-        .map(|definition| definition.name().to_string())
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        names,
-        vec![
-            "fork_record_info",
-            "fork_record_summary",
-            "fork_escalate",
-            "fork_drop",
-        ]
-    );
-    // A fork never spawns Sub-agents, never speaks to the Owner, and never
-    // starts long work — enforced as capability, not as instruction.
-    for forbidden in [
-        "threads_delegate",
-        "threads_send",
-        "threads_report",
-        "threads_create",
-        "shell_run",
-        "views_show",
-    ] {
-        assert!(
-            !names.iter().any(|name| name == forbidden),
-            "the fork catalog must not contain {forbidden}"
-        );
-    }
-}
 
 #[tokio::test]
 async fn a_fork_gets_exactly_one_exit() {

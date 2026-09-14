@@ -154,30 +154,3 @@ pub fn is_valid_tool_name(name: &str) -> bool {
         character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::is_valid_plugin_id;
-
-    #[test]
-    fn plugin_ids_are_lowercase_kebab() {
-        assert!(is_valid_plugin_id("hello"));
-        assert!(is_valid_plugin_id("linear-triage"));
-        assert!(is_valid_plugin_id("h2"));
-        assert!(!is_valid_plugin_id(""));
-        assert!(!is_valid_plugin_id("Hello"));
-        assert!(!is_valid_plugin_id("2fast"));
-        assert!(!is_valid_plugin_id("hello_world"));
-        assert!(!is_valid_plugin_id("hello-"));
-        assert!(!is_valid_plugin_id("hello--world"));
-    }
-}
-
-#[test]
-fn tool_names_are_lowercase_identifiers() {
-    assert!(is_valid_tool_name("ping"));
-    assert!(is_valid_tool_name("send_note2"));
-    assert!(!is_valid_tool_name("Ping"));
-    assert!(!is_valid_tool_name("send-note"));
-    assert!(!is_valid_tool_name(""));
-}

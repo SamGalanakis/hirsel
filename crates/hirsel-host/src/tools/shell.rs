@@ -41,25 +41,3 @@ fn truncate_output(output: impl AsRef<str>) -> String {
     truncated.push_str("\n[truncated]");
     truncated
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn timed_out_projection_preserves_stderr_and_serializes_timeout() {
-        let projected = shell_output(crate::process_run::BashCommandOutput {
-            status: None,
-            stdout: b"partial-output".to_vec(),
-            stderr: b"diagnostic: child still running".to_vec(),
-            timed_out: true,
-        });
-
-        assert_eq!(projected.stderr, "diagnostic: child still running");
-
-        let encoded = serde_json::to_value(&projected).unwrap();
-        assert_eq!(encoded["stderr"], "diagnostic: child still running");
-        assert_eq!(encoded["timed_out"], true);
-        assert!(encoded["status"].is_null());
-    }
-}

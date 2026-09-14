@@ -5,9 +5,10 @@ and follow [`../runbooks/RULES.md`](../runbooks/RULES.md). Keep those semantic
 browser checks separate from the deterministic scripted gates described here.
 
 The deterministic gate is `just e2e`. It builds the production PWA and repository
-Host, starts disposable services, and runs the Thread, artifact, showcase, blob
-policy, and helper checks. All runners share `lib/harness.mjs` for browser
-selection, free ports, Host lifecycle, polling, and WebSocket requests.
+Host, starts disposable services, and runs the Thread, OpenUI artifact,
+artifact-runtime, blob-policy, and helper checks. All runners share
+`lib/harness.mjs` for browser selection, free ports, Host lifecycle, polling,
+and WebSocket requests.
 
 ## Automated runs
 
@@ -40,24 +41,15 @@ npm run e2e:threads
 
 `HIRSEL_THREAD_SMOKE_ARTIFACTS` selects the screenshot directory. Set
 `HIRSEL_THREAD_SMOKE_ADAPTIVE=1` to include the generated-instrument continuation
-and stale-revision checks. Artifact and showcase runners use
-`HIRSEL_ARTIFACT_HOST_URL` and `HIRSEL_ARTIFACT_HOST_TOKEN`; an optional
-`HIRSEL_APP_URL` may point the showcase browser at a separate loopback app. The
-OpenUI artifact runner shares those and writes its dark and light dashboard
-screenshots under `HIRSEL_OPENUI_SHOTS`. The
-standalone artifact-runtime and SVG-preview runners use
-`HIRSEL_ARTIFACT_TEST_URL`; SVG preview additionally requires
-`HIRSEL_CAT_ARTIFACT_DB` and optionally accepts
-`HIRSEL_SVG_ARTIFACT_SCREENSHOT`.
+and stale-revision checks. The OpenUI artifact runner uses
+`HIRSEL_ARTIFACT_HOST_URL` and `HIRSEL_ARTIFACT_HOST_TOKEN` and writes its dark
+and light dashboard screenshots under `HIRSEL_OPENUI_SHOTS`. The standalone
+artifact-runtime runner uses `HIRSEL_ARTIFACT_TEST_URL`.
 
-Evidence recovery uses `HIRSEL_ARTIFACT_HOST_URL`,
-`HIRSEL_ARTIFACT_HOST_TOKEN`, `HIRSEL_ARTIFACT_DB`, and
-`HIRSEL_ARTIFACT_EVIDENCE`; `HIRSEL_ARTIFACT_THREAD_ID` and
-`HIRSEL_ARTIFACT_ID` default to `1` and `2`. The responsive fixture runner uses
-`HIRSEL_RESPONSIVE_FIXTURE` and optionally `HIRSEL_RESPONSIVE_EVIDENCE`. The
-Spaces/Tasks and real-model product runbooks optionally use
-`HIRSEL_SPACES_EVIDENCE` and `HIRSEL_RUNBOOK_ARTIFACTS`. Every default evidence
-path is below `$TMPDIR`.
+The responsive fixture runner uses `HIRSEL_RESPONSIVE_FIXTURE` and optionally
+`HIRSEL_RESPONSIVE_EVIDENCE`. The Spaces/Tasks and real-model product runbooks
+optionally use `HIRSEL_SPACES_EVIDENCE` and `HIRSEL_RUNBOOK_ARTIFACTS`. Every
+default evidence path is below `$TMPDIR`.
 
 The scripted suite creates test Threads and sends scripted messages. It makes no
 provider calls. `HIRSEL_EXPECT_UNSAFE_INLINE=1` exists only for proving the

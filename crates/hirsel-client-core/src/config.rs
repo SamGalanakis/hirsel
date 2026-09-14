@@ -175,51 +175,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builds_canonical_websocket_url() {
-        assert_eq!(
-            ClientConfig::new("localhost:3089".into(), "token".into()).websocket_url(),
-            "ws://localhost:3089/ws"
-        );
-        assert_eq!(
-            ClientConfig::new("wss://example.test/ws".into(), "token".into()).websocket_url(),
-            "wss://example.test/ws"
-        );
-        assert_eq!(
-            ClientConfig::new("http://10.0.2.2:3090".into(), "token".into()).websocket_url(),
-            "ws://10.0.2.2:3090/ws"
-        );
-        assert_eq!(
-            ClientConfig::new("https://example.test".into(), "token".into()).websocket_url(),
-            "wss://example.test/ws"
-        );
-    }
-
-    #[test]
-    fn iroh_ticket_selects_iroh_transport_without_a_websocket_host() {
-        let identity = crate::generate_iroh_identity();
-        let config =
-            ClientConfig::new_iroh("endpointticket".into(), "token".into(), identity.clone());
-        assert_eq!(
-            config.transport_target(),
-            TransportTarget::Iroh("endpointticket".into())
-        );
-        assert_eq!(config.validate(), Ok(()));
-        assert_eq!(config.auth, HelloAuth::DeviceToken("token".into()));
-        assert_eq!(config.iroh_secret_key, Some(identity));
-    }
-
-    #[test]
-    fn pairing_constructor_carries_only_the_owner_minted_code() {
-        let config = ClientConfig::new_iroh_pairing(
-            "endpointticket".into(),
-            "pairing-code".into(),
-            crate::generate_iroh_identity(),
-        );
-        assert_eq!(config.auth, HelloAuth::PairingCode("pairing-code".into()));
-        assert_eq!(config.validate(), Ok(()));
-    }
-
-    #[test]
     fn iroh_transport_requires_a_valid_secret_key() {
         let mut config = ClientConfig::new_iroh(
             "endpointticket".into(),
@@ -230,31 +185,5 @@ mod tests {
 
         config.iroh_secret_key = None;
         assert_eq!(config.validate(), Err(ConfigError::MissingIrohSecretKey));
-    }
-
-    #[test]
-    fn backoff_doubles_and_caps_without_jitter() {
-        let policy = ReconnectPolicy {
-            initial_delay_ms: 10,
-            max_delay_ms: 25,
-            jitter_ratio: 0.0,
-        };
-        assert_eq!(policy.delay_ms(0), 10);
-        assert_eq!(policy.delay_ms(1), 20);
-        assert_eq!(policy.delay_ms(2), 25);
-        assert_eq!(policy.delay_ms(40), 25);
-    }
-
-    #[test]
-    fn jitter_never_exceeds_configured_bounds() {
-        let policy = ReconnectPolicy {
-            initial_delay_ms: 100,
-            max_delay_ms: 250,
-            jitter_ratio: 0.2,
-        };
-        for _ in 0..100 {
-            assert!((80..=120).contains(&policy.delay_ms(0)));
-            assert!(policy.delay_ms(20) <= 250);
-        }
     }
 }

@@ -24,25 +24,13 @@ jobs:
   checks:
     name: Checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
-        with:
-          toolchain: 1.95.0
-          components: rustfmt, clippy
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24.18.0
-          cache: npm
-          cache-dependency-path: app/package-lock.json
-      - name: Enable pinned npm
-        run: corepack enable
-      - name: Install web dependencies
-        working-directory: app
-        run: npm ci
-      - name: Run static checks
-        run: bash scripts/check-static.sh
+      # File budgets, plugin sync and the type-vocabulary guards are pure shell:
+      # no Rust toolchain, no node_modules. This stays the fast fail-fast gate.
+      - name: File, size and vocabulary guards
+        run: bash scripts/check-static.sh --files
 
   rust:
     name: Rust
@@ -55,7 +43,10 @@ jobs:
           toolchain: 1.95.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@401aff9a7a08acb9d27b64936a90db81024cff97 # v2.8.2
-      - run: cargo build --workspace
+      # fmt + clippy share this job's warm Rust cache. `cargo test` compiles the
+      # workspace itself, so the old `cargo build --workspace` was redundant.
+      - name: Rust formatting and clippy
+        run: bash scripts/check-static.sh --rust
       - run: cargo test --workspace
 
   web:
@@ -75,6 +66,9 @@ jobs:
       - name: Enable pinned npm
         run: corepack enable
       - run: npm ci
+      - name: Web lint and generated-prompt check
+        run: bash ../scripts/check-static.sh --web
+      # `npm run build` runs tsc --noEmit before vite, so it owns type-checking.
       - run: npm run build
       - run: npm test -- --run
 

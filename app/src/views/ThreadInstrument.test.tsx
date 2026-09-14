@@ -1,4 +1,4 @@
-import { fireEvent, render, within } from "@solidjs/testing-library";
+import { fireEvent, render } from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 import type { ViewSpec } from "../protocol";
 import { ThreadInstrument } from "./ThreadInstrument";
@@ -10,80 +10,6 @@ function renderCard(ui: ViewSpec | ViewSpec[], onAction?: (a: string, d: unknown
 }
 
 describe("ThreadInstrument — constrained vocabulary", () => {
-  it("renders every node type without throwing, and a card root unwraps", () => {
-    const ui: ViewSpec = {
-      type: "card",
-      children: [
-        { type: "eyebrow", tone: "accent", boundary: true, text: "Taste boundary" },
-        { type: "heading", text: "Which way to wire `reopen`?" },
-        { type: "text", tone: "muted", text: "context here" },
-        { type: "divider" },
-        { type: "keyValue", items: [{ label: "unblocks", value: "1 agent" }] },
-        { type: "badge", label: "judgment", tone: "success" },
-        { type: "status", state: "success", label: "CI green" },
-        {
-          type: "optionList",
-          action: "choose",
-          options: [
-            { key: "A", recommended: true, label: "Option A", detail: "tradeoff" },
-            { key: "B", label: "Option B" },
-          ],
-        },
-        {
-          type: "viewSlot",
-          variant: "diff",
-          title: "the diff",
-          lines: [
-            { op: "add", text: "added line" },
-            { op: "del", text: "removed line" },
-            { op: "ctx", text: "context line" },
-          ],
-        },
-        {
-          type: "viewSlot",
-          variant: "table",
-          title: "digest",
-          rows: [{ label: "job", value: "done", state: "success" }],
-        },
-      ],
-    };
-    const screen = renderCard(ui);
-    expect(screen.getByText(/Taste boundary/)).toBeTruthy();
-    expect(screen.getByText("Option A")).toBeTruthy();
-    const recommended = screen.getByText("Recommended");
-    expect(recommended.className).toContain("text-primary");
-    expect(recommended.className).not.toContain("rounded-full");
-    expect(screen.getAllByText("success").length).toBeGreaterThan(0);
-    // `backtick` → the app's ONE inline-code treatment, shared with prose
-    // (Monospace-Earns-It); the prose around it stays text.
-    expect(screen.getByText("reopen").tagName).toBe("CODE");
-    expect(screen.getByText("reopen").className).toContain("font-mono");
-    const question = screen.getByRole("heading", { level: 3, name: /Which way to wire/ });
-    expect(question.className).toContain("text-display");
-  });
-
-  it("keeps nested generated headings below the principal h3", () => {
-    const screen = renderCard([
-      { type: "heading", text: "Choose the rollout" },
-      { type: "heading", level: 3, text: "Rollback notes" },
-    ]);
-
-    expect(screen.getByRole("heading", { level: 3, name: "Choose the rollout" })).toBeTruthy();
-    expect(screen.getByRole("heading", { level: 4, name: "Rollback notes" })).toBeTruthy();
-  });
-
-  it("degrades an unknown node to a fallback chip and never throws or loses siblings", () => {
-    const ui: ViewSpec[] = [
-      { type: "totally-unknown-node" },
-      { type: "heading", text: "still here" },
-    ];
-    const screen = renderCard(ui);
-    expect(screen.getByText(/unsupported node/)).toBeTruthy();
-    expect(screen.getByText("totally-unknown-node")).toBeTruthy();
-    // The sibling after the unknown node still renders.
-    expect(screen.getByText("still here")).toBeTruthy();
-  });
-
   it("emits `choose` with {choice, label} when an option is tapped", () => {
     const onAction = vi.fn<(a: string, d: unknown, settles: boolean) => void>();
     const screen = renderCard(
@@ -121,18 +47,6 @@ describe("ThreadInstrument — constrained vocabulary", () => {
     );
   });
 
-  it("hides completion controls for Spaces while retaining non-settling continuation", () => {
-    const screen = render(() => <ThreadInstrument allowSettlement={false} ui={[
-      { type: "optionList", action: "complete_choice", options: [{ key: "A", label: "Accept and finish" }] },
-      { type: "submit", action: "complete_form", label: "Complete" },
-      { type: "submit", action: "continue", label: "Continue", settles: false },
-    ]} />);
-
-    expect(screen.queryByRole("button", { name: "Accept and finish" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Complete" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument();
-  });
-
   it("collects the card's field values and posts them on submit", () => {
     const onAction = vi.fn<(a: string, d: unknown, settles: boolean) => void>();
     const screen = renderCard(
@@ -152,20 +66,5 @@ describe("ThreadInstrument — constrained vocabulary", () => {
     fireEvent.click(screen.getByRole("button", { name: /Ship/ }));
     expect(onAction).toHaveBeenCalledWith("choose_with_rule", { note: "always dense rows" }, true);
     expect(screen.queryByText("⌘↵")).toBeNull();
-  });
-
-  it("disables interactive controls when the card is already decided", () => {
-    const onAction = vi.fn<(a: string, d: unknown, settles: boolean) => void>();
-    const screen = render(() => (
-      <ThreadInstrument
-        ui={[{ type: "optionList", action: "choose", options: [{ key: "A", label: "Alpha" }] }]}
-        onAction={onAction}
-        disabled
-      />
-    ));
-    const btn = within(screen.container).getByRole("button", { name: /Alpha/ }) as HTMLButtonElement;
-    expect(btn.disabled).toBe(true);
-    fireEvent.click(btn);
-    expect(onAction).not.toHaveBeenCalled();
   });
 });

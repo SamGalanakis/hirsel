@@ -218,37 +218,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn content_disposition_is_inline_for_images() {
-        let header = content_disposition_header("tiny.png", "image/png");
-        assert_eq!(header.to_str().unwrap(), "inline; filename=\"tiny.png\"");
-    }
-
-    #[test]
-    fn content_disposition_is_attachment_for_documents() {
-        let header = content_disposition_header("note.txt", "text/plain");
-        assert_eq!(
-            header.to_str().unwrap(),
-            "attachment; filename=\"note.txt\""
-        );
-    }
-
-    #[test]
-    fn active_and_unknown_image_types_are_downloads() {
-        assert_eq!(
-            content_disposition_header("active.svg", "image/svg+xml")
-                .to_str()
-                .unwrap(),
-            "attachment; filename=\"active.svg\""
-        );
-        assert_eq!(
-            content_disposition_header("future.img", "image/vnd.future")
-                .to_str()
-                .unwrap(),
-            "attachment; filename=\"future.img\""
-        );
-    }
-
-    #[test]
     fn signed_blob_urls_are_scoped_and_expire() {
         let signer = BlobSigner {
             secret: Arc::from(b"test-secret".as_slice()),

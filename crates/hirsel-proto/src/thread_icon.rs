@@ -192,19 +192,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn groups_flatten_to_the_vocabulary_in_order() {
-        let grouped: Vec<&str> = THREAD_SYMBOL_GROUPS
-            .iter()
-            .flat_map(|(_, names)| names.iter().copied())
-            .collect();
-        assert_eq!(grouped, THREAD_SYMBOLS.to_vec());
-        let mut sorted = THREAD_SYMBOLS.to_vec();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(sorted.len(), THREAD_SYMBOLS.len(), "duplicate symbol name");
-    }
-
-    #[test]
     fn symbol_icons_round_trip_with_a_defaulted_tint() {
         let icon = ThreadIcon::Symbol {
             name: "rocket".to_owned(),

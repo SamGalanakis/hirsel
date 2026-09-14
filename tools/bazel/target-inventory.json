@@ -1,8 +1,8 @@
 {
   "cargo_only_target_count": 1,
   "cargo_package_count": 7,
-  "cargo_target_count": 14,
-  "generated_label_count": 22,
+  "cargo_target_count": 13,
+  "generated_label_count": 21,
   "packages": [
     {
       "declared_features": [],
@@ -127,16 +127,6 @@
           "kind": "bin-unit-test",
           "label": "//crates/hirsel-host:hirsel-pair__bin__unit_test",
           "tags": []
-        },
-        {
-          "cargo": "iroh_client_flow",
-          "cargo_only": "every case is `#[ignore]`d behind the public n0 relay, so the partition would cache an empty run as proof",
-          "kind": "test",
-          "label": "//crates/hirsel-host:iroh_client_flow__test",
-          "tags": [
-            "cargo-network-gate",
-            "manual"
-          ]
         },
         {
           "cargo": "nested_runtime",

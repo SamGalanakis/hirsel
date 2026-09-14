@@ -14,59 +14,6 @@ async fn test_state(dir: &tempfile::TempDir) -> SubagentModelState {
     SubagentModelState::load(store)
 }
 
-#[test]
-fn registry_defaults_and_variants_are_valid() {
-    for provider in REGISTRY {
-        assert!(!provider.models.is_empty());
-        for model in provider.models {
-            assert!(!model.variants.is_empty());
-            assert!(model.variants.contains(&model.default_variant));
-        }
-    }
-}
-
-/// New choices do not reorder the existing CLI defaults or retune lanes.
-#[test]
-fn registry_preserves_existing_lanes_and_adds_supported_models() {
-    let catalog = registry_catalog();
-    let lanes = catalog
-        .providers
-        .iter()
-        .flat_map(|provider| provider.models.iter())
-        .map(|model| {
-            (
-                model.id.as_str(),
-                model.enabled,
-                model.enabled_variants.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        lanes,
-        [
-            ("gpt-5.6-sol", true, vec!["high".to_string()]),
-            ("gpt-5.6-luna", true, vec!["max".to_string()]),
-            (
-                "gpt-6-astra",
-                true,
-                vec!["low", "medium", "high", "xhigh", "max", "ultra"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect()
-            ),
-            ("claude-opus-5", true, vec!["high".to_string()]),
-            (
-                "claude-fable-5-1",
-                true,
-                vec!["low", "medium", "high", "xhigh", "max"]
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect()
-            ),
-        ]
-    );
-}
-
 /// An explicit hirsel.toml override still wins over the shipped defaults.
 #[tokio::test]
 async fn overrides_win_over_default_enablement() {

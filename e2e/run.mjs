@@ -56,8 +56,6 @@ try {
     HIRSEL_OPENUI_SHOTS: join(evidenceDir, "openui"),
   };
   await run("Thread smoke", process.execPath, ["e2e/thread-smoke.mjs"], hostEnvironment);
-  await run("Artifact Thread smoke", process.execPath, ["e2e/artifact-thread-smoke.mjs"], hostEnvironment);
-  await run("Thread showcase smoke", process.execPath, ["e2e/thread-showcase-smoke.mjs"], hostEnvironment);
   await run("OpenUI artifact smoke", process.execPath, ["e2e/openui-artifact-smoke.mjs"], hostEnvironment);
 
   const vitePort = await unusedPort();

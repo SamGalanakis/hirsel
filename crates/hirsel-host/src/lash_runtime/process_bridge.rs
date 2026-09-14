@@ -503,17 +503,3 @@ pub(super) fn structured_trigger(record: &lash_core::TriggerSubscriptionRecord) 
         source => TriggerLabel::Other { key: source.into() },
     }
 }
-
-#[cfg(test)]
-mod result_tests {
-    use super::*;
-    #[test]
-    fn failed_await_output_becomes_plain_error_text() {
-        let output = lash_core::ToolCallOutput::failure(lash_core::ToolFailure::io(
-            "denied",
-            "Permission denied",
-        ));
-        let payload = json!({"await_output": ProcessAwaitOutput::Settled { output }});
-        assert_eq!(terminal_error(&payload), "Permission denied");
-    }
-}

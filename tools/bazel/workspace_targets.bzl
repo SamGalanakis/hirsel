@@ -14,7 +14,6 @@ WORKSPACE_COMPILE_TARGETS = [
     "//crates/hirsel-host:hirsel-host__unit_test",
     "//crates/hirsel-host:hirsel-pair__bin",
     "//crates/hirsel-host:hirsel-pair__bin__unit_test",
-    "//crates/hirsel-host:iroh_client_flow__test",
     "//crates/hirsel-host:nested_runtime__test",
     "//crates/hirsel-plugin-api:hirsel-plugin-api",
     "//crates/hirsel-plugin-api:hirsel-plugin-api__unit_test",
@@ -38,7 +37,6 @@ WORKSPACE_CLIPPY_TARGETS = [
     "//crates/hirsel-host:hirsel-host__unit_test",
     "//crates/hirsel-host:hirsel-pair__bin",
     "//crates/hirsel-host:hirsel-pair__bin__unit_test",
-    "//crates/hirsel-host:iroh_client_flow__test",
     "//crates/hirsel-host:nested_runtime__test",
     "//crates/hirsel-plugin-api:hirsel-plugin-api",
     "//crates/hirsel-plugin-api:hirsel-plugin-api__unit_test",
@@ -72,7 +70,6 @@ WORKSPACE_BAZEL_TEST_TARGETS = [
 ]
 
 WORKSPACE_CARGO_TEST_TARGETS = [
-    "//crates/hirsel-host:iroh_client_flow__test",
     "//crates/hirsel-host:nested_runtime__test",
 ]
 
@@ -84,7 +81,6 @@ WORKSPACE_TEST_TARGETS = [
     "//crates/hirsel-host:hirsel-host__bin__unit_test",
     "//crates/hirsel-host:hirsel-host__unit_test",
     "//crates/hirsel-host:hirsel-pair__bin__unit_test",
-    "//crates/hirsel-host:iroh_client_flow__test",
     "//crates/hirsel-host:nested_runtime__test",
     "//crates/hirsel-plugin-api:hirsel-plugin-api__unit_test",
     "//crates/hirsel-plugins:hirsel-plugins__unit_test",

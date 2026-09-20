@@ -70,6 +70,87 @@ async fn streamed_reasoning_uses_content_indices_as_block_identity() {
 }
 
 #[tokio::test]
+async fn completed_block_envelopes_do_not_duplicate_streamed_reasoning() {
+    let (mut output, events) = initialized_claude_output();
+    let captured = [
+        json!({
+            "type": "stream_event",
+            "session_id": "claude-session",
+            "event": {
+                "type": "message_start",
+                "message": {"id": "msg_01", "content": []}
+            }
+        }),
+        json!({
+            "type": "stream_event",
+            "session_id": "claude-session",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "first"}
+            }
+        }),
+        json!({
+            "type": "assistant",
+            "session_id": "claude-session",
+            "apiBlockIndex": 0,
+            "message": {
+                "id": "msg_01",
+                "content": [{"type": "thinking", "thinking": "first"}]
+            }
+        }),
+        json!({
+            "type": "stream_event",
+            "session_id": "claude-session",
+            "event": {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "thinking_delta", "thinking": "second"}
+            }
+        }),
+        json!({
+            "type": "assistant",
+            "session_id": "claude-session",
+            "apiBlockIndex": 1,
+            "message": {
+                "id": "msg_01",
+                "content": [{"type": "thinking", "thinking": "second"}]
+            }
+        }),
+    ];
+    for value in captured {
+        output.handle(&value, &events).unwrap();
+    }
+    events
+        .complete(
+            TerminalOutcome::Done {
+                summary: String::new(),
+            },
+            None,
+        )
+        .unwrap();
+
+    let reasoning = events
+        .stream()
+        .unwrap()
+        .filter_map(|event| async move {
+            match event {
+                SubagentEvent::ReasoningDelta { text, block_id } => Some((text, block_id)),
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(
+        reasoning,
+        [
+            ("first".into(), Some("claude:msg_01:0".into())),
+            ("second".into(), Some("claude:msg_01:1".into())),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn tool_heartbeat_surfaces_progress_while_forwarded_subagent_output_still_fails() {
     let (mut output, events) = initialized_claude_output();
     output

@@ -10,6 +10,7 @@ pub(super) struct ClaudeOutput {
     assistant: Option<String>,
     started_tools: BTreeMap<String, String>,
     assistant_sequence: u64,
+    assistant_message_id: Option<String>,
     streamed_blocks: BTreeSet<String>,
     streamed_legacy_prose: bool,
     streamed_legacy_reasoning: bool,
@@ -26,6 +27,7 @@ impl ClaudeOutput {
             assistant: None,
             started_tools: BTreeMap::new(),
             assistant_sequence: 0,
+            assistant_message_id: None,
             streamed_blocks: BTreeSet::new(),
             streamed_legacy_prose: false,
             streamed_legacy_reasoning: false,
@@ -122,6 +124,12 @@ impl ClaudeOutput {
             }
             Some("assistant") => {
                 self.check_session(value)?;
+                self.activate_message(
+                    value
+                        .pointer("/message/id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty()),
+                );
                 let content = value.pointer("/message/content").and_then(Value::as_array);
                 let text: String = content
                     .into_iter()
@@ -138,8 +146,9 @@ impl ClaudeOutput {
                     == Some("end_turn")
                     && !text.is_empty())
                 .then_some(text);
+                let api_block_index = value.get("apiBlockIndex").and_then(Value::as_u64);
                 for (index, block) in content.into_iter().flatten().enumerate() {
-                    let block_id = self.block_id(index as u64);
+                    let block_id = self.block_id(api_block_index.unwrap_or(index as u64));
                     match block.get("type").and_then(Value::as_str) {
                         Some("text") => {
                             if let Some(text) = block.get("text").and_then(Value::as_str)
@@ -192,13 +201,20 @@ impl ClaudeOutput {
                         _ => {}
                     }
                 }
-                self.streamed_blocks.clear();
                 self.streamed_legacy_prose = false;
                 self.streamed_legacy_reasoning = false;
                 self.assistant_sequence += 1;
             }
             Some("stream_event") => {
                 self.check_session(value)?;
+                if value.pointer("/event/type").and_then(Value::as_str) == Some("message_start") {
+                    self.activate_message(
+                        value
+                            .pointer("/event/message/id")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.is_empty()),
+                    );
+                }
                 if let Some(text) = value.pointer("/event/delta/text").and_then(Value::as_str) {
                     let block_id = self.stream_block_id(value);
                     if let Some(block_id) = &block_id {
@@ -306,7 +322,20 @@ impl ClaudeOutput {
     }
 
     fn block_id(&self, index: u64) -> String {
-        format!("claude:{}:{index}", self.assistant_sequence)
+        match self.assistant_message_id.as_deref() {
+            Some(message_id) => format!("claude:{message_id}:{index}"),
+            None => format!("claude:{}:{index}", self.assistant_sequence),
+        }
+    }
+
+    fn activate_message(&mut self, message_id: Option<&str>) {
+        let Some(message_id) = message_id else {
+            return;
+        };
+        if self.assistant_message_id.as_deref() != Some(message_id) {
+            self.assistant_message_id = Some(message_id.to_owned());
+            self.streamed_blocks.clear();
+        }
     }
 
     fn stream_block_id(&self, value: &Value) -> Option<String> {

@@ -9,8 +9,10 @@ pub(super) struct ClaudeOutput {
     session_id: Option<String>,
     assistant: Option<String>,
     started_tools: BTreeMap<String, String>,
-    streamed_prose: bool,
-    streamed_reasoning: bool,
+    assistant_sequence: u64,
+    streamed_blocks: BTreeSet<String>,
+    streamed_legacy_prose: bool,
+    streamed_legacy_reasoning: bool,
 }
 
 impl ClaudeOutput {
@@ -23,8 +25,10 @@ impl ClaudeOutput {
             session_id: None,
             assistant: None,
             started_tools: BTreeMap::new(),
-            streamed_prose: false,
-            streamed_reasoning: false,
+            assistant_sequence: 0,
+            streamed_blocks: BTreeSet::new(),
+            streamed_legacy_prose: false,
+            streamed_legacy_reasoning: false,
         }
     }
 
@@ -134,25 +138,30 @@ impl ClaudeOutput {
                     == Some("end_turn")
                     && !text.is_empty())
                 .then_some(text);
-                for block in content.into_iter().flatten() {
+                for (index, block) in content.into_iter().flatten().enumerate() {
+                    let block_id = self.block_id(index as u64);
                     match block.get("type").and_then(Value::as_str) {
                         Some("text") => {
                             if let Some(text) = block.get("text").and_then(Value::as_str)
                                 && !text.is_empty()
-                                && !self.streamed_prose
+                                && !self.streamed_legacy_prose
+                                && !self.streamed_blocks.contains(&block_id)
                             {
                                 events.emit(SubagentEvent::ProseDelta {
                                     text: text.to_string(),
+                                    block_id: Some(block_id),
                                 })?;
                             }
                         }
                         Some("thinking") => {
                             if let Some(text) = block.get("thinking").and_then(Value::as_str)
                                 && !text.is_empty()
-                                && !self.streamed_reasoning
+                                && !self.streamed_legacy_reasoning
+                                && !self.streamed_blocks.contains(&block_id)
                             {
                                 events.emit(SubagentEvent::ReasoningDelta {
                                     text: text.to_string(),
+                                    block_id: Some(block_id),
                                 })?;
                             }
                         }
@@ -183,24 +192,38 @@ impl ClaudeOutput {
                         _ => {}
                     }
                 }
-                self.streamed_prose = false;
-                self.streamed_reasoning = false;
+                self.streamed_blocks.clear();
+                self.streamed_legacy_prose = false;
+                self.streamed_legacy_reasoning = false;
+                self.assistant_sequence += 1;
             }
             Some("stream_event") => {
                 self.check_session(value)?;
                 if let Some(text) = value.pointer("/event/delta/text").and_then(Value::as_str) {
-                    self.streamed_prose = true;
+                    let block_id = self.stream_block_id(value);
+                    if let Some(block_id) = &block_id {
+                        self.streamed_blocks.insert(block_id.clone());
+                    } else {
+                        self.streamed_legacy_prose = true;
+                    }
                     events.emit(SubagentEvent::ProseDelta {
                         text: text.to_string(),
+                        block_id,
                     })?;
                 }
                 if let Some(text) = value
                     .pointer("/event/delta/thinking")
                     .and_then(Value::as_str)
                 {
-                    self.streamed_reasoning = true;
+                    let block_id = self.stream_block_id(value);
+                    if let Some(block_id) = &block_id {
+                        self.streamed_blocks.insert(block_id.clone());
+                    } else {
+                        self.streamed_legacy_reasoning = true;
+                    }
                     events.emit(SubagentEvent::ReasoningDelta {
                         text: text.to_string(),
+                        block_id,
                     })?;
                 }
             }
@@ -280,6 +303,17 @@ impl ClaudeOutput {
             _ => {}
         }
         Ok(())
+    }
+
+    fn block_id(&self, index: u64) -> String {
+        format!("claude:{}:{index}", self.assistant_sequence)
+    }
+
+    fn stream_block_id(&self, value: &Value) -> Option<String> {
+        value
+            .pointer("/event/index")
+            .and_then(Value::as_u64)
+            .map(|index| self.block_id(index))
     }
 
     fn check_session(&self, value: &Value) -> DriverResult<()> {

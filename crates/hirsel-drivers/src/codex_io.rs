@@ -270,9 +270,14 @@ pub(super) fn codex_timeline_event(value: &Value) -> Option<SubagentEvent> {
     if text.is_empty() {
         return None;
     }
+    let block_id = item
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
     Some(match item.get("type").and_then(Value::as_str) {
-        Some("reasoning") => SubagentEvent::ReasoningDelta { text },
-        _ => SubagentEvent::ProseDelta { text },
+        Some("reasoning") => SubagentEvent::ReasoningDelta { text, block_id },
+        _ => SubagentEvent::ProseDelta { text, block_id },
     })
 }
 

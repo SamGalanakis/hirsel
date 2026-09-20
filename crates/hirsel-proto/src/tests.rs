@@ -301,6 +301,7 @@ fn turn_event_prose_round_trips() {
         seq: 1,
         event: TurnEventKind::Prose {
             text: "I will check that now.".to_string(),
+            block_id: None,
         },
     };
     let encoded = serde_json::to_string(&HostToClient::TurnEvent {
@@ -322,6 +323,32 @@ fn turn_event_prose_round_trips() {
             thread_id: 1,
             seq: 1,
             event: event.event,
+        }
+    );
+}
+
+#[test]
+fn turn_event_text_block_identity_round_trips_and_legacy_frames_default_it() {
+    let event = TurnEventKind::Reasoning {
+        text: "Inspect the contract.".into(),
+        block_id: Some("reasoning-2".into()),
+    };
+    let encoded = serde_json::to_value(&event).unwrap();
+    assert_eq!(
+        encoded,
+        json!({"kind":"reasoning","text":"Inspect the contract.","block_id":"reasoning-2"})
+    );
+    assert_eq!(
+        serde_json::from_value::<TurnEventKind>(encoded).unwrap(),
+        event
+    );
+
+    assert_eq!(
+        serde_json::from_value::<TurnEventKind>(json!({"kind":"reasoning","text":"legacy chunk"}))
+            .unwrap(),
+        TurnEventKind::Reasoning {
+            text: "legacy chunk".into(),
+            block_id: None,
         }
     );
 }
@@ -566,6 +593,7 @@ fn main_scope_frames_omit_sc() {
             seq: 1,
             event: TurnEventKind::Prose {
                 text: "hello".to_string(),
+                block_id: None,
             },
         },
         HostToClient::AgentActivity {

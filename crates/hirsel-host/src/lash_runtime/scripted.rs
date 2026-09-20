@@ -1,12 +1,15 @@
 use super::*;
 
 #[cfg(test)]
-pub(super) fn scripted_host_event(event: RemoteTurnEvent) -> RemoteSessionObservationEventPayload {
+pub(super) fn scripted_host_event(
+    event: RemoteTurnEvent,
+    correlation_id: &str,
+) -> RemoteSessionObservationEventPayload {
     RemoteSessionObservationEventPayload::TurnActivity {
         activity: Box::new(lash::remote::usage::RemoteTurnActivity {
             sequence: 1,
             id: "executor-conformance".into(),
-            correlation_id: "executor-conformance-turn".into(),
+            correlation_id: correlation_id.into(),
             event,
         }),
     }
@@ -371,11 +374,32 @@ impl ScriptedAgentRuntime {
         &self,
         ingest: &mut TurnIngest,
     ) -> anyhow::Result<()> {
+        for text in ["**Inspecting ", "the first boundary.**"] {
+            ingest
+                .accept(
+                    &self.tools,
+                    ExecutorEvent::Reasoning {
+                        text: text.into(),
+                        block_id: Some("scripted-reasoning-1".into()),
+                    },
+                )
+                .await?;
+        }
+        ingest
+            .accept(
+                &self.tools,
+                ExecutorEvent::Reasoning {
+                    text: "**Preparing the second boundary.**".into(),
+                    block_id: Some("scripted-reasoning-2".into()),
+                },
+            )
+            .await?;
         ingest
             .accept(
                 &self.tools,
                 ExecutorEvent::Prose {
                     text: "I am checking the scripted path before replying.".to_string(),
+                    block_id: Some("scripted-prose-1".into()),
                 },
             )
             .await?;
@@ -407,6 +431,7 @@ impl ScriptedAgentRuntime {
                 &self.tools,
                 ExecutorEvent::Prose {
                     text: "The scripted response is ready.".to_string(),
+                    block_id: Some("scripted-prose-2".into()),
                 },
             )
             .await?;

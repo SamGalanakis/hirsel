@@ -80,12 +80,14 @@ pub(super) fn host_executor_event(
         RemoteTurnEvent::ModelRequestStarted { .. } => {
             Some(ExecutorEvent::Started { external_id: None })
         }
-        RemoteTurnEvent::AssistantProseDelta { text } => {
-            Some(ExecutorEvent::Prose { text: text.clone() })
-        }
-        RemoteTurnEvent::ReasoningDelta { text } => {
-            Some(ExecutorEvent::Reasoning { text: text.clone() })
-        }
+        RemoteTurnEvent::AssistantProseDelta { text } => Some(ExecutorEvent::Prose {
+            text: text.clone(),
+            block_id: Some(activity.correlation_id.clone()),
+        }),
+        RemoteTurnEvent::ReasoningDelta { text } => Some(ExecutorEvent::Reasoning {
+            text: text.clone(),
+            block_id: Some(activity.correlation_id.clone()),
+        }),
         RemoteTurnEvent::CodeBlockStarted {
             language,
             code,

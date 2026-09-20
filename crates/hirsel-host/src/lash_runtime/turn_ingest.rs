@@ -10,9 +10,11 @@ pub(crate) enum ExecutorEvent {
     },
     Prose {
         text: String,
+        block_id: Option<String>,
     },
     Reasoning {
         text: String,
+        block_id: Option<String>,
     },
     ToolStart {
         id: String,
@@ -73,6 +75,7 @@ pub(crate) struct TurnIngest {
 
 struct PendingText {
     kind: TextKind,
+    block_id: Option<String>,
     text: String,
     started_at: Instant,
 }
@@ -166,14 +169,16 @@ impl TurnIngest {
                     .await?;
                 self.publish_activity(tools, AgentActivityState::Thinking, Some("thinking".into()));
             }
-            ExecutorEvent::Prose { text } => {
+            ExecutorEvent::Prose { text, block_id } => {
                 let label = latest_line(&text);
-                self.push_text(tools, TextKind::Prose, text).await?;
+                self.push_text(tools, TextKind::Prose, block_id, text)
+                    .await?;
                 self.publish_activity(tools, AgentActivityState::Thinking, label);
             }
-            ExecutorEvent::Reasoning { text } => {
+            ExecutorEvent::Reasoning { text, block_id } => {
                 let label = latest_line(&text);
-                self.push_text(tools, TextKind::Reasoning, text).await?;
+                self.push_text(tools, TextKind::Reasoning, block_id, text)
+                    .await?;
                 self.publish_activity(tools, AgentActivityState::Thinking, label);
             }
             ExecutorEvent::ToolStart { id, name, args } => {
@@ -316,8 +321,14 @@ impl TurnIngest {
             return Ok(());
         }
         let event = match pending.kind {
-            TextKind::Prose => TurnEventKind::Prose { text: pending.text },
-            TextKind::Reasoning => TurnEventKind::Reasoning { text: pending.text },
+            TextKind::Prose => TurnEventKind::Prose {
+                text: pending.text,
+                block_id: pending.block_id,
+            },
+            TextKind::Reasoning => TurnEventKind::Reasoning {
+                text: pending.text,
+                block_id: pending.block_id,
+            },
         };
         self.publish_timeline(tools, event).await
     }
@@ -506,6 +517,7 @@ impl TurnIngest {
         &mut self,
         tools: &ToolSuite,
         kind: TextKind,
+        block_id: Option<String>,
         text: String,
     ) -> anyhow::Result<()> {
         if text.is_empty() {
@@ -514,12 +526,13 @@ impl TurnIngest {
         if self
             .pending
             .as_ref()
-            .is_some_and(|pending| pending.kind != kind)
+            .is_some_and(|pending| pending.kind != kind || pending.block_id != block_id)
         {
             self.flush(tools).await?;
         }
         let pending = self.pending.get_or_insert_with(|| PendingText {
             kind,
+            block_id,
             text: String::new(),
             started_at: Instant::now(),
         });

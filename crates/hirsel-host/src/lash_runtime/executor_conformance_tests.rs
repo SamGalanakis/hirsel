@@ -182,10 +182,37 @@ fn native_adapter(scenario: Scenario) -> Vec<ExecutorEvent> {
     stream_events(scenario)
         .into_iter()
         .filter_map(|event| {
-            let remote = scripted_host_event(remote_event(event));
+            let correlation_id = match &event {
+                TurnEvent::ReasoningDelta { .. } => "reasoning-1",
+                TurnEvent::AssistantProseDelta { .. } => "prose-1",
+                _ => "executor-conformance-turn",
+            };
+            let remote = scripted_host_event(remote_event(event), correlation_id);
             host_executor_event(&remote)
         })
         .collect()
+}
+
+#[test]
+fn native_adapter_uses_lash_text_correlation_as_block_identity() {
+    for event in [
+        TurnEvent::ReasoningDelta { text: "why".into() },
+        TurnEvent::AssistantProseDelta {
+            text: "what".into(),
+        },
+    ] {
+        let adapted = host_executor_event(&scripted_host_event(
+            remote_event(event),
+            "lash-output-block-7",
+        ))
+        .unwrap();
+        assert!(matches!(
+            adapted,
+            ExecutorEvent::Reasoning { block_id: Some(id), .. }
+                | ExecutorEvent::Prose { block_id: Some(id), .. }
+                if id == "lash-output-block-7"
+        ));
+    }
 }
 
 fn terminal_projection_for(scenario: Scenario) -> (ExecutorTerminalOutcome, Option<String>) {
@@ -223,9 +250,11 @@ async fn cli_adapter(scenario: Scenario) -> Vec<ExecutorEvent> {
         .filter_map(|event| match event {
             TurnEvent::ReasoningDelta { text } => Some(SubagentEvent::ReasoningDelta {
                 text: text.to_string(),
+                block_id: Some("reasoning-1".into()),
             }),
             TurnEvent::AssistantProseDelta { text } => Some(SubagentEvent::ProseDelta {
                 text: text.to_string(),
+                block_id: Some("prose-1".into()),
             }),
             TurnEvent::ToolCallStarted {
                 call_id: Some(call_id),

@@ -126,7 +126,8 @@ async fn timeline_flushes_prose_before_tool_events() {
     assert_eq!(
         events[0],
         TurnEventKind::Prose {
-            text: "I will check now.".to_string()
+            text: "I will check now.".to_string(),
+            block_id: Some("turn-1".into()),
         }
     );
     assert_eq!(
@@ -157,6 +158,45 @@ async fn timeline_flushes_prose_before_tool_events() {
                 }
             })))
         }
+    );
+}
+
+#[tokio::test]
+async fn timeline_flushes_adjacent_reasoning_blocks_but_batches_their_chunks() {
+    let events = ingest_remote_events(vec![
+        remote_turn_activity_in(
+            "reasoning-1",
+            RemoteTurnEvent::ReasoningDelta {
+                text: "**First ".into(),
+            },
+        ),
+        remote_turn_activity_in(
+            "reasoning-1",
+            RemoteTurnEvent::ReasoningDelta {
+                text: "thought.**".into(),
+            },
+        ),
+        remote_turn_activity_in(
+            "reasoning-2",
+            RemoteTurnEvent::ReasoningDelta {
+                text: "**Second thought.**".into(),
+            },
+        ),
+    ])
+    .await;
+
+    assert_eq!(
+        events,
+        [
+            TurnEventKind::Reasoning {
+                text: "**First thought.**".into(),
+                block_id: Some("reasoning-1".into()),
+            },
+            TurnEventKind::Reasoning {
+                text: "**Second thought.**".into(),
+                block_id: Some("reasoning-2".into()),
+            },
+        ]
     );
 }
 
@@ -950,11 +990,18 @@ async fn every_executor_result_matches_its_declared_output_schema() {
 }
 
 fn remote_turn_activity(event: RemoteTurnEvent) -> RemoteSessionObservationEventPayload {
+    remote_turn_activity_in("turn-1", event)
+}
+
+fn remote_turn_activity_in(
+    correlation_id: &str,
+    event: RemoteTurnEvent,
+) -> RemoteSessionObservationEventPayload {
     RemoteSessionObservationEventPayload::TurnActivity {
         activity: Box::new(lash::remote::usage::RemoteTurnActivity {
             sequence: 1,
             id: "activity-1".to_string(),
-            correlation_id: "turn-1".to_string(),
+            correlation_id: correlation_id.to_string(),
             event,
         }),
     }

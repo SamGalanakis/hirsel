@@ -39,6 +39,7 @@ async fn timeline_persistence_failure_fails_the_turn_without_broadcasting_the_ev
                 turn.id,
                 hirsel_proto::TurnEventKind::Prose {
                     text: "must not leak".into(),
+                    block_id: None,
                 },
             )
             .await

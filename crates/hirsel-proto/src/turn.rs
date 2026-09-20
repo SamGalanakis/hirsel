@@ -35,9 +35,17 @@ pub struct TurnEventPayload {
 pub enum TurnEventKind {
     Prose {
         text: String,
+        /// Stable identity for one provider output block. Events with the same
+        /// identity are chunks of that block; a different identity starts a
+        /// new block even when it is adjacent. Absent on legacy events.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_id: Option<String>,
     },
     Reasoning {
         text: String,
+        /// Same block/chunk contract as provisional prose.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_id: Option<String>,
     },
     ToolStart {
         /// Correlates start/done pairs so clients resolve the right row.

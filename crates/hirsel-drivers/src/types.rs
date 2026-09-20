@@ -130,9 +130,13 @@ pub enum SubagentEvent {
     },
     ProseDelta {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_id: Option<String>,
     },
     ReasoningDelta {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_id: Option<String>,
     },
     Progress {
         summary: String,

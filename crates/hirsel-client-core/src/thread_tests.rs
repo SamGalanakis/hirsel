@@ -398,7 +398,10 @@ fn open_requires_matching_request_and_message_ownership() {
 #[test]
 fn thread_stream_rejects_prior_turn_duplicate_sequence_and_terminal_deltas() {
     let mut store = LocalStore::default();
-    let prose = |text: &str| TurnEventKind::Prose { text: text.into() };
+    let prose = |text: &str| TurnEventKind::Prose {
+        text: text.into(),
+        block_id: None,
+    };
     store.apply_delta(5, 10, 0, prose("old"));
     store.apply_delta(5, 11, 0, prose("new"));
     store.apply_delta(5, 10, 1, prose("late"));
@@ -487,6 +490,7 @@ fn changed_history_clears_owned_state_but_preserves_plain_unsent_text() {
         1,
         TurnEventKind::Prose {
             text: "old stream".into(),
+            block_id: None,
         },
     );
     store.remove_message(88);
@@ -529,6 +533,7 @@ fn queued_later_turn_does_not_own_running_stream() {
         1,
         TurnEventKind::Prose {
             text: "first".into(),
+            block_id: None,
         },
     );
     store.upsert_turn(ThreadTurn {
@@ -549,6 +554,7 @@ fn queued_later_turn_does_not_own_running_stream() {
         2,
         TurnEventKind::Prose {
             text: "second".into(),
+            block_id: None,
         },
     );
     assert_eq!(store.streams[0].turn_id, 7);

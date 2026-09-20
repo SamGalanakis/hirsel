@@ -23,8 +23,12 @@ pub(super) fn cli_executor_event(event: SubagentEvent) -> Option<ExecutorEvent> 
         SubagentEvent::Started { external_id } => Some(ExecutorEvent::Started {
             external_id: Some(external_id),
         }),
-        SubagentEvent::ProseDelta { text } => Some(ExecutorEvent::Prose { text }),
-        SubagentEvent::ReasoningDelta { text } => Some(ExecutorEvent::Reasoning { text }),
+        SubagentEvent::ProseDelta { text, block_id } => {
+            Some(ExecutorEvent::Prose { text, block_id })
+        }
+        SubagentEvent::ReasoningDelta { text, block_id } => {
+            Some(ExecutorEvent::Reasoning { text, block_id })
+        }
         SubagentEvent::Progress { summary } if is_execution_diagnostic(&summary) => {
             Some(ExecutorEvent::Diagnostic { text: summary })
         }

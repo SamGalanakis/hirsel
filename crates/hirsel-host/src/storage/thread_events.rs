@@ -122,6 +122,7 @@ mod tests {
                 turn.id,
                 TurnEventKind::Reasoning {
                     text: "checking".into(),
+                    block_id: None,
                 },
             ),
             second_store.append_next_turn_event(
@@ -148,6 +149,7 @@ mod tests {
                     turn.id,
                     TurnEventKind::Prose {
                         text: "foreign".into(),
+                        block_id: None,
                     },
                 )
                 .await
@@ -202,6 +204,7 @@ mod tests {
                     turn.id,
                     TurnEventKind::Prose {
                         text: text.to_string(),
+                        block_id: None,
                     },
                 )
                 .await
@@ -271,6 +274,7 @@ mod tests {
                 older_background.id,
                 TurnEventKind::Reasoning {
                     text: "older background outside the supplemental bound".into(),
+                    block_id: None,
                 },
             )
             .await
@@ -309,6 +313,7 @@ mod tests {
                 visible_turn.id,
                 TurnEventKind::Reasoning {
                     text: "durable visible work".into(),
+                    block_id: None,
                 },
             )
             .await
@@ -333,7 +338,10 @@ mod tests {
                 .append_next_turn_event(
                     thread.id,
                     turn.id,
-                    TurnEventKind::Reasoning { text: text.into() },
+                    TurnEventKind::Reasoning {
+                        text: text.into(),
+                        block_id: None,
+                    },
                 )
                 .await
                 .unwrap();

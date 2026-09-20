@@ -21,6 +21,55 @@ fn initialized_claude_output() -> (ClaudeOutput, Arc<EventHub>) {
 }
 
 #[tokio::test]
+async fn streamed_reasoning_uses_content_indices_as_block_identity() {
+    let (mut output, events) = initialized_claude_output();
+    for (index, text) in [(0, "first "), (0, "thought"), (1, "second thought")] {
+        output
+            .handle(
+                &json!({
+                    "type": "stream_event",
+                    "session_id": "claude-session",
+                    "event": {
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": {"type": "thinking_delta", "thinking": text}
+                    }
+                }),
+                &events,
+            )
+            .unwrap();
+    }
+    events
+        .complete(
+            TerminalOutcome::Done {
+                summary: String::new(),
+            },
+            None,
+        )
+        .unwrap();
+
+    let reasoning = events
+        .stream()
+        .unwrap()
+        .filter_map(|event| async move {
+            match event {
+                SubagentEvent::ReasoningDelta { text, block_id } => Some((text, block_id)),
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(
+        reasoning,
+        [
+            ("first ".into(), Some("claude:0:0".into())),
+            ("thought".into(), Some("claude:0:0".into())),
+            ("second thought".into(), Some("claude:0:1".into())),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn tool_heartbeat_surfaces_progress_while_forwarded_subagent_output_still_fails() {
     let (mut output, events) = initialized_claude_output();
     output
@@ -718,7 +767,9 @@ send({'type':'result','subtype':'success','is_error':False,'result':'answer'})
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, SubagentEvent::ProseDelta { text } if text == "answer"))
+            .filter(
+                |event| matches!(event, SubagentEvent::ProseDelta { text, .. } if text == "answer")
+            )
             .count(),
         1
     );
@@ -726,7 +777,7 @@ send({'type':'result','subtype':'success','is_error':False,'result':'answer'})
         events
             .iter()
             .filter(
-                |event| matches!(event, SubagentEvent::ReasoningDelta { text } if text == "reason")
+                |event| matches!(event, SubagentEvent::ReasoningDelta { text, .. } if text == "reason")
             )
             .count(),
         1

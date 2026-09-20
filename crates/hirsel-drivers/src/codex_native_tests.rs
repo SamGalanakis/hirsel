@@ -4,6 +4,46 @@ use tempfile::TempDir;
 
 const PEER: &str = include_str!("../fixtures/codex_app_server.py");
 
+#[test]
+fn completed_text_items_use_codex_item_ids_as_block_identity() {
+    let reasoning = [("item-17", "first"), ("item-18", "second")].map(|(id, text)| {
+        codex_timeline_event(&json!({
+            "method": "item/completed",
+            "params": {"item": {
+                "id": id,
+                "type": "reasoning",
+                "summary": [text]
+            }}
+        }))
+        .unwrap()
+    });
+    assert!(matches!(
+        &reasoning[0],
+        SubagentEvent::ReasoningDelta { text, block_id: Some(block_id) }
+            if text == "first" && block_id == "item-17"
+    ));
+    assert!(matches!(
+        &reasoning[1],
+        SubagentEvent::ReasoningDelta { text, block_id: Some(block_id) }
+            if text == "second" && block_id == "item-18"
+    ));
+
+    let prose = codex_timeline_event(&json!({
+        "method": "item/completed",
+        "params": {"item": {
+            "id": "item-19",
+            "type": "agentMessage",
+            "text": "prose block"
+        }}
+    }))
+    .unwrap();
+    assert!(matches!(
+        prose,
+        SubagentEvent::ProseDelta { block_id: Some(block_id), .. }
+            if block_id == "item-19"
+    ));
+}
+
 struct Peer {
     directory: TempDir,
 }
@@ -206,7 +246,7 @@ async fn child_traffic_cannot_change_the_root_turn_result_or_steering_target() {
         loop {
             match events.next().await.unwrap() {
                 SubagentEvent::Started { external_id } => assert_eq!(external_id, "root"),
-                SubagentEvent::ProseDelta { text } if text == "root barrier" => break,
+                SubagentEvent::ProseDelta { text, .. } if text == "root barrier" => break,
                 event => panic!("child traffic leaked: {event:?}"),
             }
         }

@@ -5,6 +5,7 @@ mod config;
 mod identity;
 mod observer;
 mod store;
+mod timeline;
 mod transport;
 
 pub use client::{Client, ClientError, SendReceipt, SendThreadMessageRequest};
@@ -16,6 +17,7 @@ pub use store::{
     AgentActivity, ChatEntry, ClientSnapshot, ConfirmedMessage, CreatedThread, PendingSend,
     ThreadBrief, ThreadStream,
 };
+pub use timeline::{TimelineTextKind, timeline_text};
 
 pub use hirsel_proto::{
     AgentActivityState, Blob, ChatAuthor, ChatMessage, EffectAction, HelloAuth, ProcessInfo,

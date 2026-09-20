@@ -8,6 +8,8 @@ load(
     "hirsel_rust_unit_test",
 )
 
+load("@rules_rust//rust:defs.bzl", "rust_doc")
+
 package(default_visibility = ["//visibility:public"])
 
 hirsel_rust_build_script(
@@ -34,6 +36,12 @@ hirsel_rust_library(
     manifest_dir = "crates/hirsel-host",
     package_name = "hirsel-host",
     version = "0.1.0",
+)
+
+rust_doc(
+    name = "hirsel-host__doc",
+    crate = ":hirsel-host",
+    testonly = True,
 )
 
 hirsel_rust_unit_test(

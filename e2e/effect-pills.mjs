@@ -64,12 +64,13 @@ try {
   }
 
   const paused = await sendFixture("__hirsel_effect_pills_paused__", "paused");
+  assert(paused.effects.effects.some(effect => effect.receipt.effect === "created"), "new delegation omitted the created receipt");
   const delegated = paused.effects.effects.find(effect => effect.receipt.effect === "delegated");
   assert(delegated?.receipt.target_turn_id, "paused delegation omitted its exact target turn");
   const pausedTurnId = delegated.receipt.target_turn_id;
   await poll("paused target running", () => received(frames.slice(paused.offset), frame => frame.type === "thread_turn" && frame.turn.id === pausedTurnId && frame.turn.state === "running"), 10_000);
   const stopProjection = await poll("paused Stop projection", () => received(frames.slice(paused.offset), frame => frame.type === "thread_effects_changed" && frame.turn_id === paused.turn.id && frame.effects.some(effect => effect.actions.some(action => action.kind === "stop" && action.turn_id === pausedTurnId))), 10_000);
-  assert(stopProjection.effects.some(effect => effect.receipt.effect === "created"), "new delegation omitted the created receipt");
+  assert.deepEqual(stopProjection.effects.map(effect => effect.receipt.effect), ["delegated"], "Stop projection resent an unchanged receipt");
   // The source run card may exchange its streaming and durable render at this
   // instant. Dispatch through the mounted control without Playwright's
   // stability wait so that transition cannot outlive the target turn.

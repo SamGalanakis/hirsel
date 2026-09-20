@@ -2,7 +2,7 @@ import { For, Show } from "solid-js";
 import { artifactState } from "../artifacts/store";
 import { threadGrants } from "../grants/store";
 import { SectionLabel } from "../components/ui/section-label";
-import { effectSourceThreadId, effectsForTurn, reviewRefusedReach, runEffectAction } from "./store";
+import { effectErrorForTurn, effectSourceThreadId, effectsForTurn, reviewRefusedReach, runEffectAction } from "./store";
 import { threadState } from "../threads/store";
 import type { EffectAction, ThreadEffect, ThreadEffectTarget } from "../threads/types";
 
@@ -45,9 +45,10 @@ export function EffectPills(props: { turnId: number }) {
     <div class="flex flex-wrap gap-1.5">
       <For each={effects()}>{effect => <div class="flex min-w-0 flex-wrap items-center gap-1.5 rounded-xl border border-border/60 bg-muted/20 p-1.5" data-effect={effect.receipt.effect} data-effect-id={effect.receipt.id}>
         <span class="min-w-0 max-w-64 truncate px-1.5 text-xs text-foreground" title={targetName(effect.receipt.target)}>{effectVerb(effect)} · {targetName(effect.receipt.target)}</span>
-        <For each={effect.actions}>{action => <button type="button" class={actionClass} onClick={() => runEffectAction(action)}>{actionLabel(action)}</button>}</For>
+        <For each={effect.actions}>{action => <button type="button" class={actionClass} onClick={() => runEffectAction(action, props.turnId)}>{actionLabel(action)}</button>}</For>
         <Show when={effect.receipt.effect === "refused"}><RefusalHelp effect={effect} /></Show>
       </div>}</For>
     </div>
+    <Show when={effectErrorForTurn(props.turnId)}>{error => <p class="mt-1.5 text-meta text-destructive" role="alert">{error()}</p>}</Show>
   </section></Show>;
 }

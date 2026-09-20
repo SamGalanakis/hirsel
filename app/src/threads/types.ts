@@ -97,7 +97,8 @@ export interface ThreadDetail {
   thread: Thread;
   messages: ChatMessage[];
   turns: ThreadTurn[];
-  effects: ThreadEffect[];
+  effects?: ThreadEffect[];
+  next_effects_before?: number | null;
   turn_timelines: ThreadTurnTimeline[];
   activities: ThreadActivity[];
   has_more: boolean;
@@ -120,7 +121,7 @@ export type ThreadClientMessage =
   | { type: "revoke_thread_reach"; client_id: string; history_id: string; thread_id: number; target: ReachTarget }
   | { type: "create_thread"; client_id: string; history_id: string; title: string; kind: ThreadKind; parent_thread_id: number | null }
   | { type: "ensure_home_project"; client_id: string; history_id: string }
-  | { type: "open_thread"; client_id: string; thread_id: number; before_id: number | null }
+  | { type: "open_thread"; client_id: string; thread_id: number; before_id: number | null; effects_before?: number | null }
   | { type: "send_thread_message"; client_id: string; history_id: string; thread_id: number; body: string; focus?: TaskFocus; attachments: string[]; mentions: number[]; artifact_ids: number[]; mode: "send" | "next_turn" }
   | { type: "thread_action"; client_id: string; history_id: string; thread_id: number; action: string; data: unknown; expected_revision?: number }
   | { type: "cancel_thread_turn"; client_id: string; history_id: string; thread_id: number; turn_id: number; expected_state: ThreadTurn["state"] };

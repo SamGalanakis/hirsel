@@ -10,6 +10,17 @@ beforeEach(() => { const storage=new Map<string,string>();vi.stubGlobal("localSt
 afterEach(() => { disconnectThreads(); vi.useRealTimers();vi.unstubAllGlobals(); });
 const detail = (id: number): ThreadDetail => ({ brief: { text: "", artifact_ids: [] }, thread: makeThread(id), messages: [], turns: [], effects: [], turn_timelines: [], activities: [], related_items: [], grants: [], has_more: false });
 describe("thread transport projection", () => {
+  it("accepts an older Thread detail frame with no effects field", async () => {
+    flush(() => setThreadState(draft => { draft.threads = [makeThread(1)]; }));
+    const opened = openThread(1);
+    const request = sent.findLast(frame => frame.type === "open_thread");
+    if (request?.type !== "open_thread") throw new Error("Missing open request");
+    const legacy = detail(1); delete legacy.effects;
+    flush(() => handleThreadMessage({ type: "thread_opened", client_id: request.client_id, detail: legacy }));
+    await opened;
+    expect(threadState.histories[1].loaded).toBe(true);
+  });
+
   it("clears an archived focused Thread only after its correlated action is accepted, preserving history and draft", async () => {
     const retained = { brief: { text: "", artifact_ids: [] }, messages: [{ id: 1, thread_id: 1, author: "owner" as const, body: "Keep this conversation", ref: null, ts: "2026-09-10T10:00:00Z" }], turns: [], activities: [], loaded: true, hasMore: false };
     flush(() => setThreadState(draft => { draft.threads = [makeThread(1), makeThread(2)]; draft.histories[1] = retained; }));

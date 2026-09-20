@@ -1,16 +1,16 @@
 import { cleanup, fireEvent, render, screen } from "@solidjs/testing-library";
 import { flush } from "solid-js";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReachDialog } from "../grants/ReachDialog";
 import { closeThreadReach } from "../grants/reach";
 import { resetGrants } from "../grants/store";
 import { setHistoryId } from "../lib/history";
 import { makeThread } from "../threads/fixtures";
-import { setThreadState } from "../threads/store";
+import { attachThreadTransport, disconnectThreads, setThreadState } from "../threads/store";
 import { ThreadMessage } from "../threads/ThreadMessages";
 import type { ThreadEffect, ThreadEffectTarget, ThreadTurn } from "../threads/types";
 import { EffectPills } from "./EffectPills";
-import { handleEffectMessage, resetEffects } from "./store";
+import { attachEffectTransport, disconnectEffects, handleEffectMessage, resetEffects } from "./store";
 
 const history = "effect-history";
 const turn = (state: ThreadTurn["state"] = "completed"): ThreadTurn => ({ id: 10, thread_id: 1, requester_thread_id: null, requester_turn_id: null, owner_message_id: null, agent_message_id: null, state, accepted_at: "2026-09-20T10:00:00Z", started_at: "2026-09-20T10:00:00Z", finished_at: state === "running" ? null : "2026-09-20T10:00:01Z" });
@@ -19,12 +19,17 @@ const refused = (target: ThreadEffectTarget, reason = "outside_grant"): ThreadEf
   actions: [],
 });
 const receive = (effects: ThreadEffect[]) => flush(() => handleEffectMessage({ type: "thread_effects_changed", history_id: history, thread_id: 1, turn_id: 10, effects }));
+const sent: unknown[] = [];
 
 beforeEach(() => flush(() => {
+  sent.length = 0;
+  vi.stubGlobal("crypto", { randomUUID: () => "cancel-pill" });
   setHistoryId(history); resetEffects(); resetGrants(); closeThreadReach();
+  attachEffectTransport(frame => sent.push(frame));
+  attachThreadTransport(frame => sent.push(frame));
   setThreadState(draft => { draft.ready = true; draft.threads = [makeThread(1, { title: "Operations", kind: "space" }), makeThread(2, { title: "Billing", kind: "task", parent_thread_id: null })]; });
 }));
-afterEach(() => { cleanup(); closeThreadReach(); });
+afterEach(() => { cleanup(); closeThreadReach(); disconnectEffects(); disconnectThreads(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("effect pills", () => {
   it("renders a live effect and a completed effect-only reply outside the trace", () => {
@@ -64,5 +69,25 @@ describe("effect pills", () => {
     render(() => <EffectPills turnId={10} />);
     expect(screen.getByText(/no owning Space to guess/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Review reach" })).toBeNull();
+  });
+
+  it("renders a correlated cancellation error beside the affected pill", () => {
+    receive([{ ...refused({ kind: "thread", thread_id: 2 }), receipt: { ...refused({ kind: "thread", thread_id: 2 }).receipt, effect: "delegated", refusal: null }, actions: [{ kind: "stop", thread_id: 2, turn_id: 20 }] }]);
+    render(() => <EffectPills turnId={10} />);
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(sent).toHaveLength(1);
+    flush(() => handleEffectMessage({ type: "error", client_id: "cancel-pill", detail: "Turn state changed; reload before cancelling." }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Turn state changed; reload before cancelling.");
+    expect(sent.some(frame => (frame as { type?: string }).type === "open_thread")).toBe(true);
+  });
+
+  it("renders a correlated timeout beside the affected pill and refreshes actions", async () => {
+    vi.useFakeTimers();
+    receive([{ ...refused({ kind: "thread", thread_id: 2 }), receipt: { ...refused({ kind: "thread", thread_id: 2 }).receipt, effect: "delegated", refusal: null }, actions: [{ kind: "stop", thread_id: 2, turn_id: 20 }] }]);
+    render(() => <EffectPills turnId={10} />);
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(screen.getByRole("alert")).toHaveTextContent("Cancellation timed out. Reload and try again.");
+    expect(sent.filter(frame => (frame as { type?: string }).type === "open_thread")).toHaveLength(1);
   });
 });

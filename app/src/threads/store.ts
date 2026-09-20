@@ -5,7 +5,7 @@ import { createStore, reconcile } from "solid-js";
 import type { Blob, ChatMessage, SendMode, ServerMessage, TaskFocus } from "../protocol";
 import type { TimelineEvent } from "../store/types";
 import { enterProject, projectForThread, resetProjects, stepIntoWorker } from "../projects/store";
-import { mergeDetailEffects } from "../effects/store";
+import { beginEffectSnapshot, mergeDetailEffects } from "../effects/store";
 import { emptyHistory, mergeById, mergeDetail, mergeTurns, upsertThread, type ThreadHistory } from "./model";
 import type { Thread, ThreadClientMessage, ThreadKind } from "./types";
 
@@ -139,9 +139,11 @@ interface PendingRequest {
   kind: RequestKind;
   action?: string;
   selectionGeneration?: number;
+  effectGeneration?: number;
   historyId?: string;
   threadId?: number;
   beforeId: number | null;
+  effectsBefore?: number | null;
   onFailure?: (detail: string) => void;
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
@@ -164,11 +166,11 @@ export function disconnectThreads(): void {
   for (const timer of messageTimers.values()) clearTimeout(timer);
   messageTimers.clear();
 }
-function request(frame: Extract<ThreadClientMessage, { client_id: string }>, kind: RequestKind, threadId?: number, beforeId: number | null = null, history?: string, onFailure?: (detail: string) => void, action?: string, selection?: number): Promise<unknown> {
+function request(frame: Extract<ThreadClientMessage, { client_id: string }>, kind: RequestKind, threadId?: number, beforeId: number | null = null, history?: string, onFailure?: (detail: string) => void, action?: string, selection?: number, effectsBefore?: number | null): Promise<unknown> {
   return new Promise((resolve, reject) => {
     if (!sendFrame) { reject(new Error("Not connected")); return; }
     const timer = setTimeout(() => failRequest(frame.client_id, "Thread request timed out"), 20_000);
-    requests.set(frame.client_id, { kind, action, selectionGeneration: selection, historyId: history, threadId, beforeId, onFailure, resolve, reject, timer });
+    requests.set(frame.client_id, { kind, action, selectionGeneration: selection, effectGeneration: kind === "open" ? beginEffectSnapshot() : undefined, historyId: history, threadId, beforeId, effectsBefore, onFailure, resolve, reject, timer });
     sendFrame(frame);
   });
 }
@@ -185,10 +187,11 @@ export async function ensureHomeProject(expectedHistory: string): Promise<Thread
 function requestHomeProject(expectedHistory: string): Promise<Thread> {
   return request({ type: "ensure_home_project", client_id: crypto.randomUUID(), history_id: expectedHistory }, "home", undefined, null, expectedHistory) as Promise<Thread>;
 }
-export async function openThread(id: number, beforeId: number | null = null): Promise<void> {
+export async function openThread(id: number, beforeId: number | null = null, effectsBefore: number | null = null): Promise<void> {
   const generation = historyGeneration;
+  const expectedHistory = historyId();
   try {
-    await request({ type: "open_thread", client_id: crypto.randomUUID(), thread_id: id, before_id: beforeId }, "open", id, beforeId);
+    await request({ type: "open_thread", client_id: crypto.randomUUID(), thread_id: id, before_id: beforeId, effects_before: effectsBefore }, "open", id, beforeId, expectedHistory ?? undefined, undefined, undefined, undefined, effectsBefore);
     setThreadState(draft => { if (draft.error?.operation === "load" && draft.error.threadId === id) draft.error = null; });
   } catch (error) {
     if (generation === historyGeneration && threadState.focusedId === id) setThreadState(draft => { draft.error = { operation: "load", detail: error instanceof Error ? error.message : String(error), threadId: id, beforeId }; });
@@ -355,11 +358,12 @@ export function handleThreadMessage(message: ServerMessage): void {
     case "thread_opened": {
       const pending = requests.get(message.client_id);
       if (pending?.kind !== "open" || pending.threadId !== message.detail.thread.id) break;
+      if (pending.historyId && pending.historyId !== historyId()) break;
       clearTimeout(pending.timer); requests.delete(message.client_id);
       const id = message.detail.thread.id;
       setThreadState(draft => { reconcile(upsertThread(threadState.threads, message.detail.thread), "id")(draft["threads"]); });
       const detail = { ...message.detail, messages: message.detail.messages.filter(row => !threadState.removedMessageIds[row.id]) };
-      mergeDetailEffects(id, detail.turn_timelines.map(timeline => timeline.turn_id), detail.effects);
+      mergeDetailEffects(id, detail.turn_timelines.map(timeline => timeline.turn_id), detail.effects ?? [], pending.effectGeneration);
       setThreadState(draft => { draft["histories"][id] = mergeDetail(threadState.histories[id] ?? emptyHistory(), detail, pending.beforeId !== null); });
       for (const timeline of detail.turn_timelines) {
         const turn = detail.turns.find(turn => turn.id === timeline.turn_id);
@@ -371,6 +375,9 @@ export function handleThreadMessage(message: ServerMessage): void {
       }
       for (const row of message.detail.messages) if (row.client_id) acknowledgeMessage(row.client_id);
       pending.resolve(detail);
+      if (detail.next_effects_before !== null && detail.next_effects_before !== undefined && pending.effectsBefore !== detail.next_effects_before) {
+        void openThread(id, null, detail.next_effects_before).catch(() => {});
+      }
       break;
     }
     case "msg": receiveMessage(message.message); break;

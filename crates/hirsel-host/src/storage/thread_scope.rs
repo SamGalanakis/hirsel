@@ -457,115 +457,9 @@ impl Storage {
         Ok(caller)
     }
 
-    pub(crate) async fn bind_trigger_operation_authority(
-        &self,
-        session_id: &str,
-        actor_key: &str,
-        turn_id: u64,
-    ) -> anyhow::Result<()> {
-        let c = self.conn.lock().await;
-        let actor_marker = process_actor_marker(actor_key);
-        let valid: bool = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM thread_process_sessions s
-             JOIN thread_execution_bindings b ON b.session_id=s.session_id AND b.turn_id=?2
-             JOIN thread_turns t ON t.id=b.turn_id AND t.thread_id=s.thread_id
-             JOIN meta m ON m.key='history_id' AND m.value=s.history_id
-             WHERE s.session_id=?1)",
-            params![session_id, turn_id],
-            |row| row.get(0),
-        )?;
-        anyhow::ensure!(valid, "trigger authority has no originating accepted turn");
-        c.execute(
-            "INSERT INTO thread_process_authorities(session_id,process_id,turn_id) VALUES(?1,?2,?3)
-             ON CONFLICT(session_id,process_id) DO NOTHING",
-            params![session_id, actor_marker, turn_id],
-        )?;
-        Ok(())
-    }
-
-    pub(crate) async fn bind_trigger_authority(
-        &self,
-        session_id: &str,
-        subscription_id: &str,
-        incarnation: &str,
-        revision: u64,
-        actor_key: &str,
-    ) -> anyhow::Result<()> {
-        let mut c = self.conn.lock().await;
-        let tx = c.transaction()?;
-        let actor_marker = process_actor_marker(actor_key);
-        let trigger_marker = process_trigger_marker(subscription_id, incarnation, revision)?;
-        let turn_id: u64 = tx
-            .query_row(
-                "SELECT turn_id FROM thread_process_authorities WHERE session_id=?1 AND process_id=?2",
-                params![session_id, actor_marker],
-                |row| row.get(0),
-            )
-            .optional()?
-            .ok_or_else(|| anyhow::anyhow!("trigger authority has no originating accepted turn"))?;
-        tx.execute(
-            "INSERT INTO thread_process_authorities(session_id,process_id,turn_id) VALUES(?1,?2,?3)
-             ON CONFLICT(session_id,process_id) DO NOTHING",
-            params![session_id, trigger_marker, turn_id],
-        )?;
-        let stored: u64 = tx.query_row(
-            "SELECT turn_id FROM thread_process_authorities WHERE session_id=?1 AND process_id=?2",
-            params![session_id, trigger_marker],
-            |row| row.get(0),
-        )?;
-        anyhow::ensure!(
-            stored == turn_id,
-            "trigger authority changed after acceptance"
-        );
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub(crate) async fn carry_trigger_authority(
-        &self,
-        session_id: &str,
-        subscription_id: &str,
-        incarnation: &str,
-        previous_revision: u64,
-        revision: u64,
-    ) -> anyhow::Result<()> {
-        let previous = process_trigger_marker(subscription_id, incarnation, previous_revision)?;
-        let next = process_trigger_marker(subscription_id, incarnation, revision)?;
-        let c = self.conn.lock().await;
-        c.execute(
-            "INSERT INTO thread_process_authorities(session_id,process_id,turn_id)
-             SELECT session_id,?3,turn_id FROM thread_process_authorities
-             WHERE session_id=?1 AND process_id=?2
-             ON CONFLICT(session_id,process_id) DO NOTHING",
-            params![session_id, previous, next],
-        )?;
-        Ok(())
-    }
-
-    pub(crate) async fn bind_process_trigger_authority(
-        &self,
-        session_id: &str,
-        process_id: &str,
-        subscription_id: &str,
-        incarnation: &str,
-        revision: u64,
-    ) -> anyhow::Result<()> {
-        let marker = process_trigger_marker(subscription_id, incarnation, revision)?;
-        let c = self.conn.lock().await;
-        let changed = c.execute(
-            "INSERT INTO thread_process_authorities(session_id,process_id,turn_id)
-             SELECT session_id,?3,turn_id FROM thread_process_authorities
-             WHERE session_id=?1 AND process_id=?2
-             ON CONFLICT(session_id,process_id) DO UPDATE SET turn_id=excluded.turn_id",
-            params![session_id, marker, process_id],
-        )?;
-        anyhow::ensure!(changed == 1, "Thread process authority is unavailable");
-        Ok(())
-    }
-
-    /// Resolve a durable process to the accepted turn that originated its
-    /// trigger. The binding is established from a durable delivery snapshot;
-    /// missing provenance fails closed instead of selecting a later turn.
+    /// Resolve a durable process to its owning Thread. The first tool call for
+    /// one process pins the Thread's latest turn as a receipt namespace; that
+    /// turn is attribution only and does not need to remain running.
     pub(crate) async fn process_caller(
         &self,
         session_id: &str,
@@ -573,6 +467,19 @@ impl Storage {
         execution_id: &str,
     ) -> anyhow::Result<ThreadCaller> {
         let c = self.conn.lock().await;
+        c.execute(
+            "INSERT OR IGNORE INTO thread_process_authorities(session_id,process_id,turn_id)
+             SELECT s.session_id,?2,COALESCE(
+                 (SELECT b.turn_id FROM thread_execution_bindings b
+                  JOIN thread_turns bound ON bound.id=b.turn_id AND bound.thread_id=s.thread_id
+                  WHERE b.session_id=s.session_id ORDER BY b.turn_id DESC LIMIT 1),
+                 (SELECT latest.id FROM thread_turns latest
+                  WHERE latest.thread_id=s.thread_id ORDER BY latest.id DESC LIMIT 1)
+             ) FROM thread_process_sessions s
+             JOIN meta m ON m.key='history_id' AND m.value=s.history_id
+             WHERE s.session_id=?1",
+            params![session_id, process_id],
+        )?;
         let caller = c
             .query_row(
                 "SELECT s.history_id,s.thread_id,a.turn_id FROM thread_process_authorities a
@@ -604,21 +511,6 @@ impl Storage {
         self.conn.lock().await.execute("UPDATE thread_execution_bindings SET revoked=1 WHERE history_id=?1 AND session_id=?2 AND execution_id=?3 AND turn_id=?4",params![caller.history_id,caller.session_id,caller.execution_id,caller.turn_id])?;
         Ok(())
     }
-}
-
-fn process_actor_marker(actor_key: &str) -> String {
-    format!("\u{1f}actor:{actor_key}")
-}
-
-fn process_trigger_marker(
-    subscription_id: &str,
-    incarnation: &str,
-    revision: u64,
-) -> anyhow::Result<String> {
-    Ok(format!(
-        "\u{1f}trigger:{}",
-        serde_json::to_string(&(subscription_id, incarnation, revision))?
-    ))
 }
 
 impl Storage {

@@ -752,12 +752,7 @@ pub(super) async fn test_event_executor_with_skills(
         }),
     }));
     (
-        HirselToolExecutor {
-            tools,
-            anchors,
-            trigger_store: Arc::new(lash_core::facade_support::InMemoryTriggerStore::default()),
-            authority_storage: Arc::new(std::sync::RwLock::new(storage.clone())),
-        },
+        HirselToolExecutor { tools, anchors },
         storage,
         broadcast_log,
         dir,

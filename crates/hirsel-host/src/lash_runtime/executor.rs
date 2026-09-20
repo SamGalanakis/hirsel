@@ -3,10 +3,7 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct HirselToolExecutor {
     pub(super) tools: ToolSuite,
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) anchors: Arc<Mutex<TurnAnchorState>>,
-    pub(super) trigger_store: Arc<dyn TriggerStore>,
-    pub(super) authority_storage: Arc<std::sync::RwLock<crate::storage::Storage>>,
 }
 
 pub(super) struct HirselToolProvider {
@@ -104,7 +101,8 @@ impl HirselToolProvider {
     ) -> Result<crate::storage::ToolProfile, String> {
         let caller = self.executor.caller(call).await?;
         self.executor
-            .authority_storage()
+            .tools
+            .storage()
             .turn_tool_profile(caller.turn_id)
             .await
             .map_err(|error| error.to_string())
@@ -253,40 +251,12 @@ impl StaticToolExecute for HirselToolExecutor {
 }
 
 impl HirselToolExecutor {
-    fn authority_storage(&self) -> crate::storage::Storage {
-        self.authority_storage
-            .read()
-            .expect("authority storage poisoned")
-            .clone()
-    }
-
     async fn caller(&self, call: &ToolCall<'_>) -> Result<crate::storage::ThreadCaller, String> {
         match call.context.runtime_process_id() {
             Some(process_id) => match call.context.process_execution_env_spec().policy.session_id {
                 Some(owner_session_id) => {
-                    let deliveries = self
-                        .trigger_store
-                        .list_deliveries_by_process_id(process_id)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    let [delivery] = deliveries.as_slice() else {
-                        return Err(format!(
-                            "process authority requires exactly one durable trigger delivery; found {}",
-                            deliveries.len()
-                        ));
-                    };
-                    let storage = self.authority_storage();
-                    storage
-                        .bind_process_trigger_authority(
-                            &owner_session_id,
-                            process_id,
-                            &delivery.subscription.subscription_id,
-                            &delivery.subscription.incarnation,
-                            delivery.subscription.revision,
-                        )
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    storage
+                    self.tools
+                        .storage()
                         .process_caller(
                             &owner_session_id,
                             process_id,
@@ -299,7 +269,8 @@ impl HirselToolExecutor {
                 )),
             },
             None => {
-                self.authority_storage()
+                self.tools
+                    .storage()
                     .execution_caller(call.context.session_id(), call.context.execution_scope_id())
                     .await
             }

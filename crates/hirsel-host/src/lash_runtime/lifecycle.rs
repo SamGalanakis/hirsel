@@ -89,7 +89,7 @@ impl LashAgentRuntime {
                 as Arc<dyn lash::persistence::LashlangArtifactStore>;
         let process_env_store =
             Arc::new(lash_sqlite_store::Store::open(&lash_dir.join("process-env.db")).await?);
-        let raw_trigger_store = Arc::new(
+        let trigger_store = Arc::new(
             lash_sqlite_store::SqliteTriggerStore::open(&lash_dir.join("triggers.db")).await?,
         ) as Arc<dyn TriggerStore>;
         let process_registry = Arc::new(
@@ -142,19 +142,11 @@ impl LashAgentRuntime {
             config.prompts.agent_guidance(),
             session_bootstrap.handoff_seed.as_deref(),
         );
-        let anchors = Arc::new(Mutex::new(TurnAnchorState::default()));
-        let trigger_store = Arc::new(super::authority_trigger_store::AuthorityTriggerStore::new(
-            raw_trigger_store,
-            tools.storage().clone(),
-            session_bootstrap.session_id.clone(),
-            Arc::clone(&anchors),
-        )) as Arc<dyn TriggerStore>;
         let executor = HirselToolExecutor {
             tools: tools.clone(),
-            anchors: Arc::clone(&anchors),
-            trigger_store: Arc::clone(&trigger_store),
-            authority_storage: Arc::new(std::sync::RwLock::new(tools.storage().clone())),
+            anchors: Arc::new(Mutex::new(TurnAnchorState::default())),
         };
+        let anchors = executor.anchors.clone();
         // The coding operations open on the host's own directory until a
         // Thread's accepted execution names its own.
         let coding = Arc::new(NativeCodingBinding::new(std::fs::canonicalize(

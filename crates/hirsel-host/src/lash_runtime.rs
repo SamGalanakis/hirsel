@@ -81,7 +81,6 @@ const SNOOZE_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const SNOOZE_TICK_INTERVAL: Duration = Duration::from_millis(25);
 
 mod artifact_tools;
-mod authority_trigger_store;
 mod bridges;
 mod condense;
 mod executor;

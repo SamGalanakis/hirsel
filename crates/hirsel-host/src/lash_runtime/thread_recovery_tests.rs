@@ -1396,6 +1396,43 @@ async fn cancellation_during_native_binding_terminalizes_the_turn_and_admits_the
     );
 }
 
+#[tokio::test]
+async fn exact_stop_persists_when_the_native_lane_cannot_open() {
+    let (state, dir) = runtime_fixture().await;
+    let turn = request(&state, "unopenable-native-lane").await;
+    let turn_id = turn.turn_id.unwrap();
+    state.storage.run_thread_turn(turn_id).await.unwrap();
+    let history = state.storage.history_id().await.unwrap();
+    let lane_path = dir
+        .path()
+        .join("thread-runtime")
+        .join(&history)
+        .join(turn.thread_id.to_string());
+    std::fs::create_dir_all(lane_path.parent().unwrap()).unwrap();
+    std::fs::write(&lane_path, "not a directory").unwrap();
+
+    let error = state
+        .agent
+        .registry
+        .cancel_exact(&history, turn.thread_id, turn_id, ThreadTurnState::Running)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("File exists"), "{error:#}");
+    assert_eq!(
+        state
+            .storage
+            .requested_thread_cancellations()
+            .await
+            .unwrap()
+            .iter()
+            .map(|turn| turn.id)
+            .collect::<Vec<_>>(),
+        vec![turn_id],
+        "opening the runtime is best-effort after durable cancellation"
+    );
+}
+
 /// A Thread may name its own Native provider. The session opens on the booted
 /// one and is rebound when a turn accepted for another provider is admitted —
 /// before the input is enqueued, so the turn runs on what the Owner chose and a

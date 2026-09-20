@@ -424,7 +424,16 @@ impl ThreadRuntimeRegistry {
             work.cancel.cancel();
             return Ok(());
         }
-        let lane = self.lane(id).await?;
+        let lane = match self.lane(id).await {
+            Ok(lane) => lane,
+            Err(error) => {
+                self.tools
+                    .storage()
+                    .request_thread_cancellation(expected_history, id)
+                    .await?;
+                return Err(error);
+            }
+        };
         match lane.as_ref() {
             LaneRuntime::Lash(r) => {
                 r.request_owned_turn_cancellation(expected_history, id)
@@ -460,17 +469,28 @@ impl ThreadRuntimeRegistry {
             "cancellation belongs to an old history"
         );
         let execution = self.tools.storage().turn_execution(turn_id).await?;
-        let native_lane = if !self.is_scripted()
+        let (native_lane, native_lane_error) = if !self.is_scripted()
             && matches!(execution, crate::storage::ThreadExecution::Native { .. })
         {
-            Some(self.lane(thread_id).await?)
+            match self.lane(thread_id).await {
+                Ok(lane) => match lane.as_ref() {
+                    LaneRuntime::Lash(runtime) => (Some(Arc::clone(runtime)), None),
+                    LaneRuntime::Degraded => {
+                        (None, Some(anyhow::anyhow!("Thread has no native lane")))
+                    }
+                    LaneRuntime::Scripted(_) => (
+                        None,
+                        Some(anyhow::anyhow!(
+                            "native cancellation opened a scripted lane"
+                        )),
+                    ),
+                },
+                Err(error) => (None, Some(error)),
+            }
         } else {
-            None
+            (None, None)
         };
-        let turn = if let Some(lane) = native_lane.as_ref() {
-            let LaneRuntime::Lash(runtime) = lane.as_ref() else {
-                anyhow::bail!("Thread has no native lane")
-            };
+        let turn = if let Some(runtime) = native_lane.as_ref() {
             runtime
                 .cancel_exact_owned_turn(expected_history, thread_id, turn_id, expected_state)
                 .await?
@@ -480,6 +500,11 @@ impl ThreadRuntimeRegistry {
                 .cancel_exact_thread_turn(expected_history, thread_id, turn_id, expected_state)
                 .await?
         };
+        if turn.state == hirsel_proto::ThreadTurnState::Running
+            && let Some(error) = native_lane_error
+        {
+            return Err(error);
+        }
         if turn.state == hirsel_proto::ThreadTurnState::Running && native_lane.is_none() {
             if let Some(work) = self.cli.lock().await.get(&thread_id) {
                 anyhow::ensure!(

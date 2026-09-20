@@ -120,6 +120,7 @@ fn effect_live_snapshot_pagination_and_history_reset_keep_exact_ownership() {
         messages: vec![],
         turns: vec![turn(10, 5, ThreadTurnState::Running)],
         effects: vec![effect(1, 10, 9, vec![])],
+        next_effects_before: None,
         turn_timelines: vec![hirsel_proto::ThreadTurnTimeline {
             turn_id: 10,
             events: vec![],
@@ -128,17 +129,79 @@ fn effect_live_snapshot_pagination_and_history_reset_keep_exact_ownership() {
         has_more: true,
     };
     assert!(store.apply_detail("page", detail.clone()));
-    assert_eq!(store.effects, vec![live.clone(), unrelated]);
+    assert_eq!(store.effects, vec![detail.effects[0].clone(), unrelated]);
 
     store.replace_turn_effects(10, vec![]);
-    assert!(store.effects.iter().all(|row| row.receipt.turn_id != 10));
+    assert!(store.effects.iter().any(|row| row.receipt.turn_id == 10));
     detail.effects = vec![];
     store.track_pending("reload".into(), PendingOp::OpenThread { thread_id: 5 });
     assert!(store.apply_detail("reload", detail));
-    assert!(store.effects.iter().all(|row| row.receipt.turn_id != 10));
+    assert!(store.effects.iter().any(|row| row.receipt.turn_id == 10));
 
     store.apply_hello_ok("B".into(), vec![thread(1)], vec![], "test".into());
     assert!(store.effects.is_empty());
+}
+
+#[test]
+fn effect_snapshot_requested_before_live_projection_cannot_restore_stale_actions() {
+    let mut store = LocalStore::default();
+    store.apply_hello_ok("A".into(), vec![thread(5)], vec![], "test".into());
+    store.track_pending("stale-page".into(), PendingOp::OpenThread { thread_id: 5 });
+    let current = effect(1, 10, 9, vec![]);
+    store.replace_turn_effects(10, vec![current.clone()]);
+    let detail = ThreadDetail {
+        related_items: vec![],
+        grants: vec![],
+        brief: hirsel_proto::ThreadBrief {
+            text: String::new(),
+            artifact_ids: vec![],
+        },
+        thread: thread(5),
+        messages: vec![],
+        turns: vec![turn(10, 5, ThreadTurnState::Completed)],
+        effects: vec![effect(
+            1,
+            10,
+            9,
+            vec![EffectAction::Stop {
+                thread_id: 9,
+                turn_id: 99,
+            }],
+        )],
+        next_effects_before: None,
+        turn_timelines: vec![hirsel_proto::ThreadTurnTimeline {
+            turn_id: 10,
+            events: vec![],
+        }],
+        activities: vec![],
+        has_more: false,
+    };
+    assert!(store.apply_detail("stale-page", detail));
+    assert_eq!(store.effects, vec![current]);
+}
+
+#[test]
+fn older_thread_detail_without_effects_defaults_to_empty() {
+    let detail = ThreadDetail {
+        related_items: vec![],
+        grants: vec![],
+        brief: hirsel_proto::ThreadBrief {
+            text: String::new(),
+            artifact_ids: vec![],
+        },
+        thread: thread(5),
+        messages: vec![],
+        turns: vec![],
+        effects: vec![],
+        next_effects_before: None,
+        turn_timelines: vec![],
+        activities: vec![],
+        has_more: false,
+    };
+    let mut wire = serde_json::to_value(detail).unwrap();
+    wire.as_object_mut().unwrap().remove("effects");
+    let decoded: ThreadDetail = serde_json::from_value(wire).unwrap();
+    assert!(decoded.effects.is_empty());
 }
 #[test]
 fn ordinary_thread_survives_snapshot_read_and_stale_upsert() {
@@ -263,6 +326,7 @@ fn open_requires_matching_request_and_message_ownership() {
         messages: vec![message(1, 5, None), message(2, 9, None)],
         turns: vec![],
         effects: vec![],
+        next_effects_before: None,
         turn_timelines: vec![],
         activities: vec![],
         has_more: false,
@@ -332,6 +396,7 @@ fn removed_message_stays_removed_across_late_echo_snapshot_and_open_history() {
             messages: vec![removed],
             turns: vec![],
             effects: vec![],
+            next_effects_before: None,
             turn_timelines: vec![],
             activities: vec![],
             has_more: false,
@@ -483,6 +548,7 @@ fn current_brief_is_per_thread_and_survives_paginated_history() {
                 messages: vec![],
                 turns: vec![],
                 effects: vec![],
+                next_effects_before: None,
                 turn_timelines: vec![],
                 activities: vec![],
                 has_more: true,
@@ -514,6 +580,7 @@ fn assignment_refresh_fetches_authoritative_detail_only_for_opened_thread() {
         client_id,
         thread_id,
         before_id,
+        effects_before: _,
     } = store.refresh_open_thread(5).unwrap()
     else {
         panic!("expected detail request")
@@ -550,6 +617,7 @@ fn link_detail(revision: u64, links: Vec<hirsel_proto::ThreadRelatedItem>) -> Th
         messages: vec![],
         turns: vec![],
         effects: vec![],
+        next_effects_before: None,
         turn_timelines: vec![],
         activities: vec![],
         has_more: true,

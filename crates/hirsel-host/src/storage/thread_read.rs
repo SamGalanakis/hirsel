@@ -11,7 +11,7 @@ pub(crate) struct ThreadReadCursor {
     pub turns_before: Option<u64>,
     pub activities_before: Option<u64>,
 }
-#[derive(Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ScopedThreadDetail {
     pub history_id: String,
     pub reference_url: String,
@@ -76,6 +76,16 @@ impl Storage {
         let mut c = self.conn.lock().await;
         let tx = c.transaction()?;
         thread_scope::validate_caller(&tx, caller)?;
+        let invocation = serde_json::json!({
+            "tool": "threads_read", "thread": reference, "cursor": cursor, "limit": limit,
+        });
+        if let Some(operation_id) = operation_id
+            && let Some(detail) =
+                super::thread_effects::replay(&tx, caller, operation_id, &invocation)?
+        {
+            tx.commit()?;
+            return Ok(detail);
+        }
         let id = thread_scope::resolve(&tx, caller.thread_id, reference)?;
         let start = Some(i64::MAX as u64);
         let cursor = cursor.unwrap_or(ThreadReadCursor {
@@ -141,6 +151,7 @@ impl Storage {
                     refusal: None,
                 },
             )?;
+            super::thread_effects::remember(&tx, caller, operation_id, &invocation, &detail)?;
         }
         tx.commit()?;
         Ok(detail)

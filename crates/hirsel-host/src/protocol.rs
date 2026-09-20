@@ -434,10 +434,11 @@ where
             client_id,
             thread_id,
             before_id,
+            effects_before,
         } => {
             let detail = state
                 .storage
-                .thread_detail(thread_id, before_id, 100)
+                .thread_detail_page(thread_id, before_id, effects_before, 100)
                 .await?;
             channel
                 .send(&HostToClient::ThreadOpened { client_id, detail })

@@ -352,6 +352,16 @@ impl Storage {
         before_id: Option<u64>,
         limit: u64,
     ) -> anyhow::Result<ThreadDetail> {
+        self.thread_detail_page(id, before_id, None, limit).await
+    }
+
+    pub(crate) async fn thread_detail_page(
+        &self,
+        id: u64,
+        before_id: Option<u64>,
+        effects_before: Option<u64>,
+        limit: u64,
+    ) -> anyhow::Result<ThreadDetail> {
         let mut c = self.conn.lock().await;
         let tx = c.transaction()?;
         let thread = threads::get(&tx, id)?;
@@ -382,6 +392,12 @@ impl Storage {
             })
             .map(|turn| turn.id)
             .collect::<std::collections::HashSet<_>>();
+        let (effects, next_effects_before) =
+            super::thread_effects::page_for_thread(&tx, id, effects_before, limit)?;
+        let effect_turn_ids = effects
+            .iter()
+            .map(|effect| effect.receipt.turn_id)
+            .collect::<std::collections::HashSet<_>>();
         let mut supplemental_turn_ids = turns
             .iter()
             .filter(|turn| {
@@ -399,6 +415,7 @@ impl Storage {
         if supplemental_turn_ids.len() > supplemental_limit {
             supplemental_turn_ids.drain(..supplemental_turn_ids.len() - supplemental_limit);
         }
+        supplemental_turn_ids.extend(effect_turn_ids.iter().copied());
         let supplemental_turn_ids = supplemental_turn_ids
             .into_iter()
             .collect::<std::collections::HashSet<_>>();
@@ -410,7 +427,6 @@ impl Storage {
             .map(|turn| turn.id)
             .collect::<Vec<_>>();
         let turn_timelines = super::thread_events::for_turns(&tx, &timeline_turn_ids)?;
-        let effects = super::thread_effects::for_turns(&tx, &timeline_turn_ids)?;
         let activities = super::thread_activity::activities(&tx, id)?;
         let brief = super::thread_read::brief(&tx, id)?;
         let related_items = super::thread_related::list(&tx, id)?;
@@ -424,6 +440,7 @@ impl Storage {
             messages,
             turns,
             effects,
+            next_effects_before,
             turn_timelines,
             activities,
             has_more,

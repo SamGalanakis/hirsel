@@ -5,14 +5,21 @@ use hirsel_proto::{ChatMessage, HostToClient, Thread, ThreadActivity, ThreadTurn
 
 impl ToolSuite {
     pub(crate) async fn publish_thread_effects(&self, turn_id: u64) -> anyhow::Result<()> {
-        let (history_id, thread_id, effects) =
-            self.storage.thread_effect_publication(turn_id).await?;
-        self.broadcast(HostToClient::ThreadEffectsChanged {
-            history_id,
-            thread_id,
-            turn_id,
-            effects,
-        });
+        let mut before = None;
+        loop {
+            let (history_id, thread_id, effects, next) = self
+                .storage
+                .thread_effect_publication(turn_id, before)
+                .await?;
+            self.broadcast(HostToClient::ThreadEffectsChanged {
+                history_id,
+                thread_id,
+                turn_id,
+                effects,
+            });
+            let Some(cursor) = next else { break };
+            before = Some(cursor);
+        }
         Ok(())
     }
 

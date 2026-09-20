@@ -126,15 +126,51 @@ async fn refusal_receipts_distinguish_probes_but_dedupe_operation_replay() {
     });
 
     let first = storage
-        .record_refusal(&caller, "probe-1", "threads_read", &detail)
+        .record_refusal(
+            &caller,
+            "probe-1",
+            "threads_read",
+            &json!({"thread":2}),
+            &detail,
+        )
         .await
         .unwrap();
     let replay = storage
-        .record_refusal(&caller, "probe-1", "threads_read", &detail)
+        .record_refusal(
+            &caller,
+            "probe-1",
+            "threads_read",
+            &json!({"thread":2}),
+            &detail,
+        )
         .await
         .unwrap();
+    assert_eq!(
+        storage
+            .replayed_refusal(&caller, "probe-1", "threads_read", &json!({"thread":2}))
+            .await
+            .unwrap(),
+        Some(detail.clone())
+    );
+    let changed = storage
+        .record_refusal(
+            &caller,
+            "probe-1",
+            "threads_read",
+            &json!({"thread":999}),
+            &detail,
+        )
+        .await
+        .unwrap_err();
+    assert!(changed.to_string().contains("invocation payload changed"));
     let second = storage
-        .record_refusal(&caller, "probe-2", "threads_read", &detail)
+        .record_refusal(
+            &caller,
+            "probe-2",
+            "threads_read",
+            &json!({"thread":2}),
+            &detail,
+        )
         .await
         .unwrap();
     assert_eq!(replay.id, first.id);
@@ -165,6 +201,90 @@ async fn refusal_receipts_distinguish_probes_but_dedupe_operation_replay() {
             .map(|effect| effect.receipt.id)
             .collect::<Vec<_>>()
     );
+}
+
+#[tokio::test]
+async fn receipt_sql_rejects_incomplete_target_and_refusal_variants() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let source = thread(&storage, "source", None).await;
+    let caller = caller(&storage, source).await;
+    let connection = storage.conn.lock().await;
+    for (index, target) in ["{}", r#"{"kind":"thread"}"#, r#"{"thread_id":1}"#]
+        .into_iter()
+        .enumerate()
+    {
+        let result = connection.execute(
+            "INSERT INTO thread_effect_receipts(turn_id,operation_id,effect_index,tool,effect,target_json,created_at) VALUES(?1,?2,0,'threads_read','read',?3,'now')",
+            rusqlite::params![caller.turn_id, format!("bad-target-{index}"), target],
+        );
+        assert!(result.is_err(), "accepted malformed target {target}");
+    }
+    for (index, refusal) in ["{}", r#"{"reason":"outside_grant"}"#]
+        .into_iter()
+        .enumerate()
+    {
+        let result = connection.execute(
+            "INSERT INTO thread_effect_receipts(turn_id,operation_id,effect_index,tool,effect,target_json,refusal_json,created_at) VALUES(?1,?2,0,'threads_read','refused','{\"kind\":\"root\"}',?3,'now')",
+            rusqlite::params![caller.turn_id, format!("bad-refusal-{index}"), refusal],
+        );
+        assert!(result.is_err(), "accepted malformed refusal {refusal}");
+    }
+}
+
+#[tokio::test]
+async fn effect_pages_are_bounded_and_reach_message_less_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let source = thread(&storage, "source", None).await;
+    let caller = caller(&storage, source).await;
+    {
+        let connection = storage.conn.lock().await;
+        for index in 0..150 {
+            super::thread_effects::record(
+                &connection,
+                &caller,
+                super::thread_effects::NewEffect {
+                    operation_id: &format!("effect-page-{index}"),
+                    effect_index: 0,
+                    tool: "threads_read",
+                    effect: ThreadEffectKind::Read,
+                    target: hirsel_proto::ThreadEffectTarget::Thread { thread_id: source },
+                    target_turn_id: None,
+                    request_client_id: None,
+                    refusal: None,
+                },
+            )
+            .unwrap();
+        }
+    }
+    let newest = storage
+        .thread_detail_page(source, None, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(newest.effects.len(), 100);
+    assert_eq!(
+        newest
+            .turn_timelines
+            .iter()
+            .map(|timeline| timeline.turn_id)
+            .collect::<Vec<_>>(),
+        vec![caller.turn_id]
+    );
+    let cursor = newest.next_effects_before.expect("older effects remain");
+    let older = storage
+        .thread_detail_page(source, None, Some(cursor), 100)
+        .await
+        .unwrap();
+    assert_eq!(older.effects.len(), 50);
+    assert_eq!(older.next_effects_before, None);
+    let ids = newest
+        .effects
+        .iter()
+        .chain(&older.effects)
+        .map(|effect| effect.receipt.id)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(ids.len(), 150);
 }
 
 #[tokio::test]
@@ -259,4 +379,34 @@ async fn exact_turn_cancellation_rejects_a_state_that_advanced() {
             )
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn cancellation_requested_queue_cannot_be_claimed_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let thread_id = thread(&storage, "target", None).await;
+    let history = storage.history_id().await.unwrap();
+    let turn = storage.queue_thread_turn(thread_id, None).await.unwrap();
+    storage
+        .cancel_exact_thread_turn(&history, thread_id, turn.id, ThreadTurnState::Queued)
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .run_thread_turn(turn.id)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled before admission")
+    );
+    let stored = storage
+        .thread_detail(thread_id, None, 100)
+        .await
+        .unwrap()
+        .turns
+        .pop()
+        .unwrap();
+    assert_eq!(stored.state, ThreadTurnState::Queued);
+    assert_eq!(stored.started_at, None);
 }

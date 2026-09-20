@@ -444,6 +444,7 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                             client_id: client_id.clone(),
                             thread_id: *thread_id,
                             before_id: None,
+                            effects_before: None,
                         });
                     }
                 }
@@ -454,6 +455,7 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                         client_id,
                         thread_id,
                         before_id: None,
+                        effects_before: None,
                     });
                 }
                 true
@@ -616,7 +618,22 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
             }
             HostToClient::ThreadOpened { client_id, detail } => {
                 let thread_id = detail.thread.id;
+                let next_effects_before = detail.next_effects_before;
                 let applied = store.apply_detail(&client_id, detail);
+                if applied && let Some(effects_before) = next_effects_before {
+                    let page_id = uuid::Uuid::new_v4().to_string();
+                    store.track_pending(page_id.clone(), PendingOp::OpenThread { thread_id });
+                    client
+                        .pending_frames
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push_back(hirsel_proto::ClientToHost::OpenThread {
+                            client_id: page_id,
+                            thread_id,
+                            before_id: None,
+                            effects_before: Some(effects_before),
+                        });
+                }
                 drop(store);
                 if applied {
                     client.notify_lifecycle(LifecycleEvent::ThreadOpened {

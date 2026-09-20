@@ -351,6 +351,7 @@ async fn thread_create_is_visible_live_and_snapshot_and_reconnect_dedupes() {
             client_id: "open".into(),
             thread_id: thread.id,
             before_id: None,
+            effects_before: None,
         },
     )
     .await
@@ -834,6 +835,7 @@ async fn direct_thread_reply_cannot_suppress_rollback_to_previous_hello_summary(
             client_id: "open".into(),
             thread_id: original.id,
             before_id: None,
+            effects_before: None,
         },
         ClientToHost::CreateThread {
             history_id: state.storage.history_id().await.unwrap(),

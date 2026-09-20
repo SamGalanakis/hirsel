@@ -229,7 +229,11 @@ pub struct ThreadDetail {
     pub messages: Vec<crate::ChatMessage>,
     pub turns: Vec<ThreadTurn>,
     /// Durable effects for the turns represented by this bounded page.
+    #[serde(default)]
     pub effects: Vec<crate::ThreadEffect>,
+    /// Cursor for the next bounded page of durable effect receipts.
+    #[serde(default)]
+    pub next_effects_before: Option<u64>,
     /// Durable, exactly ordered timeline events for turns represented in this
     /// bounded message page. Legacy turns can truthfully have no events.
     pub turn_timelines: Vec<crate::ThreadTurnTimeline>,

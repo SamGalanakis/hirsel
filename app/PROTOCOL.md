@@ -21,6 +21,7 @@ A Thread is explicitly either `kind:"space"` or `kind:"task"`. Both kinds may be
 | `send_thread_message` | `client_id,history_id,thread_id,body,attachments:string[],mentions:number[],artifact_ids:number[],mode:"send"|"next_turn"` → owning `msg` and turn updates |
 | `thread_action` | `client_id,history_id,thread_id,action,data,expected_revision?` → `thread_action_applied {client_id,history_id,thread_id}`; displayed instrument controls require their revision |
 | `cancel_turn` | required `history_id,thread_id` |
+| `cancel_thread_turn` | Owner-only `client_id,history_id,thread_id,turn_id,expected_state` → `thread_turn_cancellation_applied {client_id,history_id,thread_id,turn_id}` |
 | `cancel_queued` | accepted outgoing `client_id` |
 
 `thread_action` uses `action:"set_icon"`, required `expected_revision`, and `data:{icon}` for an Owner icon edit. Image icons must reference an uploaded PNG, JPEG or WebP blob of at most 256 KiB, with real bytes matching the MIME and square dimensions no larger than 256 px; SVG is rejected. The web picker center-crops and encodes uploads before sending the action. `action:"set_kind"` uses the same revision rule and `data:{kind}` for Owner conversion. A settled Task must reopen before conversion. Space to Task is invalid while it has a Space child, and Task to Space is invalid below a Task. Same-kind requests are revision-validated no-ops. `settle` and `reopen` apply only to Tasks. Generated instrument controls whose `settles` field is true or omitted are completion controls and are hidden on Spaces; controls with `settles:false` remain available.
@@ -30,6 +31,27 @@ A Thread is explicitly either `kind:"space"` or `kind:"task"`. Both kinds may be
 `action:"set_execution"` (`data:{execution}`) is the Owner's choice of backend for a Thread. `execution` is `null` to inherit the configured default Native provider and model, or one of `{kind:"native",provider_id,model}`, `{kind:"cli",agent,model,variant}`; unknown keys are rejected. It requires `expected_revision` and is validated against the live model catalog and provider roster by exactly the code that validates `threads.delegate`, so both refuse the same agents, models and variants. A `native` target names the provider and model this Thread's own session runs on: `provider_id` is any agent-selectable instance in the provider roster (`claude` is Sub-agents only and refused), and `model` is one of that instance's curated models, or free text where the instance takes free text. The Settings Native route remains the default for every Thread that names none. The choice takes effect on the **next** turn: a turn already running keeps the backend it captured when it started. `Thread.execution` mirrors the stored choice on every listing and broadcast, and is absent on older hosts.
 
 Thread detail carries required `brief:{text:string,artifact_ids:number[]}`, its Thread, a bounded message page, turns, activities and `has_more`. Every `ChatMessage` requires `thread_id,id,author,body,ref,ts`. Each tool summary requires the canonical call `id`, `name`, and `ok`; live and durable tool data join only by that ID. Optional client correlation, attachments, tool summaries, mentions and artifact references carry their current meaning. `ref` and `mentions` are citations, never message ownership. `msg_removed {id}` is authoritative even if its echo arrives later.
+
+Thread detail also carries required `effects`, the durable effects for the
+turns represented by that bounded page. A receipt is
+`{id,turn_id,operation_id,effect_index,tool,effect,target,target_turn_id,request_client_id,refusal,created_at}`.
+`effect` is `created | sent_to | delegated | read | edited | refused`; `target`
+is exactly `{kind:"thread",thread_id}`, `{kind:"artifact",artifact_id}` or
+`{kind:"root"}`. `refusal` is null except for a refused effect, where it is
+`{reason,grant_summary,detail}`. One operation may deliberately emit multiple
+indexed effects, while replay of that operation preserves their receipt
+identities.
+
+Each receipt is projected as `{receipt,actions}`. Actions are only currently
+true Host facts: `{kind:"open",target}`, `{kind:"archive",thread_id}`,
+`{kind:"cancel_queued",thread_id,turn_id}` or
+`{kind:"stop",thread_id,turn_id}`. They may change when a target starts,
+finishes or is archived; they are not permanent receipt fields.
+`thread_effects_changed {history_id,thread_id,turn_id,effects}` replaces the
+complete current projection for that source turn, including an empty list.
+The exact-turn cancellation operation is revision-like: the Host checks the
+named turn still has `expected_state`, so a queued/running race cannot cancel
+different work.
 
 ## Execution and factual activity
 
@@ -95,13 +117,13 @@ Human `grant_thread_reach {client_id, history_id, thread_id, target, note}` and 
 
 `thread_grants_changed {client_id: string|null, history_id, thread_id, revision, grants}` carries the complete current list. Durable mutation receipts acknowledge retries with the current list. Clients reject a different history and revisions older than the last applied **reach snapshot**, independently of newer unrelated Thread metadata revisions; equal revisions are accepted. Reconnect/open reloads this snapshot from `thread_opened`.
 
-Naming an unreachable Thread or artifact is never an error and never a lie. The tool result is `{refused: true, reason, target, tool, grant_summary, detail}`, where `reason` is `outside_grant` or `owner_fence` and `target` is `{kind:"thread", thread_id}`, `{kind:"artifact", artifact_id}` or `{kind:"root"}`. `grant_summary` reads `everything (root)` for a root holder. Each refusal writes exactly one durable `refusal` Thread activity, never deduplicated, rendered in conversation as a note. `owner_fence` covers the one fence a grant cannot open: a Thread never addresses its own ancestors with work, it reports to its requester.
+Naming an unreachable Thread or artifact is never an error and never a lie. The tool result is `{refused: true, reason, target, tool, grant_summary, detail}`, where `reason` is `outside_grant` or `owner_fence` and `target` is `{kind:"thread", thread_id}`, `{kind:"artifact", artifact_id}` or `{kind:"root"}`. `grant_summary` reads `everything (root)` for a root holder. Each actual refusal probe atomically writes one durable `refusal` Thread activity and one refused effect receipt; replaying the same operation does not duplicate either, while two distinct probes remain two facts. Conversation keeps the activity note and the reply carries a refused effect pill. `owner_fence` covers the one fence an ordinary subtree grant cannot open: a Thread never addresses its own ancestors with work, it reports to its requester.
 
 Copy thread link emits an absolute same-origin `/t/{id}?history={uuid}` HTTP(S) URL. Copy reference emits ordinary Markdown `[Thread #id](URL)`. Local `#id` shorthand resolves only in its message's current history. Conversation Markdown links, including reference-style links, use one native anchor renderer with adjacent Open, Copy and explicit Add to Related actions. Local Thread URLs resolve only at the app origin; lookalikes are external links. Related combines saved references with the canonical artifact inventory; artifact preview Markdown remains inert inside its isolated frame.
 
-The Host uses one canonical storage schema 14: symbol/image Thread icons whose
+The Host uses one canonical storage schema 15: symbol/image Thread icons whose
 `threads.icon_symbol` and `threads.icon_tint` are CHECK-constrained to the
-vocabulary and palette and exclusive with the `threads.icon_blob_id` foreign key, Lash process delivery receipts and Thread
+vocabulary and palette and exclusive with the `threads.icon_blob_id` foreign key, Lash process delivery receipts, durable accepted-turn effect receipts and Thread
 authority, durable `thread_grants` reach whose NULL `target_thread_id` is the
 root, and no `monitors` table. Only the exact
 layout or an empty store is accepted; older and branch-specific layouts are

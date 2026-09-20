@@ -72,6 +72,16 @@ Every Thread carries an avatar: by default a monogram of its title — the first
 
 A turn's work is one column of flat step rows in chronological order, a hairline apart, each carrying its status glyph, name, summary and its measured duration pinned to the right edge; chrome is hover-only, never a bordered capsule. Each slot says one thing: the glyph is the outcome (no “Succeeded” after the summary), the summary is the tool's bounded start argument or nothing — a program cell's is its first statement, never its output — and the right slot is a duration the client actually measured (live events are stamped on arrival; a replayed timeline has no clock and shows none). The Agent's program cell is a peer of the tool calls beside it, not their parent. One step is open at a time and its detail panel opens below the whole row. Reasoning and provisional prose are full-width rows in the same sequence, and recorded non-step activity is a plain row beside them rather than a disclosure of its own.
 
+Effect pills sit beneath the reply and outside the collapsible work trace, so
+the durable Threads and artifacts touched by that reply remain visible when
+steps are closed. The group uses `SectionLabel` and sentence case. A pill
+states one receipt fact and may carry only actions the Host currently projects
+as true; every action has a 44px target and names exact work. Refused pills
+explain remediation in plain words: a Thread grant covers that Thread and its
+subtree, an ancestor fence has no ordinary-grant action, and an artifact has no
+project guessed on its behalf. Grant and revoke use the existing Reach dialog,
+and granting never silently retries work.
+
 Every label over a group anywhere — a form field, a run's Steps, the inventory's bands, the queue's sections, the palette's groups, Settings headings — is one `SectionLabel` (`app/src/components/ui/section-label.tsx`): sentence case, `text-meta`, medium, muted (attention-toned where it names what waits); `uppercase` is not in the type vocabulary and `scripts/check-static.sh` refuses it. Thread Info is a pane inside the same frame, not a separate sheet. Every label in it is that same label, and each fact's pencil sits directly after its value, not at the measure's far edge. It holds the Thread's own facts and the Owner's in-place edits: title, description and **Runs on**, which chooses a Native provider and model or a CLI agent — Native opens prefilled with the installation's default, so what is saved is always explicit, and a Thread that never chose reads as that same resolved Native route. Each edit is revision-guarded and settles only when the Host's revision advances.
 
 A process delivery is a structured note in its owning Thread: process name, the trigger that fired, the outcome and the body. A wake that produced nothing to read gets no card at all; consecutive ones fold into a single quiet line. Processes list one entry per process — a dense row at rest, promoted to a card while running or expanded — grouped Running and Finished, scoped to the selected Thread and its descendants, with Cancel process and Disable trigger.

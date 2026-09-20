@@ -15,14 +15,22 @@ unless a future trusted-proxy contract explicitly provides client identity.
 
 The Host runs addressed Thread conversations plus current subagent, Lash process, trigger, and fork-triage resources. Native execution is one TypeScript RLM session with process and trigger abilities. Every Thread carries the same full tool set and may select Native, Claude CLI or Codex CLI; Space-chat and worker roles are prompt guidance, not execution profiles. Registered processes and subscriptions live in per-Thread Lash stores; Hirsel projects them into the scoped Processes view and turns wakes and terminal results into conversation messages. There are no side-session compatibility flags or Event/Ping APIs.
 
-History lives in `hirsel.sqlite`. New stores use the complete current schema 14
+History lives in `hirsel.sqlite`. New stores use the complete current schema 15
 layout. Startup accepts that exact layout or an empty store and refuses every
 other layout before modification. Back up the data directory before replacing
 an older store. Configuration in `hirsel.toml`, auth/identity, plugins and
 project files remain independent. See `e2e/thread-protocol/runbook.md` for
 current validation and operator retention requirements.
 
-Schema 14 keeps Thread icons, execution preferences, process deliveries and bounded message Task focus. `message_task_focus` links one accepted Owner message to a reachable Task and stores an object snapshot; `meta['project_chat:home_thread_id']` points to the idempotently bootstrapped Home Space. Its
+Schema 15 keeps Thread icons, execution preferences, process deliveries,
+bounded message Task focus and durable effect receipts. `message_task_focus`
+links one accepted Owner message to a reachable Task and stores an object
+snapshot; `meta['project_chat:home_thread_id']` points to the idempotently
+bootstrapped Home Space. `thread_effect_receipts` records the Thread, artifact
+or root target touched by an accepted turn operation. Receipt identity is the
+turn, operation and effect index; replay does not duplicate it. Refusal details
+exist exactly on refused effects. Current actions such as Stop or Archive are
+derived projections and are not stored as claims in a receipt. The schema's
 CHECKs link terminal states to completion timestamps and enforce absent starts
 for queued work and actual starts for running work. Immutable `accepted_at`
 records acceptance separately. Instruments use SQL NULL for absence; nonempty

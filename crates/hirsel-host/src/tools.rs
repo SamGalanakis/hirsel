@@ -5,7 +5,9 @@ use std::{
 };
 
 use hirsel_drivers::{AgentKind, ClaudeCodeDriver, CodexDriver, FakeDriver, SubagentDriver};
-use hirsel_proto::{HostToClient, SubagentModelCatalog, ThreadTurnState, TurnEvent, TurnEventKind};
+use hirsel_proto::{
+    EffectAction, HostToClient, SubagentModelCatalog, ThreadTurnState, TurnEvent, TurnEventKind,
+};
 use serde::Serialize;
 use tokio::sync::broadcast;
 
@@ -21,6 +23,8 @@ mod thread_triggers;
 
 mod threads;
 mod views;
+
+type EffectProjectionCache = Arc<Mutex<HashMap<(String, u64), Vec<EffectAction>>>>;
 
 #[derive(Clone)]
 pub struct ToolsConfig {
@@ -48,6 +52,10 @@ pub struct ToolSuite {
     /// Volatile safety latch for event-loss failures whose durable failure
     /// projection may be blocked by the same transient SQLite outage.
     timeline_integrity_failures: Arc<Mutex<HashMap<u64, String>>>,
+    /// Last action projection emitted for each durable effect receipt. Receipts
+    /// remain authoritative in SQLite; this cache only suppresses unchanged
+    /// live deltas between bounded recovery snapshots.
+    effect_projections: EffectProjectionCache,
     /// Tools contributed by enabled plugins. Empty until the plugin host
     /// registers into it, and empty forever when no plugin is installed.
     plugin_tools: crate::plugins::PluginToolRegistry,
@@ -101,6 +109,7 @@ impl ToolSuite {
             claude: Arc::new(ClaudeCodeDriver::default()),
             codex: Arc::new(CodexDriver::default()),
             timeline_integrity_failures: Arc::new(Mutex::new(HashMap::new())),
+            effect_projections: Arc::new(Mutex::new(HashMap::new())),
             plugin_tools: crate::plugins::PluginToolRegistry::default(),
             thread_triggers: Arc::new(thread_triggers::ThreadTriggerHub::default()),
         }
@@ -288,6 +297,10 @@ impl ToolSuite {
 impl ToolSuite {
     pub(crate) async fn reset_runtime_projections(&self) {
         self.timeline_integrity_failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.effect_projections
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();

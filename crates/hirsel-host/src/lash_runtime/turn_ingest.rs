@@ -428,8 +428,10 @@ impl TurnIngest {
             .await?;
         if inserted {
             tools.publish_thread_activity(activity).await;
+            tools
+                .publish_thread_effect_operation(turn_id, &tool.id)
+                .await?;
         }
-        tools.publish_thread_effects(turn_id).await?;
         Ok(())
     }
 

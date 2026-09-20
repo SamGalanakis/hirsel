@@ -32,7 +32,7 @@ export function effectSourceThreadId(turnId: number): number | undefined { retur
 function sorted(effects: ThreadEffect[]): ThreadEffect[] {
   return [...effects].sort((a, b) => a.receipt.id - b.receipt.id);
 }
-/** A live frame is the complete current projection for one explicitly named turn. */
+/** Live frames are bounded deltas for one explicitly named turn. */
 export function replaceTurnEffects(threadId: number, turnId: number, effects: ThreadEffect[]): void {
   turnProjectionGeneration.set(turnId, ++projectionGeneration);
   setEffectState(draft => {
@@ -44,7 +44,7 @@ export function replaceTurnEffects(threadId: number, turnId: number, effects: Th
 export function beginEffectSnapshot(): number { return projectionGeneration; }
 /** A fetched page may race a live frame. Merge receipts for only the page's
  * turns without replacing a live projection or deleting an unrelated turn.
- * Live frames use `replaceTurnEffects`, including authoritative empties. */
+ * Live frames use `replaceTurnEffects`; reconnect pages remain authoritative. */
 export function mergeDetailEffects(threadId: number, turnIds: number[], effects: ThreadEffect[] = [], requestGeneration = projectionGeneration): void {
   const groups = new Map<number, ThreadEffect[]>();
   for (const effect of effects) {

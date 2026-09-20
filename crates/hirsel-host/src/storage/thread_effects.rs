@@ -306,6 +306,46 @@ impl super::Storage {
         Ok((history_id, thread_id, effects, next))
     }
 
+    pub(crate) async fn thread_effect_operation_publication(
+        &self,
+        turn_id: u64,
+        operation_id: &str,
+        before: Option<u64>,
+    ) -> anyhow::Result<(String, u64, Vec<ThreadEffect>, Option<u64>)> {
+        let c = self.conn.lock().await;
+        let history_id = super::schema::read_history_id(&c)?;
+        let thread_id = c.query_row(
+            "SELECT thread_id FROM thread_turns WHERE id=?1",
+            [turn_id],
+            |row| row.get(0),
+        )?;
+        let mut statement = c.prepare("SELECT id,turn_id,operation_id,effect_index,tool,effect,target_json,target_turn_id,request_client_id,refusal_json,created_at FROM thread_effect_receipts WHERE turn_id=?1 AND operation_id=?2 AND id<?3 ORDER BY id DESC LIMIT 101")?;
+        let mut receipts = statement
+            .query_map(
+                params![
+                    turn_id,
+                    operation_id,
+                    before.unwrap_or(i64::MAX as u64).min(i64::MAX as u64)
+                ],
+                receipt_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let has_more = receipts.len() > 100;
+        receipts.truncate(100);
+        receipts.reverse();
+        let next = has_more.then(|| receipts[0].id);
+        let effects = receipts
+            .into_iter()
+            .map(|receipt| {
+                Ok(ThreadEffect {
+                    actions: actions(&c, &receipt)?,
+                    receipt,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok((history_id, thread_id, effects, next))
+    }
+
     pub(crate) async fn effect_source_turns_for_target(
         &self,
         thread_id: u64,

@@ -1,4 +1,4 @@
-use hirsel_proto::{HostToClient, Thread, ThreadAttention, ThreadTurnState};
+use hirsel_proto::{HostToClient, Thread, ThreadAttention, ThreadTurnState, ToolCallSummary};
 use serde_json::json;
 
 fn summary(state: &crate::AppState, thread_id: u64) -> Thread {
@@ -230,6 +230,211 @@ async fn agent_chat_and_scheduled_digest_refresh_inventory() {
         .await
         .unwrap();
     assert_eq!(summary(&state, thread.id).last_activity_at, event.ts);
+}
+
+#[tokio::test]
+async fn one_new_effect_publishes_only_that_receipt_after_a_large_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    let thread = state
+        .storage
+        .create_thread(
+            "effect-delta",
+            "Effect delta",
+            "",
+            None,
+            ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    let turn = state
+        .storage
+        .start_thread_turn(thread.id, None)
+        .await
+        .unwrap();
+    let history = state.storage.history_id().await.unwrap();
+    let caller = state
+        .storage
+        .bind_thread_execution(&history, "effect-delta", "effect-delta", turn.id)
+        .await
+        .unwrap();
+    for index in 0..150 {
+        state
+            .storage
+            .scoped_thread_read(
+                &caller,
+                Some(&format!("old-effect-{index}")),
+                &crate::storage::ThreadRef::default(),
+                None,
+                1,
+            )
+            .await
+            .unwrap();
+    }
+    state
+        .storage
+        .scoped_thread_read(
+            &caller,
+            Some("new-effect"),
+            &crate::storage::ThreadRef::default(),
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+    state.broadcast_log.clear();
+
+    crate::lash_runtime::TurnIngest::record_tool_completion(
+        &state.tools,
+        &history,
+        (thread.id, turn.id),
+        &ToolCallSummary {
+            id: "new-effect".into(),
+            name: "threads_read".into(),
+            ok: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    let publications = state
+        .broadcast_log
+        .recent()
+        .into_iter()
+        .filter_map(|frame| match frame {
+            HostToClient::ThreadEffectsChanged {
+                turn_id, effects, ..
+            } if turn_id == turn.id => Some(effects),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(publications.len(), 1);
+    assert_eq!(publications[0].len(), 1);
+    assert_eq!(publications[0][0].receipt.operation_id, "new-effect");
+
+    state.tools.reset_runtime_projections().await;
+    crate::lash_runtime::TurnIngest::record_tool_completion(
+        &state.tools,
+        &history,
+        (thread.id, turn.id),
+        &ToolCallSummary {
+            id: "new-effect".into(),
+            name: "threads_read".into(),
+            ok: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(state.broadcast_log.recent().iter().all(|frame| {
+        !matches!(frame, HostToClient::ThreadEffectsChanged { turn_id, .. } if *turn_id == turn.id)
+    }));
+}
+
+#[tokio::test]
+async fn action_refresh_publishes_only_the_receipt_whose_projection_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    let source = state
+        .storage
+        .create_thread(
+            "effect-source",
+            "Effect source",
+            "",
+            None,
+            ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    let source_turn = state
+        .storage
+        .start_thread_turn(source.id, None)
+        .await
+        .unwrap();
+    let history = state.storage.history_id().await.unwrap();
+    let caller = state
+        .storage
+        .bind_thread_execution(&history, "effect-action", "effect-action", source_turn.id)
+        .await
+        .unwrap();
+    let assignment = crate::storage::Delegation {
+        title: "Child".into(),
+        brief: "Do the work".into(),
+        artifact_ids: vec![],
+        child_thread_id: None,
+        execution: None,
+    };
+    let invocation = serde_json::to_value(&assignment).unwrap();
+    let accepted = state
+        .storage
+        .delegate_thread(
+            &caller,
+            "delegate-effect",
+            "threads_delegate",
+            &assignment,
+            &invocation,
+        )
+        .await
+        .unwrap();
+    crate::lash_runtime::TurnIngest::record_tool_completion(
+        &state.tools,
+        &history,
+        (source.id, source_turn.id),
+        &ToolCallSummary {
+            id: "delegate-effect".into(),
+            name: "threads_delegate".into(),
+            ok: true,
+        },
+    )
+    .await
+    .unwrap();
+    state.broadcast_log.clear();
+
+    let running = state
+        .storage
+        .run_thread_turn(accepted.turn_id)
+        .await
+        .unwrap();
+    state.tools.publish_thread_turn(running.clone()).await;
+    let changed = state
+        .broadcast_log
+        .recent()
+        .into_iter()
+        .filter_map(|frame| match frame {
+            HostToClient::ThreadEffectsChanged { effects, .. } => Some(effects),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].receipt.target_turn_id, Some(accepted.turn_id));
+    assert!(
+        changed[0]
+            .actions
+            .contains(&hirsel_proto::EffectAction::Stop {
+                thread_id: accepted.thread_id,
+                turn_id: accepted.turn_id,
+            })
+    );
+
+    state.broadcast_log.clear();
+    state.tools.publish_thread_turn(running).await;
+    assert!(
+        state
+            .broadcast_log
+            .recent()
+            .iter()
+            .all(|frame| { !matches!(frame, HostToClient::ThreadEffectsChanged { .. }) })
+    );
 }
 
 #[tokio::test]

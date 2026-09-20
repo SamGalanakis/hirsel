@@ -67,13 +67,38 @@ A Thread retains `own_headline` even while it has children. The displayed `headl
 
 Schema 16 remains a complete-layout cutover with no in-place migration. Existing schema-15 data requires a separately reviewed offline backup and cutover; startup refuses it without modification.
 
+## Outside-change provenance and admission context
+
+Schema 17 adds `thread_change_deliveries`, `thread_change_cursors` and
+`thread_turn_contexts`. Material changes derive affected Space chats from the
+changed Thread's ancestry and explicit message, activity, showcase or
+material-state artifact references. The association records provenance only:
+it grants no reach, and current reach is checked again when context is
+admitted. The affected chat receives one coalesced “Changed by <Space>”
+activity and no automatic wake.
+
+Before Native enqueue, CLI spawn or scripted execution, the Host persists one
+immutable admission snapshot containing the bounded conversation, Task focus,
+artifact references, Thread/brief state and at most 32 changes / 8 KiB of
+outside-change digest. An admission retry reuses that exact snapshot; it never
+rereads mutable context under an already accepted Lash source key.
+`threads.changes` pages from an explicit change identity and reports
+`has_more`. Only a successfully completed terminal turn advances the Space
+chat cursor through the snapshot's high-water mark. Failure, cancellation and
+interruption retain redelivery without replaying execution.
+
+Schema 17 is the current complete-layout cutover. Existing schema-16 data
+requires the same separately reviewed offline backup and cutover; startup
+refuses it without modification.
+
 ## Questions and request presentation
 
 Reserved for slice 4. Durable questions and Owner request cards will implement the escalation policy stated above.
 
 ## Coordination delivery and joins
 
-Reserved for slice 5. State delivery and declared joins replace per-report conversational wakeups.
+Outside-change delivery is recorded above. Declared joins remain reserved for
+slice 5 and will replace the remaining per-report conversational wakeups.
 
 ## Board and status
 

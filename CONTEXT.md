@@ -38,6 +38,8 @@ _Avoid_: Event as a work object
 
 **Rollup headline:** A Host-derived child-count summary used when a Thread has children. It follows fixed status precedence and numeric-ID tie-breaking, never copies a child's prose and never completes the parent.
 
+**Change digest:** A bounded list of unseen material changes from another Space, frozen into one Space-chat turn before execution. Its provenance and explicit artifact associations do not grant reach; only successful terminal consumption advances the Space chat's cursor.
+
 **Thread ref:** A citation written as `#<id>`. Citing a Thread does not move a Message into it.
 
 **Generated instrument:** A constrained semantic interface attached to a Thread. It may change through multiple stages while the Thread's identity and conversation remain stable.

@@ -121,9 +121,16 @@ Naming an unreachable Thread or artifact is never an error and never a lie. The 
 
 Copy thread link emits an absolute same-origin `/t/{id}?history={uuid}` HTTP(S) URL. Copy reference emits ordinary Markdown `[Thread #id](URL)`. Local `#id` shorthand resolves only in its message's current history. Conversation Markdown links, including reference-style links, use one native anchor renderer with adjacent Open, Copy and explicit Add to Related actions. Local Thread URLs resolve only at the app origin; lookalikes are external links. Related combines saved references with the canonical artifact inventory; artifact preview Markdown remains inert inside its isolated frame.
 
-The Host uses one canonical storage schema 16: material Task state and artifact revisions, plus symbol/image Thread icons whose
+`thread_opened.detail.accepted_context` optionally exposes the latest exact Host
+context accepted for a turn, its covered change high-water mark and terminal
+consumption time. Space-chat contexts include `ThreadChangeDigest` with at most
+32 source changes and 8 KiB encoded data. `has_more` requires another page;
+`hirsel.threads_changes` / `threads_changes` accepts `after_change_id` and a
+1–32 `limit`. Delivery and explicit artifact association never widen reach.
+
+The Host uses one canonical storage schema 17: material Task state and artifact revisions, plus symbol/image Thread icons whose
 `threads.icon_symbol` and `threads.icon_tint` are CHECK-constrained to the
-vocabulary and palette and exclusive with the `threads.icon_blob_id` foreign key, Lash process delivery receipts, durable accepted-turn effect receipts and Thread
+vocabulary and palette and exclusive with the `threads.icon_blob_id` foreign key, Lash process delivery receipts, durable accepted-turn effect receipts, outside-change delivery/cursors and immutable admission snapshots, and Thread
 authority, durable `thread_grants` reach whose NULL `target_thread_id` is the
 root, and no `monitors` table. Only the exact
 layout or an empty store is accepted; older and branch-specific layouts are

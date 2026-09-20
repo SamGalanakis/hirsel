@@ -29,10 +29,38 @@ impl ToolProfile {
     pub(crate) fn allows_tool(self, name: &str) -> bool {
         match self {
             Self::Worker => true,
+            // This is the complete built-in project-chat surface. Unknown
+            // tools stay unavailable until their authority is classified
+            // here. Plugins use their own required inspection/execution
+            // classification and are checked again by the plugin registry.
             Self::ProjectChat => {
-                !crate::native_coding_tools::is_coding_tool(name)
-                    && name != "shell_run"
-                    && !name.starts_with("subagents_")
+                matches!(
+                    name,
+                    "artifacts_create"
+                        | "artifacts_edit"
+                        | "artifacts_list"
+                        | "artifacts_show"
+                        | "threads_context"
+                        | "threads_delegate"
+                        | "threads_send"
+                        | "threads_report"
+                        | "threads_cancel"
+                        | "threads_archive"
+                        | "threads_unarchive"
+                        | "threads_create"
+                        | "threads_update"
+                        | "threads_list"
+                        | "threads_read"
+                        | "threads_add_related"
+                        | "threads_remove_related"
+                        | "threads_grant"
+                        | "threads_revoke"
+                        | "threads_activity"
+                        | "views_show"
+                        | "views_update"
+                        | "views_clear"
+                        | "views_list_templates"
+                ) || name.starts_with("plugin__")
             }
         }
     }

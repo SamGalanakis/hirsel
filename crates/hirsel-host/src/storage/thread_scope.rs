@@ -469,10 +469,15 @@ impl Storage {
         let c = self.conn.lock().await;
         c.execute(
             "INSERT OR IGNORE INTO thread_process_authorities(session_id,process_id,turn_id)
-             SELECT s.session_id,?2,t.id FROM thread_process_sessions s
-             JOIN thread_turns t ON t.thread_id=s.thread_id
+             SELECT s.session_id,?2,COALESCE(
+                 (SELECT b.turn_id FROM thread_execution_bindings b
+                  JOIN thread_turns bound ON bound.id=b.turn_id AND bound.thread_id=s.thread_id
+                  WHERE b.session_id=s.session_id ORDER BY b.turn_id DESC LIMIT 1),
+                 (SELECT latest.id FROM thread_turns latest
+                  WHERE latest.thread_id=s.thread_id ORDER BY latest.id DESC LIMIT 1)
+             ) FROM thread_process_sessions s
              JOIN meta m ON m.key='history_id' AND m.value=s.history_id
-             WHERE s.session_id=?1 ORDER BY t.id DESC LIMIT 1",
+             WHERE s.session_id=?1",
             params![session_id, process_id],
         )?;
         let caller = c

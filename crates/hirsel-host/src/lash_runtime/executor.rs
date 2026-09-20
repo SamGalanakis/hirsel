@@ -94,6 +94,19 @@ impl HirselToolProvider {
         );
         definitions
     }
+
+    async fn captured_profile(
+        &self,
+        call: &ToolCall<'_>,
+    ) -> Result<crate::storage::ToolProfile, String> {
+        let caller = self.executor.caller(call).await?;
+        self.executor
+            .tools
+            .storage()
+            .turn_tool_profile(caller.turn_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[async_trait]
@@ -113,7 +126,10 @@ impl ToolProvider for HirselToolProvider {
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolOutcome {
-        let profile = self.profile();
+        let profile = match self.captured_profile(&call).await {
+            Ok(profile) => profile,
+            Err(error) => return ToolOutcome::err_fmt(error),
+        };
         if !profile.allows_tool(call.name) {
             return ToolOutcome::err_fmt(
                 "tool is unavailable to a project chat; delegate the work to a Task worker",
@@ -140,7 +156,21 @@ impl ToolProvider for HirselToolProvider {
     }
 
     async fn execute_attempt(&self, call: ToolCall<'_>) -> lash_core::ToolAttemptOutcome {
-        let profile = self.profile();
+        let profile = match self.captured_profile(&call).await {
+            Ok(profile) => profile,
+            Err(error) => {
+                return lash_core::ToolAttemptOutcome::done_without_intents(
+                    lash_core::ToolOutcomeDone::failure(lash_core::ToolFailure {
+                        class: lash_core::ToolFailureClass::Execution,
+                        code: "tool_authority_unavailable".to_string(),
+                        message: error,
+                        source: lash_core::ToolFailureSource::Tool,
+                        retry: lash_core::ToolRetryStatus::Never,
+                        raw: None,
+                    }),
+                );
+            }
+        };
         if !profile.allows_tool(call.name) {
             return lash_core::ToolAttemptOutcome::done_without_intents(
                 lash_core::ToolOutcomeDone::failure(lash_core::ToolFailure {
@@ -221,8 +251,8 @@ impl StaticToolExecute for HirselToolExecutor {
 }
 
 impl HirselToolExecutor {
-    pub(super) async fn execute_inner(&self, call: ToolCall<'_>) -> Result<Value, String> {
-        let caller = match call.context.runtime_process_id() {
+    async fn caller(&self, call: &ToolCall<'_>) -> Result<crate::storage::ThreadCaller, String> {
+        match call.context.runtime_process_id() {
             Some(process_id) => match call.context.process_execution_env_spec().policy.session_id {
                 Some(owner_session_id) => {
                     self.tools
@@ -245,7 +275,11 @@ impl HirselToolExecutor {
                     .await
             }
         }
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| error.to_string())
+    }
+
+    pub(super) async fn execute_inner(&self, call: ToolCall<'_>) -> Result<Value, String> {
+        let caller = self.caller(&call).await?;
         let key = call
             .context
             .replay_key()

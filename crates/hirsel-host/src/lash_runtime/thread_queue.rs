@@ -134,14 +134,15 @@ impl LashAgentRuntime {
         }
         let execution = self.tools.storage().turn_execution(queued.id).await?;
         let crate::storage::ThreadExecution::Native {
+            tool_profile,
             provider_id,
             model,
             cwd,
-            ..
         } = execution
         else {
             anyhow::bail!("CLI turn must run on the CLI lane");
         };
+        self.apply_captured_tool_profile(tool_profile).await?;
         self.bind_native(&provider_id, model, &cwd).await?;
         let input = owner_turn_input(&turn, &self.tools.storage()).await?;
         let source_key = owner_turn_source_key(&client_id);

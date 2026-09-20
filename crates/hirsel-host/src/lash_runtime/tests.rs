@@ -1278,6 +1278,187 @@ async fn project_chat_profile_excludes_execution_from_advertisement_and_dispatch
     );
 }
 
+#[tokio::test]
+async fn accepted_profile_controls_coding_dispatch_across_kind_changes() {
+    async fn dispatch_exec(
+        provider: Arc<HirselToolProvider>,
+        session_id: &str,
+        execution_id: &str,
+        command: &str,
+    ) -> lash_core::ToolCallOutput {
+        let prepared = lash_core::PreparedToolCall::from_parts(
+            "captured-profile-call",
+            "hirsel:native-coding:exec-command:v1",
+            "exec_command",
+            json!({ "cmd": command, "timeout_ms": 5_000 }),
+            None,
+            Value::Null,
+        );
+        let effect_controller = lash_core::ScopedEffectController::shared(
+            Arc::new(
+                lash::runtime::NativeRuntimeEffectController::default()
+                    .allow_process_lifetime_completion_keys(),
+            ),
+            lash_core::ExecutionScope::runtime_operation(execution_id),
+        )
+        .unwrap();
+        lash_core::testing::coordinate_tool_provider_with_services(
+            effect_controller,
+            Arc::new(lash_core::testing::MockSessionManager::default()),
+            session_id,
+            crate::native_coding_tools::exec_definition_for_test(),
+            provider,
+            prepared,
+        )
+        .await
+        .expect("coordinated captured-profile call")
+        .output
+    }
+
+    let (executor, storage, _broadcast_log, directory) = test_event_executor().await;
+    storage
+        .set_native_execution_default(&crate::storage::ThreadExecution::Native {
+            tool_profile: crate::storage::ToolProfile::Worker,
+            provider_id: "captured-profile-test".into(),
+            model: provider_rebind_test_model("captured-profile-model"),
+            cwd: directory.path().to_path_buf(),
+        })
+        .await
+        .unwrap();
+    let history = storage.history_id().await.unwrap();
+
+    let (project, _) = storage
+        .create_thread(
+            "captured-project",
+            "Captured project",
+            "",
+            None,
+            hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Space,
+            None,
+        )
+        .await
+        .unwrap();
+    let project_turn = storage.start_thread_turn(project.id, None).await.unwrap();
+    let converted_worker = storage
+        .set_addressed_thread_kind(
+            &history,
+            project.id,
+            hirsel_proto::ThreadKind::Task,
+            project.revision,
+        )
+        .await
+        .unwrap();
+    assert_eq!(converted_worker.kind, hirsel_proto::ThreadKind::Task);
+    storage.run_thread_turn(project_turn.id).await.unwrap();
+    storage
+        .bind_thread_execution(
+            &history,
+            "captured-project-session",
+            "captured-project-scope",
+            project_turn.id,
+        )
+        .await
+        .unwrap();
+    let project_marker = directory.path().join("project-marker");
+    let project_provider = Arc::new(HirselToolProvider {
+        executor: executor.clone(),
+        coding: Arc::new(NativeCodingBinding::new(directory.path().to_path_buf())),
+        profile: Arc::new(std::sync::RwLock::new(crate::storage::ToolProfile::Worker)),
+    });
+    let denied = dispatch_exec(
+        project_provider,
+        "captured-project-session",
+        "captured-project-scope",
+        "printf widened > project-marker",
+    )
+    .await;
+    let lash_core::ToolCallOutcome::Failure(failure) = denied.outcome else {
+        panic!("project-chat coding dispatch was not refused");
+    };
+    assert_eq!(failure.code, "tool_profile_denied");
+    assert!(!project_marker.exists());
+
+    let (worker, _) = storage
+        .create_thread(
+            "captured-worker",
+            "Captured worker",
+            "",
+            None,
+            hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
+            None,
+        )
+        .await
+        .unwrap();
+    let worker_turn = storage.start_thread_turn(worker.id, None).await.unwrap();
+    let converted_project = storage
+        .set_addressed_thread_kind(
+            &history,
+            worker.id,
+            hirsel_proto::ThreadKind::Space,
+            worker.revision,
+        )
+        .await
+        .unwrap();
+    assert_eq!(converted_project.kind, hirsel_proto::ThreadKind::Space);
+    storage.run_thread_turn(worker_turn.id).await.unwrap();
+    storage
+        .bind_thread_execution(
+            &history,
+            "captured-worker-session",
+            "captured-worker-scope",
+            worker_turn.id,
+        )
+        .await
+        .unwrap();
+    let worker_marker = directory.path().join("worker-marker");
+    let worker_provider = Arc::new(HirselToolProvider {
+        executor,
+        coding: Arc::new(NativeCodingBinding::new(directory.path().to_path_buf())),
+        // Admission restores the accepted Worker catalog even though the
+        // Thread has since become a project chat.
+        profile: Arc::new(std::sync::RwLock::new(crate::storage::ToolProfile::Worker)),
+    });
+    let allowed = dispatch_exec(
+        worker_provider,
+        "captured-worker-session",
+        "captured-worker-scope",
+        "printf worker > worker-marker",
+    )
+    .await;
+    assert!(
+        matches!(allowed.outcome, lash_core::ToolCallOutcome::Success(_)),
+        "worker dispatch failed: {allowed:?}"
+    );
+    assert_eq!(std::fs::read_to_string(worker_marker).unwrap(), "worker");
+}
+
+#[test]
+fn project_chat_builtin_tools_are_explicitly_classified() {
+    let profile = crate::storage::ToolProfile::ProjectChat;
+    assert!(!profile.allows_tool("future_execution_tool"));
+    assert!(!profile.allows_tool("exec_command"));
+    assert!(!profile.allows_tool("subagents_spawn"));
+    for name in hirsel_tool_definitions_for_profile(
+        crate::storage::ToolProfile::Worker,
+        &crate::subagent_models::registry_catalog(),
+    )
+    .into_iter()
+    .map(|definition| definition.name().to_string())
+    {
+        let expected = !matches!(
+            name.as_str(),
+            "read" | "edit" | "write" | "exec_command" | "shell_run"
+        );
+        assert_eq!(
+            profile.allows_tool(&name),
+            expected,
+            "classification changed for {name}"
+        );
+    }
+}
+
 /// Plugin tools are not a parallel catalog: they are ordinary definitions on
 /// the same provider, so they resolve a contract, appear in the manifest list,
 /// and feed the tool-surface fingerprint exactly like a built-in does.

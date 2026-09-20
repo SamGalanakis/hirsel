@@ -194,6 +194,81 @@ async fn durable_process_authority_survives_the_registering_turn() {
 }
 
 #[tokio::test]
+async fn process_authority_keeps_the_profile_of_its_own_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Storage::open(dir.path()).await.unwrap();
+    let history = s.history_id().await.unwrap();
+    s.set_native_execution_default(&crate::storage::ThreadExecution::Native {
+        tool_profile: crate::storage::ToolProfile::Worker,
+        provider_id: "process-profile-test".into(),
+        model: lash::ModelSpec::builder("process-profile-model")
+            .variant(lash::provider::ReasoningSelection::ProviderDefault)
+            .context_window_tokens(8_000)
+            .build()
+            .unwrap(),
+        cwd: dir.path().to_path_buf(),
+    })
+    .await
+    .unwrap();
+    let (project, _) = s.ensure_home_project(&history).await.unwrap();
+    let project_session = s
+        .reconcile_agent_tool_surface(project.id, "project-surface", &["threads_context".into()])
+        .await
+        .unwrap();
+    let project_turn = s.start_thread_turn(project.id, None).await.unwrap();
+    s.run_thread_turn(project_turn.id).await.unwrap();
+    s.bind_thread_execution(
+        &history,
+        &project_session.session_id,
+        "project-execution",
+        project_turn.id,
+    )
+    .await
+    .unwrap();
+    s.complete_thread_turn(&history, project_turn.id, ThreadTurnState::Completed, None)
+        .await
+        .unwrap();
+
+    let worker = s
+        .set_addressed_thread_kind(
+            &history,
+            project.id,
+            hirsel_proto::ThreadKind::Task,
+            project.revision,
+        )
+        .await
+        .unwrap();
+    let worker_session = s
+        .reconcile_agent_tool_surface(worker.id, "worker-surface", &["shell_run".into()])
+        .await
+        .unwrap();
+    let worker_turn = s.start_thread_turn(worker.id, None).await.unwrap();
+    s.run_thread_turn(worker_turn.id).await.unwrap();
+    s.bind_thread_execution(
+        &history,
+        &worker_session.session_id,
+        "worker-execution",
+        worker_turn.id,
+    )
+    .await
+    .unwrap();
+
+    let caller = s
+        .process_caller(
+            &project_session.session_id,
+            "project-process",
+            "process-scope",
+        )
+        .await
+        .unwrap();
+    assert_eq!(caller.turn_id, project_turn.id);
+    assert_eq!(
+        s.turn_tool_profile(caller.turn_id).await.unwrap(),
+        crate::storage::ToolProfile::ProjectChat
+    );
+}
+
+#[tokio::test]
 async fn hierarchy_paging_and_pin_do_not_grant_peer_access() {
     let dir = tempfile::tempdir().unwrap();
     let s = Storage::open(dir.path()).await.unwrap();

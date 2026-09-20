@@ -429,6 +429,33 @@ impl LashAgentRuntime {
             .context("apply the Owner's Agent prompt to the main-agent Lash session")
     }
 
+    pub(super) async fn apply_captured_tool_profile(
+        &self,
+        captured_profile: crate::storage::ToolProfile,
+    ) -> anyhow::Result<()> {
+        let changed = {
+            let mut profile = self.tool_profile.write().expect("tool profile poisoned");
+            if *profile == captured_profile {
+                false
+            } else {
+                *profile = captured_profile;
+                true
+            }
+        };
+        if changed {
+            self.session
+                .admin()
+                .commands()
+                .refresh_tool_catalog(
+                    "Accepted turn profile changed",
+                    format!("captured-tool-profile:{captured_profile:?}"),
+                )
+                .await
+                .context("configure the admitted catalog from the accepted turn")?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn refresh_subagent_model_tools(
         &self,
         catalog: &SubagentModelCatalog,

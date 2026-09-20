@@ -13,7 +13,7 @@ address, regardless of its ephemeral source port. Hirsel does not trust
 a shared proxy therefore share one WebSocket authentication-throttle history
 unless a future trusted-proxy contract explicitly provides client identity.
 
-The Host runs addressed Thread conversations plus current subagent, Lash process, trigger, and fork-triage resources. Native execution is one TypeScript RLM session with process and trigger abilities. Worker profiles carry the full Thread tool set and coding operations; top-level Space project chats carry the coordination/inspection profile and cannot select CLI execution. Registered processes and subscriptions live in per-Thread Lash stores; Hirsel projects them into the scoped Processes view and turns wakes and terminal results into conversation messages. There are no side-session compatibility flags or Event/Ping APIs.
+The Host runs addressed Thread conversations plus current subagent, Lash process, trigger, and fork-triage resources. Native execution is one TypeScript RLM session with process and trigger abilities. Every Thread carries the same full tool set and may select Native, Claude CLI or Codex CLI; Space-chat and worker roles are prompt guidance, not execution profiles. Registered processes and subscriptions live in per-Thread Lash stores; Hirsel projects them into the scoped Processes view and turns wakes and terminal results into conversation messages. There are no side-session compatibility flags or Event/Ping APIs.
 
 History lives in `hirsel.sqlite`. New stores use the complete current schema 14
 layout. Startup accepts that exact layout or an empty store and refuses every

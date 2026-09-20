@@ -90,4 +90,36 @@ mod tests {
             "old frame\n\nnext"
         );
     }
+
+    #[test]
+    fn tool_outcome_interrupts_the_same_reasoning_block_id() {
+        let events = [
+            TurnEventKind::ToolStart {
+                id: "tool-1".into(),
+                name: "read".into(),
+                summary: None,
+                input: None,
+            },
+            TurnEventKind::Reasoning {
+                text: "first".into(),
+                block_id: Some("reasoning-1".into()),
+            },
+            TurnEventKind::ToolDone {
+                id: "tool-1".into(),
+                name: "read".into(),
+                ok: true,
+                summary: None,
+                result: None,
+            },
+            TurnEventKind::Reasoning {
+                text: "second".into(),
+                block_id: Some("reasoning-1".into()),
+            },
+        ];
+
+        assert_eq!(
+            timeline_text(&events, TimelineTextKind::Reasoning),
+            "first\n\nsecond"
+        );
+    }
 }

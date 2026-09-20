@@ -27,6 +27,20 @@ describe("buildTimeline (fold)", () => {
     ]);
   });
 
+  it("starts a new reasoning row when a tool outcome interrupts the same block id", () => {
+    const items = buildTimeline(evs(
+      { kind: "tool_start", id: "tool-1", name: "read", summary: null, input: null },
+      { kind: "reasoning", block_id: "reasoning-1", text: "first" },
+      { kind: "tool_done", id: "tool-1", name: "read", ok: true, summary: null, result: null },
+      { kind: "reasoning", block_id: "reasoning-1", text: "second" },
+    ));
+
+    expect(items.filter(item => item.kind === "reasoning")).toMatchObject([
+      { text: "first" },
+      { text: "second" },
+    ]);
+  });
+
   it("keeps provisional prose blocks distinct in the streaming reply", () => {
     const split = splitStreamingReply(evs(
       { kind: "prose", block_id: "prose-1", text: "First " },

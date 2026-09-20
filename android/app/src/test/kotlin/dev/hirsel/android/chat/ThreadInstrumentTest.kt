@@ -29,4 +29,16 @@ class ThreadInstrumentTest {
 
         assertEquals("old frame\n\nnext", timelineText(events, "prose"))
     }
+
+    @Test
+    fun toolOutcomeInterruptsTheSameReasoningBlockId() {
+        val events = listOf(
+            TimelineTextEvent("tool_start", "", null),
+            TimelineTextEvent("reasoning", "first", "reasoning-1"),
+            TimelineTextEvent("tool_done", "", null),
+            TimelineTextEvent("reasoning", "second", "reasoning-1")
+        )
+
+        assertEquals("first\n\nsecond", timelineText(events, "reasoning"))
+    }
 }

@@ -111,3 +111,21 @@ test("canonical text blocks separate block identities but join chunks within a b
     { kind: "reasoning", text: "**Second thought.**" },
   ]);
 });
+
+test("tool outcomes interrupt canonical runs even when the reasoning block id repeats", () => {
+  const events = [
+    { seq: 1, event: { kind: "tool_start", id: "tool-1", name: "read" } },
+    { seq: 2, event: { kind: "reasoning", block_id: "reasoning-1", text: "first" } },
+    { seq: 3, event: { kind: "tool_done", id: "tool-1", name: "read", ok: true } },
+    { seq: 4, event: { kind: "reasoning", block_id: "reasoning-1", text: "second" } },
+  ];
+
+  assert.deepEqual(
+    contiguousTextBlocks(events).filter(block => block.kind === "reasoning").map(block => block.text),
+    ["first", "second"],
+  );
+  assert.deepEqual(
+    renderedTimelineExpectation(events).rows.filter(row => row.slot === "timeline-reasoning").map(row => row.rawText),
+    ["first", "second"],
+  );
+});

@@ -212,20 +212,23 @@ export function buildTimeline(events: TimelineEvent[]): TimelineItem[] {
   const tools = stepPairing();
   const code = stepPairing();
   const skipped = new Set<string>();
+  let adjacentTextEvent = false;
 
   for (const { seq, event, at } of events) {
     switch (event.kind) {
       case "prose":
       case "reasoning": {
         const last = items[items.length - 1];
-        if (last && last.kind === event.kind && last.blockId === event.block_id) {
+        if (adjacentTextEvent && last && last.kind === event.kind && last.blockId === event.block_id) {
           last.text += event.text;
         } else {
           items.push({ kind: event.kind, key: `${event.kind}-${seq}`, text: event.text, blockId: event.block_id });
         }
+        adjacentTextEvent = true;
         break;
       }
       case "tool_start": {
+        adjacentTextEvent = false;
         tools.start(items, event.id, at, {
           kind: "tool",
           key: `tool-${event.id}`,
@@ -239,6 +242,7 @@ export function buildTimeline(events: TimelineEvent[]): TimelineItem[] {
         break;
       }
       case "tool_done": {
+        adjacentTextEvent = false;
         // An orphan done is labelled from its own `name` — the start carried
         // the summary, so there is none to show.
         tools.done(items, event.id, at, {
@@ -259,6 +263,7 @@ export function buildTimeline(events: TimelineEvent[]): TimelineItem[] {
         break;
       }
       case "code_start": {
+        adjacentTextEvent = false;
         if (trivialProgram(event.code) && !event.truncated) { skipped.add(event.id); break; }
         const row: Extract<TimelineItem, { kind: "code" }> = {
           kind: "code",
@@ -273,6 +278,7 @@ export function buildTimeline(events: TimelineEvent[]): TimelineItem[] {
         break;
       }
       case "code_done": {
+        adjacentTextEvent = false;
         if (skipped.has(event.id)) break;
         // An orphan done has no source to show, only the cell's outcome — which
         // still beats dropping it silently.

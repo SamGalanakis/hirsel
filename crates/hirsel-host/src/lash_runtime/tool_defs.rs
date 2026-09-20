@@ -61,8 +61,7 @@ pub(super) fn agent_tool_surface_for_dialect(
     })
 }
 
-pub(super) fn hirsel_tool_definitions_for_profile(
-    profile: crate::storage::ToolProfile,
+pub(super) fn hirsel_tool_definitions(
     subagent_models: &SubagentModelCatalog,
 ) -> Vec<ToolDefinition> {
     let mut definitions = vec![
@@ -360,7 +359,6 @@ pub(super) fn hirsel_tool_definitions_for_profile(
     // coding operations are advertised together, so a Thread never has to be
     // handed to a second session to touch a file.
     definitions.extend(crate::native_coding_tools::definitions());
-    definitions.retain(|definition| profile.allows_tool(definition.name()));
     definitions
 }
 

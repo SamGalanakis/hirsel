@@ -174,9 +174,8 @@ impl Storage {
         }
         if let Some(focus) = focus {
             anyhow::ensure!(
-                super::thread_execution::ToolProfile::for_thread(&tx, thread_id)?
-                    == super::thread_execution::ToolProfile::ProjectChat,
-                "Task focus is only accepted by a project chat"
+                threads::get(&tx, thread_id)?.kind == ThreadKind::Space,
+                "Task focus is only accepted by a Space chat"
             );
             anyhow::ensure!(
                 focus.snapshot.is_object(),

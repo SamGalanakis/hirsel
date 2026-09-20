@@ -31,7 +31,6 @@ mod thread_scope;
 mod thread_summary;
 mod threads;
 pub(crate) use thread_execution::ThreadExecution;
-pub(crate) use thread_execution::ToolProfile;
 pub(crate) use thread_icons::{parse_agent_icon, parse_icon};
 pub(crate) use threads::ThreadPublication;
 mod thread_mutations;

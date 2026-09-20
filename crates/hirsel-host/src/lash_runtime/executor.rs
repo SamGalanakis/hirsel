@@ -9,7 +9,6 @@ pub(super) struct HirselToolExecutor {
 pub(super) struct HirselToolProvider {
     pub(super) executor: HirselToolExecutor,
     pub(super) coding: Arc<NativeCodingBinding>,
-    pub(super) profile: Arc<std::sync::RwLock<crate::storage::ToolProfile>>,
 }
 
 /// The coding operations' working directory for one Native lane.
@@ -76,36 +75,11 @@ impl NativeCodingBinding {
 }
 
 impl HirselToolProvider {
-    fn profile(&self) -> crate::storage::ToolProfile {
-        *self.profile.read().expect("tool profile poisoned")
-    }
-
     pub(super) fn definitions(&self) -> Vec<ToolDefinition> {
-        let profile = self.profile();
-        let mut definitions = hirsel_tool_definitions_for_profile(
-            profile,
-            &self.executor.tools.subagent_model_snapshot(),
-        );
-        definitions.extend(
-            self.executor
-                .tools
-                .plugin_tools()
-                .definitions_for_profile(profile),
-        );
+        let mut definitions =
+            hirsel_tool_definitions(&self.executor.tools.subagent_model_snapshot());
+        definitions.extend(self.executor.tools.plugin_tools().definitions());
         definitions
-    }
-
-    async fn captured_profile(
-        &self,
-        call: &ToolCall<'_>,
-    ) -> Result<crate::storage::ToolProfile, String> {
-        let caller = self.executor.caller(call).await?;
-        self.executor
-            .tools
-            .storage()
-            .turn_tool_profile(caller.turn_id)
-            .await
-            .map_err(|error| error.to_string())
     }
 }
 
@@ -126,26 +100,6 @@ impl ToolProvider for HirselToolProvider {
     }
 
     async fn execute(&self, call: ToolCall<'_>) -> ToolOutcome {
-        let profile = match self.captured_profile(&call).await {
-            Ok(profile) => profile,
-            Err(error) => return ToolOutcome::err_fmt(error),
-        };
-        if !profile.allows_tool(call.name) {
-            return ToolOutcome::err_fmt(
-                "tool is unavailable to a project chat; delegate the work to a Task worker",
-            );
-        }
-        if call.name.starts_with("plugin__")
-            && !self
-                .executor
-                .tools
-                .plugin_tools()
-                .allowed_for_profile(call.name, profile)
-        {
-            return ToolOutcome::err_fmt(
-                "execution-capable plugin tools are unavailable to a project chat; delegate the work to a Task worker",
-            );
-        }
         if crate::native_coding_tools::is_coding_tool(call.name) {
             return match self.coding.tools().await {
                 Ok(tools) => tools.execute(call).await,
@@ -156,53 +110,6 @@ impl ToolProvider for HirselToolProvider {
     }
 
     async fn execute_attempt(&self, call: ToolCall<'_>) -> lash_core::ToolAttemptOutcome {
-        let profile = match self.captured_profile(&call).await {
-            Ok(profile) => profile,
-            Err(error) => {
-                return lash_core::ToolAttemptOutcome::done_without_intents(
-                    lash_core::ToolOutcomeDone::failure(lash_core::ToolFailure {
-                        class: lash_core::ToolFailureClass::Execution,
-                        code: "tool_authority_unavailable".to_string(),
-                        message: error,
-                        source: lash_core::ToolFailureSource::Tool,
-                        retry: lash_core::ToolRetryStatus::Never,
-                        raw: None,
-                    }),
-                );
-            }
-        };
-        if !profile.allows_tool(call.name) {
-            return lash_core::ToolAttemptOutcome::done_without_intents(
-                lash_core::ToolOutcomeDone::failure(lash_core::ToolFailure {
-                    class: lash_core::ToolFailureClass::Execution,
-                    code: "tool_profile_denied".to_string(),
-                    message:
-                        "tool is unavailable to a project chat; delegate the work to a Task worker"
-                            .to_string(),
-                    source: lash_core::ToolFailureSource::Tool,
-                    retry: lash_core::ToolRetryStatus::Never,
-                    raw: None,
-                }),
-            );
-        }
-        if call.name.starts_with("plugin__")
-            && !self
-                .executor
-                .tools
-                .plugin_tools()
-                .allowed_for_profile(call.name, profile)
-        {
-            return lash_core::ToolAttemptOutcome::done_without_intents(
-                lash_core::ToolOutcomeDone::failure(lash_core::ToolFailure {
-                    class: lash_core::ToolFailureClass::Execution,
-                    code: "tool_profile_denied".to_string(),
-                    message: "execution-capable plugin tools are unavailable to a project chat; delegate the work to a Task worker".to_string(),
-                    source: lash_core::ToolFailureSource::Tool,
-                    retry: lash_core::ToolRetryStatus::Never,
-                    raw: None,
-                }),
-            );
-        }
         if crate::native_coding_tools::is_coding_tool(call.name) {
             return match self.coding.tools().await {
                 Ok(tools) => tools.execute_attempt(call).await,

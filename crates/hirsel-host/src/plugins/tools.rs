@@ -13,9 +13,7 @@ use std::{
     time::Duration,
 };
 
-use hirsel_plugin_api::{
-    PluginCtx, PluginTool, PluginToolEffect, PluginToolHandler, is_valid_tool_name,
-};
+use hirsel_plugin_api::{PluginCtx, PluginTool, PluginToolHandler, is_valid_tool_name};
 use lash::tools::{ToolBinding, ToolDefinition, ToolDefinitionBindingExt};
 use serde_json::{Value, json};
 
@@ -38,7 +36,6 @@ struct RegisteredTool {
     operation: String,
     description: String,
     input_schema: Value,
-    effect: PluginToolEffect,
     ctx: PluginCtx,
     handler: Arc<dyn PluginToolHandler>,
 }
@@ -72,7 +69,6 @@ impl PluginToolRegistry {
                 operation: tool.name.clone(),
                 description: tool.description,
                 input_schema: tool.input_schema,
-                effect: tool.effect,
                 ctx: ctx.clone(),
                 handler: Arc::clone(&tool.handler),
             }));
@@ -92,15 +88,8 @@ impl PluginToolRegistry {
 
     /// The definitions to append to the built-in catalog, in a stable order so
     /// the tool-surface fingerprint does not churn between boots.
-    pub(crate) fn definitions_for_profile(
-        &self,
-        profile: crate::storage::ToolProfile,
-    ) -> Vec<ToolDefinition> {
+    pub(crate) fn definitions(&self) -> Vec<ToolDefinition> {
         let mut tools = self.snapshot();
-        tools.retain(|tool| {
-            profile == crate::storage::ToolProfile::Worker
-                || tool.effect == PluginToolEffect::Inspection
-        });
         tools.sort_by(|left, right| left.catalog_name.cmp(&right.catalog_name));
         tools
             .into_iter()
@@ -120,17 +109,6 @@ impl PluginToolRegistry {
                 ))
             })
             .collect()
-    }
-
-    pub(crate) fn allowed_for_profile(
-        &self,
-        name: &str,
-        profile: crate::storage::ToolProfile,
-    ) -> bool {
-        self.read().get(name).is_some_and(|tool| {
-            profile == crate::storage::ToolProfile::Worker
-                || tool.effect == PluginToolEffect::Inspection
-        })
     }
 
     /// Catalog names of every registered plugin tool, sorted. Used as the

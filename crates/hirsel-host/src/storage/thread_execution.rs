@@ -4,69 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// The immutable authority surface captured for one accepted turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ToolProfile {
-    ProjectChat,
-    Worker,
-}
-
-impl ToolProfile {
-    pub(crate) fn for_thread(c: &Connection, thread_id: u64) -> anyhow::Result<Self> {
-        let (kind, parent): (String, Option<u64>) = c.query_row(
-            "SELECT kind,parent_thread_id FROM threads WHERE id=?1",
-            [thread_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        Ok(if kind == "space" && parent.is_none() {
-            Self::ProjectChat
-        } else {
-            Self::Worker
-        })
-    }
-
-    pub(crate) fn allows_tool(self, name: &str) -> bool {
-        match self {
-            Self::Worker => true,
-            // This is the complete built-in project-chat surface. Unknown
-            // tools stay unavailable until their authority is classified
-            // here. Plugins use their own required inspection/execution
-            // classification and are checked again by the plugin registry.
-            Self::ProjectChat => {
-                matches!(
-                    name,
-                    "artifacts_create"
-                        | "artifacts_edit"
-                        | "artifacts_list"
-                        | "artifacts_show"
-                        | "threads_context"
-                        | "threads_delegate"
-                        | "threads_send"
-                        | "threads_report"
-                        | "threads_cancel"
-                        | "threads_archive"
-                        | "threads_unarchive"
-                        | "threads_create"
-                        | "threads_update"
-                        | "threads_list"
-                        | "threads_read"
-                        | "threads_add_related"
-                        | "threads_remove_related"
-                        | "threads_grant"
-                        | "threads_revoke"
-                        | "threads_activity"
-                        | "views_show"
-                        | "views_update"
-                        | "views_clear"
-                        | "views_list_templates"
-                ) || name.starts_with("plugin__")
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "backend", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum ThreadExecution {
     /// Hirsel's own session: the full Thread tool set plus the four coding
@@ -74,18 +12,70 @@ pub(crate) enum ThreadExecution {
     /// directory those coding operations are rooted at — execution context,
     /// never a filesystem sandbox — so it is captured, not public.
     Native {
-        tool_profile: ToolProfile,
         provider_id: String,
         model: lash::ModelSpec,
         cwd: PathBuf,
     },
     Cli {
-        tool_profile: ToolProfile,
         agent: hirsel_drivers::AgentKind,
         model: String,
         variant: String,
         cwd: PathBuf,
     },
+}
+
+impl<'de> Deserialize<'de> for ThreadExecution {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Schema 14 briefly wrote `tool_profile` into preference and accepted-
+        // turn JSON. Accept exactly that retired key while preserving the
+        // existing refusal of every other unknown execution setting.
+        #[derive(Deserialize)]
+        #[serde(tag = "backend", rename_all = "snake_case", deny_unknown_fields)]
+        enum StoredThreadExecution {
+            Native {
+                #[serde(rename = "tool_profile", default)]
+                _tool_profile: Option<serde::de::IgnoredAny>,
+                provider_id: String,
+                model: lash::ModelSpec,
+                cwd: PathBuf,
+            },
+            Cli {
+                #[serde(rename = "tool_profile", default)]
+                _tool_profile: Option<serde::de::IgnoredAny>,
+                agent: hirsel_drivers::AgentKind,
+                model: String,
+                variant: String,
+                cwd: PathBuf,
+            },
+        }
+        Ok(match StoredThreadExecution::deserialize(deserializer)? {
+            StoredThreadExecution::Native {
+                provider_id,
+                model,
+                cwd,
+                ..
+            } => Self::Native {
+                provider_id,
+                model,
+                cwd,
+            },
+            StoredThreadExecution::Cli {
+                agent,
+                model,
+                variant,
+                cwd,
+                ..
+            } => Self::Cli {
+                agent,
+                model,
+                variant,
+                cwd,
+            },
+        })
+    }
 }
 /// The stored preference as the public, key-free identity of a backend.
 /// Absent means the Thread inherits the configured default Native execution.
@@ -131,11 +121,6 @@ pub(crate) fn public_target(execution: ThreadExecution) -> hirsel_proto::ThreadE
 }
 
 impl Storage {
-    pub(crate) async fn thread_tool_profile(&self, thread_id: u64) -> anyhow::Result<ToolProfile> {
-        let connection = self.conn.lock().await;
-        ToolProfile::for_thread(&connection, thread_id)
-    }
-
     /// Check the revision and write the Owner's backend choice. It applies to
     /// the NEXT turn: a running turn already captured what it runs on.
     pub(crate) async fn set_addressed_thread_execution(
@@ -151,13 +136,6 @@ impl Storage {
         anyhow::ensure!(
             current.revision == expected_revision,
             "thread changed; reload before updating where it runs"
-        );
-        let profile = ToolProfile::for_thread(&c, id)?;
-        anyhow::ensure!(
-            profile != ToolProfile::ProjectChat
-                || execution
-                    .is_none_or(|execution| matches!(execution, ThreadExecution::Native { .. })),
-            "Project chats run on Native execution; choose Native or convert this top-level Space to a Task"
         );
         match execution {
             Some(execution) => {
@@ -194,25 +172,9 @@ pub(super) fn capture_selected(
     selected: Option<&ThreadExecution>,
 ) -> anyhow::Result<()> {
     if let Some(execution) = selected {
-        let thread_id = c.query_row(
-            "SELECT thread_id FROM thread_turns WHERE id=?1",
-            [turn_id],
-            |row| row.get::<_, u64>(0),
-        )?;
-        let profile = ToolProfile::for_thread(c, thread_id)?;
-        anyhow::ensure!(
-            profile != ToolProfile::ProjectChat
-                || matches!(execution, ThreadExecution::Native { .. }),
-            "Project chats run on Native execution; CLI execution is only available to workers"
-        );
-        let mut execution = execution.clone();
-        match &mut execution {
-            ThreadExecution::Native { tool_profile, .. }
-            | ThreadExecution::Cli { tool_profile, .. } => *tool_profile = profile,
-        }
         c.execute(
             "INSERT INTO thread_turn_execution(turn_id,config) VALUES(?1,?2)",
-            params![turn_id, serde_json::to_string(&execution)?],
+            params![turn_id, serde_json::to_string(execution)?],
         )?;
     }
     Ok(())
@@ -272,33 +234,6 @@ impl Storage {
             |r| r.get(0),
         )?;
         Ok(serde_json::from_str(&value)?)
-    }
-
-    pub(crate) async fn turn_tool_profile(&self, turn_id: u64) -> anyhow::Result<ToolProfile> {
-        let connection = self.conn.lock().await;
-        let captured: Option<String> = connection
-            .query_row(
-                "SELECT config FROM thread_turn_execution WHERE turn_id=?1",
-                [turn_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(captured) = captured {
-            return Ok(match serde_json::from_str(&captured)? {
-                ThreadExecution::Native { tool_profile, .. }
-                | ThreadExecution::Cli { tool_profile, .. } => tool_profile,
-            });
-        }
-        // Host-owned background/synthetic turns can exercise the same scoped
-        // facade without a model backend. They still receive the role derived
-        // from their durable Thread; accepted model turns always take the
-        // immutable capture above.
-        let thread_id = connection.query_row(
-            "SELECT thread_id FROM thread_turns WHERE id=?1",
-            [turn_id],
-            |row| row.get(0),
-        )?;
-        ToolProfile::for_thread(&connection, thread_id)
     }
 
     pub(crate) async fn native_execution_default(&self) -> anyhow::Result<ThreadExecution> {

@@ -205,12 +205,9 @@ mod tests {
             "artifacts_show",
         ] {
             assert!(
-                hirsel_tool_definitions_for_profile(
-                    crate::storage::ToolProfile::Worker,
-                    &crate::subagent_models::registry_catalog(),
-                )
-                .iter()
-                .any(|t| t.name() == name)
+                hirsel_tool_definitions(&crate::subagent_models::registry_catalog())
+                    .iter()
+                    .any(|t| t.name() == name)
             );
         }
     }

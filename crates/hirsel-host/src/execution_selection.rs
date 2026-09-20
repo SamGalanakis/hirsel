@@ -121,7 +121,6 @@ pub(crate) async fn resolve_execution(
             None => default_cwd.clone(),
         };
         Ok(crate::storage::ThreadExecution::Native {
-            tool_profile: crate::storage::ToolProfile::Worker,
             provider_id: choice.id,
             model,
             cwd,
@@ -137,7 +136,6 @@ pub(crate) async fn resolve_execution(
             .resolve_thread_cli_model(agent, input.model.as_deref(), input.variant.as_deref())
             .map_err(|e| e.to_string())?;
         Ok(crate::storage::ThreadExecution::Cli {
-            tool_profile: crate::storage::ToolProfile::Worker,
             agent,
             model: selected.model_id,
             variant: selected.variant,

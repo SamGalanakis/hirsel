@@ -243,7 +243,7 @@ pub(crate) fn validate_thread_description(description: &str) -> anyhow::Result<(
 
 impl Storage {
     /// Return the one ordinary top-level Space used as the empty-history
-    /// landing project. The meta pointer and Thread are committed together;
+    /// landing Space. The meta pointer and Thread are committed together;
     /// raw schema initialization remains empty.
     pub async fn ensure_home_project(
         &self,
@@ -568,16 +568,6 @@ impl Storage {
                 current.settled_at.is_none(),
                 "reopen a settled Task before converting it to a Space"
             );
-            if current.parent_thread_id.is_none() {
-                let execution = super::thread_execution::select(&tx, id, None)?;
-                anyhow::ensure!(
-                    execution.is_none_or(|execution| matches!(
-                        execution,
-                        super::ThreadExecution::Native { .. }
-                    )),
-                    "Project chats run on Native execution; choose Native before converting this top-level Task to a Space"
-                );
-            }
             if let Some(parent_id) = current.parent_thread_id {
                 anyhow::ensure!(
                     get(&tx, parent_id)?.kind == ThreadKind::Space,

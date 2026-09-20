@@ -103,14 +103,14 @@ async fn the_identity_block_follows_the_thread_between_turns() {
 }
 
 #[tokio::test]
-async fn native_project_chat_role_and_profile_change_with_top_level_kind() {
+async fn native_role_follows_kind_and_nested_spaces_are_space_chats() {
     let (state, _dir) = runtime_fixture().await;
     let (project, _) = state
         .storage
         .create_thread(
             "identity-project-chat",
             "Hirsel",
-            "Coordinate the project.",
+            "Coordinate the Space.",
             None,
             ThreadAttention::Quiet,
             hirsel_proto::ThreadKind::Space,
@@ -128,10 +128,47 @@ async fn native_project_chat_role_and_profile_change_with_top_level_kind() {
     runtime.apply_agent_prompt().await.unwrap();
     let project_prompt = prompt();
     assert!(
-        project_prompt
-            .contains("Role: Project chat — dispatch work to Task workers; do not do the work."),
-        "project-chat role is missing: {project_prompt}"
+        project_prompt.contains(
+            "Role: Space chat — coordinate and dispatch work to Tasks; do not do the work here."
+        ),
+        "Space-chat role is missing: {project_prompt}"
     );
+
+    let (container, _) = state
+        .storage
+        .create_thread(
+            "identity-space-container",
+            "Container",
+            "",
+            None,
+            ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Space,
+            None,
+        )
+        .await
+        .unwrap();
+    let (nested_space, _) = state
+        .storage
+        .create_thread(
+            "identity-nested-space",
+            "Area",
+            "Coordinate this area.",
+            None,
+            ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Space,
+            Some(container.id),
+        )
+        .await
+        .unwrap();
+    let nested_block = state
+        .storage
+        .thread_identity(nested_space.id)
+        .await
+        .unwrap()
+        .block();
+    assert!(nested_block.contains(
+        "Role: Space chat — coordinate and dispatch work to Tasks; do not do the work here."
+    ));
 
     let history = state.storage.history_id().await.unwrap();
     state
@@ -152,5 +189,5 @@ async fn native_project_chat_role_and_profile_change_with_top_level_kind() {
         ),
         "converted worker role is missing: {worker_prompt}"
     );
-    assert!(!worker_prompt.contains("Role: Project chat"));
+    assert!(!worker_prompt.contains("Role: Space chat"));
 }

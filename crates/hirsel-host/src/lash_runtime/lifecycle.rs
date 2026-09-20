@@ -121,13 +121,11 @@ impl LashAgentRuntime {
         let rlm_config = hirsel_rlm_config();
         let rlm_factory =
             lash_protocol_rlm::RlmProtocolPluginFactory::new(rlm_config, artifact_store);
-        let profile = tools.storage().thread_tool_profile(thread_id).await?;
-        let mut tool_definitions =
-            hirsel_tool_definitions_for_profile(profile, &tools.subagent_model_snapshot());
+        let mut tool_definitions = hirsel_tool_definitions(&tools.subagent_model_snapshot());
         // Plugins are booted before the agent runtime, so the tools of every
         // enabled plugin are part of the first tool-surface fingerprint rather
         // than rotating the session immediately after startup.
-        tool_definitions.extend(tools.plugin_tools().definitions_for_profile(profile));
+        tool_definitions.extend(tools.plugin_tools().definitions());
         let tool_surface = agent_tool_surface(&tool_definitions)?;
         let session_bootstrap = tools
             .prepare_agent_session(
@@ -152,11 +150,9 @@ impl LashAgentRuntime {
         let coding = Arc::new(NativeCodingBinding::new(std::fs::canonicalize(
             std::env::current_dir()?,
         )?));
-        let tool_profile = Arc::new(std::sync::RwLock::new(profile));
         let tool_provider = Arc::new(HirselToolProvider {
             executor,
             coding: Arc::clone(&coding),
-            profile: Arc::clone(&tool_profile),
         });
         let notify = Arc::new(Notify::new());
         let process_notify = Arc::new(Notify::new());
@@ -225,7 +221,6 @@ impl LashAgentRuntime {
                 provider,
             }),
             coding,
-            tool_profile,
             config: config.clone(),
             capacity,
             core: core.clone(),
@@ -382,31 +377,6 @@ impl LashAgentRuntime {
     /// next turn is prompted with the new values rather than the ones the
     /// session opened on.
     pub(super) async fn apply_agent_prompt(&self) -> anyhow::Result<()> {
-        let current_profile = self
-            .tools
-            .storage()
-            .thread_tool_profile(self.thread_id)
-            .await?;
-        let changed_profile = {
-            let mut profile = self.tool_profile.write().expect("tool profile poisoned");
-            if *profile == current_profile {
-                false
-            } else {
-                *profile = current_profile;
-                true
-            }
-        };
-        if changed_profile {
-            self.session
-                .admin()
-                .commands()
-                .refresh_tool_catalog(
-                    "Thread role changed",
-                    format!("tool-profile:{current_profile:?}"),
-                )
-                .await
-                .context("rotate the session after its Thread role changed")?;
-        }
         let guidance = agent_guidance_with_handoff(
             &self.tools.storage().thread_identity(self.thread_id).await?,
             self.prompts.agent_guidance(),
@@ -427,33 +397,6 @@ impl LashAgentRuntime {
             })
             .await
             .context("apply the Owner's Agent prompt to the main-agent Lash session")
-    }
-
-    pub(super) async fn apply_captured_tool_profile(
-        &self,
-        captured_profile: crate::storage::ToolProfile,
-    ) -> anyhow::Result<()> {
-        let changed = {
-            let mut profile = self.tool_profile.write().expect("tool profile poisoned");
-            if *profile == captured_profile {
-                false
-            } else {
-                *profile = captured_profile;
-                true
-            }
-        };
-        if changed {
-            self.session
-                .admin()
-                .commands()
-                .refresh_tool_catalog(
-                    "Accepted turn profile changed",
-                    format!("captured-tool-profile:{captured_profile:?}"),
-                )
-                .await
-                .context("configure the admitted catalog from the accepted turn")?;
-        }
-        Ok(())
     }
 
     pub(super) async fn refresh_subagent_model_tools(

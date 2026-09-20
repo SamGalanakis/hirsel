@@ -757,7 +757,6 @@ async fn kind_conversion_is_revision_guarded_atomic_and_preserves_identity() {
 
     let cli_task = kinded_thread(&storage, "cli-task", ThreadKind::Task, None).await;
     let cli = super::ThreadExecution::Cli {
-        tool_profile: super::ToolProfile::Worker,
         agent: hirsel_drivers::AgentKind::Claude,
         model: "fixture-model".into(),
         variant: "fixture-variant".into(),
@@ -767,19 +766,21 @@ async fn kind_conversion_is_revision_guarded_atomic_and_preserves_identity() {
         .set_addressed_thread_execution(&history, cli_task.id, Some(&cli), cli_task.revision)
         .await
         .unwrap();
-    let error = storage
+    let space = storage
         .set_addressed_thread_kind(&history, cli_task.id, ThreadKind::Space, cli_task.revision)
         .await
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("Project chats run on Native execution; choose Native before converting"),
-        "incompatible project conversion should explain the Native requirement: {error:#}"
-    );
+        .unwrap();
     assert_eq!(
         storage.thread(cli_task.id).await.unwrap().unwrap().kind,
-        ThreadKind::Task
+        ThreadKind::Space
+    );
+    assert_eq!(
+        space.execution,
+        Some(hirsel_proto::ThreadExecutionTarget::Cli {
+            agent: "claude".into(),
+            model: "fixture-model".into(),
+            variant: "fixture-variant".into(),
+        })
     );
 }
 
@@ -1044,7 +1045,7 @@ async fn owner_title_and_description_edits_are_revision_fenced_and_broadcast() {
 /// The Owner names a backend exactly the way `threads.delegate` does, so the
 /// same catalog refuses the same things. It takes effect on the next turn.
 #[tokio::test]
-async fn owner_execution_choice_is_catalog_validated_fenced_and_clearable() {
+async fn owner_execution_choice_allows_cli_on_top_level_space_and_remains_validated() {
     use hirsel_proto::{HostToClient, ThreadExecutionTarget};
     let dir = tempfile::tempdir().unwrap();
     let state = crate::build_state(crate::tests::test_config(dir.path()))
@@ -1092,7 +1093,7 @@ async fn owner_execution_choice_is_catalog_validated_fenced_and_clearable() {
         .storage
         .create_thread(
             "runs-on-project",
-            "Project chat",
+            "Space chat",
             "",
             None,
             ThreadAttention::Quiet,
@@ -1102,7 +1103,7 @@ async fn owner_execution_choice_is_catalog_validated_fenced_and_clearable() {
         .await
         .unwrap()
         .0;
-    let project_error = state
+    let space = state
         .handle_addressed_thread_action(
             &history,
             project.id,
@@ -1111,17 +1112,9 @@ async fn owner_execution_choice_is_catalog_validated_fenced_and_clearable() {
             Some(project.revision),
         )
         .await
-        .unwrap_err();
-    assert!(
-        project_error
-            .to_string()
-            .contains("Project chats run on Native execution"),
-        "project-chat CLI refusal should explain the compatible backend: {project_error:#}"
-    );
-    assert_eq!(
-        state.storage.thread(project.id).await.unwrap().unwrap(),
-        project
-    );
+        .unwrap();
+    assert_eq!(space.kind, ThreadKind::Space);
+    assert_eq!(space.execution, Some(target.clone()));
     let before = state.storage.thread(id).await.unwrap().unwrap();
 
     for (data, expected) in [

@@ -6,15 +6,6 @@ use serde_json::Value;
 
 use crate::ctx::PluginCtx;
 
-/// Whether a plugin tool only inspects already-authorized state or can cause
-/// work or an external effect. Project chats may use inspection tools; all
-/// other plugin tools stay on workers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PluginToolEffect {
-    Inspection,
-    Execution,
-}
-
 /// The boxed future a tool handler returns. Boxing keeps [`PluginToolHandler`]
 /// object-safe, which is what lets the host hold a heterogeneous tool table.
 pub type PluginToolFuture = Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>;
@@ -43,7 +34,6 @@ pub struct PluginTool {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
-    pub effect: PluginToolEffect,
     pub handler: Arc<dyn PluginToolHandler>,
 }
 
@@ -64,14 +54,6 @@ impl PluginTool {
         Self::from_handler(name, description, input_schema, FnHandler(handler))
     }
 
-    /// Mark this tool as read-only inspection. Execution is the conservative
-    /// default so an existing plugin cannot accidentally gain project-chat
-    /// authority when a host upgrades.
-    pub fn inspection(mut self) -> Self {
-        self.effect = PluginToolEffect::Inspection;
-        self
-    }
-
     /// Same, for a handler that is its own type (state in a struct, say).
     pub fn from_handler(
         name: impl Into<String>,
@@ -83,7 +65,6 @@ impl PluginTool {
             name: name.into(),
             description: description.into(),
             input_schema,
-            effect: PluginToolEffect::Execution,
             handler: Arc::new(handler),
         }
     }
@@ -107,7 +88,6 @@ impl std::fmt::Debug for PluginTool {
             .debug_struct("PluginTool")
             .field("name", &self.name)
             .field("description", &self.description)
-            .field("effect", &self.effect)
             .finish_non_exhaustive()
     }
 }

@@ -147,8 +147,8 @@ async fn task_focus_is_replayed_idempotently_and_never_widens_reach() {
     assert!(
         worker_error
             .to_string()
-            .contains("only accepted by a project chat"),
-        "worker accepted project-chat focus: {worker_error:#}"
+            .contains("only accepted by a Space chat"),
+        "Task accepted Space-chat focus: {worker_error:#}"
     );
     assert_eq!(
         storage
@@ -190,81 +190,6 @@ async fn durable_process_authority_survives_the_registering_turn() {
         s.process_caller("unknown-session", "process-1", "scope-1")
             .await
             .is_err()
-    );
-}
-
-#[tokio::test]
-async fn process_authority_keeps_the_profile_of_its_own_session() {
-    let dir = tempfile::tempdir().unwrap();
-    let s = Storage::open(dir.path()).await.unwrap();
-    let history = s.history_id().await.unwrap();
-    s.set_native_execution_default(&crate::storage::ThreadExecution::Native {
-        tool_profile: crate::storage::ToolProfile::Worker,
-        provider_id: "process-profile-test".into(),
-        model: lash::ModelSpec::builder("process-profile-model")
-            .variant(lash::provider::ReasoningSelection::ProviderDefault)
-            .context_window_tokens(8_000)
-            .build()
-            .unwrap(),
-        cwd: dir.path().to_path_buf(),
-    })
-    .await
-    .unwrap();
-    let (project, _) = s.ensure_home_project(&history).await.unwrap();
-    let project_session = s
-        .reconcile_agent_tool_surface(project.id, "project-surface", &["threads_context".into()])
-        .await
-        .unwrap();
-    let project_turn = s.start_thread_turn(project.id, None).await.unwrap();
-    s.run_thread_turn(project_turn.id).await.unwrap();
-    s.bind_thread_execution(
-        &history,
-        &project_session.session_id,
-        "project-execution",
-        project_turn.id,
-    )
-    .await
-    .unwrap();
-    s.complete_thread_turn(&history, project_turn.id, ThreadTurnState::Completed, None)
-        .await
-        .unwrap();
-
-    let worker = s
-        .set_addressed_thread_kind(
-            &history,
-            project.id,
-            hirsel_proto::ThreadKind::Task,
-            project.revision,
-        )
-        .await
-        .unwrap();
-    let worker_session = s
-        .reconcile_agent_tool_surface(worker.id, "worker-surface", &["shell_run".into()])
-        .await
-        .unwrap();
-    let worker_turn = s.start_thread_turn(worker.id, None).await.unwrap();
-    s.run_thread_turn(worker_turn.id).await.unwrap();
-    s.bind_thread_execution(
-        &history,
-        &worker_session.session_id,
-        "worker-execution",
-        worker_turn.id,
-    )
-    .await
-    .unwrap();
-
-    let caller = s
-        .process_caller(
-            &project_session.session_id,
-            "project-process",
-            "process-scope",
-        )
-        .await
-        .unwrap();
-    assert_eq!(caller.turn_id, project_turn.id);
-    assert_eq!(
-        s.turn_tool_profile(caller.turn_id).await.unwrap(),
-        crate::storage::ToolProfile::ProjectChat
     );
 }
 
@@ -1026,7 +951,6 @@ async fn direct_owner_native_input_accepts_the_full_thread_surface() {
     let storage = Storage::open(dir.path()).await.unwrap();
     let task = thread(&storage, "native-owner-policy", None).await;
     let execution = ThreadExecution::Native {
-        tool_profile: ToolProfile::Worker,
         provider_id: "openrouter".into(),
         model: lash::ModelSpec::builder("vendor/owner-policy-model")
             .variant(lash::provider::ReasoningSelection::ProviderDefault)
@@ -1121,6 +1045,86 @@ async fn direct_owner_native_input_accepts_the_full_thread_surface() {
         panic!("a Native Thread must capture its own Native route");
     };
     assert_eq!(provider_id, "openrouter");
+}
+
+#[tokio::test]
+async fn legacy_tool_profile_json_is_ignored_and_never_rewritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let history = storage.history_id().await.unwrap();
+    let thread_id = thread(&storage, "legacy-execution-json", None).await;
+    let execution = ThreadExecution::Cli {
+        agent: hirsel_drivers::AgentKind::Claude,
+        model: "legacy-model".into(),
+        variant: "legacy-variant".into(),
+        cwd: dir.path().to_path_buf(),
+    };
+    let mut legacy = serde_json::to_value(&execution).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .insert("tool_profile".into(), json!("project_chat"));
+    let legacy_json = serde_json::to_string(&legacy).unwrap();
+    storage
+        .conn
+        .lock()
+        .await
+        .execute(
+            "INSERT INTO thread_execution_preferences(thread_id,config) VALUES(?1,?2)",
+            rusqlite::params![thread_id, legacy_json],
+        )
+        .unwrap();
+
+    let stored = storage.thread(thread_id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.execution,
+        Some(hirsel_proto::ThreadExecutionTarget::Cli {
+            agent: "claude".into(),
+            model: "legacy-model".into(),
+            variant: "legacy-variant".into(),
+        })
+    );
+    let turn = storage.start_thread_turn(thread_id, None).await.unwrap();
+    assert_eq!(storage.turn_execution(turn.id).await.unwrap(), execution);
+    let captured: String = storage
+        .conn
+        .lock()
+        .await
+        .query_row(
+            "SELECT config FROM thread_turn_execution WHERE turn_id=?1",
+            [turn.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!captured.contains("tool_profile"));
+
+    storage
+        .conn
+        .lock()
+        .await
+        .execute(
+            "UPDATE thread_turn_execution SET config=?2 WHERE turn_id=?1",
+            rusqlite::params![turn.id, serde_json::to_string(&legacy).unwrap()],
+        )
+        .unwrap();
+    assert_eq!(storage.turn_execution(turn.id).await.unwrap(), execution);
+
+    let refreshed = storage.thread(thread_id).await.unwrap().unwrap();
+    storage
+        .set_addressed_thread_execution(&history, thread_id, Some(&execution), refreshed.revision)
+        .await
+        .unwrap();
+    let preference: String = storage
+        .conn
+        .lock()
+        .await
+        .query_row(
+            "SELECT config FROM thread_execution_preferences WHERE thread_id=?1",
+            [thread_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!preference.contains("tool_profile"));
 }
 
 #[tokio::test]

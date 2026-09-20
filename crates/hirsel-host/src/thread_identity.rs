@@ -44,7 +44,6 @@ pub(crate) struct ThreadIdentity {
     pub ancestors: Vec<ThreadIdentityRef>,
     /// The ADR-0022 reach summary, already in Owner vocabulary.
     pub reach: String,
-    pub tool_profile: crate::storage::ToolProfile,
 }
 
 impl ThreadIdentity {
@@ -61,11 +60,11 @@ impl ThreadIdentity {
                 ""
             }
         ));
-        block.push_str(match self.tool_profile {
-            crate::storage::ToolProfile::ProjectChat => {
-                "Role: Project chat — dispatch work to Task workers; do not do the work.\n"
+        block.push_str(match self.thread.kind {
+            ThreadKind::Space => {
+                "Role: Space chat — coordinate and dispatch work to Tasks; do not do the work here.\n"
             }
-            crate::storage::ToolProfile::Worker => {
+            ThreadKind::Task => {
                 "Role: Worker — do the work for this Task; read its brief and current state.\n"
             }
         });

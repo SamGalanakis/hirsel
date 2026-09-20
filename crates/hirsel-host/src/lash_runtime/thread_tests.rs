@@ -14,7 +14,6 @@ async fn delegated_cli_turn(
         artifact_ids: Vec::new(),
         child_thread_id: None,
         execution: Some(crate::storage::ThreadExecution::Cli {
-            tool_profile: crate::storage::ToolProfile::Worker,
             agent: AgentKind::Claude,
             model: "fake-model".into(),
             variant: "fake-variant".into(),
@@ -38,7 +37,6 @@ const NATIVE_TEST_MODEL: &str = "vendor/native-test-model";
 
 fn native_execution(cwd: std::path::PathBuf) -> crate::storage::ThreadExecution {
     crate::storage::ThreadExecution::Native {
-        tool_profile: crate::storage::ToolProfile::Worker,
         provider_id: NATIVE_TEST_PROVIDER_ID.into(),
         model: lash::ModelSpec::builder(NATIVE_TEST_MODEL)
             .variant(ReasoningSelection::ProviderDefault)
@@ -794,10 +792,7 @@ async fn ordinary_thread_tool_creation_is_visible_and_mutable_without_action_wak
     assert!(result["thread"]["settled_at"].is_null());
     assert_eq!(result["thread"]["attention"], "quiet");
     assert!(result["thread"]["instrument"].is_null());
-    let definitions = hirsel_tool_definitions_for_profile(
-        crate::storage::ToolProfile::Worker,
-        &crate::subagent_models::registry_catalog(),
-    );
+    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
     let create_schema = definitions
         .iter()
         .find(|definition| definition.name() == "threads_create")

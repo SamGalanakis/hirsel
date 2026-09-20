@@ -121,7 +121,6 @@ async fn fake_cli_tools_publish_and_replay_structured_events_with_bounded_progre
             &state.tools,
             request,
             crate::storage::ThreadExecution::Cli {
-                tool_profile: crate::storage::ToolProfile::Worker,
                 agent: AgentKind::Claude,
                 model: "fixture".into(),
                 variant: "fixture".into(),
@@ -207,7 +206,6 @@ async fn bridge_mcp_telemetry_wins_over_duplicate_cli_tool_events() {
             &state.tools,
             request,
             crate::storage::ThreadExecution::Cli {
-                tool_profile: crate::storage::ToolProfile::Worker,
                 agent: AgentKind::Claude,
                 model: "fixture".into(),
                 variant: "fixture".into(),
@@ -343,7 +341,6 @@ fn start(
             &tools,
             request,
             crate::storage::ThreadExecution::Cli {
-                tool_profile: crate::storage::ToolProfile::Worker,
                 agent: AgentKind::Claude,
                 model: "fixture".into(),
                 variant: "fixture".into(),
@@ -507,7 +504,6 @@ async fn cli_tool_telemetry_retains_integrity_failure_until_failed_terminal() {
             &tools,
             failed_request,
             crate::storage::ThreadExecution::Cli {
-                tool_profile: crate::storage::ToolProfile::Worker,
                 agent: AgentKind::Claude,
                 model: "fixture".into(),
                 variant: "fixture".into(),

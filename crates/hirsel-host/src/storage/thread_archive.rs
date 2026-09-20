@@ -133,6 +133,16 @@ pub(crate) fn apply(
         ],
     )?;
     let activity = thread_activity::activity(tx, tx.last_insert_rowid() as u64)?;
+    if archived && threads::home_project_id(tx)?.is_some_and(|home| ids.contains(&home)) {
+        let history_id: String =
+            tx.query_row("SELECT value FROM meta WHERE key='history_id'", [], |row| {
+                row.get(0)
+            })?;
+        let (replacement, inserted) = threads::reconcile_home_project(tx, &history_id)?;
+        if inserted {
+            publications.push(replacement);
+        }
+    }
     Ok(ArchiveOutcome {
         threads: publications,
         cancelled_turn_ids,

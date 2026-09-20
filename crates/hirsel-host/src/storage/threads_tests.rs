@@ -47,6 +47,70 @@ async fn home_project_bootstrap_is_atomic_idempotent_and_unprivileged() {
         first.id.to_string()
     );
 }
+
+#[tokio::test]
+async fn archiving_home_atomically_installs_an_active_unprivileged_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let history = storage.history_id().await.unwrap();
+    let (home, _) = storage.ensure_home_project(&history).await.unwrap();
+
+    let outcome = storage
+        .archive_addressed_thread(&history, home.id, true)
+        .await
+        .unwrap();
+    assert!(
+        outcome
+            .threads
+            .iter()
+            .any(|thread| thread.id == home.id && thread.archived_at.is_some())
+    );
+    let (replacement, inserted) = storage.ensure_home_project(&history).await.unwrap();
+    assert!(!inserted);
+    assert_ne!(replacement.id, home.id);
+    assert_eq!(replacement.kind, ThreadKind::Space);
+    assert_eq!(replacement.parent_thread_id, None);
+    assert!(replacement.archived_at.is_none());
+    let conn = storage.conn.lock().await;
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM thread_grants WHERE thread_id=?1",
+            [replacement.id],
+            |row| row.get::<_, u64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn converting_home_keeps_the_task_and_installs_a_project_landing() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let history = storage.history_id().await.unwrap();
+    let (home, _) = storage.ensure_home_project(&history).await.unwrap();
+
+    let converted = storage
+        .set_addressed_thread_kind(&history, home.id, ThreadKind::Task, home.revision)
+        .await
+        .unwrap();
+    assert_eq!(converted.kind, ThreadKind::Task);
+    let (replacement, inserted) = storage.ensure_home_project(&history).await.unwrap();
+    assert!(!inserted);
+    assert_ne!(replacement.id, home.id);
+    assert_eq!(replacement.kind, ThreadKind::Space);
+    assert!(replacement.archived_at.is_none());
+    let conn = storage.conn.lock().await;
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM thread_grants WHERE thread_id=?1",
+            [replacement.id],
+            |row| row.get::<_, u64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}
 #[tokio::test]
 async fn ordinary_work_snapshot_and_lifecycle_are_independent() {
     let dir = tempfile::tempdir().unwrap();

@@ -252,39 +252,9 @@ impl Storage {
         let mut conn = self.conn.lock().await;
         let tx = conn.transaction()?;
         super::thread_scope::validate_history(&tx, expected_history)?;
-        if let Some(id) = tx
-            .query_row(
-                "SELECT value FROM meta WHERE key='project_chat:home_thread_id'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-        {
-            let id = id.parse::<u64>()?;
-            let thread = get(&tx, id)?;
-            anyhow::ensure!(
-                thread.kind == ThreadKind::Space && thread.parent_thread_id.is_none(),
-                "Home project metadata does not name a top-level Space"
-            );
-            tx.commit()?;
-            return Ok((thread, false));
-        }
-        let (thread, _) = create_in_transaction(
-            &tx,
-            &format!("project_chat:home:{expected_history}"),
-            "Home",
-            "",
-            None,
-            ThreadAttention::Quiet,
-            ThreadKind::Space,
-            None,
-        )?;
-        tx.execute(
-            "INSERT INTO meta(key,value) VALUES('project_chat:home_thread_id',?1)",
-            [thread.id.to_string()],
-        )?;
+        let (thread, inserted) = reconcile_home_project(&tx, expected_history)?;
         tx.commit()?;
-        Ok((thread, true))
+        Ok((thread, inserted))
     }
 
     pub(crate) async fn current_thread_publication(
@@ -627,12 +597,38 @@ impl Storage {
             params![id, kind_name(new_kind), Utc::now().to_rfc3339()],
         )?;
         let updated = get(&tx, id)?;
+        if home_project_id(&tx)? == Some(id) {
+            let history_id: String =
+                tx.query_row("SELECT value FROM meta WHERE key='history_id'", [], |row| {
+                    row.get(0)
+                })?;
+            reconcile_home_project(&tx, &history_id)?;
+        }
         tx.commit()?;
         Ok(updated)
     }
     pub async fn archive_thread(&self, id: u64, archived: bool) -> anyhow::Result<Thread> {
-        self.set_thread_field(id, "archived_at", archived.then(|| Utc::now().to_rfc3339()))
-            .await
+        let mut c = self.conn.lock().await;
+        let tx = c.transaction()?;
+        get(&tx, id)?;
+        tx.execute(
+            "UPDATE threads SET archived_at=?2,updated_at=?3,revision=revision+1 WHERE id=?1",
+            params![
+                id,
+                archived.then(|| Utc::now().to_rfc3339()),
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        let updated = get(&tx, id)?;
+        if archived && home_project_id(&tx)? == Some(id) {
+            let history_id: String =
+                tx.query_row("SELECT value FROM meta WHERE key='history_id'", [], |row| {
+                    row.get(0)
+                })?;
+            reconcile_home_project(&tx, &history_id)?;
+        }
+        tx.commit()?;
+        Ok(updated)
     }
     pub async fn snooze_thread(
         &self,
@@ -693,6 +689,57 @@ impl Storage {
         self.set_addressed_thread_field(expected_history, id, "read", Some("1".into()))
             .await
     }
+}
+
+/// Keep the route-free landing pointer on one active top-level Space. Callers
+/// run this in the same transaction that can make the current Home unsuitable.
+pub(super) fn reconcile_home_project(
+    tx: &Transaction<'_>,
+    history_id: &str,
+) -> anyhow::Result<(Thread, bool)> {
+    let current = tx
+        .query_row(
+            "SELECT value FROM meta WHERE key='project_chat:home_thread_id'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|id| get(tx, id).ok())
+        .filter(|thread| {
+            thread.kind == ThreadKind::Space
+                && thread.parent_thread_id.is_none()
+                && thread.archived_at.is_none()
+        });
+    if let Some(thread) = current {
+        return Ok((thread, false));
+    }
+    let (thread, _) = create_in_transaction(
+        tx,
+        &format!("project_chat:home:{history_id}:{}", uuid::Uuid::new_v4()),
+        "Home",
+        "",
+        None,
+        ThreadAttention::Quiet,
+        ThreadKind::Space,
+        None,
+    )?;
+    tx.execute(
+        "INSERT INTO meta(key,value) VALUES('project_chat:home_thread_id',?1)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [thread.id.to_string()],
+    )?;
+    Ok((thread, true))
+}
+
+pub(super) fn home_project_id(c: &rusqlite::Connection) -> anyhow::Result<Option<u64>> {
+    Ok(c.query_row(
+        "SELECT value FROM meta WHERE key='project_chat:home_thread_id'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .and_then(|value| value.parse().ok()))
 }
 
 #[cfg(test)]

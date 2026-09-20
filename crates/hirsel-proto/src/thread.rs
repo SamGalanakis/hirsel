@@ -88,6 +88,41 @@ pub struct ThreadState {
     pub steering_revision: u64,
 }
 
+/// One compact material-state change delivered to a Space chat. The Host may
+/// coalesce several consecutive revisions of one Thread into one row while
+/// retaining the last covered change identity in `change_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadChange {
+    pub change_id: u64,
+    pub thread_id: u64,
+    pub thread_title: String,
+    pub state_revision: u64,
+    pub before_headline: String,
+    pub after_headline: String,
+    pub cause: String,
+    pub source_space_id: u64,
+    pub source_space_title: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A bounded page of outside changes frozen into one accepted turn.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadChangeDigest {
+    pub through_change_id: u64,
+    pub changes: Vec<ThreadChange>,
+    pub has_more: bool,
+}
+
+/// The exact Host context accepted for the latest represented turn. This is
+/// inspection data: it neither grants reach nor asks the client to execute it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadTurnContext {
+    pub turn_id: u64,
+    pub context: serde_json::Value,
+    pub through_change_id: u64,
+    pub consumed_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadActivity {
     pub id: u64,
@@ -252,6 +287,9 @@ pub struct ThreadDetail {
     /// bounded message page. Legacy turns can truthfully have no events.
     pub turn_timelines: Vec<crate::ThreadTurnTimeline>,
     pub activities: Vec<ThreadActivity>,
+    /// Latest persisted admission snapshot for this Thread, when one exists.
+    #[serde(default)]
+    pub accepted_context: Option<ThreadTurnContext>,
     pub has_more: bool,
 }
 

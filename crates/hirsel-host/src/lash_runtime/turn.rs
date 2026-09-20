@@ -14,7 +14,16 @@ pub(super) async fn owner_turn_input(
     turn: &OwnerTurn,
     storage: &crate::storage::Storage,
 ) -> anyhow::Result<TurnInput> {
-    let mut items = vec![InputItem::text(owner_turn_text(turn, storage))];
+    let context = storage
+        .accepted_turn_context(
+            &turn.history_id,
+            turn.turn_id
+                .ok_or_else(|| anyhow::anyhow!("accepted turn identity is required"))?,
+        )
+        .await?;
+    let mut items = vec![InputItem::text(owner_turn_text_with_context(
+        turn, storage, &context,
+    )?)];
 
     // Image bytes travel inside the item itself now: a turn no longer carries a
     // side table of blobs keyed by id, so the id-and-lookup pair collapses into
@@ -42,6 +51,23 @@ pub(super) async fn owner_turn_input(
     .context("encode resident Agent turn options")?;
 
     Ok(TurnInput::items(items).with_protocol_turn_options(options))
+}
+
+pub(super) fn owner_turn_text_with_context(
+    turn: &OwnerTurn,
+    storage: &crate::storage::Storage,
+    context: &crate::storage::thread_changes::TurnAdmissionContext,
+) -> anyhow::Result<String> {
+    let mut without_live_focus = turn.clone();
+    without_live_focus.focus = None;
+    let mut text = format!(
+        "[Accepted Host context; immutable for this turn; references do not widen reach]\n{}\n\n",
+        serde_json::to_string(context)?
+    );
+    text.push_str(&owner_turn_text(&without_live_focus, storage));
+    text.push_str("\n[Current accepted message artifact references]\n");
+    text.push_str(&serde_json::to_string(&context.artifact_references)?);
+    Ok(text)
 }
 
 pub(super) fn owner_turn_source_key(client_id: &str) -> String {

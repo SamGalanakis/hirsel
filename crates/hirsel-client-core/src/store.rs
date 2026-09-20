@@ -142,6 +142,7 @@ pub struct ClientSnapshot {
     pub briefs: Vec<ThreadBrief>,
     pub related_items: Vec<ThreadRelatedItem>,
     pub grants: Vec<hirsel_proto::ThreadGrant>,
+    pub accepted_contexts: Vec<AcceptedThreadContext>,
     pub streams: Vec<ThreadStream>,
     pub opened_threads: Vec<u64>,
     pub created_threads: Vec<CreatedThread>,
@@ -170,6 +171,7 @@ pub(crate) struct LocalStore {
     pub briefs: Vec<ThreadBrief>,
     pub related_items: Vec<ThreadRelatedItem>,
     pub grants: Vec<hirsel_proto::ThreadGrant>,
+    pub accepted_contexts: Vec<AcceptedThreadContext>,
     pub streams: Vec<ThreadStream>,
     pub opened_threads: Vec<u64>,
     pub created_threads: Vec<CreatedThread>,
@@ -199,6 +201,7 @@ impl Default for LocalStore {
             briefs: Vec::new(),
             related_items: Vec::new(),
             grants: Vec::new(),
+            accepted_contexts: Vec::new(),
             streams: Vec::new(),
             opened_threads: Vec::new(),
             created_threads: Vec::new(),
@@ -224,6 +227,7 @@ impl LocalStore {
             briefs: self.briefs.clone(),
             related_items: self.related_items.clone(),
             grants: self.grants.clone(),
+            accepted_contexts: self.accepted_contexts.clone(),
             streams: self.streams.clone(),
             opened_threads: self.opened_threads.clone(),
             created_threads: self.created_threads.clone(),
@@ -399,6 +403,12 @@ impl LocalStore {
             .remove(client_id)
             .unwrap_or(self.effect_generation);
         let thread_id = detail.thread.id;
+        if let Some(context) = detail.accepted_context.clone() {
+            self.accepted_contexts
+                .retain(|accepted| accepted.thread_id != thread_id);
+            self.accepted_contexts
+                .push(AcceptedThreadContext { thread_id, context });
+        }
         let effect_turn_ids = detail
             .turn_timelines
             .iter()
@@ -533,7 +543,11 @@ impl LocalStore {
     }
 
     pub fn upsert_activity(&mut self, activity: ThreadActivity) {
-        if !self.activities.iter().any(|a| a.id == activity.id) {
+        if let Some(existing) = self.activities.iter_mut().find(|row| row.id == activity.id) {
+            if existing.thread_id == activity.thread_id {
+                *existing = activity;
+            }
+        } else {
             self.activities.push(activity);
         }
     }
@@ -672,6 +686,12 @@ impl LocalStore {
             self.processes.push(process);
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedThreadContext {
+    pub thread_id: u64,
+    pub context: hirsel_proto::ThreadTurnContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

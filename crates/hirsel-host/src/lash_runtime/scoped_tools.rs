@@ -285,6 +285,19 @@ impl ScopedThreadTools {
                 })
                 .await
             }
+            "threads_changes" => serde_json::to_value(
+                storage
+                    .thread_changes(
+                        &self.caller,
+                        args.get("after_change_id")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                        args.get("limit").and_then(Value::as_u64).unwrap_or(32) as usize,
+                    )
+                    .await
+                    .map_err(ToolError::from)?,
+            )
+            .map_err(ToolError::from),
             "threads_grant" => {
                 self.thread_mutation(crate::storage::ThreadMutation::Grant {
                     thread: reference(args, "thread")?,
@@ -542,6 +555,15 @@ impl ScopedThreadTools {
             .mutate_scoped_thread(&self.caller, &self.operation_id, &mutation)
             .await
             .map_err(ToolError::from)?;
+        for activity in self
+            .tools
+            .storage()
+            .outside_change_activities(self.caller.turn_id)
+            .await
+            .map_err(ToolError::from)?
+        {
+            self.tools.publish_thread_activity(activity).await;
+        }
         if result.get("grants").is_some() {
             let snapshot = serde_json::from_value::<crate::storage::ThreadGrants>(result.clone())?;
             self.tools.publish_thread_grants(None, snapshot).await?;

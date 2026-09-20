@@ -161,6 +161,7 @@ pub struct ClientSnapshot {
     pub effects: Vec<ThreadEffect>,
     pub briefs: Vec<ThreadBrief>,
     pub related_items: Vec<ThreadRelatedItem>,
+    pub accepted_contexts: Vec<AcceptedThreadContext>,
     pub streams: Vec<ThreadStream>,
     pub opened_threads: Vec<u64>,
     pub history_has_more: Vec<u64>,
@@ -181,6 +182,11 @@ impl From<core::ClientSnapshot> for ClientSnapshot {
             effects: value.effects.into_iter().map(Into::into).collect(),
             briefs: value.briefs.into_iter().map(Into::into).collect(),
             related_items: value.related_items.into_iter().map(Into::into).collect(),
+            accepted_contexts: value
+                .accepted_contexts
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             streams: value.streams.into_iter().map(Into::into).collect(),
             opened_threads: value.opened_threads,
             history_has_more: value.history_has_more,

@@ -392,6 +392,9 @@ pub(super) fn finish_with_failure(
         status.as_str().unwrap_or("terminal"),
         false,
     )?;
+    if state == ThreadTurnState::Completed {
+        super::thread_changes::consume_completed_context(c, id, previous.thread_id)?;
+    }
     let turn = get(c, id)?;
     if turn.requester_thread_id.is_some() {
         let message = turn

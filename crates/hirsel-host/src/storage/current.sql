@@ -62,6 +62,22 @@ CREATE TABLE thread_state_changes (
     CHECK(COALESCE(actor_turn_id IS NULL OR actor_kind='thread',0)),
     UNIQUE(thread_id,state_revision)
 );
+CREATE TABLE thread_change_deliveries (
+    chat_thread_id INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    change_id INTEGER NOT NULL REFERENCES thread_state_changes(id) ON DELETE CASCADE,
+    PRIMARY KEY(chat_thread_id,change_id)
+);
+CREATE INDEX thread_change_deliveries_by_change ON thread_change_deliveries(change_id,chat_thread_id);
+CREATE TABLE thread_change_cursors (
+    chat_thread_id INTEGER PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+    consumed_change_id INTEGER NOT NULL CHECK(COALESCE(consumed_change_id>=0,0))
+);
+CREATE TABLE thread_turn_contexts (
+    turn_id INTEGER PRIMARY KEY REFERENCES thread_turns(id) ON DELETE CASCADE,
+    context_json TEXT NOT NULL CHECK(COALESCE(json_valid(context_json) AND json_type(context_json)='object',0)),
+    through_change_id INTEGER NOT NULL CHECK(COALESCE(through_change_id>=0,0)),
+    consumed_at TEXT
+);
 CREATE TRIGGER threads_create_material_state
 AFTER INSERT ON threads
 BEGIN

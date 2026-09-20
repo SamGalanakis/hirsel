@@ -194,6 +194,15 @@ pub(super) fn hirsel_tool_definitions(
             "state",
         ),
         tool_definition(
+            "hirsel.threads_changes",
+            "threads_changes",
+            "Page the outside material changes delivered to this Space chat. Delivery supplies bounded context only; it grants no Thread or artifact reach.",
+            thread_changes_schema(),
+            json!({"type":"object"}),
+            ["threads"],
+            "changes",
+        ),
+        tool_definition(
             "hirsel.threads_list",
             "threads_list",
             "List authorized descendants, direct children by default. `under: 0` stands at the top of the tree and lists every root-level Thread — that takes root reach. Lifecycle is independent of hierarchy.",

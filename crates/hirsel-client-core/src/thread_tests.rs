@@ -1,9 +1,9 @@
 use crate::store::{LocalStore, PendingOp, PendingSend};
 use chrono::Utc;
 use hirsel_proto::{
-    ChatAuthor, ChatMessage, ClientToHost, EffectAction, Thread, ThreadAttention, ThreadDetail,
-    ThreadEffect, ThreadEffectKind, ThreadEffectReceipt, ThreadEffectTarget, ThreadKind,
-    ThreadTurn, ThreadTurnState, TurnEventKind,
+    ChatAuthor, ChatMessage, ClientToHost, EffectAction, Thread, ThreadActivity, ThreadAttention,
+    ThreadDetail, ThreadEffect, ThreadEffectKind, ThreadEffectReceipt, ThreadEffectTarget,
+    ThreadKind, ThreadTurn, ThreadTurnContext, ThreadTurnState, TurnEventKind,
 };
 
 fn thread(revision: u64) -> Thread {
@@ -135,6 +135,7 @@ fn effect_live_snapshot_pagination_and_history_reset_keep_exact_ownership() {
             events: vec![],
         }],
         activities: vec![],
+        accepted_context: None,
         has_more: true,
     };
     assert!(store.apply_detail("page", detail.clone()));
@@ -183,6 +184,7 @@ fn effect_snapshot_requested_before_live_projection_cannot_restore_stale_actions
             events: vec![],
         }],
         activities: vec![],
+        accepted_context: None,
         has_more: false,
     };
     assert!(store.apply_detail("stale-page", detail));
@@ -241,6 +243,7 @@ fn reconnect_refreshes_a_pending_open_before_its_authoritative_effect_snapshot()
                 events: vec![],
             }],
             activities: vec![],
+            accepted_context: None,
             has_more: false,
         }
     ));
@@ -263,12 +266,77 @@ fn older_thread_detail_without_effects_defaults_to_empty() {
         next_effects_before: None,
         turn_timelines: vec![],
         activities: vec![],
+        accepted_context: None,
         has_more: false,
     };
     let mut wire = serde_json::to_value(detail).unwrap();
     wire.as_object_mut().unwrap().remove("effects");
     let decoded: ThreadDetail = serde_json::from_value(wire).unwrap();
     assert!(decoded.effects.is_empty());
+}
+
+#[test]
+fn accepted_context_and_coalesced_activity_survive_snapshot_reduction() {
+    let mut store = LocalStore::default();
+    store.apply_hello_ok("history-a".into(), vec![thread(1)], vec![], "test".into());
+    let context = ThreadTurnContext {
+        turn_id: 8,
+        context: serde_json::json!({"changes":{"through_change_id":11,"changes":[],"has_more":false}}),
+        through_change_id: 11,
+        consumed_at: Some(Utc::now()),
+    };
+    let detail = ThreadDetail {
+        related_items: vec![],
+        grants: vec![],
+        brief: hirsel_proto::ThreadBrief {
+            text: String::new(),
+            artifact_ids: vec![],
+        },
+        thread: thread(1),
+        messages: vec![],
+        turns: vec![],
+        effects: vec![],
+        next_effects_before: None,
+        turn_timelines: vec![],
+        activities: vec![],
+        accepted_context: Some(context.clone()),
+        has_more: false,
+    };
+    store.track_pending(
+        "open-context".into(),
+        PendingOp::OpenThread { thread_id: 5 },
+    );
+    assert!(store.apply_detail("open-context", detail.clone()));
+    assert_eq!(store.snapshot().accepted_contexts[0].context, context);
+
+    store.track_pending("older-page".into(), PendingOp::OpenThread { thread_id: 5 });
+    assert!(store.apply_detail(
+        "older-page",
+        ThreadDetail {
+            accepted_context: None,
+            ..detail
+        }
+    ));
+    assert_eq!(store.accepted_contexts.len(), 1);
+
+    let activity = |text: &str| ThreadActivity {
+        id: 21,
+        thread_id: 5,
+        turn_id: None,
+        kind: "outside_change".into(),
+        data: serde_json::json!({"text":text}),
+        artifact_ids: vec![],
+        ts: Utc::now(),
+    };
+    store.upsert_activity(activity("Changed by Finance · 1 update"));
+    store.upsert_activity(activity("Changed by Finance · 2 updates"));
+    assert_eq!(store.activities.len(), 1);
+    assert_eq!(
+        store.activities[0].data["text"],
+        "Changed by Finance · 2 updates"
+    );
+    assert!(store.apply_hello_ok("history-b".into(), vec![thread(1)], vec![], "test".into()));
+    assert!(store.accepted_contexts.is_empty());
 }
 #[test]
 fn ordinary_thread_survives_snapshot_read_and_stale_upsert() {
@@ -396,6 +464,7 @@ fn open_requires_matching_request_and_message_ownership() {
         next_effects_before: None,
         turn_timelines: vec![],
         activities: vec![],
+        accepted_context: None,
         has_more: false,
     };
     store.apply_detail("wrong", detail.clone());
@@ -469,6 +538,7 @@ fn removed_message_stays_removed_across_late_echo_snapshot_and_open_history() {
             next_effects_before: None,
             turn_timelines: vec![],
             activities: vec![],
+            accepted_context: None,
             has_more: false,
         },
     );
@@ -624,6 +694,7 @@ fn current_brief_is_per_thread_and_survives_paginated_history() {
                 next_effects_before: None,
                 turn_timelines: vec![],
                 activities: vec![],
+                accepted_context: None,
                 has_more: true,
             },
         );
@@ -693,6 +764,7 @@ fn link_detail(revision: u64, links: Vec<hirsel_proto::ThreadRelatedItem>) -> Th
         next_effects_before: None,
         turn_timelines: vec![],
         activities: vec![],
+        accepted_context: None,
         has_more: true,
     }
 }

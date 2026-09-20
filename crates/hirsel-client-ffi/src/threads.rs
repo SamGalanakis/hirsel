@@ -1,5 +1,26 @@
 use hirsel_client_core as core;
 
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AcceptedThreadContext {
+    pub thread_id: u64,
+    pub turn_id: u64,
+    pub context_json: String,
+    pub through_change_id: u64,
+    pub consumed_at: Option<String>,
+}
+
+impl From<core::AcceptedThreadContext> for AcceptedThreadContext {
+    fn from(value: core::AcceptedThreadContext) -> Self {
+        Self {
+            thread_id: value.thread_id,
+            turn_id: value.context.turn_id,
+            context_json: value.context.context.to_string(),
+            through_change_id: value.context.through_change_id,
+            consumed_at: value.context.consumed_at.map(|time| time.to_rfc3339()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum ThreadKind {
     Space,

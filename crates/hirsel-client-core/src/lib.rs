@@ -14,8 +14,8 @@ pub use identity::generate_iroh_identity;
 pub use observer::{ClientObserver, LifecycleEvent};
 pub(crate) use store::ConnectionState;
 pub use store::{
-    AgentActivity, ChatEntry, ClientSnapshot, ConfirmedMessage, CreatedThread, PendingSend,
-    ThreadBrief, ThreadStream,
+    AcceptedThreadContext, AgentActivity, ChatEntry, ClientSnapshot, ConfirmedMessage,
+    CreatedThread, PendingSend, ThreadBrief, ThreadStream,
 };
 pub use timeline::{TimelineTextKind, timeline_text};
 

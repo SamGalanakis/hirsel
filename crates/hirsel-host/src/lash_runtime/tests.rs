@@ -426,21 +426,33 @@ async fn owner_turn_input_notes_all_attachments_and_references_images() {
         )
         .await
         .unwrap();
-    let turn = OwnerTurn {
-        history_id: "fixture-history".into(),
-        turn_id: None,
-        thread_id: 0,
-        thread_action: None,
-        message_id: Some(1),
-        report_triggered: false,
-        client_id: "client-1".to_string(),
-        body: "see attached".to_string(),
-        focus: None,
-        anchor: None,
-        attachments: vec![text.blob.clone(), image.blob.clone()],
-
-        mode: SendMode::Send,
-    };
+    let (thread, _) = storage
+        .create_thread(
+            "attachment-input-thread",
+            "Attachment input",
+            "",
+            None,
+            hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
+            None,
+        )
+        .await
+        .unwrap();
+    storage
+        .append_thread_owner_request(
+            &storage.history_id().await.unwrap(),
+            thread.id,
+            "client-1",
+            "see attached".into(),
+            &[text.blob.id.clone(), image.blob.id.clone()],
+            &[],
+            &[],
+            &json!({"mode":"send","thread_action":null}),
+        )
+        .await
+        .unwrap();
+    let turn: OwnerTurn =
+        serde_json::from_value(storage.thread_request("client-1").await.unwrap().unwrap()).unwrap();
 
     let rendered = owner_turn_text(&turn, &storage);
     assert!(rendered.contains(&format!(
@@ -550,20 +562,39 @@ async fn resident_agent_retries_bare_prose_and_projects_finished_chat_text() {
         .unwrap();
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::open(dir.path()).await.unwrap();
-    let turn = OwnerTurn {
-        history_id: "fixture-history".into(),
-        turn_id: None,
-        thread_id: 0,
-        thread_action: None,
-        message_id: Some(1),
-        report_triggered: false,
-        client_id: "resident-finish".into(),
-        body: "Say hello".into(),
-        focus: None,
-        anchor: None,
-        attachments: Vec::new(),
-        mode: SendMode::Send,
-    };
+    let (thread, _) = storage
+        .create_thread(
+            "resident-finish-thread",
+            "Resident finish",
+            "",
+            None,
+            hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
+            None,
+        )
+        .await
+        .unwrap();
+    storage
+        .append_thread_owner_request(
+            &storage.history_id().await.unwrap(),
+            thread.id,
+            "resident-finish",
+            "Say hello".into(),
+            &[],
+            &[],
+            &[],
+            &json!({"mode":"send","thread_action":null}),
+        )
+        .await
+        .unwrap();
+    let turn: OwnerTurn = serde_json::from_value(
+        storage
+            .thread_request("resident-finish")
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
 
     session
         .enqueue(owner_turn_input(&turn, &storage).await.unwrap())
@@ -933,6 +964,10 @@ async fn every_executor_result_matches_its_declared_output_schema() {
     results.insert(
         "threads_context",
         vec![json!({"thread":thread,"ancestors":[],"brief":{"text":"","artifact_ids":[]},"grants":[],"reach":"self + subtree"})],
+    );
+    results.insert(
+        "threads_changes",
+        vec![json!({"through_change_id":0,"changes":[],"has_more":false})],
     );
     let grants = json!([{"thread_id":2,"target":{"kind":"thread","thread_id":7,"title":"Billing"},"granted_by":{"kind":"owner"},"granted_at":now,"note":null}]);
     results.insert(

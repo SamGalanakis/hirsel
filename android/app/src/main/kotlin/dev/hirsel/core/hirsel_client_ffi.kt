@@ -1880,6 +1880,59 @@ public object FfiConverterTypeClient: FfiConverter<Client, Long> {
 
 
 
+data class AcceptedThreadContext (
+    var `threadId`: kotlin.ULong
+    ,
+    var `turnId`: kotlin.ULong
+    ,
+    var `contextJson`: kotlin.String
+    ,
+    var `throughChangeId`: kotlin.ULong
+    ,
+    var `consumedAt`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeAcceptedThreadContext: FfiConverterRustBuffer<AcceptedThreadContext> {
+    override fun read(buf: ByteBuffer): AcceptedThreadContext {
+        return AcceptedThreadContext(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: AcceptedThreadContext) = (
+            FfiConverterULong.allocationSize(value.`threadId`) +
+            FfiConverterULong.allocationSize(value.`turnId`) +
+            FfiConverterString.allocationSize(value.`contextJson`) +
+            FfiConverterULong.allocationSize(value.`throughChangeId`) +
+            FfiConverterOptionalString.allocationSize(value.`consumedAt`)
+    )
+
+    override fun write(value: AcceptedThreadContext, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`threadId`, buf)
+            FfiConverterULong.write(value.`turnId`, buf)
+            FfiConverterString.write(value.`contextJson`, buf)
+            FfiConverterULong.write(value.`throughChangeId`, buf)
+            FfiConverterOptionalString.write(value.`consumedAt`, buf)
+    }
+}
+
+
+
 data class AgentActivity (
     var `state`: AgentActivityState
     ,
@@ -1981,6 +2034,8 @@ data class ClientSnapshot (
     ,
     var `relatedItems`: List<ThreadRelatedItem>
     ,
+    var `acceptedContexts`: List<AcceptedThreadContext>
+    ,
     var `streams`: List<ThreadStream>
     ,
     var `openedThreads`: List<kotlin.ULong>
@@ -2020,6 +2075,7 @@ public object FfiConverterTypeClientSnapshot: FfiConverterRustBuffer<ClientSnaps
             FfiConverterSequenceTypeThreadEffect.read(buf),
             FfiConverterSequenceTypeThreadBrief.read(buf),
             FfiConverterSequenceTypeThreadRelatedItem.read(buf),
+            FfiConverterSequenceTypeAcceptedThreadContext.read(buf),
             FfiConverterSequenceTypeThreadStream.read(buf),
             FfiConverterSequenceULong.read(buf),
             FfiConverterSequenceULong.read(buf),
@@ -2038,6 +2094,7 @@ public object FfiConverterTypeClientSnapshot: FfiConverterRustBuffer<ClientSnaps
             FfiConverterSequenceTypeThreadEffect.allocationSize(value.`effects`) +
             FfiConverterSequenceTypeThreadBrief.allocationSize(value.`briefs`) +
             FfiConverterSequenceTypeThreadRelatedItem.allocationSize(value.`relatedItems`) +
+            FfiConverterSequenceTypeAcceptedThreadContext.allocationSize(value.`acceptedContexts`) +
             FfiConverterSequenceTypeThreadStream.allocationSize(value.`streams`) +
             FfiConverterSequenceULong.allocationSize(value.`openedThreads`) +
             FfiConverterSequenceULong.allocationSize(value.`historyHasMore`) +
@@ -2055,6 +2112,7 @@ public object FfiConverterTypeClientSnapshot: FfiConverterRustBuffer<ClientSnaps
             FfiConverterSequenceTypeThreadEffect.write(value.`effects`, buf)
             FfiConverterSequenceTypeThreadBrief.write(value.`briefs`, buf)
             FfiConverterSequenceTypeThreadRelatedItem.write(value.`relatedItems`, buf)
+            FfiConverterSequenceTypeAcceptedThreadContext.write(value.`acceptedContexts`, buf)
             FfiConverterSequenceTypeThreadStream.write(value.`streams`, buf)
             FfiConverterSequenceULong.write(value.`openedThreads`, buf)
             FfiConverterSequenceULong.write(value.`historyHasMore`, buf)
@@ -4290,6 +4348,34 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterString.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeAcceptedThreadContext: FfiConverterRustBuffer<List<AcceptedThreadContext>> {
+    override fun read(buf: ByteBuffer): List<AcceptedThreadContext> {
+        val len = buf.getInt()
+        return List<AcceptedThreadContext>(len) {
+            FfiConverterTypeAcceptedThreadContext.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<AcceptedThreadContext>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeAcceptedThreadContext.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<AcceptedThreadContext>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeAcceptedThreadContext.write(it, buf)
         }
     }
 }

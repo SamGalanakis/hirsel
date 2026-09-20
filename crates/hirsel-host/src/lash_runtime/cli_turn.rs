@@ -186,6 +186,10 @@ impl CliTurn {
             accepted.state == ThreadTurnState::Queued,
             "CLI input is no longer queued"
         );
+        let accepted_context = tools
+            .storage()
+            .accepted_turn_context(&request.history_id, self.turn_id)
+            .await?;
         let turn = tools.storage().run_thread_turn(self.turn_id).await?;
         tools.publish_thread_turn(turn).await;
         let mut bridge = crate::thread_tool_bridge::ThreadToolBridge::start(
@@ -194,26 +198,6 @@ impl CliTurn {
             self.turn_id,
         )
         .await?;
-        let context = tools.storage().thread_context(&bridge.caller).await?;
-        let detail = tools
-            .storage()
-            .scoped_thread_read(
-                &bridge.caller,
-                None,
-                &crate::storage::ThreadRef::default(),
-                None,
-                60,
-            )
-            .await?;
-        let history = detail
-            .messages
-            .into_iter()
-            .filter(|m| request.message_id.is_none_or(|id| m.id < id))
-            .collect::<Vec<_>>();
-        let current_artifacts = tools
-            .storage()
-            .accepted_message_references(&request.history_id, self.turn_id)
-            .await?;
         // The same block the Native system prompt opens with, ahead of the
         // machine-readable context: a CLI executor is told where it is in the
         // Owner's vocabulary before it is handed any JSON.
@@ -222,16 +206,10 @@ impl CliTurn {
             .thread_identity(request.thread_id)
             .await?
             .block();
-        let mut prompt = format!(
-            "You execute one accepted Hirsel Thread turn. Use the supplied scoped Thread tools for coordination. Only this Thread and its descendants are visible; create/delegate focused children and report upward. Parent/peer transcripts are not available. Artifacts require explicit creation and references.\n\n{identity}\nIdentity and accepted brief:\n{}\n\nThis Thread's recent conversation:\n{}\n\nAccepted input:\n{}",
-            serde_json::to_string(&context)?,
-            serde_json::to_string(&history)?,
-            request.body
+        let prompt = format!(
+            "You execute one accepted Hirsel Thread turn. Use the supplied scoped Thread tools for coordination. Only this Thread and its descendants are visible; create/delegate focused children and report upward. Parent/peer transcripts are not available. Artifacts require explicit creation and references.\n\n{identity}\n{}",
+            owner_turn_text_with_context(request, &tools.storage(), &accepted_context)?
         );
-        prompt.push_str(&format!(
-            "\n[Current accepted message artifact references]\n{}",
-            serde_json::to_string(&current_artifacts)?
-        ));
         let crate::storage::ThreadExecution::Cli {
             agent,
             model,

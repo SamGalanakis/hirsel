@@ -10,7 +10,7 @@ pub struct AgentRuntime {
     pub(super) model_selection: Option<ModelSelectionState>,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OwnerTurn {
     pub history_id: String,

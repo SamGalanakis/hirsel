@@ -250,6 +250,18 @@ pub(super) fn page_for_thread(
 }
 
 impl super::Storage {
+    pub(crate) async fn thread_turn_cancellation_requested(
+        &self,
+        turn_id: u64,
+    ) -> anyhow::Result<bool> {
+        let c = self.conn.lock().await;
+        Ok(c.query_row(
+            "SELECT cancel_requested_at IS NOT NULL FROM thread_turns WHERE id=?1",
+            [turn_id],
+            |row| row.get(0),
+        )?)
+    }
+
     #[cfg(test)]
     pub(crate) async fn thread_effects(&self, turn_id: u64) -> anyhow::Result<Vec<ThreadEffect>> {
         let c = self.conn.lock().await;

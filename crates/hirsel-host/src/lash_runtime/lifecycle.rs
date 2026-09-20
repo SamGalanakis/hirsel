@@ -233,6 +233,8 @@ impl LashAgentRuntime {
             process_notify,
             pump_lock: Mutex::new(()),
             request_lock: Mutex::new(()),
+            #[cfg(test)]
+            admission_binding_gate: AdmissionBindingGate::default(),
             anchors,
             timeline_commits: TimelineCommitBarrier::default(),
             drain_seq: AtomicU64::new(0),

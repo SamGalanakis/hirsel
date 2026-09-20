@@ -168,11 +168,48 @@ impl LashAgentRuntime {
         }
         let stored = self.tools.storage().run_thread_turn(queued.id).await?;
         self.tools.publish_thread_turn(stored).await;
+        #[cfg(test)]
+        self.admission_binding_gate.pause_before_binding().await;
         let drain_id = self.next_drain_id(&anchors);
-        self.tools
+        if let Err(error) = self
+            .tools
             .storage()
             .bind_thread_execution(&self.history_id, &self.session_id, &drain_id, queued.id)
-            .await?;
+            .await
+        {
+            let cancelled = self
+                .tools
+                .storage()
+                .thread_turn_cancellation_requested(queued.id)
+                .await?;
+            anyhow::ensure!(
+                self.cancel_lash_request(&client_id).await?,
+                "failed admission still holds a live Lash claim"
+            );
+            let failure = (!cancelled).then(|| error.to_string());
+            let completion = self
+                .tools
+                .storage()
+                .complete_thread_turn_with_failure(
+                    &self.history_id,
+                    queued.id,
+                    if cancelled {
+                        ThreadTurnState::Cancelled
+                    } else {
+                        ThreadTurnState::Failed
+                    },
+                    None,
+                    failure.as_deref(),
+                )
+                .await?;
+            if let Some(activity) = completion.failure_activity {
+                self.tools.publish_thread_activity(activity).await;
+            }
+            self.tools.publish_thread_turn(completion.turn).await;
+            *self.anchors.lock().await = TurnAnchorState::default();
+            drop(_request_guard);
+            return Box::pin(self.admit_next_thread_request()).await;
+        }
         *self.anchors.lock().await = TurnAnchorState {
             active: Some(anchors),
             drain_id: Some(drain_id),
@@ -306,6 +343,14 @@ impl LashAgentRuntime {
         // Admission and Stop share this gate so the ownership check and exact
         // cancellation cannot straddle a switch to a different Thread.
         let _request_guard = self.request_lock.lock().await;
+        self.cancel_owned_turn_locked(thread_id, turn_id).await
+    }
+
+    async fn cancel_owned_turn_locked(
+        &self,
+        thread_id: Option<u64>,
+        turn_id: Option<u64>,
+    ) -> anyhow::Result<()> {
         let mut ownership = self.anchors.lock().await;
         let route = ownership.active.as_ref();
         if let Some(thread_id) = thread_id {
@@ -360,6 +405,39 @@ impl LashAgentRuntime {
             *ownership = TurnAnchorState::default();
         }
         Ok(())
+    }
+
+    pub(super) async fn request_owned_turn_cancellation(
+        &self,
+        expected_history: &str,
+        thread_id: u64,
+    ) -> anyhow::Result<()> {
+        let _request_guard = self.request_lock.lock().await;
+        self.tools
+            .storage()
+            .request_thread_cancellation(expected_history, thread_id)
+            .await?;
+        self.cancel_owned_turn_locked(Some(thread_id), None).await
+    }
+
+    pub(super) async fn cancel_exact_owned_turn(
+        &self,
+        expected_history: &str,
+        thread_id: u64,
+        turn_id: u64,
+        expected_state: ThreadTurnState,
+    ) -> anyhow::Result<hirsel_proto::ThreadTurn> {
+        let _request_guard = self.request_lock.lock().await;
+        let turn = self
+            .tools
+            .storage()
+            .cancel_exact_thread_turn(expected_history, thread_id, turn_id, expected_state)
+            .await?;
+        if turn.state == ThreadTurnState::Running {
+            self.cancel_owned_turn_locked(Some(thread_id), Some(turn_id))
+                .await?;
+        }
+        Ok(turn)
     }
 
     pub(super) async fn cancel_thread_request(

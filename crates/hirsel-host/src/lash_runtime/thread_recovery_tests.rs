@@ -1314,6 +1314,88 @@ async fn exact_stop_rejects_a_lane_handoff_without_reaching_the_new_turn() {
     );
 }
 
+#[tokio::test]
+async fn cancellation_during_native_binding_terminalizes_the_turn_and_admits_the_next() {
+    let (state, _dir) = runtime_fixture().await;
+    let root = runtime_lane(&state, None).await;
+    let _root_pump = root.pump_lock.lock().await;
+    let first = request(&state, "binding-cancel-first").await;
+    let runtime = runtime_lane(&state, Some(first.thread_id)).await;
+    let _pump = runtime.pump_lock.lock().await;
+    let history = state.storage.history_id().await.unwrap();
+    let (_message, _) = state
+        .storage
+        .append_thread_owner_request(
+            &history,
+            first.thread_id,
+            "binding-cancel-second",
+            "message binding-cancel-second".into(),
+            &[],
+            &[],
+            &[],
+            &json!({"mode":"next_turn","thread_action":null}),
+        )
+        .await
+        .unwrap();
+    let second: OwnerTurn = serde_json::from_value(
+        state
+            .storage
+            .thread_request("binding-cancel-second")
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+
+    runtime.admission_binding_gate.arm();
+    let admitting = {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move { runtime.admit_next_thread_request().await })
+    };
+    runtime.admission_binding_gate.wait_until_running().await;
+    state
+        .storage
+        .cancel_exact_thread_turn(
+            &history,
+            first.thread_id,
+            first.turn_id.unwrap(),
+            ThreadTurnState::Running,
+        )
+        .await
+        .unwrap();
+    runtime.admission_binding_gate.resume();
+
+    assert_eq!(
+        admitting.await.unwrap().unwrap().as_deref(),
+        Some(second.client_id.as_str())
+    );
+    let detail = state
+        .storage
+        .thread_detail(first.thread_id, None, 30)
+        .await
+        .unwrap();
+    assert_eq!(
+        detail
+            .turns
+            .iter()
+            .find(|turn| turn.id == first.turn_id.unwrap())
+            .unwrap()
+            .state,
+        ThreadTurnState::Cancelled
+    );
+    assert_eq!(
+        runtime
+            .anchors
+            .lock()
+            .await
+            .active
+            .as_ref()
+            .unwrap()
+            .thread_turn_id,
+        second.turn_id.unwrap()
+    );
+}
+
 /// A Thread may name its own Native provider. The session opens on the booted
 /// one and is rebound when a turn accepted for another provider is admitted —
 /// before the input is enqueued, so the turn runs on what the Owner chose and a

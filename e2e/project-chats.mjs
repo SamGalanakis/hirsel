@@ -112,10 +112,17 @@ try {
   const focusedTurn = await poll("focused project turn", () => received(frames.slice(focusOffset), frame =>
     frame.type === "thread_turn" && frame.turn.thread_id === home.id && frame.turn.owner_message_id === focusedEcho.id
   )?.turn, 10_000);
-  await poll("focused project reply", () => received(frames.slice(focusOffset), frame =>
+  const focusedCompleted = await poll("focused project completion", () => received(frames.slice(focusOffset), frame =>
     frame.type === "thread_turn" && frame.turn.id === focusedTurn.id
-      && ["completed", "failed", "cancelled", "interrupted"].includes(frame.turn.state)
-  ), 15_000);
+      && frame.turn.state === "completed"
+  )?.turn, 15_000);
+  assert.ok(focusedCompleted.agent_message_id, "focused project turn completed without an Agent reply");
+  await poll("addressed project Agent reply", () => received(frames.slice(focusOffset), frame =>
+    frame.type === "msg"
+      && frame.message.id === focusedCompleted.agent_message_id
+      && frame.message.thread_id === home.id
+      && frame.message.author === "agent"
+  )?.message, 10_000);
 
   const drawerTrigger = page.getByRole("button", { name: "Spaces and Tasks", exact: true });
   if (await drawerTrigger.getAttribute("aria-expanded") === "false") await drawerTrigger.click();
@@ -130,11 +137,35 @@ try {
   )?.turn, 10_000);
   await page.getByRole("button", { name: "Stop the agent", exact: true }).waitFor({ state: "visible" });
   await page.getByRole("button", { name: "Send after current turn", exact: true }).waitFor({ state: "visible" });
-  await page.getByRole("button", { name: "Stop the agent", exact: true }).click();
-  await poll("stopped worker turn", () => received(frames.slice(workerOffset), frame =>
-    frame.type === "thread_turn" && frame.turn.id === workerTurn.id
-      && ["cancelled", "interrupted", "completed"].includes(frame.turn.state)
+  const queuedBody = `Queued worker follow-up ${crypto.randomUUID()}`;
+  await workerComposer.fill(queuedBody);
+  const queuedOffset = frames.length;
+  await page.getByRole("button", { name: "Send after current turn", exact: true }).click();
+  const queuedSend = await poll("queued worker send", () => sent(frames.slice(queuedOffset), frame =>
+    frame.type === "send_thread_message"
+      && frame.thread_id === task.id
+      && frame.body === queuedBody
+      && frame.mode === "next_turn"
   ), 10_000);
+  const queuedEcho = await poll("queued worker identity", () => received(frames.slice(queuedOffset), frame =>
+    frame.type === "msg"
+      && frame.message.client_id === queuedSend.client_id
+      && frame.message.thread_id === task.id
+      && frame.message.author === "owner"
+  )?.message, 10_000);
+  const queuedTurn = await poll("queued worker turn", () => received(frames.slice(queuedOffset), frame =>
+    frame.type === "thread_turn"
+      && frame.turn.thread_id === task.id
+      && frame.turn.owner_message_id === queuedEcho.id
+      && frame.turn.state === "queued"
+  )?.turn, 10_000);
+  await poll("first worker completion", () => received(frames.slice(workerOffset), frame =>
+    frame.type === "thread_turn" && frame.turn.id === workerTurn.id && frame.turn.state === "completed"
+  ), 10_000);
+  const queuedCompleted = await poll("queued worker completion", () => received(frames.slice(queuedOffset), frame =>
+    frame.type === "thread_turn" && frame.turn.id === queuedTurn.id && frame.turn.state === "completed"
+  )?.turn, 10_000);
+  assert.ok(queuedCompleted.agent_message_id, "queued worker turn completed without an Agent reply");
 
   await page.getByRole("button", { name: "Project chat", exact: true }).click();
   await page.locator(`main[data-thread-id="${home.id}"]`).waitFor({ state: "visible" });
@@ -148,6 +179,18 @@ try {
       && frame.thread.kind === "task"
       && frame.thread.parent_thread_id === home.id
   )?.thread, 15_000);
+  const delegatedTurn = await poll("delegated child ran", () => received(frames.slice(delegationOffset), frame =>
+    frame.type === "thread_turn"
+      && frame.turn.thread_id === delegated.id
+      && frame.turn.state === "completed"
+  )?.turn, 15_000);
+  assert.ok(delegatedTurn.agent_message_id, "delegated child completed without an Agent reply");
+  await poll("delegated child Agent reply", () => received(frames.slice(delegationOffset), frame =>
+    frame.type === "msg"
+      && frame.message.id === delegatedTurn.agent_message_id
+      && frame.message.thread_id === delegated.id
+      && frame.message.author === "agent"
+  )?.message, 10_000);
 
   const reloadOffset = frames.length;
   await page.goto(url, { waitUntil: "domcontentloaded" });
@@ -172,6 +215,8 @@ try {
     homeId: home.id,
     taskId: task.id,
     delegatedTaskId: delegated.id,
+    queuedTurnId: queuedTurn.id,
+    delegatedTurnId: delegatedTurn.id,
     focusedSend,
     browserErrors: errors,
   });

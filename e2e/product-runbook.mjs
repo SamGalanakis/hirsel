@@ -263,9 +263,21 @@ async function createThread(page, nonce) {
   await page.getByRole("button", { name: "New Space or Task", exact: true }).first().click();
   const creationSurface = page.getByRole("dialog", { name: "New Space or Task", exact: true });
   await creationSurface.waitFor({ state: "visible" });
+  // The dialog moves focus into its first-message box on the frame after it
+  // opens. Wait for that to land before typing the name: text typed into the
+  // box that is about to take focus ends up as a first message, and the Thread
+  // then opens with a turn nobody asked for.
+  const firstMessage = creationSurface.getByLabel("First message", { exact: true });
+  await poll(
+    "creation dialog focus",
+    () => firstMessage.evaluate(node => node === document.activeElement),
+    10_000,
+  );
   const titleInput = creationSurface.getByLabel("New space or task title", { exact: true });
   const title = `Runbook ${nonce}`;
   await titleInput.fill(title);
+  assert.equal(await titleInput.inputValue(), title, "the Thread name did not land in the name field");
+  assert.equal(await firstMessage.inputValue(), "", "the Thread name landed in the first-message field");
   await creationSurface.getByRole("button", { name: "Create Space", exact: true }).click();
   await page.locator('[data-slot="thread-context"] h1').filter({ hasText: title }).waitFor();
   // Every Space is a Space chat: the composer says so before a single turn.
@@ -480,8 +492,10 @@ async function requireInlineTool(page, callId, expectedText) {
   const hiddenByTurn = await row.evaluate(element => Boolean(element.closest("details")));
   assert.equal(hiddenByTurn, false, `tool ${callId} is hidden inside a whole-turn disclosure`);
   await openInlineTool(page, callId);
+  // The readable payload and the bounded Raw result both carry the text; the
+  // first is the one the Owner reads without opening anything further.
   const panel = page.locator(`[data-slot="timeline-detail"] [data-slot="tool-result"][data-tool-call-id="${callId}"]`).first();
-  await panel.getByText(expectedText, { exact: false }).waitFor({ timeout: 10_000 });
+  await panel.getByText(expectedText, { exact: false }).first().waitFor({ timeout: 10_000 });
 }
 
 function payloadText(event, field) {
@@ -555,12 +569,17 @@ async function runChat(context) {
   assert(secondWorkIndex >= 0, "second running turn has no stable DOM identity");
   assert(firstReplyIndex < secondWorkIndex, "newer working row renders above the older reply");
   const secondWork = handoff.dom.entries[secondWorkIndex];
+  // A turn that has just started may have streamed nothing yet; what must hold
+  // is that whatever it has streamed is inline, with no disclosure over it.
   assert.equal(secondWork.traceGated, false, "running work is collapsed behind a whole-turn disclosure");
-  assert(secondWork.timeline.some(row => row.visible), "running work shows no inline trace row");
+  assert.equal(secondWork.timeline.filter(row => !row.visible).length, 0, "running work has hidden trace rows");
 
   const secondTerminal = await waitForTurn(frames, secondTurn.id, turn => terminal(turn.state), "second turn terminal");
   assert.equal(secondTerminal.state, "completed");
   await page.getByText(secondMarker, { exact: false }).last().waitFor();
+  // A finished run rests as a closed card, so its trace has to be reopened
+  // before the collapsed tool rows inside it can be read at all.
+  await expandRunCards(page);
   await waitForStableDom(page);
   const settled = await capture("30-settled", context);
   assert.equal(settled.detail.messages.filter(message => message.author === "owner").length, 2);
@@ -747,6 +766,16 @@ async function runArtifact(context) {
   assertTimelineRendered(reloaded.dom, completed, durableTimeline(reloaded.detail, turn.turnId));
   assertToolPayload(reloaded.dom, completed, tool.started.event);
   assertToolPayload(reloaded.dom, completed, tool.done.event);
+
+  // Opening an artifact stages it as composer context. The named regression is
+  // the ordinary request ALONE, so clear that context with its own visible
+  // control before sending; an attached example would soften the very failure
+  // this phase exists to catch.
+  const stagedContext = page.locator(`main[data-thread-id="${threadId}"] [data-slot="composer-artifact-context"]`);
+  for (let guard = 0; guard < 4 && await stagedContext.count() > 0; guard += 1) {
+    await stagedContext.getByRole("button", { name: /^Remove artifact context: / }).first().click();
+  }
+  assert.equal(await stagedContext.count(), 0, "the ordinary cat request would carry a staged artifact");
 
   const naturalOffset = frames.length;
   const natural = await sendMessage(page, frames, threadId, "Make a picture of a cat artifact");

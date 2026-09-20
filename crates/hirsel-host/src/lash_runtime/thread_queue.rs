@@ -298,7 +298,11 @@ impl LashAgentRuntime {
         Ok(())
     }
 
-    pub(super) async fn cancel_owned_turn(&self, thread_id: Option<u64>) -> anyhow::Result<()> {
+    pub(super) async fn cancel_owned_turn(
+        &self,
+        thread_id: Option<u64>,
+        turn_id: Option<u64>,
+    ) -> anyhow::Result<()> {
         // Admission and Stop share this gate so the ownership check and exact
         // cancellation cannot straddle a switch to a different Thread.
         let _request_guard = self.request_lock.lock().await;
@@ -308,6 +312,12 @@ impl LashAgentRuntime {
             anyhow::ensure!(
                 route.is_some_and(|route| route.thread_id == thread_id),
                 "Thread #{thread_id} has no running turn"
+            );
+        }
+        if let Some(turn_id) = turn_id {
+            anyhow::ensure!(
+                route.is_some_and(|route| route.thread_turn_id == turn_id),
+                "turn #{turn_id} no longer owns the native lane"
             );
         }
         if let Some(id) = ownership.drain_id.as_ref() {

@@ -966,7 +966,7 @@ async fn background_runtime_drain_has_durable_turn_and_tagged_identity() {
         super::bridges::observation_thread_route(&id),
         Some((runtime.thread_id, route.thread_turn_id))
     );
-    runtime.cancel_owned_turn(None).await.unwrap();
+    runtime.cancel_owned_turn(None, None).await.unwrap();
     let output = tokio::time::timeout(Duration::from_secs(5), runtime.run_admitted_drain(&id))
         .await
         .unwrap()
@@ -1241,7 +1241,7 @@ async fn stop_during_empty_drain_retry_cancels_owned_input_without_provider() {
     runtime.clear_active_turn_id(&drain).await;
     assert!(runtime.anchors.lock().await.active.is_some());
     runtime
-        .cancel_owned_turn(Some(turn.thread_id))
+        .cancel_owned_turn(Some(turn.thread_id), turn.turn_id)
         .await
         .unwrap();
     assert!(runtime.anchors.lock().await.active.is_none());
@@ -1273,6 +1273,45 @@ async fn stop_during_empty_drain_retry_cancels_owned_input_without_provider() {
         ThreadTurnState::Cancelled
     );
     assert!(runtime.admit_next_thread_request().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn exact_stop_rejects_a_lane_handoff_without_reaching_the_new_turn() {
+    let (state, _dir) = runtime_fixture().await;
+    let root = runtime_lane(&state, None).await;
+    let _root_pump = root.pump_lock.lock().await;
+    let first = request(&state, "handoff-first").await;
+    let runtime = runtime_lane(&state, Some(first.thread_id)).await;
+    let _pump = runtime.pump_lock.lock().await;
+    runtime.admit_next_thread_request().await.unwrap();
+    let second = request(&state, "handoff-second").await;
+    {
+        let mut anchors = runtime.anchors.lock().await;
+        let active = anchors.active.as_mut().unwrap();
+        active.request_id = Some(second.client_id.clone());
+        active.thread_turn_id = second.turn_id.unwrap();
+    }
+    let error = runtime
+        .cancel_owned_turn(Some(first.thread_id), first.turn_id)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no longer owns"));
+    assert_eq!(
+        runtime
+            .anchors
+            .lock()
+            .await
+            .active
+            .as_ref()
+            .unwrap()
+            .thread_turn_id,
+        second.turn_id.unwrap()
+    );
+    assert_eq!(
+        runtime.session.pending_turn_inputs().await.unwrap().len(),
+        1,
+        "Stop for the completed turn must not reach the newly owned lane"
+    );
 }
 
 /// A Thread may name its own Native provider. The session opens on the booted

@@ -184,9 +184,11 @@ impl ThreadRuntimeRegistry {
             } else {
                 match self.lane(turn.thread_id).await?.as_ref() {
                     LaneRuntime::Lash(runtime) => {
-                        runtime.cancel_owned_turn(Some(turn.thread_id)).await?
+                        runtime
+                            .cancel_owned_turn(Some(turn.thread_id), Some(turn.id))
+                            .await?
                     }
-                    LaneRuntime::Scripted(runtime) => runtime.cancel_turn().await?,
+                    LaneRuntime::Scripted(runtime) => runtime.cancel_turn(Some(turn.id)).await?,
                     _ => {}
                 }
             }
@@ -352,10 +354,12 @@ impl ThreadRuntimeRegistry {
         for lane in self.opened().await {
             match lane.as_ref() {
                 LaneRuntime::Lash(runtime) => {
-                    let _ = runtime.cancel_owned_turn(Some(runtime.thread_id)).await;
+                    let _ = runtime
+                        .cancel_owned_turn(Some(runtime.thread_id), None)
+                        .await;
                 }
                 LaneRuntime::Scripted(runtime) => {
-                    runtime.cancel_turn().await?;
+                    runtime.cancel_turn(None).await?;
                 }
                 _ => {}
             }
@@ -422,8 +426,8 @@ impl ThreadRuntimeRegistry {
         }
         let lane = self.lane(id).await?;
         match lane.as_ref() {
-            LaneRuntime::Lash(r) => r.cancel_owned_turn(Some(id)).await,
-            LaneRuntime::Scripted(r) => r.cancel_turn().await,
+            LaneRuntime::Lash(r) => r.cancel_owned_turn(Some(id), None).await,
+            LaneRuntime::Scripted(r) => r.cancel_turn(None).await,
             LaneRuntime::Degraded => anyhow::bail!("Thread has no running turn"),
         }
     }
@@ -455,9 +459,11 @@ impl ThreadRuntimeRegistry {
             } else {
                 match self.lane(thread_id).await?.as_ref() {
                     LaneRuntime::Lash(runtime) => {
-                        runtime.cancel_owned_turn(Some(thread_id)).await?
+                        runtime
+                            .cancel_owned_turn(Some(thread_id), Some(turn_id))
+                            .await?
                     }
-                    LaneRuntime::Scripted(runtime) => runtime.cancel_turn().await?,
+                    LaneRuntime::Scripted(runtime) => runtime.cancel_turn(Some(turn_id)).await?,
                     LaneRuntime::Degraded => anyhow::bail!("Thread has no running turn"),
                 }
             }

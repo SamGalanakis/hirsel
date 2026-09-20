@@ -138,10 +138,11 @@ impl Storage {
         let c = self.conn.lock().await;
         let t = get(&c, id)?;
         if matches!(t.state, ThreadTurnState::Queued) {
-            c.execute(
-                "UPDATE thread_turns SET state='running',started_at=?2 WHERE id=?1",
+            let claimed = c.execute(
+                "UPDATE thread_turns SET state='running',started_at=?2 WHERE id=?1 AND state='queued' AND cancel_requested_at IS NULL",
                 params![id, chrono::Utc::now().to_rfc3339()],
             )?;
+            anyhow::ensure!(claimed == 1, "queued turn was cancelled before admission");
         }
         get(&c, id)
     }

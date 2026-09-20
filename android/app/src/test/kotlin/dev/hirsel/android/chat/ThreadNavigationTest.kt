@@ -1,6 +1,7 @@
 package dev.hirsel.android.chat
 
 import dev.hirsel.core.Thread
+import dev.hirsel.core.ThreadState
 import dev.hirsel.core.ThreadTint
 import dev.hirsel.core.ThreadKind
 import org.junit.Assert.assertEquals
@@ -11,6 +12,7 @@ class ThreadNavigationTest {
         kind = ThreadKind.SPACE, parentThreadId = parent, pinnedAt = pin, id = id, icon = null,
         showcasedArtifactId = null, title = "Thread $id",
         description = "", instrumentJson = "null", needsOwner = false,
+        state = ThreadState(1uL, "Space ready", "Space ready", emptyList(), emptyList(), null, 0uL),
         settledAt = null, archivedAt = null, snoozedUntil = null, read = true,
         createdAt = "2026-09-10T00:00:00Z", updatedAt = "2026-09-10T00:00:00Z",
         revision = 1uL, runningTurn = null, queuedTurnCount = 0uL,

@@ -309,6 +309,35 @@ describe("thread workspace", () => {
     });
     expect(screen.getByRole("textbox", { name: "Message project chat Home" })).toBeInTheDocument();
   });
+  it("keeps newer navigation when root Task Home resolution is delayed", async () => {
+    flush(() => setThreadState(draft => {
+      draft.threads = [
+        makeThread(4, { title: "Root task", kind: "task", parent_thread_id: null, read: true }),
+        makeThread(9, { title: "Newer task", kind: "task", parent_thread_id: null, read: true }),
+      ];
+      draft.histories[4] = {
+        brief: { text: "Root Task brief", artifact_ids: [] }, messages: [], turns: [], activities: [], loaded: true, hasMore: false,
+      };
+      draft.histories[9] = {
+        brief: { text: "Newer Task brief", artifact_ids: [] }, messages: [], turns: [], activities: [], loaded: true, hasMore: false,
+      };
+    }));
+    flush(() => focusThread(4));
+    const screen = render(() => <ThreadShell />);
+    fireEvent.click(screen.getByRole("button", { name: "Talk about this" }));
+    const request = sent.find(frame => frame.type === "ensure_home_project");
+    if (request?.type !== "ensure_home_project") throw new Error("missing Home request");
+
+    flush(() => focusThread(9));
+    const home = makeThread(5, { title: "Home", kind: "space", parent_thread_id: null, read: true });
+    flush(() => handleThreadMessage({ type: "thread_created", client_id: request.client_id, thread: home }));
+
+    await waitFor(() => expect(threadState.threads).toContainEqual(home));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(threadState.focusedId).toBe(9);
+    expect(projectState.taskFocus).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Step in with worker Newer task" })).toBeInTheDocument();
+  });
   it("shows informational activity content within its owning thread without creating work", () => {
     flush(() => handleThreadMessage({ type: "thread_activity", activity: { artifact_ids: [], id: 9, thread_id: 1, turn_id: null, kind: "plugin.build_finished", data: { plugin: "build", payload: { message: "All checks passed." } }, ts: "2026-09-09T10:00:00Z" } }));
     const screen = render(() => <ThreadShell />);

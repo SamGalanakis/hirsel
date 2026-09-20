@@ -117,6 +117,19 @@ export function setTurnExpanded(turnId: number, expanded: boolean): void {
 }
 let historyGeneration = 0;
 let selectionGeneration = 0;
+export interface ThreadNavigationGuard {
+  historyId: string;
+  focusedId: number | null;
+  selectionGeneration: number;
+}
+export function captureThreadNavigation(): ThreadNavigationGuard {
+  return { historyId: historyId() ?? "", focusedId: threadState.focusedId, selectionGeneration };
+}
+export function threadNavigationIsCurrent(guard: ThreadNavigationGuard): boolean {
+  return historyId() === guard.historyId
+    && threadState.focusedId === guard.focusedId
+    && selectionGeneration === guard.selectionGeneration;
+}
 let sendFrame: ((frame: ThreadClientMessage) => void) | null = null;
 const messageTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const MESSAGE_ACK_TIMEOUT_MS = 20_000;

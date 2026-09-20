@@ -45,7 +45,7 @@ import { threadNavigationOpen as navigationOpen, threadNavigationIntent, openThr
 import { artifactState } from "../artifacts/store";
 import { consumeTaskFocus, projectForThread, projectState, stageTaskFocus } from "../projects/store";
 import type { Thread } from "./types";
-import { ensureHomeProject, focusThread, followThreadLocation, openThread, retryThreadMessage, sendThreadMessage, threadAction, threadState } from "./store";
+import { captureThreadNavigation, ensureHomeProject, focusThread, followThreadLocation, openThread, retryThreadMessage, sendThreadMessage, threadAction, threadNavigationIsCurrent, threadState } from "./store";
 
 const button = "inline-flex min-h-11 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
 const iconButton = "inline-flex size-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-pressed:bg-muted aria-pressed:text-foreground";
@@ -174,7 +174,9 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
         </Show>
         <Show when={current()?.kind === "task"}>
           <button class={button} onClick={() => { void (async () => {
+            const navigation = captureThreadNavigation();
             const projectId = project()?.id ?? (await ensureHomeProject(props.historyId)).id;
+            if (navigation.historyId !== props.historyId || !threadNavigationIsCurrent(navigation)) return;
             const brief = history()?.brief.text ?? current()?.description ?? "";
             focusThread(projectId);
             stageTaskFocus(threadState.threads, props.id, brief, projectId);

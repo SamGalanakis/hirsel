@@ -37,6 +37,16 @@ function git(...args) {
   return execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
 }
 
+/** The durable schema this checkout ships. Read from the Host source rather
+ * than pinned here, because a stale literal fails every scenario at phase 0
+ * for a reason that has nothing to do with the product. The gate is unchanged:
+ * the isolated store must be on exactly that schema, migrated, not fresh-ish. */
+const durableSchemaVersion = Number(
+  (await readFile(join(repo, "crates/hirsel-host/src/storage/schema.rs"), "utf8"))
+    .match(/const SCHEMA_VERSION: u32 = (\d+);/)?.[1],
+);
+assert(Number.isInteger(durableSchemaVersion), "could not read the Host's durable SCHEMA_VERSION");
+
 const poll = (label, predicate, timeoutMs = 180_000) => harnessPoll(label, predicate, timeoutMs, 200);
 
 function parseFrame(payload) {
@@ -200,26 +210,56 @@ async function captureNative(label, context, threadId, parentThreadId, childThre
   return { ...snapshot, nativeStore };
 }
 
+function composerContext(page) {
+  return page.locator('main[data-thread-id] [data-slot="composer-context"]').first().innerText();
+}
+
+/** A route-free open no longer rests on an overview. It lands in the last-used
+ * top-level Space chat, or bootstraps the ordinary Space named Home when this
+ * isolated history has none. Every scenario starts from that landing, so the
+ * creation control is the one the Owner actually reaches from a Space chat and
+ * nothing races the Home redirect. */
+async function landOnSpaceChat(page, frames) {
+  const home = await poll("Home Space chat bootstrap", () => latestFrame(
+    frames,
+    frame => (frame.type === "thread_created" || frame.type === "thread_upsert")
+      && frame.thread?.title === "Home"
+      && frame.thread.kind === "space"
+      && frame.thread.parent_thread_id === null,
+  )?.frame.thread, 30_000);
+  await page.locator(`main[data-thread-id="${home.id}"]`).waitFor({ state: "visible" });
+  assert.equal(new URL(page.url()).pathname, `/t/${home.id}`, "route-free open did not land in a Space chat");
+  const context = await composerContext(page);
+  assert.match(context, /Space\s+Home/, "the composer does not label its Space recipient");
+  assert.match(context, /Focus\s+None/, "the composer does not label Task focus");
+  assert.match(context, /Worker\s+None/, "the composer does not label worker pairing");
+  return home;
+}
+
 async function createThread(page, nonce) {
-  const start = page.getByRole("button", { name: "Start a Space or Task", exact: true });
-  if (await start.isVisible()) await start.click();
-  else await page.getByRole("button", { name: "New Space or Task", exact: true }).first().click();
+  await page.getByRole("button", { name: "New Space or Task", exact: true }).first().click();
   const creationSurface = page.getByRole("dialog", { name: "New Space or Task", exact: true });
   await creationSurface.waitFor({ state: "visible" });
   const titleInput = creationSurface.getByLabel("New space or task title", { exact: true });
   const title = `Runbook ${nonce}`;
   await titleInput.fill(title);
-  await creationSurface.getByRole("button", { name: "New Space", exact: true }).click();
+  await creationSurface.getByRole("button", { name: "Create Space", exact: true }).click();
   await page.locator('[data-slot="thread-context"] h1').filter({ hasText: title }).waitFor();
+  // Every Space is a Space chat: the composer says so before a single turn.
+  await page.getByRole("textbox", { name: `Message Space chat ${title}`, exact: true }).waitFor();
   const match = new URL(page.url()).pathname.match(/^\/t\/(\d+)$/);
   assert(match, `Thread creation did not navigate: ${page.url()}`);
   return Number(match[1]);
 }
 
-async function sendOwnerMessage(page, frames, threadId, body) {
+/** The composer's primary control renames itself while a turn is running: at
+ * rest it is Send, and during a turn it is the visible "Send after current
+ * turn" queueing action that stands beside Stop. A scenario says which one it
+ * means, so a silently renamed control is a failure rather than a fallback. */
+async function sendOwnerMessage(page, frames, threadId, body, { queueing = false } = {}) {
   const offset = frames.length;
   await page.locator(`main[data-thread-id="${threadId}"] textarea`).fill(body);
-  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await page.getByRole("button", { name: queueing ? "Send after current turn" : "Send", exact: true }).click();
   const owner = await poll("Owner message acknowledgement", () => latestFrame(
     frames.slice(offset),
     frame => frame.type === "msg" && frame.message.thread_id === threadId
@@ -236,8 +276,8 @@ async function waitForOwnerTurn(frames, threadId, ownerId) {
   )?.frame.turn);
 }
 
-async function sendMessage(page, frames, threadId, body) {
-  const { owner } = await sendOwnerMessage(page, frames, threadId, body);
+async function sendMessage(page, frames, threadId, body, options) {
+  const { owner } = await sendOwnerMessage(page, frames, threadId, body, options);
   const turn = await poll("turn acceptance", () => latestFrame(
     frames,
     frame => frame.type === "thread_turn" && frame.turn.thread_id === threadId
@@ -269,7 +309,7 @@ function storeTimeline(store, turnId) {
 }
 
 function assertTimelineSurfaces(snapshot, frames, turnIds) {
-  assert.equal(snapshot.store.schemaVersion, 7, "runbook store is not durable schema 7");
+  assert.equal(snapshot.store.schemaVersion, durableSchemaVersion, `runbook store is not durable schema ${durableSchemaVersion}`);
   for (const turnId of turnIds) {
     const live = liveTimeline(frames, turnId);
     assert(live.length > 0, `turn ${turnId} streamed no timeline events`);
@@ -403,7 +443,7 @@ async function runChat(context) {
   const first = await sendMessage(page, frames, threadId, firstPrompt);
   await waitForTurn(frames, first.turnId, turn => turn.state === "running", "first turn running");
   await page.getByRole("button", { name: "Stop the agent", exact: true }).waitFor();
-  const second = await sendOwnerMessage(page, frames, threadId, secondPrompt);
+  const second = await sendOwnerMessage(page, frames, threadId, secondPrompt, { queueing: true });
   await poll("second request queued", () => latestFrame(
     frames.slice(second.offset),
     frame => frame.type === "thread_upsert" && frame.thread.id === threadId
@@ -577,7 +617,8 @@ async function runArtifact(context) {
   await card.waitFor({ state: "visible" });
 
   await page.getByRole("button", { name: "All artifacts", exact: true }).click();
-  await page.getByRole("heading", { name: "All artifacts", exact: true }).waitFor();
+  // The inventory is a named pane, not a heading: it labels its own landmark.
+  await page.getByRole("main", { name: "All artifacts", exact: true }).waitFor();
   const listRow = page.locator(`[data-slot="artifact-list"] [data-artifact-ref="${upsert.id}"]`);
   await listRow.filter({ hasText: title }).waitFor();
   await page.screenshot({ path: join(scenarioDir, "20-listed.png"), fullPage: true });
@@ -595,7 +636,8 @@ async function runArtifact(context) {
   assert.equal(await readFile(downloadPath, "utf8"), content);
 
   await preview.getByRole("button", { name: "Back to conversation", exact: true }).click();
-  await page.getByRole("button", { name: "Back to conversation", exact: true }).click();
+  await page.getByRole("button", { name: "Close All artifacts", exact: true }).click();
+  await page.locator(`main[data-thread-id="${threadId}"]`).waitFor({ state: "visible" });
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.locator(`[data-message-id="${agent.id}"] [data-artifact-ref="${upsert.id}"]`).waitFor();
   await expandInlineTools(page, [tool.started.event.id]);
@@ -1238,6 +1280,7 @@ async function runScenario(scenario) {
     const hello = await poll("hello_ok", () => latestFrame(frames, frame => frame.type === "hello_ok")?.frame);
     result.servedModel = hello.model?.current ?? null;
     result.hostVersion = hello.host_version;
+    result.landedSpaceChatId = (await landOnSpaceChat(page, frames)).id;
     const threadId = await createThread(page, nonce);
     const context = { page, frames, nonce, threadId, scenarioDir, dataDir, url, token };
     const empty = await capture("00-empty", context);
@@ -1246,7 +1289,7 @@ async function runScenario(scenario) {
     assert.equal(empty.detail.turns.length, 0);
     assert.equal(empty.store.messages.length, 0);
     assert.equal(empty.store.turns.length, 0);
-    assert.equal(empty.store.schemaVersion, 7);
+    assert.equal(empty.store.schemaVersion, durableSchemaVersion);
     assert.deepEqual(empty.store.timelineEvents, []);
     assert.deepEqual(empty.detail.turn_timelines, []);
     if (scenario === "artifact-creation" || scenario === "artifact-presentation") assert.equal(empty.store.artifacts.length, 0);

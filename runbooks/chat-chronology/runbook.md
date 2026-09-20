@@ -38,7 +38,7 @@ Settling and reloading must not reorder or duplicate anything.
 owned Host, opens `/`, and creates one Space chat named with the run nonce.
 
 **Expect:** the route-free open lands in the bootstrapped **Home** Space chat
-with the composer's Space, Focus and Worker labels all shown; the new Space
+with the composer's one recipient label shown; the new Space
 chat's composer reads `Message Space chat <name>`. `00-empty.png` shows the
 selected empty Thread, and DOM, wire, and SQLite extracts contain no messages
 or turns for its ID.
@@ -82,7 +82,7 @@ available payload; equality of only the four message IDs is insufficient. Save
 
 | Item | Objective gate | Verdict | Evidence |
 |---|---|---|---|
-| Space chat landing | route-free open lands in Home with Space, Focus and Worker labelled | | `00-*`, `result.json` |
+| Space chat landing | route-free open lands in Home with its recipient labelled | | `00-*`, `result.json` |
 | Empty scope | selected Thread has zero messages/turns on all three surfaces | | `00-*` |
 | Real queue | second send accepted while first turn is visibly running | | `10-*`, frames |
 | Queued reload | queued row and exact ID survive reload before activation | | `11-queued-reloaded-*` |
@@ -105,7 +105,7 @@ found in what ran**.
 
 | Item | Verdict | What passed it |
 |---|---|---|
-| Space chat landing | PASS | route-free open resolved to `/t/1`, `main[data-thread-id="1"]` named Home; `[data-slot="composer-context"]` read `Space Home · Focus None · Worker None` (`result.json` `landedSpaceChatId: 1`) |
+| Space chat landing | PASS | route-free open resolved to `/t/1`, `main[data-thread-id="1"]` named Home; the composer named Home as recipient with no worker (`result.json` `landedSpaceChatId: 1`) |
 | Empty scope | PASS | `00-empty-dom.json` `entries: []`; `00-empty-thread.json` no messages/turns; `00-empty-store.json` no rows, `schemaVersion 14` |
 | Real queue | PASS | second message sent with the composer's `Send after current turn` control while `Stop the agent` was present and turn 1 was still `running`; `thread_upsert.queued_turn_count` rose before any terminal turn frame |
 | Queued reload | PASS | `11-queued-reloaded-dom.json` entry `data-execution-turn="2"`, `data-outcome="queued"`, run-card header accessible name `queued`, visible word `queued`; `turns[1] = {owner_message_id: 2, state: "queued"}` on the `open_thread` snapshot and in SQLite |

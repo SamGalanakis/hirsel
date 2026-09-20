@@ -19,9 +19,7 @@ _Avoid_: Thread as a third kind alongside Space and Task
 
 **Worker:** The role of a Task's conversation. It performs the accepted work using the Thread's selected backend and universal tool surface.
 
-**Task focus:** A bounded title, brief and current-state snapshot attached to one Space-chat message. It supplies context without changing recipient, ownership or reach.
-
-**Worker pairing:** The Task worker the Owner has stepped into and is messaging directly. It is separate from Space recipient and Task focus.
+**Worker recipient:** The Task worker the Owner has stepped into and is messaging directly. “Talk about this” instead addresses the containing Space chat and drafts an ordinary `#id` reference.
 
 **Conversation:** The exchange of Messages within one Space or Task.
 
@@ -34,11 +32,13 @@ _Avoid_: Event as a work object
 
 **Attention:** Whether a Thread currently needs the Owner. Attention can change independently of Task completion, read state, and execution.
 
-**Task state:** Durable material progress on a Task: its own short headline, the displayed headline, bounded findings, explicit artifact references, checkpoint time and steering revision. It is revisioned independently from Thread metadata.
+**Headline:** A Thread's normalized, nonempty summary of at most 12 words. A Thread stores its own headline plus the displayed rollup, previous displayed headline and seen revisions directly on `threads`.
 
 **Rollup headline:** A Host-derived child-count summary used when a Thread has children. It follows fixed status precedence and numeric-ID tie-breaking, never copies a child's prose and never completes the parent.
 
-**Change digest:** A bounded list of unseen material changes from another Space, frozen into one Space-chat turn before execution. Its provenance and explicit artifact associations do not grant reach; only successful terminal consumption advances the Space chat's cursor.
+**Outside change:** One ordinary per-turn-coalesced activity on the affected Space chat when a Thread in another top-level Space changes it. It injects no context; the Agent rereads state when needed.
+
+**Derived status:** One Host projection from durable Thread facts: needs you, running, queued, hung, sleeping or idle, always with a reason. It is descriptive and never cancels or retries work.
 
 **Thread ref:** A citation written as `#<id>`. Citing a Thread does not move a Message into it.
 

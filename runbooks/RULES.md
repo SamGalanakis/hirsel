@@ -45,7 +45,7 @@ surfaces is a failure even if each surface looks internally consistent.
 A route-free open no longer rests on an overview. It lands in a **Space chat**:
 the last top-level Space this history used, or the ordinary Space named **Home**
 when it has none. Every scenario begins from that landing, checks that the
-composer separately labels its Space recipient, Task focus and worker pairing,
+composer labels its actual recipient and identifies a Task recipient as a worker,
 and then creates its own Space chat through the ordinary creation control.
 The bootstrapped Home Space is part of the isolated store and is never the
 Thread a scenario talks to.

@@ -16,11 +16,12 @@ and Task identity, nesting, root pinning, and the selected conversation remain
 legible at desktop and phone widths.
 
 Archiving a selected worker returns to its owning Space chat only after the Host
-accepts the action. Archiving a selected top-level Space forgets it and lands in the
-idempotent Space named Home. The archived Thread's conversation and unsent draft
+accepts the action. Archiving a selected top-level Space forgets it and applies the
+route-free rule: last valid Space, then first active top-level Space by ID, then an
+ordinary newly created Home. The archived Thread's conversation and unsent draft
 remain intact; it is discoverable under Archived and can be explicitly reopened.
-Browsing Archived and unarchiving do not silently change the Space recipient,
-Task focus, or worker pairing. The drawer header and New Space/New Task controls
+Browsing Archived and unarchiving do not silently change the Space recipient or
+worker pairing. The drawer header and New Space/New Task controls
 remain distinct, unclipped, and at least 44px tall at 320px, 390px, and desktop
 widths.
 

@@ -27,7 +27,7 @@ failure.
 **Do:** Run `just product-runbook tool-execution`.
 
 **Expect:** the route-free open lands in the bootstrapped **Home** Space chat
-with Space, Focus and Worker separately labelled in the composer; the scenario
+with its one recipient labelled in the composer; the scenario
 then creates its own Space chat. `00-empty.png` and the baseline extracts show
 that Thread empty on DOM, wire, and disk.
 
@@ -62,7 +62,7 @@ messages' durable `tool_calls` identities/outcomes match the streamed calls.
 
 | Item | Objective gate | Verdict | Evidence |
 |---|---|---|---|
-| Space chat landing | route-free open lands in Home with Space, Focus and Worker labelled | | `00-*`, `result.json` |
+| Space chat landing | route-free open lands in Home with its recipient labelled | | `00-*`, `result.json` |
 | Success attempt | matched visible start/done row, status mark `ok` | | `10-*` |
 | Success content | exact marker in tool result and reply | | `10-success.png`, frames |
 | Failure attempt | matched visible start/done row, status mark `failed` | | `20-*` |
@@ -84,7 +84,7 @@ re-run**.
 
 | Item | Verdict | What passed it |
 |---|---|---|
-| Space chat landing | PASS | `all-run2` `result.json` `landedSpaceChatId: 1`; composer labelled Space/Focus/Worker |
+| Space chat landing | PASS | `all-run2` `result.json` `landedSpaceChatId: 1`; composer labelled the selected recipient |
 | Success attempt | PASS | matched `tool_start`/`tool_done` on one call id with `ok: true`; the row renders as `shell_run cmd: printf '…'` with the `ok` status mark |
 | Success content | PASS | `tool_done.result.text` carries the exact stdout marker, the open panel reads `Output\n<marker>` and the Agent reply body is exactly the marker |
 | Failure attempt | PASS | `all-run1` `tool_done.ok: false`, result `No such file or directory (os error 2)`, same call id on a visible row |

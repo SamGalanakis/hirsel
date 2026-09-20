@@ -44,7 +44,7 @@ that final acceptance gate.
 **Do:** Run `just product-runbook artifact-creation`.
 
 **Expect:** the route-free open lands in the bootstrapped **Home** Space chat
-with Space, Focus and Worker separately labelled; the scenario's own Space chat
+with its one recipient labelled; the scenario's own Space chat
 then has no artifacts, messages or turns. Capture `00-empty.png` and all
 baseline extracts.
 
@@ -93,7 +93,7 @@ browser result is the deciding gate. Save `40-natural-cat-preview.png` and
 
 | Item | Objective gate | Verdict | Evidence |
 |---|---|---|---|
-| Space chat landing | route-free open lands in Home with Space, Focus and Worker labelled | | `00-*`, `result.json` |
+| Space chat landing | route-free open lands in Home with its recipient labelled | | `00-*`, `result.json` |
 | Real creation | matched real `artifacts.create` start/done call | | frames |
 | Exact stored result | title, kind, MIME, filename, and content match on wire and SQLite | | store/open snapshot |
 | Conversation reference | an Agent message of that turn carries the same artifact ID and a visible card | | `10-created.png` |
@@ -114,7 +114,7 @@ regression, which this run did not put to the test**.
 
 | Item | Verdict | What passed it |
 |---|---|---|
-| Space chat landing | PASS | `result.json` `landedSpaceChatId: 1`; `40-natural-cat-preview.png` shows `Space … · Focus None · Worker None` and the composer placeholder `Message Space chat Runbook artifact-9b4e1d99` |
+| Space chat landing | PASS | `result.json` `landedSpaceChatId: 1`; the composer names its Space recipient and no worker, with placeholder `Message Space chat Runbook artifact-9b4e1d99` |
 | Real creation | PASS | matched `artifacts_create` `tool_start`/`tool_done` with `ok: true` on one call id, in the addressed turn |
 | Exact stored result | PASS | SQLite row 1: title `Runbook receipt artifact-9b4e1d99`, kind `file`, mime `text/plain`, filename `receipt-artifact-9b4e1d99.txt`, content `HIRSEL-ARTIFACT-artifact-9b4e1d99\n` |
 | Conversation reference | PASS | Agent message 2 of turn 1 carries `artifact_ids: [1]` and renders the card; `10-created-dom.json` entry 1 shows `Artifact: Runbook receipt artifact-9b4e1d99` with its card, above the closing reply |

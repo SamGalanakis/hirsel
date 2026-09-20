@@ -22,6 +22,15 @@ an older store. Configuration in `hirsel.toml`, auth/identity, plugins and
 workspace files remain independent. See `e2e/thread-protocol/runbook.md` for
 current validation and operator retention requirements.
 
+Hung status is a read-only suspicion threshold. Configure it under the Thread section; omission defaults to ten minutes:
+
+```toml
+[threads]
+hung_after_minutes = 10
+```
+
+The Host compares this with `thread_turns.last_event_at`. It never cancels or retries a turn because it is labelled hung.
+
 Schema 18 keeps Thread icons, execution preferences, process deliveries,
 headlines, derived-status timing and the board's seen baseline. Its
 CHECKs link terminal states to completion timestamps and enforce absent starts

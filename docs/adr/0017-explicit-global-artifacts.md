@@ -1,6 +1,6 @@
 # 0017: Explicit global artifacts with conversation references
 
-> **Amended 2026-09-20:** [ADR 0025](0025-project-chats-material-state-and-coordination-delivery.md) adds a bounded Task-focus snapshot to an Owner message. Like an artifact reference, focus supplies explicit context without becoming a transcript, changing message ownership or widening reach.
+> **Clarified 2026-09-21:** [ADR 0025](0025-space-chats-essentials.md) considered and removed Task-focus snapshots. A `#id` reference supplies identity only; the agent reads the Thread through ordinary reach.
 
 Status: Accepted (2026-09-09)
 

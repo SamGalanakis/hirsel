@@ -231,9 +231,9 @@ try {
   for (const width of [2048, 1440, 1024, 768, 390, 320]) await capture(page, width, "selected", true);
 
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.getByRole("button", { name: "Project chat", exact: true }).click();
+  await page.getByRole("button", { name: "Space chat", exact: true }).click();
   const projectChat = await capture(page, 1440, "project-chat", true);
-  assert.equal(projectChat.artifactTitle, artifact.title, "opening the project chat reset the selected artifact");
+  assert.equal(projectChat.artifactTitle, artifact.title, "opening the Space chat reset the selected artifact");
   await page.locator(`[data-thread-row="${thread.id}"]`).click();
   const selectedAgain = await capture(page, 1440, "selected-again", true);
   assert.equal(selectedAgain.focusedThreadId, String(thread.id), "Thread selection changed across layout states");

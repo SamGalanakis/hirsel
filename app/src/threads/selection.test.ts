@@ -18,13 +18,13 @@ beforeEach(() => {
 });
 afterEach(() => { disconnectThreads(); vi.unstubAllGlobals(); });
 describe("explicit Thread selection", () => {
-  it("requests Home from an empty or populated forest without a saved project", () => {
+  it("requests Home from an empty or populated forest without a saved Space", () => {
     hello([]); expect(threadState.focusedId).toBeNull(); expect(frames).toContainEqual(expect.objectContaining({type:"ensure_home_project"}));
     frames.length = 0;
     hello([0,1,2]); expect(threadState.focusedId).toBeNull(); expect(frames).toContainEqual(expect.objectContaining({type:"ensure_home_project"}));
   });
   it("keeps a newer selection when delayed Home bootstrap completes", async () => {
-    helloThreads([makeThread(2, { title: "Chosen project", kind: "space", parent_thread_id: null })]);
+    helloThreads([makeThread(2, { title: "Chosen Space", kind: "space", parent_thread_id: null })]);
     const request = frames.find(frame => frame.type === "ensure_home_project");
     if (request?.type !== "ensure_home_project") throw new Error("missing Home request");
     flush(() => focusThread(2));
@@ -56,7 +56,7 @@ describe("explicit Thread selection", () => {
     history.replaceState(null, "", "/t/99?history=ab123456-1234-5678-9abc-123456789abc");
     hello([1,2]); expect(threadState.focusedId).toBeNull(); expect(threadState.linkError).toContain("unavailable"); expect(location.pathname).toBe("/t/99");
   });
-  it("restores the last project after returning to the route-free entry", () => {
+  it("restores the last Space after returning to the route-free entry", () => {
     hello([1]); flush(() => focusThread(1)); flush(() => focusThread(null));
     frames.length = 0;
     hello([1]); expect(threadState.focusedId).toBe(1); expect(frames).toContainEqual(expect.objectContaining({type:"open_thread",thread_id:1}));
@@ -87,8 +87,8 @@ describe("explicit Thread selection", () => {
     expect(()=>sendThreadMessage("test-history",2,"not yet","send",[],[],[])).toThrow("Reconnect");
     hello([1,2]); expect(threadState.focusedId).toBe(2); expect(frames).toContainEqual(expect.objectContaining({type:"open_thread",thread_id:2}));
   });
-  it("preserves unsent Task focus when reconnecting to the same project route", () => {
-    const project = makeThread(1, { title: "Project", kind: "space", parent_thread_id: null });
+  it("preserves unsent Task focus when reconnecting to the same Space route", () => {
+    const project = makeThread(1, { title: "Space", kind: "space", parent_thread_id: null });
     const task = makeThread(2, { title: "Focused Task", kind: "task", parent_thread_id: 1 });
     history.replaceState(null, "", "/t/1?history=ab123456-1234-5678-9abc-123456789abc");
     helloThreads([project, task]);

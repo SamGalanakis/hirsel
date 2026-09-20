@@ -397,8 +397,8 @@ try {
   const archiveRequest = sentFrames.slice(archiveSentOffset).find(frame => frame.type === "thread_action" && frame.thread_id === childTask.id && frame.action === "archive");
   assert(archiveRequest, "Archive did not use the selected Thread action");
   await page.locator(`main[data-thread-id="${rootSpace.id}"]`).waitFor();
-  assert.equal(new URL(page.url()).pathname, `/t/${rootSpace.id}`, "Selected archive did not return to its project chat");
-  assert.equal(await page.evaluate(key => localStorage.getItem(key), `hirsel.last-project.${archiveHistory}`), String(rootSpace.id), "Selected archive forgot its project chat");
+  assert.equal(new URL(page.url()).pathname, `/t/${rootSpace.id}`, "Selected archive did not return to its Space chat");
+  assert.equal(await page.evaluate(key => localStorage.getItem(key), `hirsel.last-project.${archiveHistory}`), String(rootSpace.id), "Selected archive forgot its Space chat");
   assert.equal(await page.evaluate(key => localStorage.getItem(key), draftKey), preservedDraft, "Selected archive deleted the composer draft");
   const historyAfterArchive = (await openThread(url, token, childTask.id)).detail;
   assert.deepEqual(historyAfterArchive.messages, historyBeforeArchive.messages, "Selected archive changed conversation history");
@@ -416,7 +416,7 @@ try {
   await page.getByRole("menuitemradio", { name: "archived", exact: true }).click();
   const archivedRow = archivedDrawer.locator(`[data-thread-row="${childTask.id}"]`);
   await archivedRow.waitFor({ state: "visible" });
-  assert.equal(await page.locator(`main[data-thread-id="${rootSpace.id}"]`).count(), 1, "Browsing Archived changed the project recipient");
+  assert.equal(await page.locator(`main[data-thread-id="${rootSpace.id}"]`).count(), 1, "Browsing Archived changed the Space recipient");
   await archivedRow.click();
   await page.locator(`main[data-thread-id="${childTask.id}"]`).waitFor();
   assert.equal(new URL(page.url()).pathname, `/t/${childTask.id}`, "Explicit archived selection did not update the route");

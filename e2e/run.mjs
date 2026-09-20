@@ -63,13 +63,13 @@ try {
   if (requested === "all") {
     await run("Thread smoke", process.execPath, ["e2e/thread-smoke.mjs"], hostEnvironment);
   }
-  await run("Project chats", process.execPath, ["e2e/project-chats.mjs"], {
+  await run("Space chats", process.execPath, ["e2e/project-chats.mjs"], {
     ...hostEnvironment,
     HIRSEL_PROJECT_CHATS_URL: host.url,
     HIRSEL_PROJECT_CHATS_TOKEN: token,
   });
   if (requested === "project-chats") {
-    console.log(`Project-chat E2E passed with isolated evidence under ${evidenceDir}`);
+    console.log(`Space-chat E2E passed with isolated evidence under ${evidenceDir}`);
     process.exitCode = 0;
   } else {
     await run("OpenUI artifact smoke", process.execPath, ["e2e/openui-artifact-smoke.mjs"], hostEnvironment);

@@ -1,4 +1,4 @@
-// Deterministic project-chat contract against an isolated scripted Host.
+// Deterministic Space-chat contract against an isolated scripted Host.
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
 
@@ -42,7 +42,7 @@ try {
     if (window === window.top) localStorage.setItem("hirsel.token", value);
   }, token);
   await page.goto(url, { waitUntil: "domcontentloaded" });
-  const hello = await poll("project-chat hello", () => received(frames, frame => frame.type === "hello_ok"), 10_000);
+  const hello = await poll("Space-chat hello", () => received(frames, frame => frame.type === "hello_ok"), 10_000);
   const home = await poll("Home bootstrap", () => {
     const frame = received(frames, candidate =>
       (candidate.type === "thread_created" || candidate.type === "thread_upsert")
@@ -57,7 +57,7 @@ try {
   });
   await page.locator(`main[data-thread-id="${home.id}"]`).waitFor({ state: "visible" });
   assert.equal(new URL(page.url()).pathname, `/t/${home.id}`);
-  assert.match(await contextText(page), /Project\s+Home/);
+  assert.match(await contextText(page), /Space\s+Home/);
   assert.match(await contextText(page), /Focus\s+None/);
   assert.match(await contextText(page), /Worker\s+None/);
   const homeDetail = await request({
@@ -71,14 +71,14 @@ try {
   await page.getByRole("button", { name: "New Space or Task", exact: true }).first().click();
   const create = page.getByRole("dialog", { name: "New Space or Task", exact: true });
   await create.waitFor({ state: "visible" });
-  const taskTitle = `Project contract ${crypto.randomUUID().slice(0, 8)}`;
+  const taskTitle = `Space contract ${crypto.randomUUID().slice(0, 8)}`;
   await create.getByLabel("New space or task title", { exact: true }).fill(taskTitle);
   await create.getByRole("button", { name: "Kind: Space", exact: true }).click();
   await page.getByRole("menuitemradio", { name: "task", exact: true }).click();
   await create.getByRole("button", { name: "Inside: Top level", exact: true }).click();
   await page.getByRole("menuitem", { name: "Home", exact: true }).click();
   await create.getByRole("button", { name: "Create Task", exact: true }).click();
-  const task = await poll("project Task creation", () => received(frames, frame =>
+  const task = await poll("Space Task creation", () => received(frames, frame =>
     frame.type === "thread_created"
       && frame.thread?.title === taskTitle
       && frame.thread.kind === "task"
@@ -86,7 +86,7 @@ try {
   )?.thread, 10_000);
   await page.locator(`main[data-thread-id="${task.id}"]`).waitFor({ state: "visible" });
   await page.getByRole("textbox", { name: `Step in with worker ${taskTitle}`, exact: true }).waitFor();
-  assert.match(await contextText(page), /Project\s+Home/);
+  assert.match(await contextText(page), /Space\s+Home/);
   assert.match(await contextText(page), new RegExp(`Worker\\s+${taskTitle}`));
 
   await page.getByRole("button", { name: "Talk about this", exact: true }).click();
@@ -94,11 +94,11 @@ try {
   assert.match(await contextText(page), new RegExp(`Focus\\s+${taskTitle}`));
   assert.match(await contextText(page), /Worker\s+None/);
   const focusBody = `Discuss ${taskTitle}`;
-  const projectComposer = page.getByRole("textbox", { name: "Message project chat Home", exact: true });
+  const projectComposer = page.getByRole("textbox", { name: "Message Space chat Home", exact: true });
   await projectComposer.fill(focusBody);
   const focusOffset = frames.length;
   await page.getByRole("button", { name: "Send", exact: true }).click();
-  const focusedSend = await poll("focused project send", () => sent(frames.slice(focusOffset), frame =>
+  const focusedSend = await poll("focused Space send", () => sent(frames.slice(focusOffset), frame =>
     frame.type === "send_thread_message" && frame.thread_id === home.id && frame.body === focusBody
   ), 10_000);
   assert.equal(focusedSend.focus.task_thread_id, task.id);
@@ -109,15 +109,15 @@ try {
   )?.message, 10_000);
   assert.deepEqual(focusedEcho.focus, focusedSend.focus);
   await poll("focus consumed after acceptance", async () => /Focus\s+None/.test(await contextText(page)), 10_000);
-  const focusedTurn = await poll("focused project turn", () => received(frames.slice(focusOffset), frame =>
+  const focusedTurn = await poll("focused Space turn", () => received(frames.slice(focusOffset), frame =>
     frame.type === "thread_turn" && frame.turn.thread_id === home.id && frame.turn.owner_message_id === focusedEcho.id
   )?.turn, 10_000);
-  const focusedCompleted = await poll("focused project completion", () => received(frames.slice(focusOffset), frame =>
+  const focusedCompleted = await poll("focused Space completion", () => received(frames.slice(focusOffset), frame =>
     frame.type === "thread_turn" && frame.turn.id === focusedTurn.id
       && frame.turn.state === "completed"
   )?.turn, 15_000);
-  assert.ok(focusedCompleted.agent_message_id, "focused project turn completed without an Agent reply");
-  await poll("addressed project Agent reply", () => received(frames.slice(focusOffset), frame =>
+  assert.ok(focusedCompleted.agent_message_id, "focused Space turn completed without an Agent reply");
+  await poll("addressed Space Agent reply", () => received(frames.slice(focusOffset), frame =>
     frame.type === "msg"
       && frame.message.id === focusedCompleted.agent_message_id
       && frame.message.thread_id === home.id
@@ -197,7 +197,7 @@ try {
       && ["cancelled", "interrupted"].includes(frame.turn.state)
   )?.turn, 10_000);
 
-  await page.getByRole("button", { name: "Project chat", exact: true }).click();
+  await page.getByRole("button", { name: "Space chat", exact: true }).click();
   await page.locator(`main[data-thread-id="${home.id}"]`).waitFor({ state: "visible" });
   const delegationBody = `Please delegate this scripted check ${crypto.randomUUID()}`;
   await projectComposer.fill(delegationBody);
@@ -232,7 +232,7 @@ try {
   assert.equal(
     sent(frames.slice(reloadOffset), frame => frame.type === "ensure_home_project"),
     undefined,
-    "route-free reload bootstrapped Home instead of restoring the last project",
+    "route-free reload bootstrapped Home instead of restoring the last Space",
   );
   assert.equal(
     reloadedHello.threads.filter(thread => thread.title === "Home" && thread.kind === "space" && thread.parent_thread_id === null).length,
@@ -256,7 +256,7 @@ try {
     await writeFile(`${evidenceDir}/project-chats.json`, `${JSON.stringify(evidence, null, 2)}\n`);
   }
   await page.close();
-  console.log("Project landing, explicit focus, worker pairing, queued send, cancellation and delegation passed.");
+  console.log("Space landing, explicit focus, worker pairing, queued send, cancellation and delegation passed.");
 } finally {
   await browser.close();
 }

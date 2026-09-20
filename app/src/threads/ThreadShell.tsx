@@ -97,7 +97,7 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
   const backTitle = () => {
     if (backsToConversation()) return "Back to conversation";
     const previous = previousThread();
-    return previous === null ? "Back to project chat" : `Back to #${previous}`;
+    return previous === null ? "Back to Space chat" : `Back to #${previous}`;
   };
   const goBack = () => {
     if (backsToConversation()) { setPane("conversation"); return; }
@@ -206,11 +206,11 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
     </div>
     <ThreadError threadId={props.id} />
     <Show when={writable()}>
-    <Composer artifactContext={draftArtifact(props.id)} onRemoveArtifactContext={() => stageDraftArtifact(props.id, null)} onConsumeArtifactContext={id => consumeDraftArtifact(props.id, id)} ariaLabel={projectChat() ? `Message project chat ${current()?.title ?? "this project"}` : `Step in with worker ${current()?.title ?? "this Task"}`} draftKey={`${historyId()}:thread-${props.id}`} attachments={attachments} thinking={thinking()} focused threads={threadState.threads}
+    <Composer artifactContext={draftArtifact(props.id)} onRemoveArtifactContext={() => stageDraftArtifact(props.id, null)} onConsumeArtifactContext={id => consumeDraftArtifact(props.id, id)} ariaLabel={projectChat() ? `Message Space chat ${current()?.title ?? "this Space"}` : `Step in with worker ${current()?.title ?? "this Task"}`} draftKey={`${historyId()}:thread-${props.id}`} attachments={attachments} thinking={thinking()} focused threads={threadState.threads}
       context={{
         projectRecipient: projectState.projectRecipientId !== null
-          ? threadState.threads.find(thread => thread.id === projectState.projectRecipientId)?.title ?? `Project #${projectState.projectRecipientId}`
-          : "No project",
+          ? threadState.threads.find(thread => thread.id === projectState.projectRecipientId)?.title ?? `Space #${projectState.projectRecipientId}`
+          : "No Space",
         taskFocus: projectChat() && projectState.taskFocus ? threadState.threads.find(thread => thread.id === projectState.taskFocus?.task_thread_id)?.title ?? `Task #${projectState.taskFocus.task_thread_id}` : null,
         workerPairing: projectState.workerPairingId !== null
           ? threadState.threads.find(thread => thread.id === projectState.workerPairingId)?.title ?? `Thread #${projectState.workerPairingId}`
@@ -411,7 +411,7 @@ export function ThreadShell() {
         `split` and above, a labelled bottom bar below it. There is no top-left
         rail on a phone — the bar is the reach. */}
     <nav aria-label="Hirsel" data-slot="icon-rail" class="relative z-10 order-last flex w-full shrink-0 items-stretch justify-around gap-0.5 border-t border-border px-1 pb-[env(safe-area-inset-bottom)] pt-1 split:order-none split:w-14 split:flex-col split:items-center split:justify-start split:gap-2 split:border-t-0 split:px-0 split:py-2">
-      <button class={`${iconButton} hidden split:inline-flex`} aria-label="Project chat" title="Open project chat" aria-pressed={threadState.focusedId === projectState.projectRecipientId && !globalArtifacts() ? "true" : "false"} onClick={() => { setGlobalArtifacts(false); returnToProjectChat(); }}><BrandMark size={23} /></button>
+      <button class={`${iconButton} hidden split:inline-flex`} aria-label="Space chat" title="Open Space chat" aria-pressed={threadState.focusedId === projectState.projectRecipientId && !globalArtifacts() ? "true" : "false"} onClick={() => { setGlobalArtifacts(false); returnToProjectChat(); }}><BrandMark size={23} /></button>
       <button class={`${barButton} relative`} aria-label="Spaces and Tasks" aria-describedby={attentionCount() > 0 ? "thread-attention-summary" : undefined} title={attentionCount() > 0 ? `Spaces & Tasks · ${attentionCount()} need you` : "Spaces & Tasks"} data-slot="thread-navigation-trigger" aria-controls="thread-navigation" aria-expanded={navigationMode() === "docked" || navigationMode() === "modal" ? "true" : "false"} aria-pressed={threadState.focusedId !== null && !globalArtifacts() ? "true" : "false"} onClick={() => navigationMode() === "docked" || navigationMode() === "modal" ? closeNavigation() : openNavigation()}><GitBranch class="size-5" /><span class="split:hidden">Threads</span><Show when={attentionCount() > 0}><span aria-hidden="true" class="absolute right-2 top-1 size-1.5 rounded-full bg-status-attention" /><span id="thread-attention-summary" class="sr-only">{attentionCount()} {attentionCount() === 1 ? "item needs" : "items need"} your attention</span></Show></button>
       <Show when={threadState.focusedId !== null && !globalArtifacts()}><svg class="pointer-events-none absolute top-[58px] left-12 hidden h-8 w-4 text-border split:block" viewBox="0 0 16 32" fill="none" aria-hidden="true" data-slot="thread-connector"><path d="M0 24h4c8 0 12-4 12-12V0" stroke="currentColor" /></svg></Show>
       <button class={barButton} aria-label="New Space or Task" title="New Space or Task" onClick={() => openThreadCreate(null)}><Plus class="size-5" /><span class="split:hidden">New</span></button>

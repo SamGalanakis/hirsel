@@ -27,11 +27,11 @@ async function expectLifecycle(page, label) {
   await page.keyboard.press("Escape");
 }
 async function projectChat(page) {
-  const rail = page.getByRole("button", { name: "Project chat", exact: true });
+  const rail = page.getByRole("button", { name: "Space chat", exact: true });
   if (await rail.isVisible()) await rail.click();
   else await page.getByRole("button", { name: "Back", exact: true }).click();
-  await page.getByRole("textbox", { name: /Message project chat/ }).waitFor();
-  if (!/^\/t\/\d+$/.test(new URL(page.url()).pathname)) throw new Error("Project chat did not restore an addressed project");
+  await page.getByRole("textbox", { name: /Message Space chat/ }).waitFor();
+  if (!/^\/t\/\d+$/.test(new URL(page.url()).pathname)) throw new Error("Space chat did not restore an addressed Space");
 }
 const browser = await launchBrowser();
 try {
@@ -68,7 +68,7 @@ try {
     if (!/^\/t\/\d+$/.test(path)) throw new Error(`Thread create did not navigate: ${path}`);
     await page.locator("textarea").fill("This draft belongs to this thread");
     await projectChat(page);
-    if (await page.locator("textarea").inputValue() === "This draft belongs to this thread") throw new Error("Thread draft leaked into the project chat");
+    if (await page.locator("textarea").inputValue() === "This draft belongs to this thread") throw new Error("Thread draft leaked into the Space chat");
     await page.goto(`${url}${route}`);
     await page.locator('[data-slot="thread-context"] h1').filter({ hasText: title }).waitFor();
     if (await page.locator("textarea").inputValue() !== "This draft belongs to this thread") throw new Error("Thread draft was lost");
@@ -87,7 +87,7 @@ try {
     if (!ownedMessages.some(message => message.author === "owner" && message.body === body) || !ownedMessages.some(message => message.author === "agent")) throw new Error("Host did not emit both messages with correct Thread ownership");
     if (artifacts) await page.screenshot({ path: `${artifacts}/thread-conversation-${viewport.width}.png`, fullPage: true });
     await projectChat(page);
-    if (await page.getByText(body, { exact: true }).count()) throw new Error("Owned message leaked into the project chat");
+    if (await page.getByText(body, { exact: true }).count()) throw new Error("Owned message leaked into the Space chat");
     await page.goto(`${url}${route}`);
     await page.getByText(body, { exact: true }).waitFor();
     await chooseLifecycle(page, "Mark Task done");

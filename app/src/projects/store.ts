@@ -5,9 +5,9 @@ import type { Thread } from "../threads/types";
 import { ancestorsIn, threadIndex } from "../threads/tree";
 
 interface ProjectState {
-  /** The top-level Space whose conversation receives project-chat messages. */
+  /** The top-level Space whose conversation receives Space-chat messages. */
   projectRecipientId: number | null;
-  /** The bounded Task snapshot explicitly staged for the next project message. */
+  /** The bounded Task snapshot explicitly staged for the next Space-chat message. */
   taskFocus: TaskFocus | null;
   /** The worker whose own conversation the Owner has stepped into. */
   workerPairingId: number | null;

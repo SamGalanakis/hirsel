@@ -231,12 +231,12 @@ describe("thread workspace", () => {
     fireEvent.keyDown(groceries, { key: "Enter" });
     await waitFor(() => expect(sent.some(f => f.type === "send_thread_message" && f.thread_id === 1 && f.body === "groceries draft")).toBe(true));
   });
-  it("talks about a Task in its project chat with one explicit bounded focus", async () => {
+  it("talks about a Task in its Space chat with one explicit bounded focus", async () => {
     flush(() => setThreadState(draft => {
       draft.threads = [
         makeThread(0, { title: "Hirsel", kind: "space", parent_thread_id: null, read: true }),
         makeThread(1, {
-          title: "Project chat contract",
+          title: "Space chat contract",
           kind: "task",
           parent_thread_id: 0,
           description: "Implement the accepted contract.",
@@ -255,18 +255,18 @@ describe("thread workspace", () => {
     }));
     flush(() => { focusThread(0); focusThread(1); });
     const screen = render(() => <ThreadShell />);
-    expect(screen.getByRole("textbox", { name: "Step in with worker Project chat contract" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Step in with worker Space chat contract" })).toBeInTheDocument();
     let context = screen.container.querySelector('[data-slot="composer-context"]')!;
-    expect(context).toHaveTextContent("ProjectHirsel");
+    expect(context).toHaveTextContent("SpaceHirsel");
     expect(context).toHaveTextContent("FocusNone");
-    expect(context).toHaveTextContent("WorkerProject chat contract");
+    expect(context).toHaveTextContent("WorkerSpace chat contract");
 
     fireEvent.click(screen.getByRole("button", { name: "Talk about this" }));
     expect(threadState.focusedId).toBe(0);
-    const input = screen.getByRole("textbox", { name: "Message project chat Hirsel" });
+    const input = screen.getByRole("textbox", { name: "Message Space chat Hirsel" });
     context = screen.container.querySelector('[data-slot="composer-context"]')!;
-    expect(context).toHaveTextContent("ProjectHirsel");
-    expect(context).toHaveTextContent("FocusProject chat contract");
+    expect(context).toHaveTextContent("SpaceHirsel");
+    expect(context).toHaveTextContent("FocusSpace chat contract");
     expect(context).toHaveTextContent("WorkerNone");
 
     fireEvent.input(input, { target: { value: "What should we do next?" } });
@@ -278,7 +278,7 @@ describe("thread workspace", () => {
       focus: {
         task_thread_id: 1,
         snapshot: {
-          title: "Project chat contract",
+          title: "Space chat contract",
           brief: "Accepted Task brief",
           instrument_summary: JSON.stringify({ type: "text", text: "Ready" }),
         },
@@ -307,7 +307,7 @@ describe("thread workspace", () => {
       workerPairingId: null,
       taskFocus: { task_thread_id: 4, snapshot: { title: "Root task", brief: "Root Task brief", instrument_summary: null } },
     });
-    expect(screen.getByRole("textbox", { name: "Message project chat Home" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message Space chat Home" })).toBeInTheDocument();
   });
   it("keeps newer navigation when root Task Home resolution is delayed", async () => {
     flush(() => setThreadState(draft => {
@@ -382,19 +382,19 @@ describe("thread workspace", () => {
     expect(note.closest('[data-slot="conversation-note"]')).toBeInTheDocument();
     expect(threadState.histories[1].turns).toHaveLength(2);
   });
-  it("keeps ordinary zero and returns from a worker to the remembered project chat", () => {
+  it("keeps ordinary zero and returns from a worker to the remembered Space chat", () => {
     flush(() => focusThread(0));
     const screen = render(() => <ThreadShell />);
     expect(location.pathname).toBe("/t/0");
     expect(screen.container.querySelector('[data-thread-id="0"]')).toHaveClass("thread-focus-frame");
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Hirsel");
     flush(() => focusThread(1));
-    fireEvent.click(screen.getByRole("button", { name: "Project chat" }));
+    fireEvent.click(screen.getByRole("button", { name: "Space chat" }));
     expect(threadState.focusedId).toBe(0);
     expect(location.pathname).toBe("/t/0");
-    expect(screen.getByRole("textbox", { name: "Message project chat Hirsel" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message Space chat Hirsel" })).toBeInTheDocument();
     const context = screen.container.querySelector('[data-slot="composer-context"]')!;
-    expect(context).toHaveTextContent("ProjectHirsel");
+    expect(context).toHaveTextContent("SpaceHirsel");
     expect(context).toHaveTextContent("FocusNone");
     expect(context).toHaveTextContent("WorkerNone");
     expect(screen.queryByRole("dialog", { name: "Spaces and Tasks" })).toBeNull();
@@ -424,7 +424,7 @@ describe("thread workspace", () => {
     const screen = render(() => <ThreadShell />);
     const dispose = installGlobalKeymap();
     try {
-      screen.getByRole("button", { name: "Project chat" }).focus();
+      screen.getByRole("button", { name: "Space chat" }).focus();
       fireEvent.keyDown(window, { key: "g" });
       fireEvent.keyDown(window, { key: "t" });
       expect(screen.getByRole("dialog", { name: "Spaces and Tasks" })).toBeInTheDocument();
@@ -965,16 +965,16 @@ describe("panes and Back", () => {
     expect(composer(view)).toBeInTheDocument();
     expect(threadState.focusedId).toBe(1);
   });
-  it("goes Back from the first worker conversation to the remembered project chat", () => {
+  it("goes Back from the first worker conversation to the remembered Space chat", () => {
     responsiveMedia(1440);
     flush(() => { focusThread(0); focusThread(1); });
     const view = render(() => <ThreadShell />);
     expect(view.getByRole("complementary", { name: "Spaces and Tasks" })).toBeVisible();
     const back = view.getByRole("button", { name: "Back" });
-    expect(back).toHaveAttribute("title", "Back to project chat");
+    expect(back).toHaveAttribute("title", "Back to Space chat");
     fireEvent.click(back);
     expect(threadState.focusedId).toBe(0);
-    expect(view.getByRole("textbox", { name: "Message project chat Hirsel" })).toBeInTheDocument();
+    expect(view.getByRole("textbox", { name: "Message Space chat Hirsel" })).toBeInTheDocument();
   });
   it("goes Back to the Thread this session came from", () => {
     responsiveMedia(1440);
@@ -985,7 +985,7 @@ describe("panes and Back", () => {
     expect(back).toHaveAttribute("title", "Back to #1");
     fireEvent.click(back);
     expect(threadState.focusedId).toBe(1);
-    expect(view.getByRole("button", { name: "Back" })).toHaveAttribute("title", "Back to project chat");
+    expect(view.getByRole("button", { name: "Back" })).toHaveAttribute("title", "Back to Space chat");
   });
 });
 

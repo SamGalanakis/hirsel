@@ -14,7 +14,7 @@ import {
 const threads = [
   makeThread(1, { title: "Hirsel", kind: "space", parent_thread_id: null }),
   makeThread(2, {
-    title: "Project chat contract",
+    title: "Space chat contract",
     kind: "task",
     parent_thread_id: 1,
     description: "Implement the accepted contract.",
@@ -24,8 +24,8 @@ const threads = [
 
 beforeEach(() => flush(resetProjects));
 
-describe("project conversation state", () => {
-  it("keeps project recipient, Task focus and worker pairing independent", () => {
+describe("Space conversation state", () => {
+  it("keeps Space recipient, Task focus and worker pairing independent", () => {
     flush(() => enterProject(1));
     expect(projectState).toMatchObject({
       projectRecipientId: 1,
@@ -46,7 +46,7 @@ describe("project conversation state", () => {
     expect(projectState.taskFocus).toEqual({
       task_thread_id: 2,
       snapshot: {
-        title: "Project chat contract",
+        title: "Space chat contract",
         brief: "Accepted brief",
         instrument_summary: JSON.stringify({ type: "text", text: "Ready" }),
       },
@@ -58,10 +58,10 @@ describe("project conversation state", () => {
     expect(projectState.workerPairingId).toBeNull();
   });
 
-  it("refuses to stage non-Tasks or Tasks without an owning project", () => {
+  it("refuses to stage non-Tasks or Tasks without an owning Space", () => {
     const rootTask = makeThread(3, { kind: "task", parent_thread_id: null });
     expect(stageTaskFocus([...threads, rootTask], 1, "not a Task")).toBeNull();
-    expect(stageTaskFocus([...threads, rootTask], 3, "no project")).toBeNull();
+    expect(stageTaskFocus([...threads, rootTask], 3, "no Space")).toBeNull();
     expect(projectState).toMatchObject({
       projectRecipientId: null,
       taskFocus: null,

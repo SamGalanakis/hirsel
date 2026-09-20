@@ -40,6 +40,27 @@ surfaces is a failure even if each surface looks internally consistent.
 - Preserve only sanitized evidence. Never record auth frames, tokens, provider
   credentials, or unrelated configuration.
 
+## Where a scenario starts
+
+A route-free open no longer rests on an overview. It lands in a **Space chat**:
+the last top-level Space this history used, or the ordinary Space named **Home**
+when it has none. Every scenario begins from that landing, checks that the
+composer separately labels its Space recipient, Task focus and worker pairing,
+and then creates its own Space chat through the ordinary creation control.
+The bootstrapped Home Space is part of the isolated store and is never the
+Thread a scenario talks to.
+
+## Reading a turn
+
+A finished turn rests as one **run card** that states its own outcome: a status
+mark, an announced outcome word, and the reply itself. The card's trace opens
+inside it and holds one row per step — the Agent's program cells and the tool
+calls they made, as peers in arrival order.
+
+Inside one turn exactly one step's payload panel is open at a time, so evidence
+for several calls in the same turn is opened and captured one call at a time.
+Steps in different turns are independent and may be read together.
+
 ## Driving and waiting
 
 - Use actual controls. DOM injection, client-store mutation, direct tool calls,
@@ -50,8 +71,9 @@ surfaces is a failure even if each surface looks internally consistent.
   whether work finished.
 - Screenshots accompany assertions; they do not replace them. Capture every
   named checkpoint with the relevant rows scrolled into view.
-- Individual tool payloads may expand in place. A whole-turn disclosure hiding
-  reasoning, tool calls, or results fails the inline chronology contract.
+- Individual step payloads may expand in place, in the shared panel below the
+  run of rows they belong to. A whole-turn disclosure hiding reasoning, tool
+  calls, or results fails the inline chronology contract.
 
 ## Abort and report
 

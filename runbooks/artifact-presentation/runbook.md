@@ -18,6 +18,12 @@ ordinary Artifact preview and a Thread showcase at desktop and phone widths.
 
 ## Scenario
 
+The route-free open lands in the bootstrapped **Home** Space chat, with Space,
+Focus and Worker separately labelled in the composer; the scenario creates its
+own Space chat and works there. All four `artifacts.create` calls belong to one
+turn, which shares one payload panel, so each call is opened and captured in
+its own right.
+
 Use isolated disposable Host data and the production web build. Create real
 HTML, Markdown, SVG, and Solid artifacts with distinctive leading whitespace,
 HTML-looking text, and a trailing newline. Do not use port 3076.
@@ -48,3 +54,24 @@ For each format in the ordinary viewer and showcase:
 Capture one desktop and one phone screenshot with the Source mode selected in
 each surface, plus machine-readable assertions for content equality, focus,
 non-execution, reset/refresh behavior, downloads, and viewport overflow.
+
+## Judged run — 2026-09-20
+
+Source `ed16130`, provider `codex`, model `gpt-5.6-sol` variant `medium`, one
+model turn. Evidence: `presentation-run3/artifact-presentation`. Objective
+result: **ABORT**, at the reasoning-integrity gate. Judged verdict: **FAIL — a
+product fault in how consecutive reasoning blocks are rendered**.
+
+| Item | Verdict | What passed it |
+|---|---|---|
+| Space chat landing | PASS | `result.json` `landedSpaceChatId: 1`; the scenario's own Space chat opened empty on all three surfaces with `schemaVersion 14` |
+| Four real creations | PASS | exactly four `artifacts_create` `tool_start`/`tool_done` pairs, all `ok`, and exactly four `artifact_upsert` frames |
+| Exact stored formats | PASS | SQLite: `html`/null/null, `markdown`/null/null, `image`/`image/svg+xml`/null, `solid`/null/null, each with the exact content including its leading space and trailing newline |
+| Rendered trace | PASS | `10-created-formats-call-*.png` show the run card's steps — one Agent code cell and four `artifacts_create` rows in arrival order, each with its own content summary, `ok` mark and duration — matching the canonical events exactly |
+| Per-call payload | PASS | each call was opened in turn and its `tool_start.input` and `tool_done.result` text appeared in the shared panel for that call id |
+| Reasoning integrity | **FAIL** | the turn streamed three separate reasoning blocks (`**Clarifying artifacts.create usage constraints**`, `**Preparing precise artifacts.create calls**`, `**Ensuring content formatting with spacing and newlines**`). They are concatenated with no separator, so the Owner reads one unbroken run — `Clarifying artifacts.create usage constraintsPreparing precise artifacts.create callsEnsuring content formatting with spacing and newlines` (`10-created-formats-call-0.png`) — and the adjoining `**` markers form `****`, which destroys the emphasis |
+| Presentation sweep | NOT REACHED | the run aborted before the desktop and phone Rendered/Source sweep |
+
+**Aggregate.** Creation, storage and the trace are truthful. The turn's thinking
+is not: three distinct thoughts are presented as one sentence. That is a
+rendering fault, not a runbook expectation that drifted.

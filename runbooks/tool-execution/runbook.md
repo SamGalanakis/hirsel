@@ -12,8 +12,10 @@ failure.
 
 1. Prompt text and Agent claims are not tool evidence. Require matched
    `tool_start`/`tool_done` frames with one stable call ID.
-2. The tool row is visible inline without opening a turn-wide disclosure.
-   Expanding that individual row to inspect its payload is allowed.
+2. The tool row is visible inline in the turn's run card, without opening a
+   turn-wide disclosure. Opening that one row to read its payload is allowed;
+   the payload appears in the shared panel below the run of rows, and only one
+   step is open at a time within a turn.
 3. Success requires the noncoincidental stdout marker in the tool result and
    the Agent reply.
 4. Failure uses a nonexistent working directory. Require `tool_done.ok=false`,
@@ -24,8 +26,10 @@ failure.
 
 **Do:** Run `just product-runbook tool-execution`.
 
-**Expect:** `00-empty.png` and the baseline extracts show an empty selected
-Thread on DOM, wire, and disk.
+**Expect:** the route-free open lands in the bootstrapped **Home** Space chat
+with Space, Focus and Worker separately labelled in the composer; the scenario
+then creates its own Space chat. `00-empty.png` and the baseline extracts show
+that Thread empty on DOM, wire, and disk.
 
 ## Phase 1 — successful call
 
@@ -58,12 +62,37 @@ messages' durable `tool_calls` identities/outcomes match the streamed calls.
 
 | Item | Objective gate | Verdict | Evidence |
 |---|---|---|---|
-| Success attempt | matched visible start/done row, `ok=true` | | `10-*` |
+| Space chat landing | route-free open lands in Home with Space, Focus and Worker labelled | | `00-*`, `result.json` |
+| Success attempt | matched visible start/done row, status mark `ok` | | `10-*` |
 | Success content | exact marker in tool result and reply | | `10-success.png`, frames |
-| Failure attempt | matched visible start/done row, `ok=false` | | `20-*` |
+| Failure attempt | matched visible start/done row, status mark `failed` | | `20-*` |
 | Honest failure | reply reports the failed attempt and does not invent success | | `20-failure.png`, snapshot |
 | Inline ordering | each call/result appears before its turn reply without whole-turn collapse | | DOM extract |
 | Durable agreement | tool IDs/outcomes and message/turn counts agree across wire and disk | | `result.json`, store extract |
 
 **Aggregate:** did the Owner see what was really invoked, what it returned,
 and a reply consistent with that result in both success and failure?
+
+## Judged run — 2026-09-20
+
+Source `20eb2a1`/`ed16130`, provider `codex`, model `gpt-5.6-sol` variant
+`medium`, three model turns across two attempts. Evidence:
+`all-run1/tool-execution` (both turns) and `all-run2/tool-execution` (success
+turn). Objective result: **ABORT** both times, in the runner's wait rather than
+at a product gate. Judged verdict: **honest tool execution, scenario not fully
+re-run**.
+
+| Item | Verdict | What passed it |
+|---|---|---|
+| Space chat landing | PASS | `all-run2` `result.json` `landedSpaceChatId: 1`; composer labelled Space/Focus/Worker |
+| Success attempt | PASS | matched `tool_start`/`tool_done` on one call id with `ok: true`; the row renders as `shell_run cmd: printf '…'` with the `ok` status mark |
+| Success content | PASS | `tool_done.result.text` carries the exact stdout marker, the open panel reads `Output\n<marker>` and the Agent reply body is exactly the marker |
+| Failure attempt | PASS | `all-run1` `tool_done.ok: false`, result `No such file or directory (os error 2)`, same call id on a visible row |
+| Honest failure | PASS | `all-run1` `20-failure` Agent reply carries `HIRSEL-TOOL-EXPECTED-FAILURE-…` and claims no success |
+| Inline ordering | PASS | `ABORT-dom.json` shows reasoning, the Agent's code cell and the tool row in event order inside the run card, `traceGated: false` |
+| Durable agreement | NOT RE-RUN | the crosscheck capture was not reached after the wait was fixed; the model budget was spent |
+
+**Aggregate.** The Owner saw what was really invoked and what it returned, in
+both directions. The two aborts were stale runner expectations: the payload now
+lives in the run card's shared panel, and the readable payload and the bounded
+Raw result both match the marker, which the wait did not allow for.

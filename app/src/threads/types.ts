@@ -64,6 +64,25 @@ export interface ThreadActivity {
   data: unknown;
   ts: string;
 }
+export interface ThreadChange {
+  change_id: number;
+  thread_id: number;
+  thread_title: string;
+  state_revision: number;
+  before_headline: string;
+  after_headline: string;
+  cause: string;
+  source_space_id: number;
+  source_space_title: string;
+  created_at: string;
+}
+export interface ThreadChangeDigest { through_change_id: number; changes: ThreadChange[]; has_more: boolean }
+export interface ThreadTurnContext {
+  turn_id: number;
+  context: { changes?: ThreadChangeDigest; [key: string]: unknown };
+  through_change_id: number;
+  consumed_at: string | null;
+}
 export type ThreadEffectKind = "created" | "sent_to" | "delegated" | "read" | "edited" | "refused";
 export type ThreadEffectTarget = { kind: "thread"; thread_id: number } | { kind: "artifact"; artifact_id: number } | { kind: "root" };
 export interface ThreadEffectRefusal { reason: string; grant_summary: string; detail: string }
@@ -111,6 +130,7 @@ export interface ThreadDetail {
   next_effects_before?: number | null;
   turn_timelines: ThreadTurnTimeline[];
   activities: ThreadActivity[];
+  accepted_context?: ThreadTurnContext | null;
   has_more: boolean;
 }
 export type ThreadServerMessage =

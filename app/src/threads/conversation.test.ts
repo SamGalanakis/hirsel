@@ -61,6 +61,15 @@ it("renders the exact current scheduled digest payload as an owner-facing chrono
   expect(conversationEntries({...emptyHistory(),activities:[activity]}).map(row=>row.key)).toEqual(['activity-9']);
 });
 
+it("coalesces an updated outside-change activity by durable identity", async () => {
+  const { activityText, ownerFacingActivity } = await import("./conversation");
+  const first = { artifact_ids: [], id: 17, thread_id: 1, turn_id: null, kind: "outside_change", data: { text: "Changed by Finance · 1 update" }, ts: ts(2) };
+  const updated = { ...first, data: { text: "Changed by Finance · 2 updates" } };
+  expect(ownerFacingActivity(updated)).toBe(true);
+  expect(activityText(updated)).toBe("Changed by Finance · 2 updates");
+  expect(conversationEntries({ ...emptyHistory(), activities: [first, updated] }).map(row => row.key)).toEqual(["activity-17"]);
+});
+
 it("positions cancelled queued background work by acceptance without inventing a start", () => {
   const cancelled: ThreadTurn = { ...turn(9, null, null), state: "cancelled", accepted_at: ts(2), started_at: null, finished_at: ts(4) };
   const history = { ...emptyHistory(), messages: [message(1, "owner"), message(3, "agent")], turns: [cancelled] };

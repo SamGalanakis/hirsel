@@ -32,7 +32,7 @@ export function activityText(activity: ThreadActivity): string {
   const kind = activity.kind.replace(/^plugin\./, "");
   if (kind === "refusal") return refusalText(data);
   if (kind === "archived") return archivedText(data);
-  const fields = kind === "child_report" ? [data.summary] : kind === "delegation_received" ? [data.brief] : kind === "info" || kind === "summary" ? [data.description, data.content_md] : kind === "process_completed" ? [data.summary] : kind === "scheduled_digest" ? [data.text] : [];
+  const fields = kind === "child_report" ? [data.summary] : kind === "delegation_received" ? [data.brief] : kind === "info" || kind === "summary" ? [data.description, data.content_md] : kind === "process_completed" ? [data.summary] : kind === "scheduled_digest" || kind === "outside_change" ? [data.text] : [];
   return fields.filter((value): value is string => typeof value === "string" && value.length > 0).join("\n\n");
 }
 export function ownerFacingActivity(activity: ThreadActivity): boolean { return activity.kind === "child_report" || activity.kind === "delegation_received" || activity.artifact_ids.length > 0 || activityText(activity).length > 0; }
@@ -61,7 +61,8 @@ export function conversationEntries(history: ThreadHistory): ConversationEntry[]
     positioned.push({ entry: { key: `turn-${turn.id}`, kind: "turn", turn }, time, order: 1 });
   }
   const visibleTurns = new Set([...finals.values()].filter(turn => loaded.has(turn.agent_message_id!)).map(turn => turn.id).concat(unfinished.map(turn => turn.id)));
-  for (const activity of history.activities) {
+  const activities = [...new Map(history.activities.map(activity => [activity.id, activity])).values()];
+  for (const activity of activities) {
     if (!inPage(activity.ts) || (activity.turn_id !== null && !visibleTurns.has(activity.turn_id))) continue;
     if (ownerFacingActivity(activity) || activity.turn_id === null) positioned.push({ entry: { key: `activity-${activity.id}`, kind: "activity", activity }, time: instant(activity.ts), order: 2 });
   }

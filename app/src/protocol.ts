@@ -503,8 +503,8 @@ export interface ProcessActionAppliedMsg {
  * `code_start.code` is the FULL source (rendered as code, not condensed);
  * `truncated` marks the rare cell clipped at the host's 64 KiB safety cap. */
 export type TurnEvent =
-  | { kind: "prose"; text: string }
-  | { kind: "reasoning"; text: string }
+  | { kind: "prose"; text: string; block_id?: string }
+  | { kind: "reasoning"; text: string; block_id?: string }
   | { kind: "tool_start"; id: string; name: string; summary: string | null; input: TurnEventPayload | null }
   | { kind: "tool_done"; id: string; name: string; ok: boolean; summary: string | null; result: TurnEventPayload | null }
   | { kind: "code_start"; id: string; language: string; code: string; truncated: boolean }

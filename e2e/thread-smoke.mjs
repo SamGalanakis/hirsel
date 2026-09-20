@@ -26,6 +26,18 @@ async function expectLifecycle(page, label) {
   await page.getByRole("menuitem", { name: label, exact: true }).waitFor();
   await page.keyboard.press("Escape");
 }
+async function expectSeparatedReasoning(page) {
+  const card = page.locator('[data-slot="run-card"]').last();
+  const header = card.locator('[data-slot="run-card-header"]');
+  if (await header.getAttribute("aria-expanded") === "false") await header.click();
+  const rows = card.locator('[data-slot="timeline-reasoning"]');
+  await rows.nth(1).waitFor();
+  const text = (await rows.allTextContents()).map(value => value.trim());
+  if (JSON.stringify(text) !== JSON.stringify([
+    "Inspecting the first boundary.",
+    "Preparing the second boundary.",
+  ])) throw new Error(`Reasoning blocks were not rendered separately: ${JSON.stringify(text)}`);
+}
 async function projectChat(page) {
   const rail = page.getByRole("button", { name: "Space chat", exact: true });
   if (await rail.isVisible()) await rail.click();
@@ -79,6 +91,7 @@ try {
     if (viewport.width < 1024) await page.getByRole("button", { name: "Send", exact: true }).click();
     else await page.locator("textarea").press("Enter");
     await page.getByRole("article", { name: "Hirsel", exact: true }).filter({ hasText: "scripted Agent mode" }).waitFor();
+    await expectSeparatedReasoning(page);
     const ownedMessages = await poll("owned message frames", () => {
       const messages = frames.filter(frame => frame.type === "msg" && frame.message.thread_id === threadId).map(frame => frame.message);
       return messages.some(message => message.author === "owner" && message.body === body)
@@ -93,6 +106,7 @@ try {
     await chooseLifecycle(page, "Mark Task done");
     await expectLifecycle(page, "Reopen Task");
     await page.reload();
+    await expectSeparatedReasoning(page);
     await expectLifecycle(page, "Reopen Task");
     await chooseLifecycle(page, "Reopen Task");
     await expectLifecycle(page, "Mark Task done");

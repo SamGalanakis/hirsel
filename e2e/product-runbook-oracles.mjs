@@ -18,12 +18,12 @@ export function contiguousTextBlocks(events) {
   let active = null;
   for (const [index, { event }] of events.entries()) {
     if ((event.kind === "prose" || event.kind === "reasoning") && event.text) {
-      if (active?.kind === event.kind && active.lastIndex === index - 1) {
+      if (active?.kind === event.kind && active.blockId === event.block_id && active.lastIndex === index - 1) {
         active.text += event.text;
         active.lastIndex = index;
         active.eventCount += 1;
       } else {
-        active = { kind: event.kind, text: event.text, firstIndex: index, lastIndex: index, eventCount: 1 };
+        active = { kind: event.kind, ...(event.block_id === undefined ? {} : { blockId: event.block_id }), text: event.text, firstIndex: index, lastIndex: index, eventCount: 1 };
         blocks.push(active);
       }
     } else {
@@ -50,12 +50,12 @@ export function renderedTimelineExpectation(events) {
     if (event.kind === "prose" || event.kind === "reasoning") {
       if (!event.text) continue;
       const previous = rows.at(-1);
-      if (previous?.slot === `timeline-${event.kind}` && previous.lastIndex === index - 1) {
+      if (previous?.slot === `timeline-${event.kind}` && previous.blockId === event.block_id && previous.lastIndex === index - 1) {
         previous.rawText += event.text;
         previous.text = renderedMarkdownText(previous.rawText);
         previous.lastIndex = index;
       } else {
-        rows.push({ slot: `timeline-${event.kind}`, toolCallId: null, codeId: null, rawText: event.text, text: renderedMarkdownText(event.text), lastIndex: index });
+        rows.push({ slot: `timeline-${event.kind}`, toolCallId: null, codeId: null, ...(event.block_id === undefined ? {} : { blockId: event.block_id }), rawText: event.text, text: renderedMarkdownText(event.text), lastIndex: index });
       }
     } else if (event.kind === "tool_start" || (event.kind === "tool_done" && !toolRows.has(event.id))) {
       rows.push({ slot: "timeline-tool", toolCallId: event.id, codeId: null });
@@ -71,7 +71,7 @@ export function renderedTimelineExpectation(events) {
       codeRows.add(event.id);
     }
   }
-  const rawReply = events.slice(activityEnd).map(({ event }) => event.kind === "prose" ? event.text : "").join("");
+  const rawReply = contiguousTextBlocks(events.slice(activityEnd)).map(block => block.text).join("\n\n");
   return { rows, rawReply, reply: rawReply ? renderedMarkdownText(rawReply) : "" };
 }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TurnEvent } from "../../protocol";
 import type { TimelineEvent } from "../../store/types";
-import { buildTimeline, isReasoningTail, timelineTools } from "./timeline";
+import { buildTimeline, isReasoningTail, splitStreamingReply, timelineTools } from "./timeline";
 
 function evs(...events: TurnEvent[]): TimelineEvent[] {
   return events.map((event, i) => ({ seq: i + 1, event }));
@@ -12,6 +12,30 @@ describe("buildTimeline (fold)", () => {
     const items = buildTimeline(evs({ kind: "prose", text: "Hello " }, { kind: "prose", text: "world" }));
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ kind: "prose", text: "Hello world" });
+  });
+
+  it("keeps adjacent reasoning blocks separate while joining chunks within each block", () => {
+    const items = buildTimeline(evs(
+      { kind: "reasoning", block_id: "reasoning-1", text: "**First " },
+      { kind: "reasoning", block_id: "reasoning-1", text: "thought.**" },
+      { kind: "reasoning", block_id: "reasoning-2", text: "**Second thought.**" },
+    ));
+
+    expect(items).toMatchObject([
+      { kind: "reasoning", text: "**First thought.**" },
+      { kind: "reasoning", text: "**Second thought.**" },
+    ]);
+  });
+
+  it("keeps provisional prose blocks distinct in the streaming reply", () => {
+    const split = splitStreamingReply(evs(
+      { kind: "prose", block_id: "prose-1", text: "First " },
+      { kind: "prose", block_id: "prose-1", text: "paragraph." },
+      { kind: "prose", block_id: "prose-2", text: "Second paragraph." },
+    ));
+
+    expect(split.activity).toEqual([]);
+    expect(split.reply).toBe("First paragraph.\n\nSecond paragraph.");
   });
 
   it("splits the prose block at a tool_start and reopens after it", () => {

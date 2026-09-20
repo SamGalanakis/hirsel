@@ -76,7 +76,9 @@ private fun InstrumentNode(node: Any?, fields: MutableMap<String, String>, enabl
 internal fun StreamTimeline(eventsJson: String) {
     val events = remember(eventsJson) { runCatching { JSONArray(eventsJson) }.getOrDefault(JSONArray()) }
     val colors = LocalHirselColors.current
-    val prose = buildString { repeat(events.length()) { i -> events.optJSONObject(i)?.let { if (it.optString("kind") == "prose") append(it.optString("text")) } } }
+    val reasoning = timelineText(events, "reasoning")
+    if (reasoning.isNotEmpty()) Text(reasoning, color = colors.MutedForeground)
+    val prose = timelineText(events, "prose")
     if (prose.isNotEmpty()) Text(prose, color = colors.Foreground)
     repeat(events.length()) { i -> events.optJSONObject(i)?.let { event ->
         val label = when (event.optString("kind")) {
@@ -88,4 +90,35 @@ internal fun StreamTimeline(eventsJson: String) {
         }
         label?.let { Text(it, color = colors.MutedForeground) }
     } }
+}
+
+internal data class TimelineTextEvent(val kind: String, val text: String, val blockId: String?)
+
+private fun timelineText(events: JSONArray, kind: String): String = timelineText(
+    (0 until events.length()).mapNotNull { index ->
+        events.optJSONObject(index)?.let { event ->
+            TimelineTextEvent(
+                kind = event.optString("kind"),
+                text = event.optString("text"),
+                blockId = event.takeIf { it.has("block_id") }?.optString("block_id")
+            )
+        }
+    },
+    kind
+)
+
+internal fun timelineText(events: List<TimelineTextEvent>, kind: String): String {
+    val blocks = mutableListOf<Pair<String?, StringBuilder>>()
+    var adjacent = false
+    events.forEach { event ->
+        if (event.kind != kind) {
+            adjacent = false
+            return@forEach
+        }
+        val last = blocks.lastOrNull()
+        if (adjacent && last != null && last.first == event.blockId) last.second.append(event.text)
+        else blocks += event.blockId to StringBuilder(event.text)
+        adjacent = true
+    }
+    return blocks.joinToString("\n\n") { it.second.toString() }
 }

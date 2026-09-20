@@ -98,3 +98,16 @@ test("contiguous reasoning blocks retain exact repeated content for integrity ch
   assert.equal(hasExactAdjacentDuplicate(reasoning[0].text), true);
   assert.equal(hasExactAdjacentDuplicate(reasoning[1].text), false);
 });
+
+test("canonical text blocks separate block identities but join chunks within a block", () => {
+  const blocks = contiguousTextBlocks([
+    { seq: 1, event: { kind: "reasoning", block_id: "first", text: "**First " } },
+    { seq: 2, event: { kind: "reasoning", block_id: "first", text: "thought.**" } },
+    { seq: 3, event: { kind: "reasoning", block_id: "second", text: "**Second thought.**" } },
+  ]);
+
+  assert.deepEqual(blocks.map(({ kind, text }) => ({ kind, text })), [
+    { kind: "reasoning", text: "**First thought.**" },
+    { kind: "reasoning", text: "**Second thought.**" },
+  ]);
+});

@@ -25,8 +25,8 @@ export type StepStatus =
  * a tool row carries its start summary plus its `status`, which holds the done
  * result once it resolves. */
 export type TimelineItem =
-  | { kind: "prose"; key: string; text: string }
-  | { kind: "reasoning"; key: string; text: string }
+  | { kind: "prose"; key: string; text: string; blockId?: string }
+  | { kind: "reasoning"; key: string; text: string; blockId?: string }
   | {
       kind: "tool";
       key: string;
@@ -68,9 +68,9 @@ type StepItem = Extract<TimelineItem, { status: StepStatus }>;
 /**
  * Fold ordered timeline events into interleaved items, exactly in `seq` order:
  *
- * - Consecutive same-kind prose/reasoning deltas accumulate into one block/run;
- *   any change of kind (including a tool_start) closes the current block, and a
- *   later prose delta opens a new one.
+ * - Consecutive same-kind prose/reasoning deltas with the same optional block
+ *   identity accumulate into one block/run. A changed identity or kind closes
+ *   it. Legacy events have no identity and retain the old contiguous behavior.
  * - `tool_start` inserts a tool row at its position; `tool_done` resolves the
  *   matching-`id` row in place (spinner → ok/fail + result). A `tool_done` with
  *   no matching open row (e.g. a reconnect mid-turn dropped the start) is not
@@ -98,6 +98,20 @@ export interface StreamingSplit {
   reply: string;
 }
 
+function joinTextRun(events: TimelineEvent[], kind: "prose" | "reasoning"): string {
+  let text = "";
+  let blockId: string | undefined;
+  let hasBlock = false;
+  for (const { event } of events) {
+    if (event.kind !== kind) continue;
+    if (hasBlock && blockId !== event.block_id) text += "\n\n";
+    text += event.text;
+    blockId = event.block_id;
+    hasBlock = true;
+  }
+  return text;
+}
+
 /**
  * Split a running turn's events into activity and the in-flight reply.
  *
@@ -118,7 +132,7 @@ export function splitStreamingReply(events: TimelineEvent[]): StreamingSplit {
   const trailing = events.slice(start);
   return {
     activity: events.slice(0, start),
-    reply: trailing.map(({ event }) => (event.kind === "prose" ? event.text : "")).join(""),
+    reply: joinTextRun(trailing, "prose"),
   };
 }
 
@@ -204,10 +218,10 @@ export function buildTimeline(events: TimelineEvent[]): TimelineItem[] {
       case "prose":
       case "reasoning": {
         const last = items[items.length - 1];
-        if (last && last.kind === event.kind) {
+        if (last && last.kind === event.kind && last.blockId === event.block_id) {
           last.text += event.text;
         } else {
-          items.push({ kind: event.kind, key: `${event.kind}-${seq}`, text: event.text });
+          items.push({ kind: event.kind, key: `${event.kind}-${seq}`, text: event.text, blockId: event.block_id });
         }
         break;
       }

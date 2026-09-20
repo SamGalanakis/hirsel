@@ -181,6 +181,64 @@ fn effect_snapshot_requested_before_live_projection_cannot_restore_stale_actions
 }
 
 #[test]
+fn reconnect_refreshes_a_pending_open_before_its_authoritative_effect_snapshot() {
+    let mut store = LocalStore::default();
+    store.apply_hello_ok("A".into(), vec![thread(5)], vec![], "test".into());
+    store.upsert_turn(turn(10, 5, ThreadTurnState::Running));
+    store.track_pending(
+        "reconnect-open".into(),
+        PendingOp::OpenThread { thread_id: 5 },
+    );
+    store.replace_turn_effects(
+        10,
+        vec![effect(
+            1,
+            10,
+            9,
+            vec![EffectAction::Stop {
+                thread_id: 9,
+                turn_id: 99,
+            }],
+        )],
+    );
+
+    let frames = crate::transport::reconnect_pending_opens(&mut store);
+    assert_eq!(
+        frames,
+        vec![ClientToHost::OpenThread {
+            client_id: "reconnect-open".into(),
+            thread_id: 5,
+            before_id: None,
+            effects_before: None,
+        }]
+    );
+    let authoritative = effect(1, 10, 9, vec![]);
+    assert!(store.apply_detail(
+        "reconnect-open",
+        ThreadDetail {
+            related_items: vec![],
+            grants: vec![],
+            brief: hirsel_proto::ThreadBrief {
+                text: String::new(),
+                artifact_ids: vec![],
+            },
+            thread: thread(5),
+            messages: vec![],
+            turns: vec![turn(10, 5, ThreadTurnState::Completed)],
+            effects: vec![authoritative.clone()],
+            next_effects_before: None,
+            turn_timelines: vec![hirsel_proto::ThreadTurnTimeline {
+                turn_id: 10,
+                events: vec![],
+            }],
+            activities: vec![],
+            has_more: false,
+        }
+    ));
+    assert_eq!(store.effects, vec![authoritative]);
+}
+
+#[test]
 fn older_thread_detail_without_effects_defaults_to_empty() {
     let detail = ThreadDetail {
         related_items: vec![],

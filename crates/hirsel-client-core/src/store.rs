@@ -253,6 +253,16 @@ impl LocalStore {
         self.pending_ops.insert(client_id, operation);
     }
 
+    pub(crate) fn refresh_pending_open_effect_generation(&mut self, client_id: &str) {
+        if matches!(
+            self.pending_ops.get(client_id),
+            Some(PendingOp::OpenThread { .. })
+        ) {
+            self.pending_effect_generations
+                .insert(client_id.to_string(), self.effect_generation);
+        }
+    }
+
     pub fn complete_pending(&mut self, client_id: &str) -> Option<PendingOp> {
         self.pending_effect_generations.remove(client_id);
         self.pending_ops.remove(client_id)

@@ -438,16 +438,7 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 frames.retain(|frame| {
                     !matches!(frame, hirsel_proto::ClientToHost::OpenThread { .. })
                 });
-                for (client_id, operation) in &store.pending_ops {
-                    if let PendingOp::OpenThread { thread_id } = operation {
-                        frames.push_back(hirsel_proto::ClientToHost::OpenThread {
-                            client_id: client_id.clone(),
-                            thread_id: *thread_id,
-                            before_id: None,
-                            effects_before: None,
-                        });
-                    }
-                }
+                frames.extend(reconnect_pending_opens(&mut store));
                 for thread_id in restore {
                     let client_id = uuid::Uuid::new_v4().to_string();
                     store.track_pending(client_id.clone(), PendingOp::OpenThread { thread_id });
@@ -699,6 +690,29 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
     if changed {
         client.notify_snapshot();
     }
+}
+
+pub(crate) fn reconnect_pending_opens(store: &mut crate::store::LocalStore) -> Vec<ClientToHost> {
+    let opens = store
+        .pending_ops
+        .iter()
+        .filter_map(|(client_id, operation)| match operation {
+            PendingOp::OpenThread { thread_id } => Some((client_id.clone(), *thread_id)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    opens
+        .into_iter()
+        .map(|(client_id, thread_id)| {
+            store.refresh_pending_open_effect_generation(&client_id);
+            ClientToHost::OpenThread {
+                client_id,
+                thread_id,
+                before_id: None,
+                effects_before: None,
+            }
+        })
+        .collect()
 }
 
 fn notify_protocol_error(inner: &Weak<ClientInner>, detail: String) {

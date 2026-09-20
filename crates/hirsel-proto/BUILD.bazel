@@ -8,6 +8,8 @@ load(
     "hirsel_rust_unit_test",
 )
 
+load("@rules_rust//rust:defs.bzl", "rust_doc")
+
 package(default_visibility = ["//visibility:public"])
 
 hirsel_rust_library(
@@ -20,6 +22,12 @@ hirsel_rust_library(
     manifest_dir = "crates/hirsel-proto",
     package_name = "hirsel-proto",
     version = "0.1.0",
+)
+
+rust_doc(
+    name = "hirsel-proto__doc",
+    crate = ":hirsel-proto",
+    testonly = True,
 )
 
 hirsel_rust_unit_test(

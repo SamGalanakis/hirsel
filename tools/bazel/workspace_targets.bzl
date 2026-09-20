@@ -46,6 +46,16 @@ WORKSPACE_CLIPPY_TARGETS = [
     "//crates/hirsel-proto:hirsel-proto__unit_test",
 ]
 
+WORKSPACE_DOC_TARGETS = [
+    "//crates/hirsel-client-core:hirsel-client-core__doc",
+    "//crates/hirsel-client-ffi:hirsel-client-ffi__doc",
+    "//crates/hirsel-drivers:hirsel-drivers__doc",
+    "//crates/hirsel-host:hirsel-host__doc",
+    "//crates/hirsel-plugin-api:hirsel-plugin-api__doc",
+    "//crates/hirsel-plugins:hirsel-plugins__doc",
+    "//crates/hirsel-proto:hirsel-proto__doc",
+]
+
 WORKSPACE_RUST_SOURCE_TARGETS = [
     "//crates/hirsel-client-core:rust_sources",
     "//crates/hirsel-client-ffi:rust_sources",

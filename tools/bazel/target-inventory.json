@@ -6,6 +6,7 @@
   "packages": [
     {
       "declared_features": [],
+      "doc": "//crates/hirsel-client-core:hirsel-client-core__doc",
       "manifest": "crates/hirsel-client-core/Cargo.toml",
       "package": "hirsel-client-core",
       "resolved_features": [],
@@ -33,6 +34,7 @@
       "declared_features": [
         "bindgen-cli"
       ],
+      "doc": "//crates/hirsel-client-ffi:hirsel-client-ffi__doc",
       "manifest": "crates/hirsel-client-ffi/Cargo.toml",
       "package": "hirsel-client-ffi",
       "resolved_features": [],
@@ -65,6 +67,7 @@
     },
     {
       "declared_features": [],
+      "doc": "//crates/hirsel-drivers:hirsel-drivers__doc",
       "manifest": "crates/hirsel-drivers/Cargo.toml",
       "package": "hirsel-drivers",
       "resolved_features": [],
@@ -84,6 +87,7 @@
     },
     {
       "declared_features": [],
+      "doc": "//crates/hirsel-host:hirsel-host__doc",
       "manifest": "crates/hirsel-host/Cargo.toml",
       "package": "hirsel-host",
       "resolved_features": [],
@@ -142,6 +146,7 @@
     },
     {
       "declared_features": [],
+      "doc": "//crates/hirsel-plugin-api:hirsel-plugin-api__doc",
       "manifest": "crates/hirsel-plugin-api/Cargo.toml",
       "package": "hirsel-plugin-api",
       "resolved_features": [],
@@ -161,6 +166,7 @@
     },
     {
       "declared_features": [],
+      "doc": "//crates/hirsel-plugins:hirsel-plugins__doc",
       "manifest": "crates/hirsel-plugins/Cargo.toml",
       "package": "hirsel-plugins",
       "resolved_features": [],
@@ -180,6 +186,7 @@
     },
     {
       "declared_features": [],
+      "doc": "//crates/hirsel-proto:hirsel-proto__doc",
       "manifest": "crates/hirsel-proto/Cargo.toml",
       "package": "hirsel-proto",
       "resolved_features": [],

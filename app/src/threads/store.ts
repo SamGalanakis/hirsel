@@ -45,7 +45,7 @@ export function routeThreadId(path = location.pathname + location.search): numbe
   return link?.kind === "thread" && link.target.history_id === historyId() ? link.target.thread_id : null;
 }
 /** Resolve a copied link only against the authoritative connected history. */
-export function followThreadLocation(authoritativeHistory: string | null = historyId()): void {
+export function followThreadLocation(authoritativeHistory: string | null = historyId(), reconcileSelection = false): void {
   const link = parseThreadLink(location.pathname + location.search);
   if (!link) {
     if (!threadState.ready || !authoritativeHistory) { focusThread(null, false); return; }
@@ -70,18 +70,23 @@ export function followThreadLocation(authoritativeHistory: string | null = histo
   // Canonicalise the shorthand in place, so copying the address now yields a
   // link that survives leaving this history.
   if (link.kind === "local") history.replaceState(null, "", threadPath(target!));
-  focusThread(target!.thread_id, false, authoritativeHistory);
+  focusThread(target!.thread_id, false, authoritativeHistory, reconcileSelection);
 }
 function openRouteFree(authoritativeHistory: string): void {
   const projectId = restoredProject(threadState.threads, authoritativeHistory);
   if (projectId !== null) {
     history.replaceState(null, "", threadPath({ kind: "thread", history_id: authoritativeHistory, thread_id: projectId }));
-    focusThread(projectId, false, authoritativeHistory);
+    focusThread(projectId, false, authoritativeHistory, true);
     return;
   }
+  const selection = selectionGeneration;
+  const routeIntent = location.pathname + location.search;
   setThreadState(draft => { draft.focusedId = null; draft.linkError = null; });
   void requestHomeProject(authoritativeHistory).then(home => {
-    if (historyId() !== authoritativeHistory) return;
+    if (historyId() !== authoritativeHistory
+      || selectionGeneration !== selection
+      || location.pathname + location.search !== routeIntent
+      || parseThreadLink(routeIntent) !== null) return;
     history.replaceState(null, "", threadPath({ kind: "thread", history_id: authoritativeHistory, thread_id: home.id }));
     focusThread(home.id, false, authoritativeHistory);
   }).catch(detail => {
@@ -176,7 +181,7 @@ export async function openThread(id: number, beforeId: number | null = null): Pr
     throw error;
   }
 }
-export function focusThread(id: number | null, updateUrl = true, currentHistory = historyId()): void {
+export function focusThread(id: number | null, updateUrl = true, currentHistory = historyId(), reconcileSelection = false): void {
   if (id !== null && (!threadState.ready || !currentHistory)) return;
   selectionGeneration++;
   setThreadState(draft => { draft["focusedId"] = id; });
@@ -186,7 +191,7 @@ export function focusThread(id: number | null, updateUrl = true, currentHistory 
     const thread = threadState.threads.find(candidate => candidate.id === id);
     const project = thread ? projectForThread(threadState.threads, id) : null;
     if (project) rememberProject(project.id, currentHistory);
-    if (thread?.parent_thread_id === null && thread.kind === "space") enterProject(thread.id);
+    if (thread?.parent_thread_id === null && thread.kind === "space") enterProject(thread.id, reconcileSelection);
     else if (thread) stepIntoWorker(threadState.threads, thread.id);
     if (sendFrame) void openThread(id).catch(() => {});
   }
@@ -301,7 +306,7 @@ export function handleThreadMessage(message: ServerMessage): void {
       setThreadState(draft => { reconcile(message.threads, "id")(draft["threads"]); draft.ready = true; });
       for (const pending of threadState.pending) if (!pending.failed) transmitMessage(pending);
       const route = parseThreadLink(location.pathname + location.search);
-      if (route) { followThreadLocation(message.history_id); break; }
+      if (route) { followThreadLocation(message.history_id, true); break; }
       openRouteFree(message.history_id);
       break;
     }

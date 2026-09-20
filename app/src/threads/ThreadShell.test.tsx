@@ -8,7 +8,7 @@ import { makeThread } from "./fixtures";
 import { installGlobalKeymap } from "../lib/keymap";
 import { closeThreadNavigation, recordThreadVisit } from "./navigation";
 import { closeThreadCreate } from "./create";
-import { resetProjects } from "../projects/store";
+import { projectState, resetProjects } from "../projects/store";
 import { attachThreadTransport, disconnectThreads, focusThread, handleThreadMessage, openThread, sendThreadMessage, setThreadState, threadState } from "./store";
 import type { ThreadClientMessage, ThreadTurn } from "./types";
 vi.mock("../ws/client", () => ({ getClient: () => ({ cancelTurn: vi.fn() }), makeClientId: () => crypto.randomUUID() }));
@@ -285,6 +285,29 @@ describe("thread workspace", () => {
       },
     })));
     expect(context).toHaveTextContent("FocusNone");
+  });
+  it("routes a root Task through Home and stages its focus without granting reach", async () => {
+    flush(() => setThreadState(draft => {
+      draft.threads = [makeThread(4, { title: "Root task", kind: "task", parent_thread_id: null, read: true })];
+      draft.histories[4] = {
+        brief: { text: "Root Task brief", artifact_ids: [] }, messages: [], turns: [], activities: [], loaded: true, hasMore: false,
+      };
+    }));
+    flush(() => focusThread(4));
+    const screen = render(() => <ThreadShell />);
+    fireEvent.click(screen.getByRole("button", { name: "Talk about this" }));
+    const request = sent.find(frame => frame.type === "ensure_home_project");
+    if (request?.type !== "ensure_home_project") throw new Error("missing Home request");
+    const home = makeThread(5, { title: "Home", kind: "space", parent_thread_id: null, read: true });
+    flush(() => handleThreadMessage({ type: "thread_created", client_id: request.client_id, thread: home }));
+
+    await waitFor(() => expect(threadState.focusedId).toBe(5));
+    expect(projectState).toMatchObject({
+      projectRecipientId: 5,
+      workerPairingId: null,
+      taskFocus: { task_thread_id: 4, snapshot: { title: "Root task", brief: "Root Task brief", instrument_summary: null } },
+    });
+    expect(screen.getByRole("textbox", { name: "Message project chat Home" })).toBeInTheDocument();
   });
   it("shows informational activity content within its owning thread without creating work", () => {
     flush(() => handleThreadMessage({ type: "thread_activity", activity: { artifact_ids: [], id: 9, thread_id: 1, turn_id: null, kind: "plugin.build_finished", data: { plugin: "build", payload: { message: "All checks passed." } }, ts: "2026-09-09T10:00:00Z" } }));

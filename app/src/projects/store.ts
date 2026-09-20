@@ -31,8 +31,12 @@ export function projectForThread(threads: Thread[], threadId: number): Thread | 
   return path.find(candidate => candidate.parent_thread_id === null && candidate.kind === "space") ?? null;
 }
 
-export function enterProject(projectId: number): void {
-  setProjectState(draft => { Object.assign(draft, { projectRecipientId: projectId, taskFocus: null, workerPairingId: null }); });
+export function enterProject(projectId: number, preserveStagedFocus = false): void {
+  setProjectState(draft => { Object.assign(draft, {
+    projectRecipientId: projectId,
+    taskFocus: preserveStagedFocus && draft.projectRecipientId === projectId ? draft.taskFocus : null,
+    workerPairingId: null,
+  }); });
 }
 
 export function stepIntoWorker(threads: Thread[], threadId: number): void {
@@ -62,9 +66,11 @@ function instrumentSummary(instrument: Thread["instrument"]): string | null {
   return boundedUtf8(summary, 2_000);
 }
 
-export function stageTaskFocus(threads: Thread[], threadId: number, brief: string): number | null {
+export function stageTaskFocus(threads: Thread[], threadId: number, brief: string, recipientId?: number): number | null {
   const task = threads.find(candidate => candidate.id === threadId && candidate.kind === "task");
-  const project = task ? projectForThread(threads, threadId) : null;
+  const project = recipientId === undefined
+    ? task ? projectForThread(threads, threadId) : null
+    : threads.find(candidate => candidate.id === recipientId && candidate.kind === "space" && candidate.parent_thread_id === null) ?? null;
   if (!task || !project) return null;
   setProjectState(draft => { Object.assign(draft, {
     projectRecipientId: project.id,

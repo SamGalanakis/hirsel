@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setHistoryId } from "../lib/history";
 import type { ThreadClientMessage } from "./types";
 import { makeThread } from "./fixtures";
+import { projectState, stageTaskFocus } from "../projects/store";
 import { attachThreadTransport, disconnectThreads, focusThread, handleThreadMessage, resetThreads, routeThreadId, setThreadState, threadState, followThreadLocation, sendThreadMessage } from "./store";
 const frames: ThreadClientMessage[] = [];
 const helloThreads = (threads: ReturnType<typeof makeThread>[]) => flush(() => handleThreadMessage({ type: "hello_ok", history_id: "ab123456-1234-5678-9abc-123456789abc", threads, processes: [], views: [], host_version: "test", model: null, subagent_models: null, prompts: null, providers: null }));
@@ -21,6 +22,19 @@ describe("explicit Thread selection", () => {
     hello([]); expect(threadState.focusedId).toBeNull(); expect(frames).toContainEqual(expect.objectContaining({type:"ensure_home_project"}));
     frames.length = 0;
     hello([0,1,2]); expect(threadState.focusedId).toBeNull(); expect(frames).toContainEqual(expect.objectContaining({type:"ensure_home_project"}));
+  });
+  it("keeps a newer selection when delayed Home bootstrap completes", async () => {
+    helloThreads([makeThread(2, { title: "Chosen project", kind: "space", parent_thread_id: null })]);
+    const request = frames.find(frame => frame.type === "ensure_home_project");
+    if (request?.type !== "ensure_home_project") throw new Error("missing Home request");
+    flush(() => focusThread(2));
+    const home = makeThread(3, { title: "Home", kind: "space", parent_thread_id: null });
+    flush(() => handleThreadMessage({ type: "thread_created", client_id: request.client_id, thread: home }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(threadState.threads).toContainEqual(home);
+    expect(threadState.focusedId).toBe(2);
+    expect(location.pathname).toBe("/t/2");
   });
   it("prioritizes an explicit ordinary zero route over saved and focused IDs", () => {
     localStorage.setItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc", "2");
@@ -72,6 +86,23 @@ describe("explicit Thread selection", () => {
     expect(threadState.focusedId).toBeNull(); expect(frames).toEqual([]);
     expect(()=>sendThreadMessage("test-history",2,"not yet","send",[],[],[])).toThrow("Reconnect");
     hello([1,2]); expect(threadState.focusedId).toBe(2); expect(frames).toContainEqual(expect.objectContaining({type:"open_thread",thread_id:2}));
+  });
+  it("preserves unsent Task focus when reconnecting to the same project route", () => {
+    const project = makeThread(1, { title: "Project", kind: "space", parent_thread_id: null });
+    const task = makeThread(2, { title: "Focused Task", kind: "task", parent_thread_id: 1 });
+    history.replaceState(null, "", "/t/1?history=ab123456-1234-5678-9abc-123456789abc");
+    helloThreads([project, task]);
+    flush(() => stageTaskFocus([project, task], task.id, "Unsent focus"));
+    const staged = projectState.taskFocus;
+
+    flush(disconnectThreads);
+    attachThreadTransport(frame => frames.push(frame));
+    helloThreads([project, task]);
+    expect(projectState.projectRecipientId).toBe(project.id);
+    expect(projectState.taskFocus).toEqual(staged);
+
+    flush(() => focusThread(project.id));
+    expect(projectState.taskFocus).toBeNull();
   });
 
   it("validates the first hello against its payload while the history signal is still pending",()=>{

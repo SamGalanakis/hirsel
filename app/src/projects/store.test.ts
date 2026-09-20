@@ -68,4 +68,20 @@ describe("project conversation state", () => {
       workerPairingId: null,
     });
   });
+
+  it("preserves staged focus only while reconciling the same recipient", () => {
+    flush(() => enterProject(1));
+    flush(() => stageTaskFocus(threads, 2, "Accepted brief"));
+    const staged = projectState.taskFocus;
+
+    flush(() => enterProject(1, true));
+    expect(projectState.taskFocus).toEqual(staged);
+
+    flush(() => enterProject(1));
+    expect(projectState.taskFocus).toBeNull();
+
+    flush(() => stageTaskFocus(threads, 2, "Accepted brief"));
+    flush(() => enterProject(9, true));
+    expect(projectState).toMatchObject({ projectRecipientId: 9, taskFocus: null });
+  });
 });

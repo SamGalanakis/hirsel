@@ -55,7 +55,7 @@ The web renders pills outside the collapsible trace, including during running
 work and for failed or empty-final turns. Refused Thread pills reuse Reach and
 spell out subtree scope without retrying the operation. `owner_fence` offers no
 ineffective ordinary grant, and artifact refusals do not invent an owning
-project. This adds no authority beyond ADR 0022.
+Space. This adds no authority beyond ADR 0022.
 
 ## Material state and headlines
 
@@ -75,4 +75,4 @@ Reserved for slice 6. The board and derived status remain projections of durable
 
 ## Supersession
 
-This amends ADR 0016: top-level Space conversations are the Owner's Space-chat landing, and later state delivery/joins supersede automatic parent follow-up per report. It amends ADR 0017 by making an explicitly stored focus snapshot another reference into existing durable material, never a second owner or transcript. It does not supersede ADR 0023: one Native execution surface and the universal tool profile remain authoritative. ADRs 0018, 0020 and 0022 remain authoritative for topology, executor events and reach; in particular, ADR 0022 remains the sole authority model.
+This amends ADR 0016: top-level Space conversations are the Owner's Space-chat landing, and later state delivery/joins supersede automatic parent follow-up per report. It amends ADR 0017 by making an explicitly stored focus snapshot another reference into existing durable material, never a second owner or transcript. It does not supersede ADR 0023: one Native execution surface and the universal tool surface remain authoritative. ADRs 0018, 0020 and 0022 remain authoritative for topology, executor events and reach; in particular, ADR 0022 remains the sole authority model.

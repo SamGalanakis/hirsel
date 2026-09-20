@@ -38,5 +38,5 @@ Remediation preserves this ADR's authority. An `outside_grant` Thread pill may
 open the existing Reach dialog and explains that the grant covers the target's
 whole subtree; granting never retries the refused call. An `owner_fence` pill
 explains that an ordinary subtree grant cannot open the fence and offers none.
-An artifact refusal guesses no owning project or grant. Existing grants remain
+An artifact refusal guesses no owning Space or grant. Existing grants remain
 revocable through Reach.

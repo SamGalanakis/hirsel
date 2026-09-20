@@ -31,7 +31,7 @@ function RefusalHelp(props: { effect: ThreadEffect }) {
     <Show when={refusal()?.reason === "owner_fence"} fallback={<Show when={target().kind === "artifact"} fallback={<Show when={target().kind === "thread"} fallback={<p>This attempted everything (root). Review Reach to grant or revoke access to the whole history. Granting never retries the refused operation.</p>}><>
       <p>Reach would cover this Thread and everything below it. Granting never retries the refused operation.</p>
       <Show when={threadTargetId()}>{targetId => <Show when={grantHeld(props.effect.receipt.turn_id, targetId())}><p>That subtree is now granted; Reach also lets you revoke it.</p></Show>}</Show>
-    </></Show>}><p>Artifacts have no owning project to guess. Share an explicit artifact reference instead.</p></Show>}>
+    </></Show>}><p>Artifacts have no owning Space to guess. Share an explicit artifact reference instead.</p></Show>}>
       <p>This is an ancestor fence. An ordinary subtree grant cannot open it; only existing root reach can.</p>
     </Show>
     <Show when={grantable()}><button type="button" class={`${actionClass} mt-2`} onClick={() => reviewRefusedReach(props.effect.receipt.turn_id, threadTargetId() ?? undefined)}>Review reach</button></Show>

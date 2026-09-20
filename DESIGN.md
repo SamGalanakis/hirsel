@@ -79,7 +79,7 @@ states one receipt fact and may carry only actions the Host currently projects
 as true; every action has a 44px target and names exact work. Refused pills
 explain remediation in plain words: a Thread grant covers that Thread and its
 subtree, an ancestor fence has no ordinary-grant action, and an artifact has no
-project guessed on its behalf. Grant and revoke use the existing Reach dialog,
+owning Space guessed on its behalf. Grant and revoke use the existing Reach dialog,
 and granting never silently retries work.
 
 Every label over a group anywhere — a form field, a run's Steps, the inventory's bands, the queue's sections, the palette's groups, Settings headings — is one `SectionLabel` (`app/src/components/ui/section-label.tsx`): sentence case, `text-meta`, medium, muted (attention-toned where it names what waits); `uppercase` is not in the type vocabulary and `scripts/check-static.sh` refuses it. Thread Info is a pane inside the same frame, not a separate sheet. Every label in it is that same label, and each fact's pencil sits directly after its value, not at the measure's far edge. It holds the Thread's own facts and the Owner's in-place edits: title, description and **Runs on**, which chooses a Native provider and model or a CLI agent — Native opens prefilled with the installation's default, so what is saved is always explicit, and a Thread that never chose reads as that same resolved Native route. Each edit is revision-guarded and settles only when the Host's revision advances.

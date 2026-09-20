@@ -49,7 +49,7 @@ try {
     expected: "thread_created",
   });
 
-  const composer = page.getByRole("textbox", { name: "Message project chat Home", exact: true });
+  const composer = page.getByRole("textbox", { name: "Message Space chat Home", exact: true });
   async function sendFixture(body, label) {
     const offset = frames.length;
     await composer.fill(body);

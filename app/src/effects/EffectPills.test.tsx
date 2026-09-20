@@ -22,7 +22,7 @@ const receive = (effects: ThreadEffect[]) => flush(() => handleEffectMessage({ t
 
 beforeEach(() => flush(() => {
   setHistoryId(history); resetEffects(); resetGrants(); closeThreadReach();
-  setThreadState(draft => { draft.ready = true; draft.threads = [makeThread(1, { title: "Project", kind: "space" }), makeThread(2, { title: "Billing", kind: "task", parent_thread_id: null })]; });
+  setThreadState(draft => { draft.ready = true; draft.threads = [makeThread(1, { title: "Operations", kind: "space" }), makeThread(2, { title: "Billing", kind: "task", parent_thread_id: null })]; });
 }));
 afterEach(() => { cleanup(); closeThreadReach(); });
 
@@ -59,10 +59,10 @@ describe("effect pills", () => {
     expect(screen.queryByRole("button", { name: "Review reach" })).toBeNull();
   });
 
-  it("does not guess a project for an artifact refusal", () => {
+  it("does not guess a Space for an artifact refusal", () => {
     receive([refused({ kind: "artifact", artifact_id: 44 })]);
     render(() => <EffectPills turnId={10} />);
-    expect(screen.getByText(/no owning project to guess/i)).toBeInTheDocument();
+    expect(screen.getByText(/no owning Space to guess/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Review reach" })).toBeNull();
   });
 });

@@ -1,5 +1,7 @@
 # 0017: Explicit global artifacts with conversation references
 
+> **Amended 2026-09-20:** [ADR 0025](0025-project-chats-material-state-and-coordination-delivery.md) adds a bounded Task-focus snapshot to an Owner message. Like an artifact reference, focus supplies explicit context without becoming a transcript, changing message ownership or widening reach.
+
 Status: Accepted (2026-09-09)
 
 The Owner wants reusable results alongside the conversation, created deliberately by the Agent. Executor's explicit create/edit/list/show workflow is the reference; its React runtime and backend tool bridge are excluded.

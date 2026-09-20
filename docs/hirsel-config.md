@@ -13,16 +13,16 @@ address, regardless of its ephemeral source port. Hirsel does not trust
 a shared proxy therefore share one WebSocket authentication-throttle history
 unless a future trusted-proxy contract explicitly provides client identity.
 
-The Host runs addressed Thread conversations plus current subagent, Lash process, trigger, and fork-triage resources. Native execution is one TypeScript RLM session with process and trigger abilities, carrying the full Thread tool set and the four coding operations together. Registered processes and subscriptions live in per-Thread Lash stores; Hirsel projects them into the scoped Processes view and turns wakes and terminal results into conversation messages. There are no side-session compatibility flags or Event/Ping APIs.
+The Host runs addressed Thread conversations plus current subagent, Lash process, trigger, and fork-triage resources. Native execution is one TypeScript RLM session with process and trigger abilities. Worker profiles carry the full Thread tool set and coding operations; top-level Space project chats carry the coordination/inspection profile and cannot select CLI execution. Registered processes and subscriptions live in per-Thread Lash stores; Hirsel projects them into the scoped Processes view and turns wakes and terminal results into conversation messages. There are no side-session compatibility flags or Event/Ping APIs.
 
-History lives in `hirsel.sqlite`. New stores use the complete current schema 8
+History lives in `hirsel.sqlite`. New stores use the complete current schema 14
 layout. Startup accepts that exact layout or an empty store and refuses every
 other layout before modification. Back up the data directory before replacing
 an older store. Configuration in `hirsel.toml`, auth/identity, plugins and
 project files remain independent. See `e2e/thread-protocol/runbook.md` for
 current validation and operator retention requirements.
 
-Schema 12 keeps Thread icons, execution preferences and process deliveries. Its
+Schema 14 keeps Thread icons, execution preferences, process deliveries and bounded message Task focus. `message_task_focus` links one accepted Owner message to a reachable Task and stores an object snapshot; `meta['project_chat:home_thread_id']` points to the idempotently bootstrapped Home Space. Its
 CHECKs link terminal states to completion timestamps and enforce absent starts
 for queued work and actual starts for running work. Immutable `accepted_at`
 records acceptance separately. Instruments use SQL NULL for absence; nonempty
@@ -32,7 +32,7 @@ activity reference; activity ids provide ordering and the activity holds the
 report payload. Schema 8 also binds every push token to its authenticated device, restricts
 platforms to supported values, and loads delivery targets only for unrevoked
 devices. Each agent role keeps one typed SessionProfile JSON meta row.
-There is no in-place migration: schema 7 and obsolete layouts stamped 8
+There is no in-place migration: older schema versions and obsolete or branch-specific layouts
 require backup and fresh-data handling before this build can start.
 
 Schema 5 added the append-only `thread_turn_events` timeline. The Host commits

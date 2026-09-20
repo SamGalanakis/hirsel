@@ -15,26 +15,29 @@ Their live queued, needs-input, and request-error states remain visible. Space
 and Task identity, nesting, root pinning, and the selected conversation remain
 legible at desktop and phone widths.
 
-Archiving the selected Thread returns to the unaddressed overview only after the
-Host accepts the action. Its conversation and unsent draft remain intact; the
-Thread is discoverable under Archived and can be explicitly reopened. Browsing
-Archived and unarchiving do not silently choose a different recipient. The
-drawer header and New Space/New Task controls remain distinct, unclipped, and
-at least 44px tall at 320px, 390px, and desktop widths.
+Archiving a selected worker returns to its project chat only after the Host
+accepts the action. Archiving a selected project forgets it and lands in the
+idempotent Home project. The archived Thread's conversation and unsent draft
+remain intact; it is discoverable under Archived and can be explicitly reopened.
+Browsing Archived and unarchiving do not silently change the project recipient,
+Task focus, or worker pairing. The drawer header and New Space/New Task controls
+remain distinct, unclipped, and at least 44px tall at 320px, 390px, and desktop
+widths.
 
 ## Isolated no-model check
 
 This scenario creates and changes the core hierarchy through the production web
 controls against a fresh isolated Host store on an unused non-3076 port. It
 reconciles each checkpoint with authenticated WebSocket snapshots and SQLite,
-including IDs, kinds, parentage, revisions, completion, and pinning. It reloads
+including IDs, kinds, parentage, revisions, completion, pinning, and the owning
+project chat. It reloads
 after Task completion, conversion, and pinning. The scripted/fake service makes
 no provider call.
 
 Before the fixture-only layer, the runner also sends a unique conversation
 marker through the real composer, leaves a second unique draft unsent, archives
-that selected Thread through its action menu, and reconciles the overview route,
-remembered selection, browser draft, authenticated history, Archived inventory,
+that selected Thread through its action menu, and reconciles the project-chat landing,
+remembered project, browser draft, authenticated history, Archived inventory,
 explicit archived selection, unarchive behavior, and SQLite row. Empty and
 populated drawer states are measured and captured together at 320px, 390px, and
 desktop widths; the measurements cover header overlap, utility and creation
@@ -70,8 +73,8 @@ that Space avatars read as softly square and Task avatars as round; the kind
 labels and selected context are easy to scan; hierarchy remains readable; the
 pinned Task appears once; Task completion and conversion controls use clear
 language; both invalid conversions show an understandable error without losing
-the selected conversation; the archive returns to the overview while preserving
-history and draft and remains explicitly reopenable; and queued plus needs-input
+the selected conversation; the archive returns to the owning project chat while
+preserving history and draft and remains explicitly reopenable; and queued plus needs-input
 state remains visible on the Space while completion controls are absent. Confirm
 from the empty and populated layout JSON that the header groups do not overlap,
 all measured controls are at least 44px, both creation labels remain visible and

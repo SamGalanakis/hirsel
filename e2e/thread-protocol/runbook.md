@@ -6,12 +6,12 @@ The supported wire contract is [app/PROTOCOL.md](../../app/PROTOCOL.md). Hello u
 
 Automated current gates:
 
-- `cargo test --workspace`: current schema rejection/initialization/reopen, Thread lifecycle/revisions/actions, pagination/mentions/attachments, artifacts/publication receipts, status timing, authenticated WebSocket/iroh, native offline queue/reconnect/store-identity reset, model/provider/prompt edits, Lash process and subagent lifecycle, recovery/cancellation, terminal-delivery retries, fork triage, and push attention episodes.
+- `cargo test --workspace`: schema-14 rejection/initialization/reopen, Home bootstrap and Task-focus persistence/retry/reach refusal, role-specific tool profiles, Thread lifecycle/revisions/actions, pagination/mentions/attachments, artifacts/publication receipts, status timing, authenticated WebSocket/iroh, native offline queue/reconnect/store-identity reset, model/provider/prompt edits, Lash process and subagent lifecycle, recovery/cancellation, terminal-delivery retries, fork triage, and push attention episodes.
 - `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all -- --check`.
 - `bash android/build-native.sh`, then Android Kotlin compilation with the repository Android environment. Native clients must be rebuilt for this protocol; no old payload aliases remain.
 - Frontend tests and desktop/phone browser proof against the current candidate host. Test running turn N while N+1 is queued, current turn ownership after pagination, current scheduled_digest text, lifecycle/filter actions, views, explicit artifacts, and history A→B clearing pending transport requests with reachable plain-text draft recovery.
 
-Only use the isolated fixture for mutating tests. Exercise CreateThread/SendThreadMessage/ThreadAction with concrete IDs and generated-action revisions. Confirm process completion and meaningful activity timestamps, attachment roundtrip, per-Thread artifact discovery, and tagged cancellation. Validate repeated same-name tool calls remain distinct. Push tests use a recording/barrier sender, not real devices.
+Only use the isolated fixture for mutating tests. Exercise EnsureHomeProject/CreateThread/SendThreadMessage/ThreadAction with concrete IDs and generated-action revisions. Confirm Home is idempotent and ungranted, focus is bounded and cannot cross reach, process completion and meaningful activity timestamps, attachment roundtrip, per-Thread artifact discovery, and tagged cancellation. Validate repeated same-name tool calls remain distinct. Push tests use a recording/barrier sender, not real devices.
 
 Real-provider semantic checks (explicit opt-in): multi-turn recall before/after restart, continuation/compaction, subagent completion/abandonment, process-trigger wake triage, cancellation and later queue recovery. These use the same current Thread protocol; they are not a compatibility suite and are not run by the deterministic gate.
 

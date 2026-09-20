@@ -52,8 +52,8 @@ Thread metadata. Related edits do not change factual activity time, attention,
 read state or execution state. Human broadcasts contain the complete current
 list even when an agent's tool result hides inaccessible Thread references.
 
-Current store schema 12 includes Related receipts, typed symbol/image Thread
-icons, the optional showcased artifact, and Lash process delivery receipts and
+Current store schema 14 includes Related receipts, typed symbol/image Thread
+icons, the optional showcased artifact, message Task focus, and Lash process delivery receipts and
 Thread authority in its canonical layout, with no `monitors` table. Startup
 accepts that exact layout or an empty store. Older and altered layouts, including
 the earlier branch-specific schema 7 layouts, require an offline replacement with

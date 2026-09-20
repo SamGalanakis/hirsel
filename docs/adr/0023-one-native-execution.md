@@ -2,6 +2,8 @@
 
 Accepted 2026-09-13.
 
+> **Amended 2026-09-20:** [ADR 0025](0025-project-chats-material-state-and-coordination-delivery.md) retains one Native session but gives it a captured role-specific tool profile. Project chats coordinate without coding, shell, direct sub-agent or execution-capable plugin tools; workers keep this ADR's full surface.
+
 A Thread runs on exactly one of three backends: **Native**, the **Claude CLI**,
 or the **Codex CLI**. Native is Hirsel's own RLM session on one provider
 instance and one model. The earlier distinction between a coordinator session

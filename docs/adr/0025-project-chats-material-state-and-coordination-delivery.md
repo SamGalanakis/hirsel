@@ -30,32 +30,7 @@ Navigation remains `threads/store.ts::focusedId`; it grants none of the three me
 
 ## Storage and protocol
 
-Schema 14 added `message_task_focus(message_id PK/FK chat_messages, task_thread_id FK threads, snapshot_json TEXT NOT NULL CHECK object)`. `TaskFocus` is optional on `SendThreadMessage` and `ChatMessage`. Client-core carries it through pending state, retry, reconnect and confirmed snapshots; FFI callers that do not support focus send `None`.
-
-## Durable effects
-
-Schema 15 adds `thread_effect_receipts`. Every accepted-turn Thread or artifact
-create, send, delegation, read, edit or refusal records a receipt in the same
-transaction as its effect. Identity is `(turn_id, operation_id, effect_index)`:
-two actual probes remain two facts, while replay of one operation does not
-duplicate either its activity or receipt. Targets are closed Thread, artifact
-or root variants and preserve an attempted inaccessible identifier. Refusal
-details exist exactly for refused effects.
-
-`ThreadDetail.effects` reloads receipts for its bounded turn page and
-`ThreadEffectsChanged` publishes a complete live projection for one source
-turn through the existing turn-ingest sequencing barrier. Receipts are durable
-facts. Open, Archive, Cancel queued and Stop are current Host projections,
-refreshed as the target changes rather than persisted as promises. The new
-Owner-only `CancelThreadTurn` operation carries the history, exact target
-Thread and turn, and expected state, with a correlated acknowledgement; it can
-therefore stop delegation work without guessing from an Owner message.
-
-The web renders pills outside the collapsible trace, including during running
-work and for failed or empty-final turns. Refused Thread pills reuse Reach and
-spell out subtree scope without retrying the operation. `owner_fence` offers no
-ineffective ordinary grant, and artifact refusals do not invent an owning
-Space. This adds no authority beyond ADR 0022.
+Schema 14 adds `message_task_focus(message_id PK/FK chat_messages, task_thread_id FK threads, snapshot_json TEXT NOT NULL CHECK object)`. `TaskFocus` is optional on `SendThreadMessage` and `ChatMessage`. Client-core carries it through pending state, retry, reconnect and confirmed snapshots; FFI callers that do not support focus send `None`.
 
 ## Material state and headlines
 
@@ -100,4 +75,4 @@ Reserved for slice 6. The board and derived status remain projections of durable
 
 ## Supersession
 
-This amends ADR 0016: top-level Space conversations are the Owner's Space-chat landing, and later state delivery/joins supersede automatic parent follow-up per report. It amends ADR 0017 by making an explicitly stored focus snapshot another reference into existing durable material, never a second owner or transcript. It does not supersede ADR 0023: one Native execution surface and the universal tool surface remain authoritative. ADRs 0018, 0020 and 0022 remain authoritative for topology, executor events and reach; in particular, ADR 0022 remains the sole authority model.
+This amends ADR 0016: top-level Space conversations are the Owner's Space-chat landing, and later state delivery/joins supersede automatic parent follow-up per report. It amends ADR 0017 by making an explicitly stored focus snapshot another reference into existing durable material, never a second owner or transcript. It does not supersede ADR 0023: one Native execution surface and the universal tool profile remain authoritative. ADRs 0018, 0020 and 0022 remain authoritative for topology, executor events and reach; in particular, ADR 0022 remains the sole authority model.

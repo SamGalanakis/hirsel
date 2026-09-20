@@ -201,22 +201,15 @@ CREATE TABLE thread_effect_receipts (
     effect_index INTEGER NOT NULL CHECK(effect_index >= 0),
     tool TEXT NOT NULL,
     effect TEXT NOT NULL CHECK(effect IN ('created','sent_to','delegated','read','edited','refused')),
-    target_json TEXT NOT NULL CHECK(COALESCE(
+    target_json TEXT NOT NULL CHECK(
         json_type(target_json)='object' AND
         ((json_extract(target_json,'$.kind')='thread' AND json_type(target_json,'$.thread_id')='integer' AND json_extract(target_json,'$.thread_id')>0 AND json_remove(target_json,'$.kind','$.thread_id')='{}') OR
          (json_extract(target_json,'$.kind')='artifact' AND json_type(target_json,'$.artifact_id')='integer' AND json_extract(target_json,'$.artifact_id')>0 AND json_remove(target_json,'$.kind','$.artifact_id')='{}') OR
          (json_extract(target_json,'$.kind')='root' AND json_remove(target_json,'$.kind')='{}'))
-    ,0)),
+    ),
     target_turn_id INTEGER REFERENCES thread_turns(id),
     request_client_id TEXT,
-    refusal_json TEXT CHECK(COALESCE(
-        refusal_json IS NULL OR
-        (json_type(refusal_json)='object' AND
-         json_type(refusal_json,'$.reason')='text' AND
-         json_type(refusal_json,'$.grant_summary')='text' AND
-         json_type(refusal_json,'$.detail')='text' AND
-         json_remove(refusal_json,'$.reason','$.grant_summary','$.detail')='{}')
-    ,0)),
+    refusal_json TEXT CHECK(refusal_json IS NULL OR json_type(refusal_json)='object'),
     created_at TEXT NOT NULL,
     CHECK((effect='refused')=(refusal_json IS NOT NULL)),
     UNIQUE(turn_id,operation_id,effect_index)

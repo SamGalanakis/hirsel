@@ -364,8 +364,6 @@ pub(crate) struct LashAgentRuntime {
     pub(super) process_notify: Arc<Notify>,
     pub(super) pump_lock: Mutex<()>,
     pub(super) request_lock: Mutex<()>,
-    #[cfg(test)]
-    pub(super) admission_binding_gate: AdmissionBindingGate,
     pub(super) anchors: Arc<Mutex<TurnAnchorState>>,
     pub(super) timeline_commits: TimelineCommitBarrier,
     pub(super) drain_seq: AtomicU64,
@@ -383,36 +381,6 @@ pub(crate) struct LashAgentRuntime {
     pub(super) fork_wake: crate::fork_wake::ForkWakeHandle,
     pub(super) trigger_store: Arc<dyn TriggerStore>,
     pub(super) last_processes: Mutex<HashMap<String, hirsel_proto::ProcessInfo>>,
-}
-
-#[cfg(test)]
-#[derive(Default)]
-pub(super) struct AdmissionBindingGate {
-    armed: AtomicBool,
-    running: Notify,
-    resume: Notify,
-}
-
-#[cfg(test)]
-impl AdmissionBindingGate {
-    pub(super) fn arm(&self) {
-        self.armed.store(true, Ordering::Release);
-    }
-
-    pub(super) async fn wait_until_running(&self) {
-        self.running.notified().await;
-    }
-
-    pub(super) fn resume(&self) {
-        self.resume.notify_one();
-    }
-
-    pub(super) async fn pause_before_binding(&self) {
-        if self.armed.swap(false, Ordering::AcqRel) {
-            self.running.notify_one();
-            self.resume.notified().await;
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

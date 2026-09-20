@@ -581,16 +581,9 @@ async fn bounded_agent_history_cursor_reaches_all_collections_once() {
     }
     let mut cursor = None;
     let (mut messages, mut turns, mut activities) = (vec![], vec![], vec![]);
-    let mut page_index = 0;
     loop {
         let page = s
-            .scoped_thread_read(
-                &actor,
-                Some(&format!("paged-read-{page_index}")),
-                &ThreadRef::default(),
-                cursor,
-                2,
-            )
+            .scoped_thread_read(&actor, Some("paged-read"), &ThreadRef::default(), cursor, 2)
             .await
             .unwrap();
         assert!(page.messages.len() <= 2 && page.turns.len() <= 2 && page.activities.len() <= 2);
@@ -598,7 +591,6 @@ async fn bounded_agent_history_cursor_reaches_all_collections_once() {
         turns.extend(page.turns.iter().map(|t| t.id));
         activities.extend(page.activities.iter().map(|a| a.id));
         cursor = page.next_cursor;
-        page_index += 1;
         if cursor.is_none() {
             break;
         }
@@ -610,53 +602,6 @@ async fn bounded_agent_history_cursor_reaches_all_collections_once() {
             ids.len()
         );
     }
-}
-
-#[tokio::test]
-async fn scoped_thread_read_replay_binds_cursor_and_limit() {
-    let dir = tempfile::tempdir().unwrap();
-    let s = Storage::open(dir.path()).await.unwrap();
-    let root = thread(&s, "root", None).await;
-    let actor = caller(&s, root).await;
-    let first = s
-        .scoped_thread_read(&actor, Some("read-once"), &ThreadRef::default(), None, 2)
-        .await
-        .unwrap();
-    let changed_limit = s
-        .scoped_thread_read(&actor, Some("read-once"), &ThreadRef::default(), None, 3)
-        .await
-        .unwrap_err();
-    assert!(
-        changed_limit
-            .to_string()
-            .contains("invocation payload changed")
-    );
-    let changed_cursor = s
-        .scoped_thread_read(
-            &actor,
-            Some("read-once"),
-            &ThreadRef::default(),
-            Some(super::thread_read::ThreadReadCursor {
-                messages_before: Some(1),
-                turns_before: Some(1),
-                activities_before: Some(1),
-            }),
-            2,
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        changed_cursor
-            .to_string()
-            .contains("invocation payload changed")
-    );
-    assert_eq!(
-        s.scoped_thread_read(&actor, Some("read-once"), &ThreadRef::default(), None, 2)
-            .await
-            .unwrap()
-            .reference_url,
-        first.reference_url
-    );
 }
 
 #[tokio::test]

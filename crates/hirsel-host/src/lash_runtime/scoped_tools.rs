@@ -46,25 +46,15 @@ impl ScopedThreadTools {
     /// requester both see exactly what was tried. Distinct probes log distinct
     /// facts; transport replay of one operation reuses its original receipt.
     pub(crate) async fn execute(&self, name: &str, args: &Value) -> Result<Value, String> {
-        if let Some(result) = self
-            .tools
-            .storage()
-            .replayed_refusal(&self.caller, &self.operation_id, name, args)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            return Ok(result);
-        }
         match self.dispatch(name, args).await {
             Ok(value) => Ok(value),
             Err(ToolError::Message(message)) => Err(message),
-            Err(ToolError::Refused(refusal)) => self.refuse(name, args, refusal).await,
+            Err(ToolError::Refused(refusal)) => self.refuse(name, refusal).await,
         }
     }
     async fn refuse(
         &self,
         name: &str,
-        args: &Value,
         refusal: crate::storage::OutsideGrant,
     ) -> Result<Value, String> {
         let storage = self.tools.storage();
@@ -81,7 +71,7 @@ impl ScopedThreadTools {
             "detail": refusal.to_string(),
         });
         let activity = storage
-            .record_refusal(&self.caller, &self.operation_id, name, args, &result)
+            .record_refusal(&self.caller, &self.operation_id, name, &result)
             .await
             .map_err(|e| e.to_string())?;
         self.tools.publish_thread_activity(activity).await;
@@ -364,7 +354,7 @@ impl ScopedThreadTools {
             "artifacts_list" => {
                 let under = self.resolve(args, "thread").await?;
                 let artifacts = storage
-                    .scoped_artifacts(&self.caller, Some(&self.operation_id), under, Some(args))
+                    .scoped_artifacts(&self.caller, Some(&self.operation_id), under)
                     .await
                     .map_err(ToolError::from)?;
                 Ok(json!({"artifacts":artifacts}))

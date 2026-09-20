@@ -337,7 +337,6 @@ impl Client {
             client_id: client_id.clone(),
             thread_id,
             before_id,
-            effects_before: None,
         });
         SendReceipt { client_id }
     }
@@ -368,7 +367,6 @@ impl Client {
             client_id: client_id.clone(),
             thread_id,
             before_id: None,
-            effects_before: None,
         });
         drop(store);
         Some(SendReceipt { client_id })

@@ -2,7 +2,7 @@
 
 Accepted 2026-09-13.
 
-Every Thread-addressing agent tool accepts any Thread or artifact ID. Naming an ID is never an error and never a lie: the Host either performs the call or returns a typed refusal the model can read — `{refused: true, reason, target, tool, grant_summary}` — as an ordinary tool result rather than a transport error. Each actual refusal probe writes exactly one durable `refusal` activity in the Thread that tried it, so two distinct probes in one turn are two facts. Transport replay of one operation is idempotent rather than a new probe. The web conversation renders the activity as a ConversationNote; the Owner sees what was attempted and why it did not land.
+Every Thread-addressing agent tool accepts any Thread or artifact ID. Naming an ID is never an error and never a lie: the Host either performs the call or returns a typed refusal the model can read — `{refused: true, reason, target, tool, grant_summary}` — as an ordinary tool result rather than a transport error. Each refusal writes exactly one durable `refusal` activity in the Thread that tried it, with no deduplication, so two probes in one turn are two facts. The web conversation renders them as ConversationNotes; the Owner sees what was attempted and why it did not land.
 
 Reach is durable, visible data. A Thread's default reach is itself and its descendants. `thread_grants(thread_id, target_thread_id, granted_by, granted_by_thread_id, granted_at, note)` widens it: the named Thread and its whole subtree become addressable, exactly as the default subtree is. Reach is one-way — the target gains nothing — and a grant that merely restates the default is refused rather than stored. Only the Owner, through the `grant_thread_reach` and `revoke_thread_reach` client ops, or a strict ancestor, through the `threads.grant` and `threads.revoke` tools, may change a Thread's reach. An ancestor can only hand on reach it already holds, and it can never widen itself. Narrowing needs no reach of its own: an ancestor may remove any grant, including one the Owner made.
 
@@ -25,18 +25,3 @@ Reach moved out of the conversation. It changes rarely, so the always-visible st
 ## Amendment, 2026-09-14: root reaches every level
 
 Root means everything, in every direction. A Thread that holds a root grant addresses every Thread at every level — ancestors as well as peers and descendants — through `threads.send` and `threads.delegate` alike. The owner fence is unchanged for every Thread without root: it still reports to its requester rather than messaging upward, and the refusal still reads `owner_fence`. One helper, `thread_scope::owner_fence`, decides it for both the send and the delegation path, so the two can never disagree. No wire type, schema or refusal reason changes.
-
-## Amendment, 2026-09-20: refusal effect pills
-
-Schema 15 atomically pairs every refusal activity with a refused effect receipt
-for the accepted source turn. The receipt retains the exact attempted Thread,
-artifact or root target and refusal explanation. This is durable provenance,
-not inference from tool telemetry. The reply renders it as an effect pill even
-while running, after failure, without a final Agent message and after reload.
-
-Remediation preserves this ADR's authority. An `outside_grant` Thread pill may
-open the existing Reach dialog and explains that the grant covers the target's
-whole subtree; granting never retries the refused call. An `owner_fence` pill
-explains that an ordinary subtree grant cannot open the fence and offers none.
-An artifact refusal guesses no owning Space or grant. Existing grants remain
-revocable through Reach.

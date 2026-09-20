@@ -3,16 +3,14 @@ import type { ServerMessage } from "../protocol";
 import { openArtifact } from "../artifacts/store";
 import { openThreadReach } from "../grants/reach";
 import { historyId } from "../lib/history";
-import { focusThread, openThread, threadAction, threadState } from "../threads/store";
+import { focusThread, threadAction, threadState } from "../threads/store";
 import type { EffectAction, ThreadClientMessage, ThreadEffect, ThreadTurn } from "../threads/types";
 
 interface TurnEffects { threadId: number; effects: ThreadEffect[] }
-interface EffectState { turns: Record<number, TurnEffects>; errors: Record<number, string> }
-export const [effectState, setEffectState] = createStore<EffectState>({ turns: {}, errors: {} });
-let projectionGeneration = 0;
-const turnProjectionGeneration = new Map<number, number>();
+interface EffectState { turns: Record<number, TurnEffects>; error: string | null }
+export const [effectState, setEffectState] = createStore<EffectState>({ turns: {}, error: null });
 let transport: ((frame: ThreadClientMessage) => void) | null = null;
-const pending = new Map<string, { history: string; threadId: number; turnId: number; sourceTurnId?: number; timer: ReturnType<typeof setTimeout> }>();
+const pending = new Map<string, { history: string; threadId: number; turnId: number; timer: ReturnType<typeof setTimeout> }>();
 
 export function attachEffectTransport(send: (frame: ThreadClientMessage) => void): void { transport = send; }
 export function disconnectEffects(): void {
@@ -22,30 +20,21 @@ export function disconnectEffects(): void {
 }
 export function resetEffects(): void {
   disconnectEffects();
-  projectionGeneration++;
-  turnProjectionGeneration.clear();
-  setEffectState(draft => { draft.turns = {}; draft.errors = {}; });
+  setEffectState(draft => { draft.turns = {}; draft.error = null; });
 }
 export function effectsForTurn(turnId: number | undefined): ThreadEffect[] { return turnId === undefined ? [] : effectState.turns[turnId]?.effects ?? []; }
-export function effectErrorForTurn(turnId: number): string | undefined { return effectState.errors[turnId]; }
 export function effectSourceThreadId(turnId: number): number | undefined { return effectState.turns[turnId]?.threadId; }
 function sorted(effects: ThreadEffect[]): ThreadEffect[] {
   return [...effects].sort((a, b) => a.receipt.id - b.receipt.id);
 }
-/** Live frames are bounded deltas for one explicitly named turn. */
+/** A live frame is the complete current projection for one explicitly named turn. */
 export function replaceTurnEffects(threadId: number, turnId: number, effects: ThreadEffect[]): void {
-  turnProjectionGeneration.set(turnId, ++projectionGeneration);
-  setEffectState(draft => {
-    const byId = new Map((draft.turns[turnId]?.effects ?? []).map(effect => [effect.receipt.id, effect]));
-    for (const effect of effects) byId.set(effect.receipt.id, effect);
-    draft.turns[turnId] = { threadId, effects: sorted([...byId.values()]) };
-  });
+  setEffectState(draft => { draft.turns[turnId] = { threadId, effects: sorted(effects) }; });
 }
-export function beginEffectSnapshot(): number { return projectionGeneration; }
 /** A fetched page may race a live frame. Merge receipts for only the page's
  * turns without replacing a live projection or deleting an unrelated turn.
- * Live frames use `replaceTurnEffects`; reconnect pages remain authoritative. */
-export function mergeDetailEffects(threadId: number, turnIds: number[], effects: ThreadEffect[] = [], requestGeneration = projectionGeneration): void {
+ * Live frames use `replaceTurnEffects`, including authoritative empties. */
+export function mergeDetailEffects(threadId: number, turnIds: number[], effects: ThreadEffect[]): void {
   const groups = new Map<number, ThreadEffect[]>();
   for (const effect of effects) {
     const rows = groups.get(effect.receipt.turn_id) ?? [];
@@ -54,8 +43,7 @@ export function mergeDetailEffects(threadId: number, turnIds: number[], effects:
   setEffectState(draft => {
     for (const turnId of new Set(turnIds)) {
       const byId = new Map((draft.turns[turnId]?.effects ?? []).map(effect => [effect.receipt.id, effect]));
-      const snapshotIsCurrent = (turnProjectionGeneration.get(turnId) ?? 0) <= requestGeneration;
-      for (const effect of groups.get(turnId) ?? []) if (snapshotIsCurrent || !byId.has(effect.receipt.id)) byId.set(effect.receipt.id, effect);
+      for (const effect of groups.get(turnId) ?? []) if (!byId.has(effect.receipt.id)) byId.set(effect.receipt.id, effect);
       draft.turns[turnId] = { threadId, effects: sorted([...byId.values()]) };
     }
   });
@@ -63,15 +51,7 @@ export function mergeDetailEffects(threadId: number, turnIds: number[], effects:
 function finish(clientId: string, error?: string): void {
   const request = pending.get(clientId); if (!request) return;
   clearTimeout(request.timer); pending.delete(clientId);
-  if (request.history !== historyId()) return;
-  if (request.sourceTurnId !== undefined) setEffectState(draft => {
-    if (error) draft.errors[request.sourceTurnId!] = error;
-    else delete draft.errors[request.sourceTurnId!];
-  });
-  if (error && request.sourceTurnId !== undefined) {
-    const source = effectState.turns[request.sourceTurnId];
-    if (source) void openThread(source.threadId).catch(() => {});
-  }
+  if (error && request.history === historyId()) setEffectState(draft => { draft.error = error; });
 }
 export function handleEffectMessage(message: ServerMessage): void {
   if (message.type === "thread_effects_changed") {
@@ -84,16 +64,13 @@ export function handleEffectMessage(message: ServerMessage): void {
     finish(message.client_id, message.detail);
   }
 }
-function cancelExact(history: string, action: Extract<EffectAction, {kind:"cancel_queued"|"stop"}>, expectedState: ThreadTurn["state"], sourceTurnId?: number): void {
-  if (!transport || historyId() !== history) {
-    if (sourceTurnId !== undefined) setEffectState(draft => { draft.errors[sourceTurnId] = "Reconnect before cancelling this turn."; });
-    return;
-  }
+function cancelExact(history: string, action: Extract<EffectAction, {kind:"cancel_queued"|"stop"}>, expectedState: ThreadTurn["state"]): void {
+  if (!transport || historyId() !== history) { setEffectState(draft => { draft.error = "Reconnect before cancelling this turn."; }); return; }
   const clientId = crypto.randomUUID();
-  pending.set(clientId, { history, threadId: action.thread_id, turnId: action.turn_id, sourceTurnId, timer: setTimeout(() => finish(clientId, "Cancellation timed out. Reload and try again."), 20_000) });
+  pending.set(clientId, { history, threadId: action.thread_id, turnId: action.turn_id, timer: setTimeout(() => finish(clientId, "Cancellation timed out. Reload and try again."), 20_000) });
   transport({ type: "cancel_thread_turn", client_id: clientId, history_id: history, thread_id: action.thread_id, turn_id: action.turn_id, expected_state: expectedState });
 }
-export function runEffectAction(action: EffectAction, sourceTurnId?: number): void {
+export function runEffectAction(action: EffectAction): void {
   const history = historyId(); if (!history) return;
   if (action.kind === "open") {
     if (action.target.kind === "thread") focusThread(action.target.thread_id);
@@ -101,7 +78,7 @@ export function runEffectAction(action: EffectAction, sourceTurnId?: number): vo
   } else if (action.kind === "archive") {
     const thread = threadState.threads.find(candidate => candidate.id === action.thread_id);
     if (thread && !thread.archived_at) threadAction(history, thread.id, "archive", {}, thread.revision);
-  } else cancelExact(history, action, action.kind === "stop" ? "running" : "queued", sourceTurnId);
+  } else cancelExact(history, action, action.kind === "stop" ? "running" : "queued");
 }
 export function reviewRefusedReach(sourceTurnId: number, targetThreadId?: number): void {
   const source = effectState.turns[sourceTurnId];

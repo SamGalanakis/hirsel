@@ -293,22 +293,11 @@ impl Storage {
         caller: &super::ThreadCaller,
         operation_id: Option<&str>,
         under: u64,
-        operation_input: Option<&serde_json::Value>,
     ) -> anyhow::Result<Vec<ArtifactSummary>> {
         let mut c = self.conn.lock().await;
         let tx = c.transaction()?;
         super::thread_scope::validate_caller(&tx, caller)?;
         super::thread_scope::authorize(&tx, caller.thread_id, under)?;
-        let invocation = operation_input
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({"tool":"artifacts_list","under":under}));
-        if let Some(operation_id) = operation_id
-            && let Some(artifacts) =
-                super::thread_effects::replay(&tx, caller, operation_id, &invocation)?
-        {
-            tx.commit()?;
-            return Ok(artifacts);
-        }
         let ids=tx.prepare("WITH RECURSIVE scope(id) AS (SELECT id FROM threads WHERE id=?1 UNION ALL SELECT t.id FROM threads t JOIN scope s ON t.parent_thread_id=s.id) SELECT r.artifact_id FROM message_artifacts r JOIN chat_messages m ON m.id=r.message_id JOIN scope s ON s.id=m.thread_id UNION SELECT r.artifact_id FROM activity_artifacts r JOIN thread_activities a ON a.id=r.activity_id JOIN scope s ON s.id=a.thread_id UNION SELECT t.showcased_artifact_id FROM threads t JOIN scope s ON s.id=t.id WHERE t.showcased_artifact_id IS NOT NULL ORDER BY 1")?.query_map([under],|r|r.get::<_,u64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let artifacts = ids
             .into_iter()
@@ -339,7 +328,6 @@ impl Storage {
                     },
                 )?;
             }
-            super::thread_effects::remember(&tx, caller, operation_id, &invocation, &artifacts)?;
         }
         tx.commit()?;
         Ok(artifacts)

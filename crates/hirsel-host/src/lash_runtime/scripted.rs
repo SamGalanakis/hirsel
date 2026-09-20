@@ -36,25 +36,16 @@ pub(super) struct ScriptedActiveTurn {
     pub(super) cancel: lash::CancellationToken,
 }
 
-impl ScriptedQueueState {
-    fn cancellation_for(
-        &self,
-        turn_id: Option<u64>,
-    ) -> anyhow::Result<Option<lash::CancellationToken>> {
-        if let Some(turn_id) = turn_id {
-            anyhow::ensure!(
-                self.active.as_ref().and_then(|active| active.turn_id) == Some(turn_id),
-                "turn #{turn_id} no longer owns the scripted lane"
-            );
-        }
-        Ok(self.active.as_ref().map(|active| active.cancel.clone()))
-    }
-}
-
 impl ScriptedAgentRuntime {
-    pub(super) async fn cancel_turn(&self, turn_id: Option<u64>) -> anyhow::Result<()> {
-        let state = self.state.lock().await;
-        if let Some(cancel) = state.cancellation_for(turn_id)? {
+    pub(super) async fn cancel_turn(&self) -> anyhow::Result<()> {
+        if let Some(cancel) = self
+            .state
+            .lock()
+            .await
+            .active
+            .as_ref()
+            .map(|active| active.cancel.clone())
+        {
             cancel.cancel();
         }
 
@@ -436,25 +427,5 @@ impl ScriptedAgentRuntime {
             )
             .await?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod exact_cancellation_tests {
-    use super::*;
-
-    #[test]
-    fn completed_turn_cannot_cancel_the_scripted_turn_admitted_after_it() {
-        let next = lash::CancellationToken::new();
-        let state = ScriptedQueueState {
-            queue: VecDeque::new(),
-            active: Some(ScriptedActiveTurn {
-                turn_id: Some(22),
-                cancel: next.clone(),
-            }),
-        };
-        let error = state.cancellation_for(Some(21)).unwrap_err();
-        assert!(error.to_string().contains("no longer owns"));
-        assert!(!next.is_cancelled(), "Stop for turn 21 reached turn 22");
     }
 }

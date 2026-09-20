@@ -5,40 +5,6 @@ use hirsel_proto::{
     ThreadEffectTarget, ThreadTurnState,
 };
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::{Serialize, de::DeserializeOwned};
-
-pub(super) fn replay<T: DeserializeOwned>(
-    c: &Connection,
-    caller: &ThreadCaller,
-    operation_id: &str,
-    invocation: &impl Serialize,
-) -> anyhow::Result<Option<T>> {
-    let payload = serde_json::to_string(invocation)?;
-    let stored = c.query_row(
-        "SELECT payload,result FROM thread_mutation_receipts WHERE turn_id=?1 AND operation_id=?2",
-        params![caller.turn_id, operation_id],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-    ).optional()?;
-    let Some((old_payload, result)) = stored else {
-        return Ok(None);
-    };
-    anyhow::ensure!(old_payload == payload, "effect invocation payload changed");
-    Ok(Some(serde_json::from_str(&result)?))
-}
-
-pub(super) fn remember(
-    c: &Connection,
-    caller: &ThreadCaller,
-    operation_id: &str,
-    invocation: &impl Serialize,
-    result: &impl Serialize,
-) -> anyhow::Result<()> {
-    c.execute(
-        "INSERT INTO thread_mutation_receipts(turn_id,operation_id,payload,result) VALUES(?1,?2,?3,?4)",
-        params![caller.turn_id, operation_id, serde_json::to_string(invocation)?, serde_json::to_string(result)?],
-    )?;
-    Ok(())
-}
 
 fn effect_name(effect: ThreadEffectKind) -> &'static str {
     match effect {
@@ -192,7 +158,6 @@ fn actions(c: &Connection, receipt: &ThreadEffectReceipt) -> anyhow::Result<Vec<
     Ok(actions)
 }
 
-#[cfg(test)]
 pub(super) fn for_turns(c: &Connection, turn_ids: &[u64]) -> anyhow::Result<Vec<ThreadEffect>> {
     if turn_ids.is_empty() {
         return Ok(Vec::new());
@@ -215,53 +180,7 @@ pub(super) fn for_turns(c: &Connection, turn_ids: &[u64]) -> anyhow::Result<Vec<
         .collect()
 }
 
-pub(super) fn page_for_thread(
-    c: &Connection,
-    thread_id: u64,
-    before: Option<u64>,
-    limit: u64,
-) -> anyhow::Result<(Vec<ThreadEffect>, Option<u64>)> {
-    let limit = limit.clamp(1, 100) as usize;
-    let mut statement = c.prepare("SELECT e.id,e.turn_id,e.operation_id,e.effect_index,e.tool,e.effect,e.target_json,e.target_turn_id,e.request_client_id,e.refusal_json,e.created_at FROM thread_effect_receipts e JOIN thread_turns t ON t.id=e.turn_id WHERE t.thread_id=?1 AND e.id<?2 ORDER BY e.id DESC LIMIT ?3")?;
-    let mut receipts = statement
-        .query_map(
-            params![
-                thread_id,
-                before.unwrap_or(i64::MAX as u64).min(i64::MAX as u64),
-                limit as u64 + 1
-            ],
-            receipt_row,
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let has_more = receipts.len() > limit;
-    receipts.truncate(limit);
-    receipts.reverse();
-    let next = has_more.then(|| receipts[0].id);
-    let effects = receipts
-        .into_iter()
-        .map(|receipt| {
-            Ok(ThreadEffect {
-                actions: actions(c, &receipt)?,
-                receipt,
-            })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    Ok((effects, next))
-}
-
 impl super::Storage {
-    pub(crate) async fn thread_turn_cancellation_requested(
-        &self,
-        turn_id: u64,
-    ) -> anyhow::Result<bool> {
-        let c = self.conn.lock().await;
-        Ok(c.query_row(
-            "SELECT cancel_requested_at IS NOT NULL FROM thread_turns WHERE id=?1",
-            [turn_id],
-            |row| row.get(0),
-        )?)
-    }
-
     #[cfg(test)]
     pub(crate) async fn thread_effects(&self, turn_id: u64) -> anyhow::Result<Vec<ThreadEffect>> {
         let c = self.conn.lock().await;
@@ -271,8 +190,7 @@ impl super::Storage {
     pub(crate) async fn thread_effect_publication(
         &self,
         turn_id: u64,
-        before: Option<u64>,
-    ) -> anyhow::Result<(String, u64, Vec<ThreadEffect>, Option<u64>)> {
+    ) -> anyhow::Result<(String, u64, Vec<ThreadEffect>)> {
         let c = self.conn.lock().await;
         let history_id = super::schema::read_history_id(&c)?;
         let thread_id = c.query_row(
@@ -280,70 +198,7 @@ impl super::Storage {
             [turn_id],
             |r| r.get(0),
         )?;
-        let mut statement = c.prepare("SELECT id,turn_id,operation_id,effect_index,tool,effect,target_json,target_turn_id,request_client_id,refusal_json,created_at FROM thread_effect_receipts WHERE turn_id=?1 AND id<?2 ORDER BY id DESC LIMIT 101")?;
-        let mut receipts = statement
-            .query_map(
-                params![
-                    turn_id,
-                    before.unwrap_or(i64::MAX as u64).min(i64::MAX as u64)
-                ],
-                receipt_row,
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let has_more = receipts.len() > 100;
-        receipts.truncate(100);
-        receipts.reverse();
-        let next = has_more.then(|| receipts[0].id);
-        let effects = receipts
-            .into_iter()
-            .map(|receipt| {
-                Ok(ThreadEffect {
-                    actions: actions(&c, &receipt)?,
-                    receipt,
-                })
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        Ok((history_id, thread_id, effects, next))
-    }
-
-    pub(crate) async fn thread_effect_operation_publication(
-        &self,
-        turn_id: u64,
-        operation_id: &str,
-        before: Option<u64>,
-    ) -> anyhow::Result<(String, u64, Vec<ThreadEffect>, Option<u64>)> {
-        let c = self.conn.lock().await;
-        let history_id = super::schema::read_history_id(&c)?;
-        let thread_id = c.query_row(
-            "SELECT thread_id FROM thread_turns WHERE id=?1",
-            [turn_id],
-            |row| row.get(0),
-        )?;
-        let mut statement = c.prepare("SELECT id,turn_id,operation_id,effect_index,tool,effect,target_json,target_turn_id,request_client_id,refusal_json,created_at FROM thread_effect_receipts WHERE turn_id=?1 AND operation_id=?2 AND id<?3 ORDER BY id DESC LIMIT 101")?;
-        let mut receipts = statement
-            .query_map(
-                params![
-                    turn_id,
-                    operation_id,
-                    before.unwrap_or(i64::MAX as u64).min(i64::MAX as u64)
-                ],
-                receipt_row,
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let has_more = receipts.len() > 100;
-        receipts.truncate(100);
-        receipts.reverse();
-        let next = has_more.then(|| receipts[0].id);
-        let effects = receipts
-            .into_iter()
-            .map(|receipt| {
-                Ok(ThreadEffect {
-                    actions: actions(&c, &receipt)?,
-                    receipt,
-                })
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        Ok((history_id, thread_id, effects, next))
+        Ok((history_id, thread_id, for_turns(&c, &[turn_id])?))
     }
 
     pub(crate) async fn effect_source_turns_for_target(

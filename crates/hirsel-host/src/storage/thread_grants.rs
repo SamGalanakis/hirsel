@@ -272,35 +272,6 @@ fn replay(c: &Connection, client_id: &str, payload: &str) -> anyhow::Result<bool
 }
 
 impl Storage {
-    pub(crate) async fn replayed_refusal(
-        &self,
-        caller: &ThreadCaller,
-        operation_id: &str,
-        tool: &str,
-        args: &serde_json::Value,
-    ) -> anyhow::Result<Option<serde_json::Value>> {
-        let c = self.conn.lock().await;
-        thread_scope::validate_caller(&c, caller)?;
-        let stored = c.query_row(
-            "SELECT payload,result FROM thread_mutation_receipts WHERE turn_id=?1 AND operation_id=?2",
-            params![caller.turn_id, operation_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        ).optional()?;
-        let Some((payload, result)) = stored else {
-            return Ok(None);
-        };
-        let payload: serde_json::Value = serde_json::from_str(&payload)?;
-        if payload["kind"] != "refusal" {
-            return Ok(None);
-        }
-        anyhow::ensure!(
-            payload == serde_json::json!({"kind":"refusal","tool":tool,"args":args}),
-            "effect invocation payload changed"
-        );
-        let result: serde_json::Value = serde_json::from_str(&result)?;
-        Ok(Some(result["result"].clone()))
-    }
-
     pub(crate) async fn grants_publication_snapshot(
         &self,
         history_id: &str,
@@ -365,26 +336,11 @@ impl Storage {
         caller: &ThreadCaller,
         operation_id: &str,
         tool: &str,
-        args: &serde_json::Value,
         detail: &serde_json::Value,
     ) -> anyhow::Result<hirsel_proto::ThreadActivity> {
         let mut c = self.conn.lock().await;
         let tx = c.transaction()?;
         thread_scope::validate_caller(&tx, caller)?;
-        let invocation = serde_json::json!({"kind":"refusal","tool":tool,"args":args});
-        if let Some(stored) = super::thread_effects::replay::<serde_json::Value>(
-            &tx,
-            caller,
-            operation_id,
-            &invocation,
-        )? {
-            let activity_id = stored["activity_id"]
-                .as_u64()
-                .ok_or_else(|| anyhow::anyhow!("stored refusal activity is invalid"))?;
-            let activity = super::thread_activity::activity(&tx, activity_id)?;
-            tx.commit()?;
-            return Ok(activity);
-        }
         let target: hirsel_proto::ThreadEffectTarget =
             serde_json::from_value(detail["target"].clone())?;
         let refusal = hirsel_proto::ThreadEffectRefusal {
@@ -433,13 +389,6 @@ impl Storage {
             ],
         )?;
         let activity = super::thread_activity::activity(&tx, tx.last_insert_rowid() as u64)?;
-        super::thread_effects::remember(
-            &tx,
-            caller,
-            operation_id,
-            &invocation,
-            &serde_json::json!({"activity_id":activity.id,"result":detail}),
-        )?;
         tx.commit()?;
         Ok(activity)
     }

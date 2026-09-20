@@ -158,9 +158,6 @@ pub(crate) struct LocalStore {
     removed_message_ids: HashSet<u64>,
     related_revisions: HashMap<u64, u64>,
     grant_revisions: HashMap<u64, u64>,
-    effect_generation: u64,
-    turn_effect_generations: HashMap<u64, u64>,
-    pending_effect_generations: HashMap<String, u64>,
     pub connection: ConnectionState,
     pub messages: Vec<ChatEntry>,
     pub threads: Vec<Thread>,
@@ -187,9 +184,6 @@ impl Default for LocalStore {
             removed_message_ids: HashSet::new(),
             related_revisions: HashMap::new(),
             grant_revisions: HashMap::new(),
-            effect_generation: 0,
-            turn_effect_generations: HashMap::new(),
-            pending_effect_generations: HashMap::new(),
             connection: ConnectionState::Offline,
             messages: Vec::new(),
             threads: Vec::new(),
@@ -246,25 +240,10 @@ impl LocalStore {
     }
 
     pub fn track_pending(&mut self, client_id: String, operation: PendingOp) {
-        if matches!(operation, PendingOp::OpenThread { .. }) {
-            self.pending_effect_generations
-                .insert(client_id.clone(), self.effect_generation);
-        }
         self.pending_ops.insert(client_id, operation);
     }
 
-    pub(crate) fn refresh_pending_open_effect_generation(&mut self, client_id: &str) {
-        if matches!(
-            self.pending_ops.get(client_id),
-            Some(PendingOp::OpenThread { .. })
-        ) {
-            self.pending_effect_generations
-                .insert(client_id.to_string(), self.effect_generation);
-        }
-    }
-
     pub fn complete_pending(&mut self, client_id: &str) -> Option<PendingOp> {
-        self.pending_effect_generations.remove(client_id);
         self.pending_ops.remove(client_id)
     }
 
@@ -394,10 +373,6 @@ impl LocalStore {
             return false;
         }
         self.pending_ops.remove(client_id);
-        let effect_generation = self
-            .pending_effect_generations
-            .remove(client_id)
-            .unwrap_or(self.effect_generation);
         let thread_id = detail.thread.id;
         let effect_turn_ids = detail
             .turn_timelines
@@ -441,7 +416,7 @@ impl LocalStore {
         {
             self.upsert_activity(activity);
         }
-        self.merge_detail_effects(&effect_turn_ids, detail.effects, effect_generation);
+        self.merge_detail_effects(&effect_turn_ids, detail.effects);
         self.messages
             .sort_by_key(|entry| entry.id().unwrap_or(u64::MAX));
         true
@@ -528,7 +503,6 @@ impl LocalStore {
             client_id,
             thread_id,
             before_id: None,
-            effects_before: None,
         })
     }
 
@@ -563,37 +537,13 @@ impl LocalStore {
         {
             return;
         }
-        self.effect_generation = self.effect_generation.wrapping_add(1);
-        self.turn_effect_generations
-            .insert(turn_id, self.effect_generation);
-        let replacements = effects
-            .into_iter()
-            .map(|effect| (effect.receipt.id, effect))
-            .collect::<HashMap<_, _>>();
-        for effect in &mut self.effects {
-            if let Some(replacement) = replacements.get(&effect.receipt.id) {
-                *effect = replacement.clone();
-            }
-        }
-        let existing = self
-            .effects
-            .iter()
-            .map(|effect| effect.receipt.id)
-            .collect::<HashSet<_>>();
-        self.effects.extend(
-            replacements
-                .into_values()
-                .filter(|effect| !existing.contains(&effect.receipt.id)),
-        );
+        self.effects
+            .retain(|effect| effect.receipt.turn_id != turn_id);
+        self.effects.extend(effects);
         self.effects.sort_by_key(|effect| effect.receipt.id);
     }
 
-    fn merge_detail_effects(
-        &mut self,
-        turn_ids: &[u64],
-        effects: Vec<hirsel_proto::ThreadEffect>,
-        request_generation: u64,
-    ) {
+    fn merge_detail_effects(&mut self, turn_ids: &[u64], effects: Vec<hirsel_proto::ThreadEffect>) {
         let turns = turn_ids.iter().copied().collect::<HashSet<_>>();
         if effects
             .iter()
@@ -601,31 +551,14 @@ impl LocalStore {
         {
             return;
         }
-        let incoming = effects
-            .into_iter()
-            .map(|effect| (effect.receipt.id, effect))
-            .collect::<HashMap<_, _>>();
-        for effect in &mut self.effects {
-            if turns.contains(&effect.receipt.turn_id)
-                && self
-                    .turn_effect_generations
-                    .get(&effect.receipt.turn_id)
-                    .copied()
-                    .unwrap_or_default()
-                    <= request_generation
-                && let Some(replacement) = incoming.get(&effect.receipt.id)
-            {
-                *effect = replacement.clone();
-            }
-        }
         let existing = self
             .effects
             .iter()
             .map(|effect| effect.receipt.id)
             .collect::<HashSet<_>>();
         self.effects.extend(
-            incoming
-                .into_values()
+            effects
+                .into_iter()
                 .filter(|effect| !existing.contains(&effect.receipt.id)),
         );
         self.effects.sort_by_key(|effect| effect.receipt.id);

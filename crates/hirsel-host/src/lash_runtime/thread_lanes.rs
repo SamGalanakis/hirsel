@@ -184,11 +184,9 @@ impl ThreadRuntimeRegistry {
             } else {
                 match self.lane(turn.thread_id).await?.as_ref() {
                     LaneRuntime::Lash(runtime) => {
-                        runtime
-                            .cancel_owned_turn(Some(turn.thread_id), Some(turn.id))
-                            .await?
+                        runtime.cancel_owned_turn(Some(turn.thread_id)).await?
                     }
-                    LaneRuntime::Scripted(runtime) => runtime.cancel_turn(Some(turn.id)).await?,
+                    LaneRuntime::Scripted(runtime) => runtime.cancel_turn().await?,
                     _ => {}
                 }
             }
@@ -354,12 +352,10 @@ impl ThreadRuntimeRegistry {
         for lane in self.opened().await {
             match lane.as_ref() {
                 LaneRuntime::Lash(runtime) => {
-                    let _ = runtime
-                        .cancel_owned_turn(Some(runtime.thread_id), None)
-                        .await;
+                    let _ = runtime.cancel_owned_turn(Some(runtime.thread_id)).await;
                 }
                 LaneRuntime::Scripted(runtime) => {
-                    runtime.cancel_turn(None).await?;
+                    runtime.cancel_turn().await?;
                 }
                 _ => {}
             }
@@ -416,43 +412,19 @@ impl ThreadRuntimeRegistry {
             history == expected_history,
             "cancellation belongs to an old history"
         );
+        self.tools
+            .storage()
+            .request_thread_cancellation(expected_history, id)
+            .await?;
         if let Some(work) = self.cli.lock().await.get(&id) {
-            self.tools
-                .storage()
-                .request_thread_cancellation(expected_history, id)
-                .await?;
             work.cancel.cancel();
             return Ok(());
         }
-        let lane = match self.lane(id).await {
-            Ok(lane) => lane,
-            Err(error) => {
-                self.tools
-                    .storage()
-                    .request_thread_cancellation(expected_history, id)
-                    .await?;
-                return Err(error);
-            }
-        };
+        let lane = self.lane(id).await?;
         match lane.as_ref() {
-            LaneRuntime::Lash(r) => {
-                r.request_owned_turn_cancellation(expected_history, id)
-                    .await
-            }
-            LaneRuntime::Scripted(r) => {
-                self.tools
-                    .storage()
-                    .request_thread_cancellation(expected_history, id)
-                    .await?;
-                r.cancel_turn(None).await
-            }
-            LaneRuntime::Degraded => {
-                self.tools
-                    .storage()
-                    .request_thread_cancellation(expected_history, id)
-                    .await?;
-                anyhow::bail!("Thread has no running turn")
-            }
+            LaneRuntime::Lash(r) => r.cancel_owned_turn(Some(id)).await,
+            LaneRuntime::Scripted(r) => r.cancel_turn().await,
+            LaneRuntime::Degraded => anyhow::bail!("Thread has no running turn"),
         }
     }
     pub(super) async fn cancel_exact(
@@ -468,44 +440,12 @@ impl ThreadRuntimeRegistry {
             history == expected_history,
             "cancellation belongs to an old history"
         );
-        let execution = self.tools.storage().turn_execution(turn_id).await?;
-        let (native_lane, native_lane_error) = if !self.is_scripted()
-            && matches!(execution, crate::storage::ThreadExecution::Native { .. })
-        {
-            match self.lane(thread_id).await {
-                Ok(lane) => match lane.as_ref() {
-                    LaneRuntime::Lash(runtime) => (Some(Arc::clone(runtime)), None),
-                    LaneRuntime::Degraded => {
-                        (None, Some(anyhow::anyhow!("Thread has no native lane")))
-                    }
-                    LaneRuntime::Scripted(_) => (
-                        None,
-                        Some(anyhow::anyhow!(
-                            "native cancellation opened a scripted lane"
-                        )),
-                    ),
-                },
-                Err(error) => (None, Some(error)),
-            }
-        } else {
-            (None, None)
-        };
-        let turn = if let Some(runtime) = native_lane.as_ref() {
-            runtime
-                .cancel_exact_owned_turn(expected_history, thread_id, turn_id, expected_state)
-                .await?
-        } else {
-            self.tools
-                .storage()
-                .cancel_exact_thread_turn(expected_history, thread_id, turn_id, expected_state)
-                .await?
-        };
-        if turn.state == hirsel_proto::ThreadTurnState::Running
-            && let Some(error) = native_lane_error
-        {
-            return Err(error);
-        }
-        if turn.state == hirsel_proto::ThreadTurnState::Running && native_lane.is_none() {
+        let turn = self
+            .tools
+            .storage()
+            .cancel_exact_thread_turn(expected_history, thread_id, turn_id, expected_state)
+            .await?;
+        if turn.state == hirsel_proto::ThreadTurnState::Running {
             if let Some(work) = self.cli.lock().await.get(&thread_id) {
                 anyhow::ensure!(
                     work.turn_id == turn_id,
@@ -514,8 +454,10 @@ impl ThreadRuntimeRegistry {
                 work.cancel.cancel();
             } else {
                 match self.lane(thread_id).await?.as_ref() {
-                    LaneRuntime::Lash(_) => anyhow::bail!("native cancellation lost its lane"),
-                    LaneRuntime::Scripted(runtime) => runtime.cancel_turn(Some(turn_id)).await?,
+                    LaneRuntime::Lash(runtime) => {
+                        runtime.cancel_owned_turn(Some(thread_id)).await?
+                    }
+                    LaneRuntime::Scripted(runtime) => runtime.cancel_turn().await?,
                     LaneRuntime::Degraded => anyhow::bail!("Thread has no running turn"),
                 }
             }

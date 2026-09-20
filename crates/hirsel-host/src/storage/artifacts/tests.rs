@@ -7,57 +7,6 @@ fn draft(content: &str) -> ArtifactDraft {
         expected_content: None,
     }
 }
-
-#[tokio::test]
-async fn scoped_list_replay_returns_the_original_receipt_set_including_empty() {
-    let dir = tempfile::tempdir().unwrap();
-    let storage = Storage::open(dir.path()).await.unwrap();
-    let caller = storage.test_running_caller().await;
-    let empty = storage
-        .scoped_artifacts(&caller, Some("empty-list"), caller.thread_id, None)
-        .await
-        .unwrap();
-    assert!(empty.is_empty());
-    storage
-        .publish_artifact(
-            "create-after-list",
-            &serde_json::json!({"tool":"artifacts_create","content":"first"}),
-            &caller,
-            None,
-            Some(draft("first")),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        storage
-            .scoped_artifacts(&caller, Some("empty-list"), caller.thread_id, None)
-            .await
-            .unwrap(),
-        empty
-    );
-
-    let first = storage
-        .scoped_artifacts(&caller, Some("stable-list"), caller.thread_id, None)
-        .await
-        .unwrap();
-    storage
-        .publish_artifact(
-            "create-later",
-            &serde_json::json!({"tool":"artifacts_create","content":"later"}),
-            &caller,
-            None,
-            Some(draft("later")),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        storage
-            .scoped_artifacts(&caller, Some("stable-list"), caller.thread_id, None)
-            .await
-            .unwrap(),
-        first
-    );
-}
 #[tokio::test]
 async fn explicit_artifact_is_atomic_replay_safe_and_globally_referenced() {
     let dir = tempfile::tempdir().unwrap();

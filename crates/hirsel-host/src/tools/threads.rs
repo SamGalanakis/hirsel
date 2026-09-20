@@ -4,73 +4,15 @@ use hirsel_proto::{ChatAuthor, ToolCallSummary};
 use hirsel_proto::{ChatMessage, HostToClient, Thread, ThreadActivity, ThreadTurn};
 
 impl ToolSuite {
-    fn changed_effects(
-        &self,
-        history_id: &str,
-        effects: Vec<hirsel_proto::ThreadEffect>,
-    ) -> Vec<hirsel_proto::ThreadEffect> {
-        let mut projections = self
-            .effect_projections
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        effects
-            .into_iter()
-            .filter(|effect| {
-                let key = (history_id.to_string(), effect.receipt.id);
-                let changed = projections
-                    .get(&key)
-                    .is_none_or(|actions| actions != &effect.actions);
-                projections.insert(key, effect.actions.clone());
-                changed
-            })
-            .collect()
-    }
-
-    pub(crate) async fn publish_thread_effect_operation(
-        &self,
-        turn_id: u64,
-        operation_id: &str,
-    ) -> anyhow::Result<()> {
-        let mut before = None;
-        loop {
-            let (history_id, thread_id, effects, next) = self
-                .storage
-                .thread_effect_operation_publication(turn_id, operation_id, before)
-                .await?;
-            let effects = self.changed_effects(&history_id, effects);
-            if !effects.is_empty() {
-                self.broadcast(HostToClient::ThreadEffectsChanged {
-                    history_id,
-                    thread_id,
-                    turn_id,
-                    effects,
-                });
-            }
-            let Some(cursor) = next else { break };
-            before = Some(cursor);
-        }
-        Ok(())
-    }
-
-    async fn publish_changed_thread_effects(&self, turn_id: u64) -> anyhow::Result<()> {
-        let mut before = None;
-        loop {
-            let (history_id, thread_id, effects, next) = self
-                .storage
-                .thread_effect_publication(turn_id, before)
-                .await?;
-            let effects = self.changed_effects(&history_id, effects);
-            if !effects.is_empty() {
-                self.broadcast(HostToClient::ThreadEffectsChanged {
-                    history_id,
-                    thread_id,
-                    turn_id,
-                    effects,
-                });
-            }
-            let Some(cursor) = next else { break };
-            before = Some(cursor);
-        }
+    pub(crate) async fn publish_thread_effects(&self, turn_id: u64) -> anyhow::Result<()> {
+        let (history_id, thread_id, effects) =
+            self.storage.thread_effect_publication(turn_id).await?;
+        self.broadcast(HostToClient::ThreadEffectsChanged {
+            history_id,
+            thread_id,
+            turn_id,
+            effects,
+        });
         Ok(())
     }
 
@@ -78,7 +20,7 @@ impl ToolSuite {
         match self.storage.effect_source_turns_for_target(thread_id).await {
             Ok(turn_ids) => {
                 for turn_id in turn_ids {
-                    if let Err(error) = self.publish_changed_thread_effects(turn_id).await {
+                    if let Err(error) = self.publish_thread_effects(turn_id).await {
                         tracing::warn!(turn_id, %error, "failed to refresh Thread effect actions");
                     }
                 }
@@ -157,6 +99,7 @@ impl ToolSuite {
                 });
                 drop(guard);
                 self.pushes.enqueue_thread(&publication).await;
+                self.refresh_effects_targeting(thread_id).await;
             }
             Err(error) => tracing::warn!(thread_id, %error, "cannot refresh Thread summary"),
         }
@@ -196,7 +139,6 @@ impl ToolSuite {
         let terminal = turn.state.is_terminal();
         self.broadcast(HostToClient::ThreadTurn { turn });
         self.publish_thread_summary(thread_id).await;
-        self.refresh_effects_targeting(thread_id).await;
         if terminal {
             self.emit_thread_trigger(
                 crate::lash_runtime::THREAD_TURN_SOURCE_TYPE,

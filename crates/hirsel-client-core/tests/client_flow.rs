@@ -270,7 +270,6 @@ async fn live_effects_and_exact_turn_cancellation_cross_native_transport() {
             client_id,
             thread_id: 5,
             before_id: None,
-            ..
         } = receive_client(&mut socket).await
         else {
             panic!("open")
@@ -302,7 +301,6 @@ async fn live_effects_and_exact_turn_cancellation_cross_native_transport() {
                     messages: vec![],
                     turns: vec![turn],
                     effects: vec![],
-                    next_effects_before: None,
                     turn_timelines: vec![],
                     activities: vec![],
                     has_more: false,
@@ -754,7 +752,6 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
             client_id,
             thread_id,
             before_id,
-            ..
         } = receive_client(&mut socket).await
         else {
             panic!("open");
@@ -781,7 +778,6 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
                     }],
                     turns: vec![],
                     effects: vec![],
-                    next_effects_before: None,
                     turn_timelines: vec![],
                     activities: vec![],
                     has_more: false,
@@ -1067,7 +1063,6 @@ async fn lost_open_ack_retries_same_identity_after_reconnect() {
             client_id: original_id,
             thread_id: 5,
             before_id: None,
-            ..
         } = receive_client(&mut first).await
         else {
             panic!("initial open")
@@ -1082,7 +1077,6 @@ async fn lost_open_ack_retries_same_identity_after_reconnect() {
             client_id: retry_id,
             thread_id: 5,
             before_id: None,
-            ..
         } = receive_client(&mut second).await
         else {
             panic!("open retry")
@@ -1103,7 +1097,6 @@ async fn lost_open_ack_retries_same_identity_after_reconnect() {
                     messages: vec![],
                     turns: vec![],
                     effects: vec![],
-                    next_effects_before: None,
                     turn_timelines: vec![],
                     activities: vec![],
                     has_more: false,
@@ -1145,7 +1138,6 @@ async fn lost_paginated_open_error_retries_same_identity_without_background_dupl
             client_id,
             thread_id: 5,
             before_id: None,
-            ..
         } = receive_client(&mut first).await
         else {
             panic!("initial open")
@@ -1165,7 +1157,6 @@ async fn lost_paginated_open_error_retries_same_identity_without_background_dupl
                     messages: vec![],
                     turns: vec![],
                     effects: vec![],
-                    next_effects_before: None,
                     turn_timelines: vec![],
                     activities: vec![],
                     has_more: true,
@@ -1177,7 +1168,6 @@ async fn lost_paginated_open_error_retries_same_identity_without_background_dupl
             client_id: pagination_id,
             thread_id: 5,
             before_id: Some(10),
-            ..
         } = receive_client(&mut first).await
         else {
             panic!("pagination open")
@@ -1192,7 +1182,6 @@ async fn lost_paginated_open_error_retries_same_identity_without_background_dupl
             client_id: retry_id,
             thread_id: 5,
             before_id: None,
-            ..
         } = receive_client(&mut second).await
         else {
             panic!("pagination retry")
@@ -1341,7 +1330,6 @@ async fn live_assignment_refreshes_current_brief_without_user_reopen() {
                 client_id,
                 thread_id,
                 before_id,
-                ..
             } = receive_client(&mut socket).await
             else {
                 panic!("detail request")
@@ -1362,7 +1350,6 @@ async fn live_assignment_refreshes_current_brief_without_user_reopen() {
                         messages: vec![],
                         turns: vec![],
                         effects: vec![],
-                        next_effects_before: None,
                         turn_timelines: vec![],
                         activities: vec![],
                         has_more: false,
@@ -1435,7 +1422,6 @@ async fn saved_link_commands_snapshots_and_correlated_results_cross_native_trans
                     messages: vec![],
                     turns: vec![],
                     effects: vec![],
-                    next_effects_before: None,
                     turn_timelines: vec![],
                     activities: vec![],
                     has_more: true,

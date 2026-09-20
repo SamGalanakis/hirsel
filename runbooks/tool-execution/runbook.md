@@ -21,11 +21,6 @@ failure.
 4. Failure uses a nonexistent working directory. Require `tool_done.ok=false`,
    a visible failed result, and a reply that explicitly reports expected
    failure. A claimed failure with no call fails.
-5. Tool telemetry is not effect evidence. These two `shell.run` calls touch no
-   Thread or artifact, so they must not fabricate a durable effect pill from
-   `tool_done.ok` or the assistant's summary. Thread/artifact tools instead
-   require their own transactional effect receipt, which remains visible while
-   the source turn runs and after failure or reload.
 
 ## Phase 0 — start empty
 
@@ -62,7 +57,6 @@ message/turn rows.
 
 **Expect:** two Owner + two Agent messages, two terminal turns, and the Agent
 messages' durable `tool_calls` identities/outcomes match the streamed calls.
-The turn details have no effect receipts for these shell-only calls.
 
 ## Scorecard
 
@@ -75,7 +69,6 @@ The turn details have no effect receipts for these shell-only calls.
 | Honest failure | reply reports the failed attempt and does not invent success | | `20-failure.png`, snapshot |
 | Inline ordering | each call/result appears before its turn reply without whole-turn collapse | | DOM extract |
 | Durable agreement | tool IDs/outcomes and message/turn counts agree across wire and disk | | `result.json`, store extract |
-| No invented effects | shell telemetry produces no Thread/artifact effect receipt or pill | | wire and store extracts |
 
 **Aggregate:** did the Owner see what was really invoked, what it returned,
 and a reply consistent with that result in both success and failure?

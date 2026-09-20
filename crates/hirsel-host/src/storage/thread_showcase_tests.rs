@@ -159,7 +159,7 @@ async fn showcase_tool_scope_replay_reference_grant_and_removal() {
     let shared = s.scoped_artifact(&child_actor, artifact_id).await.unwrap();
     assert_eq!(shared.summary.thread_ids, vec![child]);
     assert_eq!(
-        s.scoped_artifacts(&child_actor, None, child, None)
+        s.scoped_artifacts(&child_actor, None, child)
             .await
             .unwrap()
             .len(),
@@ -234,7 +234,7 @@ async fn showcase_tool_scope_replay_reference_grant_and_removal() {
     assert!(cleared["thread"]["showcased_artifact_id"].is_null());
     assert!(s.scoped_artifact(&child_actor, artifact_id).await.is_err());
     assert!(
-        s.scoped_artifacts(&child_actor, None, child, None)
+        s.scoped_artifacts(&child_actor, None, child)
             .await
             .unwrap()
             .is_empty()

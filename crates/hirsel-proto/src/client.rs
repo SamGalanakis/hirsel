@@ -72,8 +72,6 @@ pub enum ClientToHost {
         client_id: String,
         thread_id: u64,
         before_id: Option<u64>,
-        #[serde(default)]
-        effects_before: Option<u64>,
     },
     AddThreadRelated {
         client_id: String,

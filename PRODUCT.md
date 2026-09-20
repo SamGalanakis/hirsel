@@ -50,16 +50,6 @@ Each Space chat talks with the Owner, resolves the intended Task and dispatches 
 
 Agent tools are fenced, not sandboxed. Every Thread and artifact ID is addressable: naming one outside a Thread's reach returns a typed refusal the Agent can read and act on, recorded as a durable refusal in the conversation, never an opaque error pretending the target is not there. Reach is durable, visible state — self and descendants by default, widened by explicit grants that name one other Thread and its subtree. Only the Owner or an ancestor Thread can widen, an ancestor can only hand on reach it already holds and never widens itself, and either can narrow. A Thread messages anything it can reach, but never its own ancestors: work reports to the requester that asked for it. Humans retain the full tree. These are application resource boundaries, not a global filesystem or multiuser security model. [ADR 0022](docs/adr/0022-fences-universal-addressing-and-grants.md) records the model.
 
-Every Thread or artifact an Agent reply touched appears beside that reply as a
-compact effect pill, backed by a receipt committed with the mutation, read or
-refusal. Pills arrive while the turn is running and remain through failed
-turns, replies with no final Agent message, pagination and reload. A receipt is
-the durable fact; Open, Archive, Cancel queued and Stop are live Host
-projections shown only while true and always name the exact target work. A
-refused Thread pill explains the subtree scope before opening Reach and never
-retries automatically. Ancestor-fence and artifact refusals explain why no
-ordinary guessed grant is offered.
-
 A Thread runs on exactly one of three backends: Native, the Claude CLI, or the Codex CLI. Native and CLI turns translate into one durable executor event contract, so reconnect replay and client rendering do not depend on the backend. Native is Hirsel's own TypeScript RLM session on a chosen provider and model, with process and trigger abilities. It may define arbitrary Lash processes, attach them to available triggers, and call its ordinary tools from process bodies. Hirsel contributes trigger sources and projects the Lash registry; it does not wrap process execution in another engine. Every process has a concrete owning Thread. Wakes and terminal results become bounded conversation messages and follow the same fork-triage rule as other non-owner input. Registered trigger and process state reopens from Lash's durable stores after restart. Recurring processes are created only at an Owner's request.
 
 A Native Thread's TypeScript programs carry the full Thread tool set and the four coding operations—`files.read`, `files.edit`, `files.write`, and `shell.exec`—alongside RLM's process, trigger, finish, and frame-compaction primitives. Every Thread has the same tool surface, and any Thread may select Native, Claude CLI or Codex CLI. A Thread is never handed to a second session to touch a file. Hirsel creates no default processes. Background work requires an explicit destination. Per-Thread FIFO and bounded cross-Thread concurrency preserve request identity.

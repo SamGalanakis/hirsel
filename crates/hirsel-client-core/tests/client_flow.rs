@@ -50,6 +50,11 @@ fn thread(id: u64, read: bool, settled: bool) -> Thread {
         archived_at: None,
         snoozed_until: None,
         read,
+        own_headline: "Ready".into(),
+        headline: "Ready".into(),
+        previous_headline: None,
+        headline_revision: 1,
+        last_seen_headline_revision: 1,
         created_at: Utc::now(),
         updated_at: Utc::now(),
         revision: if read { 2 } else { 1 },
@@ -57,6 +62,10 @@ fn thread(id: u64, read: bool, settled: bool) -> Thread {
         queued_turn_count: 0,
         last_finished_turn: None,
         last_activity_at: Utc::now(),
+        status: hirsel_proto::ThreadStatus {
+            kind: hirsel_proto::ThreadStatusKind::Idle,
+            reason: "No work is active".into(),
+        },
     }
 }
 

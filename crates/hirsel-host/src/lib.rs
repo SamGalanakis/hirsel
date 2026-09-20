@@ -31,6 +31,7 @@ pub mod templates;
 mod thread_commands;
 pub(crate) mod thread_identity;
 pub mod thread_instrument;
+mod thread_rollups;
 pub mod thread_tool_bridge;
 pub mod tools;
 pub mod ws;
@@ -75,6 +76,7 @@ pub struct AppState {
     pub subagent_models: subagent_models::SubagentModelState,
     pub prompts: prompt_config::PromptConfig,
     pub providers_roster: providers::ProviderRosterState,
+    config_store: host_config::ConfigStore,
     pub started_at: SystemTime,
     pub debug_enabled: bool,
     pub data_dir: Arc<PathBuf>,
@@ -131,6 +133,11 @@ pub struct OwnerSubmission {
 }
 
 impl AppState {
+    fn refresh_thread_projection_config(&self) {
+        self.storage
+            .set_hung_after_minutes(self.config_store.hung_after_minutes());
+    }
+
     pub fn set_iroh_ticket(&self, ticket: Option<String>) {
         *self
             .iroh_ticket
@@ -610,6 +617,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
     let storage = Storage::open(&config.data_dir)
         .await
         .with_context(|| format!("open storage under {}", config.data_dir.display()))?;
+    storage.set_hung_after_minutes(config_store.hung_after_minutes());
     let (broadcaster, _) = broadcast::channel(512);
     let broadcast_log = BroadcastLog::default();
     let template_store = templates::TemplateStore::load(config.templates_dir.clone())
@@ -682,7 +690,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
             model: config.model.clone(),
             data_dir: config.data_dir.clone(),
             driver_mode: config.driver,
-            config_store,
+            config_store: config_store.clone(),
             providers: providers_roster.clone(),
             prompts: prompts.clone(),
         },
@@ -705,6 +713,7 @@ pub async fn build_state(config: Config) -> anyhow::Result<AppState> {
         subagent_models,
         prompts,
         providers_roster,
+        config_store,
         started_at: SystemTime::now(),
         debug_enabled: config.debug,
         data_dir: Arc::new(config.data_dir),

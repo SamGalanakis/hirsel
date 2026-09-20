@@ -853,7 +853,7 @@ async fn every_executor_result_matches_its_declared_output_schema() {
         results.insert(name, vec![json!({"id":1,"content":"result"})]);
     }
     results.insert("artifacts_list", vec![json!({"artifacts":[]})]);
-    let thread = json!({"id":1,"kind":"task","title":"Buy groceries","description":"","instrument":null,"attention":"quiet","settled_at":null,"archived_at":null,"snoozed_until":null,"read":false,"created_at":now,"updated_at":now,"revision":1});
+    let thread = json!({"id":1,"kind":"task","parent_thread_id":null,"pinned_at":null,"title":"Buy groceries","icon":null,"showcased_artifact_id":null,"description":"","instrument":null,"attention":"quiet","settled_at":null,"archived_at":null,"snoozed_until":null,"read":false,"own_headline":"Ready","headline":"Ready","previous_headline":null,"headline_revision":1,"last_seen_headline_revision":1,"created_at":now,"updated_at":now,"revision":1,"running_turn":null,"queued_turn_count":0,"last_finished_turn":null,"last_activity_at":now,"status":{"kind":"idle","reason":"No work is active"}});
     results.insert(
         "threads_create",
         vec![json!({"thread_id":1,"thread":thread})],
@@ -861,6 +861,10 @@ async fn every_executor_result_matches_its_declared_output_schema() {
     results.insert(
         "threads_update",
         vec![json!({"thread_id":1,"thread":thread})],
+    );
+    results.insert(
+        "threads_state",
+        vec![json!({"thread_id":1,"thread":thread,"threads":[thread]})],
     );
     results.insert("threads_list", vec![json!({"threads":[thread]})]);
     let archive_activity = json!({"id":9,"thread_id":1,"turn_id":2,"kind":"archived","data":{},"artifact_ids":[],"ts":now});

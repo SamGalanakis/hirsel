@@ -138,6 +138,11 @@ fn event(id: u64, name: &str, description: &str) -> hirsel_proto::Thread {
         archived_at: None,
         snoozed_until: None,
         read: false,
+        own_headline: "Ready".into(),
+        headline: "Ready".into(),
+        previous_headline: None,
+        headline_revision: 1,
+        last_seen_headline_revision: 1,
         created_at: Utc::now(),
         updated_at: Utc::now(),
         revision: 1,
@@ -145,6 +150,10 @@ fn event(id: u64, name: &str, description: &str) -> hirsel_proto::Thread {
         queued_turn_count: 0,
         last_finished_turn: None,
         last_activity_at: Utc::now(),
+        status: hirsel_proto::ThreadStatus {
+            kind: hirsel_proto::ThreadStatusKind::NeedsYou,
+            reason: "Waiting for your input".into(),
+        },
     }
 }
 

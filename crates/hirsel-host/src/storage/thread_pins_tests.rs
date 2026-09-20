@@ -35,6 +35,7 @@ async fn root_pin_actions_advance_revision_without_changing_history() {
         .await
         .unwrap()
         .0;
+    let root = storage.thread(root.id).await.unwrap().unwrap();
     let pinned = state
         .handle_addressed_thread_action(
             &state.storage.history_id().await.unwrap(),

@@ -39,6 +39,10 @@ fn append_next(
         "INSERT INTO thread_turn_events(turn_id,seq,event) VALUES(?1,?2,?3)",
         params![turn_id, seq, serde_json::to_string(&event)?],
     )?;
+    tx.execute(
+        "UPDATE thread_turns SET last_event_at=?2 WHERE id=?1",
+        params![turn_id, chrono::Utc::now().to_rfc3339()],
+    )?;
     tx.commit()?;
     Ok(TurnEvent { seq, event })
 }

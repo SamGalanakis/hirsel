@@ -56,6 +56,20 @@ impl SlotKeys {
 }
 
 impl ConfigStore {
+    pub fn hung_after_minutes(&self) -> u64 {
+        self.reload_if_changed();
+        self.inner
+            .lock()
+            .expect("config lock poisoned")
+            .document
+            .get("threads")
+            .and_then(Item::as_table)
+            .and_then(|table| table.get("hung_after_minutes"))
+            .and_then(Item::as_integer)
+            .and_then(|value| u64::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(10)
+    }
     pub async fn load(
         path: PathBuf,
         docs_path: &Path,
@@ -449,6 +463,11 @@ fn default_document(docs_path: &Path) -> anyhow::Result<DocumentMut> {
 [model]
 id = "deepseek/deepseek-v4.1-flash"
 variant = "default"
+
+# A running turn with no durable timeline event for this many minutes is shown
+# as hung. This is suspicion only; Hirsel never cancels or retries it.
+[threads]
+hung_after_minutes = 10
 
 # The Agent's system prompt. With no `prompt` key (or an empty one) the Agent
 # runs on the bundled `prompts/agent.md`. Set one here or in Settings > Prompt

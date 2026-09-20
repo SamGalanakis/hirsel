@@ -84,6 +84,7 @@ impl Storage {
             params![thread_id, now],
         )?;
         let turn_id = tx.last_insert_rowid() as u64;
+        crate::thread_rollups::refresh_from(&tx, thread_id)?;
         super::thread_execution::capture(&tx, thread_id, turn_id, None)?;
         let mut payload = payload.clone();
         payload["turn_id"] = serde_json::json!(turn_id);
@@ -129,6 +130,7 @@ impl Storage {
         }
         tx.execute("INSERT INTO thread_turns(thread_id,owner_message_id,state,accepted_at,requester_thread_id) VALUES(?1,?2,'queued',?3,(SELECT parent_thread_id FROM threads WHERE id=?1))",params![thread_id,owner_message_id,chrono::Utc::now().to_rfc3339()])?;
         let id = tx.last_insert_rowid() as u64;
+        crate::thread_rollups::refresh_from(&tx, thread_id)?;
         super::thread_execution::capture(&tx, thread_id, id, None)?;
         let t = get(&tx, id)?;
         tx.commit()?;
@@ -139,9 +141,10 @@ impl Storage {
         let t = get(&c, id)?;
         if matches!(t.state, ThreadTurnState::Queued) {
             c.execute(
-                "UPDATE thread_turns SET state='running',started_at=?2 WHERE id=?1",
+                "UPDATE thread_turns SET state='running',started_at=?2,last_event_at=?2 WHERE id=?1",
                 params![id, chrono::Utc::now().to_rfc3339()],
             )?;
+            crate::thread_rollups::refresh_from(&c, t.thread_id)?;
         }
         get(&c, id)
     }
@@ -168,8 +171,9 @@ impl Storage {
                 return get(&c, id);
             }
         }
-        c.execute("INSERT INTO thread_turns(thread_id,owner_message_id,state,accepted_at,started_at,requester_thread_id) VALUES(?1,?2,'running',?3,?3,(SELECT parent_thread_id FROM threads WHERE id=?1))",params![thread_id,owner_message_id,chrono::Utc::now().to_rfc3339()])?;
+        c.execute("INSERT INTO thread_turns(thread_id,owner_message_id,state,accepted_at,started_at,last_event_at,requester_thread_id) VALUES(?1,?2,'running',?3,?3,?3,(SELECT parent_thread_id FROM threads WHERE id=?1))",params![thread_id,owner_message_id,chrono::Utc::now().to_rfc3339()])?;
         let id = c.last_insert_rowid() as u64;
+        crate::thread_rollups::refresh_from(&c, thread_id)?;
         super::thread_execution::capture(&c, thread_id, id, None)?;
         get(&c, id)
     }
@@ -348,6 +352,7 @@ pub(super) fn finish_with_failure(
     }
     let status = serde_json::to_value(state)?;
     c.execute("UPDATE thread_turns SET state=?2,agent_message_id=COALESCE(?3,agent_message_id),finished_at=?4 WHERE id=?1",params![id,status.as_str(),agent_message_id,chrono::Utc::now().to_rfc3339()])?;
+    crate::thread_rollups::refresh_from(c, previous.thread_id)?;
     let turn = get(c, id)?;
     if turn.requester_thread_id.is_some() {
         let message = turn

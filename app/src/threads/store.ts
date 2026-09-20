@@ -138,6 +138,12 @@ interface PendingRequest {
 }
 const requests = new Map<string, PendingRequest>();
 export function attachThreadTransport(send: (frame: ThreadClientMessage) => void): void { sendFrame = send; }
+export function markHeadlinesSeen(expectedHistory: string, threadIds: number[]): void {
+  if (!sendFrame || historyId() !== expectedHistory || !threadState.ready) return;
+  const ids = [...new Set(threadIds)].filter(id => Number.isSafeInteger(id) && id > 0).sort((a, b) => a - b);
+  if (ids.length === 0) return;
+  sendFrame({ type: "mark_thread_headlines_seen", client_id: crypto.randomUUID(), history_id: expectedHistory, thread_ids: ids });
+}
 function failRequest(id: string, detail: string): void {
   const request = requests.get(id);
   if (!request) return;
@@ -298,11 +304,19 @@ export function handleThreadMessage(message: ServerMessage): void {
   setThreadState(() => {
   switch (message.type) {
     case "hello_ok": {
+      const generation = historyGeneration;
       setThreadState(draft => { reconcile(message.threads, "id")(draft["threads"]); draft.ready = true; });
       for (const pending of threadState.pending) if (!pending.failed) transmitMessage(pending);
-      const route = parseThreadLink(location.pathname + location.search);
-      if (route) { followThreadLocation(message.history_id, true); break; }
-      openRouteFree(message.history_id);
+      // This handler itself runs inside a Solid store transaction. Reconcile
+      // the route only after the authoritative snapshot and ready flag have
+      // committed; otherwise an empty first history observes ready=false and
+      // silently declines to create its ordinary Home Space.
+      queueMicrotask(() => {
+        if (!threadState.ready || historyGeneration !== generation) return;
+        const route = parseThreadLink(location.pathname + location.search);
+        if (route) followThreadLocation(message.history_id, true);
+        else openRouteFree(message.history_id);
+      });
       break;
     }
     case "thread_upsert":

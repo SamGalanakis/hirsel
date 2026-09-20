@@ -36,6 +36,9 @@ pub(super) fn thread_create_schema() -> Value {
 pub(super) fn thread_update_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{"thread":thread_ref_schema(),"title":{"type":"string","minLength":1},"description":{"type":"string"},"icon":icon_schema(),"showcased_artifact_id":{"type":["integer","null"],"minimum":1,"description":"Show one accessible artifact beside this Thread chat. Omit to preserve; null removes. Self or descendants only. This explicit reference grants the target scope read access while showcased; it creates no conversation card."},"instrument":{"type":["object","array","null"],"description":"A nonempty instrument object or array of components; null removes the instrument. Empty objects and arrays are invalid."},"attention":attention_schema()}})
 }
+pub(super) fn thread_state_schema() -> Value {
+    json!({"type":"object","additionalProperties":false,"required":["headline"],"properties":{"thread":thread_ref_schema(),"headline":{"type":"string","minLength":1,"maxLength":240,"description":"A normalized, nonempty headline of at most 12 words."}}})
+}
 pub(super) fn thread_list_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{"under":thread_place_schema(),"depth":{"type":"integer","minimum":1,"maximum":8,"default":1},"limit":{"type":"integer","minimum":1,"maximum":100,"default":50},"after_id":{"type":"integer","minimum":0}}})
 }

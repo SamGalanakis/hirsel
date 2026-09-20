@@ -10,6 +10,23 @@ CREATE TABLE threads (
         description TEXT NOT NULL, instrument TEXT CHECK(instrument IS NULL OR (json_type(instrument) IN ('object','array') AND json(instrument) NOT IN ('{}','[]'))),
         attention TEXT NOT NULL CHECK(attention IN ('quiet','needs_owner')),
         settled_at TEXT, archived_at TEXT, snoozed_until TEXT, read INTEGER NOT NULL,
+        own_headline TEXT NOT NULL DEFAULT 'Ready' CHECK(COALESCE(
+            length(CAST(own_headline AS BLOB)) BETWEEN 1 AND 240 AND own_headline=trim(own_headline) AND
+            instr(own_headline,'  ')=0 AND instr(own_headline,char(9))=0 AND instr(own_headline,char(10))=0 AND
+            instr(own_headline,char(11))=0 AND instr(own_headline,char(12))=0 AND instr(own_headline,char(13))=0 AND
+            length(own_headline)-length(replace(own_headline,' ',''))+1<=12,0)),
+        headline TEXT NOT NULL DEFAULT 'Ready' CHECK(COALESCE(
+            length(CAST(headline AS BLOB)) BETWEEN 1 AND 240 AND headline=trim(headline) AND
+            instr(headline,'  ')=0 AND instr(headline,char(9))=0 AND instr(headline,char(10))=0 AND
+            instr(headline,char(11))=0 AND instr(headline,char(12))=0 AND instr(headline,char(13))=0 AND
+            length(headline)-length(replace(headline,' ',''))+1<=12,0)),
+        previous_headline TEXT CHECK(previous_headline IS NULL OR COALESCE(
+            length(CAST(previous_headline AS BLOB)) BETWEEN 1 AND 240 AND previous_headline=trim(previous_headline) AND
+            instr(previous_headline,'  ')=0 AND instr(previous_headline,char(9))=0 AND instr(previous_headline,char(10))=0 AND
+            instr(previous_headline,char(11))=0 AND instr(previous_headline,char(12))=0 AND instr(previous_headline,char(13))=0 AND
+            length(previous_headline)-length(replace(previous_headline,' ',''))+1<=12,0)),
+        headline_revision INTEGER NOT NULL DEFAULT 1 CHECK(COALESCE(headline_revision>0,0)),
+        last_seen_headline_revision INTEGER NOT NULL DEFAULT 1 CHECK(COALESCE(last_seen_headline_revision>=0 AND last_seen_headline_revision<=headline_revision,0)),
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL, revision INTEGER NOT NULL,
         CHECK(kind = 'task' OR settled_at IS NULL),
         CHECK(parent_thread_id IS NULL OR parent_thread_id != id),
@@ -54,9 +71,10 @@ END;
         requester_thread_id INTEGER REFERENCES threads(id),
         requester_turn_id INTEGER REFERENCES thread_turns(id),
         owner_message_id INTEGER UNIQUE, agent_message_id INTEGER, state TEXT NOT NULL CHECK(state IN ($TURN_STATES)),
-        accepted_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, cancel_requested_at TEXT,
+        accepted_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, cancel_requested_at TEXT, last_event_at TEXT,
         CHECK(state != 'queued' OR started_at IS NULL),
         CHECK(state != 'running' OR started_at IS NOT NULL),
+        CHECK(COALESCE(state != 'running' OR last_event_at IS NOT NULL,0)),
         CHECK((state IN ($TERMINAL_TURN_STATES)) = (finished_at IS NOT NULL)),
         CHECK(requester_turn_id IS NULL OR requester_thread_id IS NOT NULL));
 CREATE UNIQUE INDEX thread_one_running ON thread_turns(thread_id) WHERE state='running';

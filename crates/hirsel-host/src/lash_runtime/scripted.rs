@@ -249,6 +249,99 @@ impl ScriptedAgentRuntime {
         self.emit_scripted_timeline(ingest).await?;
         let turn_text = owner_turn_text(turn, &self.tools.storage());
         let lower = turn_text.to_lowercase();
+        if self.config.driver_mode == DriverMode::Fake
+            && turn.body.trim() == "__hirsel_effect_pills_projection__"
+        {
+            let turn_id = turn
+                .turn_id
+                .ok_or_else(|| anyhow::anyhow!("accepted turn missing"))?;
+            let launch = uuid::Uuid::new_v4().to_string();
+            let caller = self
+                .tools
+                .storage()
+                .bind_thread_execution(&turn.history_id, &launch, &launch, turn_id)
+                .await?;
+            let operation_id = format!("scripted:{turn_id}:effect-projection");
+            let args = json!({"client_id":operation_id,"kind":"task","title":"Projected effect"});
+            ingest
+                .accept(
+                    &self.tools,
+                    ExecutorEvent::ToolStart {
+                        id: operation_id.clone(),
+                        name: "threads_create".into(),
+                        args: args.clone(),
+                    },
+                )
+                .await?;
+            let result = ScopedThreadTools {
+                tools: self.tools.clone(),
+                caller,
+                operation_id: operation_id.clone(),
+            }
+            .execute("threads_create", &args)
+            .await
+            .map_err(anyhow::Error::msg)?;
+            ingest
+                .accept(
+                    &self.tools,
+                    ExecutorEvent::ToolDone {
+                        id: operation_id,
+                        name: "threads_create".into(),
+                        ok: true,
+                        output: result,
+                    },
+                )
+                .await?;
+        }
+        if self.config.driver_mode == DriverMode::Fake
+            && turn.body.trim().starts_with("__hirsel_task_headline__:")
+        {
+            let turn_id = turn
+                .turn_id
+                .ok_or_else(|| anyhow::anyhow!("accepted turn missing"))?;
+            let task_id = turn
+                .body
+                .trim()
+                .trim_start_matches("__hirsel_task_headline__:")
+                .parse::<u64>()?;
+            let launch = uuid::Uuid::new_v4().to_string();
+            let caller = self
+                .tools
+                .storage()
+                .bind_thread_execution(&turn.history_id, &launch, &launch, turn_id)
+                .await?;
+            let operation_id = format!("scripted:{turn_id}:headline");
+            let args = json!({"thread":task_id,"headline":"  Release\n evidence   ready "});
+            ingest
+                .accept(
+                    &self.tools,
+                    ExecutorEvent::ToolStart {
+                        id: operation_id.clone(),
+                        name: "threads_state".into(),
+                        args: args.clone(),
+                    },
+                )
+                .await?;
+            let result = ScopedThreadTools {
+                tools: self.tools.clone(),
+                caller,
+                operation_id: operation_id.clone(),
+            }
+            .execute("threads_state", &args)
+            .await
+            .map_err(anyhow::Error::msg)?;
+            ingest
+                .accept(
+                    &self.tools,
+                    ExecutorEvent::ToolDone {
+                        id: operation_id,
+                        name: "threads_state".into(),
+                        ok: true,
+                        output: result,
+                    },
+                )
+                .await?;
+        }
         if self.config.driver_mode == DriverMode::Fake && lower.contains("delegate") {
             let turn_id = turn
                 .turn_id

@@ -44,6 +44,7 @@ pub(crate) use thread_scope::{OutsideGrant, ThreadCaller, ThreadRef};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Context;
 use rusqlite::Connection;
@@ -64,6 +65,7 @@ pub struct Storage {
     conn: Arc<Mutex<Connection>>,
     blobs_dir: Arc<PathBuf>,
     pairing_codes: Arc<Mutex<PairingCodes>>,
+    hung_after_minutes: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,14 +84,21 @@ impl Storage {
         let db_path = data_dir.join("hirsel.sqlite");
         let mut conn = Connection::open(db_path)?;
         schema::initialize(&mut conn)?;
-        thread_summary::register_timestamp_function(&conn)?;
+        let hung_after_minutes = Arc::new(AtomicU64::new(10));
+        thread_summary::register_functions(&conn, hung_after_minutes.clone())?;
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
             blobs_dir: Arc::new(blobs_dir),
             pairing_codes: Arc::new(Mutex::new(PairingCodes::default())),
+            hung_after_minutes,
         };
         storage.log_orphaned_blobs().await?;
         Ok(storage)
+    }
+
+    pub(crate) fn set_hung_after_minutes(&self, minutes: u64) {
+        self.hung_after_minutes
+            .store(minutes.max(1), Ordering::Relaxed);
     }
 
     pub async fn reset(&self) -> anyhow::Result<()> {

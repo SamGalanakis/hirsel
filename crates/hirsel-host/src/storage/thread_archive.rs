@@ -114,6 +114,7 @@ pub(crate) fn apply(
     }
     publications.extend(changed);
     publications.sort_by_key(|thread| (thread.id != root, thread.id));
+    crate::thread_rollups::refresh_from(tx, root)?;
     let data = json!({
         "archived": archived,
         "actor": actor.actor,

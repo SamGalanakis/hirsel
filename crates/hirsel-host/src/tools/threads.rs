@@ -70,6 +70,11 @@ impl ToolSuite {
     pub(crate) async fn publish_thread_summary(&self, thread_id: u64) {
         match self.storage.current_thread_publication(thread_id).await {
             Ok((guard, publication)) => {
+                for ancestor in publication.ancestors().iter().rev() {
+                    self.broadcast(HostToClient::ThreadUpsert {
+                        thread: ancestor.clone(),
+                    });
+                }
                 self.broadcast(HostToClient::ThreadUpsert {
                     thread: publication.thread().clone(),
                 });
@@ -92,6 +97,11 @@ impl ToolSuite {
             .await
         {
             Ok((guard, publication)) => {
+                for ancestor in publication.ancestors().iter().rev() {
+                    self.broadcast(HostToClient::ThreadUpsert {
+                        thread: ancestor.clone(),
+                    });
+                }
                 self.broadcast(HostToClient::ThreadUpsert {
                     thread: publication.thread().clone(),
                 });

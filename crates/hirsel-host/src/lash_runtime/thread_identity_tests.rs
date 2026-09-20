@@ -105,10 +105,10 @@ async fn the_identity_block_follows_the_thread_between_turns() {
 #[tokio::test]
 async fn native_role_follows_kind_and_nested_spaces_are_space_chats() {
     let (state, _dir) = runtime_fixture().await;
-    let (project, _) = state
+    let (space, _) = state
         .storage
         .create_thread(
-            "identity-project-chat",
+            "identity-space-chat",
             "Hirsel",
             "Coordinate the Space.",
             None,
@@ -118,7 +118,7 @@ async fn native_role_follows_kind_and_nested_spaces_are_space_chats() {
         )
         .await
         .unwrap();
-    let runtime = runtime_lane(&state, Some(project.id)).await;
+    let runtime = runtime_lane(&state, Some(space.id)).await;
     let _pump = runtime.pump_lock.lock().await;
     let prompt = || {
         serde_json::to_string(&runtime.session.policy_snapshot().prompt)
@@ -126,12 +126,12 @@ async fn native_role_follows_kind_and_nested_spaces_are_space_chats() {
     };
 
     runtime.apply_agent_prompt().await.unwrap();
-    let project_prompt = prompt();
+    let space_prompt = prompt();
     assert!(
-        project_prompt.contains(
+        space_prompt.contains(
             "Role: Space chat — coordinate and dispatch work to Tasks; do not do the work here."
         ),
-        "Space-chat role is missing: {project_prompt}"
+        "Space-chat role is missing: {space_prompt}"
     );
 
     let (container, _) = state
@@ -175,9 +175,9 @@ async fn native_role_follows_kind_and_nested_spaces_are_space_chats() {
         .storage
         .set_addressed_thread_kind(
             &history,
-            project.id,
+            space.id,
             hirsel_proto::ThreadKind::Task,
-            project.revision,
+            space.revision,
         )
         .await
         .unwrap();

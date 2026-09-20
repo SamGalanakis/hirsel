@@ -317,3 +317,111 @@ async fn timestamp_projection_orders_mixed_offsets_within_one_millisecond() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn derived_status_has_reasons_and_hung_tracks_durable_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let thread = storage
+        .create_thread(
+            "status",
+            "Status",
+            "",
+            None,
+            ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    let idle = storage.thread(thread.id).await.unwrap().unwrap();
+    assert_eq!(idle.status.kind, hirsel_proto::ThreadStatusKind::Idle);
+    assert_eq!(idle.status.reason, "No work is active");
+    let queued = storage.queue_thread_turn(thread.id, None).await.unwrap();
+    let projected = storage.thread(thread.id).await.unwrap().unwrap();
+    assert_eq!(
+        projected.status.kind,
+        hirsel_proto::ThreadStatusKind::Queued
+    );
+    assert_eq!(projected.status.reason, "1 turn queued");
+    storage.run_thread_turn(queued.id).await.unwrap();
+    assert_eq!(
+        storage
+            .thread(thread.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+            .kind,
+        hirsel_proto::ThreadStatusKind::Running
+    );
+    storage.set_hung_after_minutes(1);
+    storage
+        .conn
+        .lock()
+        .await
+        .execute(
+            "UPDATE thread_turns SET last_event_at='2020-01-01T00:00:00Z' WHERE id=?1",
+            [queued.id],
+        )
+        .unwrap();
+    let hung = storage.thread(thread.id).await.unwrap().unwrap();
+    assert_eq!(hung.status.kind, hirsel_proto::ThreadStatusKind::Hung);
+    assert_eq!(hung.status.reason, "No durable turn event for 1 minute");
+    storage
+        .append_next_turn_event(
+            thread.id,
+            queued.id,
+            hirsel_proto::TurnEventKind::Prose {
+                text: "still working".into(),
+                block_id: Some("p1".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .thread(thread.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+            .kind,
+        hirsel_proto::ThreadStatusKind::Running
+    );
+    storage
+        .update_thread(
+            thread.id,
+            None,
+            None,
+            None,
+            Some(ThreadAttention::NeedsOwner),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .thread(thread.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+            .kind,
+        hirsel_proto::ThreadStatusKind::NeedsYou
+    );
+    storage
+        .snooze_thread(thread.id, Some(Utc::now() + chrono::Duration::hours(1)))
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .thread(thread.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+            .kind,
+        hirsel_proto::ThreadStatusKind::Sleeping
+    );
+}

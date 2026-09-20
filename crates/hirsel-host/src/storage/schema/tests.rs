@@ -100,6 +100,11 @@ async fn fresh_store_is_current_and_reopen_keeps_identity() {
             ("archived_at".into(), "TEXT".into(), false),
             ("snoozed_until".into(), "TEXT".into(), false),
             ("read".into(), "INTEGER".into(), true),
+            ("own_headline".into(), "TEXT".into(), true),
+            ("headline".into(), "TEXT".into(), true),
+            ("previous_headline".into(), "TEXT".into(), false),
+            ("headline_revision".into(), "INTEGER".into(), true),
+            ("last_seen_headline_revision".into(), "INTEGER".into(), true),
             ("created_at".into(), "TEXT".into(), true),
             ("updated_at".into(), "TEXT".into(), true),
             ("revision".into(), "INTEGER".into(), true),
@@ -180,12 +185,12 @@ async fn previous_schema_version_is_refused_without_in_place_evolution() {
             .await
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        14
+        18
     );
     drop(storage);
     let path = dir.path().join("hirsel.sqlite");
     let conn = Connection::open(&path).unwrap();
-    conn.pragma_update(None, "user_version", 13).unwrap();
+    conn.pragma_update(None, "user_version", 17).unwrap();
     drop(conn);
     let before = std::fs::read(&path).unwrap();
     assert!(Storage::open(dir.path()).await.is_err());
@@ -213,9 +218,9 @@ async fn unknown_current_layouts_and_bad_identity_are_untouched() {
 
 #[tokio::test]
 async fn branch_specific_schema_seven_layouts_are_refused_without_modification() {
-    // 10 is a stale version number; 14 is the current one carrying a layout
+    // 10 is a stale version number; 18 is the current one carrying a layout
     // that is not the current one.
-    for version in [10, 14] {
+    for version in [10, 18] {
         for layout in [
             include_str!("icons-only-v7.sql"),
             include_str!("processes-only-v7.sql"),
@@ -278,7 +283,7 @@ async fn turn_state_and_completion_timestamp_must_agree() {
     ] {
         assert_eq!(
             conn.execute(
-                "UPDATE thread_turns SET state=?2,finished_at=?3,started_at=CASE WHEN ?2='running' THEN accepted_at ELSE NULL END WHERE id=?1",
+                "UPDATE thread_turns SET state=?2,finished_at=?3,started_at=CASE WHEN ?2='running' THEN accepted_at ELSE NULL END,last_event_at=CASE WHEN ?2='running' THEN accepted_at ELSE last_event_at END WHERE id=?1",
                 rusqlite::params![turn.id, state, finished]
             )
             .is_ok(),
@@ -321,6 +326,18 @@ async fn turn_state_and_completion_timestamp_must_agree() {
     assert!(
         conn.execute(
             "UPDATE thread_turns SET accepted_at=NULL WHERE id=?1",
+            [turn.id]
+        )
+        .is_err()
+    );
+    conn.execute(
+        "UPDATE thread_turns SET state='running',started_at=accepted_at,finished_at=NULL,last_event_at=accepted_at WHERE id=?1",
+        [turn.id],
+    )
+    .unwrap();
+    assert!(
+        conn.execute(
+            "UPDATE thread_turns SET last_event_at=NULL WHERE id=?1",
             [turn.id]
         )
         .is_err()

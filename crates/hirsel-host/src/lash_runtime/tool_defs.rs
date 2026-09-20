@@ -185,6 +185,15 @@ pub(super) fn hirsel_tool_definitions(
             "update",
         ),
         tool_definition(
+            "hirsel.threads_state",
+            "threads_state",
+            "Set this Thread's short current headline. The Host normalizes whitespace, rolls parent headlines up from child counts and execution facts, and never completes a Task.",
+            thread_state_schema(),
+            json!({"type":"object"}),
+            ["threads"],
+            "state",
+        ),
+        tool_definition(
             "hirsel.threads_list",
             "threads_list",
             "List authorized descendants, direct children by default. `under: 0` stands at the top of the tree and lists every root-level Thread — that takes root reach. Lifecycle is independent of hierarchy.",

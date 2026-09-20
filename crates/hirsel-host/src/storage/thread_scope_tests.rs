@@ -483,6 +483,95 @@ async fn active_transport_revocation_fences_preconstructed_thread_writer() {
 }
 
 #[tokio::test]
+async fn cross_space_changes_coalesce_into_one_ordinary_space_activity_per_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Storage::open(dir.path()).await.unwrap();
+    let first_space = s
+        .create_thread(
+            "space-a",
+            "Space A",
+            "",
+            None,
+            ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Space,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    let actor_id = thread(&s, "actor", Some(first_space.id)).await;
+    let second_space = s
+        .create_thread(
+            "space-b",
+            "Space B",
+            "",
+            None,
+            ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Space,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    let target = thread(&s, "target", Some(second_space.id)).await;
+    {
+        let conn = s.conn.lock().await;
+        super::thread_grants::grant(
+            &conn,
+            actor_id,
+            hirsel_proto::ReachTarget::Root,
+            &hirsel_proto::ThreadGrantSource::Owner,
+            None,
+        )
+        .unwrap();
+    }
+    let actor = caller(&s, actor_id).await;
+    for (operation_id, title) in [
+        ("first-change", "First edit"),
+        ("second-change", "Second edit"),
+    ] {
+        s.mutate_scoped_thread(
+            &actor,
+            operation_id,
+            &ThreadMutation::Update {
+                thread: ThreadRef::Id(target),
+                title: Some(title.into()),
+                icon: None,
+                showcased_artifact_id: None,
+                description: None,
+                instrument: None,
+                attention: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let activities = s
+        .thread_detail(second_space.id, None, 100)
+        .await
+        .unwrap()
+        .activities;
+    let outside = activities
+        .iter()
+        .filter(|activity| activity.kind == "outside_change")
+        .collect::<Vec<_>>();
+    assert_eq!(outside.len(), 1);
+    assert_eq!(outside[0].turn_id, None);
+    assert_eq!(
+        outside[0].data["text"],
+        json!(format!("Changed by #{}: multiple changes", actor_id))
+    );
+    assert!(
+        s.thread_detail(first_space.id, None, 100)
+            .await
+            .unwrap()
+            .activities
+            .iter()
+            .all(|activity| activity.kind != "outside_change")
+    );
+}
+
+#[tokio::test]
 async fn history_reset_reused_ids_reject_old_callers_receipts_and_revocation() {
     let dir = tempfile::tempdir().unwrap();
     let s = Storage::open(dir.path()).await.unwrap();
@@ -911,30 +1000,30 @@ async fn direct_owner_native_input_accepts_the_full_thread_surface() {
 }
 
 #[tokio::test]
-async fn legacy_tool_profile_json_is_ignored_and_never_rewritten() {
+async fn extra_tool_profile_json_is_ignored_and_never_rewritten() {
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::open(dir.path()).await.unwrap();
     let history = storage.history_id().await.unwrap();
-    let thread_id = thread(&storage, "legacy-execution-json", None).await;
+    let thread_id = thread(&storage, "extra-execution-json", None).await;
     let execution = ThreadExecution::Cli {
         agent: hirsel_drivers::AgentKind::Claude,
         model: "legacy-model".into(),
         variant: "legacy-variant".into(),
         cwd: dir.path().to_path_buf(),
     };
-    let mut legacy = serde_json::to_value(&execution).unwrap();
-    legacy
+    let mut stored_config = serde_json::to_value(&execution).unwrap();
+    stored_config
         .as_object_mut()
         .unwrap()
-        .insert("tool_profile".into(), json!("project_chat"));
-    let legacy_json = serde_json::to_string(&legacy).unwrap();
+        .insert("tool_profile".into(), json!("space_chat"));
+    let stored_json = serde_json::to_string(&stored_config).unwrap();
     storage
         .conn
         .lock()
         .await
         .execute(
             "INSERT INTO thread_execution_preferences(thread_id,config) VALUES(?1,?2)",
-            rusqlite::params![thread_id, legacy_json],
+            rusqlite::params![thread_id, stored_json],
         )
         .unwrap();
 
@@ -967,7 +1056,7 @@ async fn legacy_tool_profile_json_is_ignored_and_never_rewritten() {
         .await
         .execute(
             "UPDATE thread_turn_execution SET config=?2 WHERE turn_id=?1",
-            rusqlite::params![turn.id, serde_json::to_string(&legacy).unwrap()],
+            rusqlite::params![turn.id, serde_json::to_string(&stored_config).unwrap()],
         )
         .unwrap();
     assert_eq!(storage.turn_execution(turn.id).await.unwrap(), execution);

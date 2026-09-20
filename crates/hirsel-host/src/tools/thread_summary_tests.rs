@@ -142,6 +142,67 @@ async fn terminal_child_turn_emits_typed_turn_and_completion_triggers() {
 }
 
 #[tokio::test]
+async fn child_status_publication_refreshes_changed_ancestor_rollups() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::build_state(crate::tests::test_config(dir.path()))
+        .await
+        .unwrap();
+    let (space, _) = state
+        .storage
+        .create_thread(
+            "rollup-space",
+            "Space",
+            "",
+            None,
+            ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Space,
+            None,
+        )
+        .await
+        .unwrap();
+    let (task, _) = state
+        .storage
+        .create_thread(
+            "rollup-task",
+            "Task",
+            "",
+            None,
+            ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Task,
+            Some(space.id),
+        )
+        .await
+        .unwrap();
+    state.broadcast_log.clear();
+
+    let queued = state
+        .storage
+        .queue_thread_turn(task.id, None)
+        .await
+        .unwrap();
+    state.tools.publish_thread_turn(queued).await;
+
+    let upserts = state
+        .broadcast_log
+        .recent()
+        .into_iter()
+        .filter_map(|frame| match frame {
+            HostToClient::ThreadUpsert { thread } => Some(thread),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(upserts.last().map(|thread| thread.id), Some(task.id));
+    let published_space = upserts
+        .iter()
+        .find(|thread| thread.id == space.id)
+        .expect("changed Space rollup is published with its child");
+    assert_eq!(
+        published_space.headline,
+        format!("1 child · #{} queued", task.id)
+    );
+}
+
+#[tokio::test]
 async fn message_and_activity_publish_recency_without_changing_thread_lifecycle() {
     let dir = tempfile::tempdir().unwrap();
     let state = crate::build_state(crate::tests::test_config(dir.path()))

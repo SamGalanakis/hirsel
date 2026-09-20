@@ -61,6 +61,11 @@ pub struct Thread {
     pub archived_at: Option<DateTime<Utc>>,
     pub snoozed_until: Option<DateTime<Utc>>,
     pub read: bool,
+    pub own_headline: String,
+    pub headline: String,
+    pub previous_headline: Option<String>,
+    pub headline_revision: u64,
+    pub last_seen_headline_revision: u64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub revision: u64,
@@ -72,6 +77,24 @@ pub struct Thread {
     /// Latest factual conversation/execution activity, falling back to creation.
     /// Reading or changing lifecycle metadata does not advance this timestamp.
     pub last_activity_at: DateTime<Utc>,
+    pub status: ThreadStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadStatusKind {
+    NeedsYou,
+    Running,
+    Queued,
+    Hung,
+    Sleeping,
+    Idle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadStatus {
+    pub kind: ThreadStatusKind,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

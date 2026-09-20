@@ -2135,6 +2135,16 @@ data class Thread (
     var `snoozedUntil`: kotlin.String?
     , 
     var `read`: kotlin.Boolean
+    ,
+    var `ownHeadline`: kotlin.String
+    ,
+    var `headline`: kotlin.String
+    ,
+    var `previousHeadline`: kotlin.String?
+    ,
+    var `headlineRevision`: kotlin.ULong
+    ,
+    var `lastSeenHeadlineRevision`: kotlin.ULong
     , 
     var `createdAt`: kotlin.String
     , 
@@ -2149,6 +2159,10 @@ data class Thread (
     var `lastFinishedTurn`: ThreadTurn?
     , 
     var `lastActivityAt`: kotlin.String
+    ,
+    var `status`: kotlin.String
+    ,
+    var `statusReason`: kotlin.String
     
 ){
     
@@ -2181,10 +2195,17 @@ public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
             FfiConverterBoolean.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterOptionalTypeThreadTurn.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterOptionalTypeThreadTurn.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
             FfiConverterString.read(buf),
         )
     }
@@ -2204,13 +2225,20 @@ public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
             FfiConverterOptionalString.allocationSize(value.`archivedAt`) +
             FfiConverterOptionalString.allocationSize(value.`snoozedUntil`) +
             FfiConverterBoolean.allocationSize(value.`read`) +
+            FfiConverterString.allocationSize(value.`ownHeadline`) +
+            FfiConverterString.allocationSize(value.`headline`) +
+            FfiConverterOptionalString.allocationSize(value.`previousHeadline`) +
+            FfiConverterULong.allocationSize(value.`headlineRevision`) +
+            FfiConverterULong.allocationSize(value.`lastSeenHeadlineRevision`) +
             FfiConverterString.allocationSize(value.`createdAt`) +
             FfiConverterString.allocationSize(value.`updatedAt`) +
             FfiConverterULong.allocationSize(value.`revision`) +
             FfiConverterOptionalTypeThreadTurn.allocationSize(value.`runningTurn`) +
             FfiConverterULong.allocationSize(value.`queuedTurnCount`) +
             FfiConverterOptionalTypeThreadTurn.allocationSize(value.`lastFinishedTurn`) +
-            FfiConverterString.allocationSize(value.`lastActivityAt`)
+            FfiConverterString.allocationSize(value.`lastActivityAt`) +
+            FfiConverterString.allocationSize(value.`status`) +
+            FfiConverterString.allocationSize(value.`statusReason`)
     )
 
     override fun write(value: Thread, buf: ByteBuffer) {
@@ -2228,6 +2256,11 @@ public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
             FfiConverterOptionalString.write(value.`archivedAt`, buf)
             FfiConverterOptionalString.write(value.`snoozedUntil`, buf)
             FfiConverterBoolean.write(value.`read`, buf)
+            FfiConverterString.write(value.`ownHeadline`, buf)
+            FfiConverterString.write(value.`headline`, buf)
+            FfiConverterOptionalString.write(value.`previousHeadline`, buf)
+            FfiConverterULong.write(value.`headlineRevision`, buf)
+            FfiConverterULong.write(value.`lastSeenHeadlineRevision`, buf)
             FfiConverterString.write(value.`createdAt`, buf)
             FfiConverterString.write(value.`updatedAt`, buf)
             FfiConverterULong.write(value.`revision`, buf)
@@ -2235,6 +2268,8 @@ public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
             FfiConverterULong.write(value.`queuedTurnCount`, buf)
             FfiConverterOptionalTypeThreadTurn.write(value.`lastFinishedTurn`, buf)
             FfiConverterString.write(value.`lastActivityAt`, buf)
+            FfiConverterString.write(value.`status`, buf)
+            FfiConverterString.write(value.`statusReason`, buf)
     }
 }
 
@@ -4055,5 +4090,3 @@ public object FfiConverterSequenceTypeChatMessage: FfiConverterRustBuffer<List<C
     )
     }
     
-
-

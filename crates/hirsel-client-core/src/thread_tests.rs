@@ -22,6 +22,11 @@ fn thread(revision: u64) -> Thread {
         archived_at: None,
         snoozed_until: None,
         read: false,
+        own_headline: "Ready".into(),
+        headline: "Ready".into(),
+        previous_headline: None,
+        headline_revision: 1,
+        last_seen_headline_revision: 1,
         created_at: Utc::now(),
         updated_at: Utc::now(),
         revision,
@@ -29,6 +34,10 @@ fn thread(revision: u64) -> Thread {
         queued_turn_count: 0,
         last_finished_turn: None,
         last_activity_at: Utc::now(),
+        status: hirsel_proto::ThreadStatus {
+            kind: hirsel_proto::ThreadStatusKind::Idle,
+            reason: "No work is active".into(),
+        },
     }
 }
 fn message(id: u64, thread_id: u64, client_id: Option<&str>) -> ChatMessage {

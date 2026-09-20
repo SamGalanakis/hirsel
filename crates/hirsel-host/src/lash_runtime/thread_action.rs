@@ -63,10 +63,20 @@ mod tests {
     fn action_capture_keeps_original_fields_without_live_summary_projections() {
         let original = historical_thread();
         let mut current = original.clone();
+        current["parent_thread_id"] = Value::Null;
+        current["pinned_at"] = Value::Null;
+        current["icon"] = Value::Null;
+        current["showcased_artifact_id"] = Value::Null;
+        current["own_headline"] = json!("Ready");
+        current["headline"] = json!("Ready");
+        current["previous_headline"] = Value::Null;
+        current["headline_revision"] = json!(1);
+        current["last_seen_headline_revision"] = json!(1);
         current["running_turn"] = Value::Null;
         current["queued_turn_count"] = json!(3);
         current["last_finished_turn"] = Value::Null;
         current["last_activity_at"] = json!("2026-09-09T12:00:00Z");
+        current["status"] = json!({"kind":"queued","reason":"3 turns queued"});
         let thread: Thread = serde_json::from_value(current.clone()).unwrap();
         let captured = ThreadActionSnapshot::from(thread);
         assert_eq!(serde_json::to_value(&captured).unwrap(), original);

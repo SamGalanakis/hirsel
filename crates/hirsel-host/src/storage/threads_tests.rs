@@ -556,6 +556,7 @@ async fn kind_conversion_is_revision_guarded_atomic_and_preserves_identity() {
         Some(convertible.id),
     )
     .await;
+    let convertible = storage.thread(convertible.id).await.unwrap().unwrap();
     let converted = storage
         .set_addressed_thread_kind(
             &history,
@@ -612,6 +613,7 @@ async fn kind_conversion_is_revision_guarded_atomic_and_preserves_identity() {
         Some(blocked.id),
     )
     .await;
+    let blocked = storage.thread(blocked.id).await.unwrap().unwrap();
     assert!(
         storage
             .set_addressed_thread_kind(&history, blocked.id, ThreadKind::Task, blocked.revision,)
@@ -1166,4 +1168,139 @@ async fn instruments_round_trip_objects_arrays_and_sql_null_and_reject_empty_val
                 .is_err()
         );
     }
+}
+
+#[tokio::test]
+async fn headlines_share_rust_and_sql_bounds_and_seen_is_not_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let task = kinded_thread(&storage, "headline", ThreadKind::Task, None).await;
+    assert_eq!(
+        super::threads::validate_headline("  one\ttwo\nthree  ").unwrap(),
+        "one two three"
+    );
+    assert!(
+        super::threads::validate_headline(
+            "one two three four five six seven eight nine ten eleven twelve thirteen"
+        )
+        .is_err()
+    );
+    let changed = {
+        let conn = storage.conn.lock().await;
+        super::threads::set_headline(&conn, task.id, "  one\ttwo\nthree  ").unwrap()
+    };
+    assert_eq!(changed, vec![task.id]);
+    let updated = storage.thread(task.id).await.unwrap().unwrap();
+    assert_eq!(updated.own_headline, "one two three");
+    assert_eq!(updated.headline, "one two three");
+    assert_eq!(updated.previous_headline.as_deref(), Some("Ready"));
+    assert_eq!(updated.headline_revision, task.headline_revision + 1);
+    assert!(!updated.read);
+    let read = storage.mark_thread_read(task.id).await.unwrap();
+    assert!(read.read);
+    let seen = storage
+        .mark_headlines_seen(&storage.history_id().await.unwrap(), &[task.id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(seen.read);
+    assert_eq!(seen.last_seen_headline_revision, seen.headline_revision);
+    let conn = storage.conn.lock().await;
+    for invalid in [
+        "",
+        " one",
+        "one  two",
+        "one\ttwo",
+        "one two three four five six seven eight nine ten eleven twelve thirteen",
+    ] {
+        assert!(
+            conn.execute(
+                "UPDATE threads SET own_headline=?2 WHERE id=?1",
+                rusqlite::params![task.id, invalid]
+            )
+            .is_err(),
+            "SQL accepted {invalid:?}"
+        );
+    }
+    assert!(
+        conn.execute(
+            "UPDATE threads SET own_headline=NULL WHERE id=?1",
+            [task.id]
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn parent_rollup_uses_fact_precedence_id_ties_and_never_child_prose_or_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let parent = kinded_thread(&storage, "parent", ThreadKind::Task, None).await;
+    let first = kinded_thread(&storage, "first", ThreadKind::Task, Some(parent.id)).await;
+    let second = kinded_thread(&storage, "second", ThreadKind::Task, Some(parent.id)).await;
+    let initial = storage.thread(parent.id).await.unwrap().unwrap();
+    assert_eq!(initial.headline, format!("2 children · #{} idle", first.id));
+    {
+        let conn = storage.conn.lock().await;
+        super::threads::set_headline(&conn, second.id, "Never copy this child prose").unwrap();
+    }
+    assert!(
+        !storage
+            .thread(parent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .headline
+            .contains("Never copy")
+    );
+    storage
+        .update_thread(
+            second.id,
+            None,
+            None,
+            None,
+            Some(ThreadAttention::NeedsOwner),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.thread(parent.id).await.unwrap().unwrap().headline,
+        format!("2 children · #{} needs you", second.id)
+    );
+    storage
+        .update_thread(
+            first.id,
+            None,
+            None,
+            None,
+            Some(ThreadAttention::NeedsOwner),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.thread(parent.id).await.unwrap().unwrap().headline,
+        format!("2 children · #{} needs you", first.id)
+    );
+    storage
+        .update_thread(first.id, None, None, None, Some(ThreadAttention::Quiet))
+        .await
+        .unwrap();
+    storage
+        .update_thread(second.id, None, None, None, Some(ThreadAttention::Quiet))
+        .await
+        .unwrap();
+    let turn = storage.start_thread_turn(second.id, None).await.unwrap();
+    assert_eq!(
+        storage.thread(parent.id).await.unwrap().unwrap().headline,
+        format!("2 children · #{} running", second.id)
+    );
+    storage
+        .finish_thread_turn(turn.id, ThreadTurnState::Completed, None)
+        .await
+        .unwrap();
+    storage.settle_thread(second.id, true).await.unwrap();
+    let rolled = storage.thread(parent.id).await.unwrap().unwrap();
+    assert_eq!(rolled.headline, format!("2 children · #{} done", second.id));
+    assert!(rolled.settled_at.is_none());
 }

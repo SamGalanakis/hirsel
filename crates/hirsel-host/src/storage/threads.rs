@@ -7,6 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 pub(crate) struct ThreadPublication {
     history_id: String,
     thread: Thread,
+    ancestors: Vec<Thread>,
 }
 
 impl ThreadPublication {
@@ -18,13 +19,21 @@ impl ThreadPublication {
         &self.thread
     }
 
+    pub(crate) fn ancestors(&self) -> &[Thread] {
+        &self.ancestors
+    }
+
     #[cfg(test)]
     pub(crate) fn test(history_id: String, thread: Thread) -> Self {
-        Self { history_id, thread }
+        Self {
+            history_id,
+            thread,
+            ancestors: Vec::new(),
+        }
     }
 }
 
-pub(super) const COLUMNS: &str = "id,title,description,instrument,attention,settled_at,archived_at,snoozed_until,read,created_at,updated_at,revision,parent_thread_id,pinned_at,icon_symbol,icon_blob_id,showcased_artifact_id,kind,icon_tint";
+pub(super) const COLUMNS: &str = "id,title,description,instrument,attention,settled_at,archived_at,snoozed_until,read,created_at,updated_at,revision,parent_thread_id,pinned_at,icon_symbol,icon_blob_id,showcased_artifact_id,kind,icon_tint,own_headline,headline,previous_headline,headline_revision,last_seen_headline_revision";
 pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
     let parent_thread_id = r.get::<_, Option<u64>>(12)?;
     let time = |i| -> rusqlite::Result<Option<DateTime<Utc>>> {
@@ -99,6 +108,11 @@ pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
         archived_at: time(6)?,
         snoozed_until: time(7)?,
         read: r.get(8)?,
+        own_headline: r.get(19)?,
+        headline: r.get(20)?,
+        previous_headline: r.get(21)?,
+        headline_revision: r.get(22)?,
+        last_seen_headline_revision: r.get(23)?,
         created_at: parse_ts(&r.get::<_, String>(9)?)?,
         updated_at: parse_ts(&r.get::<_, String>(10)?)?,
         revision: r.get(11)?,
@@ -106,6 +120,10 @@ pub(super) fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
         queued_turn_count: 0,
         last_finished_turn: None,
         last_activity_at: parse_ts(&r.get::<_, String>(9)?)?,
+        status: hirsel_proto::ThreadStatus {
+            kind: hirsel_proto::ThreadStatusKind::Idle,
+            reason: "No work is active".into(),
+        },
     })
 }
 pub(super) fn get(conn: &Connection, id: u64) -> anyhow::Result<Thread> {
@@ -126,6 +144,27 @@ pub(super) fn snapshot(conn: &Connection) -> anyhow::Result<Vec<Thread>> {
         super::thread_summary::populate(conn, thread)?;
     }
     Ok(threads)
+}
+
+fn publication(
+    conn: &Connection,
+    history_id: String,
+    id: u64,
+) -> anyhow::Result<ThreadPublication> {
+    let thread = get(conn, id)?;
+    let mut parent = thread.parent_thread_id;
+    let mut ancestors = Vec::new();
+    while let Some(id) = parent {
+        anyhow::ensure!(ancestors.len() < 64, "Thread ancestry exceeds 64 levels");
+        let ancestor = get(conn, id)?;
+        parent = ancestor.parent_thread_id;
+        ancestors.push(ancestor);
+    }
+    Ok(ThreadPublication {
+        history_id,
+        thread,
+        ancestors,
+    })
 }
 pub(super) fn attention(value: ThreadAttention) -> &'static str {
     match value {
@@ -218,13 +257,54 @@ fn create_in_transaction(
     }
     let now = Utc::now().to_rfc3339();
     tx.execute("INSERT INTO threads(client_id,kind,title,description,instrument,attention,read,created_at,updated_at,revision,parent_thread_id) VALUES(?1,?2,?3,?4,?5,?6,0,?7,?7,1,?8)",params![client_id,kind_name(kind),title.trim(),description,instrument.map(serde_json::to_string).transpose()?,attention(needs),now,parent_thread_id])?;
-    Ok((get(tx, tx.last_insert_rowid() as u64)?, true))
+    let created = get(tx, tx.last_insert_rowid() as u64)?;
+    crate::thread_rollups::refresh_from(tx, created.id)?;
+    Ok((created, true))
 }
 
 /// The Owner and the Agent share one bound for a Thread's own text, so an
 /// Owner edit can never fail on something an Agent was allowed to write.
 pub(crate) const MAX_THREAD_TITLE_CHARS: usize = 200;
 pub(crate) const MAX_THREAD_DESCRIPTION_CHARS: usize = 20_000;
+pub(crate) const MAX_HEADLINE_BYTES: usize = 240;
+pub(crate) fn normalize_headline(headline: &str) -> String {
+    headline
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+pub(crate) fn validate_headline(headline: &str) -> anyhow::Result<String> {
+    let normalized = normalize_headline(headline);
+    anyhow::ensure!(!normalized.is_empty(), "headline must not be empty");
+    anyhow::ensure!(
+        normalized.split(' ').count() <= 12,
+        "headline must contain at most 12 words"
+    );
+    anyhow::ensure!(
+        normalized.len() <= MAX_HEADLINE_BYTES,
+        "headline must contain at most {MAX_HEADLINE_BYTES} bytes"
+    );
+    Ok(normalized)
+}
+pub(crate) fn set_headline(c: &Connection, id: u64, headline: &str) -> anyhow::Result<Vec<u64>> {
+    let headline = validate_headline(headline)?;
+    get(c, id)?;
+    let has_children: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM threads WHERE parent_thread_id=?1 AND archived_at IS NULL)",
+        [id],
+        |r| r.get(0),
+    )?;
+    c.execute("UPDATE threads SET own_headline=?2,previous_headline=headline,headline=CASE WHEN ?3 THEN headline ELSE ?2 END,headline_revision=headline_revision+1,updated_at=?4,revision=revision+1,read=0 WHERE id=?1", params![id, headline, has_children, Utc::now().to_rfc3339()])?;
+    let mut changed = vec![id];
+    if has_children {
+        changed.extend(crate::thread_rollups::refresh_self_and_ancestors(c, id)?);
+    } else {
+        changed.extend(crate::thread_rollups::refresh_from(c, id)?);
+    }
+    changed.sort_unstable();
+    changed.dedup();
+    Ok(changed)
+}
 pub(crate) fn validate_thread_title(title: &str) -> anyhow::Result<()> {
     anyhow::ensure!(!title.trim().is_empty(), "thread title must not be empty");
     anyhow::ensure!(
@@ -242,15 +322,43 @@ pub(crate) fn validate_thread_description(description: &str) -> anyhow::Result<(
 }
 
 impl Storage {
+    pub(crate) async fn mark_headlines_seen(
+        &self,
+        expected_history: &str,
+        ids: &[u64],
+    ) -> anyhow::Result<Vec<Thread>> {
+        let mut ids = ids.to_vec();
+        ids.sort_unstable();
+        ids.dedup();
+        anyhow::ensure!(
+            ids.len() <= 500,
+            "at most 500 displayed Threads may be marked seen"
+        );
+        let mut c = self.conn.lock().await;
+        let tx = c.transaction()?;
+        super::thread_scope::validate_history(&tx, expected_history)?;
+        for id in &ids {
+            anyhow::ensure!(*id > 0, "Thread IDs must be positive");
+            get(&tx, *id)?;
+            tx.execute(
+                "UPDATE threads SET last_seen_headline_revision=headline_revision WHERE id=?1",
+                [id],
+            )?;
+        }
+        let result = ids
+            .into_iter()
+            .map(|id| get(&tx, id))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        tx.commit()?;
+        Ok(result)
+    }
+
     pub(crate) async fn current_thread_publication(
         &self,
         id: u64,
     ) -> anyhow::Result<(tokio::sync::MutexGuard<'_, Connection>, ThreadPublication)> {
         let c = self.conn.lock().await;
-        let publication = ThreadPublication {
-            history_id: super::schema::read_history_id(&c)?,
-            thread: get(&c, id)?,
-        };
+        let publication = publication(&c, super::schema::read_history_id(&c)?, id)?;
         Ok((c, publication))
     }
 
@@ -261,10 +369,7 @@ impl Storage {
     ) -> anyhow::Result<(tokio::sync::MutexGuard<'_, Connection>, ThreadPublication)> {
         let guard = self.conn.lock().await;
         super::thread_scope::validate_history(&guard, expected_history)?;
-        let publication = ThreadPublication {
-            history_id: expected_history.to_owned(),
-            thread: get(&guard, expected.id)?,
-        };
+        let publication = publication(&guard, expected_history.to_owned(), expected.id)?;
         anyhow::ensure!(
             publication.thread == *expected,
             "Thread publication snapshot is stale"
@@ -379,10 +484,16 @@ impl Storage {
         if let Some(description) = description {
             validate_thread_description(description)?;
         }
-        let c = self.conn.lock().await;
-        get(&c, id)?;
-        c.execute("UPDATE threads SET title=COALESCE(?2,title),description=COALESCE(?3,description),instrument=CASE WHEN ?7 THEN ?4 ELSE instrument END,attention=COALESCE(?5,attention),updated_at=?6,revision=revision+1,read=0 WHERE id=?1",params![id,title,description,instrument.flatten().map(serde_json::to_string).transpose()?,needs.map(attention),Utc::now().to_rfc3339(),instrument.is_some()])?;
-        get(&c, id)
+        let mut c = self.conn.lock().await;
+        let tx = c.transaction()?;
+        get(&tx, id)?;
+        tx.execute("UPDATE threads SET title=COALESCE(?2,title),description=COALESCE(?3,description),instrument=CASE WHEN ?7 THEN ?4 ELSE instrument END,attention=COALESCE(?5,attention),updated_at=?6,revision=revision+1,read=0 WHERE id=?1",params![id,title,description,instrument.flatten().map(serde_json::to_string).transpose()?,needs.map(attention),Utc::now().to_rfc3339(),instrument.is_some()])?;
+        if needs.is_some() {
+            crate::thread_rollups::refresh_from(&tx, id)?;
+        }
+        let updated = get(&tx, id)?;
+        tx.commit()?;
+        Ok(updated)
     }
     /// The Owner's own title/description edit: revision-fenced exactly like an
     /// icon edit, and never marking the Thread unread — the Owner wrote it.
@@ -453,14 +564,15 @@ impl Storage {
         id: u64,
         settled: bool,
     ) -> anyhow::Result<Thread> {
-        let c = self.conn.lock().await;
-        super::thread_scope::validate_history(&c, expected_history)?;
-        let thread = get(&c, id)?;
+        let mut c = self.conn.lock().await;
+        let tx = c.transaction()?;
+        super::thread_scope::validate_history(&tx, expected_history)?;
+        let thread = get(&tx, id)?;
         anyhow::ensure!(
             thread.kind == ThreadKind::Task,
             "only Tasks can be completed or reopened"
         );
-        c.execute(
+        tx.execute(
             "UPDATE threads SET settled_at=?2,updated_at=?3,revision=revision+1 WHERE id=?1",
             params![
                 id,
@@ -468,7 +580,10 @@ impl Storage {
                 Utc::now().to_rfc3339()
             ],
         )?;
-        get(&c, id)
+        crate::thread_rollups::refresh_from(&tx, id)?;
+        let updated = get(&tx, id)?;
+        tx.commit()?;
+        Ok(updated)
     }
     /// The Owner archive action. It runs the same [`super::thread_archive`]
     /// path the agent's `threads.archive` tool runs: subtree, cancellation,
@@ -502,23 +617,33 @@ impl Storage {
         id: u64,
         until: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Thread> {
-        self.set_addressed_thread_field(
-            expected_history,
-            id,
-            "snoozed_until",
-            until.map(|value| value.to_rfc3339()),
-        )
-        .await
+        let mut c = self.conn.lock().await;
+        let tx = c.transaction()?;
+        super::thread_scope::validate_history(&tx, expected_history)?;
+        get(&tx, id)?;
+        tx.execute(
+            "UPDATE threads SET snoozed_until=?2,updated_at=?3,revision=revision+1 WHERE id=?1",
+            params![
+                id,
+                until.map(|value| value.to_rfc3339()),
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        crate::thread_rollups::refresh_from(&tx, id)?;
+        let updated = get(&tx, id)?;
+        tx.commit()?;
+        Ok(updated)
     }
     #[cfg(test)]
     pub(crate) async fn settle_thread(&self, id: u64, settled: bool) -> anyhow::Result<Thread> {
-        let c = self.conn.lock().await;
-        let thread = get(&c, id)?;
+        let mut c = self.conn.lock().await;
+        let tx = c.transaction()?;
+        let thread = get(&tx, id)?;
         anyhow::ensure!(
             thread.kind == ThreadKind::Task,
             "only Tasks can be completed or reopened"
         );
-        c.execute(
+        tx.execute(
             "UPDATE threads SET settled_at=?2,updated_at=?3,revision=revision+1 WHERE id=?1",
             params![
                 id,
@@ -526,7 +651,10 @@ impl Storage {
                 Utc::now().to_rfc3339()
             ],
         )?;
-        get(&c, id)
+        crate::thread_rollups::refresh_from(&tx, id)?;
+        let updated = get(&tx, id)?;
+        tx.commit()?;
+        Ok(updated)
     }
 
     pub(crate) async fn set_addressed_thread_kind(
@@ -584,8 +712,21 @@ impl Storage {
         id: u64,
         until: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Thread> {
-        self.set_thread_field(id, "snoozed_until", until.map(|v| v.to_rfc3339()))
-            .await
+        let mut c = self.conn.lock().await;
+        let tx = c.transaction()?;
+        get(&tx, id)?;
+        tx.execute(
+            "UPDATE threads SET snoozed_until=?2,updated_at=?3,revision=revision+1 WHERE id=?1",
+            params![
+                id,
+                until.map(|value| value.to_rfc3339()),
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        crate::thread_rollups::refresh_from(&tx, id)?;
+        let updated = get(&tx, id)?;
+        tx.commit()?;
+        Ok(updated)
     }
     pub async fn pin_thread(&self, id: u64, pinned: bool) -> anyhow::Result<Thread> {
         let c = self.conn.lock().await;

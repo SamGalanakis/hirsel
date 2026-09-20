@@ -6,9 +6,10 @@ fn thread() -> hirsel_proto::Thread {
         "id":5,"kind":"space","parent_thread_id":null,"pinned_at":null,"title":"Same ID","icon":null,
         "showcased_artifact_id":null,"description":"","instrument":null,"attention":"quiet",
         "settled_at":null,"archived_at":null,"snoozed_until":null,"read":false,
+        "own_headline":"Ready","headline":"Ready","previous_headline":null,"headline_revision":1,"last_seen_headline_revision":1,
         "created_at":"2026-09-10T10:00:00Z","updated_at":"2026-09-10T10:00:00Z","revision":1,
         "running_turn":null,"queued_turn_count":0,"last_finished_turn":null,
-        "last_activity_at":"2026-09-10T10:00:00Z"
+        "last_activity_at":"2026-09-10T10:00:00Z","status":{"kind":"idle","reason":"No work is active"}
     }))
     .unwrap()
 }

@@ -184,6 +184,7 @@ impl Storage {
                     "UPDATE threads SET settled_at=?2,revision=revision+1,updated_at=?2 WHERE id=?1",
                     params![thread_id, now],
                 )?;
+                crate::thread_rollups::refresh_from(&tx, thread_id)?;
             } else {
                 tx.execute(
                     "UPDATE threads SET revision=revision+1,updated_at=?2 WHERE id=?1",

@@ -254,6 +254,13 @@ impl ScopedThreadTools {
                 })
                 .await
             }
+            "threads_state" => {
+                self.thread_mutation(crate::storage::ThreadMutation::State {
+                    thread: reference(args, "thread")?,
+                    headline: required_string(args, "headline")?,
+                })
+                .await
+            }
             "threads_grant" => {
                 self.thread_mutation(crate::storage::ThreadMutation::Grant {
                     thread: reference(args, "thread")?,
@@ -557,6 +564,13 @@ impl ScopedThreadTools {
                 .await;
         }
         if let Some(activity) = result.get("activity") {
+            self.tools
+                .publish_thread_activity(
+                    serde_json::from_value(activity.clone()).map_err(ToolError::from)?,
+                )
+                .await;
+        }
+        if let Some(activity) = result.get("outside_activity") {
             self.tools
                 .publish_thread_activity(
                     serde_json::from_value(activity.clone()).map_err(ToolError::from)?,

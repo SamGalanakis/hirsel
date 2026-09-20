@@ -221,6 +221,7 @@ async fn refresh_thread_upsert(
     event: HostToClient,
 ) -> anyhow::Result<HostToClient> {
     if let HostToClient::ThreadUpsert { thread } = event {
+        state.refresh_thread_projection_config();
         let thread = state
             .storage
             .thread(thread.id)
@@ -239,6 +240,7 @@ pub fn host_version() -> String {
 }
 
 async fn build_snapshot(state: &AppState) -> anyhow::Result<(HostToClient, HelloBroadcastDedupe)> {
+    state.refresh_thread_projection_config();
     let snapshot = state.storage.hello_snapshot().await?;
     let views = state.views.snapshot().await;
     let mut dedupe = HelloBroadcastDedupe::new(views.clone());
@@ -408,9 +410,10 @@ where
                 )
                 .await?;
             if inserted {
-                state.broadcast(HostToClient::ThreadUpsert {
-                    thread: thread.clone(),
-                });
+                state
+                    .tools
+                    .publish_thread(&history_id, thread.clone())
+                    .await;
             }
             channel
                 .send(&HostToClient::ThreadCreated { client_id, thread })
@@ -421,6 +424,7 @@ where
             thread_id,
             before_id,
         } => {
+            state.refresh_thread_projection_config();
             let detail = state
                 .storage
                 .thread_detail(thread_id, before_id, 100)
@@ -556,6 +560,26 @@ where
                     client_id,
                     history_id,
                     thread_id,
+                })
+                .await?;
+        }
+        ClientToHost::MarkThreadHeadlinesSeen {
+            client_id,
+            history_id,
+            thread_ids,
+        } => {
+            for thread in state
+                .storage
+                .mark_headlines_seen(&history_id, &thread_ids)
+                .await?
+            {
+                state.broadcast(HostToClient::ThreadUpsert { thread });
+            }
+            channel
+                .send(&HostToClient::ThreadActionApplied {
+                    client_id,
+                    history_id,
+                    thread_id: 0,
                 })
                 .await?;
         }

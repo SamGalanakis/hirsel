@@ -122,6 +122,11 @@ pub enum ClientToHost {
         #[serde(default)]
         expected_revision: Option<u64>,
     },
+    MarkThreadHeadlinesSeen {
+        client_id: String,
+        history_id: String,
+        thread_ids: Vec<u64>,
+    },
 
     CancelTurn {
         history_id: String,

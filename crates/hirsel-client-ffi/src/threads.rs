@@ -110,6 +110,11 @@ pub struct Thread {
     pub archived_at: Option<String>,
     pub snoozed_until: Option<String>,
     pub read: bool,
+    pub own_headline: String,
+    pub headline: String,
+    pub previous_headline: Option<String>,
+    pub headline_revision: u64,
+    pub last_seen_headline_revision: u64,
     pub created_at: String,
     pub updated_at: String,
     pub revision: u64,
@@ -117,6 +122,8 @@ pub struct Thread {
     pub queued_turn_count: u64,
     pub last_finished_turn: Option<ThreadTurn>,
     pub last_activity_at: String,
+    pub status: String,
+    pub status_reason: String,
 }
 impl From<core::Thread> for Thread {
     fn from(t: core::Thread) -> Self {
@@ -135,6 +142,11 @@ impl From<core::Thread> for Thread {
             archived_at: t.archived_at.map(|t| t.to_rfc3339()),
             snoozed_until: t.snoozed_until.map(|t| t.to_rfc3339()),
             read: t.read,
+            own_headline: t.own_headline,
+            headline: t.headline,
+            previous_headline: t.previous_headline,
+            headline_revision: t.headline_revision,
+            last_seen_headline_revision: t.last_seen_headline_revision,
             created_at: t.created_at.to_rfc3339(),
             updated_at: t.updated_at.to_rfc3339(),
             revision: t.revision,
@@ -142,6 +154,12 @@ impl From<core::Thread> for Thread {
             queued_turn_count: t.queued_turn_count,
             last_finished_turn: t.last_finished_turn.map(Into::into),
             last_activity_at: t.last_activity_at.to_rfc3339(),
+            status: serde_json::to_value(t.status.kind)
+                .expect("status serializes")
+                .as_str()
+                .expect("status is a string")
+                .to_owned(),
+            status_reason: t.status.reason,
         }
     }
 }

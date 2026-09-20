@@ -25,6 +25,11 @@ export interface Thread {
   archived_at: string | null;
   snoozed_until: string | null;
   read: boolean;
+  own_headline: string;
+  headline: string;
+  previous_headline: string | null;
+  headline_revision: number;
+  last_seen_headline_revision: number;
   created_at: string;
   updated_at: string;
   revision: number;
@@ -32,6 +37,7 @@ export interface Thread {
   queued_turn_count: number;
   last_finished_turn: ThreadTurn | null;
   last_activity_at: string;
+  status: { kind: "needs_you" | "running" | "queued" | "hung" | "sleeping" | "idle"; reason: string };
 }
 export interface ThreadTurn {
   id: number;
@@ -97,6 +103,7 @@ export type ThreadServerMessage =
   | { type: "thread_activity"; activity: ThreadActivity }
   | { type: "thread_turn"; turn: ThreadTurn };
 export type ThreadClientMessage =
+  | { type: "mark_thread_headlines_seen"; client_id: string; history_id: string; thread_ids: number[] }
   | { type: "add_thread_related"; client_id: string; history_id: string; thread_id: number; target: RelatedTarget; title: string | null }
   | { type: "remove_thread_related"; client_id: string; history_id: string; thread_id: number; item_id: number }
   | { type: "grant_thread_reach"; client_id: string; history_id: string; thread_id: number; target: ReachTarget; note: string | null }

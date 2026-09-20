@@ -396,20 +396,19 @@ try {
   const archivedUpsert = await waitForFrame(frames, archiveOffset, "selected archive", frame => frame.type === "thread_upsert" && frame.thread?.id === childTask.id && frame.thread.archived_at !== null);
   const archiveRequest = sentFrames.slice(archiveSentOffset).find(frame => frame.type === "thread_action" && frame.thread_id === childTask.id && frame.action === "archive");
   assert(archiveRequest, "Archive did not use the selected Thread action");
-  await page.getByRole("heading", { name: "What needs you", exact: true }).waitFor();
-  assert.equal(new URL(page.url()).pathname, "/", "Selected archive did not route to the overview");
-  assert.equal(await page.locator("main[data-thread-id]").count(), 0, "Selected archive retained an addressed conversation");
-  assert.equal(await page.evaluate(key => localStorage.getItem(key), `hirsel.last-thread.${archiveHistory}`), null, "Selected archive retained its remembered selection");
+  await page.locator(`main[data-thread-id="${rootSpace.id}"]`).waitFor();
+  assert.equal(new URL(page.url()).pathname, `/t/${rootSpace.id}`, "Selected archive did not return to its project chat");
+  assert.equal(await page.evaluate(key => localStorage.getItem(key), `hirsel.last-project.${archiveHistory}`), String(rootSpace.id), "Selected archive forgot its project chat");
   assert.equal(await page.evaluate(key => localStorage.getItem(key), draftKey), preservedDraft, "Selected archive deleted the composer draft");
   const historyAfterArchive = (await openThread(url, token, childTask.id)).detail;
   assert.deepEqual(historyAfterArchive.messages, historyBeforeArchive.messages, "Selected archive changed conversation history");
   assert.equal(historyAfterArchive.thread.archived_at, archivedUpsert.thread.archived_at, "Archived inventory and open_thread disagree");
   assert.equal(Date.parse(threadRecord(storeSnapshot(), childTask.id).archived_at), Date.parse(archivedUpsert.thread.archived_at), "Archive was not durable in SQLite");
   await Promise.all([
-    page.screenshot({ path: join(evidenceDir, "15-archive-overview.png"), fullPage: true }),
-    writeFile(join(evidenceDir, "15-archive-overview-dom.json"), `${JSON.stringify(await domSnapshot(page), null, 2)}\n`),
-    writeFile(join(evidenceDir, "15-archive-overview-thread.json"), `${JSON.stringify(historyAfterArchive, null, 2)}\n`),
-    writeFile(join(evidenceDir, "15-archive-overview-store.json"), `${JSON.stringify(storeSnapshot(), null, 2)}\n`),
+    page.screenshot({ path: join(evidenceDir, "15-archive-project-chat.png"), fullPage: true }),
+    writeFile(join(evidenceDir, "15-archive-project-chat-dom.json"), `${JSON.stringify(await domSnapshot(page), null, 2)}\n`),
+    writeFile(join(evidenceDir, "15-archive-project-chat-thread.json"), `${JSON.stringify(historyAfterArchive, null, 2)}\n`),
+    writeFile(join(evidenceDir, "15-archive-project-chat-store.json"), `${JSON.stringify(storeSnapshot(), null, 2)}\n`),
   ]);
 
   const archivedDrawer = await ensureDrawer(page);
@@ -417,7 +416,7 @@ try {
   await page.getByRole("menuitemradio", { name: "archived", exact: true }).click();
   const archivedRow = archivedDrawer.locator(`[data-thread-row="${childTask.id}"]`);
   await archivedRow.waitFor({ state: "visible" });
-  assert.equal(await page.locator("main[data-thread-id]").count(), 0, "Browsing Archived changed the recipient");
+  assert.equal(await page.locator(`main[data-thread-id="${rootSpace.id}"]`).count(), 1, "Browsing Archived changed the project recipient");
   await archivedRow.click();
   await page.locator(`main[data-thread-id="${childTask.id}"]`).waitFor();
   assert.equal(new URL(page.url()).pathname, `/t/${childTask.id}`, "Explicit archived selection did not update the route");

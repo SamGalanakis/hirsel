@@ -12,6 +12,11 @@ import {
   unusedPort,
 } from "./lib/harness.mjs";
 
+const requested = process.argv[2] ?? "all";
+if (!new Set(["all", "project-chats"]).has(requested)) {
+  throw new Error(`Unknown deterministic E2E scenario: ${requested}`);
+}
+
 function run(label, command, args, env = {}) {
   return new Promise((resolveRun, reject) => {
     const child = startProcess(command, args, {
@@ -55,59 +60,71 @@ try {
     HIRSEL_ARTIFACT_HOST_TOKEN: token,
     HIRSEL_OPENUI_SHOTS: join(evidenceDir, "openui"),
   };
-  await run("Thread smoke", process.execPath, ["e2e/thread-smoke.mjs"], hostEnvironment);
-  await run("OpenUI artifact smoke", process.execPath, ["e2e/openui-artifact-smoke.mjs"], hostEnvironment);
-
-  const vitePort = await unusedPort();
-  const viteUrl = `http://127.0.0.1:${vitePort}`;
-  // Start the optimizer cold so the dependency scan is guaranteed to report,
-  // and never reuse a half-populated cache from an earlier run.
-  await rm(join(repoRoot, "app", "node_modules", ".vite-artifact-preview"), { recursive: true, force: true });
-  const viteLogs = [];
-  vite = startProcess(process.execPath, [
-    join(repoRoot, "app", "node_modules", "vite", "bin", "vite.js"),
-    "--config",
-    join(repoRoot, "app", "artifact-preview.config.ts"),
-    "--host",
-    "127.0.0.1",
-    "--port",
-    String(vitePort),
-    "--strictPort",
-  ], { cwd: join(repoRoot, "app"), env: process.env, logs: viteLogs });
-  const previewAlive = () => {
-    if (vite.exitCode !== null || vite.signalCode !== null) {
-      throw new Error(`Artifact preview exited (${vite.exitCode ?? vite.signalCode})`);
-    }
-    return true;
-  };
-  await poll("artifact preview readiness", async () => {
-    previewAlive();
-    return (await fetch(`${viteUrl}/tools/artifact-smoke.html`)).ok;
-  }, 30_000);
-  // The dev server discovers dynamically imported dependencies only while a
-  // browser walks the module graph, and finishes by reloading every open page
-  // ("optimized dependencies changed. reloading"). Landing mid-test, that
-  // reload resets the smoke's artifact and its assertions time out on content
-  // that was replaced by the reload. Walk the graph here and wait for the
-  // optimizer's own completion line, so the reload is spent before the smoke.
-  const warmup = await launchBrowser();
-  try {
-    const page = await warmup.newPage();
-    await page.goto(`${viteUrl}/tools/artifact-smoke.html`);
-    await page.frameLocator("iframe").getByRole("button", { name: "Count 0", exact: true }).waitFor();
-    await poll("artifact preview dependency optimization", () => {
-      previewAlive();
-      return viteLogs.some(line => /dependencies optimized/.test(line));
-    }, 120_000);
-  } finally {
-    await warmup.close();
+  if (requested === "all") {
+    await run("Thread smoke", process.execPath, ["e2e/thread-smoke.mjs"], hostEnvironment);
   }
-  await run("Artifact runtime smoke", process.execPath, ["e2e/artifact-runtime-smoke.mjs"], {
-    HIRSEL_ARTIFACT_TEST_URL: viteUrl,
+  await run("Project chats", process.execPath, ["e2e/project-chats.mjs"], {
+    ...hostEnvironment,
+    HIRSEL_PROJECT_CHATS_URL: host.url,
+    HIRSEL_PROJECT_CHATS_TOKEN: token,
   });
+  if (requested === "project-chats") {
+    console.log(`Project-chat E2E passed with isolated evidence under ${evidenceDir}`);
+    process.exitCode = 0;
+  } else {
+    await run("OpenUI artifact smoke", process.execPath, ["e2e/openui-artifact-smoke.mjs"], hostEnvironment);
 
-  await run("Blob inline policy", process.execPath, ["e2e/blob-inline-policy.mjs"]);
-  console.log(`E2E suite passed with isolated evidence under ${evidenceDir}`);
+    const vitePort = await unusedPort();
+    const viteUrl = `http://127.0.0.1:${vitePort}`;
+    // Start the optimizer cold so the dependency scan is guaranteed to report,
+    // and never reuse a half-populated cache from an earlier run.
+    await rm(join(repoRoot, "app", "node_modules", ".vite-artifact-preview"), { recursive: true, force: true });
+    const viteLogs = [];
+    vite = startProcess(process.execPath, [
+      join(repoRoot, "app", "node_modules", "vite", "bin", "vite.js"),
+      "--config",
+      join(repoRoot, "app", "artifact-preview.config.ts"),
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(vitePort),
+      "--strictPort",
+    ], { cwd: join(repoRoot, "app"), env: process.env, logs: viteLogs });
+    const previewAlive = () => {
+      if (vite.exitCode !== null || vite.signalCode !== null) {
+        throw new Error(`Artifact preview exited (${vite.exitCode ?? vite.signalCode})`);
+      }
+      return true;
+    };
+    await poll("artifact preview readiness", async () => {
+      previewAlive();
+      return (await fetch(`${viteUrl}/tools/artifact-smoke.html`)).ok;
+    }, 30_000);
+    // The dev server discovers dynamically imported dependencies only while a
+    // browser walks the module graph, and finishes by reloading every open page
+    // ("optimized dependencies changed. reloading"). Landing mid-test, that
+    // reload resets the smoke's artifact and its assertions time out on content
+    // that was replaced by the reload. Walk the graph here and wait for the
+    // optimizer's own completion line, so the reload is spent before the smoke.
+    const warmup = await launchBrowser();
+    try {
+      const page = await warmup.newPage();
+      await page.goto(`${viteUrl}/tools/artifact-smoke.html`);
+      await page.frameLocator("iframe").getByRole("button", { name: "Count 0", exact: true }).waitFor();
+      await poll("artifact preview dependency optimization", () => {
+        previewAlive();
+        return viteLogs.some(line => /dependencies optimized/.test(line));
+      }, 120_000);
+    } finally {
+      await warmup.close();
+    }
+    await run("Artifact runtime smoke", process.execPath, ["e2e/artifact-runtime-smoke.mjs"], {
+      HIRSEL_ARTIFACT_TEST_URL: viteUrl,
+    });
+
+    await run("Blob inline policy", process.execPath, ["e2e/blob-inline-policy.mjs"]);
+    console.log(`E2E suite passed with isolated evidence under ${evidenceDir}`);
+  }
 } catch (error) {
   if (hostLogs.length) console.error(hostLogs.slice(-40).join("\n"));
   throw error;

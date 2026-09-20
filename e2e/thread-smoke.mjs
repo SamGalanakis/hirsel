@@ -26,11 +26,12 @@ async function expectLifecycle(page, label) {
   await page.getByRole("menuitem", { name: label, exact: true }).waitFor();
   await page.keyboard.press("Escape");
 }
-async function overview(page) {
-  await page.getByRole("button", { name: "Thread overview", exact: true }).click();
-  await page.locator('[data-slot="thread-empty"]').waitFor();
-  if (new URL(page.url()).pathname !== "/") throw new Error("Overview did not clear the explicit selection");
-  if (await page.locator("textarea").count()) throw new Error("Overview has an implicit recipient");
+async function projectChat(page) {
+  const rail = page.getByRole("button", { name: "Project chat", exact: true });
+  if (await rail.isVisible()) await rail.click();
+  else await page.getByRole("button", { name: "Back", exact: true }).click();
+  await page.getByRole("textbox", { name: /Message project chat/ }).waitFor();
+  if (!/^\/t\/\d+$/.test(new URL(page.url()).pathname)) throw new Error("Project chat did not restore an addressed project");
 }
 const browser = await launchBrowser();
 try {
@@ -58,7 +59,7 @@ try {
     await page.getByLabel("New space or task title").fill(title);
     await page.getByRole("button", { name: "Kind: Space", exact: true }).click();
     await page.getByRole("menuitemradio", { name: "task", exact: true }).click();
-    await page.getByRole("button", { name: "New Task", exact: true }).click();
+    await page.getByRole("button", { name: "Create Task", exact: true }).click();
     await page.locator('[data-slot="thread-context"] h1').filter({ hasText: title }).waitFor();
     const location = new URL(page.url());
     const path = location.pathname;
@@ -66,8 +67,8 @@ try {
     const threadId = Number(path.split("/").at(-1));
     if (!/^\/t\/\d+$/.test(path)) throw new Error(`Thread create did not navigate: ${path}`);
     await page.locator("textarea").fill("This draft belongs to this thread");
-    await overview(page);
-    if (await page.locator("textarea").count()) throw new Error("Thread draft leaked into overview");
+    await projectChat(page);
+    if (await page.locator("textarea").inputValue() === "This draft belongs to this thread") throw new Error("Thread draft leaked into the project chat");
     await page.goto(`${url}${route}`);
     await page.locator('[data-slot="thread-context"] h1').filter({ hasText: title }).waitFor();
     if (await page.locator("textarea").inputValue() !== "This draft belongs to this thread") throw new Error("Thread draft was lost");
@@ -85,8 +86,8 @@ try {
     }, 5_000);
     if (!ownedMessages.some(message => message.author === "owner" && message.body === body) || !ownedMessages.some(message => message.author === "agent")) throw new Error("Host did not emit both messages with correct Thread ownership");
     if (artifacts) await page.screenshot({ path: `${artifacts}/thread-conversation-${viewport.width}.png`, fullPage: true });
-    await overview(page);
-    if (await page.getByText(body, { exact: true }).count()) throw new Error("Owned message leaked into overview");
+    await projectChat(page);
+    if (await page.getByText(body, { exact: true }).count()) throw new Error("Owned message leaked into the project chat");
     await page.goto(`${url}${route}`);
     await page.getByText(body, { exact: true }).waitFor();
     await chooseLifecycle(page, "Mark Task done");

@@ -19,7 +19,7 @@ const broadcast = (world, frame) => {
   if (id !== null) broadcast(world, { type: "thread_upsert", thread: threadFor(world, id) });
 };
 function makeThread(id, title, kind, parent_thread_id = null) {
-  return { id, kind, title, icon: null, showcased_artifact_id: null, parent_thread_id, pinned_at: null, description: "", execution: null, instrument: null, attention: "quiet", settled_at: null, archived_at: null, snoozed_until: null, read: false, created_at: now(), updated_at: now(), revision: 1 };
+  return { id, kind, title, icon: null, showcased_artifact_id: null, parent_thread_id, pinned_at: null, description: "", execution: null, instrument: null, attention: "quiet", settled_at: null, archived_at: null, snoozed_until: null, read: false, own_headline: "Ready", headline: "Ready", previous_headline: null, headline_revision: 1, last_seen_headline_revision: 1, created_at: now(), updated_at: now(), revision: 1, running_turn: null, queued_turn_count: 0, last_finished_turn: null, last_activity_at: now(), status: { kind: "idle", reason: "No work is active" } };
 }
 function worldFor(token) {
   if (!tenants.has(token)) {

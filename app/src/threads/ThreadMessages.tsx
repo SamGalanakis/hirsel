@@ -14,6 +14,7 @@ import { threadState } from "./store";
 import { workLabel } from "./work-summary";
 import { state } from "../store/store";
 import { anyOverlayOpen } from "../lib/focus";
+import { EffectPills } from "../effects/EffectPills";
 
 /** A keyed response moves to its final chronological position without replacing
  * controls. Browsers can still drop focus when moving that existing DOM node. */
@@ -79,6 +80,7 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
               side is the message itself, which is all there is to say. */}
           <Show when={!owner()} fallback={<><Markdown>{message()?.body ?? ""}</Markdown><For each={message()?.artifact_ids ?? []}>{id => <ArtifactCard id={id} />}</For></>}>
             <RunCard turn={turn()} message={message()} trigger={trigger()} activities={activities(turn()?.id)} events={events()} live={turn()?.state === "running"} />
+            <Show when={turn()}>{current => <EffectPills turnId={current().id} threadId={props.threadId} activities={props.history.activities} events={events()} />}</Show>
           </Show>
           <Show when={message()?.attachments?.length}><ul class="mt-2 text-xs text-muted-foreground"><For each={message()?.attachments}>{blob => <li><button class="underline" onClick={() => { void getClient()?.getBlobUrl(blob.id).then(url => window.open(url, "_blank", "noopener,noreferrer")); }}>{blob.name}</button></li>}</For></ul></Show>
         </div>

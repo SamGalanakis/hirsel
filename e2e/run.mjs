@@ -13,7 +13,7 @@ import {
 } from "./lib/harness.mjs";
 
 const requested = process.argv[2] ?? "all";
-if (!new Set(["all", "project-chats"]).has(requested)) {
+if (!new Set(["all", "space-chats", "effect-pills", "task-state"]).has(requested)) {
   throw new Error(`Unknown deterministic E2E scenario: ${requested}`);
 }
 
@@ -63,13 +63,18 @@ try {
   if (requested === "all") {
     await run("Thread smoke", process.execPath, ["e2e/thread-smoke.mjs"], hostEnvironment);
   }
-  await run("Space chats", process.execPath, ["e2e/project-chats.mjs"], {
-    ...hostEnvironment,
-    HIRSEL_PROJECT_CHATS_URL: host.url,
-    HIRSEL_PROJECT_CHATS_TOKEN: token,
-  });
-  if (requested === "project-chats") {
-    console.log(`Space-chat E2E passed with isolated evidence under ${evidenceDir}`);
+  const scenarios = [
+    { id: "space-chats", label: "Space chats", file: "e2e/space-chats.mjs", env: { HIRSEL_SPACE_CHATS_URL: host.url, HIRSEL_SPACE_CHATS_TOKEN: token } },
+    { id: "effect-pills", label: "Effect pills", file: "e2e/effect-pills.mjs", env: { HIRSEL_EFFECT_PILLS_URL: host.url, HIRSEL_EFFECT_PILLS_TOKEN: token } },
+    { id: "task-state", label: "Task headlines", file: "e2e/task-state.mjs", env: { HIRSEL_TASK_STATE_URL: host.url, HIRSEL_TASK_STATE_TOKEN: token } },
+  ];
+  for (const scenario of scenarios) {
+    if (requested === "all" || requested === scenario.id) {
+      await run(scenario.label, process.execPath, [scenario.file], { ...hostEnvironment, ...scenario.env });
+    }
+  }
+  if (requested !== "all") {
+    console.log(`${requested} E2E passed with isolated evidence under ${evidenceDir}`);
     process.exitCode = 0;
   } else {
     await run("OpenUI artifact smoke", process.execPath, ["e2e/openui-artifact-smoke.mjs"], hostEnvironment);

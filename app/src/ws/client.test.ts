@@ -139,6 +139,13 @@ describe("HirselWsClient lifecycle", () => {
 
     ws.serverSend(HELLO_OK);
     expect(store.state.connection).toBe("connected");
+    await Promise.resolve();
+    expect(ws.sent.map(frame => JSON.parse(frame))).toContainEqual(expect.objectContaining({
+      type: "create_thread",
+      title: "Home",
+      kind: "space",
+      parent_thread_id: null,
+    }));
   });
 
   it("sends history-scoped process cancel and fenced trigger disable frames", async () => {
@@ -370,8 +377,9 @@ describe("current history boundary", () => {
     const thread = makeThread(1, { running_turn: running });
     const c = client.startClient("wss://host/ws", "good");
     const first = FakeWebSocket.instances[0];
-    first.serverOpen(); first.serverSend({ ...HELLO_OK, threads: [thread] });
+    first.serverOpen(); first.serverSend({ ...HELLO_OK, threads: [thread] }); await Promise.resolve();
     flush(() => threads.focusThread(1, false));
+    history.replaceState(null, "", "/t/1");
     const firstOpen = first.sent.map(row => JSON.parse(row)).find(frame => frame.type === "open_thread");
     first.serverSend({ type: "thread_opened", client_id: firstOpen.client_id, detail: { thread, brief: { text: "", artifact_ids: [] }, messages: [owner], turns: [running], turn_timelines: [], activities: [], related_items: [], has_more: false } });
     expect(threads.threadState.histories[1].turns[0].state).toBe("running");
@@ -379,7 +387,7 @@ describe("current history boundary", () => {
     first.serverClose(1006);
     vi.advanceTimersByTime(2_000);
     const reconnected = FakeWebSocket.instances[1];
-    reconnected.serverOpen(); reconnected.serverSend({ ...HELLO_OK, threads: [makeThread(1)] });
+    reconnected.serverOpen(); reconnected.serverSend({ ...HELLO_OK, threads: [makeThread(1)] }); await Promise.resolve();
     const reconnectOpen = reconnected.sent.map(row => JSON.parse(row)).find(frame => frame.type === "open_thread");
     const final = { id: 11, thread_id: 1, author: "agent" as const, body: "Done", ref: owner.id, ts: "2026-09-10T10:00:05Z" };
     const completed = { ...running, state: "completed" as const, agent_message_id: final.id, finished_at: final.ts };

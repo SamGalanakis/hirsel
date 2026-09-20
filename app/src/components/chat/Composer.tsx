@@ -83,8 +83,8 @@ interface Props {
    * offers these and the send resolves refs against them. */
   threads?: RefTarget[];
   context?: {
-    spaceRecipient: string;
-    workerPairing: string | null;
+    recipient: string;
+    taskWorker: boolean;
   };
 }
 
@@ -278,8 +278,7 @@ export function Composer(props: Props) {
       <div class="w-full">
 
       <div class="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/50 px-2 py-1" data-slot="composer-context">
-        <span class="inline-flex min-w-0 items-baseline gap-1"><SectionLabel as="span">Recipient</SectionLabel><span class="max-w-40 truncate text-xs text-foreground">{props.context?.spaceRecipient ?? "Hirsel"}</span></span>
-        <span class="inline-flex min-w-0 items-baseline gap-1"><SectionLabel as="span">Worker</SectionLabel><span class="max-w-40 truncate text-xs text-foreground">{props.context?.workerPairing ?? "None"}</span></span>
+        <span class="inline-flex min-w-0 items-baseline gap-1"><SectionLabel as="span">Recipient</SectionLabel><span class="max-w-64 truncate text-xs text-foreground">{props.context?.recipient ?? "Hirsel"}<Show when={props.context?.taskWorker}> · Task worker</Show></span></span>
       </div>
 
       <Show when={props.artifactContext}>{artifact => <div data-slot="composer-artifact-context" class="flex min-h-11 items-center gap-2 border-b border-border/50 text-xs text-muted-foreground"><FileText class="ml-2 size-4 shrink-0" /><span class="min-w-0 flex-1 truncate" title={artifact().title}>About {artifact().title}</span><button type="button" class="inline-flex size-11 shrink-0 items-center justify-center rounded-lg hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={`Remove artifact context: ${artifact().title}`} onClick={() => props.onRemoveArtifactContext?.()}><X class="size-4" /></button></div>}</Show>

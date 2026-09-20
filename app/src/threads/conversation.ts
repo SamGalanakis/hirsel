@@ -32,6 +32,7 @@ export function activityText(activity: ThreadActivity): string {
   const kind = activity.kind.replace(/^plugin\./, "");
   if (kind === "refusal") return refusalText(data);
   if (kind === "archived") return archivedText(data);
+  if (kind === "outside_change" && typeof data.text === "string") return data.text;
   const fields = kind === "child_report" ? [data.summary] : kind === "delegation_received" ? [data.brief] : kind === "info" || kind === "summary" ? [data.description, data.content_md] : kind === "process_completed" ? [data.summary] : kind === "scheduled_digest" ? [data.text] : [];
   return fields.filter((value): value is string => typeof value === "string" && value.length > 0).join("\n\n");
 }

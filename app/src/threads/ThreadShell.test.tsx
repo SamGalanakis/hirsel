@@ -257,15 +257,13 @@ describe("thread workspace", () => {
     const screen = render(() => <ThreadShell />);
     expect(screen.getByRole("textbox", { name: "Step in with worker Space chat contract" })).toBeInTheDocument();
     let context = screen.container.querySelector('[data-slot="composer-context"]')!;
-    expect(context).toHaveTextContent("RecipientHirsel");
-    expect(context).toHaveTextContent("WorkerSpace chat contract");
+    expect(context).toHaveTextContent("RecipientSpace chat contract · Task worker");
 
     fireEvent.click(screen.getByRole("button", { name: "Talk about this" }));
     expect(threadState.focusedId).toBe(0);
     const input = screen.getByRole("textbox", { name: "Message Space chat Hirsel" });
     context = screen.container.querySelector('[data-slot="composer-context"]')!;
     expect(context).toHaveTextContent("RecipientHirsel");
-    expect(context).toHaveTextContent("WorkerNone");
     expect(input).toHaveValue("#1 ");
 
     fireEvent.input(input, { target: { value: "#1 What should we do next?" } });
@@ -333,7 +331,6 @@ describe("thread workspace", () => {
     expect(screen.getByRole("textbox", { name: "Message Space chat Hirsel" })).toBeInTheDocument();
     const context = screen.container.querySelector('[data-slot="composer-context"]')!;
     expect(context).toHaveTextContent("RecipientHirsel");
-    expect(context).toHaveTextContent("WorkerNone");
     expect(screen.queryByRole("dialog", { name: "Spaces and Tasks" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Spaces and Tasks" }));
     fireEvent.click(screen.container.querySelector('[data-thread-row="1"]')!);
@@ -528,7 +525,6 @@ describe("nested Thread workspace", () => {
     expect(view.queryByRole("textbox", { name: "Step in with worker Review" })).toBeNull();
     const context = view.container.querySelector('[data-slot="composer-context"]')!;
     expect(context).toHaveTextContent("RecipientReview");
-    expect(context).toHaveTextContent("WorkerNone");
     expect(spaceState).toMatchObject({ spaceRecipientId: 9, workerPairingId: null });
   });
   it("pins a top-level Thread first once within its lifecycle filter", async () => {
@@ -872,6 +868,27 @@ it("keeps typed instrument field values across an unrelated revision bump and su
   const action = sent.find(frame => frame.type === "thread_action") as { data: Record<string, unknown>; expected_revision: number } | undefined;
   expect(action?.data).toEqual({ confirmation: "ready" });
   expect(action?.expected_revision).toBe(2);
+});
+
+it("orders a Task as headline, instrument, children, then timeline", () => {
+  flush(() => setThreadState(draft => {
+    draft.threads = [
+      makeThread(1, { kind: "task", title: "Release", headline: "Preparing release", instrument: [{ type: "heading", text: "Choose the release window" }] }),
+      makeThread(3, { kind: "task", title: "Verify", headline: "Checks running", parent_thread_id: 1 }),
+    ];
+    draft.histories[1] = { brief: { text: "", artifact_ids: [] }, messages: [{ id: 41, thread_id: 1, author: "owner", body: "Use the safe window", ref: null, ts: "2026-09-09T10:00:00Z" }], turns: [], activities: [], loaded: true, hasMore: false };
+  }));
+  const view = render(() => <ThreadShell />);
+  const scroll = view.container.querySelector('[data-slot="thread-scroll"]')!;
+  const nodes = [
+    scroll.querySelector('[data-slot="task-headline"]')!,
+    view.getByText("Choose the release window"),
+    scroll.querySelector('[data-slot="task-children"]')!,
+    scroll.querySelector('[data-message-id="41"]')!,
+  ];
+  for (let index = 1; index < nodes.length; index += 1) {
+    expect(nodes[index - 1].compareDocumentPosition(nodes[index]) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  }
 });
 
 describe("panes and Back", () => {

@@ -46,6 +46,8 @@ import { artifactState } from "../artifacts/store";
 import { spaceForThread, spaceState } from "../spaces/store";
 import type { Thread } from "./types";
 import { focusThread, followThreadLocation, openThread, retryThreadMessage, sendThreadMessage, threadAction, threadState } from "./store";
+import { SpaceChatShell } from "./SpaceChatShell";
+import { TaskShell, type TaskConversationSlots } from "./TaskShell";
 
 const button = "inline-flex min-h-11 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
 const iconButton = "inline-flex size-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-pressed:bg-muted aria-pressed:text-foreground";
@@ -80,7 +82,7 @@ function NeedsYouPill(props: { thread: { attention: string; last_activity_at: st
     </span>
   </Show>;
 }
-function ThreadConversation(props: { id: number; historyId: string; attachments: AttachmentsController }) {
+function ThreadConversation(props: { id: number; historyId: string; attachments: AttachmentsController; taskSlots?: TaskConversationSlots }) {
   const [pane, setPane] = createSignal<"conversation" | "related" | "info">("conversation");
   const showRelated = () => pane() === "related";
   /** The Thread's own facts, in the frame, in place of the conversation. */
@@ -107,7 +109,7 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
   };
   const attachments = props.attachments;
   const current = () => threadState.threads.find(t => t.id === props.id);
-  const project = () => spaceForThread(threadState.threads, props.id);
+  const space = () => spaceForThread(threadState.threads, props.id);
   const spaceChat = () => current()?.kind === "space";
   const history = () => threadState.histories[props.id];
   const messages = () => history()?.messages ?? [];
@@ -174,7 +176,7 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
         </Show>
         <Show when={current()?.kind === "task"}>
           <button class={button} onClick={() => {
-            const spaceId = project()?.id;
+            const spaceId = space()?.id;
             if (spaceId === undefined) return;
             const key = `hirsel.draft.${props.historyId}:thread-${spaceId}`;
             const reference = `#${props.id}`;
@@ -188,14 +190,16 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
       <Show when={!showRelated()} fallback={<RelatedList origin={origin} />}>
       <Show when={showInfo() && current()} fallback={
       <div class="mx-auto flex w-full max-w-measure flex-col gap-6">
+        {props.taskSlots?.headline()}
         <Show when={current()?.parent_thread_id !== null && current()?.parent_thread_id !== undefined}><nav aria-label="Thread ancestry" class="flex flex-wrap items-center gap-1 text-xs text-muted-foreground"><For each={threadAncestors(threadState.threads, props.id)}>{parent => <><ThreadLink id={parent.id} /><span aria-hidden="true">/</span></>}</For><span class="break-words">#{props.id} {current()?.title}</span></nav></Show>
-        <Show when={current()?.instrument}>
+        <Show when={current()?.instrument} fallback={<Show when={props.taskSlots && current()?.showcased_artifact_id}>{artifactId => <ArtifactCard id={artifactId()} />}</Show>}>
           {/* Keyed on the instrument itself, not the revision: an unrelated
               revision bump (a message, a read receipt) must not remount the
               card and discard what the Owner has typed. The action carries the
               revision read at submit time, which the Host checks exactly. */}
           <Show when={JSON.stringify(current()?.instrument)} keyed>{spec => <ThreadInstrument ui={JSON.parse(spec) as Thread["instrument"] ?? undefined} allowSettlement={current()?.kind === "task"} onAction={(action, data) => threadAction(props.historyId, props.id, action, data, current()?.revision)} />}</Show>
         </Show>
+        {props.taskSlots?.children()}
         <Show when={history()?.hasMore}><button class={button} disabled={loading()} onClick={() => void earlier()}>{loading() ? "Loading…" : "Load earlier messages"}</button></Show>
         <Show when={!history()?.loaded && !(threadState.error?.operation === "load" && threadState.error.threadId === props.id)}><p role="status" class="text-sm text-muted-foreground">Loading conversation…</p></Show>
         <Show when={history()?.loaded && messages().length === 0 && pending().length === 0 && !thinking()}><p class="text-sm text-muted-foreground">Start the conversation for this thread.</p></Show>
@@ -209,12 +213,12 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
     <Show when={writable()}>
     <Composer artifactContext={draftArtifact(props.id)} onRemoveArtifactContext={() => stageDraftArtifact(props.id, null)} onConsumeArtifactContext={id => consumeDraftArtifact(props.id, id)} ariaLabel={spaceChat() ? `Message Space chat ${current()?.title ?? "this Space"}` : `Step in with worker ${current()?.title ?? "this Task"}`} draftKey={`${historyId()}:thread-${props.id}`} attachments={attachments} thinking={thinking()} focused threads={threadState.threads}
       context={{
-        spaceRecipient: spaceState.spaceRecipientId !== null
-          ? threadState.threads.find(thread => thread.id === spaceState.spaceRecipientId)?.title ?? `Space #${spaceState.spaceRecipientId}`
-          : "No Space",
-        workerPairing: spaceState.workerPairingId !== null
+        recipient: spaceState.workerPairingId !== null
           ? threadState.threads.find(thread => thread.id === spaceState.workerPairingId)?.title ?? `Thread #${spaceState.workerPairingId}`
-          : null,
+          : spaceState.spaceRecipientId !== null
+            ? threadState.threads.find(thread => thread.id === spaceState.spaceRecipientId)?.title ?? `Space #${spaceState.spaceRecipientId}`
+            : "No Space",
+        taskWorker: spaceState.workerPairingId !== null,
       }}
       onSend={(body, mode, blobs, mentions, artifactIds) => {
         sendThreadMessage(props.historyId, props.id, body, mode, blobs, mentions, artifactIds);
@@ -222,6 +226,11 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
       onStop={() => getClient()?.cancelTurn(props.historyId, props.id)} getLastOwnerBody={() => messages().findLast(m => m.author === "owner")?.body ?? null} />
     </Show>
   </main></RelatedContext>;
+}
+function FocusedThreadShell(props: { id: number; historyId: string; attachments: AttachmentsController }) {
+  const kind = () => threadState.threads.find(thread => thread.id === props.id)?.kind;
+  const conversation = (taskSlots?: TaskConversationSlots) => <ThreadConversation id={props.id} historyId={props.historyId} attachments={props.attachments} taskSlots={taskSlots} />;
+  return <Show when={kind() === "space"} fallback={<TaskShell taskId={props.id} conversation={conversation} />}><SpaceChatShell spaceId={props.id} conversation={() => conversation()} /></Show>;
 }
 
 function PendingMessageRow(props: { message: (typeof threadState.pending)[number] }) {
@@ -426,7 +435,7 @@ export function ThreadShell() {
       <Show when={state.connection !== "connected"}><div class="flex shrink-0 justify-end px-3 pt-2"><ConnectionPill /></div></Show>
       <div class="flex min-h-0 flex-1 gap-2 py-2 pr-2 pl-2 sm:gap-3 sm:pr-3">
         <Show when={!globalArtifacts()} fallback={<ArtifactsPane onClose={() => setGlobalArtifacts(false)} />}>
-        <Show when={threadState.ready && historyId() && threadState.focusedId !== null && threadState.threads.some(thread => thread.id === threadState.focusedId) ? { id: threadState.focusedId!, history: historyId()! } : null} keyed fallback={<ThreadStart browsable={navigationMode() !== "docked"} onSelect={selectThread} />} >{focused => <ThreadConversation id={focused.id} historyId={focused.history} attachments={attachmentsFor(focused.id)} />}</Show>
+        <Show when={threadState.ready && historyId() && threadState.focusedId !== null && threadState.threads.some(thread => thread.id === threadState.focusedId) ? { id: threadState.focusedId!, history: historyId()! } : null} keyed fallback={<ThreadStart browsable={navigationMode() !== "docked"} onSelect={selectThread} />} >{focused => <FocusedThreadShell id={focused.id} historyId={focused.history} attachments={attachmentsFor(focused.id)} />}</Show>
         </Show>
         <Show when={!sideCollapsed()} fallback={<Show when={collapsedShowcase()}>
           <button type="button" data-slot="collapsed-pane-tab" class="flex w-8 shrink-0 items-center justify-center rounded-lg border border-border text-meta text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Show the showcase and close the utility pane" title="Show the showcase" onClick={closeRightRegion}>

@@ -156,20 +156,43 @@ async function domSnapshot(page) {
         turnId: element.getAttribute("data-execution-turn"),
         activityId: element.getAttribute("data-activity-id"),
         role: element.getAttribute("aria-label"),
+        // A run rests as one card that states its own outcome: the machine-
+        // readable mark and the word the Owner reads and hears.
+        outcome: element.querySelector('[data-slot="run-card"]')?.getAttribute("data-outcome") ?? null,
+        outcomeLabel: element.querySelector('[data-slot="run-card-header"]')?.getAttribute("aria-label") ?? null,
         text: element.textContent?.trim() ?? "",
         messageText: element.querySelector(':scope > div > [data-testid="markdown"], :scope > div > [data-slot="run-card"] > [data-testid="markdown"]')?.textContent?.trim() ?? null,
         visible: visible(element),
-        workDetails: [...element.querySelectorAll('[data-slot="work-details"]')].map(details => ({
-          open: details.open,
-          visible: visible(details),
-        })),
-        timeline: [...element.querySelectorAll('[data-slot="timeline"] > li')].map(row => ({
-          slot: row.getAttribute("data-slot"),
-          toolCallId: row.getAttribute("data-tool-call-id"),
-          text: row.textContent?.trim() ?? "",
-          visible: visible(row),
-          result: row.querySelector('[data-slot="tool-result"]')?.textContent?.trim() ?? null,
-        })),
+        // The inline chronology contract: no disclosure stands over a whole
+        // turn's trace. A tool's own Raw result lives inside the trace and is
+        // not an ancestor of it.
+        traceGated: Boolean(element.querySelector('[data-slot="timeline"]')?.closest("details")),
+        // One trace, two row kinds and one shared payload panel: a step row
+        // (tool call or Agent program cell) says what it is and how it ended,
+        // and the open step's payload renders as its own `timeline-detail` row
+        // below the run of pills. Only one step is open at a time, so a row's
+        // payload is read from that panel by the step's own id.
+        timeline: [...element.querySelectorAll('[data-slot="timeline"] > li')].map(row => {
+          const list = row.parentElement;
+          const toolCallId = row.getAttribute("data-tool-call-id");
+          const codeId = row.getAttribute("data-code-id");
+          const control = row.querySelector("button[aria-expanded]");
+          const panel = toolCallId
+            ? list?.querySelector(`[data-slot="timeline-detail"] [data-slot="tool-result"][data-tool-call-id="${CSS.escape(toolCallId)}"]`)
+            : null;
+          return {
+            slot: row.getAttribute("data-slot"),
+            toolCallId,
+            codeId,
+            text: row.textContent?.trim() ?? "",
+            visible: visible(row),
+            // The step's own four-state mark, as it is announced.
+            statusLabel: row.querySelector("svg[aria-label]")?.getAttribute("aria-label") ?? null,
+            open: control ? control.getAttribute("aria-expanded") === "true" : null,
+            result: panel ? panel.textContent?.trim() ?? "" : null,
+            rawResult: panel?.querySelector('[data-slot="tool-result-raw"]')?.textContent?.trim() ?? null,
+          };
+        }),
       }));
     return {
       entries,
@@ -319,6 +342,18 @@ function assertTimelineSurfaces(snapshot, frames, turnIds) {
   }
 }
 
+/** The Agent message of THIS turn that carries the artifact reference. An
+ * `artifacts.create` commits its own message, so the reference sits between
+ * the Owner's request and the turn's closing reply, never outside the turn. */
+function referencingAgentMessage(detail, turn, artifactId) {
+  const message = detail.messages.find(candidate => candidate.author === "agent"
+    && candidate.id > turn.owner_message_id
+    && candidate.id <= turn.agent_message_id
+    && candidate.artifact_ids?.includes(artifactId));
+  assert(message, `turn ${turn.id} has no Agent message referencing artifact ${artifactId}`);
+  return message;
+}
+
 function agentReply(detail, turn) {
   const message = detail.messages.find(candidate => candidate.id === turn.agent_message_id);
   assert(message?.author === "agent", `turn ${turn.id} has no durable Agent reply`);
@@ -345,13 +380,45 @@ async function expandRunCards(page) {
   }
 }
 
-async function expandInlineTools(page, callIds) {
+/** The trace opens one step at a time: the payload panel belongs to whichever
+ * pill is open, so evidence for several calls is gathered one call at a time
+ * rather than by opening them all at once. Returns nothing; the caller
+ * captures after each open. */
+async function openInlineTool(page, callId) {
   await expandRunCards(page);
-  for (const callId of callIds) {
-    const row = page.locator(`[data-slot="timeline-tool"][data-tool-call-id="${callId}"]`).first();
-    await row.waitFor({ state: "visible", timeout: 10_000 });
-    const toggle = row.locator("button[aria-expanded]").first();
-    if (await toggle.count() && await toggle.getAttribute("aria-expanded") === "false") await toggle.click();
+  const row = page.locator(`[data-slot="timeline-tool"][data-tool-call-id="${callId}"]`).first();
+  await row.waitFor({ state: "visible", timeout: 10_000 });
+  const toggle = row.locator("button[aria-expanded]").first();
+  assert.equal(await toggle.count(), 1, `tool ${callId} has no payload to open`);
+  if (await toggle.getAttribute("aria-expanded") === "false") await toggle.click();
+  await page.locator(`[data-slot="timeline-detail"] [data-slot="tool-result"][data-tool-call-id="${callId}"]`)
+    .first().waitFor({ state: "visible", timeout: 10_000 });
+}
+
+/** Each run card owns its own open step, so calls that live in different turns
+ * can be read together; several calls inside ONE turn share one panel and must
+ * be opened — and captured — one at a time. */
+async function expandInlineTools(page, callIds) {
+  for (const callId of callIds) await openInlineTool(page, callId);
+}
+
+/** What the Owner can read for one open tool: the result payload first, then
+ * the exact input, with the bounded wire envelope kept under Raw result. */
+function assertToolPayload(dom, turn, event) {
+  const entry = dom.entries.find(candidate => candidate.messageId === String(turn.agent_message_id));
+  assert(entry, `turn ${turn.id} has no rendered completed entry`);
+  const row = entry.timeline.find(candidate => candidate.toolCallId === event.id);
+  assert(row, `tool ${event.id} has no rendered row`);
+  assert.equal(row.open, true, `tool ${event.id} payload was read while the step was closed`);
+  const payload = row.result ?? "";
+  if (event.kind === "tool_start" && event.input?.text) {
+    assert(payload.includes(event.input.text), `tool ${event.id} input payload is absent from the open DOM panel`);
+  }
+  if (event.kind === "tool_done" && event.result?.text) {
+    assert(
+      payload.includes(event.result.text) || row.rawResult?.includes(event.result.text),
+      `tool ${event.id} result payload is absent from the open DOM panel`,
+    );
   }
 }
 
@@ -359,19 +426,19 @@ function assertTimelineRendered(dom, turn, events) {
   const entry = dom.entries.find(candidate => candidate.messageId === String(turn.agent_message_id));
   assert(entry, `turn ${turn.id} has no rendered completed entry`);
   const expected = renderedTimelineExpectation(events);
-  for (const { event } of events) {
-    if (event.kind === "tool_start" && event.input?.text) {
-      const row = entry.timeline.find(candidate => candidate.toolCallId === event.id);
-      assert(row?.result?.includes(event.input.text), `tool ${event.id} input payload is absent from the expanded DOM row`);
-    }
-    if (event.kind === "tool_done" && event.result?.text) {
-      const row = entry.timeline.find(candidate => candidate.toolCallId === event.id);
-      assert(row?.result?.includes(event.result.text), `tool ${event.id} result payload is absent from the expanded DOM row`);
-    }
-  }
+  // The shared payload panel is not an event row; at most one is ever open.
+  const detailRows = entry.timeline.filter(row => row.slot === "timeline-detail");
+  assert(detailRows.length <= 1, `turn ${turn.id} rendered more than one open step panel`);
+  const steps = entry.timeline.filter(row => row.slot !== "timeline-detail");
+  const identity = row => ({
+    slot: row.slot,
+    toolCallId: row.toolCallId ?? null,
+    codeId: row.codeId ?? null,
+    ...(row.slot === "timeline-tool" || row.slot === "timeline-code" ? {} : { text: row.text }),
+  });
   assert.deepEqual(
-    entry.timeline.map(row => ({ slot: row.slot, toolCallId: row.toolCallId, ...(row.slot === "timeline-tool" ? {} : { text: row.text }) })),
-    expected.rows.map(({ slot, toolCallId, text }) => ({ slot, toolCallId, ...(slot === "timeline-tool" ? {} : { text }) })),
+    steps.map(identity),
+    expected.rows.map(identity),
     `turn ${turn.id} rendered timeline order or content differs from its canonical events`,
   );
   if (expected.rawReply) {
@@ -408,11 +475,13 @@ async function requireInlineTool(page, callId, expectedText) {
   await expandRunCards(page);
   const row = page.locator(`[data-slot="timeline-tool"][data-tool-call-id="${callId}"]`).first();
   await row.waitFor({ state: "visible", timeout: 10_000 });
-  const hiddenByTurn = await row.evaluate(element => Boolean(element.closest('details[data-slot="work-details"]')));
-  assert.equal(hiddenByTurn, false, `tool ${callId} is hidden inside whole-turn Work details`);
-  const toggle = row.locator("button").first();
-  if (await toggle.count() && !(await row.getByText(expectedText, { exact: false }).count())) await toggle.click();
-  await row.getByText(expectedText, { exact: false }).waitFor({ timeout: 10_000 });
+  // No whole-turn disclosure may stand between the Owner and this call: the
+  // row belongs to the run card's inline trace, not to a details gate over it.
+  const hiddenByTurn = await row.evaluate(element => Boolean(element.closest("details")));
+  assert.equal(hiddenByTurn, false, `tool ${callId} is hidden inside a whole-turn disclosure`);
+  await openInlineTool(page, callId);
+  const panel = page.locator(`[data-slot="timeline-detail"] [data-slot="tool-result"][data-tool-call-id="${callId}"]`).first();
+  await panel.getByText(expectedText, { exact: false }).waitFor({ timeout: 10_000 });
 }
 
 function payloadText(event, field) {
@@ -455,7 +524,12 @@ async function runChat(context) {
   const assertQueued = snapshot => {
     const entry = snapshot.dom.entries.find(candidate => candidate.turnId === String(queuedTurn.id));
     assert(entry?.visible, "accepted queued turn has no visible row");
-    assert.match(entry.text, /Queued/, "accepted queued turn is not labelled Queued");
+    // The accepted request rests as its own quiet run card, and the card says
+    // what state it is in: the machine-readable mark, the announced outcome
+    // and the one word the Owner reads.
+    assert.equal(entry.outcome, "queued", "accepted queued turn's run card is not marked queued");
+    assert.match(entry.outcomeLabel ?? "", /^queued\b/, "accepted queued turn does not announce a queued outcome");
+    assert.match(entry.text, /\bqueued\b/, "accepted queued turn shows no queued word");
     const detailTurn = snapshot.detail.turns.find(turn => turn.id === queuedTurn.id);
     assert.equal(detailTurn?.owner_message_id, second.owner.id);
     assert.equal(detailTurn?.state, "queued");
@@ -465,7 +539,7 @@ async function runChat(context) {
   };
   assertQueued(await capture("10-queued", context));
   await page.reload({ waitUntil: "domcontentloaded" });
-  await page.locator(`[data-execution-turn="${queuedTurn.id}"]`).getByText("Queued", { exact: true }).waitFor();
+  await page.locator(`[data-execution-turn="${queuedTurn.id}"]`).getByText("queued", { exact: true }).waitFor();
   assertQueued(await capture("11-queued-reloaded", context));
 
   const firstTerminal = await waitForTurn(frames, first.turnId, turn => terminal(turn.state), "first turn terminal");
@@ -481,7 +555,8 @@ async function runChat(context) {
   assert(secondWorkIndex >= 0, "second running turn has no stable DOM identity");
   assert(firstReplyIndex < secondWorkIndex, "newer working row renders above the older reply");
   const secondWork = handoff.dom.entries[secondWorkIndex];
-  assert.equal(secondWork.workDetails.length, 0, "running work is collapsed behind whole-turn Work details");
+  assert.equal(secondWork.traceGated, false, "running work is collapsed behind a whole-turn disclosure");
+  assert(secondWork.timeline.some(row => row.visible), "running work shows no inline trace row");
 
   const secondTerminal = await waitForTurn(frames, secondTurn.id, turn => terminal(turn.state), "second turn terminal");
   assert.equal(secondTerminal.state, "completed");
@@ -499,7 +574,9 @@ async function runChat(context) {
     const row = settled.dom.entries.flatMap(entry => entry.timeline).find(candidate => candidate.toolCallId === tool.started.event.id);
     assert(row?.visible, `tool ${tool.started.event.id} has no visible collapsed row`);
     assert(row.text.includes(tool.started.event.summary), `tool ${tool.started.event.id} lost its command/subject summary`);
-    assert.match(row.text, /Succeeded/, `tool ${tool.started.event.id} has no plain success outcome`);
+    // The outcome is the row's own status mark, announced in plain words; it
+    // is never the transport envelope.
+    assert.equal(row.statusLabel, "ok", `tool ${tool.started.event.id} has no plain success outcome`);
     assert.doesNotMatch(row.text, /ok status 0/, `tool ${tool.started.event.id} exposes transport status instead of a plain outcome`);
     return row.text;
   });
@@ -521,6 +598,15 @@ async function runChat(context) {
   assertTimelineRendered(settledExpanded.dom, secondTerminal, durableTimeline(settledExpanded.detail, secondTurn.id));
   assertReasoningIntegrity(settledExpanded.dom, firstTerminal, durableTimeline(settledExpanded.detail, first.turnId));
   assertReasoningIntegrity(settledExpanded.dom, secondTerminal, durableTimeline(settledExpanded.detail, secondTurn.id));
+  // Each call lives in its own turn, so both payload panels stand open at once.
+  for (const [turn, tool] of [[firstTerminal, firstTool], [secondTerminal, secondTool]]) {
+    assertToolPayload(settledExpanded.dom, turn, tool.started.event);
+    assertToolPayload(settledExpanded.dom, turn, tool.done.event);
+    const row = settledExpanded.dom.entries
+      .find(entry => entry.messageId === String(turn.agent_message_id))
+      .timeline.find(candidate => candidate.toolCallId === tool.started.event.id);
+    assert(row.rawResult?.startsWith("Raw result"), `tool ${tool.started.event.id} lost the bounded raw result envelope`);
+  }
   const before = timelineProjection(settledExpanded.dom);
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.locator(`[data-message-id="${secondTerminal.agent_message_id}"]`).getByText(secondMarker, { exact: true }).waitFor();
@@ -535,6 +621,10 @@ async function runChat(context) {
   assertTimelineRendered(reloaded.dom, secondTerminal, durableTimeline(reloaded.detail, secondTurn.id));
   assertReasoningIntegrity(reloaded.dom, firstTerminal, durableTimeline(reloaded.detail, first.turnId));
   assertReasoningIntegrity(reloaded.dom, secondTerminal, durableTimeline(reloaded.detail, secondTurn.id));
+  for (const [turn, tool] of [[firstTerminal, firstTool], [secondTerminal, secondTool]]) {
+    assertToolPayload(reloaded.dom, turn, tool.started.event);
+    assertToolPayload(reloaded.dom, turn, tool.done.event);
+  }
   return {
     markers: [firstMarker, secondMarker],
     turnIds: [first.turnId, secondTurn.id],
@@ -586,6 +676,10 @@ async function runTools(context) {
   assertTimelineSurfaces(final, frames, [success.turnId, failure.turnId]);
   assertTimelineRendered(final.dom, successTerminal, durableTimeline(final.detail, success.turnId));
   assertTimelineRendered(final.dom, failureTerminal, durableTimeline(final.detail, failure.turnId));
+  for (const [turn, tool] of [[successTerminal, successTool], [failureTerminal, failureTool]]) {
+    assertToolPayload(final.dom, turn, tool.started.event);
+    assertToolPayload(final.dom, turn, tool.done.event);
+  }
   return {
     successMarker,
     failureMarker,
@@ -611,8 +705,10 @@ async function runArtifact(context) {
   const upsert = latestFrame(frames, frame => frame.type === "artifact_upsert" && frame.artifact.title === title)?.frame.artifact;
   assert(upsert, "creation emitted no matching artifact_upsert");
   const created = await openThread(context.url, context.token, threadId);
-  const agent = created.messages.find(message => message.id === completed.agent_message_id);
-  assert(agent?.artifact_ids?.includes(upsert.id), "Agent message does not reference the created artifact");
+  // `artifacts.create` commits the mutation, an Agent message and the
+  // reference together (ADR 0017), so the card belongs to that message inside
+  // this turn rather than to the turn's closing sentence.
+  const agent = referencingAgentMessage(created, completed, upsert.id);
   const card = page.locator(`[data-message-id="${agent.id}"] [data-artifact-ref="${upsert.id}"]`);
   await card.waitFor({ state: "visible" });
 
@@ -649,6 +745,8 @@ async function runArtifact(context) {
   );
   assertTimelineSurfaces(reloaded, frames, [turn.turnId]);
   assertTimelineRendered(reloaded.dom, completed, durableTimeline(reloaded.detail, turn.turnId));
+  assertToolPayload(reloaded.dom, completed, tool.started.event);
+  assertToolPayload(reloaded.dom, completed, tool.done.event);
 
   const naturalOffset = frames.length;
   const natural = await sendMessage(page, frames, threadId, "Make a picture of a cat artifact");
@@ -666,8 +764,8 @@ async function runArtifact(context) {
   assert.match(payloadText(naturalTool.started.event, "input"), /cat/i);
   assert.match(payloadText(naturalTool.done.event, "result"), new RegExp(cat.title));
   const catDetail = await openThread(context.url, context.token, threadId);
-  const catAgent = agentReply(catDetail, naturalCompleted);
-  assert(catAgent.artifact_ids?.includes(cat.id), "natural cat Agent reply does not reference its artifact");
+  const catAgent = referencingAgentMessage(catDetail, naturalCompleted, cat.id);
+  assert(agentReply(catDetail, naturalCompleted).body.trim().length > 0, "natural cat turn produced no closing reply");
   const storedCatBeforePreview = storeSnapshot(context.dataDir, threadId).artifacts.find(artifact => artifact.id === cat.id);
   assert(storedCatBeforePreview, "natural cat artifact is absent from SQLite");
   assert(/<svg\b|<canvas\b|<img\b|createElement\s*\(\s*["'](?:svg|canvas|img)["']/i.test(storedCatBeforePreview.content), "natural cat artifact has no graphical image surface");
@@ -689,6 +787,8 @@ async function runArtifact(context) {
   );
   assertTimelineSurfaces(naturalCapture, frames, [turn.turnId, natural.turnId]);
   assertTimelineRendered(naturalCapture.dom, naturalCompleted, durableTimeline(naturalCapture.detail, natural.turnId));
+  assertToolPayload(naturalCapture.dom, naturalCompleted, naturalTool.started.event);
+  assertToolPayload(naturalCapture.dom, naturalCompleted, naturalTool.done.event);
   return {
     exact: { turnId: turn.turnId, toolCallId: tool.started.event.id, artifactId: upsert.id, title, filename, content, downloadPath },
     naturalCat: { prompt: "Make a picture of a cat artifact", turnId: natural.turnId, toolCallId: naturalTool.started.event.id, artifactId: cat.id, title: cat.title, kind: cat.kind, mime: cat.mime },
@@ -841,7 +941,15 @@ async function runArtifactPresentation(context) {
     .filter(row => row.direction === "received" && row.frame.type === "artifact_upsert")
     .map(row => [row.frame.artifact.id, row.frame.artifact])).values()];
   assert.equal(upserts.length, 4, "presentation turn did not emit exactly four artifact upserts");
-  await expandInlineTools(page, starts.map(frame => frame.event.id));
+  // All four calls belong to ONE turn, so they share one payload panel: open
+  // and capture each in its own right rather than claiming four open panels.
+  for (const [index, start] of starts.entries()) {
+    await openInlineTool(page, start.event.id);
+    const open = await capture(`10-created-formats-call-${index}`, context);
+    assertTimelineRendered(open.dom, completed, durableTimeline(open.detail, request.turnId));
+    assertToolPayload(open.dom, completed, start.event);
+    assertToolPayload(open.dom, completed, dones.find(frame => frame.event.id === start.event.id).event);
+  }
   const initial = await capture("10-created-formats", context);
   const stored = expected.map(item => {
     const artifact = initial.store.artifacts.find(candidate => candidate.title === item.title);

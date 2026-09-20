@@ -62,6 +62,28 @@ test("rendered timeline expectation preserves interleaved row order", () => {
   assert.equal(expected.reply, "Final reply intact.");
 });
 
+test("rendered timeline expectation keeps Agent program cells as peers of the tools they called", () => {
+  const events = [
+    { seq: 0, event: { kind: "reasoning", text: "Plan the call." } },
+    { seq: 1, event: { kind: "code_start", id: "cell-1", language: "typescript", code: "const out = await shell.run({ cmd: \"pwd\" });", truncated: false } },
+    { seq: 2, event: { kind: "tool_start", id: "call-1", name: "shell_run" } },
+    { seq: 3, event: { kind: "tool_done", id: "call-1", name: "shell_run" } },
+    { seq: 4, event: { kind: "code_done", id: "cell-1", ok: true } },
+    // A program that only reports back is the wake protocol, not work: the
+    // trace drops it, so the expectation must drop it too.
+    { seq: 5, event: { kind: "code_start", id: "cell-2", language: "typescript", code: "finish(\"done\");", truncated: false } },
+    { seq: 6, event: { kind: "code_done", id: "cell-2", ok: true } },
+  ];
+  const expected = renderedTimelineExpectation(events);
+
+  assert.deepEqual(expected.rows.map(({ slot, toolCallId, codeId }) => ({ slot, toolCallId, codeId })), [
+    { slot: "timeline-reasoning", toolCallId: null, codeId: null },
+    { slot: "timeline-code", toolCallId: null, codeId: "cell-1" },
+    { slot: "timeline-tool", toolCallId: "call-1", codeId: null },
+  ]);
+  assert.equal(expected.rawReply, "");
+});
+
 test("contiguous reasoning blocks retain exact repeated content for integrity checks", () => {
   const phrase = "Run the focused test before editing.";
   const events = [

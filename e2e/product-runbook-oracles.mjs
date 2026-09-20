@@ -33,11 +33,19 @@ export function contiguousTextBlocks(events) {
   return blocks;
 }
 
+/** A program that only reports back carries nothing the Owner asked about, so
+ * the trace drops it. Mirrors `TRIVIAL_FINISH` in
+ * `app/src/components/chat/timeline.ts`; the two must agree or this oracle
+ * stops describing the rendered trace. */
+const TRIVIAL_FINISH = /^(?:await\s+)?finish\(\s*(?:"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'|`(?:[^`\\$]|\\[\s\S]|\$(?!\{))*`)?\s*\)\s*;?$/;
+
 export function renderedTimelineExpectation(events) {
   let activityEnd = events.length;
   while (activityEnd > 0 && events[activityEnd - 1].event.kind === "prose") activityEnd -= 1;
   const rows = [];
   const toolRows = new Set();
+  const codeRows = new Set();
+  const skippedCode = new Set();
   for (const [index, { event }] of events.slice(0, activityEnd).entries()) {
     if (event.kind === "prose" || event.kind === "reasoning") {
       if (!event.text) continue;
@@ -47,11 +55,20 @@ export function renderedTimelineExpectation(events) {
         previous.text = renderedMarkdownText(previous.rawText);
         previous.lastIndex = index;
       } else {
-        rows.push({ slot: `timeline-${event.kind}`, toolCallId: null, rawText: event.text, text: renderedMarkdownText(event.text), lastIndex: index });
+        rows.push({ slot: `timeline-${event.kind}`, toolCallId: null, codeId: null, rawText: event.text, text: renderedMarkdownText(event.text), lastIndex: index });
       }
     } else if (event.kind === "tool_start" || (event.kind === "tool_done" && !toolRows.has(event.id))) {
-      rows.push({ slot: "timeline-tool", toolCallId: event.id });
+      rows.push({ slot: "timeline-tool", toolCallId: event.id, codeId: null });
       toolRows.add(event.id);
+    } else if (event.kind === "code_start") {
+      // The Agent's own program cell is a peer of the tool rows beside it, in
+      // arrival order — the Owner reads one flat sequence, not a tree.
+      if (TRIVIAL_FINISH.test(event.code.trim()) && !event.truncated) { skippedCode.add(event.id); continue; }
+      rows.push({ slot: "timeline-code", toolCallId: null, codeId: event.id });
+      codeRows.add(event.id);
+    } else if (event.kind === "code_done" && !codeRows.has(event.id) && !skippedCode.has(event.id)) {
+      rows.push({ slot: "timeline-code", toolCallId: null, codeId: event.id });
+      codeRows.add(event.id);
     }
   }
   const rawReply = events.slice(activityEnd).map(({ event }) => event.kind === "prose" ? event.text : "").join("");

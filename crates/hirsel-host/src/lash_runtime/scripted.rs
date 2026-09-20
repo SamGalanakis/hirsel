@@ -319,65 +319,6 @@ impl ScriptedAgentRuntime {
             )
             .await?;
         }
-        if self.config.driver_mode == DriverMode::Fake
-            && turn.body.trim().starts_with("__hirsel_task_state__:")
-        {
-            let turn_id = turn
-                .turn_id
-                .ok_or_else(|| anyhow::anyhow!("accepted turn missing"))?;
-            let values = turn.body.trim().split(':').collect::<Vec<_>>();
-            anyhow::ensure!(values.len() == 3, "invalid scripted Task-state fixture");
-            let task_id = values[1].parse::<u64>()?;
-            let state_revision = values[2].parse::<u64>()?;
-            let launch = uuid::Uuid::new_v4().to_string();
-            let caller = self
-                .tools
-                .storage()
-                .bind_thread_execution(&turn.history_id, &launch, &launch, turn_id)
-                .await?;
-            let facade = |suffix: &str| ScopedThreadTools {
-                tools: self.tools.clone(),
-                caller: caller.clone(),
-                operation_id: format!("scripted:{turn_id}:task-state:{suffix}"),
-            };
-            let artifact = facade("artifact-create")
-                .execute(
-                    "artifacts_create",
-                    &json!({
-                        "title":"Task state evidence",
-                        "kind":"markdown",
-                        "content":"first revision"
-                    }),
-                )
-                .await
-                .map_err(anyhow::Error::msg)?;
-            let artifact_id = artifact["id"]
-                .as_u64()
-                .ok_or_else(|| anyhow::anyhow!("scripted artifact omitted its ID"))?;
-            facade("state")
-                .execute(
-                    "threads_state",
-                    &json!({
-                        "thread":task_id,
-                        "expected_state_revision":state_revision,
-                        "headline":"  Release\n evidence   ready ",
-                        "findings":["Linux checks passed","Android remains"],
-                        "artifact_ids":[artifact_id]
-                    }),
-                )
-                .await
-                .map_err(anyhow::Error::msg)?;
-            facade("artifact-edit")
-                .execute(
-                    "artifacts_edit",
-                    &json!({
-                        "artifact_id":artifact_id,
-                        "edits":[{"old_string":"first","new_string":"second"}]
-                    }),
-                )
-                .await
-                .map_err(anyhow::Error::msg)?;
-        }
         if self.config.driver_mode == DriverMode::Fake && lower.contains("delegate") {
             let turn_id = turn
                 .turn_id

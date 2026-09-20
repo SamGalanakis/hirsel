@@ -864,22 +864,6 @@ async fn every_executor_result_matches_its_declared_output_schema() {
         "threads_update",
         vec![json!({"thread_id":1,"thread":thread})],
     );
-    results.insert(
-        "threads_state",
-        vec![json!({
-            "thread_id": 1,
-            "state": {
-                "revision": 2,
-                "headline": "Evidence is ready",
-                "own_headline": "Evidence is ready",
-                "findings": [],
-                "artifact_ids": [],
-                "checkpoint_at": now,
-                "steering_revision": 0
-            },
-            "threads": [thread]
-        })],
-    );
     results.insert("threads_list", vec![json!({"threads":[thread]})]);
     let archive_activity = json!({"id":9,"thread_id":1,"turn_id":2,"kind":"archived","data":{},"artifact_ids":[],"ts":now});
     results.insert(

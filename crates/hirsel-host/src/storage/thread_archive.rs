@@ -105,20 +105,6 @@ pub(crate) fn apply(
             )?
         };
         if updated > 0 {
-            super::thread_state::touch(
-                tx,
-                *id,
-                match actor.actor {
-                    "owner" => super::thread_state::StateActor::owner(),
-                    _ => super::thread_state::StateActor {
-                        kind: "thread",
-                        thread_id: Some(actor.thread_id),
-                        turn_id: actor.turn_id,
-                    },
-                },
-                if archived { "archived" } else { "unarchived" },
-                false,
-            )?;
             changed.push(threads::get(tx, *id)?);
         }
     }

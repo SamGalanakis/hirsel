@@ -257,13 +257,6 @@ impl Storage {
                     "UPDATE threads SET settled_at=?2,revision=revision+1,updated_at=?2 WHERE id=?1",
                     params![thread_id, now],
                 )?;
-                super::thread_state::touch(
-                    &tx,
-                    thread_id,
-                    super::thread_state::StateActor::owner(),
-                    "instrument_settled",
-                    false,
-                )?;
             } else {
                 tx.execute(
                     "UPDATE threads SET revision=revision+1,updated_at=?2 WHERE id=?1",
@@ -328,13 +321,6 @@ impl Storage {
             tx.execute(
                 "INSERT INTO thread_requests(client_id,payload) VALUES(?1,?2)",
                 params![client_id, serde_json::to_string(&request)?],
-            )?;
-            super::thread_state::touch(
-                &tx,
-                thread_id,
-                super::thread_state::StateActor::owner(),
-                "owner_steering",
-                true,
             )?;
         }
         tx.commit()?;

@@ -2157,8 +2157,6 @@ data class Thread (
     ,
     var `instrumentJson`: kotlin.String?
     ,
-    var `state`: ThreadState
-    ,
     var `needsOwner`: kotlin.Boolean
     ,
     var `settledAt`: kotlin.String?
@@ -2207,7 +2205,6 @@ public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
             FfiConverterOptionalULong.read(buf),
             FfiConverterString.read(buf),
             FfiConverterOptionalString.read(buf),
-            FfiConverterTypeThreadState.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
@@ -2233,7 +2230,6 @@ public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
             FfiConverterOptionalULong.allocationSize(value.`showcasedArtifactId`) +
             FfiConverterString.allocationSize(value.`description`) +
             FfiConverterOptionalString.allocationSize(value.`instrumentJson`) +
-            FfiConverterTypeThreadState.allocationSize(value.`state`) +
             FfiConverterBoolean.allocationSize(value.`needsOwner`) +
             FfiConverterOptionalString.allocationSize(value.`settledAt`) +
             FfiConverterOptionalString.allocationSize(value.`archivedAt`) +
@@ -2258,7 +2254,6 @@ public object FfiConverterTypeThread: FfiConverterRustBuffer<Thread> {
             FfiConverterOptionalULong.write(value.`showcasedArtifactId`, buf)
             FfiConverterString.write(value.`description`, buf)
             FfiConverterOptionalString.write(value.`instrumentJson`, buf)
-            FfiConverterTypeThreadState.write(value.`state`, buf)
             FfiConverterBoolean.write(value.`needsOwner`, buf)
             FfiConverterOptionalString.write(value.`settledAt`, buf)
             FfiConverterOptionalString.write(value.`archivedAt`, buf)
@@ -2551,69 +2546,6 @@ public object FfiConverterTypeThreadRelatedItem: FfiConverterRustBuffer<ThreadRe
             FfiConverterTypeThreadRelatedTarget.write(value.`target`, buf)
             FfiConverterOptionalString.write(value.`title`, buf)
             FfiConverterString.write(value.`createdAt`, buf)
-    }
-}
-
-
-
-data class ThreadState (
-    var `revision`: kotlin.ULong
-    ,
-    var `headline`: kotlin.String
-    ,
-    var `ownHeadline`: kotlin.String
-    ,
-    var `findings`: List<kotlin.String>
-    ,
-    var `artifactIds`: List<kotlin.ULong>
-    ,
-    var `checkpointAt`: kotlin.String?
-    ,
-    var `steeringRevision`: kotlin.ULong
-
-){
-
-
-
-
-
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeThreadState: FfiConverterRustBuffer<ThreadState> {
-    override fun read(buf: ByteBuffer): ThreadState {
-        return ThreadState(
-            FfiConverterULong.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
-            FfiConverterSequenceString.read(buf),
-            FfiConverterSequenceULong.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterULong.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: ThreadState) = (
-            FfiConverterULong.allocationSize(value.`revision`) +
-            FfiConverterString.allocationSize(value.`headline`) +
-            FfiConverterString.allocationSize(value.`ownHeadline`) +
-            FfiConverterSequenceString.allocationSize(value.`findings`) +
-            FfiConverterSequenceULong.allocationSize(value.`artifactIds`) +
-            FfiConverterOptionalString.allocationSize(value.`checkpointAt`) +
-            FfiConverterULong.allocationSize(value.`steeringRevision`)
-    )
-
-    override fun write(value: ThreadState, buf: ByteBuffer) {
-            FfiConverterULong.write(value.`revision`, buf)
-            FfiConverterString.write(value.`headline`, buf)
-            FfiConverterString.write(value.`ownHeadline`, buf)
-            FfiConverterSequenceString.write(value.`findings`, buf)
-            FfiConverterSequenceULong.write(value.`artifactIds`, buf)
-            FfiConverterOptionalString.write(value.`checkpointAt`, buf)
-            FfiConverterULong.write(value.`steeringRevision`, buf)
     }
 }
 

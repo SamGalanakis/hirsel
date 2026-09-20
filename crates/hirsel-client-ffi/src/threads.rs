@@ -105,7 +105,6 @@ pub struct Thread {
     pub showcased_artifact_id: Option<u64>,
     pub description: String,
     pub instrument_json: Option<String>,
-    pub state: ThreadState,
     pub needs_owner: bool,
     pub settled_at: Option<String>,
     pub archived_at: Option<String>,
@@ -131,7 +130,6 @@ impl From<core::Thread> for Thread {
             showcased_artifact_id: t.showcased_artifact_id,
             description: t.description,
             instrument_json: t.instrument.map(|ui| ui.to_string()),
-            state: t.state.into(),
             needs_owner: t.attention == core::ThreadAttention::NeedsOwner,
             settled_at: t.settled_at.map(|t| t.to_rfc3339()),
             archived_at: t.archived_at.map(|t| t.to_rfc3339()),
@@ -144,31 +142,6 @@ impl From<core::Thread> for Thread {
             queued_turn_count: t.queued_turn_count,
             last_finished_turn: t.last_finished_turn.map(Into::into),
             last_activity_at: t.last_activity_at.to_rfc3339(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct ThreadState {
-    pub revision: u64,
-    pub headline: String,
-    pub own_headline: String,
-    pub findings: Vec<String>,
-    pub artifact_ids: Vec<u64>,
-    pub checkpoint_at: Option<String>,
-    pub steering_revision: u64,
-}
-
-impl From<core::ThreadState> for ThreadState {
-    fn from(state: core::ThreadState) -> Self {
-        Self {
-            revision: state.revision,
-            headline: state.headline,
-            own_headline: state.own_headline,
-            findings: state.findings,
-            artifact_ids: state.artifact_ids,
-            checkpoint_at: state.checkpoint_at.map(|value| value.to_rfc3339()),
-            steering_revision: state.steering_revision,
         }
     }
 }

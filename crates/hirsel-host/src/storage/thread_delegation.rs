@@ -41,13 +41,6 @@ pub(super) fn enqueue(
         "INSERT INTO thread_requests(client_id,payload) VALUES(?1,?2)",
         params![client_id, serde_json::to_string(&payload)?],
     )?;
-    super::thread_state::touch(
-        c,
-        thread_id,
-        super::thread_state::StateActor::host(),
-        "work_queued",
-        false,
-    )?;
     Ok(turn_id)
 }
 fn link_artifacts(c: &Connection, activity_id: u64, ids: &[u64]) -> anyhow::Result<()> {
@@ -103,13 +96,7 @@ impl Storage {
         } else {
             let now = chrono::Utc::now().to_rfc3339();
             tx.execute("INSERT INTO threads(kind,parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision) VALUES('task',?1,?2,'',NULL,'quiet',0,?3,?3,1)",params![caller.thread_id,assignment.title.trim(),now])?;
-            let id = tx.last_insert_rowid() as u64;
-            crate::thread_rollups::refresh_ancestors(
-                &tx,
-                id,
-                super::thread_state::StateActor::thread(caller),
-            )?;
-            id
+            tx.last_insert_rowid() as u64
         };
         if let Some(execution) = &assignment.execution {
             tx.execute("INSERT INTO thread_execution_preferences(thread_id,config) VALUES(?1,?2) ON CONFLICT(thread_id) DO UPDATE SET config=excluded.config",params![child,serde_json::to_string(execution)?])?;

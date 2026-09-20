@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { flush } from "solid-js";
 import type { ArtifactClientMessage, ArtifactSummary } from "./types";
-const row: ArtifactSummary = { id: 9, revision: 1, title: "Plan", kind: "html", thread_ids: [2, 5], created_at: "a", updated_at: "b" };
+const row: ArtifactSummary = { id: 9, title: "Plan", kind: "html", thread_ids: [2, 5], created_at: "a", updated_at: "b" };
 beforeEach(() => vi.resetModules());
 describe("artifact references", () => {
   it("tracks inventory loading and failure separately from preview and retains rows through retry", async () => {

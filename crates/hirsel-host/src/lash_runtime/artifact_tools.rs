@@ -100,16 +100,8 @@ impl ScopedThreadTools {
                 .map_err(ToolError::from)?
         };
         self.tools.publish_artifact(result.0.summary.clone());
-        let material_threads = if name == "artifacts_edit" {
-            result.0.summary.thread_ids.clone()
-        } else {
-            Vec::new()
-        };
         if let Some(message) = result.1 {
             self.tools.publish_thread_message(message).await;
-        }
-        for thread_id in material_threads {
-            self.tools.publish_thread_summary(thread_id).await;
         }
         let scoped = storage
             .scoped_artifact(&self.caller, result.0.summary.id)

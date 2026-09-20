@@ -3,7 +3,7 @@ import { artifactCaption, downloadIdentity, hasArtifactSource, openersFor, rende
 import type { ArtifactKind, ArtifactSummary } from "./types";
 
 const summary = (kind: ArtifactKind): ArtifactSummary =>
-  ({ id: 1, revision: 1, title: "Result", thread_ids: [], created_at: "a", updated_at: "b", ...kind });
+  ({ id: 1, title: "Result", thread_ids: [], created_at: "a", updated_at: "b", ...kind });
 
 describe("one render discriminator", () => {
   it("maps every kind onto exactly one surface", () => {

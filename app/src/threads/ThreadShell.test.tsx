@@ -99,21 +99,6 @@ describe("thread workspace", () => {
     expect(screen.queryByText("Groceries only")).toBeNull();
     expect(threadState.focusedId).toBe(2);
   });
-  it("places Task state before the conversation and omits it from Space chats", () => {
-    flush(() => setThreadState(draft => {
-      const task = draft.threads.find(thread => thread.id === 1)!;
-      task.state = { ...task.state, headline: "Release evidence ready", findings: ["Checks passed"], revision: 3 };
-      draft.histories[1] = { brief: { text: "", artifact_ids: [] }, messages: [{ id: 11, thread_id: 1, author: "owner", body: "Conversation marker", ref: null, ts: "2026-09-09T10:00:00Z" }], turns: [], activities: [], loaded: true, hasMore: false };
-    }));
-    const view = render(() => <ThreadShell />);
-    const state = view.container.querySelector('[data-slot="task-state"]')!;
-    const message = view.getByText("Conversation marker");
-    expect(state).toBeVisible();
-    expect(state.compareDocumentPosition(message) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-
-    flush(() => focusThread(2));
-    expect(view.container.querySelector('[data-slot="task-state"]')).toBeNull();
-  });
   it("opens the existing drawer from the full context title", async () => {
     const title = "Launch preparation and documentation for the west coast production workspace";
     flush(() => setThreadState(draft => { draft.threads[1].title = title; }));

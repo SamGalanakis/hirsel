@@ -362,66 +362,6 @@ async fn thread_create_is_visible_live_and_snapshot_and_reconnect_dedupes() {
 }
 
 #[tokio::test]
-async fn owner_child_creation_broadcasts_material_parent_rollup() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = build_state(crate::tests::test_config(dir.path()))
-        .await
-        .unwrap();
-    let parent = state
-        .storage
-        .create_thread(
-            "rollup-parent",
-            "Home",
-            "",
-            None,
-            hirsel_proto::ThreadAttention::Quiet,
-            hirsel_proto::ThreadKind::Space,
-            None,
-        )
-        .await
-        .unwrap()
-        .0;
-    state.broadcast_log.clear();
-    let mut channel = TestChannel {
-        incoming: VecDeque::new(),
-        sent: Vec::new(),
-    };
-    handle_as_owner(
-        &state,
-        &mut channel,
-        ClientToHost::CreateThread {
-            history_id: state.storage.history_id().await.unwrap(),
-            kind: hirsel_proto::ThreadKind::Task,
-            parent_thread_id: Some(parent.id),
-            client_id: "rollup-child".into(),
-            title: "Child".into(),
-        },
-    )
-    .await
-    .unwrap();
-    let HostToClient::ThreadCreated { thread: child, .. } = &channel.sent[0] else {
-        panic!("missing creation acknowledgement")
-    };
-    let expected = format!("1 child · #{} idle", child.id);
-    assert_eq!(
-        state
-            .storage
-            .thread(parent.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .state
-            .headline,
-        expected
-    );
-    assert!(state.broadcast_log.recent().iter().any(|frame| matches!(
-        frame,
-        HostToClient::ThreadUpsert { thread }
-            if thread.id == parent.id && thread.state.headline == expected
-    )));
-}
-
-#[tokio::test]
 async fn already_sent_old_history_mutations_cannot_touch_reused_thread_ids() {
     let dir = tempfile::tempdir().unwrap();
     let state = build_state(crate::tests::test_config(dir.path()))

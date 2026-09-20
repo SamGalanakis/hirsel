@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ARTIFACT_CSP, ARTIFACT_SANDBOX, artifactDocument } from "./document";
 import { compileArtifact } from "./compiler";
 import type { Artifact } from "./types";
-const artifact: Artifact = { id: 1, revision: 1, title: "Counter", kind: "solid", content: "", thread_ids: [3], created_at: "2026-09-09", updated_at: "2026-09-09" };
+const artifact: Artifact = { id: 1, title: "Counter", kind: "solid", content: "", thread_ids: [3], created_at: "2026-09-09", updated_at: "2026-09-09" };
 describe("artifact isolation", () => {
   it("allows local scripts without granting origin, forms, popups or a network", () => {
     expect(ARTIFACT_SANDBOX).toBe("allow-scripts");

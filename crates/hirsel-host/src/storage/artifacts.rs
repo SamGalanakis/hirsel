@@ -75,13 +75,12 @@ pub(super) fn message_artifacts(c: &Connection, message_id: u64) -> rusqlite::Re
 pub(super) fn summary(c: &Connection, id: u64) -> anyhow::Result<ArtifactSummary> {
     let mut artifact = c
         .query_row(
-            "SELECT id,title,kind,kind_data,created_at,updated_at,revision FROM artifacts WHERE id=?1",
+            "SELECT id,title,kind,kind_data,created_at,updated_at FROM artifacts WHERE id=?1",
             [id],
             |r| {
                 let (tag, data): (String, String) = (r.get(2)?, r.get(3)?);
                 Ok(ArtifactSummary {
                     id: r.get(0)?,
-                    revision: r.get(6)?,
                     title: r.get(1)?,
                     kind: kind_from_columns(&tag, &data).map_err(|e| {
                         rusqlite::Error::FromSqlConversionFailure(
@@ -98,7 +97,7 @@ pub(super) fn summary(c: &Connection, id: u64) -> anyhow::Result<ArtifactSummary
         )
         .optional()?
         .ok_or_else(|| anyhow::anyhow!("artifact {id} does not exist"))?;
-    artifact.thread_ids=c.prepare("SELECT m.thread_id FROM message_artifacts r JOIN chat_messages m ON m.id=r.message_id WHERE r.artifact_id=?1 UNION SELECT a.thread_id FROM activity_artifacts r JOIN thread_activities a ON a.id=r.activity_id WHERE r.artifact_id=?1 UNION SELECT id FROM threads WHERE showcased_artifact_id=?1 UNION SELECT thread_id FROM thread_state_artifacts WHERE artifact_id=?1 ORDER BY 1")?.query_map([id],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    artifact.thread_ids=c.prepare("SELECT m.thread_id FROM message_artifacts r JOIN chat_messages m ON m.id=r.message_id WHERE r.artifact_id=?1 UNION SELECT a.thread_id FROM activity_artifacts r JOIN thread_activities a ON a.id=r.activity_id WHERE r.artifact_id=?1 UNION SELECT id FROM threads WHERE showcased_artifact_id=?1 ORDER BY 1")?.query_map([id],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
     Ok(artifact)
 }
 fn get(c: &Connection, id: u64) -> anyhow::Result<Artifact> {
@@ -130,7 +129,7 @@ impl Storage {
         if let Some(id) = thread_id {
             threads::get(&c, id)?;
         }
-        let ids=c.prepare("SELECT a.id FROM artifacts a WHERE ?1 IS NULL OR EXISTS (SELECT 1 FROM message_artifacts r JOIN chat_messages m ON m.id=r.message_id WHERE r.artifact_id=a.id AND m.thread_id=?1) OR EXISTS (SELECT 1 FROM activity_artifacts r JOIN thread_activities t ON t.id=r.activity_id WHERE r.artifact_id=a.id AND t.thread_id=?1) OR EXISTS (SELECT 1 FROM threads t WHERE t.id=?1 AND t.showcased_artifact_id=a.id) OR EXISTS (SELECT 1 FROM thread_state_artifacts r WHERE r.thread_id=?1 AND r.artifact_id=a.id) ORDER BY a.updated_at DESC,a.id DESC")?.query_map([thread_id],|r|r.get::<_,u64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let ids=c.prepare("SELECT a.id FROM artifacts a WHERE ?1 IS NULL OR EXISTS (SELECT 1 FROM message_artifacts r JOIN chat_messages m ON m.id=r.message_id WHERE r.artifact_id=a.id AND m.thread_id=?1) OR EXISTS (SELECT 1 FROM activity_artifacts r JOIN thread_activities t ON t.id=r.activity_id WHERE r.artifact_id=a.id AND t.thread_id=?1) OR EXISTS (SELECT 1 FROM threads t WHERE t.id=?1 AND t.showcased_artifact_id=a.id) ORDER BY a.updated_at DESC,a.id DESC")?.query_map([thread_id],|r|r.get::<_,u64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         ids.into_iter().map(|id| summary(&c, id)).collect()
     }
     pub(crate) async fn artifact_operation(
@@ -217,14 +216,7 @@ impl Storage {
                 }
                 let updated_at = next_updated_at(&tx, id)?;
                 let (tag, data) = kind_columns(&draft.kind)?;
-                tx.execute("UPDATE artifacts SET title=?2,kind=?3,kind_data=?4,content=?5,updated_at=?6,revision=revision+1 WHERE id=?1",params![id,draft.title,tag,data,draft.content,updated_at])?;
-                let actor = match actor {
-                    Publication::Human(_) => super::thread_state::StateActor::owner(),
-                    Publication::Execution(caller) => {
-                        super::thread_state::StateActor::thread(caller)
-                    }
-                };
-                super::thread_state::touch_artifact_references(&tx, id, actor)?;
+                tx.execute("UPDATE artifacts SET title=?2,kind=?3,kind_data=?4,content=?5,updated_at=?6 WHERE id=?1",params![id,draft.title,tag,data,draft.content,updated_at])?;
                 id
             }
             (None, Some(draft)) => {
@@ -317,7 +309,7 @@ impl Storage {
             tx.commit()?;
             return Ok(artifacts);
         }
-        let ids=tx.prepare("WITH RECURSIVE scope(id) AS (SELECT id FROM threads WHERE id=?1 UNION ALL SELECT t.id FROM threads t JOIN scope s ON t.parent_thread_id=s.id) SELECT r.artifact_id FROM message_artifacts r JOIN chat_messages m ON m.id=r.message_id JOIN scope s ON s.id=m.thread_id UNION SELECT r.artifact_id FROM activity_artifacts r JOIN thread_activities a ON a.id=r.activity_id JOIN scope s ON s.id=a.thread_id UNION SELECT t.showcased_artifact_id FROM threads t JOIN scope s ON s.id=t.id WHERE t.showcased_artifact_id IS NOT NULL UNION SELECT r.artifact_id FROM thread_state_artifacts r JOIN scope s ON s.id=r.thread_id ORDER BY 1")?.query_map([under],|r|r.get::<_,u64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let ids=tx.prepare("WITH RECURSIVE scope(id) AS (SELECT id FROM threads WHERE id=?1 UNION ALL SELECT t.id FROM threads t JOIN scope s ON t.parent_thread_id=s.id) SELECT r.artifact_id FROM message_artifacts r JOIN chat_messages m ON m.id=r.message_id JOIN scope s ON s.id=m.thread_id UNION SELECT r.artifact_id FROM activity_artifacts r JOIN thread_activities a ON a.id=r.activity_id JOIN scope s ON s.id=a.thread_id UNION SELECT t.showcased_artifact_id FROM threads t JOIN scope s ON s.id=t.id WHERE t.showcased_artifact_id IS NOT NULL ORDER BY 1")?.query_map([under],|r|r.get::<_,u64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let artifacts = ids
             .into_iter()
             .map(|id| {

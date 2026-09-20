@@ -52,7 +52,7 @@ mod tests;
 pub use thread::{
     ReachTarget, Thread, ThreadActivity, ThreadAttention, ThreadBrief, ThreadDetail,
     ThreadExecutionTarget, ThreadGrant, ThreadGrantSource, ThreadGrantTarget, ThreadKind,
-    ThreadRelatedItem, ThreadRelatedTarget, ThreadState, ThreadTurn, ThreadTurnState,
+    ThreadRelatedItem, ThreadRelatedTarget, ThreadTurn, ThreadTurnState,
 };
 pub use thread_icon::{
     THREAD_SYMBOL_GROUPS, THREAD_SYMBOLS, ThreadIcon, ThreadTint, is_thread_symbol,

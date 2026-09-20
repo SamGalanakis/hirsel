@@ -68,13 +68,6 @@ impl Storage {
             anyhow::ensure!(exists, "Artifact is unavailable");
         }
         c.execute("UPDATE threads SET showcased_artifact_id=?2,updated_at=?3,revision=revision+1 WHERE id=?1", params![id, artifact_id, chrono::Utc::now().to_rfc3339()])?;
-        super::thread_state::touch(
-            &c,
-            id,
-            super::thread_state::StateActor::owner(),
-            "showcase_updated",
-            false,
-        )?;
         touch_artifacts(&c, current.showcased_artifact_id, artifact_id)?;
         let thread = threads::get(&c, id)?;
         c.commit()?;

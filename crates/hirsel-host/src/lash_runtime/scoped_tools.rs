@@ -265,26 +265,6 @@ impl ScopedThreadTools {
                 })
                 .await
             }
-            "threads_state" => {
-                self.thread_mutation(crate::storage::ThreadMutation::State {
-                    thread: reference(args, "thread")?,
-                    expected_state_revision: args["expected_state_revision"]
-                        .as_u64()
-                        .ok_or("expected_state_revision must be a positive integer")?,
-                    headline: required_string(args, "headline")?,
-                    findings: args
-                        .get("findings")
-                        .map(|value| serde_json::from_value(value.clone()))
-                        .transpose()
-                        .map_err(ToolError::from)?,
-                    artifact_ids: args
-                        .get("artifact_ids")
-                        .map(|value| serde_json::from_value(value.clone()))
-                        .transpose()
-                        .map_err(ToolError::from)?,
-                })
-                .await
-            }
             "threads_grant" => {
                 self.thread_mutation(crate::storage::ThreadMutation::Grant {
                     thread: reference(args, "thread")?,

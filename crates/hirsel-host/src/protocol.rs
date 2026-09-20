@@ -411,9 +411,6 @@ where
                 state.broadcast(HostToClient::ThreadUpsert {
                     thread: thread.clone(),
                 });
-                for ancestor in state.storage.thread_ancestors(thread.id).await? {
-                    state.broadcast(HostToClient::ThreadUpsert { thread: ancestor });
-                }
             }
             channel
                 .send(&HostToClient::ThreadCreated { client_id, thread })

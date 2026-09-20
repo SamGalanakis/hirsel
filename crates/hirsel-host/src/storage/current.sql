@@ -17,58 +17,6 @@ CREATE TABLE threads (
         CHECK(icon_symbol IS NULL OR icon_blob_id IS NULL),
         CHECK((icon_tint IS NULL) = (icon_symbol IS NULL)));
 CREATE INDEX threads_parent ON threads(parent_thread_id,id);
-CREATE TABLE thread_state (
-    thread_id INTEGER PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
-    revision INTEGER NOT NULL CHECK(COALESCE(revision > 0,0)),
-    own_headline TEXT NOT NULL CHECK(COALESCE(
-        length(CAST(own_headline AS BLOB)) BETWEEN 1 AND 240 AND
-        own_headline=trim(own_headline) AND instr(own_headline,'  ')=0 AND
-        instr(own_headline,char(9))=0 AND instr(own_headline,char(10))=0 AND
-        instr(own_headline,char(11))=0 AND instr(own_headline,char(12))=0 AND instr(own_headline,char(13))=0 AND
-        length(own_headline)-length(replace(own_headline,' ',''))+1<=12
-    ,0)),
-    headline TEXT NOT NULL CHECK(COALESCE(
-        length(CAST(headline AS BLOB)) BETWEEN 1 AND 240 AND
-        headline=trim(headline) AND instr(headline,'  ')=0 AND
-        instr(headline,char(9))=0 AND instr(headline,char(10))=0 AND
-        instr(headline,char(11))=0 AND instr(headline,char(12))=0 AND instr(headline,char(13))=0 AND
-        length(headline)-length(replace(headline,' ',''))+1<=12
-    ,0)),
-    findings_json TEXT NOT NULL CHECK(COALESCE(
-        json_valid(findings_json) AND json_type(findings_json)='array' AND
-        json_array_length(findings_json)<=32 AND length(CAST(findings_json AS BLOB))<=8192
-    ,0)),
-    checkpoint_at TEXT,
-    steering_revision INTEGER NOT NULL CHECK(COALESCE(steering_revision>=0,0))
-);
-CREATE TABLE thread_state_artifacts (
-    thread_id INTEGER NOT NULL REFERENCES thread_state(thread_id) ON DELETE CASCADE,
-    artifact_id INTEGER NOT NULL REFERENCES artifacts(id),
-    PRIMARY KEY(thread_id,artifact_id)
-);
-CREATE INDEX thread_state_artifacts_by_artifact ON thread_state_artifacts(artifact_id,thread_id);
-CREATE TABLE thread_state_changes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    thread_id INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-    state_revision INTEGER NOT NULL CHECK(COALESCE(state_revision>0,0)),
-    before_json TEXT NOT NULL CHECK(COALESCE(json_valid(before_json) AND json_type(before_json)='object',0)),
-    after_json TEXT NOT NULL CHECK(COALESCE(json_valid(after_json) AND json_type(after_json)='object',0)),
-    actor_kind TEXT NOT NULL CHECK(COALESCE(actor_kind IN ('owner','thread','host'),0)),
-    actor_thread_id INTEGER REFERENCES threads(id),
-    actor_turn_id INTEGER REFERENCES thread_turns(id),
-    cause TEXT NOT NULL CHECK(COALESCE(length(trim(cause)) BETWEEN 1 AND 200,0)),
-    created_at TEXT NOT NULL,
-    CHECK(COALESCE((actor_kind='thread')=(actor_thread_id IS NOT NULL),0)),
-    CHECK(COALESCE(actor_turn_id IS NULL OR actor_kind='thread',0)),
-    UNIQUE(thread_id,state_revision)
-);
-CREATE TRIGGER threads_create_material_state
-AFTER INSERT ON threads
-BEGIN
-    INSERT INTO thread_state(thread_id,revision,own_headline,headline,findings_json,checkpoint_at,steering_revision)
-    VALUES(NEW.id,1,CASE NEW.kind WHEN 'task' THEN 'Task ready' ELSE 'Space ready' END,
-           CASE NEW.kind WHEN 'task' THEN 'Task ready' ELSE 'Space ready' END,'[]',NULL,0);
-END;
 CREATE TRIGGER threads_parent_immutable
 BEFORE UPDATE OF parent_thread_id ON threads
 WHEN NEW.parent_thread_id IS NOT OLD.parent_thread_id
@@ -207,8 +155,7 @@ CREATE TABLE artifacts (
         id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN ($ARTIFACT_KINDS)),
         kind_data TEXT NOT NULL, content TEXT NOT NULL,
-        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-        revision INTEGER NOT NULL DEFAULT 1 CHECK(COALESCE(revision>0,0)));
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE message_artifacts (
         message_id INTEGER NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
         artifact_id INTEGER NOT NULL REFERENCES artifacts(id), PRIMARY KEY(message_id,artifact_id));

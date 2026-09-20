@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { artifactDocument } from "./document";
 import type { Artifact } from "./types";
-const file: Artifact = { id: 1, revision: 1, kind: "markdown", title: "Plan", content: "", created_at: "a", updated_at: "a", thread_ids: [] };
+const file: Artifact = { id: 1, kind: "markdown", title: "Plan", content: "", created_at: "a", updated_at: "a", thread_ids: [] };
 const doc = (content: string, artifact: Artifact = file) => new DOMParser().parseFromString(artifactDocument({ ...artifact, content }), "text/html");
 describe("explicit Markdown artifacts", () => {
   it("renders headings, lists, fenced code and checked links through the common parser", () => {

@@ -20,7 +20,6 @@ export interface Thread {
   description: string;
   execution?: ThreadExecutionTarget | null;
   instrument: ViewSpec | ViewSpec[] | null;
-  state: ThreadState;
   attention: "quiet" | "needs_owner";
   settled_at: string | null;
   archived_at: string | null;
@@ -33,15 +32,6 @@ export interface Thread {
   queued_turn_count: number;
   last_finished_turn: ThreadTurn | null;
   last_activity_at: string;
-}
-export interface ThreadState {
-  revision: number;
-  headline: string;
-  own_headline: string;
-  findings: string[];
-  artifact_ids: number[];
-  checkpoint_at: string | null;
-  steering_revision: number;
 }
 export interface ThreadTurn {
   id: number;

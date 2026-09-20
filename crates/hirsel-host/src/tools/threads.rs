@@ -160,7 +160,6 @@ impl ToolSuite {
             }
             Err(error) => tracing::warn!(thread_id, %error, "cannot refresh Thread summary"),
         }
-        self.publish_ancestor_rollups(thread_id).await;
     }
     pub(crate) async fn publish_thread_message(&self, message: ChatMessage) {
         let thread_id = message.thread_id;
@@ -183,17 +182,6 @@ impl ToolSuite {
                 self.refresh_effects_targeting(thread_id).await;
             }
             Err(error) => tracing::warn!(thread_id, %error, "cannot publish stale Thread summary"),
-        }
-        self.publish_ancestor_rollups(thread_id).await;
-    }
-    async fn publish_ancestor_rollups(&self, thread_id: u64) {
-        match self.storage.thread_ancestors(thread_id).await {
-            Ok(ancestors) => {
-                for thread in ancestors {
-                    self.broadcast(HostToClient::ThreadUpsert { thread });
-                }
-            }
-            Err(error) => tracing::warn!(thread_id, %error, "cannot publish ancestor rollups"),
         }
     }
     pub(crate) async fn publish_thread_activity(&self, activity: ThreadActivity) {

@@ -38,7 +38,7 @@ class RelatedItemsBindingTest {
                     attachments = listOf("blob-1"), clientId = "send-1", body = "Draft",
                     mentions = emptyList(), artifactIds = emptyList(), timestamp = "now",
                 ),
-            ), threads = emptyList(), effects = emptyList(),
+            ), threads = emptyList(),
             turns = emptyList(), activities = emptyList(), briefs = emptyList(),
             relatedItems = listOf(link("Reference"), link(null).copy(
                 id = 8uL, target = ThreadRelatedTarget.Thread(historyId = "old", threadId = 0uL),

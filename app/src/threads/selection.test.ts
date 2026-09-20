@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setHistoryId } from "../lib/history";
 import type { ThreadClientMessage } from "./types";
 import { makeThread } from "./fixtures";
-import { projectState, stageTaskFocus } from "../projects/store";
+import { spaceState } from "../spaces/store";
 import { attachThreadTransport, disconnectThreads, focusThread, handleThreadMessage, resetThreads, routeThreadId, setThreadState, threadState, followThreadLocation, sendThreadMessage } from "./store";
 const frames: ThreadClientMessage[] = [];
 const helloThreads = (threads: ReturnType<typeof makeThread>[]) => flush(() => handleThreadMessage({ type: "hello_ok", history_id: "ab123456-1234-5678-9abc-123456789abc", threads, processes: [], views: [], host_version: "test", model: null, subagent_models: null, prompts: null, providers: null }));
@@ -18,15 +18,17 @@ beforeEach(() => {
 });
 afterEach(() => { disconnectThreads(); vi.unstubAllGlobals(); });
 describe("explicit Thread selection", () => {
-  it("requests Home from an empty or populated forest without a saved Space", () => {
-    hello([]); expect(threadState.focusedId).toBeNull(); expect(frames).toContainEqual(expect.objectContaining({type:"ensure_home_project"}));
+  it("creates Home only for an empty forest and otherwise opens the first Space", () => {
+    hello([]); expect(threadState.focusedId).toBeNull(); expect(frames).toContainEqual(expect.objectContaining({type:"create_thread", title:"Home", kind:"space", parent_thread_id:null}));
     frames.length = 0;
-    hello([0,1,2]); expect(threadState.focusedId).toBeNull(); expect(frames).toContainEqual(expect.objectContaining({type:"ensure_home_project"}));
+    hello([0,1,2]); expect(threadState.focusedId).toBe(0); expect(frames).toContainEqual(expect.objectContaining({type:"open_thread", thread_id:0}));
   });
   it("keeps a newer selection when delayed Home bootstrap completes", async () => {
-    helloThreads([makeThread(2, { title: "Chosen Space", kind: "space", parent_thread_id: null })]);
-    const request = frames.find(frame => frame.type === "ensure_home_project");
-    if (request?.type !== "ensure_home_project") throw new Error("missing Home request");
+    helloThreads([]);
+    const request = frames.find(frame => frame.type === "create_thread");
+    if (request?.type !== "create_thread") throw new Error("missing Home create");
+    const chosen = makeThread(2, { title: "Chosen Space", kind: "space", parent_thread_id: null });
+    flush(() => handleThreadMessage({ type: "thread_upsert", thread: chosen }));
     flush(() => focusThread(2));
     const home = makeThread(3, { title: "Home", kind: "space", parent_thread_id: null });
     flush(() => handleThreadMessage({ type: "thread_created", client_id: request.client_id, thread: home }));
@@ -44,8 +46,8 @@ describe("explicit Thread selection", () => {
     flush(() => focusThread(nested.id));
 
     expect(threadState.focusedId).toBe(nested.id);
-    expect(projectState).toMatchObject({ projectRecipientId: nested.id, workerPairingId: null });
-    expect(localStorage.getItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc")).toBe(String(home.id));
+    expect(spaceState).toMatchObject({ spaceRecipientId: nested.id, workerPairingId: null });
+    expect(localStorage.getItem("hirsel.last-space.ab123456-1234-5678-9abc-123456789abc")).toBe(String(home.id));
   });
   it("pairs a Task with its nearest containing Space chat", () => {
     const home = makeThread(1, { title: "Home", kind: "space", parent_thread_id: null });
@@ -56,11 +58,11 @@ describe("explicit Thread selection", () => {
     flush(() => focusThread(task.id));
 
     expect(threadState.focusedId).toBe(task.id);
-    expect(projectState).toMatchObject({ projectRecipientId: nested.id, workerPairingId: task.id });
-    expect(localStorage.getItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc")).toBe(String(home.id));
+    expect(spaceState).toMatchObject({ spaceRecipientId: nested.id, workerPairingId: task.id });
+    expect(localStorage.getItem("hirsel.last-space.ab123456-1234-5678-9abc-123456789abc")).toBe(String(home.id));
   });
   it("prioritizes an explicit ordinary zero route over saved and focused IDs", () => {
-    localStorage.setItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc", "2");
+    localStorage.setItem("hirsel.last-space.ab123456-1234-5678-9abc-123456789abc", "2");
     history.replaceState(null, "", "/t/0?history=ab123456-1234-5678-9abc-123456789abc");
     hello([0,1,2]);
     expect(threadState.focusedId).toBe(0);
@@ -68,14 +70,15 @@ describe("explicit Thread selection", () => {
     expect(routeThreadId("/t/9007199254740993")).toBeNull();
   });
   it("restores only a valid selection from this history", () => {
-    localStorage.setItem("hirsel.last-project.another-history", "1");
-    localStorage.setItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc", "99");
-    hello([1,2]); expect(threadState.focusedId).toBeNull(); expect(frames).toContainEqual(expect.objectContaining({type:"ensure_home_project"}));
-    localStorage.setItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc", "2");
+    localStorage.setItem("hirsel.last-space.another-history", "1");
+    localStorage.setItem("hirsel.last-space.ab123456-1234-5678-9abc-123456789abc", "99");
+    hello([1,2]); expect(threadState.focusedId).toBe(1); expect(frames).toContainEqual(expect.objectContaining({type:"open_thread",thread_id:1}));
+    history.replaceState(null, "", "/");
+    localStorage.setItem("hirsel.last-space.ab123456-1234-5678-9abc-123456789abc", "2");
     hello([1,2]); expect(threadState.focusedId).toBe(2); expect(location.pathname).toBe("/t/2");
   });
   it("never redirects a missing explicit destination to saved or pinned work", () => {
-    localStorage.setItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc", "1");
+    localStorage.setItem("hirsel.last-space.ab123456-1234-5678-9abc-123456789abc", "1");
     history.replaceState(null, "", "/t/99?history=ab123456-1234-5678-9abc-123456789abc");
     hello([1,2]); expect(threadState.focusedId).toBeNull(); expect(threadState.linkError).toContain("unavailable"); expect(location.pathname).toBe("/t/99");
   });
@@ -93,7 +96,7 @@ describe("explicit Thread selection", () => {
     hello([1]); expect(threadState.focusedId).toBeNull(); expect(frames).toEqual([]);
   });
   it("resolves an unqualified route against the connected history and still refuses unknown IDs",()=>{
-    localStorage.setItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc","1");
+    localStorage.setItem("hirsel.last-space.ab123456-1234-5678-9abc-123456789abc","1");
     history.replaceState(null,"","/t/1"); hello([1]);
     expect(threadState.focusedId).toBe(1); expect(threadState.linkError).toBeNull();
     expect(location.search).toContain("ab123456-1234-5678-9abc-123456789abc");
@@ -110,24 +113,6 @@ describe("explicit Thread selection", () => {
     expect(()=>sendThreadMessage("test-history",2,"not yet","send",[],[],[])).toThrow("Reconnect");
     hello([1,2]); expect(threadState.focusedId).toBe(2); expect(frames).toContainEqual(expect.objectContaining({type:"open_thread",thread_id:2}));
   });
-  it("preserves unsent Task focus when reconnecting to the same Space route", () => {
-    const project = makeThread(1, { title: "Space", kind: "space", parent_thread_id: null });
-    const task = makeThread(2, { title: "Focused Task", kind: "task", parent_thread_id: 1 });
-    history.replaceState(null, "", "/t/1?history=ab123456-1234-5678-9abc-123456789abc");
-    helloThreads([project, task]);
-    flush(() => stageTaskFocus([project, task], task.id, "Unsent focus"));
-    const staged = projectState.taskFocus;
-
-    flush(disconnectThreads);
-    attachThreadTransport(frame => frames.push(frame));
-    helloThreads([project, task]);
-    expect(projectState.projectRecipientId).toBe(project.id);
-    expect(projectState.taskFocus).toEqual(staged);
-
-    flush(() => focusThread(project.id));
-    expect(projectState.taskFocus).toBeNull();
-  });
-
   it("validates the first hello against its payload while the history signal is still pending",()=>{
     flush(()=>setHistoryId(null));
     history.replaceState(null,"","/t/2?history=ab123456-1234-5678-9abc-123456789abc");
@@ -140,11 +125,11 @@ describe("explicit Thread selection", () => {
   });
 
   it("does not restore an archived selection from an authoritative snapshot", () => {
-    localStorage.setItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc", "2");
+    localStorage.setItem("hirsel.last-space.ab123456-1234-5678-9abc-123456789abc", "2");
     helloThreads([makeThread(1), makeThread(2, { archived_at: "2026-09-10T10:00:00Z" })]);
-    expect(threadState.focusedId).toBeNull();
-    expect(localStorage.getItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc")).toBeNull();
-    expect(location.pathname).toBe("/");
+    expect(threadState.focusedId).toBe(1);
+    expect(localStorage.getItem("hirsel.last-space.ab123456-1234-5678-9abc-123456789abc")).toBe("1");
+    expect(location.pathname).toBe("/t/1");
   });
 
   it("clears a previously focused Thread when a route-free snapshot archives it", () => {
@@ -153,8 +138,8 @@ describe("explicit Thread selection", () => {
     history.replaceState(null, "", "/");
     helloThreads([makeThread(2, { archived_at: "2026-09-10T10:00:00Z", revision: 2 })]);
     expect(threadState.focusedId).toBeNull();
-    expect(localStorage.getItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc")).toBeNull();
-    expect(location.pathname).toBe("/");
+    expect(localStorage.getItem("hirsel.last-space.ab123456-1234-5678-9abc-123456789abc")).toBeNull();
+    expect(frames).toContainEqual(expect.objectContaining({ type: "create_thread", title: "Home" }));
   });
 
   it("keeps an explicit archived Thread route selectable", () => {

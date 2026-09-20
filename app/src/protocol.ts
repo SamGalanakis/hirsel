@@ -41,7 +41,6 @@ export interface ProcessOrigin {
 export interface ChatMessage {
   origin?: ProcessOrigin;
   artifact_ids?: number[];
-  focus?: TaskFocus;
   thread_id: number;
   client_id?: string;
   id: number; // u64, monotonic, host-assigned
@@ -55,11 +54,6 @@ export interface ChatMessage {
   /** v1.4: tools invoked in the turn that committed this (agent) message.
    * Optional on the wire; absent/empty renders no footer chip. */
   tool_calls?: ToolCall[];
-}
-
-export interface TaskFocus {
-  task_thread_id: number;
-  snapshot: Record<string, unknown>;
 }
 
 /** Lifecycle of a Lash process from the owning Thread's durable registry. */

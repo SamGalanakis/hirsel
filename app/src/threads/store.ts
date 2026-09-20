@@ -2,9 +2,9 @@ import { parseThreadLink, threadPath } from "../lib/thread-url";
 import { historyId } from "../lib/history";
 import { createStore, reconcile } from "solid-js";
 
-import type { Blob, ChatMessage, SendMode, ServerMessage, TaskFocus } from "../protocol";
+import type { Blob, ChatMessage, SendMode, ServerMessage } from "../protocol";
 import type { TimelineEvent } from "../store/types";
-import { enterProject, projectForThread, resetProjects, stepIntoWorker } from "../projects/store";
+import { enterSpace, resetSpaces, stepIntoWorker, topLevelSpaceForThread } from "../spaces/store";
 import { emptyHistory, mergeById, mergeDetail, mergeTurns, upsertThread, type ThreadHistory } from "./model";
 import type { Thread, ThreadClientMessage, ThreadKind } from "./types";
 
@@ -16,7 +16,6 @@ interface PendingMessage {
   attachments: Blob[];
   mentions: number[];
   artifactIds: number[];
-  focus: TaskFocus | null;
   mode: SendMode;
   failed: boolean;
 }
@@ -73,16 +72,20 @@ export function followThreadLocation(authoritativeHistory: string | null = histo
   focusThread(target!.thread_id, false, authoritativeHistory, reconcileSelection);
 }
 function openRouteFree(authoritativeHistory: string): void {
-  const projectId = restoredProject(threadState.threads, authoritativeHistory);
-  if (projectId !== null) {
-    history.replaceState(null, "", threadPath({ kind: "thread", history_id: authoritativeHistory, thread_id: projectId }));
-    focusThread(projectId, false, authoritativeHistory, true);
+  const spaceId = restoredSpace(threadState.threads, authoritativeHistory)
+    ?? [...threadState.threads]
+      .filter(thread => thread.kind === "space" && thread.parent_thread_id === null && !thread.archived_at)
+      .sort((left, right) => left.id - right.id)[0]?.id
+    ?? null;
+  if (spaceId !== null) {
+    history.replaceState(null, "", threadPath({ kind: "thread", history_id: authoritativeHistory, thread_id: spaceId }));
+    focusThread(spaceId, false, authoritativeHistory, true);
     return;
   }
   const selection = selectionGeneration;
   const routeIntent = location.pathname + location.search;
   setThreadState(draft => { draft.focusedId = null; draft.linkError = null; });
-  void requestHomeProject(authoritativeHistory).then(home => {
+  void createThread(authoritativeHistory, "Home", "space", null).then(home => {
     if (historyId() !== authoritativeHistory
       || selectionGeneration !== selection
       || location.pathname + location.search !== routeIntent
@@ -93,19 +96,19 @@ function openRouteFree(authoritativeHistory: string): void {
     if (historyId() === authoritativeHistory) setThreadState(draft => { draft.error = { operation: "request", detail: detail instanceof Error ? detail.message : String(detail) }; });
   });
 }
-function rememberProject(id: number, currentHistory = historyId()): void {
-  const key = currentHistory ? `hirsel.last-project.${currentHistory}` : null; if (key) localStorage.setItem(key, String(id));
+function rememberSpace(id: number, currentHistory = historyId()): void {
+  const key = currentHistory ? `hirsel.last-space.${currentHistory}` : null; if (key) localStorage.setItem(key, String(id));
 }
-function forgetProject(currentHistory = historyId()): void {
-  const key = currentHistory ? `hirsel.last-project.${currentHistory}` : null;
+function forgetSpace(currentHistory = historyId()): void {
+  const key = currentHistory ? `hirsel.last-space.${currentHistory}` : null;
   if (key) localStorage.removeItem(key);
 }
-function restoredProject(threads: Thread[], currentHistory = historyId()): number | null {
-  const key = currentHistory ? `hirsel.last-project.${currentHistory}` : null; const saved = key ? localStorage.getItem(key) : null;
+function restoredSpace(threads: Thread[], currentHistory = historyId()): number | null {
+  const key = currentHistory ? `hirsel.last-space.${currentHistory}` : null; const saved = key ? localStorage.getItem(key) : null;
   if (saved === null || !/^\d+$/.test(saved)) return null;
   const id = Number(saved);
   const thread = threads.find(candidate => candidate.id === id && candidate.kind === "space" && candidate.parent_thread_id === null);
-  if (thread?.archived_at) { forgetProject(currentHistory); return null; }
+  if (thread?.archived_at) { forgetSpace(currentHistory); return null; }
   return thread ? id : null;
 }
 export const [threadState, setThreadState] = createStore<ThreadState>({
@@ -117,23 +120,10 @@ export function setTurnExpanded(turnId: number, expanded: boolean): void {
 }
 let historyGeneration = 0;
 let selectionGeneration = 0;
-export interface ThreadNavigationGuard {
-  historyId: string;
-  focusedId: number | null;
-  selectionGeneration: number;
-}
-export function captureThreadNavigation(): ThreadNavigationGuard {
-  return { historyId: historyId() ?? "", focusedId: threadState.focusedId, selectionGeneration };
-}
-export function threadNavigationIsCurrent(guard: ThreadNavigationGuard): boolean {
-  return historyId() === guard.historyId
-    && threadState.focusedId === guard.focusedId
-    && selectionGeneration === guard.selectionGeneration;
-}
 let sendFrame: ((frame: ThreadClientMessage) => void) | null = null;
 const messageTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const MESSAGE_ACK_TIMEOUT_MS = 20_000;
-type RequestKind = "create" | "home" | "open" | "action";
+type RequestKind = "create" | "open" | "action";
 interface PendingRequest {
   kind: RequestKind;
   action?: string;
@@ -176,14 +166,6 @@ export async function createThread(expectedHistory: string, title: string, kind:
   if (historyId() !== expectedHistory) throw new Error("History changed. Reopen this control and try again.");
   return await request({ type: "create_thread", client_id: crypto.randomUUID(), history_id: expectedHistory, title, kind, parent_thread_id: parentId }, "create", undefined, null, expectedHistory) as Thread;
 }
-export async function ensureHomeProject(expectedHistory: string): Promise<Thread> {
-  if (!threadState.ready) throw new Error("Reconnect before opening Home.");
-  if (historyId() !== expectedHistory) throw new Error("History changed. Reopen Hirsel and try again.");
-  return await requestHomeProject(expectedHistory);
-}
-function requestHomeProject(expectedHistory: string): Promise<Thread> {
-  return request({ type: "ensure_home_project", client_id: crypto.randomUUID(), history_id: expectedHistory }, "home", undefined, null, expectedHistory) as Promise<Thread>;
-}
 export async function openThread(id: number, beforeId: number | null = null): Promise<void> {
   const generation = historyGeneration;
   try {
@@ -194,7 +176,7 @@ export async function openThread(id: number, beforeId: number | null = null): Pr
     throw error;
   }
 }
-export function focusThread(id: number | null, updateUrl = true, currentHistory = historyId(), reconcileSelection = false): void {
+export function focusThread(id: number | null, updateUrl = true, currentHistory = historyId(), _reconcileSelection = false): void {
   if (id !== null && (!threadState.ready || !currentHistory)) return;
   selectionGeneration++;
   setThreadState(draft => { draft["focusedId"] = id; });
@@ -202,9 +184,9 @@ export function focusThread(id: number | null, updateUrl = true, currentHistory 
   if (updateUrl) history.pushState(null, "", id === null ? "/" : threadPath({kind:"thread", history_id:currentHistory!, thread_id:id}));
   if (id !== null) {
     const thread = threadState.threads.find(candidate => candidate.id === id);
-    const project = thread ? projectForThread(threadState.threads, id) : null;
-    if (project) rememberProject(project.id, currentHistory);
-    if (thread?.kind === "space") enterProject(thread.id, reconcileSelection);
+    const space = thread ? topLevelSpaceForThread(threadState.threads, id) : null;
+    if (space) rememberSpace(space.id, currentHistory);
+    if (thread?.kind === "space") enterSpace(thread.id);
     else if (thread) stepIntoWorker(threadState.threads, thread.id);
     if (sendFrame) void openThread(id).catch(() => {});
   }
@@ -213,9 +195,9 @@ function clearArchivedFocus(id: number, currentHistory = historyId()): void {
   if (!currentHistory || historyId() !== currentHistory || threadState.focusedId !== id) return;
   selectionGeneration++;
   const archived = threadState.threads.find(thread => thread.id === id);
-  const project = archived ? projectForThread(threadState.threads, id) : null;
+  const space = archived ? topLevelSpaceForThread(threadState.threads, id) : null;
   setThreadState(draft => { draft.focusedId = null; draft.error = null; draft.linkError = null; });
-  if (project?.id === id) forgetProject(currentHistory);
+  if (space?.id === id) forgetSpace(currentHistory);
   history.replaceState(null, "", "/");
   openRouteFree(currentHistory);
 }
@@ -234,7 +216,7 @@ export function threadAction(expectedHistory: string, id: number, action: string
 }
 function pendingFrame(pending: PendingMessage): ThreadClientMessage {
   return { type: "send_thread_message", client_id: pending.clientId, history_id: pending.historyId, thread_id: pending.threadId,
-    body: pending.body, ...(pending.focus ? { focus: pending.focus } : {}), attachments: pending.attachments.map(b => b.id), mentions: pending.mentions, artifact_ids: [...pending.artifactIds], mode: pending.mode };
+    body: pending.body, attachments: pending.attachments.map(b => b.id), mentions: pending.mentions, artifact_ids: [...pending.artifactIds], mode: pending.mode };
 }
 function clearMessageTimer(clientId: string): void {
   clearTimeout(messageTimers.get(clientId));
@@ -254,12 +236,12 @@ function transmitMessage(pending: PendingMessage): void {
   }, MESSAGE_ACK_TIMEOUT_MS));
   sendFrame(pendingFrame(pending));
 }
-export function sendThreadMessage(expectedHistory: string, threadId: number, body: string, mode: SendMode, attachments: Blob[], mentions: number[], artifactIds: number[], focus: TaskFocus | null = null): void {
+export function sendThreadMessage(expectedHistory: string, threadId: number, body: string, mode: SendMode, attachments: Blob[], mentions: number[], artifactIds: number[]): void {
   if (!threadState.ready) throw new Error("Reconnect before sending to a Thread.");
   if (historyId() !== expectedHistory) throw new Error("History changed. Reopen this Thread before sending.");
   const references = [...new Set(artifactIds)].sort((a,b) => a-b);
   if (references.length > 16 || references.some(id => !Number.isSafeInteger(id) || id < 0)) throw new Error("A message supports at most 16 valid artifact references.");
-  const pending: PendingMessage = { clientId: crypto.randomUUID(), historyId: expectedHistory, threadId, body, attachments, mentions, artifactIds: references, focus, mode, failed: false };
+  const pending: PendingMessage = { clientId: crypto.randomUUID(), historyId: expectedHistory, threadId, body, attachments, mentions, artifactIds: references, mode, failed: false };
   setThreadState(draft => { draft["pending"] = (rows => [...rows, pending])(draft["pending"]); });
   transmitMessage(pending);
 }
@@ -335,7 +317,7 @@ export function handleThreadMessage(message: ServerMessage): void {
       setThreadState(draft => { reconcile(upsertThread(threadState.threads, message.thread), "id")(draft["threads"]); });
       if (message.type === "thread_created") {
         const pending = requests.get(message.client_id);
-        if (pending?.kind === "create" || pending?.kind === "home") { clearTimeout(pending.timer); requests.delete(message.client_id); pending.resolve(message.thread); }
+        if (pending?.kind === "create") { clearTimeout(pending.timer); requests.delete(message.client_id); pending.resolve(message.thread); }
       }
       if (archivedFocusedThread) clearArchivedFocus(message.thread.id);
       break;
@@ -421,6 +403,6 @@ export function resetThreads(): void {
   selectionGeneration++;
   disconnectThreads();
   setThreadState(draft => { Object.assign(draft, { threads: [], histories: {}, turnDetails: {}, removedMessageIds: {}, expandedTurns: {}, pending: [], focusedId: null, error: null, linkError: null, ready: false }); });
-  resetProjects();
+  resetSpaces();
   // Keep an incoming qualified destination until the next hello validates its history.
 }

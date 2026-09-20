@@ -8,7 +8,7 @@ import { makeThread } from "./fixtures";
 import { installGlobalKeymap } from "../lib/keymap";
 import { closeThreadNavigation, recordThreadVisit } from "./navigation";
 import { closeThreadCreate } from "./create";
-import { projectState, resetProjects } from "../projects/store";
+import { resetSpaces, spaceState } from "../spaces/store";
 import { attachThreadTransport, disconnectThreads, focusThread, handleThreadMessage, openThread, sendThreadMessage, setThreadState, threadState } from "./store";
 import type { ThreadClientMessage, ThreadTurn } from "./types";
 vi.mock("../ws/client", () => ({ getClient: () => ({ cancelTurn: vi.fn() }), makeClientId: () => crypto.randomUUID() }));
@@ -49,7 +49,7 @@ beforeEach(() => {
   flush(() => closeThreadNavigation());
   flush(() => recordThreadVisit(null));
   flush(() => closeThreadCreate());
-  flush(() => resetProjects());
+  flush(() => resetSpaces());
   const storage = new Map<string, string>();
   vi.stubGlobal("localStorage", { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) });
   flush(() => setThreadState(draft => { Object.assign(draft, { ready: true, linkError: null, threads: [makeThread(0, { title: "Hirsel", read: true }), makeThread(1, { kind: "task", read: true }), makeThread(2, { title: "Holiday", read: true })], histories: {}, turnDetails: {}, pending: [], focusedId: 1, error: null }); }));
@@ -257,86 +257,24 @@ describe("thread workspace", () => {
     const screen = render(() => <ThreadShell />);
     expect(screen.getByRole("textbox", { name: "Step in with worker Space chat contract" })).toBeInTheDocument();
     let context = screen.container.querySelector('[data-slot="composer-context"]')!;
-    expect(context).toHaveTextContent("SpaceHirsel");
-    expect(context).toHaveTextContent("FocusNone");
+    expect(context).toHaveTextContent("RecipientHirsel");
     expect(context).toHaveTextContent("WorkerSpace chat contract");
 
     fireEvent.click(screen.getByRole("button", { name: "Talk about this" }));
     expect(threadState.focusedId).toBe(0);
     const input = screen.getByRole("textbox", { name: "Message Space chat Hirsel" });
     context = screen.container.querySelector('[data-slot="composer-context"]')!;
-    expect(context).toHaveTextContent("SpaceHirsel");
-    expect(context).toHaveTextContent("FocusSpace chat contract");
+    expect(context).toHaveTextContent("RecipientHirsel");
     expect(context).toHaveTextContent("WorkerNone");
+    expect(input).toHaveValue("#1 ");
 
-    fireEvent.input(input, { target: { value: "What should we do next?" } });
+    fireEvent.input(input, { target: { value: "#1 What should we do next?" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(sent).toContainEqual(expect.objectContaining({
       type: "send_thread_message",
       thread_id: 0,
-      body: "What should we do next?",
-      focus: {
-        task_thread_id: 1,
-        snapshot: {
-          title: "Space chat contract",
-          brief: "Accepted Task brief",
-          instrument_summary: JSON.stringify({ type: "text", text: "Ready" }),
-        },
-      },
+      body: "#1 What should we do next?",
     })));
-    expect(context).toHaveTextContent("FocusNone");
-  });
-  it("routes a root Task through Home and stages its focus without granting reach", async () => {
-    flush(() => setThreadState(draft => {
-      draft.threads = [makeThread(4, { title: "Root task", kind: "task", parent_thread_id: null, read: true })];
-      draft.histories[4] = {
-        brief: { text: "Root Task brief", artifact_ids: [] }, messages: [], turns: [], activities: [], loaded: true, hasMore: false,
-      };
-    }));
-    flush(() => focusThread(4));
-    const screen = render(() => <ThreadShell />);
-    fireEvent.click(screen.getByRole("button", { name: "Talk about this" }));
-    const request = sent.find(frame => frame.type === "ensure_home_project");
-    if (request?.type !== "ensure_home_project") throw new Error("missing Home request");
-    const home = makeThread(5, { title: "Home", kind: "space", parent_thread_id: null, read: true });
-    flush(() => handleThreadMessage({ type: "thread_created", client_id: request.client_id, thread: home }));
-
-    await waitFor(() => expect(threadState.focusedId).toBe(5));
-    expect(projectState).toMatchObject({
-      projectRecipientId: 5,
-      workerPairingId: null,
-      taskFocus: { task_thread_id: 4, snapshot: { title: "Root task", brief: "Root Task brief", instrument_summary: null } },
-    });
-    expect(screen.getByRole("textbox", { name: "Message Space chat Home" })).toBeInTheDocument();
-  });
-  it("keeps newer navigation when root Task Home resolution is delayed", async () => {
-    flush(() => setThreadState(draft => {
-      draft.threads = [
-        makeThread(4, { title: "Root task", kind: "task", parent_thread_id: null, read: true }),
-        makeThread(9, { title: "Newer task", kind: "task", parent_thread_id: null, read: true }),
-      ];
-      draft.histories[4] = {
-        brief: { text: "Root Task brief", artifact_ids: [] }, messages: [], turns: [], activities: [], loaded: true, hasMore: false,
-      };
-      draft.histories[9] = {
-        brief: { text: "Newer Task brief", artifact_ids: [] }, messages: [], turns: [], activities: [], loaded: true, hasMore: false,
-      };
-    }));
-    flush(() => focusThread(4));
-    const screen = render(() => <ThreadShell />);
-    fireEvent.click(screen.getByRole("button", { name: "Talk about this" }));
-    const request = sent.find(frame => frame.type === "ensure_home_project");
-    if (request?.type !== "ensure_home_project") throw new Error("missing Home request");
-
-    flush(() => focusThread(9));
-    const home = makeThread(5, { title: "Home", kind: "space", parent_thread_id: null, read: true });
-    flush(() => handleThreadMessage({ type: "thread_created", client_id: request.client_id, thread: home }));
-
-    await waitFor(() => expect(threadState.threads).toContainEqual(home));
-    await new Promise(resolve => setTimeout(resolve, 0));
-    expect(threadState.focusedId).toBe(9);
-    expect(projectState.taskFocus).toBeNull();
-    expect(screen.getByRole("textbox", { name: "Step in with worker Newer task" })).toBeInTheDocument();
   });
   it("shows informational activity content within its owning thread without creating work", () => {
     flush(() => handleThreadMessage({ type: "thread_activity", activity: { artifact_ids: [], id: 9, thread_id: 1, turn_id: null, kind: "plugin.build_finished", data: { plugin: "build", payload: { message: "All checks passed." } }, ts: "2026-09-09T10:00:00Z" } }));
@@ -394,8 +332,7 @@ describe("thread workspace", () => {
     expect(location.pathname).toBe("/t/0");
     expect(screen.getByRole("textbox", { name: "Message Space chat Hirsel" })).toBeInTheDocument();
     const context = screen.container.querySelector('[data-slot="composer-context"]')!;
-    expect(context).toHaveTextContent("SpaceHirsel");
-    expect(context).toHaveTextContent("FocusNone");
+    expect(context).toHaveTextContent("RecipientHirsel");
     expect(context).toHaveTextContent("WorkerNone");
     expect(screen.queryByRole("dialog", { name: "Spaces and Tasks" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Spaces and Tasks" }));
@@ -590,9 +527,9 @@ describe("nested Thread workspace", () => {
     expect(view.getByRole("textbox", { name: "Message Space chat Review" })).toBeInTheDocument();
     expect(view.queryByRole("textbox", { name: "Step in with worker Review" })).toBeNull();
     const context = view.container.querySelector('[data-slot="composer-context"]')!;
-    expect(context).toHaveTextContent("SpaceReview");
+    expect(context).toHaveTextContent("RecipientReview");
     expect(context).toHaveTextContent("WorkerNone");
-    expect(projectState).toMatchObject({ projectRecipientId: 9, workerPairingId: null });
+    expect(spaceState).toMatchObject({ spaceRecipientId: 9, workerPairingId: null });
   });
   it("pins a top-level Thread first once within its lifecycle filter", async () => {
     const view = render(() => <ThreadShell />);

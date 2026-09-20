@@ -98,11 +98,10 @@ impl Storage {
             let tx = conn.transaction()?;
             tx.execute_batch(
                 "
-                DELETE FROM meta WHERE key LIKE 'thread:%' OR key LIKE 'project_chat:%';
+                DELETE FROM meta WHERE key LIKE 'thread:%';
                 DELETE FROM turn_output_artifacts;
                 DELETE FROM artifact_operations;
                 DELETE FROM message_artifacts;
-                DELETE FROM message_task_focus;
                 DELETE FROM activity_artifacts;
                 DELETE FROM artifacts;
                 DELETE FROM thread_related_receipts;

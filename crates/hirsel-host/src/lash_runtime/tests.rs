@@ -435,7 +435,6 @@ async fn owner_turn_input_notes_all_attachments_and_references_images() {
         report_triggered: false,
         client_id: "client-1".to_string(),
         body: "see attached".to_string(),
-        focus: None,
         anchor: None,
         attachments: vec![text.blob.clone(), image.blob.clone()],
 
@@ -559,7 +558,6 @@ async fn resident_agent_retries_bare_prose_and_projects_finished_chat_text() {
         report_triggered: false,
         client_id: "resident-finish".into(),
         body: "Say hello".into(),
-        focus: None,
         anchor: None,
         attachments: Vec::new(),
         mode: SendMode::Send,

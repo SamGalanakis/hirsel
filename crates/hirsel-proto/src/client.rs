@@ -64,10 +64,6 @@ pub enum ClientToHost {
         client_id: String,
         title: String,
     },
-    EnsureHomeProject {
-        client_id: String,
-        history_id: String,
-    },
     OpenThread {
         client_id: String,
         thread_id: u64,
@@ -108,8 +104,6 @@ pub enum ClientToHost {
         history_id: String,
         thread_id: u64,
         body: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        focus: Option<crate::TaskFocus>,
         #[serde(default)]
         attachments: Vec<String>,
         #[serde(default)]

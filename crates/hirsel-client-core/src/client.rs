@@ -19,7 +19,6 @@ pub struct SendThreadMessageRequest {
     pub thread_id: u64,
     pub attachments: Vec<String>,
     pub body: String,
-    pub focus: Option<hirsel_proto::TaskFocus>,
     pub mentions: Vec<u64>,
     pub artifact_ids: Vec<u64>,
 }
@@ -31,7 +30,6 @@ impl SendThreadMessageRequest {
             thread_id,
             attachments: Vec::new(),
             body,
-            focus: None,
             mentions: Vec::new(),
             artifact_ids: Vec::new(),
         }
@@ -291,29 +289,6 @@ impl Client {
                 kind,
                 parent_thread_id,
             },
-        );
-        drop(store);
-        if let Some(sender) = self
-            .inner
-            .command_tx
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            let _ = sender.send(Command::SendPending);
-        }
-        Some(SendReceipt { client_id })
-    }
-
-    pub fn ensure_home_project(&self, history_id: String) -> Option<SendReceipt> {
-        let client_id = Uuid::new_v4().to_string();
-        let mut store = self.inner.write_store();
-        if store.history_id.as_deref() != Some(&history_id) {
-            return None;
-        }
-        store.track_pending(
-            client_id.clone(),
-            PendingOp::EnsureHomeProject { history_id },
         );
         drop(store);
         if let Some(sender) = self
@@ -593,7 +568,6 @@ pub(crate) fn pending_to_wire(send: &PendingSend) -> ClientToHost {
         history_id: send.history_id.clone(),
         thread_id: send.thread_id,
         body: send.body.clone(),
-        focus: send.focus.clone(),
         attachments: send.attachments.clone(),
         mode: hirsel_proto::SendMode::Send,
         mentions: send.mentions.clone(),

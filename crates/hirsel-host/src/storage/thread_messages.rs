@@ -28,7 +28,6 @@ impl Storage {
             mentions,
             artifact_ids,
             None,
-            None,
         )
         .await
     }
@@ -44,33 +43,6 @@ impl Storage {
         artifact_ids: &[u64],
         request: &serde_json::Value,
     ) -> anyhow::Result<(ChatMessage, bool)> {
-        self.append_thread_owner_request_with_focus(
-            expected_history,
-            thread_id,
-            client_id,
-            body,
-            attachments,
-            mentions,
-            artifact_ids,
-            None,
-            request,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn append_thread_owner_request_with_focus(
-        &self,
-        expected_history: &str,
-        thread_id: u64,
-        client_id: &str,
-        body: String,
-        attachments: &[String],
-        mentions: &[u64],
-        artifact_ids: &[u64],
-        focus: Option<&hirsel_proto::TaskFocus>,
-        request: &serde_json::Value,
-    ) -> anyhow::Result<(ChatMessage, bool)> {
         self.append_thread_owner_record(
             expected_history,
             thread_id,
@@ -80,7 +52,6 @@ impl Storage {
             attachments,
             mentions,
             artifact_ids,
-            focus,
             Some(request),
         )
         .await
@@ -96,7 +67,6 @@ impl Storage {
         attachments: &[String],
         mentions: &[u64],
         artifact_ids: &[u64],
-        focus: Option<&hirsel_proto::TaskFocus>,
         request: Option<&serde_json::Value>,
     ) -> anyhow::Result<(ChatMessage, bool)> {
         let artifact_ids = artifact_ids
@@ -140,7 +110,6 @@ impl Storage {
                 message.thread_id == thread_id,
                 "client_id belongs to another thread"
             );
-            anyhow::ensure!(message.focus.as_ref() == focus, "client_id focus changed");
             if let Some(action) = action {
                 let receipt = tx
                     .query_row(
@@ -171,48 +140,6 @@ impl Storage {
         for mention in mentions {
             threads::get(&tx, *mention)
                 .map_err(|error| anyhow::anyhow!("unknown mentioned Thread #{mention}: {error}"))?;
-        }
-        if let Some(focus) = focus {
-            anyhow::ensure!(
-                threads::get(&tx, thread_id)?.kind == ThreadKind::Space,
-                "Task focus is only accepted by a Space chat"
-            );
-            anyhow::ensure!(
-                focus.snapshot.is_object(),
-                "Task focus snapshot must be an object"
-            );
-            anyhow::ensure!(
-                serde_json::to_vec(&focus.snapshot)?.len() <= 16 * 1024,
-                "Task focus snapshot exceeds 16 KiB"
-            );
-            let snapshot = focus.snapshot.as_object().expect("object checked above");
-            anyhow::ensure!(
-                snapshot.len() == 3
-                    && snapshot.contains_key("title")
-                    && snapshot.contains_key("brief")
-                    && snapshot.contains_key("instrument_summary"),
-                "Task focus snapshot must contain only title, brief and instrument_summary"
-            );
-            anyhow::ensure!(
-                snapshot["title"].as_str().is_some_and(|title| {
-                    title.chars().count() <= super::threads::MAX_THREAD_TITLE_CHARS
-                }),
-                "Task focus title is invalid"
-            );
-            anyhow::ensure!(
-                snapshot["brief"].as_str().is_some(),
-                "Task focus brief must be text"
-            );
-            anyhow::ensure!(
-                snapshot["instrument_summary"].is_null()
-                    || snapshot["instrument_summary"]
-                        .as_str()
-                        .is_some_and(|summary| summary.len() <= 2_003),
-                "Task focus instrument summary must be null or bounded text"
-            );
-            let task = threads::get(&tx, focus.task_thread_id)?;
-            anyhow::ensure!(task.kind == ThreadKind::Task, "Task focus must name a Task");
-            super::thread_scope::authorize(&tx, thread_id, focus.task_thread_id)?;
         }
         let action_settles = if let Some(action) = action {
             let context: crate::lash_runtime::ThreadActionContext =
@@ -279,12 +206,6 @@ impl Storage {
             "INSERT INTO client_messages(client_id,msg_id) VALUES(?1,?2)",
             params![client_id, id],
         )?;
-        if let Some(focus) = focus {
-            tx.execute(
-                "INSERT INTO message_task_focus(message_id,task_thread_id,snapshot_json) VALUES(?1,?2,?3)",
-                params![id, focus.task_thread_id, serde_json::to_string(&focus.snapshot)?],
-            )?;
-        }
         for (position, blob) in attachments.iter().enumerate() {
             tx.execute(
                 "INSERT INTO message_attachments(message_id,blob_id,position) VALUES(?1,?2,?3)",

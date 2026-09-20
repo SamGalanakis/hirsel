@@ -26,8 +26,6 @@ pub struct ChatMessage {
     pub artifact_ids: Vec<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub focus: Option<TaskFocus>,
     pub thread_id: u64,
     #[serde(default)]
     pub mentions: Vec<u64>,
@@ -41,15 +39,6 @@ pub struct ChatMessage {
     pub attachments: Vec<Blob>,
     #[serde(default)]
     pub tool_calls: Vec<ToolCallSummary>,
-}
-
-/// A bounded, accepted snapshot of the Task the Owner is discussing in a
-/// project chat. It carries context only; it never widens the recipient's
-/// reach.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskFocus {
-    pub task_thread_id: u64,
-    pub snapshot: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

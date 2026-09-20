@@ -83,8 +83,7 @@ interface Props {
    * offers these and the send resolves refs against them. */
   threads?: RefTarget[];
   context?: {
-    projectRecipient: string;
-    taskFocus: string | null;
+    spaceRecipient: string;
     workerPairing: string | null;
   };
 }
@@ -279,8 +278,7 @@ export function Composer(props: Props) {
       <div class="w-full">
 
       <div class="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/50 px-2 py-1" data-slot="composer-context">
-        <span class="inline-flex min-w-0 items-baseline gap-1"><SectionLabel as="span">Space</SectionLabel><span class="max-w-40 truncate text-xs text-foreground">{props.context?.projectRecipient ?? "Hirsel"}</span></span>
-        <span class="inline-flex min-w-0 items-baseline gap-1"><SectionLabel as="span">Focus</SectionLabel><span class="max-w-40 truncate text-xs text-foreground">{props.context?.taskFocus ?? "None"}</span></span>
+        <span class="inline-flex min-w-0 items-baseline gap-1"><SectionLabel as="span">Recipient</SectionLabel><span class="max-w-40 truncate text-xs text-foreground">{props.context?.spaceRecipient ?? "Hirsel"}</span></span>
         <span class="inline-flex min-w-0 items-baseline gap-1"><SectionLabel as="span">Worker</SectionLabel><span class="max-w-40 truncate text-xs text-foreground">{props.context?.workerPairing ?? "None"}</span></span>
       </div>
 

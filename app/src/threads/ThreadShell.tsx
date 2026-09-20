@@ -43,9 +43,9 @@ import { getClient } from "../ws/client";
 import { ThreadNavigation, type ThreadNavigationMode } from "./ThreadNavigation";
 import { threadNavigationOpen as navigationOpen, threadNavigationIntent, openThreadNavigation, closeThreadNavigation, popThreadVisit, previousThread, recordThreadVisit } from "./navigation";
 import { artifactState } from "../artifacts/store";
-import { consumeTaskFocus, projectState, spaceForThread, stageTaskFocus } from "../projects/store";
+import { spaceForThread, spaceState } from "../spaces/store";
 import type { Thread } from "./types";
-import { captureThreadNavigation, ensureHomeProject, focusThread, followThreadLocation, openThread, retryThreadMessage, sendThreadMessage, threadAction, threadNavigationIsCurrent, threadState } from "./store";
+import { focusThread, followThreadLocation, openThread, retryThreadMessage, sendThreadMessage, threadAction, threadState } from "./store";
 
 const button = "inline-flex min-h-11 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
 const iconButton = "inline-flex size-11 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-pressed:bg-muted aria-pressed:text-foreground";
@@ -53,7 +53,7 @@ const iconButton = "inline-flex size-11 shrink-0 items-center justify-center rou
  * it. One control, two shapes — the phone never loses the label. */
 const barButton = "inline-flex min-h-12 flex-1 flex-col items-center justify-center gap-0.5 rounded-lg px-1 py-1 text-meta font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-pressed:text-foreground split:size-11 split:min-h-11 split:flex-none split:gap-0 split:p-0 split:text-sm split:aria-pressed:bg-muted split:aria-pressed:text-foreground";
 const desktopNavigationPreferenceKey = "hirsel.thread-navigation.desktop";
-function returnToProjectChat(): void {
+function returnToSpaceChat(): void {
   focusThread(null);
   followThreadLocation();
 }
@@ -102,7 +102,7 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
   const goBack = () => {
     if (backsToConversation()) { setPane("conversation"); return; }
     const previous = popThreadVisit();
-    if (previous === null) returnToProjectChat();
+    if (previous === null) returnToSpaceChat();
     else focusThread(previous);
   };
   const attachments = props.attachments;
@@ -173,14 +173,15 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
           <ThreadActions thread={current()!} />
         </Show>
         <Show when={current()?.kind === "task"}>
-          <button class={button} onClick={() => { void (async () => {
-            const navigation = captureThreadNavigation();
-            const projectId = project()?.id ?? (await ensureHomeProject(props.historyId)).id;
-            if (navigation.historyId !== props.historyId || !threadNavigationIsCurrent(navigation)) return;
-            const brief = history()?.brief.text ?? current()?.description ?? "";
-            focusThread(projectId);
-            stageTaskFocus(threadState.threads, props.id, brief, projectId);
-          })(); }}><MessageCircle class="size-4" />Talk about this</button>
+          <button class={button} onClick={() => {
+            const spaceId = project()?.id;
+            if (spaceId === undefined) return;
+            const key = `hirsel.draft.${props.historyId}:thread-${spaceId}`;
+            const reference = `#${props.id}`;
+            const existing = localStorage.getItem(key)?.trim() ?? "";
+            localStorage.setItem(key, existing ? `${existing} ${reference}` : `${reference} `);
+            focusThread(spaceId);
+          }}><MessageCircle class="size-4" />Talk about this</button>
         </Show>
       </header>
     <div ref={node => { scroller = node; }} class="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-gutter" data-slot="thread-scroll" onScroll={() => { if (scroller) following = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80; }}>
@@ -208,18 +209,15 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
     <Show when={writable()}>
     <Composer artifactContext={draftArtifact(props.id)} onRemoveArtifactContext={() => stageDraftArtifact(props.id, null)} onConsumeArtifactContext={id => consumeDraftArtifact(props.id, id)} ariaLabel={spaceChat() ? `Message Space chat ${current()?.title ?? "this Space"}` : `Step in with worker ${current()?.title ?? "this Task"}`} draftKey={`${historyId()}:thread-${props.id}`} attachments={attachments} thinking={thinking()} focused threads={threadState.threads}
       context={{
-        projectRecipient: projectState.projectRecipientId !== null
-          ? threadState.threads.find(thread => thread.id === projectState.projectRecipientId)?.title ?? `Space #${projectState.projectRecipientId}`
+        spaceRecipient: spaceState.spaceRecipientId !== null
+          ? threadState.threads.find(thread => thread.id === spaceState.spaceRecipientId)?.title ?? `Space #${spaceState.spaceRecipientId}`
           : "No Space",
-        taskFocus: spaceChat() && projectState.taskFocus ? threadState.threads.find(thread => thread.id === projectState.taskFocus?.task_thread_id)?.title ?? `Task #${projectState.taskFocus.task_thread_id}` : null,
-        workerPairing: projectState.workerPairingId !== null
-          ? threadState.threads.find(thread => thread.id === projectState.workerPairingId)?.title ?? `Thread #${projectState.workerPairingId}`
+        workerPairing: spaceState.workerPairingId !== null
+          ? threadState.threads.find(thread => thread.id === spaceState.workerPairingId)?.title ?? `Thread #${spaceState.workerPairingId}`
           : null,
       }}
       onSend={(body, mode, blobs, mentions, artifactIds) => {
-        const focus = spaceChat() ? projectState.taskFocus : null;
-        sendThreadMessage(props.historyId, props.id, body, mode, blobs, mentions, artifactIds, focus);
-        if (focus) consumeTaskFocus();
+        sendThreadMessage(props.historyId, props.id, body, mode, blobs, mentions, artifactIds);
       }}
       onStop={() => getClient()?.cancelTurn(props.historyId, props.id)} getLastOwnerBody={() => messages().findLast(m => m.author === "owner")?.body ?? null} />
     </Show>
@@ -411,7 +409,7 @@ export function ThreadShell() {
         `split` and above, a labelled bottom bar below it. There is no top-left
         rail on a phone — the bar is the reach. */}
     <nav aria-label="Hirsel" data-slot="icon-rail" class="relative z-10 order-last flex w-full shrink-0 items-stretch justify-around gap-0.5 border-t border-border px-1 pb-[env(safe-area-inset-bottom)] pt-1 split:order-none split:w-14 split:flex-col split:items-center split:justify-start split:gap-2 split:border-t-0 split:px-0 split:py-2">
-      <button class={`${iconButton} hidden split:inline-flex`} aria-label="Space chat" title="Open Space chat" aria-pressed={threadState.focusedId === projectState.projectRecipientId && !globalArtifacts() ? "true" : "false"} onClick={() => { setGlobalArtifacts(false); returnToProjectChat(); }}><BrandMark size={23} /></button>
+      <button class={`${iconButton} hidden split:inline-flex`} aria-label="Space chat" title="Open Space chat" aria-pressed={threadState.focusedId === spaceState.spaceRecipientId && !globalArtifacts() ? "true" : "false"} onClick={() => { setGlobalArtifacts(false); returnToSpaceChat(); }}><BrandMark size={23} /></button>
       <button class={`${barButton} relative`} aria-label="Spaces and Tasks" aria-describedby={attentionCount() > 0 ? "thread-attention-summary" : undefined} title={attentionCount() > 0 ? `Spaces & Tasks · ${attentionCount()} need you` : "Spaces & Tasks"} data-slot="thread-navigation-trigger" aria-controls="thread-navigation" aria-expanded={navigationMode() === "docked" || navigationMode() === "modal" ? "true" : "false"} aria-pressed={threadState.focusedId !== null && !globalArtifacts() ? "true" : "false"} onClick={() => navigationMode() === "docked" || navigationMode() === "modal" ? closeNavigation() : openNavigation()}><GitBranch class="size-5" /><span class="split:hidden">Threads</span><Show when={attentionCount() > 0}><span aria-hidden="true" class="absolute right-2 top-1 size-1.5 rounded-full bg-status-attention" /><span id="thread-attention-summary" class="sr-only">{attentionCount()} {attentionCount() === 1 ? "item needs" : "items need"} your attention</span></Show></button>
       <Show when={threadState.focusedId !== null && !globalArtifacts()}><svg class="pointer-events-none absolute top-[58px] left-12 hidden h-8 w-4 text-border split:block" viewBox="0 0 16 32" fill="none" aria-hidden="true" data-slot="thread-connector"><path d="M0 24h4c8 0 12-4 12-12V0" stroke="currentColor" /></svg></Show>
       <button class={barButton} aria-label="New Space or Task" title="New Space or Task" onClick={() => openThreadCreate(null)}><Plus class="size-5" /><span class="split:hidden">New</span></button>

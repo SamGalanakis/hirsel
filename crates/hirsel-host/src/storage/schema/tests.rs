@@ -29,7 +29,6 @@ async fn fresh_store_is_current_and_reopen_keeps_identity() {
         "process_deliveries",
         "thread_process_sessions",
         "thread_process_authorities",
-        "message_task_focus",
     ] {
         assert!(names.iter().any(|name| name == required));
     }
@@ -38,35 +37,6 @@ async fn fresh_store_is_current_and_reopen_keeps_identity() {
         [], |row| Ok((row.get(0)?, row.get(1)?)),
     ).unwrap();
     assert_eq!(icon_foreign_key, ("blobs".into(), "id".into()));
-    let focus_columns = conn
-        .prepare("SELECT name,type,\"notnull\" FROM pragma_table_xinfo('message_task_focus') ORDER BY cid")
-        .unwrap()
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?)))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert_eq!(
-        focus_columns,
-        vec![
-            ("message_id".into(), "INTEGER".into(), false),
-            ("task_thread_id".into(), "INTEGER".into(), true),
-            ("snapshot_json".into(), "TEXT".into(), true),
-        ]
-    );
-    let focus_foreign_keys = conn
-        .prepare(r#"SELECT "from","table","to" FROM pragma_foreign_key_list('message_task_focus') ORDER BY "from""#)
-        .unwrap()
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert_eq!(
-        focus_foreign_keys,
-        vec![
-            ("message_id".into(), "chat_messages".into(), "id".into()),
-            ("task_thread_id".into(), "threads".into(), "id".into()),
-        ]
-    );
     let push_columns = conn
         .prepare("SELECT name FROM pragma_table_xinfo('push_tokens') ORDER BY cid")
         .unwrap()

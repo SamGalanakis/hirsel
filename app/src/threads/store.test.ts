@@ -23,9 +23,8 @@ describe("thread transport projection", () => {
     flush(() => handleThreadMessage({ type: "thread_action_applied", client_id: archive.client_id, history_id: archive.history_id, thread_id: archive.thread_id }));
     await Promise.resolve();
 
-    expect(threadState.focusedId).toBeNull();
-    expect(location.pathname).toBe("/");
-    expect(localStorage.getItem("hirsel.last-project.test-history")).toBeNull();
+    expect(threadState.focusedId).toBe(1);
+    expect(location.pathname).toBe("/t/1");
     expect(threadState.histories[1]).toEqual(retained);
     expect(localStorage.getItem("hirsel.draft.test-history:thread-1")).toBe("Keep this draft");
   });
@@ -132,24 +131,18 @@ describe("thread transport projection", () => {
   });
   it("fails a missing acknowledgement and retries the same identity without duplicating content", () => {
     vi.useFakeTimers();
-    const focus = {
-      task_thread_id: 2,
-      snapshot: { title: "Focused Task", brief: "Keep this", instrument_summary: null },
-    };
-    flush(() => sendThreadMessage("test-history", 1, "Buy groceries", "send", [], [2], [], focus));
+    flush(() => sendThreadMessage("test-history", 1, "Buy groceries", "send", [], [2], []));
     const clientId = threadState.pending[0].clientId;
-    expect(threadState.pending[0].focus).toEqual(focus);
-    expect(sent[0]).toMatchObject({ type: "send_thread_message", focus });
+    expect(sent[0]).toMatchObject({ type: "send_thread_message" });
     flush(() => vi.advanceTimersByTime(20_000));
     expect(threadState.pending[0].failed).toBe(true);
     flush(() => retryThreadMessage(clientId));
     expect(threadState.pending[0].failed).toBe(false);
     expect(sent[1]).toEqual(sent[0]);
-    flush(() => handleThreadMessage({ type: "msg", message: { id: 7, thread_id: 1, client_id: clientId, author: "owner", body: "Buy groceries", focus, ref: null, ts: "2026-09-09T10:00:00Z" } }));
+    flush(() => handleThreadMessage({ type: "msg", message: { id: 7, thread_id: 1, client_id: clientId, author: "owner", body: "Buy groceries", ref: null, ts: "2026-09-09T10:00:00Z" } }));
     flush(() => vi.advanceTimersByTime(20_000));
     expect(threadState.pending).toEqual([]);
     expect(threadState.histories[1].messages).toHaveLength(1);
-    expect(threadState.histories[1].messages[0].focus).toEqual(focus);
   });
   it("preserves back-to-back protocol records before the reactive microtask commits", () => {
     handleThreadMessage({ type: "thread_upsert", thread: makeThread(1) });
@@ -267,7 +260,7 @@ describe("thread transport projection", () => {
     disconnectThreads();
     attachThreadTransport(frame => sent.push(frame));
     flush(() => setThreadState(draft => { draft["focusedId"] = 1; }));
-    localStorage.setItem("hirsel.last-project.test-history", "1");
+    localStorage.setItem("hirsel.last-space.test-history", "1");
     flush(() => handleThreadMessage({ type: "hello_ok", threads: [makeThread(1), makeThread(2)], history_id: "test-history", processes: [], views: [], host_version: "test", model: null, subagent_models: null, prompts: null, providers: null }));
     const reconnectOpen = sent.at(-1);
     if (reconnectOpen?.type !== "open_thread") throw new Error("expected reconnect open command");

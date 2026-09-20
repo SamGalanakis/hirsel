@@ -738,7 +738,6 @@ impl LashAgentRuntime {
             report_triggered: false,
             client_id: client_id.clone(),
             body: text,
-            focus: None,
             anchor: None,
             attachments: Vec::new(),
 

@@ -316,7 +316,6 @@ async fn request(state: &crate::AppState) -> OwnerTurn {
         report_triggered: false,
         client_id: "delivery-input".into(),
         body: "Test delivery".into(),
-        focus: None,
         anchor: None,
         attachments: vec![],
         mode: hirsel_proto::SendMode::Send,

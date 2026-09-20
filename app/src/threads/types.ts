@@ -1,4 +1,4 @@
-import type { ChatMessage, TaskFocus, ThreadTurnTimeline, ViewSpec } from "../protocol";
+import type { ChatMessage, ThreadTurnTimeline, ViewSpec } from "../protocol";
 import type { ThreadSymbol, ThreadTint } from "./thread-symbols";
 export type ThreadKind = "space" | "task";
 export type ThreadIcon =
@@ -102,7 +102,6 @@ export type ThreadClientMessage =
   | { type: "grant_thread_reach"; client_id: string; history_id: string; thread_id: number; target: ReachTarget; note: string | null }
   | { type: "revoke_thread_reach"; client_id: string; history_id: string; thread_id: number; target: ReachTarget }
   | { type: "create_thread"; client_id: string; history_id: string; title: string; kind: ThreadKind; parent_thread_id: number | null }
-  | { type: "ensure_home_project"; client_id: string; history_id: string }
   | { type: "open_thread"; client_id: string; thread_id: number; before_id: number | null }
-  | { type: "send_thread_message"; client_id: string; history_id: string; thread_id: number; body: string; focus?: TaskFocus; attachments: string[]; mentions: number[]; artifact_ids: number[]; mode: "send" | "next_turn" }
+  | { type: "send_thread_message"; client_id: string; history_id: string; thread_id: number; body: string; attachments: string[]; mentions: number[]; artifact_ids: number[]; mode: "send" | "next_turn" }
   | { type: "thread_action"; client_id: string; history_id: string; thread_id: number; action: string; data: unknown; expected_revision?: number };

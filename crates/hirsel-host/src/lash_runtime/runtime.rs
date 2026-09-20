@@ -21,8 +21,6 @@ pub struct OwnerTurn {
     pub report_triggered: bool,
     pub client_id: String,
     pub body: String,
-    #[serde(default)]
-    pub focus: Option<hirsel_proto::TaskFocus>,
     pub anchor: Option<u64>,
     pub attachments: Vec<Blob>,
     pub mode: SendMode,

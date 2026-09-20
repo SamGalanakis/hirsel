@@ -24,7 +24,6 @@ async fn delegated_cli_turn(
         .delegate_thread(
             caller,
             operation_id,
-            "threads_delegate",
             &assignment,
             &serde_json::to_value(&assignment).unwrap(),
         )
@@ -100,7 +99,6 @@ async fn inherited_native_delegation_expands_selected_skills_before_acceptance()
         .delegate_thread(
             &caller,
             "native-skill-initial",
-            "threads_delegate",
             &initial,
             &serde_json::to_value(&initial).unwrap(),
         )
@@ -185,7 +183,6 @@ async fn native_preference_is_captured_for_follow_up_turns() {
         .delegate_thread(
             &caller,
             "native-initial",
-            "threads_delegate",
             &assignment,
             &serde_json::to_value(&assignment).unwrap(),
         )
@@ -202,7 +199,6 @@ async fn native_preference_is_captured_for_follow_up_turns() {
         .delegate_thread(
             &caller,
             "native-follow-up",
-            "threads_delegate",
             &follow_up,
             &serde_json::to_value(&follow_up).unwrap(),
         )
@@ -243,7 +239,6 @@ async fn restart_interrupts_a_running_native_turn_without_replaying_it() {
         .delegate_thread(
             &caller,
             "native-interrupted",
-            "threads_delegate",
             &assignment,
             &serde_json::to_value(&assignment).unwrap(),
         )
@@ -790,7 +785,6 @@ async fn ordinary_thread_tool_creation_is_visible_and_mutable_without_action_wak
         )
         .await
         .unwrap();
-    executor.operation_id = "read-after-update-2".into();
     let result = executor
         .execute("threads_read", &json!({"thread":id}))
         .await

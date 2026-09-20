@@ -133,13 +133,6 @@ pub enum ClientToHost {
         history_id: String,
         thread_id: u64,
     },
-    CancelThreadTurn {
-        client_id: String,
-        history_id: String,
-        thread_id: u64,
-        turn_id: u64,
-        expected_state: crate::ThreadTurnState,
-    },
     CancelQueued {
         client_id: String,
     },

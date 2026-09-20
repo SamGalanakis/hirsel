@@ -30,57 +30,9 @@ async fn fresh_store_is_current_and_reopen_keeps_identity() {
         "thread_process_sessions",
         "thread_process_authorities",
         "message_task_focus",
-        "thread_effect_receipts",
     ] {
         assert!(names.iter().any(|name| name == required));
     }
-    let effect_columns = conn
-        .prepare("SELECT name,type,\"notnull\" FROM pragma_table_xinfo('thread_effect_receipts') ORDER BY cid")
-        .unwrap()
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?)))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert_eq!(
-        effect_columns,
-        vec![
-            ("id".into(), "INTEGER".into(), false),
-            ("turn_id".into(), "INTEGER".into(), true),
-            ("operation_id".into(), "TEXT".into(), true),
-            ("effect_index".into(), "INTEGER".into(), true),
-            ("tool".into(), "TEXT".into(), true),
-            ("effect".into(), "TEXT".into(), true),
-            ("target_json".into(), "TEXT".into(), true),
-            ("target_turn_id".into(), "INTEGER".into(), false),
-            ("request_client_id".into(), "TEXT".into(), false),
-            ("refusal_json".into(), "TEXT".into(), false),
-            ("created_at".into(), "TEXT".into(), true),
-        ]
-    );
-    let effect_foreign_keys = conn
-        .prepare(r#"SELECT "from","table","to" FROM pragma_foreign_key_list('thread_effect_receipts') ORDER BY "from""#)
-        .unwrap()
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert_eq!(
-        effect_foreign_keys,
-        vec![
-            ("target_turn_id".into(), "thread_turns".into(), "id".into()),
-            ("turn_id".into(), "thread_turns".into(), "id".into()),
-        ]
-    );
-    let effect_sql: String = conn
-        .query_row(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='thread_effect_receipts'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(effect_sql.contains("UNIQUE(turn_id,operation_id,effect_index)"));
-    assert!(effect_sql.contains("'created','sent_to','delegated','read','edited','refused'"));
-    assert!(effect_sql.contains("CHECK((effect='refused')=(refusal_json IS NOT NULL))"));
     let icon_foreign_key: (String, String) = conn.query_row(
         r#"SELECT "table", "to" FROM pragma_foreign_key_list('threads') WHERE "from"='icon_blob_id'"#,
         [], |row| Ok((row.get(0)?, row.get(1)?)),
@@ -258,12 +210,12 @@ async fn previous_schema_version_is_refused_without_in_place_evolution() {
             .await
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        15
+        14
     );
     drop(storage);
     let path = dir.path().join("hirsel.sqlite");
     let conn = Connection::open(&path).unwrap();
-    conn.pragma_update(None, "user_version", 14).unwrap();
+    conn.pragma_update(None, "user_version", 13).unwrap();
     drop(conn);
     let before = std::fs::read(&path).unwrap();
     assert!(Storage::open(dir.path()).await.is_err());
@@ -291,9 +243,9 @@ async fn unknown_current_layouts_and_bad_identity_are_untouched() {
 
 #[tokio::test]
 async fn branch_specific_schema_seven_layouts_are_refused_without_modification() {
-    // 10 is a stale version number; 15 is the current one carrying a layout
+    // 10 is a stale version number; 14 is the current one carrying a layout
     // that is not the current one.
-    for version in [10, 15] {
+    for version in [10, 14] {
         for layout in [
             include_str!("icons-only-v7.sql"),
             include_str!("processes-only-v7.sql"),

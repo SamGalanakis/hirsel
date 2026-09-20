@@ -57,7 +57,6 @@ impl Storage {
         &self,
         caller: &ThreadCaller,
         operation_id: &str,
-        tool: &str,
         assignment: &Delegation,
         invocation: &serde_json::Value,
     ) -> anyhow::Result<DelegatedTurn> {
@@ -84,7 +83,6 @@ impl Storage {
             anyhow::ensure!(old==payload,"delegation operation payload changed");
             return Ok(DelegatedTurn{thread_id,turn_id});
         }
-        let created = assignment.child_thread_id.is_none();
         let child = if let Some(id) = assignment.child_thread_id {
             // Any Thread in reach can be addressed — a direct child today, an
             // explicitly granted peer once the Owner or an ancestor widens it.
@@ -115,40 +113,6 @@ impl Storage {
         tx.execute("INSERT INTO thread_activities(thread_id,turn_id,kind,data,ts) VALUES(?1,?2,'delegation_received',?3,?4)",params![child,turn_id,serde_json::to_string(&data)?,chrono::Utc::now().to_rfc3339()])?;
         link_artifacts(&tx, tx.last_insert_rowid() as u64, &assignment.artifact_ids)?;
         tx.execute("INSERT INTO thread_delegations(requester_turn_id,operation_id,payload,child_thread_id,child_turn_id) VALUES(?1,?2,?3,?4,?5)",params![caller.turn_id,operation_id,payload,child,turn_id])?;
-        if created {
-            super::thread_effects::record(
-                &tx,
-                caller,
-                super::thread_effects::NewEffect {
-                    operation_id,
-                    effect_index: 0,
-                    tool,
-                    effect: hirsel_proto::ThreadEffectKind::Created,
-                    target: hirsel_proto::ThreadEffectTarget::Thread { thread_id: child },
-                    target_turn_id: None,
-                    request_client_id: Some(&request_id),
-                    refusal: None,
-                },
-            )?;
-        }
-        super::thread_effects::record(
-            &tx,
-            caller,
-            super::thread_effects::NewEffect {
-                operation_id,
-                effect_index: u32::from(created),
-                tool,
-                effect: if tool == "threads_send" {
-                    hirsel_proto::ThreadEffectKind::SentTo
-                } else {
-                    hirsel_proto::ThreadEffectKind::Delegated
-                },
-                target: hirsel_proto::ThreadEffectTarget::Thread { thread_id: child },
-                target_turn_id: Some(turn_id),
-                request_client_id: Some(&request_id),
-                refusal: None,
-            },
-        )?;
         tx.commit()?;
         Ok(DelegatedTurn {
             thread_id: child,

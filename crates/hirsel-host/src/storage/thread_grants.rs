@@ -334,63 +334,20 @@ impl Storage {
     pub(crate) async fn record_refusal(
         &self,
         caller: &ThreadCaller,
-        operation_id: &str,
-        tool: &str,
         detail: &serde_json::Value,
     ) -> anyhow::Result<hirsel_proto::ThreadActivity> {
-        let mut c = self.conn.lock().await;
-        let tx = c.transaction()?;
-        thread_scope::validate_caller(&tx, caller)?;
-        let target: hirsel_proto::ThreadEffectTarget =
-            serde_json::from_value(detail["target"].clone())?;
-        let refusal = hirsel_proto::ThreadEffectRefusal {
-            reason: detail["reason"]
-                .as_str()
-                .unwrap_or("outside_grant")
-                .to_string(),
-            grant_summary: detail["grant_summary"]
-                .as_str()
-                .unwrap_or("self + subtree")
-                .to_string(),
-            detail: detail["detail"].as_str().unwrap_or("refused").to_string(),
-        };
-        let receipt_id = super::thread_effects::record(
-            &tx,
-            caller,
-            super::thread_effects::NewEffect {
-                operation_id,
-                effect_index: 0,
-                tool,
-                effect: hirsel_proto::ThreadEffectKind::Refused,
-                target,
-                target_turn_id: None,
-                request_client_id: None,
-                refusal: Some(&refusal),
-            },
-        )?;
-        if let Some(activity_id) = tx.query_row(
-            "SELECT id FROM thread_activities WHERE thread_id=?1 AND turn_id=?2 AND kind='refusal' AND json_extract(data,'$.effect_receipt_id')=?3",
-            params![caller.thread_id,caller.turn_id,receipt_id],
-            |r| r.get::<_,u64>(0),
-        ).optional()? {
-            let activity = super::thread_activity::activity(&tx, activity_id)?;
-            tx.commit()?;
-            return Ok(activity);
-        }
-        let mut activity_detail = detail.clone();
-        activity_detail["effect_receipt_id"] = serde_json::json!(receipt_id);
-        tx.execute(
+        let c = self.conn.lock().await;
+        thread_scope::validate_caller(&c, caller)?;
+        c.execute(
             "INSERT INTO thread_activities(thread_id,turn_id,kind,data,ts) VALUES(?1,?2,'refusal',?3,?4)",
             params![
                 caller.thread_id,
                 caller.turn_id,
-                serde_json::to_string(&activity_detail)?,
+                serde_json::to_string(detail)?,
                 chrono::Utc::now().to_rfc3339()
             ],
         )?;
-        let activity = super::thread_activity::activity(&tx, tx.last_insert_rowid() as u64)?;
-        tx.commit()?;
-        Ok(activity)
+        super::thread_activity::activity(&c, c.last_insert_rowid() as u64)
     }
 
     /// What an agent sees of its own reach, without a mutation.

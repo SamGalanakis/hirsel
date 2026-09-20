@@ -20,11 +20,9 @@ pub use store::{
 pub use timeline::{TimelineTextKind, timeline_text};
 
 pub use hirsel_proto::{
-    AgentActivityState, Blob, ChatAuthor, ChatMessage, EffectAction, HelloAuth, ProcessInfo,
-    ProcessState, Thread, ThreadActivity, ThreadAttention, ThreadEffect, ThreadEffectKind,
-    ThreadEffectReceipt, ThreadEffectRefusal, ThreadEffectTarget, ThreadIcon, ThreadKind,
-    ThreadRelatedItem, ThreadRelatedTarget, ThreadTint, ThreadTurn, ThreadTurnState,
-    ToolCallSummary,
+    AgentActivityState, Blob, ChatAuthor, ChatMessage, HelloAuth, ProcessInfo, ProcessState,
+    Thread, ThreadActivity, ThreadAttention, ThreadIcon, ThreadKind, ThreadRelatedItem,
+    ThreadRelatedTarget, ThreadTint, ThreadTurn, ThreadTurnState, ToolCallSummary,
 };
 
 #[cfg(test)]

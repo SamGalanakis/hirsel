@@ -3,7 +3,6 @@ import { attachGrantTransport, disconnectGrants, handleGrantMessage, resetGrants
 import { acceptHistory } from "../lib/history";
 import { attachArtifactTransport, disconnectArtifacts, handleArtifactMessage, resetArtifacts } from "../artifacts/store";
 import { attachThreadTransport, disconnectThreads, handleThreadMessage, resetThreads } from "../threads/store";
-import { attachEffectTransport, disconnectEffects, handleEffectMessage, resetEffects } from "../effects/store";
 // Single WebSocket client module: connect, hello/hello_ok, reconnect with
 // exponential backoff, offline outgoing queue flushed on reconnect using
 // stable client_ids so the host can dedupe resends. Also owns the v1.1 blob
@@ -109,7 +108,6 @@ class HirselWsClient {
   close(): void {
     this.closedByClient = true;
     disconnectThreads();
-    disconnectEffects();
     disconnectRelated();
     disconnectGrants();
     disconnectArtifacts();
@@ -408,10 +406,9 @@ class HirselWsClient {
 
   private handleServerMessage(message: ServerMessage): void {
     if (message.type === "hello_ok") {
-      if (acceptHistory(message.history_id)) { this.clearRequests("History was reset. Start this request again."); resetThreads(); resetArtifacts(); resetRelated(); resetGrants(); resetEffects(); }
+      if (acceptHistory(message.history_id)) { this.clearRequests("History was reset. Start this request again."); resetThreads(); resetArtifacts(); resetRelated(); resetGrants(); }
       this.authenticated = true;
       attachThreadTransport(frame => { trackRelatedRead(frame, message.history_id); this.sendFrame(frame); });
-      attachEffectTransport(frame => this.sendFrame(frame));
       attachRelatedTransport(frame => this.sendFrame(frame));
       attachGrantTransport(frame => this.sendFrame(frame));
       attachArtifactTransport(frame => this.sendFrame(frame));
@@ -419,7 +416,6 @@ class HirselWsClient {
     handleArtifactMessage(message);
     handleRelatedMessage(message);
     handleGrantMessage(message);
-    handleEffectMessage(message);
     handleThreadMessage(message);
     switch (message.type) {
       case "hello_ok": {

@@ -5,7 +5,6 @@ import { createStore, reconcile } from "solid-js";
 import type { Blob, ChatMessage, SendMode, ServerMessage, TaskFocus } from "../protocol";
 import type { TimelineEvent } from "../store/types";
 import { enterProject, projectForThread, resetProjects, stepIntoWorker } from "../projects/store";
-import { mergeDetailEffects } from "../effects/store";
 import { emptyHistory, mergeById, mergeDetail, mergeTurns, upsertThread, type ThreadHistory } from "./model";
 import type { Thread, ThreadClientMessage, ThreadKind } from "./types";
 
@@ -359,7 +358,6 @@ export function handleThreadMessage(message: ServerMessage): void {
       const id = message.detail.thread.id;
       setThreadState(draft => { reconcile(upsertThread(threadState.threads, message.detail.thread), "id")(draft["threads"]); });
       const detail = { ...message.detail, messages: message.detail.messages.filter(row => !threadState.removedMessageIds[row.id]) };
-      mergeDetailEffects(id, detail.turn_timelines.map(timeline => timeline.turn_id), detail.effects);
       setThreadState(draft => { draft["histories"][id] = mergeDetail(threadState.histories[id] ?? emptyHistory(), detail, pending.beforeId !== null); });
       for (const timeline of detail.turn_timelines) {
         const turn = detail.turns.find(turn => turn.id === timeline.turn_id);

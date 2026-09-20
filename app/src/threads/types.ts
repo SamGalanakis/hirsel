@@ -54,20 +54,6 @@ export interface ThreadActivity {
   data: unknown;
   ts: string;
 }
-export type ThreadEffectKind = "created" | "sent_to" | "delegated" | "read" | "edited" | "refused";
-export type ThreadEffectTarget = { kind: "thread"; thread_id: number } | { kind: "artifact"; artifact_id: number } | { kind: "root" };
-export interface ThreadEffectRefusal { reason: string; grant_summary: string; detail: string }
-export interface ThreadEffectReceipt {
-  id: number; turn_id: number; operation_id: string; effect_index: number; tool: string;
-  effect: ThreadEffectKind; target: ThreadEffectTarget; target_turn_id: number | null;
-  request_client_id: string | null; refusal: ThreadEffectRefusal | null; created_at: string;
-}
-export type EffectAction =
-  | { kind: "open"; target: ThreadEffectTarget }
-  | { kind: "archive"; thread_id: number }
-  | { kind: "cancel_queued"; thread_id: number; turn_id: number }
-  | { kind: "stop"; thread_id: number; turn_id: number };
-export interface ThreadEffect { receipt: ThreadEffectReceipt; actions: EffectAction[] }
 export type RelatedTarget = { kind: "url"; url: string } | { kind: "thread"; history_id: string; thread_id: number };
 export interface ThreadRelatedItem {
   id: number;
@@ -97,7 +83,6 @@ export interface ThreadDetail {
   thread: Thread;
   messages: ChatMessage[];
   turns: ThreadTurn[];
-  effects: ThreadEffect[];
   turn_timelines: ThreadTurnTimeline[];
   activities: ThreadActivity[];
   has_more: boolean;
@@ -105,11 +90,9 @@ export interface ThreadDetail {
 export type ThreadServerMessage =
   | { type: "thread_related_changed"; client_id: string | null; history_id: string; thread_id: number; revision: number; items: ThreadRelatedItem[] }
   | { type: "thread_grants_changed"; client_id: string | null; history_id: string; thread_id: number; revision: number; grants: ThreadGrant[] }
-  | { type: "thread_effects_changed"; history_id: string; thread_id: number; turn_id: number; effects: ThreadEffect[] }
   | { type: "thread_upsert"; thread: Thread }
   | { type: "thread_created"; client_id: string; thread: Thread }
   | { type: "thread_action_applied"; client_id: string; history_id: string; thread_id: number }
-  | { type: "thread_turn_cancellation_applied"; client_id: string; history_id: string; thread_id: number; turn_id: number }
   | { type: "thread_opened"; client_id: string; detail: ThreadDetail }
   | { type: "thread_activity"; activity: ThreadActivity }
   | { type: "thread_turn"; turn: ThreadTurn };
@@ -122,5 +105,4 @@ export type ThreadClientMessage =
   | { type: "ensure_home_project"; client_id: string; history_id: string }
   | { type: "open_thread"; client_id: string; thread_id: number; before_id: number | null }
   | { type: "send_thread_message"; client_id: string; history_id: string; thread_id: number; body: string; focus?: TaskFocus; attachments: string[]; mentions: number[]; artifact_ids: number[]; mode: "send" | "next_turn" }
-  | { type: "thread_action"; client_id: string; history_id: string; thread_id: number; action: string; data: unknown; expected_revision?: number }
-  | { type: "cancel_thread_turn"; client_id: string; history_id: string; thread_id: number; turn_id: number; expected_state: ThreadTurn["state"] };
+  | { type: "thread_action"; client_id: string; history_id: string; thread_id: number; action: string; data: unknown; expected_revision?: number };

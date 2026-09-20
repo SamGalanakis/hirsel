@@ -199,18 +199,6 @@ impl AgentRuntime {
         self.registry.cancel(expected_history, thread_id).await
     }
 
-    pub async fn cancel_exact_thread_turn(
-        &self,
-        expected_history: &str,
-        thread_id: u64,
-        turn_id: u64,
-        expected_state: hirsel_proto::ThreadTurnState,
-    ) -> anyhow::Result<()> {
-        self.registry
-            .cancel_exact(expected_history, thread_id, turn_id, expected_state)
-            .await
-    }
-
     pub async fn cancel_turn(&self) -> anyhow::Result<()> {
         anyhow::bail!("cancellation requires an explicit Thread")
     }

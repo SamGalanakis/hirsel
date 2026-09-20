@@ -267,7 +267,6 @@ async fn delegation_is_atomic_idempotent_and_reports_once_after_hidden_parent_re
         .delegate_thread(
             &actor,
             "op1",
-            "threads_delegate",
             &assignment,
             &serde_json::to_value(&assignment).unwrap(),
         )
@@ -277,7 +276,6 @@ async fn delegation_is_atomic_idempotent_and_reports_once_after_hidden_parent_re
         .delegate_thread(
             &actor,
             "op1",
-            "threads_delegate",
             &assignment,
             &serde_json::to_value(&assignment).unwrap(),
         )
@@ -292,7 +290,6 @@ async fn delegation_is_atomic_idempotent_and_reports_once_after_hidden_parent_re
         s.delegate_thread(
             &actor,
             "op1",
-            "threads_delegate",
             &changed,
             &serde_json::to_value(&changed).unwrap()
         )
@@ -305,15 +302,9 @@ async fn delegation_is_atomic_idempotent_and_reports_once_after_hidden_parent_re
         ..assignment.clone()
     };
     assert!(
-        s.delegate_thread(
-            &actor,
-            "op2",
-            "threads_delegate",
-            &bad,
-            &serde_json::to_value(&bad).unwrap()
-        )
-        .await
-        .is_err()
+        s.delegate_thread(&actor, "op2", &bad, &serde_json::to_value(&bad).unwrap())
+            .await
+            .is_err()
     );
     let detail = s
         .thread_detail(accepted.thread_id, None, 100)
@@ -437,7 +428,6 @@ async fn scoped_artifact_receipts_hide_peer_backlinks_and_cancelled_writes_have_
         .delegate_thread(
             &actor,
             "delegate",
-            "threads_delegate",
             &assignment,
             &serde_json::to_value(&assignment).unwrap(),
         )
@@ -583,7 +573,7 @@ async fn bounded_agent_history_cursor_reaches_all_collections_once() {
     let (mut messages, mut turns, mut activities) = (vec![], vec![], vec![]);
     loop {
         let page = s
-            .scoped_thread_read(&actor, Some("paged-read"), &ThreadRef::default(), cursor, 2)
+            .scoped_thread_read(&actor, &ThreadRef::default(), cursor, 2)
             .await
             .unwrap();
         assert!(page.messages.len() <= 2 && page.turns.len() <= 2 && page.activities.len() <= 2);
@@ -697,7 +687,7 @@ async fn history_reset_reused_ids_reject_old_callers_receipts_and_revocation() {
     assert!(worker.await.unwrap().is_err());
     assert!(s.thread_context(&old).await.is_err());
     assert!(
-        s.scoped_thread_read(&old, Some("old-read"), &ThreadRef::default(), None, 10)
+        s.scoped_thread_read(&old, &ThreadRef::default(), None, 10)
             .await
             .is_err()
     );

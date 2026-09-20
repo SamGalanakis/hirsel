@@ -410,7 +410,6 @@ impl Storage {
             .map(|turn| turn.id)
             .collect::<Vec<_>>();
         let turn_timelines = super::thread_events::for_turns(&tx, &timeline_turn_ids)?;
-        let effects = super::thread_effects::for_turns(&tx, &timeline_turn_ids)?;
         let activities = super::thread_activity::activities(&tx, id)?;
         let brief = super::thread_read::brief(&tx, id)?;
         let related_items = super::thread_related::list(&tx, id)?;
@@ -423,7 +422,6 @@ impl Storage {
             thread,
             messages,
             turns,
-            effects,
             turn_timelines,
             activities,
             has_more,

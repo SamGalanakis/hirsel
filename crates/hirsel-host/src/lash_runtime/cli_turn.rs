@@ -199,7 +199,6 @@ impl CliTurn {
             .storage()
             .scoped_thread_read(
                 &bridge.caller,
-                None,
                 &crate::storage::ThreadRef::default(),
                 None,
                 60,

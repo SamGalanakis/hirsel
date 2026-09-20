@@ -139,23 +139,6 @@ impl Storage {
             }
             ThreadMutation::Cancel { thread } => {
                 let id = thread_scope::resolve(&tx, caller.thread_id, thread)?;
-                // A self-cancel revokes the caller as soon as cancellation is
-                // requested, so its durable effect must join the transaction
-                // before that revocation while the accepted turn is valid.
-                super::thread_effects::record(
-                    &tx,
-                    caller,
-                    super::thread_effects::NewEffect {
-                        operation_id,
-                        effect_index: 0,
-                        tool: "threads_cancel",
-                        effect: hirsel_proto::ThreadEffectKind::Edited,
-                        target: hirsel_proto::ThreadEffectTarget::Thread { thread_id: id },
-                        target_turn_id: None,
-                        request_client_id: None,
-                        refusal: None,
-                    },
-                )?;
                 let turn = super::thread_archive::request_cancel(&tx, id, true, None)?
                     .first()
                     .copied();
@@ -301,76 +284,6 @@ impl Storage {
         if let Some(id) = result.get("thread_id").and_then(Value::as_u64) {
             result["history_id"] = json!(caller.history_id);
             result["reference_url"] = json!(thread_scope::reference_url(&caller.history_id, id));
-            let (tool, effect, request_client_id) = match mutation {
-                ThreadMutation::AddRelated { .. } => (
-                    "threads_add_related",
-                    hirsel_proto::ThreadEffectKind::Edited,
-                    None,
-                ),
-                ThreadMutation::RemoveRelated { .. } => (
-                    "threads_remove_related",
-                    hirsel_proto::ThreadEffectKind::Edited,
-                    None,
-                ),
-                ThreadMutation::Cancel { .. } => (
-                    "threads_cancel",
-                    hirsel_proto::ThreadEffectKind::Edited,
-                    None,
-                ),
-                ThreadMutation::Archive { archived: true, .. } => (
-                    "threads_archive",
-                    hirsel_proto::ThreadEffectKind::Edited,
-                    None,
-                ),
-                ThreadMutation::Archive {
-                    archived: false, ..
-                } => (
-                    "threads_unarchive",
-                    hirsel_proto::ThreadEffectKind::Edited,
-                    None,
-                ),
-                ThreadMutation::Create { client_id, .. } => (
-                    "threads_create",
-                    hirsel_proto::ThreadEffectKind::Created,
-                    Some(client_id.as_str()),
-                ),
-                ThreadMutation::Update { .. } => (
-                    "threads_update",
-                    hirsel_proto::ThreadEffectKind::Edited,
-                    None,
-                ),
-                ThreadMutation::Activity { .. } => (
-                    "threads_activity",
-                    hirsel_proto::ThreadEffectKind::Edited,
-                    None,
-                ),
-                ThreadMutation::Grant { .. } => (
-                    "threads_grant",
-                    hirsel_proto::ThreadEffectKind::Edited,
-                    None,
-                ),
-                ThreadMutation::Revoke { .. } => (
-                    "threads_revoke",
-                    hirsel_proto::ThreadEffectKind::Edited,
-                    None,
-                ),
-            };
-            if !matches!(mutation, ThreadMutation::Cancel { .. }) {
-                super::thread_effects::record(
-                    &tx,
-                    caller,
-                    super::thread_effects::NewEffect {
-                        operation_id,
-                        effect_index: 0,
-                        tool,
-                        effect,
-                        target: hirsel_proto::ThreadEffectTarget::Thread { thread_id: id },
-                        target_turn_id: None,
-                        request_client_id,
-                        refusal: None,
-                    },
-                )?;
-            }
         }
         tx.execute("INSERT INTO thread_mutation_receipts(turn_id,operation_id,payload,result) VALUES(?1,?2,?3,?4)",params![caller.turn_id,operation_id,payload,serde_json::to_string(&result)?])?;
         tx.commit()?;

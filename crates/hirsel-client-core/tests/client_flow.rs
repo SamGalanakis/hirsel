@@ -143,27 +143,6 @@ async fn wait_for_snapshot(
     .expect("client state did not converge")
 }
 
-fn effect(id: u64, turn_id: u64) -> hirsel_proto::ThreadEffect {
-    hirsel_proto::ThreadEffect {
-        receipt: hirsel_proto::ThreadEffectReceipt {
-            id,
-            turn_id,
-            operation_id: "effect-op".into(),
-            effect_index: 0,
-            tool: "artifacts.show".into(),
-            effect: hirsel_proto::ThreadEffectKind::Read,
-            target: hirsel_proto::ThreadEffectTarget::Artifact { artifact_id: 9 },
-            target_turn_id: None,
-            request_client_id: None,
-            refusal: None,
-            created_at: Utc.timestamp_opt(3, 0).unwrap(),
-        },
-        actions: vec![hirsel_proto::EffectAction::Open {
-            target: hirsel_proto::ThreadEffectTarget::Artifact { artifact_id: 9 },
-        }],
-    }
-}
-
 fn test_config(address: std::net::SocketAddr) -> ClientConfig {
     ClientConfig {
         host: address.to_string(),
@@ -251,141 +230,6 @@ async fn connect_loads_state_and_observer_sees_online() {
     );
 
     let _ = release_tx.send(());
-    client.disconnect().await;
-    server.await.unwrap();
-}
-
-#[tokio::test]
-async fn live_effects_and_exact_turn_cancellation_cross_native_transport() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let (release_tx, release_rx) = oneshot::channel();
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = accept_async(stream).await.unwrap();
-        receive_client(&mut socket).await;
-        send_hello(&mut socket, vec![], vec![thread(5, false, false)], vec![]).await;
-
-        let ClientToHost::OpenThread {
-            client_id,
-            thread_id: 5,
-            before_id: None,
-        } = receive_client(&mut socket).await
-        else {
-            panic!("open")
-        };
-        let turn = hirsel_proto::ThreadTurn {
-            id: 10,
-            thread_id: 5,
-            requester_thread_id: None,
-            requester_turn_id: None,
-            owner_message_id: None,
-            agent_message_id: None,
-            state: hirsel_proto::ThreadTurnState::Running,
-            accepted_at: Utc.timestamp_opt(1, 0).unwrap(),
-            started_at: Some(Utc.timestamp_opt(2, 0).unwrap()),
-            finished_at: None,
-        };
-        send_server(
-            &mut socket,
-            &HostToClient::ThreadOpened {
-                client_id,
-                detail: hirsel_proto::ThreadDetail {
-                    thread: thread(5, false, false),
-                    brief: hirsel_proto::ThreadBrief {
-                        text: String::new(),
-                        artifact_ids: vec![],
-                    },
-                    related_items: vec![],
-                    grants: vec![],
-                    messages: vec![],
-                    turns: vec![turn],
-                    effects: vec![],
-                    turn_timelines: vec![],
-                    activities: vec![],
-                    has_more: false,
-                },
-            },
-        )
-        .await;
-        send_server(
-            &mut socket,
-            &HostToClient::ThreadEffectsChanged {
-                history_id: "test-store-a".into(),
-                thread_id: 5,
-                turn_id: 10,
-                effects: vec![effect(7, 10)],
-            },
-        )
-        .await;
-
-        let cancel = receive_client(&mut socket).await;
-        let ClientToHost::CancelThreadTurn {
-            client_id,
-            history_id,
-            thread_id,
-            turn_id,
-            expected_state,
-        } = cancel
-        else {
-            panic!("exact cancellation")
-        };
-        assert_eq!(history_id, "test-store-a");
-        assert_eq!((thread_id, turn_id), (5, 10));
-        assert_eq!(expected_state, hirsel_proto::ThreadTurnState::Running);
-        send_server(
-            &mut socket,
-            &HostToClient::ThreadTurnCancellationApplied {
-                client_id,
-                history_id,
-                thread_id,
-                turn_id,
-            },
-        )
-        .await;
-        let _ = release_rx.await;
-    });
-
-    let client = Client::new(test_config(address)).unwrap();
-    let observer = Arc::new(RecordingObserver::default());
-    client.set_observer(Some(observer.clone()));
-    client.connect().await.unwrap();
-    wait_for_snapshot(&client, |snapshot| {
-        snapshot.history_id.as_deref() == Some("test-store-a")
-    })
-    .await;
-    client.open_thread(5, None);
-    let snapshot = wait_for_snapshot(&client, |snapshot| {
-        snapshot.effects.iter().any(|row| row.receipt.id == 7)
-    })
-    .await;
-    assert_eq!(snapshot.effects[0].receipt.turn_id, 10);
-
-    let receipt = client
-        .cancel_thread_turn(
-            "test-store-a".into(),
-            5,
-            10,
-            hirsel_proto::ThreadTurnState::Running,
-        )
-        .unwrap();
-    timeout(Duration::from_secs(3), async {
-        loop {
-            if observer.lifecycle.lock().unwrap().iter().any(|event| {
-                matches!(event,
-                    LifecycleEvent::ThreadTurnCancellationApplied {
-                        client_id, history_id, thread_id: 5, turn_id: 10,
-                    } if client_id == &receipt.client_id && history_id == "test-store-a"
-                )
-            }) {
-                break;
-            }
-            sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
-    release_tx.send(()).unwrap();
     client.disconnect().await;
     server.await.unwrap();
 }
@@ -777,7 +621,6 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
                         ..chat(1, ChatAuthor::Agent, "Milk")
                     }],
                     turns: vec![],
-                    effects: vec![],
                     turn_timelines: vec![],
                     activities: vec![],
                     has_more: false,
@@ -1096,7 +939,6 @@ async fn lost_open_ack_retries_same_identity_after_reconnect() {
                     thread: thread(5, false, false),
                     messages: vec![],
                     turns: vec![],
-                    effects: vec![],
                     turn_timelines: vec![],
                     activities: vec![],
                     has_more: false,
@@ -1156,7 +998,6 @@ async fn lost_paginated_open_error_retries_same_identity_without_background_dupl
                     thread: thread(5, false, false),
                     messages: vec![],
                     turns: vec![],
-                    effects: vec![],
                     turn_timelines: vec![],
                     activities: vec![],
                     has_more: true,
@@ -1349,7 +1190,6 @@ async fn live_assignment_refreshes_current_brief_without_user_reopen() {
                         },
                         messages: vec![],
                         turns: vec![],
-                        effects: vec![],
                         turn_timelines: vec![],
                         activities: vec![],
                         has_more: false,
@@ -1421,7 +1261,6 @@ async fn saved_link_commands_snapshots_and_correlated_results_cross_native_trans
                     grants: vec![],
                     messages: vec![],
                     turns: vec![],
-                    effects: vec![],
                     turn_timelines: vec![],
                     activities: vec![],
                     has_more: true,

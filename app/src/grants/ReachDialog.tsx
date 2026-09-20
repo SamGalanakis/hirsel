@@ -65,7 +65,7 @@ export function ReachDialog() {
   createEffect(() => ({ target: threadReachTarget(), history: historyId() }), ({ target, history }) => {
     if (target && target.history !== history) { close(); return; }
     if (target) {
-      setQuery(target.suggestedThreadId === undefined ? "" : `#${target.suggestedThreadId}`); setError(null); setBusy(false);
+      setQuery(""); setError(null); setBusy(false);
       restore = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       if (!dialog?.open) dialog?.showModal();
       const frame = requestAnimationFrame(() => search?.focus());

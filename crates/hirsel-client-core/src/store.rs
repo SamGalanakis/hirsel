@@ -138,7 +138,6 @@ pub struct ClientSnapshot {
     pub threads: Vec<Thread>,
     pub turns: Vec<ThreadTurn>,
     pub activities: Vec<ThreadActivity>,
-    pub effects: Vec<hirsel_proto::ThreadEffect>,
     pub briefs: Vec<ThreadBrief>,
     pub related_items: Vec<ThreadRelatedItem>,
     pub grants: Vec<hirsel_proto::ThreadGrant>,
@@ -163,7 +162,6 @@ pub(crate) struct LocalStore {
     pub threads: Vec<Thread>,
     pub turns: Vec<ThreadTurn>,
     pub activities: Vec<ThreadActivity>,
-    pub effects: Vec<hirsel_proto::ThreadEffect>,
     pub briefs: Vec<ThreadBrief>,
     pub related_items: Vec<ThreadRelatedItem>,
     pub grants: Vec<hirsel_proto::ThreadGrant>,
@@ -189,7 +187,6 @@ impl Default for LocalStore {
             threads: Vec::new(),
             turns: Vec::new(),
             activities: Vec::new(),
-            effects: Vec::new(),
             briefs: Vec::new(),
             related_items: Vec::new(),
             grants: Vec::new(),
@@ -214,7 +211,6 @@ impl LocalStore {
             threads: self.threads.clone(),
             turns: self.turns.clone(),
             activities: self.activities.clone(),
-            effects: self.effects.clone(),
             briefs: self.briefs.clone(),
             related_items: self.related_items.clone(),
             grants: self.grants.clone(),
@@ -374,11 +370,6 @@ impl LocalStore {
         }
         self.pending_ops.remove(client_id);
         let thread_id = detail.thread.id;
-        let effect_turn_ids = detail
-            .turn_timelines
-            .iter()
-            .map(|timeline| timeline.turn_id)
-            .collect::<Vec<_>>();
         self.replace_related_items(thread_id, detail.thread.revision, detail.related_items);
         self.replace_grants(thread_id, detail.thread.revision, detail.grants);
         self.briefs.retain(|b| b.thread_id != thread_id);
@@ -416,7 +407,6 @@ impl LocalStore {
         {
             self.upsert_activity(activity);
         }
-        self.merge_detail_effects(&effect_turn_ids, detail.effects);
         self.messages
             .sort_by_key(|entry| entry.id().unwrap_or(u64::MAX));
         true
@@ -530,40 +520,6 @@ impl LocalStore {
         }
     }
 
-    pub fn replace_turn_effects(&mut self, turn_id: u64, effects: Vec<hirsel_proto::ThreadEffect>) {
-        if effects
-            .iter()
-            .any(|effect| effect.receipt.turn_id != turn_id)
-        {
-            return;
-        }
-        self.effects
-            .retain(|effect| effect.receipt.turn_id != turn_id);
-        self.effects.extend(effects);
-        self.effects.sort_by_key(|effect| effect.receipt.id);
-    }
-
-    fn merge_detail_effects(&mut self, turn_ids: &[u64], effects: Vec<hirsel_proto::ThreadEffect>) {
-        let turns = turn_ids.iter().copied().collect::<HashSet<_>>();
-        if effects
-            .iter()
-            .any(|effect| !turns.contains(&effect.receipt.turn_id))
-        {
-            return;
-        }
-        let existing = self
-            .effects
-            .iter()
-            .map(|effect| effect.receipt.id)
-            .collect::<HashSet<_>>();
-        self.effects.extend(
-            effects
-                .into_iter()
-                .filter(|effect| !existing.contains(&effect.receipt.id)),
-        );
-        self.effects.sort_by_key(|effect| effect.receipt.id);
-    }
-
     pub fn stream(&mut self, thread_id: u64, turn_id: u64) -> Option<&mut ThreadStream> {
         if self
             .turns
@@ -627,11 +583,6 @@ pub(crate) enum PendingOp {
     ThreadAction {
         history_id: String,
         thread_id: u64,
-    },
-    CancelThreadTurn {
-        history_id: String,
-        thread_id: u64,
-        turn_id: u64,
     },
     AddThreadRelated {
         history_id: String,

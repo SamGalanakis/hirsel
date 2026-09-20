@@ -10,7 +10,6 @@ pub use artifact::{Artifact, ArtifactKind, ArtifactSummary};
 
 mod chat;
 mod client;
-mod effect;
 mod host;
 mod models;
 mod process;
@@ -25,10 +24,6 @@ pub use chat::{
     TriggerLabel,
 };
 pub use client::{AgentSlot, ClientToHost, HelloAuth, PushPlatform, SendMode};
-pub use effect::{
-    EffectAction, ThreadEffect, ThreadEffectKind, ThreadEffectReceipt, ThreadEffectRefusal,
-    ThreadEffectTarget,
-};
 pub use host::HostToClient;
 pub use models::{
     AgentModelConfig, AvailableModel, ForkAgentConfig, ModelSelection, ModelSnapshot, PromptDoc,

@@ -20,7 +20,6 @@ mod thread_related;
 pub(crate) use thread_related::ThreadRelated;
 mod thread_activity;
 mod thread_archive;
-mod thread_effects;
 mod thread_events;
 mod thread_execution;
 mod thread_icons;
@@ -114,7 +113,6 @@ impl Storage {
                 DELETE FROM thread_execution_preferences;
                 DELETE FROM thread_turn_execution;
                 DELETE FROM thread_mutation_receipts;
-                DELETE FROM thread_effect_receipts;
                 DELETE FROM thread_process_authorities;
                 DELETE FROM thread_process_sessions;
                 DELETE FROM thread_execution_bindings;
@@ -131,7 +129,7 @@ impl Storage {
                 DELETE FROM threads;
                 DELETE FROM blobs;
                 DELETE FROM sqlite_sequence
-                WHERE name IN ('chat_messages', 'threads', 'thread_turns', 'thread_activities', 'thread_related_items', 'thread_effect_receipts');
+                WHERE name IN ('chat_messages', 'threads', 'thread_turns', 'thread_activities', 'thread_related_items');
                 ",
             )?;
             tx.execute(
@@ -159,9 +157,6 @@ mod threads_tests;
 
 #[cfg(test)]
 mod thread_scope_tests;
-
-#[cfg(test)]
-mod thread_effect_tests;
 
 #[cfg(test)]
 impl Storage {

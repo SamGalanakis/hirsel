@@ -249,67 +249,6 @@ impl ScriptedAgentRuntime {
         self.emit_scripted_timeline(ingest).await?;
         let turn_text = owner_turn_text(turn, &self.tools.storage());
         let lower = turn_text.to_lowercase();
-        if self.config.driver_mode == DriverMode::Fake
-            && turn.body.trim().starts_with("__hirsel_effect_pills_")
-        {
-            let turn_id = turn
-                .turn_id
-                .ok_or_else(|| anyhow::anyhow!("accepted turn missing"))?;
-            let launch = uuid::Uuid::new_v4().to_string();
-            let caller = self
-                .tools
-                .storage()
-                .bind_thread_execution(&turn.history_id, &launch, &launch, turn_id)
-                .await?;
-            let facade = ScopedThreadTools {
-                tools: self.tools.clone(),
-                caller,
-                operation_id: format!("scripted:{turn_id}:effect-pills"),
-            };
-            let tool = match turn.body.trim() {
-                "__hirsel_effect_pills_paused__" => {
-                    facade.execute("threads_delegate", &json!({"title":"Paused effect target","brief":"slow:30","artifact_ids":[],"agent":"native","provider_id":"codex","model":"gpt-5.6-sol"})).await.map_err(anyhow::Error::msg)?;
-                    "threads_delegate"
-                }
-                "__hirsel_effect_pills_failed__" => {
-                    facade.execute("threads_delegate", &json!({"title":"Failed effect target","brief":"slow:0.2","artifact_ids":[],"agent":"native","provider_id":"codex","model":"gpt-5.6-sol"})).await.map_err(anyhow::Error::msg)?;
-                    TurnIngest::record_tool_completion(
-                        &self.tools,
-                        &turn.history_id,
-                        (turn.thread_id, turn_id),
-                        &hirsel_proto::ToolCallSummary {
-                            id: facade.operation_id.clone(),
-                            name: "threads_delegate".into(),
-                            ok: true,
-                        },
-                    )
-                    .await?;
-                    anyhow::bail!("scripted effect-pills failure after durable delegation")
-                }
-                value if value.starts_with("__hirsel_effect_pills_refused__:") => {
-                    let target = value
-                        .trim_start_matches("__hirsel_effect_pills_refused__:")
-                        .parse::<u64>()?;
-                    facade
-                        .execute("threads_read", &json!({"thread":target,"limit":1}))
-                        .await
-                        .map_err(anyhow::Error::msg)?;
-                    "threads_read"
-                }
-                _ => anyhow::bail!("unknown scripted effect-pills fixture"),
-            };
-            TurnIngest::record_tool_completion(
-                &self.tools,
-                &turn.history_id,
-                (turn.thread_id, turn_id),
-                &hirsel_proto::ToolCallSummary {
-                    id: facade.operation_id.clone(),
-                    name: tool.into(),
-                    ok: true,
-                },
-            )
-            .await?;
-        }
         if self.config.driver_mode == DriverMode::Fake && lower.contains("delegate") {
             let turn_id = turn
                 .turn_id

@@ -4,10 +4,10 @@ import type { Thread } from "../threads/types";
 
 /** Reach changes rarely, so it lives one level in: the Thread's actions menu
  * opens this modal, which owns the whole reach list while it is open. */
-export const [threadReachTarget, setThreadReachTarget] = createSignal<{ thread: Thread; history: string; suggestedThreadId?: number } | null>(null);
-export function openThreadReach(thread: Thread, suggestedThreadId?: number): void {
+export const [threadReachTarget, setThreadReachTarget] = createSignal<{ thread: Thread; history: string } | null>(null);
+export function openThreadReach(thread: Thread): void {
   const history = historyId();
-  if (history) setThreadReachTarget({ thread: { ...thread }, history, suggestedThreadId });
+  if (history) setThreadReachTarget({ thread: { ...thread }, history });
 }
 export function closeThreadReach(): void { setThreadReachTarget(null); }
 /** The dialog's own name, so the Owner always knows whose reach they are editing. */

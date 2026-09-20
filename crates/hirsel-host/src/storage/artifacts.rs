@@ -249,31 +249,6 @@ impl Storage {
                 "INSERT OR IGNORE INTO turn_output_artifacts(turn_id,artifact_id) VALUES(?1,?2)",
                 params![caller.turn_id, artifact_id],
             )?;
-            let (expected_tool, effect) = match (id, draft.is_some()) {
-                (None, true) => ("artifacts_create", hirsel_proto::ThreadEffectKind::Created),
-                (Some(_), true) => ("artifacts_edit", hirsel_proto::ThreadEffectKind::Edited),
-                (Some(_), false) => ("artifacts_show", hirsel_proto::ThreadEffectKind::Read),
-                (None, false) => unreachable!("validated above"),
-            };
-            let tool = operation_input["tool"].as_str().unwrap_or(expected_tool);
-            anyhow::ensure!(
-                tool == expected_tool,
-                "artifact effect tool did not match its operation"
-            );
-            super::thread_effects::record(
-                &tx,
-                caller,
-                super::thread_effects::NewEffect {
-                    operation_id,
-                    effect_index: 0,
-                    tool,
-                    effect,
-                    target: hirsel_proto::ThreadEffectTarget::Artifact { artifact_id },
-                    target_turn_id: None,
-                    request_client_id: None,
-                    refusal: None,
-                },
-            )?;
         }
         let result = (
             get(&tx, artifact_id)?,
@@ -291,46 +266,20 @@ impl Storage {
     pub(crate) async fn scoped_artifacts(
         &self,
         caller: &super::ThreadCaller,
-        operation_id: Option<&str>,
         under: u64,
     ) -> anyhow::Result<Vec<ArtifactSummary>> {
-        let mut c = self.conn.lock().await;
-        let tx = c.transaction()?;
-        super::thread_scope::validate_caller(&tx, caller)?;
-        super::thread_scope::authorize(&tx, caller.thread_id, under)?;
-        let ids=tx.prepare("WITH RECURSIVE scope(id) AS (SELECT id FROM threads WHERE id=?1 UNION ALL SELECT t.id FROM threads t JOIN scope s ON t.parent_thread_id=s.id) SELECT r.artifact_id FROM message_artifacts r JOIN chat_messages m ON m.id=r.message_id JOIN scope s ON s.id=m.thread_id UNION SELECT r.artifact_id FROM activity_artifacts r JOIN thread_activities a ON a.id=r.activity_id JOIN scope s ON s.id=a.thread_id UNION SELECT t.showcased_artifact_id FROM threads t JOIN scope s ON s.id=t.id WHERE t.showcased_artifact_id IS NOT NULL ORDER BY 1")?.query_map([under],|r|r.get::<_,u64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        let artifacts = ids
-            .into_iter()
+        let c = self.conn.lock().await;
+        super::thread_scope::validate_caller(&c, caller)?;
+        super::thread_scope::authorize(&c, caller.thread_id, under)?;
+        let ids=c.prepare("WITH RECURSIVE scope(id) AS (SELECT id FROM threads WHERE id=?1 UNION ALL SELECT t.id FROM threads t JOIN scope s ON t.parent_thread_id=s.id) SELECT r.artifact_id FROM message_artifacts r JOIN chat_messages m ON m.id=r.message_id JOIN scope s ON s.id=m.thread_id UNION SELECT r.artifact_id FROM activity_artifacts r JOIN thread_activities a ON a.id=r.activity_id JOIN scope s ON s.id=a.thread_id UNION SELECT t.showcased_artifact_id FROM threads t JOIN scope s ON s.id=t.id WHERE t.showcased_artifact_id IS NOT NULL ORDER BY 1")?.query_map([under],|r|r.get::<_,u64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
             .map(|id| {
-                let mut item = summary(&tx, id)?;
-                item.thread_ids.retain(|id| {
-                    super::thread_scope::authorize(&tx, caller.thread_id, *id).is_ok()
-                });
+                let mut item = summary(&c, id)?;
+                item.thread_ids
+                    .retain(|id| super::thread_scope::authorize(&c, caller.thread_id, *id).is_ok());
                 Ok(item)
             })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        if let Some(operation_id) = operation_id {
-            for (effect_index, artifact) in artifacts.iter().enumerate() {
-                super::thread_effects::record(
-                    &tx,
-                    caller,
-                    super::thread_effects::NewEffect {
-                        operation_id,
-                        effect_index: effect_index as u32,
-                        tool: "artifacts_list",
-                        effect: hirsel_proto::ThreadEffectKind::Read,
-                        target: hirsel_proto::ThreadEffectTarget::Artifact {
-                            artifact_id: artifact.id,
-                        },
-                        target_turn_id: None,
-                        request_client_id: None,
-                        refusal: None,
-                    },
-                )?;
-            }
-        }
-        tx.commit()?;
-        Ok(artifacts)
+            .collect()
     }
 }
 

@@ -15,15 +15,13 @@ Hirsel is a personal orchestration system for one Owner. The Owner and Agents wo
 **Thread:** The durable conversational identity shared by a Space or Task, including its Messages, Turns, Activity and generated instrument. The Owner-facing kinds are Space and Task.
 _Avoid_: Thread as a third kind alongside Space and Task
 
-**Project:** A top-level Space. Project is a role in the existing Thread topology, not another stored kind.
+**Space chat:** The conversation of any Space. It talks with the Owner and dispatches work to Tasks; it does not perform the work itself. This is guidance and presentation, not an authority or execution profile.
 
-**Project chat:** The conversation of a top-level Space. It talks with the Owner and dispatches work to Task workers; it does not perform the work.
+**Worker:** The role of a Task's conversation. It performs the accepted work using the Thread's selected backend and universal tool surface.
 
-**Worker:** The execution role of every non-project-chat Thread. It performs the accepted Task using its captured execution and tool profile.
+**Task focus:** A bounded title, brief and current-state snapshot attached to one Space-chat message. It supplies context without changing recipient, ownership or reach.
 
-**Task focus:** A bounded title, brief and current-state snapshot attached to one project-chat message. It supplies context without changing recipient, ownership or reach.
-
-**Worker pairing:** The Task worker the Owner has stepped into and is messaging directly. It is separate from project recipient and Task focus.
+**Worker pairing:** The Task worker the Owner has stepped into and is messaging directly. It is separate from Space recipient and Task focus.
 
 **Conversation:** The exchange of Messages within one Space or Task.
 

@@ -2,7 +2,7 @@
 
 > **Refined 2026-09-10:** [ADR 0018](0018-spaces-and-tasks.md) introduces Space/Task kinds, constrained child kinds and Task-only completion. The universal settlement statements below are superseded; common conversation ownership remains.
 
-> **Amended 2026-09-20:** [ADR 0025](0025-project-chats-material-state-and-coordination-delivery.md) makes each top-level Space conversation its project chat. Project chats dispatch to Task workers; focus remains context in the owning project message. The later material-state delivery and join contract supersedes automatic parent follow-up per report.
+> **Amended 2026-09-20:** [ADR 0025](0025-project-chats-material-state-and-coordination-delivery.md) makes each Space conversation its Space chat. Space chats dispatch to Tasks; focus remains context in the owning Space-chat message. The later material-state delivery and join contract supersedes automatic parent follow-up per report.
 
 Accepted 2026-09-09 following the T3 Code prospect and the Owner's explicit decision to adopt its domain model.
 

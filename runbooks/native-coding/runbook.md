@@ -12,9 +12,9 @@ Follow [`../RULES.md`](../RULES.md). This runbook is a bounded real-provider pro
   instance with the intended default model; Settings › Providers shows the
   `Native` marker on that same instance.
 - Prepare a tiny repository with one focused failing test and no valuable state.
-- Start in a top-level Space project chat. It must remain Native and must not
-  advertise or execute coding, shell, direct sub-agent, or execution-capable
-  plugin tools. The coding destination is the child Task worker created below.
+- Select Native on any Thread. Coding is available in Spaces and Tasks alike;
+  the Space-chat and worker distinction is guidance, not a tool fence. This
+  runbook does not require addressing a worker Task specifically.
 
 Run the dedicated scenario from the repository root after building the reviewed
 tree. Supply the OpenRouter key through the process environment without writing
@@ -31,14 +31,14 @@ model so the inherited Native route is observable.
 
 ## Bounded scenario
 
-Spend at most two Native model turns: one initial delegation and one follow-up. Do not automatically retry a failed or timed-out model call.
+Spend at most two Native model turns: one initial request and one follow-up. Do not automatically retry a failed or timed-out model call.
 
-1. Ask the project chat to delegate one child Task with `agent: "native"`. The brief tells the child to inspect the fixture, run the focused failing test, make the smallest repair, rerun it, and summarize changed files plus checks. Confirm the project-chat catalog itself contains coordination and inspection tools but no coding operation.
-2. While the child is running, verify the parent UI remains responsive without sending another prompt.
-3. Step in to the child Task worker. In its timeline, verify the callable catalog advertises `read`, `edit`, `write` and `exec_command` beside the ordinary Thread tools: one Native worker session carries the whole surface, and a Thread is never handed to a second session to touch a file.
+1. In the selected Thread, ask the Agent to inspect the fixture, run the focused failing test, make the smallest repair, rerun it, and summarize changed files plus checks. Confirm its catalog advertises `read`, `edit`, `write` and `exec_command` beside the ordinary Thread tools.
+2. While the command is running, verify the UI remains responsive without sending another prompt.
+3. Verify one Native session carries the whole surface and the Thread is never handed to a second session to touch a file.
 4. Verify chronological reasoning, tool start, tool result, and assistant output rows. The first test must visibly fail and the later focused test must pass. Reconcile DOM, `open_thread`, captured frames, and SQLite IDs.
-5. Send one follow-up to the same child asking it to identify the earlier changed file and test result without rereading the whole repository. Verify the same Task retains context and produces exactly one new terminal report to the parent.
-6. Confirm neither successful turn marks the Task done.
+5. Send one follow-up to the same Thread asking it to identify the earlier changed file and test result without rereading the whole repository. Verify the same Thread retains context and produces exactly one new terminal reply.
+6. If the selected Thread is a Task, confirm neither successful turn marks it done.
 
 The fixture is intentionally wrong in one numeric operation. The Native session
 must use all four coding tools: read the source and test, observe the focused test

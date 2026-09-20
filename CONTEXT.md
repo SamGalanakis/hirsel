@@ -34,6 +34,10 @@ _Avoid_: Event as a work object
 
 **Attention:** Whether a Thread currently needs the Owner. Attention can change independently of Task completion, read state, and execution.
 
+**Task state:** Durable material progress on a Task: its own short headline, the displayed headline, bounded findings, explicit artifact references, checkpoint time and steering revision. It is revisioned independently from Thread metadata.
+
+**Rollup headline:** A Host-derived child-count summary used when a Thread has children. It follows fixed status precedence and numeric-ID tie-breaking, never copies a child's prose and never completes the parent.
+
 **Thread ref:** A citation written as `#<id>`. Citing a Thread does not move a Message into it.
 
 **Generated instrument:** A constrained semantic interface attached to a Thread. It may change through multiple stages while the Thread's identity and conversation remain stable.
@@ -44,6 +48,6 @@ _Avoid_: Event as a work object
 
 **Host:** The long-running owner of Hirsel's durable state and execution.
 
-**Artifact:** An explicitly agent-published result with global identity and current mutable content. It has no owning Thread and no revision history. Formats are Solid 2 JSX, HTML, or UTF-8 files. Interactive previews are local only, without network or backend access.
+**Artifact:** An explicitly agent-published result with global identity, a positive current revision and mutable content. It has no owning Thread or stored historical versions. Formats are Solid 2 JSX, HTML, OpenUI, images, Markdown, or UTF-8 files. Interactive previews are local only, without network or backend access.
 
 **Artifact reference:** A Message-to-Artifact link. Create, edit and show publish a reference card in the current conversation. Many Threads can reference the same Artifact; earlier cards resolve the current content. References do not transfer Message ownership or alter the composer's addressed Thread.

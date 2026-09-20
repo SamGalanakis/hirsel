@@ -55,6 +55,19 @@ Capture one desktop and one phone screenshot with the Source mode selected in
 each surface, plus machine-readable assertions for content equality, focus,
 non-execution, reset/refresh behavior, downloads, and viewport overflow.
 
+## Known upstream blocker
+
+The reasoning-integrity gate cannot pass on a Native session while the model
+emits more than one reasoning summary in a turn. Lash gives every anonymous
+reasoning delta in a model call the same fallback correlation id and carries no
+block boundary, so the Host cannot tell a new block from the next chunk
+([Ascending-AI/lash#1769](https://github.com/Ascending-AI/lash/issues/1769),
+found at pin `47e6e23764939c790961fbe2905ee08ff5373a95`). Hirsel does not work
+around this, and the gate is not loosened: a Native run that produces two or
+more reasoning summaries fails here until the Lash pin carries the fix. Claude
+CLI and Codex CLI turns take block identity from their own event streams and
+are unaffected.
+
 ## Judged run — 2026-09-20
 
 Source `ed16130`, provider `codex`, model `gpt-5.6-sol` variant `medium`, one

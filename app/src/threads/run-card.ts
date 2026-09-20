@@ -79,10 +79,10 @@ export function runOutcomeLabel(outcome: RunOutcome): string {
 }
 
 /**
- * Every artifact this run produced, once. The Host publishes an artifact twice
- * — once as its own receipt message, once attached to the turn's final reply —
- * and a turn can attach the same artifact more than once, so the card joins on
- * the artifact ID and keeps the first position it appeared in. An activity the
+ * Every artifact this run produced, once. ADR 0017 publication creates one
+ * receipt message carrying the artifact reference; the turn's final reply does
+ * not copy it. The defensive join still handles repeated references in legacy
+ * frames or activities by keeping the first position. An activity the
  * conversation renders in its own right (a child report, a brief) keeps its
  * cards there; the card never shows the same artifact from both places.
  */

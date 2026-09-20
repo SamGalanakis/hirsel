@@ -50,16 +50,6 @@ pub(super) fn thread_state_schema() -> Value {
         }
     })
 }
-pub(super) fn thread_changes_schema() -> Value {
-    json!({
-        "type":"object",
-        "additionalProperties":false,
-        "properties":{
-            "after_change_id":{"type":"integer","minimum":0,"default":0},
-            "limit":{"type":"integer","minimum":1,"maximum":32,"default":32}
-        }
-    })
-}
 pub(super) fn thread_list_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{"under":thread_place_schema(),"depth":{"type":"integer","minimum":1,"maximum":8,"default":1},"limit":{"type":"integer","minimum":1,"maximum":100,"default":50},"after_id":{"type":"integer","minimum":0}}})
 }

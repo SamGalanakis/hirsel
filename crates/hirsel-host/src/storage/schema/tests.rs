@@ -34,9 +34,6 @@ async fn fresh_store_is_current_and_reopen_keeps_identity() {
         "thread_state",
         "thread_state_artifacts",
         "thread_state_changes",
-        "thread_change_deliveries",
-        "thread_change_cursors",
-        "thread_turn_contexts",
     ] {
         assert!(names.iter().any(|name| name == required));
     }
@@ -154,40 +151,6 @@ async fn fresh_store_is_current_and_reopen_keeps_identity() {
         .unwrap();
     assert!(state_change_sql.contains("UNIQUE(thread_id,state_revision)"));
     assert!(state_change_sql.contains("actor_kind IN ('owner','thread','host')"));
-    let delivery_foreign_keys: Vec<(String, String, String)> = conn
-        .prepare(r#"SELECT "from","table","to" FROM pragma_foreign_key_list('thread_change_deliveries') ORDER BY "from""#)
-        .unwrap()
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
-        .unwrap();
-    assert_eq!(
-        delivery_foreign_keys,
-        [
-            (
-                "change_id".into(),
-                "thread_state_changes".into(),
-                "id".into()
-            ),
-            ("chat_thread_id".into(), "threads".into(), "id".into()),
-        ]
-    );
-    let context_columns: Vec<(String, String, bool)> = conn
-        .prepare("SELECT name,type,\"notnull\" FROM pragma_table_xinfo('thread_turn_contexts') ORDER BY cid")
-        .unwrap()
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
-        .unwrap();
-    assert_eq!(
-        context_columns,
-        [
-            ("turn_id".into(), "INTEGER".into(), false),
-            ("context_json".into(), "TEXT".into(), true),
-            ("through_change_id".into(), "INTEGER".into(), true),
-            ("consumed_at".into(), "TEXT".into(), false),
-        ]
-    );
     let icon_foreign_key: (String, String) = conn.query_row(
         r#"SELECT "table", "to" FROM pragma_foreign_key_list('threads') WHERE "from"='icon_blob_id'"#,
         [], |row| Ok((row.get(0)?, row.get(1)?)),
@@ -365,12 +328,12 @@ async fn previous_schema_version_is_refused_without_in_place_evolution() {
             .await
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        17
+        16
     );
     drop(storage);
     let path = dir.path().join("hirsel.sqlite");
     let conn = Connection::open(&path).unwrap();
-    conn.pragma_update(None, "user_version", 16).unwrap();
+    conn.pragma_update(None, "user_version", 15).unwrap();
     drop(conn);
     let before = std::fs::read(&path).unwrap();
     assert!(Storage::open(dir.path()).await.is_err());
@@ -398,9 +361,9 @@ async fn unknown_current_layouts_and_bad_identity_are_untouched() {
 
 #[tokio::test]
 async fn branch_specific_schema_seven_layouts_are_refused_without_modification() {
-    // 10 is a stale version number; 17 is the current one carrying a layout
+    // 10 is a stale version number; 16 is the current one carrying a layout
     // that is not the current one.
-    for version in [10, 17] {
+    for version in [10, 16] {
         for layout in [
             include_str!("icons-only-v7.sql"),
             include_str!("processes-only-v7.sql"),

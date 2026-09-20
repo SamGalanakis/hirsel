@@ -6,11 +6,10 @@ export interface ThreadHistory {
   messages: ChatMessage[];
   turns: ThreadTurn[];
   activities: ThreadActivity[];
-  acceptedContext?: ThreadDetail["accepted_context"];
   hasMore: boolean;
   loaded: boolean;
 }
-export const emptyHistory = (): ThreadHistory => ({ brief: { text: "", artifact_ids: [] }, messages: [], turns: [], activities: [], acceptedContext: null, hasMore: false, loaded: false });
+export const emptyHistory = (): ThreadHistory => ({ brief: { text: "", artifact_ids: [] }, messages: [], turns: [], activities: [], hasMore: false, loaded: false });
 export function upsertThread(threads: Thread[], incoming: Thread): Thread[] {
   const prior = threads.find(t => t.id === incoming.id);
   if (prior && prior.revision > incoming.revision) return threads;
@@ -41,7 +40,6 @@ export function mergeDetail(prior: ThreadHistory, detail: ThreadDetail, earlier:
     messages: mergeById(detail.messages.filter(m => m.thread_id === id), prior.messages),
     turns,
     activities: mergeById(detail.activities.filter(a => a.thread_id === id), prior.activities),
-    acceptedContext: detail.accepted_context ?? prior.acceptedContext,
     hasMore: earlier || !prior.loaded ? detail.has_more : prior.hasMore,
     loaded: true,
   };

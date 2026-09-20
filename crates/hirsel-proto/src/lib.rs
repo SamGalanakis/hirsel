@@ -50,10 +50,9 @@ pub const IROH_OWNER_ALPN: &[u8] = b"hirsel/owner/1";
 mod tests;
 
 pub use thread::{
-    ReachTarget, Thread, ThreadActivity, ThreadAttention, ThreadBrief, ThreadChange,
-    ThreadChangeDigest, ThreadDetail, ThreadExecutionTarget, ThreadGrant, ThreadGrantSource,
-    ThreadGrantTarget, ThreadKind, ThreadRelatedItem, ThreadRelatedTarget, ThreadState, ThreadTurn,
-    ThreadTurnContext, ThreadTurnState,
+    ReachTarget, Thread, ThreadActivity, ThreadAttention, ThreadBrief, ThreadDetail,
+    ThreadExecutionTarget, ThreadGrant, ThreadGrantSource, ThreadGrantTarget, ThreadKind,
+    ThreadRelatedItem, ThreadRelatedTarget, ThreadState, ThreadTurn, ThreadTurnState,
 };
 pub use thread_icon::{
     THREAD_SYMBOL_GROUPS, THREAD_SYMBOLS, ThreadIcon, ThreadTint, is_thread_symbol,

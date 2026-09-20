@@ -29,7 +29,7 @@ export function ActivityEntry(props: { activity: ThreadActivity }) {
    * the two columns, never a third bubble competing with them. */
   const note = () => !report() && !assignment() && props.activity.artifact_ids.length === 0 && ownerFacingActivity(props.activity)
     && !activityText(props.activity).includes("\n") && activityText(props.activity).length <= 120;
-  return <Show when={!note()} fallback={<span data-activity-id={props.activity.id}><ConversationNote><span>{activityText(props.activity)}</span> · <time datetime={props.activity.ts}>{new Date(props.activity.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></ConversationNote></span>}><article data-activity-id={props.activity.id} class="space-y-2">
+  return <Show when={!note()} fallback={<span data-activity-id={props.activity.id}><ConversationNote>{activityText(props.activity)} · <time datetime={props.activity.ts}>{new Date(props.activity.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></ConversationNote></span>}><article data-activity-id={props.activity.id} class="space-y-2">
     <Show when={ownerFacingActivity(props.activity)} fallback={<RunCard activities={[props.activity]} events={[]} />}>
       {/* Identity and time are what a reader needs; the turn number and a
           "completed" that only restates the default belong in the tooltip. */}

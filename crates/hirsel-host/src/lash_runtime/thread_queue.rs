@@ -55,7 +55,7 @@ impl LashAgentRuntime {
         else {
             return Ok(None);
         };
-        let turn: OwnerTurn = serde_json::from_value(payload.clone())?;
+        let mut turn: OwnerTurn = serde_json::from_value(payload.clone())?;
         let accepted = turn.stored_turn(&self.tools.storage()).await?;
         if !matches!(
             self.tools.storage().turn_execution(accepted.id).await?,
@@ -63,16 +63,30 @@ impl LashAgentRuntime {
         ) {
             return Ok(None);
         }
+        let mut detail = self
+            .tools
+            .storage()
+            .thread_detail(turn.thread_id, turn.message_id, 30)
+            .await?;
         let queued = if let Some(id) = payload.get("turn_id").and_then(Value::as_u64) {
-            self.tools
-                .storage()
-                .accepted_thread_turn(&turn.history_id, id, turn.thread_id)
-                .await?
+            detail
+                .turns
+                .iter()
+                .find(|t| t.id == id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("missing background ThreadTurn {id}"))?
         } else {
             turn.stored_turn(&self.tools.storage()).await?
         };
+        if !detail.turns.iter().any(|t| t.id == queued.id) {
+            detail.turns.push(queued.clone());
+        }
         // Interrupted work is never replayed automatically after a restart.
-        if queued.state.is_terminal() {
+        if detail
+            .turns
+            .iter()
+            .any(|t| t.id == queued.id && t.state.is_terminal())
+        {
             anyhow::ensure!(
                 self.cancel_lash_request(&client_id).await?,
                 "interrupted Thread input still holds a live Lash claim"
@@ -84,6 +98,39 @@ impl LashAgentRuntime {
             *self.anchors.lock().await = TurnAnchorState::default();
             drop(_request_guard);
             return Box::pin(self.admit_next_thread_request()).await;
+        }
+        let history = detail
+            .messages
+            .into_iter()
+            .filter(|m| turn.message_id.is_none_or(|id|m.id<id))
+            .map(|m| json!({"id":m.id,"author":m.author,"body":m.body,"origin":m.origin,"artifact_ids":m.artifact_ids}))
+            .collect::<Vec<_>>();
+        let current_artifacts = self
+            .tools
+            .storage()
+            .accepted_message_references(&turn.history_id, queued.id)
+            .await?;
+        let source_label = if turn.message_id.is_none() {
+            "Background wake"
+        } else {
+            "Owner message"
+        };
+        turn.body = format!(
+            "[Thread #{}: {}]\n[durable conversation context]\n{}\n\n[{source_label}]\n{}",
+            turn.thread_id,
+            detail.thread.title,
+            serde_json::to_string(&history)?,
+            turn.body
+        );
+        turn.body.push_str(&format!(
+            "\n[Current accepted message artifact references]\n{}",
+            serde_json::to_string(&current_artifacts)?
+        ));
+        if let Some(message_id) = turn.message_id
+            && let Some(message) = self.tools.storage().chat_message(message_id).await?
+            && !message.mentions.is_empty()
+        {
+            turn.body.push_str(&format!("\n[Explicitly referenced Threads: {}. References do not change the owning Thread; use threads.read for their context.]",message.mentions.iter().map(|id|format!("#{id}")).collect::<Vec<_>>().join(", ")));
         }
         let execution = self.tools.storage().turn_execution(queued.id).await?;
         let crate::storage::ThreadExecution::Native {

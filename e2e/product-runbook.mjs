@@ -20,7 +20,7 @@ const requested = process.argv[2] ?? "all";
 const scenarios = requested === "all"
   ? ["chat-chronology", "tool-execution", "artifact-creation", "artifact-presentation"]
   : [requested];
-const knownScenarios = new Set(["chat-chronology", "tool-execution", "artifact-creation", "artifact-presentation", "native-coding", "process-wakes", "task-state"]);
+const knownScenarios = new Set(["chat-chronology", "tool-execution", "artifact-creation", "artifact-presentation", "native-coding", "process-wakes"]);
 for (const scenario of scenarios) assert(knownScenarios.has(scenario), `Unknown product runbook: ${scenario}`);
 if (scenarios.includes("native-coding")) {
   assert(process.env.OPENROUTER_API_KEY?.trim(), "native-coding requires OPENROUTER_API_KEY; no model call was started");
@@ -1338,96 +1338,6 @@ async function runNativeCoding(context, fixture) {
   };
 }
 
-async function runTaskState(context) {
-  const { page, frames, nonce, threadId: spaceId, dataDir, url, token, scenarioDir } = context;
-  const headline = `Evidence ${nonce} ready`;
-  const findingOne = `Linux checks passed ${nonce}`;
-  const findingTwo = `Android remains ${nonce}`;
-  const artifactTitle = `Task state evidence ${nonce}`;
-  const prompt = `Delegate one child Task to a worker. In that worker, publish one Markdown artifact titled "${artifactTitle}" with content "first revision ${nonce}". Then call threads.state on the worker's own Task with headline "${headline}", findings ["${findingOne}", "${findingTwo}"], and that artifact ID, using the current state revision. Then edit that artifact once, replacing "first" with "second". Do not complete the Task. Your Space chat must coordinate only.`;
-  const source = await sendMessage(page, frames, spaceId, prompt);
-  const child = await poll("delegated Task", () => latestFrame(
-    frames,
-    frame => frame.type === "thread_upsert"
-      && frame.thread.parent_thread_id === spaceId
-      && frame.thread.kind === "task",
-  )?.frame.thread);
-  const childTurn = await poll("worker turn", () => latestFrame(
-    frames,
-    frame => frame.type === "thread_turn" && frame.turn.thread_id === child.id,
-  )?.frame.turn);
-  await waitForTurn(frames, childTurn.id, turn => turn.state === "running", "worker running");
-  await poll("live running rollup", () => latestFrame(
-    frames,
-    frame => frame.type === "thread_upsert"
-      && frame.thread.id === spaceId
-      && frame.thread.state.headline === `1 child · #${child.id} running`,
-  )?.frame.thread);
-  const childTerminal = await waitForTurn(frames, childTurn.id, turn => terminal(turn.state), "worker terminal");
-  assert.equal(childTerminal.state, "completed", "worker did not complete its bounded turn");
-  await waitForTurn(frames, source.turnId, turn => terminal(turn.state), "Space coordination terminal");
-
-  const detail = await poll("checkpointed Task state", async () => {
-    const current = await openThread(url, token, child.id);
-    return current.thread.state.headline === headline
-      && current.thread.state.findings?.[0] === findingOne
-      && current.thread.state.findings?.[1] === findingTwo
-      && current.thread.state.artifact_ids?.length === 1
-      ? current
-      : null;
-  });
-  assert.equal(detail.thread.settled_at, null, "worker state update completed the Task");
-  const artifactId = detail.thread.state.artifact_ids[0];
-  const database = join(dataDir, "hirsel.sqlite");
-  const artifact = sqliteJson(database, `SELECT id,title,revision,content FROM artifacts WHERE id=${artifactId}`)[0];
-  assert.equal(artifact.title, artifactTitle);
-  assert.equal(artifact.revision, 2, "artifact edit did not advance its revision exactly once");
-  assert.match(artifact.content, new RegExp(`second revision ${nonce}`));
-  const changes = sqliteJson(database, `SELECT state_revision,actor_kind,cause FROM thread_state_changes WHERE thread_id=${child.id} ORDER BY state_revision`);
-  assert(changes.some(change => change.cause === "threads.state" && change.actor_kind === "thread"), "Task state has no worker-authored change row");
-  assert(changes.some(change => change.cause === "artifact_revision"), "artifact edit did not fan out to Task state");
-  const effects = sqliteJson(database, `SELECT tool,effect FROM thread_effect_receipts WHERE turn_id=${childTurn.id} AND tool='threads_state'`);
-  assert.deepEqual(effects, [{ tool: "threads_state", effect: "edited" }]);
-  const parent = await openThread(url, token, spaceId);
-  assert.equal(parent.thread.settled_at, null);
-  assert.match(parent.thread.state.headline, new RegExp(`^1 child · #${child.id} `));
-  assert.notEqual(parent.thread.state.headline, headline, "parent copied worker prose");
-
-  const drawer = page.getByRole("button", { name: "Spaces and Tasks", exact: true });
-  if (await drawer.getAttribute("aria-expanded") === "false") await drawer.click();
-  await page.locator(`[data-thread-row="${child.id}"]`).click();
-  const state = page.locator(`main[data-thread-id="${child.id}"] [data-slot="task-state"]`);
-  await state.getByText(headline, { exact: true }).waitFor();
-  await state.getByText(findingOne, { exact: true }).waitFor();
-  await state.getByText(findingTwo, { exact: true }).waitFor();
-  await state.getByText(artifactTitle, { exact: true }).waitFor();
-  await page.screenshot({ path: join(scenarioDir, "10-task-state.png"), fullPage: true });
-
-  await page.reload({ waitUntil: "domcontentloaded" });
-  await page.locator(`main[data-thread-id="${child.id}"]`).waitFor();
-  await page.locator(`main[data-thread-id="${child.id}"] [data-slot="task-state"]`).getByText(headline, { exact: true }).waitFor();
-  await page.screenshot({ path: join(scenarioDir, "20-task-state-reloaded.png"), fullPage: true });
-  await writeFile(join(scenarioDir, "task-state-store.json"), `${JSON.stringify({ child: detail.thread, parent: parent.thread, artifact, changes, effects }, null, 2)}\n`);
-  return {
-    taskId: child.id,
-    workerTurnId: childTurn.id,
-    headline,
-    artifactId,
-    artifactRevision: artifact.revision,
-    objectiveGates: {
-      delegatedWorkerCheckpoint: "PASS",
-      deterministicParentRollup: "PASS",
-      artifactRevisionFanout: "PASS",
-      taskRemainsOpen: "PASS",
-      reloadAgreement: "PASS",
-    },
-    judgedScorecard: {
-      status: "NOT_JUDGED",
-      instruction: "Inspect 10-task-state.png and 20-task-state-reloaded.png with task-state-store.json before assigning a product verdict.",
-    },
-  };
-}
-
 async function runScenario(scenario) {
   const scenarioDir = join(evidenceRoot, scenario);
   const dataDir = join(scenarioDir, "state");
@@ -1531,8 +1441,6 @@ async function runScenario(scenario) {
           ? await runArtifact(context)
           : scenario === "artifact-presentation"
             ? await runArtifactPresentation(context)
-            : scenario === "task-state"
-              ? await runTaskState(context)
             : await runNativeCoding(context, nativeFixture);
     assert.deepEqual(browserErrors, [], `browser errors: ${JSON.stringify(browserErrors)}`);
     result.objectiveStatus = "OBJECTIVE_PASS";

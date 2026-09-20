@@ -118,31 +118,6 @@ impl Storage {
 }
 
 impl Storage {
-    #[cfg(test)]
-    pub(crate) async fn accepted_message_references(
-        &self,
-        history: &str,
-        turn_id: u64,
-    ) -> anyhow::Result<Vec<serde_json::Value>> {
-        let c = self.conn.lock().await;
-        thread_scope::validate_history(&c, history)?;
-        let turn = thread_activity::get(&c, turn_id)?;
-        let Some(message_id) = turn.owner_message_id else {
-            return Ok(vec![]);
-        };
-        let mut query = c.prepare(
-            "SELECT a.id,a.title FROM message_artifacts r JOIN artifacts a ON a.id=r.artifact_id WHERE r.message_id=?1 ORDER BY a.id",
-        )?;
-        Ok(query
-            .query_map([message_id], |r| {
-                Ok(serde_json::json!({
-                    "artifact_id": r.get::<_, u64>(0)?,
-                    "title": r.get::<_, String>(1)?,
-                }))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
     pub(crate) async fn background_context(
         &self,
         history: &str,
@@ -177,6 +152,23 @@ impl Storage {
         super::threads::get(&c, thread_id)?;
         c.execute("INSERT INTO thread_activities(thread_id,turn_id,kind,data,ts) VALUES(?1,NULL,?2,?3,?4)",params![thread_id,kind,serde_json::to_string(data)?,chrono::Utc::now().to_rfc3339()])?;
         thread_activity::activity(&c, c.last_insert_rowid() as u64)
+    }
+}
+
+impl Storage {
+    pub(crate) async fn accepted_message_references(
+        &self,
+        history: &str,
+        turn_id: u64,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let c = self.conn.lock().await;
+        thread_scope::validate_history(&c, history)?;
+        let turn = thread_activity::get(&c, turn_id)?;
+        let Some(message_id) = turn.owner_message_id else {
+            return Ok(vec![]);
+        };
+        let mut query=c.prepare("SELECT a.id,a.title FROM message_artifacts r JOIN artifacts a ON a.id=r.artifact_id WHERE r.message_id=?1 ORDER BY a.id")?;
+        Ok(query.query_map([message_id],|r|Ok(serde_json::json!({"artifact_id":r.get::<_,u64>(0)?,"title":r.get::<_,String>(1)?})))?.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
 

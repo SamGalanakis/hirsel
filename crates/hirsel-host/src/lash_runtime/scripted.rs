@@ -189,11 +189,6 @@ impl ScriptedAgentRuntime {
         cancel: lash::CancellationToken,
     ) -> anyhow::Result<()> {
         let record = turn.stored_turn(&self.tools.storage()).await?;
-        let accepted_context = self
-            .tools
-            .storage()
-            .accepted_turn_context(&turn.history_id, record.id)
-            .await?;
         let record = self.tools.storage().run_thread_turn(record.id).await?;
         self.tools.publish_thread_turn(record.clone()).await;
         if let Some(active) = self.state.lock().await.active.as_mut() {
@@ -208,9 +203,7 @@ impl ScriptedAgentRuntime {
         ingest
             .accept(&self.tools, ExecutorEvent::Started { external_id: None })
             .await?;
-        let result = self
-            .handle_turn_inner(&turn, &accepted_context, &cancel, &mut ingest)
-            .await;
+        let result = self.handle_turn_inner(&turn, &cancel, &mut ingest).await;
         let outcome = if cancel.is_cancelled() {
             ExecutorTerminalOutcome::Cancelled
         } else if result.is_ok() {
@@ -251,7 +244,6 @@ impl ScriptedAgentRuntime {
     pub(super) async fn handle_turn_inner(
         &self,
         turn: &OwnerTurn,
-        accepted_context: &crate::storage::thread_changes::TurnAdmissionContext,
         cancel: &lash::CancellationToken,
         ingest: &mut TurnIngest,
     ) -> anyhow::Result<Option<String>> {
@@ -264,12 +256,8 @@ impl ScriptedAgentRuntime {
             return Ok(None);
         }
         self.emit_scripted_timeline(ingest).await?;
-        // Scripted intent selection remains scoped to the accepted input. The
-        // immutable executor context also contains earlier conversation, whose
-        // words must not trigger another deterministic fixture action.
-        let lower = owner_turn_text(turn, &self.tools.storage()).to_lowercase();
-        let turn_text =
-            owner_turn_text_with_context(turn, &self.tools.storage(), accepted_context)?;
+        let turn_text = owner_turn_text(turn, &self.tools.storage());
+        let lower = turn_text.to_lowercase();
         if self.config.driver_mode == DriverMode::Fake
             && turn.body.trim().starts_with("__hirsel_effect_pills_")
         {
@@ -390,43 +378,6 @@ impl ScriptedAgentRuntime {
                 .await
                 .map_err(anyhow::Error::msg)?;
         }
-        if self.config.driver_mode == DriverMode::Fake
-            && turn
-                .body
-                .trim()
-                .starts_with("__hirsel_change_digest_emit__:")
-        {
-            let turn_id = turn
-                .turn_id
-                .ok_or_else(|| anyhow::anyhow!("accepted turn missing"))?;
-            let values = turn.body.trim().split(':').collect::<Vec<_>>();
-            anyhow::ensure!(values.len() == 3, "invalid scripted change-digest fixture");
-            let task_id = values[1].parse::<u64>()?;
-            let state_revision = values[2].parse::<u64>()?;
-            let launch = uuid::Uuid::new_v4().to_string();
-            let caller = self
-                .tools
-                .storage()
-                .bind_thread_execution(&turn.history_id, &launch, &launch, turn_id)
-                .await?;
-            ScopedThreadTools {
-                tools: self.tools.clone(),
-                caller,
-                operation_id: format!("scripted:{turn_id}:change-digest"),
-            }
-            .execute(
-                "threads_state",
-                &json!({
-                    "thread":task_id,
-                    "expected_state_revision":state_revision,
-                    "headline":"Outside digest ready",
-                    "findings":["Changed from another Space"],
-                    "artifact_ids":[]
-                }),
-            )
-            .await
-            .map_err(anyhow::Error::msg)?;
-        }
         if self.config.driver_mode == DriverMode::Fake && lower.contains("delegate") {
             let turn_id = turn
                 .turn_id
@@ -473,11 +424,6 @@ impl ScriptedAgentRuntime {
             return Ok(Some("pong".into()));
         }
         if !turn.attachments.is_empty() {
-            return Ok(Some(format!("Scripted turn input:\n\n{turn_text}")));
-        }
-        if self.config.driver_mode == DriverMode::Fake
-            && turn.body.trim() == "__hirsel_change_digest_capture__"
-        {
             return Ok(Some(format!("Scripted turn input:\n\n{turn_text}")));
         }
         Ok(Some("I received the Owner message. This scripted Agent mode is a deterministic test double; set HIRSEL_AGENT=lash for the real RLM runtime.".into()))

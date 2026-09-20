@@ -28,7 +28,6 @@ struct Invocation {
 }
 
 pub(crate) struct ThreadToolBridge {
-    #[cfg(test)]
     pub(crate) caller: crate::storage::ThreadCaller,
     pub(crate) socket_path: PathBuf,
     pub(crate) capability_file: PathBuf,
@@ -124,7 +123,6 @@ impl ThreadToolBridge {
                 .await;
         });
         Ok(Self {
-            #[cfg(test)]
             caller,
             socket_path,
             capability_file,

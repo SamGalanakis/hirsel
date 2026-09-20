@@ -59,13 +59,7 @@ Space. This adds no authority beyond ADR 0022.
 
 ## Material state and headlines
 
-Schema 16 adds `thread_state`, `thread_state_artifacts` and the append-only `thread_state_changes` audit stream, plus a positive `artifacts.revision`. Every Thread receives state atomically at creation so Spaces can carry parent rollups, while the product presents the state card on Tasks. `ThreadState.revision` is independent from `Thread.revision`. Reads, read receipts and telemetry do not advance it; material lifecycle, instrument, showcase, steering, terminal-result and referenced-artifact changes do.
-
-`threads.state` checkpoints one reachable Task with revision compare-and-swap. It normalizes ASCII whitespace to single spaces and requires a nonempty headline of at most 12 words and 240 UTF-8 bytes. Findings and artifact references are bounded. A conflict returns the expected and actual state revisions plus the current state and records no effect. A committed write records exactly one `edited` effect receipt. Artifact edits advance the artifact revision and each state that explicitly references it.
-
-A Thread retains `own_headline` even while it has children. The displayed `headline` for a parent is Host-derived: a bounded direct-child count plus the numerically lowest child whose active subtree has the highest fixed status precedence (`needs you`, `failed`, `running`, `queued`, `blocked`, `done`, `idle`). Current running or queued work takes precedence over an older terminal result on the same Thread. Archived subtrees do not participate. No child prose is selected, and no rollup settles a parent. The material mutation, every changed ancestor headline and every corresponding change row commit in one SQLite transaction, then `ThreadUpsert` publishes the changed state.
-
-Schema 16 remains a complete-layout cutover with no in-place migration. Existing schema-15 data requires a separately reviewed offline backup and cutover; startup refuses it without modification.
+Reserved for slice 3. Task state, findings, headline rollups and visit baselines will extend this decision without changing Space-chat identity.
 
 ## Outside-change provenance and admission context
 

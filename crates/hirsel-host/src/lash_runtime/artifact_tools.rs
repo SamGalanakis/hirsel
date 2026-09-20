@@ -99,13 +99,6 @@ impl ScopedThreadTools {
                 .await
                 .map_err(ToolError::from)?
         };
-        for activity in storage
-            .outside_change_activities(self.caller.turn_id)
-            .await
-            .map_err(ToolError::from)?
-        {
-            self.tools.publish_thread_activity(activity).await;
-        }
         self.tools.publish_artifact(result.0.summary.clone());
         let material_threads = if name == "artifacts_edit" {
             result.0.summary.thread_ids.clone()

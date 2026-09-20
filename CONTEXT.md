@@ -50,6 +50,6 @@ _Avoid_: Event as a work object
 
 **Host:** The long-running owner of Hirsel's durable state and execution.
 
-**Artifact:** An explicitly agent-published result with global identity, a positive current revision and mutable content. It has no owning Thread or stored historical versions. Formats are Solid 2 JSX, HTML, OpenUI, images, Markdown, or UTF-8 files. Interactive previews are local only, without network or backend access.
+**Artifact:** An explicitly agent-published result with global identity and current mutable content. It has no owning Thread and no revision history. Formats are Solid 2 JSX, HTML, or UTF-8 files. Interactive previews are local only, without network or backend access.
 
 **Artifact reference:** A Message-to-Artifact link. Create, edit and show publish a reference card in the current conversation. Many Threads can reference the same Artifact; earlier cards resolve the current content. References do not transfer Message ownership or alter the composer's addressed Thread.

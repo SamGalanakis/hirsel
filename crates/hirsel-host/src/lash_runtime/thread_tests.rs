@@ -835,54 +835,6 @@ async fn ordinary_thread_tool_creation_is_visible_and_mutable_without_action_wak
     );
 }
 
-#[tokio::test]
-async fn space_change_tool_exposes_bounded_cursor_pagination() {
-    let (executor, storage, _log, _dir) = super::tests::test_event_executor().await;
-    let (space, _) = storage
-        .create_thread(
-            "changes-space",
-            "Changes Space",
-            "",
-            None,
-            hirsel_proto::ThreadAttention::Quiet,
-            hirsel_proto::ThreadKind::Space,
-            None,
-        )
-        .await
-        .unwrap();
-    let turn = storage.start_thread_turn(space.id, None).await.unwrap();
-    let caller = storage
-        .bind_thread_execution(
-            &storage.history_id().await.unwrap(),
-            "changes-session",
-            "changes-execution",
-            turn.id,
-        )
-        .await
-        .unwrap();
-    let tools = ScopedThreadTools {
-        tools: executor.tools,
-        caller,
-        operation_id: "changes-page".into(),
-    };
-    let page = tools
-        .execute("threads_changes", &json!({"after_change_id":0,"limit":1}))
-        .await
-        .unwrap();
-    assert_eq!(
-        page,
-        json!({"through_change_id":0,"changes":[],"has_more":false})
-    );
-
-    let definition = hirsel_tool_definitions(&crate::subagent_models::registry_catalog())
-        .into_iter()
-        .find(|definition| definition.name() == "threads_changes")
-        .unwrap();
-    let schema = definition.contract.input_schema.canonical();
-    assert_eq!(schema["properties"]["limit"]["maximum"], 32);
-    assert_eq!(schema["properties"]["after_change_id"]["minimum"], 0);
-}
-
 /// A delegation that names neither provider nor model runs where its parent
 /// runs: the default answer to "where does this run" is "here". Naming a model
 /// still wins over the inherited one.

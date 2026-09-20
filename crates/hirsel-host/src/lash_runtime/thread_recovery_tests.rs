@@ -278,75 +278,13 @@ async fn accepted_lash_input_survives_admission_retry_with_changed_thread_contex
     let (state, _dir) = runtime_fixture().await;
     let runtime = runtime_lane(&state, None).await;
     let _pump = runtime.pump_lock.lock().await;
-    let history = state.storage.history_id().await.unwrap();
-    let (space, _) = state
-        .storage
-        .create_thread(
-            "accepted",
-            "Accepted Space",
-            "",
-            None,
-            ThreadAttention::Quiet,
-            hirsel_proto::ThreadKind::Space,
-            None,
-        )
-        .await
-        .unwrap();
-    let (task, _) = state
-        .storage
-        .create_thread(
-            "accepted-focus",
-            "Original focus title",
-            "",
-            None,
-            ThreadAttention::Quiet,
-            hirsel_proto::ThreadKind::Task,
-            Some(space.id),
-        )
-        .await
-        .unwrap();
-    let focus = hirsel_proto::TaskFocus {
-        task_thread_id: task.id,
-        snapshot: json!({"title":"Original focus title","brief":"Frozen focus","instrument_summary":null}),
-    };
-    state
-        .storage
-        .append_thread_owner_request_with_focus(
-            &history,
-            space.id,
-            "accepted",
-            "message accepted".into(),
-            &[],
-            &[],
-            &[],
-            Some(&focus),
-            &json!({"mode":"send","thread_action":null,"focus":focus}),
-        )
-        .await
-        .unwrap();
-    let turn: OwnerTurn = serde_json::from_value(
-        state
-            .storage
-            .thread_request("accepted")
-            .await
-            .unwrap()
-            .unwrap(),
-    )
-    .unwrap();
+    let turn = request(&state, "accepted").await;
     let runtime = runtime_lane(&state, Some(turn.thread_id)).await;
     let _turn_pump = runtime.pump_lock.lock().await;
-    let frozen = state
-        .storage
-        .accepted_turn_context(&history, turn.turn_id.unwrap())
-        .await
-        .unwrap();
-    assert_eq!(frozen.focus, Some(focus));
-    let input = owner_turn_input(&turn, &state.storage).await.unwrap();
-    let frozen_input = serde_json::to_value(&input).unwrap();
     // Fault boundary: Lash accepted the input, Hirsel has not marked its turn running.
     runtime
         .session
-        .enqueue(input)
+        .enqueue(owner_turn_input(&turn, &state.storage).await.unwrap())
         .id(turn.client_id.clone())
         .ingress(TurnInputIngress::next_turn())
         .send()
@@ -363,50 +301,13 @@ async fn accepted_lash_input_survives_admission_retry_with_changed_thread_contex
         )
         .await
         .unwrap();
-    state
-        .storage
-        .update_thread(task.id, Some("Changed focus title"), None, None, None)
-        .await
-        .unwrap();
-    state
-        .storage
-        .append_thread_chat(
-            turn.thread_id,
-            ChatAuthor::Owner,
-            "later private context",
-            None,
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-    assert!(
-        runtime
-            .session
-            .enqueue(TurnInput::text("changed retry payload"))
-            .id(turn.client_id.clone())
-            .ingress(TurnInputIngress::next_turn())
-            .send()
-            .await
-            .is_err(),
-        "Lash must reject a changed payload for an accepted source key"
-    );
     assert_eq!(
         runtime.admit_next_thread_request().await.unwrap(),
         Some(turn.client_id)
     );
-    let pending = runtime.session.pending_turn_inputs().await.unwrap();
-    assert_eq!(pending.len(), 1);
     assert_eq!(
-        serde_json::to_value(&pending[0].input).unwrap(),
-        frozen_input
-    );
-    assert_eq!(
-        state
-            .storage
-            .accepted_turn_context(&history, turn.turn_id.unwrap())
-            .await
-            .unwrap(),
-        frozen
+        runtime.session.pending_turn_inputs().await.unwrap().len(),
+        1
     );
     let detail = state
         .storage
@@ -456,16 +357,15 @@ async fn cancelling_between_lash_acceptance_and_hirsel_admission_removes_both_qu
             .unwrap()
             .is_empty()
     );
-    let detail = state
-        .storage
-        .thread_detail(turn.thread_id, None, 30)
-        .await
-        .unwrap();
-    assert_eq!(detail.turns[0].state, ThreadTurnState::Cancelled);
     assert_eq!(
-        detail.accepted_context.unwrap().consumed_at,
-        None,
-        "the acceptance/cancellation gap consumed context"
+        state
+            .storage
+            .thread_detail(turn.thread_id, None, 30)
+            .await
+            .unwrap()
+            .turns[0]
+            .state,
+        ThreadTurnState::Cancelled
     );
 }
 

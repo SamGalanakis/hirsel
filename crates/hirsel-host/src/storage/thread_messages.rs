@@ -445,7 +445,6 @@ impl Storage {
         let brief = super::thread_read::brief(&tx, id)?;
         let related_items = super::thread_related::list(&tx, id)?;
         let grants = super::thread_grants::list(&tx, id)?;
-        let accepted_context = super::thread_changes::latest_context(&tx, id)?;
         tx.commit()?;
         Ok(ThreadDetail {
             related_items,
@@ -458,7 +457,6 @@ impl Storage {
             next_effects_before,
             turn_timelines,
             activities,
-            accepted_context,
             has_more,
         })
     }

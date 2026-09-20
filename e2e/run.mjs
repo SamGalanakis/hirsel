@@ -13,7 +13,7 @@ import {
 } from "./lib/harness.mjs";
 
 const requested = process.argv[2] ?? "all";
-if (!new Set(["all", "project-chats", "effect-pills", "task-state", "change-digest"]).has(requested)) {
+if (!new Set(["all", "project-chats", "effect-pills"]).has(requested)) {
   throw new Error(`Unknown deterministic E2E scenario: ${requested}`);
 }
 
@@ -77,21 +77,7 @@ try {
       HIRSEL_EFFECT_PILLS_TOKEN: token,
     });
   }
-  if (requested === "all" || requested === "task-state") {
-    await run("Task state", process.execPath, ["e2e/task-state.mjs"], {
-      ...hostEnvironment,
-      HIRSEL_TASK_STATE_URL: host.url,
-      HIRSEL_TASK_STATE_TOKEN: token,
-    });
-  }
-  if (requested === "all" || requested === "change-digest") {
-    await run("Change digest", process.execPath, ["e2e/change-digest.mjs"], {
-      ...hostEnvironment,
-      HIRSEL_CHANGE_DIGEST_URL: host.url,
-      HIRSEL_CHANGE_DIGEST_TOKEN: token,
-    });
-  }
-  if (["project-chats", "effect-pills", "task-state", "change-digest"].includes(requested)) {
+  if (requested === "project-chats" || requested === "effect-pills") {
     console.log(`${requested} E2E passed with isolated evidence under ${evidenceDir}`);
     process.exitCode = 0;
   } else {

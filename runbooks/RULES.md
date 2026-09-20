@@ -102,7 +102,6 @@ just product-runbook tool-execution
 just product-runbook artifact-creation
 just product-runbook artifact-presentation
 just product-runbook native-coding
-just product-runbook task-state
 ```
 
 `all` uses four separate empty stores and no more than seven model turns. Set
@@ -114,8 +113,3 @@ The explicitly selected `process-wakes` scenario uses one Owner turn to register
 a three-second timer and one normal process-delivery turn. It is separate from
 `all` and never retries model calls. It checks DOM, live frames, reload, receipt
 JSON, and the owning Thread's exact turn count.
-
-The explicitly selected `task-state` scenario uses one Space-chat coordination
-turn and one delegated worker turn. It is separate from `all`; it checks the
-material-state card, deterministic parent rollup, artifact revision fan-out and
-reload agreement without expanding the shared seven-turn battery.

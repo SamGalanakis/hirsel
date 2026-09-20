@@ -135,16 +135,6 @@ fn record_change(
             chrono::Utc::now().to_rfc3339(),
         ],
     )?;
-    let change_id = c.last_insert_rowid() as u64;
-    super::thread_changes::record_deliveries(
-        c,
-        change_id,
-        thread_id,
-        before,
-        after,
-        actor.thread_id,
-        actor.turn_id,
-    )?;
     Ok(())
 }
 

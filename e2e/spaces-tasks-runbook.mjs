@@ -398,17 +398,17 @@ try {
   assert(archiveRequest, "Archive did not use the selected Thread action");
   await page.locator(`main[data-thread-id="${rootSpace.id}"]`).waitFor();
   assert.equal(new URL(page.url()).pathname, `/t/${rootSpace.id}`, "Selected archive did not return to its Space chat");
-  assert.equal(await page.evaluate(key => localStorage.getItem(key), `hirsel.last-project.${archiveHistory}`), String(rootSpace.id), "Selected archive forgot its Space chat");
+  assert.equal(await page.evaluate(key => localStorage.getItem(key), `hirsel.last-space.${archiveHistory}`), String(rootSpace.id), "Selected archive forgot its Space chat");
   assert.equal(await page.evaluate(key => localStorage.getItem(key), draftKey), preservedDraft, "Selected archive deleted the composer draft");
   const historyAfterArchive = (await openThread(url, token, childTask.id)).detail;
   assert.deepEqual(historyAfterArchive.messages, historyBeforeArchive.messages, "Selected archive changed conversation history");
   assert.equal(historyAfterArchive.thread.archived_at, archivedUpsert.thread.archived_at, "Archived inventory and open_thread disagree");
   assert.equal(Date.parse(threadRecord(storeSnapshot(), childTask.id).archived_at), Date.parse(archivedUpsert.thread.archived_at), "Archive was not durable in SQLite");
   await Promise.all([
-    page.screenshot({ path: join(evidenceDir, "15-archive-project-chat.png"), fullPage: true }),
-    writeFile(join(evidenceDir, "15-archive-project-chat-dom.json"), `${JSON.stringify(await domSnapshot(page), null, 2)}\n`),
-    writeFile(join(evidenceDir, "15-archive-project-chat-thread.json"), `${JSON.stringify(historyAfterArchive, null, 2)}\n`),
-    writeFile(join(evidenceDir, "15-archive-project-chat-store.json"), `${JSON.stringify(storeSnapshot(), null, 2)}\n`),
+    page.screenshot({ path: join(evidenceDir, "15-archive-space-chat.png"), fullPage: true }),
+    writeFile(join(evidenceDir, "15-archive-space-chat-dom.json"), `${JSON.stringify(await domSnapshot(page), null, 2)}\n`),
+    writeFile(join(evidenceDir, "15-archive-space-chat-thread.json"), `${JSON.stringify(historyAfterArchive, null, 2)}\n`),
+    writeFile(join(evidenceDir, "15-archive-space-chat-store.json"), `${JSON.stringify(storeSnapshot(), null, 2)}\n`),
   ]);
 
   const archivedDrawer = await ensureDrawer(page);

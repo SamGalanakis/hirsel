@@ -38,7 +38,7 @@ async function expectSeparatedReasoning(page) {
     "Preparing the second boundary.",
   ])) throw new Error(`Reasoning blocks were not rendered separately: ${JSON.stringify(text)}`);
 }
-async function projectChat(page) {
+async function spaceChat(page) {
   const rail = page.getByRole("button", { name: "Space chat", exact: true });
   if (await rail.isVisible()) await rail.click();
   else await page.getByRole("button", { name: "Back", exact: true }).click();
@@ -79,7 +79,7 @@ try {
     const threadId = Number(path.split("/").at(-1));
     if (!/^\/t\/\d+$/.test(path)) throw new Error(`Thread create did not navigate: ${path}`);
     await page.locator("textarea").fill("This draft belongs to this thread");
-    await projectChat(page);
+    await spaceChat(page);
     if (await page.locator("textarea").inputValue() === "This draft belongs to this thread") throw new Error("Thread draft leaked into the Space chat");
     await page.goto(`${url}${route}`);
     await page.locator('[data-slot="thread-context"] h1').filter({ hasText: title }).waitFor();
@@ -99,7 +99,7 @@ try {
     }, 5_000);
     if (!ownedMessages.some(message => message.author === "owner" && message.body === body) || !ownedMessages.some(message => message.author === "agent")) throw new Error("Host did not emit both messages with correct Thread ownership");
     if (artifacts) await page.screenshot({ path: `${artifacts}/thread-conversation-${viewport.width}.png`, fullPage: true });
-    await projectChat(page);
+    await spaceChat(page);
     if (await page.getByText(body, { exact: true }).count()) throw new Error("Owned message leaked into the Space chat");
     await page.goto(`${url}${route}`);
     await page.getByText(body, { exact: true }).waitFor();

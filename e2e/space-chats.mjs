@@ -4,8 +4,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 
 import { isolatedUrl, launchBrowser, poll, request } from "./lib/harness.mjs";
 
-const url = isolatedUrl(process.env.HIRSEL_PROJECT_CHATS_URL, "HIRSEL_PROJECT_CHATS_URL");
-const token = process.env.HIRSEL_PROJECT_CHATS_TOKEN ?? "dev-token";
+const url = isolatedUrl(process.env.HIRSEL_SPACE_CHATS_URL, "HIRSEL_SPACE_CHATS_URL");
+const token = process.env.HIRSEL_SPACE_CHATS_TOKEN ?? "dev-token";
 const evidenceDir = process.env.HIRSEL_THREAD_SMOKE_ARTIFACTS;
 if (evidenceDir) await mkdir(evidenceDir, { recursive: true });
 
@@ -44,6 +44,10 @@ try {
   await page.goto(url, { waitUntil: "domcontentloaded" });
   const hello = await poll("Space-chat hello", () => received(frames, frame => frame.type === "hello_ok"), 10_000);
   const home = await poll("Home bootstrap", () => {
+    const snapshot = hello.threads.find(thread =>
+      thread.title === "Home" && thread.kind === "space" && thread.parent_thread_id === null
+    );
+    if (snapshot) return snapshot;
     const frame = received(frames, candidate =>
       (candidate.type === "thread_created" || candidate.type === "thread_upsert")
       && candidate.thread?.title === "Home"
@@ -57,9 +61,7 @@ try {
   });
   await page.locator(`main[data-thread-id="${home.id}"]`).waitFor({ state: "visible" });
   assert.equal(new URL(page.url()).pathname, `/t/${home.id}`);
-  assert.match(await contextText(page), /Space\s+Home/);
-  assert.match(await contextText(page), /Focus\s+None/);
-  assert.match(await contextText(page), /Worker\s+None/);
+  assert.match(await contextText(page), /Recipient\s+Home/);
   const homeDetail = await request({
     url,
     token,
@@ -84,8 +86,7 @@ try {
   )?.thread, 10_000);
   await page.locator(`main[data-thread-id="${nested.id}"]`).waitFor({ state: "visible" });
   await page.getByRole("textbox", { name: `Message Space chat ${nestedTitle}`, exact: true }).waitFor();
-  assert.match(await contextText(page), new RegExp(`Space\\s+${nestedTitle}`));
-  assert.match(await contextText(page), /Worker\s+None/);
+  assert.match(await contextText(page), new RegExp(`Recipient\\s+${nestedTitle}`));
   assert.equal(
     await page.getByRole("textbox", { name: `Step in with worker ${nestedTitle}`, exact: true }).count(),
     0,
@@ -114,29 +115,24 @@ try {
   )?.thread, 10_000);
   await page.locator(`main[data-thread-id="${task.id}"]`).waitFor({ state: "visible" });
   await page.getByRole("textbox", { name: `Step in with worker ${taskTitle}`, exact: true }).waitFor();
-  assert.match(await contextText(page), /Space\s+Home/);
-  assert.match(await contextText(page), new RegExp(`Worker\\s+${taskTitle}`));
+  assert.match(await contextText(page), new RegExp(`Recipient\\s+${taskTitle}\\s+·\\s+Task worker`));
 
   await page.getByRole("button", { name: "Talk about this", exact: true }).click();
   await page.locator(`main[data-thread-id="${home.id}"]`).waitFor({ state: "visible" });
-  assert.match(await contextText(page), new RegExp(`Focus\\s+${taskTitle}`));
-  assert.match(await contextText(page), /Worker\s+None/);
-  const focusBody = `Discuss ${taskTitle}`;
-  const projectComposer = page.getByRole("textbox", { name: "Message Space chat Home", exact: true });
-  await projectComposer.fill(focusBody);
+  assert.match(await contextText(page), /Recipient\s+Home/);
+  const focusBody = `#${task.id} Discuss ${taskTitle}`;
+  const spaceComposer = page.getByRole("textbox", { name: "Message Space chat Home", exact: true });
+  assert.match(await spaceComposer.inputValue(), new RegExp(`#${task.id}`));
+  await spaceComposer.fill(focusBody);
   const focusOffset = frames.length;
   await page.getByRole("button", { name: "Send", exact: true }).click();
   const focusedSend = await poll("focused Space send", () => sent(frames.slice(focusOffset), frame =>
     frame.type === "send_thread_message" && frame.thread_id === home.id && frame.body === focusBody
   ), 10_000);
-  assert.equal(focusedSend.focus.task_thread_id, task.id);
-  assert.deepEqual(Object.keys(focusedSend.focus.snapshot).sort(), ["brief", "instrument_summary", "title"]);
-  assert.equal(focusedSend.focus.snapshot.title, taskTitle);
+  assert.deepEqual(focusedSend.mentions, [task.id]);
   const focusedEcho = await poll("focused message echo", () => received(frames.slice(focusOffset), frame =>
     frame.type === "msg" && frame.message.author === "owner" && frame.message.body === focusBody
   )?.message, 10_000);
-  assert.deepEqual(focusedEcho.focus, focusedSend.focus);
-  await poll("focus consumed after acceptance", async () => /Focus\s+None/.test(await contextText(page)), 10_000);
   const focusedTurn = await poll("focused Space turn", () => received(frames.slice(focusOffset), frame =>
     frame.type === "thread_turn" && frame.turn.thread_id === home.id && frame.turn.owner_message_id === focusedEcho.id
   )?.turn, 10_000);
@@ -228,7 +224,7 @@ try {
   await page.getByRole("button", { name: "Space chat", exact: true }).click();
   await page.locator(`main[data-thread-id="${home.id}"]`).waitFor({ state: "visible" });
   const delegationBody = `Please delegate this scripted check ${crypto.randomUUID()}`;
-  await projectComposer.fill(delegationBody);
+  await spaceComposer.fill(delegationBody);
   const delegationOffset = frames.length;
   await page.getByRole("button", { name: "Send", exact: true }).click();
   const delegated = await poll("scripted atomic delegation", () => received(frames.slice(delegationOffset), frame =>
@@ -258,7 +254,7 @@ try {
   await page.locator(`main[data-thread-id="${home.id}"]`).waitFor({ state: "visible" });
   assert.equal(new URL(page.url()).pathname, `/t/${home.id}`);
   assert.equal(
-    sent(frames.slice(reloadOffset), frame => frame.type === "ensure_home_project"),
+    sent(frames.slice(reloadOffset), frame => frame.type === "create_thread" && frame.title === "Home"),
     undefined,
     "route-free reload bootstrapped Home instead of restoring the last Space",
   );
@@ -281,11 +277,11 @@ try {
     browserErrors: errors,
   });
   if (evidenceDir) {
-    await page.screenshot({ path: `${evidenceDir}/project-chats.png`, fullPage: true });
-    await writeFile(`${evidenceDir}/project-chats.json`, `${JSON.stringify(evidence, null, 2)}\n`);
+    await page.screenshot({ path: `${evidenceDir}/space-chats.png`, fullPage: true });
+    await writeFile(`${evidenceDir}/space-chats.json`, `${JSON.stringify(evidence, null, 2)}\n`);
   }
   await page.close();
-  console.log("Space landing, explicit focus, worker pairing, queued send, cancellation and delegation passed.");
+  console.log("Space landing, Task reference, worker pairing, queued send, cancellation and delegation passed.");
 } finally {
   await browser.close();
 }

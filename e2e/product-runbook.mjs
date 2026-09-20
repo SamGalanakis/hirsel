@@ -253,9 +253,7 @@ async function landOnSpaceChat(page, frames) {
   await page.locator(`main[data-thread-id="${home.id}"]`).waitFor({ state: "visible" });
   assert.equal(new URL(page.url()).pathname, `/t/${home.id}`, "route-free open did not land in a Space chat");
   const context = await composerContext(page);
-  assert.match(context, /Space\s+Home/, "the composer does not label its Space recipient");
-  assert.match(context, /Focus\s+None/, "the composer does not label Task focus");
-  assert.match(context, /Worker\s+None/, "the composer does not label worker pairing");
+  assert.match(context, /Recipient\s+Home/, "the composer does not label its Space recipient");
   return home;
 }
 

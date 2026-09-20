@@ -14,6 +14,7 @@ import { threadState } from "./store";
 import { workLabel } from "./work-summary";
 import { state } from "../store/store";
 import { anyOverlayOpen } from "../lib/focus";
+import { effectsForTurn } from "../effects/store";
 
 /** A keyed response moves to its final chronological position without replacing
  * controls. Browsers can still drop focus when moving that existing DOM node. */
@@ -54,7 +55,7 @@ export function ThreadMessage(props: { entry: ConversationEntry; history: Thread
    * claims the Agent produced something. Until the first reasoning line, pill or
    * word arrives it is one spinner on the margin where the card will open. */
   const pending = () => !owner() && !message() && turn()?.state === "running"
-    && activities(turn()?.id).length === 0 && split().reply === "" && buildTimeline(split().activity).length === 0;
+    && activities(turn()?.id).length === 0 && effectsForTurn(turn()?.id).length === 0 && split().reply === "" && buildTimeline(split().activity).length === 0;
   return <>
     <Show when={process()}>{delivery => <ProcessNote message={delivery()} origin={delivery().origin!} />}</Show>
     <Show when={props.entry.kind !== "activity" && !process()}>

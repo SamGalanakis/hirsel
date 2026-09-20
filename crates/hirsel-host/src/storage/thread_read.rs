@@ -67,14 +67,16 @@ impl Storage {
     pub(crate) async fn scoped_thread_read(
         &self,
         caller: &ThreadCaller,
+        operation_id: Option<&str>,
         reference: &ThreadRef,
         cursor: Option<ThreadReadCursor>,
         limit: u64,
     ) -> anyhow::Result<ScopedThreadDetail> {
         anyhow::ensure!((1..=100).contains(&limit), "read limit must be 1..100");
-        let c = self.conn.lock().await;
-        thread_scope::validate_caller(&c, caller)?;
-        let id = thread_scope::resolve(&c, caller.thread_id, reference)?;
+        let mut c = self.conn.lock().await;
+        let tx = c.transaction()?;
+        thread_scope::validate_caller(&tx, caller)?;
+        let id = thread_scope::resolve(&tx, caller.thread_id, reference)?;
         let start = Some(i64::MAX as u64);
         let cursor = cursor.unwrap_or(ThreadReadCursor {
             messages_before: start,
@@ -82,21 +84,26 @@ impl Storage {
             activities_before: start,
         });
         let (m, messages_before) =
-            page_ids(&c, "chat_messages", id, cursor.messages_before, limit)?;
-        let (t, turns_before) = page_ids(&c, "thread_turns", id, cursor.turns_before, limit)?;
-        let (a, activities_before) =
-            page_ids(&c, "thread_activities", id, cursor.activities_before, limit)?;
+            page_ids(&tx, "chat_messages", id, cursor.messages_before, limit)?;
+        let (t, turns_before) = page_ids(&tx, "thread_turns", id, cursor.turns_before, limit)?;
+        let (a, activities_before) = page_ids(
+            &tx,
+            "thread_activities",
+            id,
+            cursor.activities_before,
+            limit,
+        )?;
         let messages = m
             .into_iter()
-            .map(|id| chat::get_chat_message(&c, id).map_err(Into::into))
+            .map(|id| chat::get_chat_message(&tx, id).map_err(Into::into))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let turns = t
             .into_iter()
-            .map(|id| thread_activity::get(&c, id))
+            .map(|id| thread_activity::get(&tx, id))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let activities = a
             .into_iter()
-            .map(|id| thread_activity::activity(&c, id))
+            .map(|id| thread_activity::activity(&tx, id))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let next_cursor =
             if messages_before.is_none() && turns_before.is_none() && activities_before.is_none() {
@@ -108,16 +115,34 @@ impl Storage {
                     activities_before,
                 })
             };
-        Ok(ScopedThreadDetail {
+        let detail = ScopedThreadDetail {
             history_id: caller.history_id.clone(),
             reference_url: thread_scope::reference_url(&caller.history_id, id),
-            related_items: super::thread_related::list_scoped(&c, id, caller.thread_id)?,
-            thread: threads::get(&c, id)?,
-            brief: brief(&c, id)?,
+            related_items: super::thread_related::list_scoped(&tx, id, caller.thread_id)?,
+            thread: threads::get(&tx, id)?,
+            brief: brief(&tx, id)?,
             messages,
             turns,
             activities,
             next_cursor,
-        })
+        };
+        if let Some(operation_id) = operation_id {
+            super::thread_effects::record(
+                &tx,
+                caller,
+                super::thread_effects::NewEffect {
+                    operation_id,
+                    effect_index: 0,
+                    tool: "threads_read",
+                    effect: hirsel_proto::ThreadEffectKind::Read,
+                    target: hirsel_proto::ThreadEffectTarget::Thread { thread_id: id },
+                    target_turn_id: None,
+                    request_client_id: None,
+                    refusal: None,
+                },
+            )?;
+        }
+        tx.commit()?;
+        Ok(detail)
     }
 }

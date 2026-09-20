@@ -95,6 +95,12 @@ pub enum HostToClient {
         revision: u64,
         grants: Vec<crate::ThreadGrant>,
     },
+    ThreadEffectsChanged {
+        history_id: String,
+        thread_id: u64,
+        turn_id: u64,
+        effects: Vec<crate::ThreadEffect>,
+    },
     ThreadCreated {
         client_id: String,
         thread: crate::Thread,
@@ -103,6 +109,12 @@ pub enum HostToClient {
         client_id: String,
         history_id: String,
         thread_id: u64,
+    },
+    ThreadTurnCancellationApplied {
+        client_id: String,
+        history_id: String,
+        thread_id: u64,
+        turn_id: u64,
     },
     ThreadActivity {
         activity: crate::ThreadActivity,

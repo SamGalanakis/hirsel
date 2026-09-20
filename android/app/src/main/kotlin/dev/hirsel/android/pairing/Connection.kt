@@ -316,6 +316,7 @@ private fun openConnection(spec: ConnectionSpec, mainHandler: Handler): Connecti
                         conn.acceptAction(event.clientId, event.historyId, event.threadId)
                         conn.phase
                     }
+                    is LifecycleEvent.ThreadTurnCancellationApplied -> conn.phase
                     is LifecycleEvent.ProtocolError -> {
                         conn.receiveProtocolError(event.detail, event.clientId)
                         conn.phase

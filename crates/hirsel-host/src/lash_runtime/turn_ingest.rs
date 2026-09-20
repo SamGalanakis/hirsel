@@ -429,6 +429,7 @@ impl TurnIngest {
         if inserted {
             tools.publish_thread_activity(activity).await;
         }
+        tools.publish_thread_effects(turn_id).await?;
         Ok(())
     }
 

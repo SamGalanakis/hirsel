@@ -42,9 +42,9 @@ impl ScopedThreadTools {
     }
     /// Every ID is addressable. A call that lands outside this Thread's reach
     /// comes back as a readable result — `{refused:true,...}` — and leaves one
-    /// durable activity row per attempt, so the Owner and the Thread's
-    /// requester both see exactly what was tried. There is no dedupe: a turn
-    /// that probes the same Thread twice logs twice.
+    /// durable activity row per operation, so the Owner and the Thread's
+    /// requester both see exactly what was tried. Distinct probes log distinct
+    /// facts; transport replay of one operation reuses its original receipt.
     pub(crate) async fn execute(&self, name: &str, args: &Value) -> Result<Value, String> {
         match self.dispatch(name, args).await {
             Ok(value) => Ok(value),
@@ -71,7 +71,7 @@ impl ScopedThreadTools {
             "detail": refusal.to_string(),
         });
         let activity = storage
-            .record_refusal(&self.caller, &result)
+            .record_refusal(&self.caller, &self.operation_id, name, &result)
             .await
             .map_err(|e| e.to_string())?;
         self.tools.publish_thread_activity(activity).await;
@@ -221,6 +221,7 @@ impl ScopedThreadTools {
                     storage
                         .scoped_thread_read(
                             &self.caller,
+                            Some(&self.operation_id),
                             &reference(args, "thread")?,
                             cursor,
                             args.get("limit").and_then(Value::as_u64).unwrap_or(30),
@@ -301,7 +302,7 @@ impl ScopedThreadTools {
                     }
                 };
                 let accepted = storage
-                    .delegate_thread(&self.caller, &self.operation_id, &assignment, args)
+                    .delegate_thread(&self.caller, &self.operation_id, name, &assignment, args)
                     .await
                     .map_err(ToolError::from)?;
                 // Runtime admission polls the committed outbox; returning never
@@ -353,7 +354,7 @@ impl ScopedThreadTools {
             "artifacts_list" => {
                 let under = self.resolve(args, "thread").await?;
                 let artifacts = storage
-                    .scoped_artifacts(&self.caller, under)
+                    .scoped_artifacts(&self.caller, Some(&self.operation_id), under)
                     .await
                     .map_err(ToolError::from)?;
                 Ok(json!({"artifacts":artifacts}))

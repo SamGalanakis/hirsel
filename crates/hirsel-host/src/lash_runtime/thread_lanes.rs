@@ -427,6 +427,47 @@ impl ThreadRuntimeRegistry {
             LaneRuntime::Degraded => anyhow::bail!("Thread has no running turn"),
         }
     }
+    pub(super) async fn cancel_exact(
+        &self,
+        expected_history: &str,
+        thread_id: u64,
+        turn_id: u64,
+        expected_state: hirsel_proto::ThreadTurnState,
+    ) -> anyhow::Result<()> {
+        let admission = self.admission.lock().await;
+        let history = self.epoch.read().expect("runtime epoch poisoned").0.clone();
+        anyhow::ensure!(
+            history == expected_history,
+            "cancellation belongs to an old history"
+        );
+        let turn = self
+            .tools
+            .storage()
+            .cancel_exact_thread_turn(expected_history, thread_id, turn_id, expected_state)
+            .await?;
+        if turn.state == hirsel_proto::ThreadTurnState::Running {
+            if let Some(work) = self.cli.lock().await.get(&thread_id) {
+                anyhow::ensure!(
+                    work.turn_id == turn_id,
+                    "another turn is running in this Thread"
+                );
+                work.cancel.cancel();
+            } else {
+                match self.lane(thread_id).await?.as_ref() {
+                    LaneRuntime::Lash(runtime) => {
+                        runtime.cancel_owned_turn(Some(thread_id)).await?
+                    }
+                    LaneRuntime::Scripted(runtime) => runtime.cancel_turn().await?,
+                    LaneRuntime::Degraded => anyhow::bail!("Thread has no running turn"),
+                }
+            }
+        }
+        drop(admission);
+        if turn.state == hirsel_proto::ThreadTurnState::Queued {
+            self.pump_pending().await?;
+        }
+        Ok(())
+    }
     pub(super) async fn cancel_queued(
         &self,
         client_id: &str,

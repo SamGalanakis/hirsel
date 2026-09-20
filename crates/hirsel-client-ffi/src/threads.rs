@@ -198,6 +198,110 @@ impl From<core::ThreadTurn> for ThreadTurn {
         }
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum ThreadEffectKind {
+    Created,
+    SentTo,
+    Delegated,
+    Read,
+    Edited,
+    Refused,
+}
+impl From<core::ThreadEffectKind> for ThreadEffectKind {
+    fn from(value: core::ThreadEffectKind) -> Self {
+        match value {
+            core::ThreadEffectKind::Created => Self::Created,
+            core::ThreadEffectKind::SentTo => Self::SentTo,
+            core::ThreadEffectKind::Delegated => Self::Delegated,
+            core::ThreadEffectKind::Read => Self::Read,
+            core::ThreadEffectKind::Edited => Self::Edited,
+            core::ThreadEffectKind::Refused => Self::Refused,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum ThreadEffectTarget {
+    Thread { thread_id: u64 },
+    Artifact { artifact_id: u64 },
+    Root,
+}
+impl From<core::ThreadEffectTarget> for ThreadEffectTarget {
+    fn from(value: core::ThreadEffectTarget) -> Self {
+        match value {
+            core::ThreadEffectTarget::Thread { thread_id } => Self::Thread { thread_id },
+            core::ThreadEffectTarget::Artifact { artifact_id } => Self::Artifact { artifact_id },
+            core::ThreadEffectTarget::Root => Self::Root,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ThreadEffectReceipt {
+    pub id: u64,
+    pub turn_id: u64,
+    pub operation_id: String,
+    pub effect_index: u32,
+    pub tool: String,
+    pub effect: ThreadEffectKind,
+    pub target: ThreadEffectTarget,
+    pub target_turn_id: Option<u64>,
+    pub request_client_id: Option<String>,
+    pub refusal_json: Option<String>,
+    pub created_at: String,
+}
+impl From<core::ThreadEffectReceipt> for ThreadEffectReceipt {
+    fn from(value: core::ThreadEffectReceipt) -> Self {
+        Self {
+            id: value.id,
+            turn_id: value.turn_id,
+            operation_id: value.operation_id,
+            effect_index: value.effect_index,
+            tool: value.tool,
+            effect: value.effect.into(),
+            target: value.target.into(),
+            target_turn_id: value.target_turn_id,
+            request_client_id: value.request_client_id,
+            refusal_json: value
+                .refusal
+                .map(|refusal| serde_json::to_string(&refusal).expect("effect refusal serializes")),
+            created_at: value.created_at.to_rfc3339(),
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum EffectAction {
+    Open { target: ThreadEffectTarget },
+    Archive { thread_id: u64 },
+    CancelQueued { thread_id: u64, turn_id: u64 },
+    Stop { thread_id: u64, turn_id: u64 },
+}
+impl From<core::EffectAction> for EffectAction {
+    fn from(value: core::EffectAction) -> Self {
+        match value {
+            core::EffectAction::Open { target } => Self::Open {
+                target: target.into(),
+            },
+            core::EffectAction::Archive { thread_id } => Self::Archive { thread_id },
+            core::EffectAction::CancelQueued { thread_id, turn_id } => {
+                Self::CancelQueued { thread_id, turn_id }
+            }
+            core::EffectAction::Stop { thread_id, turn_id } => Self::Stop { thread_id, turn_id },
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ThreadEffect {
+    pub receipt: ThreadEffectReceipt,
+    pub actions: Vec<EffectAction>,
+}
+impl From<core::ThreadEffect> for ThreadEffect {
+    fn from(value: core::ThreadEffect) -> Self {
+        Self {
+            receipt: value.receipt.into(),
+            actions: value.actions.into_iter().map(Into::into).collect(),
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ThreadActivity {
     pub artifact_ids: Vec<u64>,

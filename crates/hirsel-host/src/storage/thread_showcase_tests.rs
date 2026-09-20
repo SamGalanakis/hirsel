@@ -159,7 +159,10 @@ async fn showcase_tool_scope_replay_reference_grant_and_removal() {
     let shared = s.scoped_artifact(&child_actor, artifact_id).await.unwrap();
     assert_eq!(shared.summary.thread_ids, vec![child]);
     assert_eq!(
-        s.scoped_artifacts(&child_actor, child).await.unwrap().len(),
+        s.scoped_artifacts(&child_actor, None, child)
+            .await
+            .unwrap()
+            .len(),
         1
     );
     assert_eq!(s.artifacts(Some(child)).await.unwrap().len(), 1);
@@ -204,6 +207,7 @@ async fn showcase_tool_scope_replay_reference_grant_and_removal() {
         .unwrap();
     assert_eq!(refused["refused"], json!(true));
     assert_eq!(refused["reason"], json!("outside_grant"));
+    child_tools.operation_id = "child-peer-probe".into();
     let refused = child_tools
         .execute(
             "threads_update",
@@ -213,6 +217,7 @@ async fn showcase_tool_scope_replay_reference_grant_and_removal() {
         .unwrap();
     assert_eq!(refused["target"], json!({"kind":"thread","thread_id":peer}));
     // An artifact outside reach refuses the same way a Thread does.
+    child_tools.operation_id = "child-artifact-probe".into();
     let refused = child_tools
         .execute("threads_update", &json!({"showcased_artifact_id":99999}))
         .await
@@ -221,6 +226,7 @@ async fn showcase_tool_scope_replay_reference_grant_and_removal() {
         refused["target"],
         json!({"kind":"artifact","artifact_id":99999})
     );
+    child_tools.operation_id = "child-clear-showcase".into();
     let cleared = child_tools
         .execute("threads_update", &json!({"showcased_artifact_id":null}))
         .await
@@ -228,7 +234,7 @@ async fn showcase_tool_scope_replay_reference_grant_and_removal() {
     assert!(cleared["thread"]["showcased_artifact_id"].is_null());
     assert!(s.scoped_artifact(&child_actor, artifact_id).await.is_err());
     assert!(
-        s.scoped_artifacts(&child_actor, child)
+        s.scoped_artifacts(&child_actor, None, child)
             .await
             .unwrap()
             .is_empty()

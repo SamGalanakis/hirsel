@@ -543,6 +543,37 @@ impl Client {
         true
     }
 
+    pub fn cancel_thread_turn(
+        &self,
+        history_id: String,
+        thread_id: u64,
+        turn_id: u64,
+        expected_state: hirsel_proto::ThreadTurnState,
+    ) -> Option<SendReceipt> {
+        let mut store = self.inner.write_store();
+        if store.history_id.as_deref() != Some(&history_id) {
+            return None;
+        }
+        let client_id = Uuid::new_v4().to_string();
+        store.track_pending(
+            client_id.clone(),
+            PendingOp::CancelThreadTurn {
+                history_id: history_id.clone(),
+                thread_id,
+                turn_id,
+            },
+        );
+        drop(store);
+        self.queue_frame(ClientToHost::CancelThreadTurn {
+            client_id: client_id.clone(),
+            history_id,
+            thread_id,
+            turn_id,
+            expected_state,
+        });
+        Some(SendReceipt { client_id })
+    }
+
     /// Register a push token once the WebSocket is online. Registrations made
     /// while disconnected remain queued until the next successful handshake.
     pub fn register_push_token(&self, platform: String, token: String) -> Result<(), ClientError> {

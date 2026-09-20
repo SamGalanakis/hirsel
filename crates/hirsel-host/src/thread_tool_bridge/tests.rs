@@ -132,6 +132,34 @@ async fn discovery_eof_does_not_revoke_actual_provider_and_receipts_do_not_dupli
     assert_eq!(refusal["refused"], true);
     assert_eq!(refusal["reason"], "outside_grant");
     assert_eq!(refusal["target"]["thread_id"], other.id);
+    let second_denied = rpc(
+        &bridge,
+        "actual",
+        "denied-again",
+        call("threads_read", json!({"thread":other.id,"limit":1})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(second_denied["result"]["isError"], false, "{second_denied}");
+    let effects = state
+        .storage
+        .thread_effects(bridge.caller.turn_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| effect.receipt.effect == hirsel_proto::ThreadEffectKind::Created)
+            .count(),
+        1
+    );
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| effect.receipt.effect == hirsel_proto::ThreadEffectKind::Refused)
+            .count(),
+        2
+    );
     let calls = bridge.tool_calls().await;
     assert_eq!(
         calls,
@@ -143,6 +171,11 @@ async fn discovery_eof_does_not_revoke_actual_provider_and_receipts_do_not_dupli
             },
             hirsel_proto::ToolCallSummary {
                 id: "actual:denied".into(),
+                name: "threads_read".into(),
+                ok: true
+            },
+            hirsel_proto::ToolCallSummary {
+                id: "actual:denied-again".into(),
                 name: "threads_read".into(),
                 ok: true
             }
@@ -166,12 +199,12 @@ async fn discovery_eof_does_not_revoke_actual_provider_and_receipts_do_not_dupli
         .collect::<Vec<_>>();
     assert_eq!(
         events.len(),
-        4,
-        "replay must not emit another tool start/done pair"
+        6,
+        "three distinct calls emit three pairs; replay emits no additional pair"
     );
     assert_eq!(
         events.iter().map(|e| e.0).collect::<Vec<_>>(),
-        vec![0, 1, 2, 3]
+        vec![0, 1, 2, 3, 4, 5]
     );
     for pair in events.chunks(2) {
         let (

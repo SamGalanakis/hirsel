@@ -249,6 +249,10 @@ async fn bridge_mcp_telemetry_wins_over_duplicate_cli_tool_events() {
             .count(),
         1
     );
+    assert!(
+        detail.effects.is_empty(),
+        "duplicate CLI telemetry must not fabricate an effect receipt"
+    );
 }
 #[async_trait::async_trait]
 impl SubagentDriver for TerminalPeer {

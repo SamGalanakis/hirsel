@@ -54,6 +54,7 @@ struct Projection {
     timeline: Vec<Value>,
     tool_activities: Vec<Value>,
     tool_calls: Vec<ToolCallSummary>,
+    effect_count: usize,
     state: hirsel_proto::ThreadTurnState,
     broadcasts: Vec<Value>,
 }
@@ -427,6 +428,7 @@ async fn project(backend: Backend, scenario: Scenario) -> Projection {
         timeline,
         tool_activities,
         tool_calls,
+        effect_count: detail.effects.len(),
         state: turn.state,
         broadcasts: normalized_broadcasts(&log, caller.thread_id, caller.turn_id),
     }
@@ -467,6 +469,10 @@ async fn every_executor_matches_the_shared_turn_contract() {
                 );
                 assert_eq!(expected.tool_activities.len(), 2);
                 assert_eq!(expected.tool_calls.len(), 2);
+                assert_eq!(
+                    expected.effect_count, 0,
+                    "telemetry must not fabricate effect receipts"
+                );
                 assert!(expected.tool_calls[0].ok);
                 assert!(!expected.tool_calls[1].ok);
             }

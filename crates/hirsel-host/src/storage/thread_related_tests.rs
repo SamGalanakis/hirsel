@@ -36,7 +36,7 @@ async fn related_urls_deduplicate_preserve_destinations_and_do_not_create_work()
         format!("/t/{}?history={}", c.thread_id, c.history_id)
     );
     let read = s
-        .scoped_thread_read(&c, &ThreadRef::default(), None, 1)
+        .scoped_thread_read(&c, Some("read-related-1"), &ThreadRef::default(), None, 1)
         .await
         .unwrap();
     assert_eq!(read.reference_url, context.reference_url);
@@ -86,7 +86,7 @@ async fn related_urls_deduplicate_preserve_destinations_and_do_not_create_work()
         after.related_items
     );
     assert_eq!(
-        s.scoped_thread_read(&c, &ThreadRef::default(), None, 1)
+        s.scoped_thread_read(&c, Some("read-related-2"), &ThreadRef::default(), None, 1)
             .await
             .unwrap()
             .related_items,
@@ -273,7 +273,7 @@ async fn related_thread_targets_are_typed_scoped_and_never_grant_foreign_context
     );
     assert!(s.thread_context(&c).await.unwrap().related_items.is_empty());
     assert!(
-        s.scoped_thread_read(&c, &ThreadRef::default(), None, 1)
+        s.scoped_thread_read(&c, Some("read-related-3"), &ThreadRef::default(), None, 1)
             .await
             .unwrap()
             .related_items
@@ -339,9 +339,15 @@ async fn related_thread_targets_are_typed_scoped_and_never_grant_foreign_context
         .is_err()
     );
     assert!(
-        s.scoped_thread_read(&c, &ThreadRef::Id(peer.thread_id), None, 1)
-            .await
-            .is_err()
+        s.scoped_thread_read(
+            &c,
+            Some("read-related-peer"),
+            &ThreadRef::Id(peer.thread_id),
+            None,
+            1
+        )
+        .await
+        .is_err()
     );
     let (_, public) = s
         .related_publication_snapshot(&c.history_id, c.thread_id)

@@ -585,6 +585,26 @@ where
                 .cancel_thread_turn(&history_id, thread_id)
                 .await?;
         }
+        ClientToHost::CancelThreadTurn {
+            client_id,
+            history_id,
+            thread_id,
+            turn_id,
+            expected_state,
+        } => {
+            state
+                .agent
+                .cancel_exact_thread_turn(&history_id, thread_id, turn_id, expected_state)
+                .await?;
+            channel
+                .send(&HostToClient::ThreadTurnCancellationApplied {
+                    client_id,
+                    history_id,
+                    thread_id,
+                    turn_id,
+                })
+                .await?;
+        }
         ClientToHost::CancelQueued { client_id } => {
             state.cancel_queued_message(&client_id).await?;
         }

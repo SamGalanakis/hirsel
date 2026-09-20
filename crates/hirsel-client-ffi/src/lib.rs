@@ -158,6 +158,7 @@ pub struct ClientSnapshot {
     pub threads: Vec<Thread>,
     pub turns: Vec<ThreadTurn>,
     pub activities: Vec<ThreadActivity>,
+    pub effects: Vec<ThreadEffect>,
     pub briefs: Vec<ThreadBrief>,
     pub related_items: Vec<ThreadRelatedItem>,
     pub streams: Vec<ThreadStream>,
@@ -177,6 +178,7 @@ impl From<core::ClientSnapshot> for ClientSnapshot {
             threads: value.threads.into_iter().map(Into::into).collect(),
             turns: value.turns.into_iter().map(Into::into).collect(),
             activities: value.activities.into_iter().map(Into::into).collect(),
+            effects: value.effects.into_iter().map(Into::into).collect(),
             briefs: value.briefs.into_iter().map(Into::into).collect(),
             related_items: value.related_items.into_iter().map(Into::into).collect(),
             streams: value.streams.into_iter().map(Into::into).collect(),
@@ -210,6 +212,12 @@ pub enum LifecycleEvent {
         history_id: String,
         thread_id: u64,
     },
+    ThreadTurnCancellationApplied {
+        client_id: String,
+        history_id: String,
+        thread_id: u64,
+        turn_id: u64,
+    },
     ThreadOpened {
         client_id: String,
         thread_id: u64,
@@ -238,6 +246,17 @@ impl From<core::LifecycleEvent> for LifecycleEvent {
                 client_id,
                 history_id,
                 thread_id,
+            },
+            core::LifecycleEvent::ThreadTurnCancellationApplied {
+                client_id,
+                history_id,
+                thread_id,
+                turn_id,
+            } => Self::ThreadTurnCancellationApplied {
+                client_id,
+                history_id,
+                thread_id,
+                turn_id,
             },
             core::LifecycleEvent::ThreadOpened {
                 client_id,
@@ -513,6 +532,32 @@ impl Client {
 
     pub fn cancel_turn(&self, history_id: String, thread_id: u64) -> bool {
         self.core.cancel_turn(history_id, thread_id)
+    }
+
+    pub fn cancel_thread_turn(
+        &self,
+        history_id: String,
+        thread_id: u64,
+        turn_id: u64,
+        expected_state: ThreadTurnState,
+    ) -> Option<SendReceipt> {
+        self.core
+            .cancel_thread_turn(
+                history_id,
+                thread_id,
+                turn_id,
+                match expected_state {
+                    ThreadTurnState::Queued => core::ThreadTurnState::Queued,
+                    ThreadTurnState::Running => core::ThreadTurnState::Running,
+                    ThreadTurnState::Completed => core::ThreadTurnState::Completed,
+                    ThreadTurnState::Failed => core::ThreadTurnState::Failed,
+                    ThreadTurnState::Cancelled => core::ThreadTurnState::Cancelled,
+                    ThreadTurnState::Interrupted => core::ThreadTurnState::Interrupted,
+                },
+            )
+            .map(|receipt| SendReceipt {
+                client_id: receipt.client_id,
+            })
     }
 
     pub fn register_push_token(&self, platform: String, token: String) -> Result<(), ClientError> {

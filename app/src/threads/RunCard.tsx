@@ -12,6 +12,7 @@ import type { TimelineEvent } from "../store/types";
 import { ownerFacingActivity } from "./conversation";
 import { hasTrace, runOrigin, runOriginLabel, runOutcome, runOutcomeLabel, turnArtifactIds, type RunOutcome } from "./run-card";
 import { setTurnExpanded, threadState } from "./store";
+import { EffectPills } from "../effects/EffectPills";
 import type { ThreadActivity, ThreadTurn } from "./types";
 import { failureReason, mergePersistedToolCalls, toolSummary, workDuration, workLabel } from "./work-summary";
 
@@ -124,6 +125,7 @@ export function RunCard(props: { turn?: ThreadTurn; message?: ChatMessage; trigg
         explanation, provenance. */}
     <Show when={body()}><Markdown>{body()}</Markdown></Show>
     <For each={artifacts()}>{id => <ArtifactCard id={id} />}</For>
+    <Show when={props.turn}>{turn => <EffectPills turnId={turn().id} />}</Show>
     <Show when={failed()}><div class="max-w-prose space-y-1 pt-1 text-sm">
       <p class="break-words text-destructive" data-slot="work-failure">{failureReason(props.activities) ?? "This run ended before it could finish."}</p>
       <p class="text-meta text-muted-foreground" data-slot="work-recovery">Send a message to continue.</p>

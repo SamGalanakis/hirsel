@@ -194,6 +194,27 @@ CREATE TABLE thread_process_authorities (
 CREATE TABLE thread_mutation_receipts (
     turn_id INTEGER NOT NULL REFERENCES thread_turns(id),operation_id TEXT NOT NULL,payload TEXT NOT NULL,result TEXT NOT NULL,
     PRIMARY KEY(turn_id,operation_id));
+CREATE TABLE thread_effect_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    turn_id INTEGER NOT NULL REFERENCES thread_turns(id),
+    operation_id TEXT NOT NULL,
+    effect_index INTEGER NOT NULL CHECK(effect_index >= 0),
+    tool TEXT NOT NULL,
+    effect TEXT NOT NULL CHECK(effect IN ('created','sent_to','delegated','read','edited','refused')),
+    target_json TEXT NOT NULL CHECK(
+        json_type(target_json)='object' AND
+        ((json_extract(target_json,'$.kind')='thread' AND json_type(target_json,'$.thread_id')='integer' AND json_extract(target_json,'$.thread_id')>0 AND json_remove(target_json,'$.kind','$.thread_id')='{}') OR
+         (json_extract(target_json,'$.kind')='artifact' AND json_type(target_json,'$.artifact_id')='integer' AND json_extract(target_json,'$.artifact_id')>0 AND json_remove(target_json,'$.kind','$.artifact_id')='{}') OR
+         (json_extract(target_json,'$.kind')='root' AND json_remove(target_json,'$.kind')='{}'))
+    ),
+    target_turn_id INTEGER REFERENCES thread_turns(id),
+    request_client_id TEXT,
+    refusal_json TEXT CHECK(refusal_json IS NULL OR json_type(refusal_json)='object'),
+    created_at TEXT NOT NULL,
+    CHECK((effect='refused')=(refusal_json IS NOT NULL)),
+    UNIQUE(turn_id,operation_id,effect_index)
+);
+CREATE INDEX thread_effect_receipts_target_turn ON thread_effect_receipts(target_turn_id);
 CREATE TABLE thread_execution_preferences (thread_id INTEGER PRIMARY KEY REFERENCES threads(id),config TEXT NOT NULL);
 CREATE TABLE thread_turn_execution (turn_id INTEGER PRIMARY KEY REFERENCES thread_turns(id),config TEXT NOT NULL);
 CREATE TABLE plugin_thread_kv (

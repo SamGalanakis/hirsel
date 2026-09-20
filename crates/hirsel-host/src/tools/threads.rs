@@ -4,6 +4,30 @@ use hirsel_proto::{ChatAuthor, ToolCallSummary};
 use hirsel_proto::{ChatMessage, HostToClient, Thread, ThreadActivity, ThreadTurn};
 
 impl ToolSuite {
+    pub(crate) async fn publish_thread_effects(&self, turn_id: u64) -> anyhow::Result<()> {
+        let (history_id, thread_id, effects) =
+            self.storage.thread_effect_publication(turn_id).await?;
+        self.broadcast(HostToClient::ThreadEffectsChanged {
+            history_id,
+            thread_id,
+            turn_id,
+            effects,
+        });
+        Ok(())
+    }
+
+    async fn refresh_effects_targeting(&self, thread_id: u64) {
+        match self.storage.effect_source_turns_for_target(thread_id).await {
+            Ok(turn_ids) => {
+                for turn_id in turn_ids {
+                    if let Err(error) = self.publish_thread_effects(turn_id).await {
+                        tracing::warn!(turn_id, %error, "failed to refresh Thread effect actions");
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(thread_id, %error, "failed to find Thread effect actions"),
+        }
+    }
     pub(crate) async fn publish_thread_related(
         &self,
         client_id: Option<String>,
@@ -75,6 +99,7 @@ impl ToolSuite {
                 });
                 drop(guard);
                 self.pushes.enqueue_thread(&publication).await;
+                self.refresh_effects_targeting(thread_id).await;
             }
             Err(error) => tracing::warn!(thread_id, %error, "cannot refresh Thread summary"),
         }
@@ -97,6 +122,7 @@ impl ToolSuite {
                 });
                 drop(guard);
                 self.pushes.enqueue_thread(&publication).await;
+                self.refresh_effects_targeting(thread_id).await;
             }
             Err(error) => tracing::warn!(thread_id, %error, "cannot publish stale Thread summary"),
         }

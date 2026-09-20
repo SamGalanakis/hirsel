@@ -501,6 +501,23 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                 grants,
                 client_id: _,
             } => store.apply_thread_grants(&history_id, thread_id, revision, grants),
+            HostToClient::ThreadEffectsChanged {
+                history_id,
+                thread_id,
+                turn_id,
+                effects,
+            } => {
+                if store.history_id.as_deref() != Some(&history_id)
+                    || !store
+                        .turns
+                        .iter()
+                        .any(|turn| turn.id == turn_id && turn.thread_id == thread_id)
+                {
+                    return;
+                }
+                store.replace_turn_effects(turn_id, effects);
+                true
+            }
             HostToClient::ThreadRelatedChanged {
                 history_id,
                 thread_id,
@@ -574,6 +591,26 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
                     client_id,
                     history_id,
                     thread_id,
+                });
+                false
+            }
+            HostToClient::ThreadTurnCancellationApplied {
+                client_id,
+                history_id,
+                thread_id,
+                turn_id,
+            } => {
+                if !matches!(store.pending_ops.get(&client_id), Some(PendingOp::CancelThreadTurn { history_id: pending_history, thread_id: pending_thread, turn_id: pending_turn }) if pending_history == &history_id && *pending_thread == thread_id && *pending_turn == turn_id)
+                {
+                    return;
+                }
+                store.complete_pending(&client_id);
+                drop(store);
+                client.notify_lifecycle(LifecycleEvent::ThreadTurnCancellationApplied {
+                    client_id,
+                    history_id,
+                    thread_id,
+                    turn_id,
                 });
                 false
             }

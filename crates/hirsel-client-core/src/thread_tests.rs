@@ -1,7 +1,8 @@
 use crate::store::{LocalStore, PendingOp, PendingSend};
 use chrono::Utc;
 use hirsel_proto::{
-    ChatAuthor, ChatMessage, ClientToHost, Thread, ThreadAttention, ThreadDetail, ThreadKind,
+    ChatAuthor, ChatMessage, ClientToHost, EffectAction, Thread, ThreadAttention, ThreadDetail,
+    ThreadEffect, ThreadEffectKind, ThreadEffectReceipt, ThreadEffectTarget, ThreadKind,
     ThreadTurn, ThreadTurnState, TurnEventKind,
 };
 
@@ -55,6 +56,89 @@ fn pending(thread_id: u64, client_id: &str) -> PendingSend {
     request.mentions = vec![9];
     request.artifact_ids = vec![44];
     PendingSend::new(request, client_id.into())
+}
+fn turn(id: u64, thread_id: u64, state: ThreadTurnState) -> ThreadTurn {
+    ThreadTurn {
+        requester_thread_id: None,
+        requester_turn_id: None,
+        id,
+        thread_id,
+        owner_message_id: None,
+        agent_message_id: None,
+        state,
+        accepted_at: Utc::now(),
+        started_at: (state != ThreadTurnState::Queued).then(Utc::now),
+        finished_at: state.is_terminal().then(Utc::now),
+    }
+}
+fn effect(
+    id: u64,
+    turn_id: u64,
+    target_thread_id: u64,
+    actions: Vec<EffectAction>,
+) -> ThreadEffect {
+    ThreadEffect {
+        receipt: ThreadEffectReceipt {
+            id,
+            turn_id,
+            operation_id: format!("effect-{id}"),
+            effect_index: 0,
+            tool: "threads_read".into(),
+            effect: ThreadEffectKind::Read,
+            target: ThreadEffectTarget::Thread {
+                thread_id: target_thread_id,
+            },
+            target_turn_id: None,
+            request_client_id: None,
+            refusal: None,
+            created_at: Utc::now(),
+        },
+        actions,
+    }
+}
+
+#[test]
+fn effect_live_snapshot_pagination_and_history_reset_keep_exact_ownership() {
+    let mut store = LocalStore::default();
+    store.apply_hello_ok("A".into(), vec![thread(1)], vec![], "test".into());
+    store.upsert_turn(turn(10, 5, ThreadTurnState::Running));
+    store.upsert_turn(turn(11, 5, ThreadTurnState::Completed));
+    let live = effect(1, 10, 9, vec![EffectAction::Archive { thread_id: 9 }]);
+    let unrelated = effect(2, 11, 8, vec![]);
+    store.replace_turn_effects(10, vec![live.clone()]);
+    store.replace_turn_effects(11, vec![unrelated.clone()]);
+
+    store.track_pending("page".into(), PendingOp::OpenThread { thread_id: 5 });
+    let mut detail = ThreadDetail {
+        related_items: vec![],
+        grants: vec![],
+        brief: hirsel_proto::ThreadBrief {
+            text: String::new(),
+            artifact_ids: vec![],
+        },
+        thread: thread(1),
+        messages: vec![],
+        turns: vec![turn(10, 5, ThreadTurnState::Running)],
+        effects: vec![effect(1, 10, 9, vec![])],
+        turn_timelines: vec![hirsel_proto::ThreadTurnTimeline {
+            turn_id: 10,
+            events: vec![],
+        }],
+        activities: vec![],
+        has_more: true,
+    };
+    assert!(store.apply_detail("page", detail.clone()));
+    assert_eq!(store.effects, vec![live.clone(), unrelated]);
+
+    store.replace_turn_effects(10, vec![]);
+    assert!(store.effects.iter().all(|row| row.receipt.turn_id != 10));
+    detail.effects = vec![];
+    store.track_pending("reload".into(), PendingOp::OpenThread { thread_id: 5 });
+    assert!(store.apply_detail("reload", detail));
+    assert!(store.effects.iter().all(|row| row.receipt.turn_id != 10));
+
+    store.apply_hello_ok("B".into(), vec![thread(1)], vec![], "test".into());
+    assert!(store.effects.is_empty());
 }
 #[test]
 fn ordinary_thread_survives_snapshot_read_and_stale_upsert() {
@@ -178,6 +262,7 @@ fn open_requires_matching_request_and_message_ownership() {
         thread: thread(1),
         messages: vec![message(1, 5, None), message(2, 9, None)],
         turns: vec![],
+        effects: vec![],
         turn_timelines: vec![],
         activities: vec![],
         has_more: false,
@@ -246,6 +331,7 @@ fn removed_message_stays_removed_across_late_echo_snapshot_and_open_history() {
             thread: thread(1),
             messages: vec![removed],
             turns: vec![],
+            effects: vec![],
             turn_timelines: vec![],
             activities: vec![],
             has_more: false,
@@ -396,6 +482,7 @@ fn current_brief_is_per_thread_and_survives_paginated_history() {
                 },
                 messages: vec![],
                 turns: vec![],
+                effects: vec![],
                 turn_timelines: vec![],
                 activities: vec![],
                 has_more: true,
@@ -462,6 +549,7 @@ fn link_detail(revision: u64, links: Vec<hirsel_proto::ThreadRelatedItem>) -> Th
         grants: vec![],
         messages: vec![],
         turns: vec![],
+        effects: vec![],
         turn_timelines: vec![],
         activities: vec![],
         has_more: true,

@@ -601,5 +601,6 @@ fn identity(c: &Connection, thread: &Thread) -> anyhow::Result<ThreadIdentity> {
         description: thread.description.clone(),
         ancestors,
         reach: super::thread_grants::reach_summary(c, thread.id)?,
+        tool_profile: super::ToolProfile::for_thread(c, thread.id)?,
     })
 }

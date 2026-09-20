@@ -21,6 +21,8 @@ pub struct OwnerTurn {
     pub report_triggered: bool,
     pub client_id: String,
     pub body: String,
+    #[serde(default)]
+    pub focus: Option<hirsel_proto::TaskFocus>,
     pub anchor: Option<u64>,
     pub attachments: Vec<Blob>,
     pub mode: SendMode,
@@ -334,6 +336,9 @@ pub(crate) struct LashAgentRuntime {
     /// The coding operations' working directory for this lane, shared with the
     /// tool provider so an admission can re-root it.
     pub(super) coding: Arc<NativeCodingBinding>,
+    /// Shared with the tool provider so a kind conversion changes both the
+    /// advertised and executable surface before the next accepted turn.
+    pub(super) tool_profile: Arc<std::sync::RwLock<crate::storage::ToolProfile>>,
     /// Kept so a provider rebind can build a handle for another roster instance
     /// without reaching back through the registry.
     pub(super) config: RuntimeConfig,

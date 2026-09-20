@@ -395,6 +395,7 @@ async fn owner_turn_input_notes_all_attachments_and_references_images() {
         report_triggered: false,
         client_id: "client-1".to_string(),
         body: "see attached".to_string(),
+        focus: None,
         anchor: None,
         attachments: vec![text.blob.clone(), image.blob.clone()],
 
@@ -518,6 +519,7 @@ async fn resident_agent_retries_bare_prose_and_projects_finished_chat_text() {
         report_triggered: false,
         client_id: "resident-finish".into(),
         body: "Say hello".into(),
+        focus: None,
         anchor: None,
         attachments: Vec::new(),
         mode: SendMode::Send,
@@ -788,7 +790,10 @@ fn tool_prose_never_names_a_dialect() {
         })
         .collect::<Vec<_>>();
 
-    for definition in hirsel_tool_definitions(&crate::subagent_models::registry_catalog()) {
+    for definition in hirsel_tool_definitions_for_profile(
+        crate::storage::ToolProfile::Worker,
+        &crate::subagent_models::registry_catalog(),
+    ) {
         let mut prose = vec![definition.description().to_string()];
         collect_prose(definition.contract.input_schema.canonical(), &mut prose);
         collect_prose(definition.contract.output_schema.canonical(), &mut prose);
@@ -923,10 +928,13 @@ async fn every_executor_result_matches_its_declared_output_schema() {
     // directory, so their results are exercised by the coding-tool tests rather
     // than by this static executor table; every other advertised tool must
     // appear here.
-    let definitions: Vec<_> = hirsel_tool_definitions(&crate::subagent_models::registry_catalog())
-        .into_iter()
-        .filter(|definition| !crate::native_coding_tools::is_coding_tool(definition.name()))
-        .collect();
+    let definitions: Vec<_> = hirsel_tool_definitions_for_profile(
+        crate::storage::ToolProfile::Worker,
+        &crate::subagent_models::registry_catalog(),
+    )
+    .into_iter()
+    .filter(|definition| !crate::native_coding_tools::is_coding_tool(definition.name()))
+    .collect();
     assert_eq!(results.len(), definitions.len());
     for definition in definitions {
         let examples = results
@@ -1098,6 +1106,178 @@ impl hirsel_plugin_api::Plugin for CatalogTestPlugin {
     }
 }
 
+/// One conservative execution tool and one explicitly inspection-only tool,
+/// so the project-chat profile can prove both sides of the plugin boundary.
+struct ProjectProfileTestPlugin;
+
+#[hirsel_plugin_api::async_trait]
+impl hirsel_plugin_api::Plugin for ProjectProfileTestPlugin {
+    fn id(&self) -> &'static str {
+        "project-profile-test"
+    }
+
+    fn label(&self) -> &'static str {
+        "Project profile test"
+    }
+
+    fn tools(&self) -> Vec<hirsel_plugin_api::PluginTool> {
+        vec![
+            hirsel_plugin_api::PluginTool::new(
+                "execute",
+                "Perform test work.",
+                serde_json::json!({ "type": "object", "properties": {} }),
+                |_ctx, _args| async move { Ok(serde_json::json!({ "executed": true })) },
+            ),
+            hirsel_plugin_api::PluginTool::new(
+                "inspect",
+                "Inspect test state.",
+                serde_json::json!({ "type": "object", "properties": {} }),
+                |_ctx, _args| async move { Ok(serde_json::json!({ "inspected": true })) },
+            )
+            .inspection(),
+        ]
+    }
+}
+
+#[tokio::test]
+async fn project_chat_profile_excludes_execution_from_advertisement_and_dispatch() {
+    let (executor, storage, _broadcast_log, _dir) = test_event_executor().await;
+    let (broadcaster, _keepalive) = broadcast::channel(8);
+    let _host = crate::plugins::PluginHost::start(
+        vec![hirsel_plugin_api::PluginRegistration::new(
+            Box::new(ProjectProfileTestPlugin),
+            "1.0.0",
+            "plugins/project-profile-test",
+        )],
+        storage.clone(),
+        executor.tools.clone(),
+        broadcaster,
+        BroadcastLog::default(),
+        crate::plugins::SupervisorConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let (project, _) = storage
+        .create_thread(
+            "profile-project",
+            "Profile project",
+            "",
+            None,
+            hirsel_proto::ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Space,
+            None,
+        )
+        .await
+        .unwrap();
+    storage
+        .set_native_execution_default(&crate::storage::ThreadExecution::Native {
+            tool_profile: crate::storage::ToolProfile::Worker,
+            provider_id: "profile-test".into(),
+            model: provider_rebind_test_model("profile-test-model"),
+            cwd: std::env::current_dir().unwrap().canonicalize().unwrap(),
+        })
+        .await
+        .unwrap();
+    let turn = storage.start_thread_turn(project.id, None).await.unwrap();
+    let history = storage.history_id().await.unwrap();
+    let caller = storage
+        .bind_thread_execution(&history, "profile-session", "profile-execution", turn.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.turn_tool_profile(turn.id).await.unwrap(),
+        crate::storage::ToolProfile::ProjectChat
+    );
+
+    let tools = executor.tools.clone();
+    let provider = HirselToolProvider {
+        executor,
+        coding: Arc::new(NativeCodingBinding::new(
+            std::env::current_dir().unwrap().canonicalize().unwrap(),
+        )),
+        profile: Arc::new(std::sync::RwLock::new(
+            crate::storage::ToolProfile::ProjectChat,
+        )),
+    };
+    let advertised = provider
+        .tool_manifests()
+        .into_iter()
+        .map(|manifest| manifest.name)
+        .collect::<Vec<_>>();
+    for denied in [
+        "read",
+        "edit",
+        "write",
+        "exec_command",
+        "shell_run",
+        "subagents_spawn",
+        "plugin__project_profile_test__execute",
+    ] {
+        assert!(
+            !advertised.iter().any(|name| name == denied),
+            "project chat advertised {denied}: {advertised:?}"
+        );
+    }
+    for retained in [
+        "threads_delegate",
+        "threads_read",
+        "artifacts_create",
+        "views_show",
+        "plugin__project_profile_test__inspect",
+    ] {
+        assert!(
+            advertised.iter().any(|name| name == retained),
+            "project chat omitted {retained}: {advertised:?}"
+        );
+    }
+
+    let worker_catalog = scoped_mcp_catalog(&tools, crate::storage::ToolProfile::Worker);
+    for retained in [
+        "read",
+        "edit",
+        "write",
+        "exec_command",
+        "shell_run",
+        "plugin__project_profile_test__execute",
+    ] {
+        assert!(
+            worker_catalog
+                .iter()
+                .any(|definition| definition["name"] == retained),
+            "worker omitted {retained}"
+        );
+    }
+
+    let scoped = ScopedThreadTools {
+        tools,
+        caller,
+        operation_id: "profile-dispatch".into(),
+    };
+    for denied in [
+        "read",
+        "edit",
+        "write",
+        "exec_command",
+        "shell_run",
+        "subagents_spawn",
+        "plugin__project_profile_test__execute",
+    ] {
+        let error = scoped.execute(denied, &json!({})).await.unwrap_err();
+        assert!(
+            error.contains("unavailable to a project chat"),
+            "unexpected {denied} denial: {error}"
+        );
+    }
+    assert_eq!(
+        scoped
+            .execute("plugin__project_profile_test__inspect", &json!({}))
+            .await
+            .unwrap(),
+        json!({ "inspected": true })
+    );
+}
+
 /// Plugin tools are not a parallel catalog: they are ordinary definitions on
 /// the same provider, so they resolve a contract, appear in the manifest list,
 /// and feed the tool-surface fingerprint exactly like a built-in does.
@@ -1126,6 +1306,7 @@ async fn plugin_tools_join_the_real_agent_tool_catalog() {
         coding: Arc::new(NativeCodingBinding::new(
             std::env::current_dir().unwrap().canonicalize().unwrap(),
         )),
+        profile: Arc::new(std::sync::RwLock::new(crate::storage::ToolProfile::Worker)),
     };
     assert!(
         provider
@@ -1317,7 +1498,10 @@ async fn session_surface_bootstrap_stores_rotates_emits_and_seeds() {
 
 #[test]
 fn view_tool_contract_is_canvas_only_without_a_placement_dimension() {
-    let definitions = hirsel_tool_definitions(&crate::subagent_models::registry_catalog());
+    let definitions = hirsel_tool_definitions_for_profile(
+        crate::storage::ToolProfile::Worker,
+        &crate::subagent_models::registry_catalog(),
+    );
     let show = definitions
         .iter()
         .find(|d| d.name() == "views_show")

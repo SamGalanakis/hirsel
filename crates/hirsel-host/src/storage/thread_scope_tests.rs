@@ -29,6 +29,143 @@ async fn bound_caller(s: &Storage, turn_id: u64) -> ThreadCaller {
 }
 
 #[tokio::test]
+async fn task_focus_is_replayed_idempotently_and_never_widens_reach() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let history = storage.history_id().await.unwrap();
+    let (project, _) = storage
+        .create_thread(
+            "focus-project",
+            "Project",
+            "",
+            None,
+            ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Space,
+            None,
+        )
+        .await
+        .unwrap();
+    let focused = thread(&storage, "focused-task", Some(project.id)).await;
+    let outside = thread(&storage, "outside-task", None).await;
+    let focus = hirsel_proto::TaskFocus {
+        task_thread_id: focused,
+        snapshot: json!({"title":"Focused task","brief":"Do the bounded work","instrument_summary":"Ready"}),
+    };
+    let request = json!({"mode":"send","body":"Discuss this","focus":focus});
+    let (message, inserted) = storage
+        .append_thread_owner_request_with_focus(
+            &history,
+            project.id,
+            "focus-message",
+            "Discuss this".into(),
+            &[],
+            &[],
+            &[],
+            Some(&focus),
+            &request,
+        )
+        .await
+        .unwrap();
+    assert!(inserted);
+    assert_eq!(message.focus, Some(focus.clone()));
+    let (retried, inserted) = storage
+        .append_thread_owner_request_with_focus(
+            &history,
+            project.id,
+            "focus-message",
+            "Discuss this".into(),
+            &[],
+            &[],
+            &[],
+            Some(&focus),
+            &request,
+        )
+        .await
+        .unwrap();
+    assert!(!inserted);
+    assert_eq!(retried, message);
+
+    let changed = hirsel_proto::TaskFocus {
+        snapshot: json!({"title":"Changed"}),
+        ..focus.clone()
+    };
+    assert!(
+        storage
+            .append_thread_owner_request_with_focus(
+                &history,
+                project.id,
+                "focus-message",
+                "Discuss this".into(),
+                &[],
+                &[],
+                &[],
+                Some(&changed),
+                &request,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("client_id focus changed")
+    );
+
+    let outside_focus = hirsel_proto::TaskFocus {
+        task_thread_id: outside,
+        snapshot: json!({"title":"Outside","brief":"Outside reach","instrument_summary":null}),
+    };
+    let error = storage
+        .append_thread_owner_request_with_focus(
+            &history,
+            project.id,
+            "outside-focus",
+            "Discuss this".into(),
+            &[],
+            &[],
+            &[],
+            Some(&outside_focus),
+            &json!({}),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.downcast_ref::<OutsideGrant>().is_some(),
+        "focus refusal remains the typed reach refusal: {error:#}"
+    );
+    let worker_error = storage
+        .append_thread_owner_request_with_focus(
+            &history,
+            focused,
+            "worker-focus",
+            "This must stay an ordinary worker message".into(),
+            &[],
+            &[],
+            &[],
+            Some(&focus),
+            &json!({}),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        worker_error
+            .to_string()
+            .contains("only accepted by a project chat"),
+        "worker accepted project-chat focus: {worker_error:#}"
+    );
+    assert_eq!(
+        storage
+            .conn
+            .lock()
+            .await
+            .query_row(
+                "SELECT count(*) FROM client_messages WHERE client_id='outside-focus'",
+                [],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn durable_process_authority_survives_the_registering_turn() {
     let dir = tempfile::tempdir().unwrap();
     let s = Storage::open(dir.path()).await.unwrap();
@@ -814,6 +951,7 @@ async fn direct_owner_native_input_accepts_the_full_thread_surface() {
     let storage = Storage::open(dir.path()).await.unwrap();
     let task = thread(&storage, "native-owner-policy", None).await;
     let execution = ThreadExecution::Native {
+        tool_profile: ToolProfile::Worker,
         provider_id: "openrouter".into(),
         model: lash::ModelSpec::builder("vendor/owner-policy-model")
             .variant(lash::provider::ReasoningSelection::ProviderDefault)

@@ -22,6 +22,7 @@ import { toast } from "../../lib/toast";
 import { THREAD_REF_PICKER_ID, ThreadRefPicker } from "./ThreadRefPicker";
 import { createThreadRefPicker } from "./useThreadRefPicker";
 import { Button } from "../ui/button";
+import { SectionLabel } from "../ui/section-label";
 import { Textarea } from "../ui/textarea";
 import { useTextInput } from "./useTextInput";
 import {
@@ -81,6 +82,11 @@ interface Props {
   /** The citable field: every resting Thread, in queue order. The `#` picker
    * offers these and the send resolves refs against them. */
   threads?: RefTarget[];
+  context?: {
+    projectRecipient: string;
+    taskFocus: string | null;
+    workerPairing: string | null;
+  };
 }
 
 /** Composer anchored at the bottom of the thread world. CLI-grade keyboard map on fine-pointer
@@ -272,6 +278,12 @@ export function Composer(props: Props) {
     >
       <div class="w-full">
 
+      <div class="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/50 px-2 py-1" data-slot="composer-context">
+        <span class="inline-flex min-w-0 items-baseline gap-1"><SectionLabel as="span">Project</SectionLabel><span class="max-w-40 truncate text-xs text-foreground">{props.context?.projectRecipient ?? "Hirsel"}</span></span>
+        <span class="inline-flex min-w-0 items-baseline gap-1"><SectionLabel as="span">Focus</SectionLabel><span class="max-w-40 truncate text-xs text-foreground">{props.context?.taskFocus ?? "None"}</span></span>
+        <span class="inline-flex min-w-0 items-baseline gap-1"><SectionLabel as="span">Worker</SectionLabel><span class="max-w-40 truncate text-xs text-foreground">{props.context?.workerPairing ?? "None"}</span></span>
+      </div>
+
       <Show when={props.artifactContext}>{artifact => <div data-slot="composer-artifact-context" class="flex min-h-11 items-center gap-2 border-b border-border/50 text-xs text-muted-foreground"><FileText class="ml-2 size-4 shrink-0" /><span class="min-w-0 flex-1 truncate" title={artifact().title}>About {artifact().title}</span><button type="button" class="inline-flex size-11 shrink-0 items-center justify-center rounded-lg hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={`Remove artifact context: ${artifact().title}`} onClick={() => props.onRemoveArtifactContext?.()}><X class="size-4" /></button></div>}</Show>
       {/* Staged attachment chips. */}
       <Show when={props.attachments.files().length > 0}>
@@ -429,17 +441,17 @@ export function Composer(props: Props) {
             alongside it while the Agent is working. */}
         <Button
           type="button"
-          size="icon-sm"
-          class="size-11 shrink-0 rounded-full"
-          onPointerDown={onSendPointerDown}
-          onPointerUp={onSendPointerUp}
-          onPointerLeave={onSendPointerUp}
-          onClick={onSendClick}
+          size={props.thinking ? "sm" : "icon-sm"}
+          class={props.thinking ? "min-h-11 shrink-0 rounded-full px-3" : "size-11 shrink-0 rounded-full"}
+          onPointerDown={() => { if (!props.thinking) onSendPointerDown(); }}
+          onPointerUp={() => { if (!props.thinking) onSendPointerUp(); }}
+          onPointerLeave={() => { if (!props.thinking) onSendPointerUp(); }}
+          onClick={() => props.thinking ? void submit("next_turn") : onSendClick()}
           disabled={!canSend() || sending()}
-          aria-label="Send"
-          title={coarse() ? "Send · hold to queue for next turn" : "Send · Ctrl/Cmd+Shift+Enter to queue for next turn"}
+          aria-label={props.thinking ? "Send after current turn" : "Send"}
+          title={props.thinking ? "Send after current turn" : coarse() ? "Send · hold to queue for next turn" : "Send · Ctrl/Cmd+Shift+Enter to queue for next turn"}
         >
-          <Show when={sending()} fallback={<ArrowUp class="size-5" />}>
+          <Show when={sending()} fallback={props.thinking ? <span>Send after current turn</span> : <ArrowUp class="size-5" />}>
             <LoaderCircle class="size-5 animate-spin" />
           </Show>
         </Button>

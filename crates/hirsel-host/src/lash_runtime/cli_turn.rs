@@ -232,6 +232,7 @@ impl CliTurn {
             model,
             variant,
             cwd,
+            ..
         } = execution
         else {
             anyhow::bail!("CLI execution settings required")

@@ -36,7 +36,7 @@ pub use ctx::{
     PluginSettingsAccess, PluginThreads, SettingsSnapshot,
 };
 pub use settings::{SettingDescriptor, SettingKind};
-pub use tools::{PluginTool, PluginToolFuture, PluginToolHandler};
+pub use tools::{PluginTool, PluginToolEffect, PluginToolFuture, PluginToolHandler};
 
 /// Re-exported so a plugin crate does not need its own `async-trait`
 /// dependency just to implement [`Plugin`].

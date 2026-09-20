@@ -82,6 +82,11 @@ CREATE TABLE thread_turn_events (turn_id INTEGER NOT NULL REFERENCES thread_turn
                 client_id TEXT PRIMARY KEY,
                 msg_id INTEGER NOT NULL REFERENCES chat_messages(id)
             );
+            CREATE TABLE message_task_focus (
+                message_id INTEGER PRIMARY KEY REFERENCES chat_messages(id),
+                task_thread_id INTEGER NOT NULL REFERENCES threads(id),
+                snapshot_json TEXT NOT NULL CHECK(json_type(snapshot_json)='object')
+            );
             CREATE TABLE blobs (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,

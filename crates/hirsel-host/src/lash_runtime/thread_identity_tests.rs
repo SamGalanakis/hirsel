@@ -51,6 +51,12 @@ async fn the_identity_block_follows_the_thread_between_turns() {
         "first turn names the Thread: {first}"
     );
     assert!(first.contains(&format!(r#"Ancestors: Space #{} \"Hirsel\""#, parent.id)));
+    assert!(
+        first.contains(
+            "Role: Worker — do the work for this Task; read its brief and current state."
+        ),
+        "Native worker role is missing: {first}"
+    );
     assert!(first.contains(r"Description: (none yet)"));
 
     state
@@ -94,4 +100,57 @@ async fn the_identity_block_follows_the_thread_between_turns() {
         r#"Reach: self + subtree · +Space #{} \"Billing\""#,
         billing.id
     )));
+}
+
+#[tokio::test]
+async fn native_project_chat_role_and_profile_change_with_top_level_kind() {
+    let (state, _dir) = runtime_fixture().await;
+    let (project, _) = state
+        .storage
+        .create_thread(
+            "identity-project-chat",
+            "Hirsel",
+            "Coordinate the project.",
+            None,
+            ThreadAttention::Quiet,
+            hirsel_proto::ThreadKind::Space,
+            None,
+        )
+        .await
+        .unwrap();
+    let runtime = runtime_lane(&state, Some(project.id)).await;
+    let _pump = runtime.pump_lock.lock().await;
+    let prompt = || {
+        serde_json::to_string(&runtime.session.policy_snapshot().prompt)
+            .expect("prompt layer serializes")
+    };
+
+    runtime.apply_agent_prompt().await.unwrap();
+    let project_prompt = prompt();
+    assert!(
+        project_prompt
+            .contains("Role: Project chat — dispatch work to Task workers; do not do the work."),
+        "project-chat role is missing: {project_prompt}"
+    );
+
+    let history = state.storage.history_id().await.unwrap();
+    state
+        .storage
+        .set_addressed_thread_kind(
+            &history,
+            project.id,
+            hirsel_proto::ThreadKind::Task,
+            project.revision,
+        )
+        .await
+        .unwrap();
+    runtime.apply_agent_prompt().await.unwrap();
+    let worker_prompt = prompt();
+    assert!(
+        worker_prompt.contains(
+            "Role: Worker — do the work for this Task; read its brief and current state."
+        ),
+        "converted worker role is missing: {worker_prompt}"
+    );
+    assert!(!worker_prompt.contains("Role: Project chat"));
 }

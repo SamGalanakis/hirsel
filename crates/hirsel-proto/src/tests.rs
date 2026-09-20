@@ -546,6 +546,7 @@ fn main_scope_frames_omit_sc() {
         HostToClient::Msg {
             message: ChatMessage {
                 origin: None,
+                focus: None,
                 artifact_ids: Vec::new(),
                 client_id: None,
                 thread_id: 0,

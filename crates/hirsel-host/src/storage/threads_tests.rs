@@ -1,6 +1,52 @@
 use super::Storage;
 use hirsel_proto::{ChatAuthor, Thread, ThreadAttention, ThreadKind, ThreadTurnState};
 use serde_json::json;
+
+#[tokio::test]
+async fn home_project_bootstrap_is_atomic_idempotent_and_unprivileged() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(dir.path()).await.unwrap();
+    let history = storage.history_id().await.unwrap();
+
+    let (first, inserted) = storage.ensure_home_project(&history).await.unwrap();
+    assert!(inserted);
+    assert!(first.id > 0);
+    assert_eq!(first.title, "Home");
+    assert_eq!(first.kind, ThreadKind::Space);
+    assert_eq!(first.parent_thread_id, None);
+
+    let (second, inserted) = storage.ensure_home_project(&history).await.unwrap();
+    assert!(!inserted);
+    assert_eq!(second, first);
+    let conn = storage.conn.lock().await;
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM threads WHERE title='Home'",
+            [],
+            |row| row.get::<_, u64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM thread_grants WHERE thread_id=?1",
+            [first.id],
+            |row| row.get::<_, u64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT value FROM meta WHERE key='project_chat:home_thread_id'",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        first.id.to_string()
+    );
+}
 #[tokio::test]
 async fn ordinary_work_snapshot_and_lifecycle_are_independent() {
     let dir = tempfile::tempdir().unwrap();
@@ -644,6 +690,33 @@ async fn kind_conversion_is_revision_guarded_atomic_and_preserves_identity() {
     assert_eq!(space.kind, ThreadKind::Space);
     assert!(space.settled_at.is_none());
     assert!(storage.settle_thread(space.id, true).await.is_err());
+
+    let cli_task = kinded_thread(&storage, "cli-task", ThreadKind::Task, None).await;
+    let cli = super::ThreadExecution::Cli {
+        tool_profile: super::ToolProfile::Worker,
+        agent: hirsel_drivers::AgentKind::Claude,
+        model: "fixture-model".into(),
+        variant: "fixture-variant".into(),
+        cwd: std::env::current_dir().unwrap().canonicalize().unwrap(),
+    };
+    let cli_task = storage
+        .set_addressed_thread_execution(&history, cli_task.id, Some(&cli), cli_task.revision)
+        .await
+        .unwrap();
+    let error = storage
+        .set_addressed_thread_kind(&history, cli_task.id, ThreadKind::Space, cli_task.revision)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Project chats run on Native execution; choose Native before converting"),
+        "incompatible project conversion should explain the Native requirement: {error:#}"
+    );
+    assert_eq!(
+        storage.thread(cli_task.id).await.unwrap().unwrap().kind,
+        ThreadKind::Task
+    );
 }
 
 #[tokio::test]
@@ -951,6 +1024,40 @@ async fn owner_execution_choice_is_catalog_validated_fenced_and_clearable() {
         model: model.id.clone(),
         variant: model.enabled_variants[0].clone(),
     };
+    let project = state
+        .storage
+        .create_thread(
+            "runs-on-project",
+            "Project chat",
+            "",
+            None,
+            ThreadAttention::Quiet,
+            ThreadKind::Space,
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+    let project_error = state
+        .handle_addressed_thread_action(
+            &history,
+            project.id,
+            "set_execution".into(),
+            json!({ "execution": target }),
+            Some(project.revision),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        project_error
+            .to_string()
+            .contains("Project chats run on Native execution"),
+        "project-chat CLI refusal should explain the compatible backend: {project_error:#}"
+    );
+    assert_eq!(
+        state.storage.thread(project.id).await.unwrap().unwrap(),
+        project
+    );
     let before = state.storage.thread(id).await.unwrap().unwrap();
 
     for (data, expected) in [

@@ -74,6 +74,10 @@ pub(super) fn owner_turn_text(turn: &OwnerTurn, storage: &crate::storage::Storag
         );
         text.push_str("\nUse threads.update to advance this same Thread's instrument or attention. Preserve identity. Continue is not Task completion; only the Owner can explicitly complete a Task, and Spaces remain ongoing.");
     }
+    if let Some(focus) = &turn.focus {
+        text.push_str("\n\n[Authoritative Task focus; context only, not additional reach]\n");
+        text.push_str(&serde_json::to_string(focus).unwrap_or_default());
+    }
 
     text
 }

@@ -31,6 +31,7 @@ mod thread_scope;
 mod thread_summary;
 mod threads;
 pub(crate) use thread_execution::ThreadExecution;
+pub(crate) use thread_execution::ToolProfile;
 pub(crate) use thread_icons::{parse_agent_icon, parse_icon};
 pub(crate) use threads::ThreadPublication;
 mod thread_mutations;
@@ -98,10 +99,11 @@ impl Storage {
             let tx = conn.transaction()?;
             tx.execute_batch(
                 "
-                DELETE FROM meta WHERE key LIKE 'thread:%';
+                DELETE FROM meta WHERE key LIKE 'thread:%' OR key LIKE 'project_chat:%';
                 DELETE FROM turn_output_artifacts;
                 DELETE FROM artifact_operations;
                 DELETE FROM message_artifacts;
+                DELETE FROM message_task_focus;
                 DELETE FROM activity_artifacts;
                 DELETE FROM artifacts;
                 DELETE FROM thread_related_receipts;
@@ -168,7 +170,7 @@ impl Storage {
                 "",
                 None,
                 hirsel_proto::ThreadAttention::Quiet,
-                hirsel_proto::ThreadKind::Space,
+                hirsel_proto::ThreadKind::Task,
                 None,
             )
             .await

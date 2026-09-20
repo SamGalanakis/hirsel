@@ -337,6 +337,11 @@ async fn flush_pending(
             )
         })
         .collect::<Vec<_>>();
+    let home_projects = client
+        .read_store()
+        .pending_home_projects()
+        .map(|(client_id, history_id)| (client_id.clone(), history_id.clone()))
+        .collect::<Vec<_>>();
     let pending: Vec<_> = client.read_store().pending_sends().cloned().collect();
     drop(client);
 
@@ -365,6 +370,16 @@ async fn flush_pending(
                     title,
                     kind,
                     parent_thread_id,
+                })
+                .await?;
+        }
+    }
+    for (client_id, history_id) in home_projects {
+        if sent_this_connection.insert(client_id.clone()) {
+            channel
+                .send(&hirsel_proto::ClientToHost::EnsureHomeProject {
+                    client_id,
+                    history_id,
                 })
                 .await?;
         }
@@ -524,7 +539,7 @@ fn handle_server_message(inner: &Weak<ClientInner>, message: HostToClient) {
             HostToClient::ThreadCreated { client_id, thread } => {
                 if !matches!(
                     store.pending_ops.get(&client_id),
-                    Some(PendingOp::CreateThread { .. })
+                    Some(PendingOp::CreateThread { .. } | PendingOp::EnsureHomeProject { .. })
                 ) {
                     return;
                 }

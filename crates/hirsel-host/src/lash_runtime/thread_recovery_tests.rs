@@ -1369,6 +1369,7 @@ async fn an_admitted_turn_rebinds_the_session_to_this_threads_native_provider() 
         provider_id,
         model,
         cwd,
+        ..
     } = default
     else {
         panic!("the configured default execution is a Native backend");

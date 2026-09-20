@@ -46,6 +46,22 @@ impl ScopedThreadTools {
     /// requester both see exactly what was tried. There is no dedupe: a turn
     /// that probes the same Thread twice logs twice.
     pub(crate) async fn execute(&self, name: &str, args: &Value) -> Result<Value, String> {
+        let profile = self
+            .tools
+            .storage()
+            .turn_tool_profile(self.caller.turn_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !profile.allows_tool(name) {
+            return Err(
+                "tool is unavailable to a project chat; delegate the work to a Task worker".into(),
+            );
+        }
+        if name.starts_with("plugin__")
+            && !self.tools.plugin_tools().allowed_for_profile(name, profile)
+        {
+            return Err("execution-capable plugin tools are unavailable to a project chat; delegate the work to a Task worker".into());
+        }
         match self.dispatch(name, args).await {
             Ok(value) => Ok(value),
             Err(ToolError::Message(message)) => Err(message),
@@ -78,7 +94,13 @@ impl ScopedThreadTools {
         Ok(result)
     }
     async fn dispatch(&self, name: &str, args: &Value) -> Result<Value, ToolError> {
-        let definition = scoped_mcp_catalog(&self.tools)
+        let profile = self
+            .tools
+            .storage()
+            .turn_tool_profile(self.caller.turn_id)
+            .await
+            .map_err(ToolError::from)?;
+        let definition = scoped_mcp_catalog(&self.tools, profile)
             .into_iter()
             .find(|tool| tool["name"] == name)
             .ok_or_else(|| "tool is unavailable in this scope".to_string())?;
@@ -377,9 +399,13 @@ impl ScopedThreadTools {
     }
 }
 
-pub(crate) fn scoped_mcp_catalog(tools: &ToolSuite) -> Vec<Value> {
-    let mut definitions = hirsel_tool_definitions(&tools.subagent_model_snapshot());
-    definitions.extend(tools.plugin_tools().definitions());
+pub(crate) fn scoped_mcp_catalog(
+    tools: &ToolSuite,
+    profile: crate::storage::ToolProfile,
+) -> Vec<Value> {
+    let mut definitions =
+        hirsel_tool_definitions_for_profile(profile, &tools.subagent_model_snapshot());
+    definitions.extend(tools.plugin_tools().definitions_for_profile(profile));
     definitions.into_iter().map(|d|json!({"name":d.name(),"description":d.manifest.description,"inputSchema":d.contract.input_schema.canonical})).collect()
 }
 

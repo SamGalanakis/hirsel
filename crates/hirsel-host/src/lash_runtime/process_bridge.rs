@@ -195,6 +195,7 @@ impl LashAgentRuntime {
                 delivered.message.id,
                 serde_json::to_string(&delivered.message)?
             ),
+            focus: None,
             anchor: None,
             attachments: Vec::new(),
             mode: SendMode::NextTurn,

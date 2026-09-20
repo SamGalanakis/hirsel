@@ -411,6 +411,7 @@ impl Client {
         artifact_ids: Vec<u64>,
     ) -> Option<SendReceipt> {
         let mut request = core::SendThreadMessageRequest::new(history_id, thread_id, body);
+        request.focus = None;
         request.thread_id = thread_id;
         request.attachments = attachments;
         request.mentions = mentions;

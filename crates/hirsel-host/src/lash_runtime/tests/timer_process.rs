@@ -107,6 +107,7 @@ finish("registered");
             coding: Arc::new(NativeCodingBinding::new(
                 std::env::current_dir().unwrap().canonicalize().unwrap(),
             )),
+            profile: Arc::new(std::sync::RwLock::new(crate::storage::ToolProfile::Worker)),
         }))
         .plugin(Arc::new(HirselPluginFactory))
         .commit_budget(lash::CommitBudget::bounded(1024 * 1024, 512))

@@ -38,7 +38,34 @@ impl AppState {
         mode: SendMode,
         artifact_ids: Vec<u64>,
     ) -> anyhow::Result<OwnerSubmission> {
-        self.submit_addressed_turn(
+        self.submit_addressed_thread_message_with_focus(
+            expected_history,
+            client_id,
+            thread_id,
+            body,
+            attachments,
+            mentions,
+            mode,
+            artifact_ids,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn submit_addressed_thread_message_with_focus(
+        &self,
+        expected_history: &str,
+        client_id: String,
+        thread_id: u64,
+        body: String,
+        attachments: Vec<String>,
+        mentions: Vec<u64>,
+        mode: SendMode,
+        artifact_ids: Vec<u64>,
+        focus: Option<hirsel_proto::TaskFocus>,
+    ) -> anyhow::Result<OwnerSubmission> {
+        self.submit_addressed_turn_with_focus(
             expected_history,
             client_id,
             thread_id,
@@ -48,9 +75,11 @@ impl AppState {
             mode,
             None,
             artifact_ids,
+            focus,
         )
         .await
     }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn submit_addressed_turn(
         &self,
@@ -64,15 +93,48 @@ impl AppState {
         thread_action: Option<ThreadActionContext>,
         artifact_ids: Vec<u64>,
     ) -> anyhow::Result<OwnerSubmission> {
+        self.submit_addressed_turn_with_focus(
+            expected_history,
+            client_id,
+            thread_id,
+            body,
+            attachments,
+            mentions,
+            mode,
+            thread_action,
+            artifact_ids,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn submit_addressed_turn_with_focus(
+        &self,
+        expected_history: &str,
+        client_id: String,
+        thread_id: u64,
+        body: String,
+        attachments: Vec<String>,
+        mentions: Vec<u64>,
+        mode: SendMode,
+        thread_action: Option<ThreadActionContext>,
+        artifact_ids: Vec<u64>,
+        focus: Option<hirsel_proto::TaskFocus>,
+    ) -> anyhow::Result<OwnerSubmission> {
         self.agent.readiness()?;
         let agent_body = self
             .owner_input_body(&client_id, &body, thread_action.is_some())
             .await?;
-        let request =
-            serde_json::json!({"mode":mode,"thread_action":thread_action,"body":agent_body});
+        let request = serde_json::json!({
+            "mode": mode,
+            "thread_action": thread_action,
+            "body": agent_body,
+            "focus": focus.clone(),
+        });
         let (message, inserted) = self
             .storage
-            .append_thread_owner_request(
+            .append_thread_owner_request_with_focus(
                 expected_history,
                 thread_id,
                 &client_id,
@@ -80,6 +142,7 @@ impl AppState {
                 &attachments,
                 &mentions,
                 &artifact_ids,
+                focus.as_ref(),
                 &request,
             )
             .await?;

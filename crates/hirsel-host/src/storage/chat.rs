@@ -42,6 +42,10 @@ impl Storage {
             "DELETE FROM message_attachments WHERE message_id = ?1",
             params![id],
         )?;
+        tx.execute(
+            "DELETE FROM message_task_focus WHERE message_id = ?1",
+            params![id],
+        )?;
         tx.execute("DELETE FROM client_messages WHERE msg_id = ?1", params![id])?;
         let changed = tx.execute("DELETE FROM chat_messages WHERE id = ?1", params![id])?;
         tx.commit()?;
@@ -146,6 +150,7 @@ pub(super) fn get_chat_message(conn: &Connection, id: u64) -> rusqlite::Result<C
     message.artifact_ids = super::artifacts::message_artifacts(conn, id)?;
     message.attachments = message_attachments(conn, id)?;
     message.origin = super::process_deliveries::message_origin(conn, id)?;
+    message.focus = message_focus(conn, id)?;
     Ok(message)
 }
 
@@ -164,6 +169,7 @@ pub(super) fn load_attachments_for_messages(
         message.artifact_ids = super::artifacts::message_artifacts(conn, message.id)?;
         message.attachments = message_attachments(conn, message.id)?;
         message.origin = super::process_deliveries::message_origin(conn, message.id)?;
+        message.focus = message_focus(conn, message.id)?;
     }
     Ok(())
 }
@@ -176,6 +182,7 @@ pub(super) fn chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result
         origin: None,
         artifact_ids: Vec::new(),
         client_id: None,
+        focus: None,
         thread_id: row.get(6)?,
         mentions: serde_json::from_str(&row.get::<_, String>(7)?)
             .map_err(|e| rusqlite::Error::FromSqlConversionFailure(7, Type::Text, Box::new(e)))?,
@@ -189,6 +196,26 @@ pub(super) fn chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result
             rusqlite::Error::FromSqlConversionFailure(5, Type::Text, Box::new(error))
         })?,
     })
+}
+
+fn message_focus(
+    conn: &Connection,
+    message_id: u64,
+) -> rusqlite::Result<Option<hirsel_proto::TaskFocus>> {
+    conn.query_row(
+        "SELECT task_thread_id,snapshot_json FROM message_task_focus WHERE message_id=?1",
+        [message_id],
+        |row| {
+            let snapshot = serde_json::from_str(&row.get::<_, String>(1)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
+            })?;
+            Ok(hirsel_proto::TaskFocus {
+                task_thread_id: row.get(0)?,
+                snapshot,
+            })
+        },
+    )
+    .optional()
 }
 
 pub(super) fn author_to_str(author: ChatAuthor) -> &'static str {

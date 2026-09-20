@@ -46,6 +46,7 @@ pub struct ConfirmedMessage {
     pub origin: Option<Box<hirsel_proto::MessageOrigin>>,
     pub thread_id: u64,
     pub client_id: Option<String>,
+    pub focus: Option<hirsel_proto::TaskFocus>,
     pub mentions: Vec<u64>,
     pub artifact_ids: Vec<u64>,
     pub id: u64,
@@ -64,6 +65,7 @@ impl From<ChatMessage> for ConfirmedMessage {
             id: message.id,
             thread_id: message.thread_id,
             client_id: message.client_id,
+            focus: message.focus,
             mentions: message.mentions,
             artifact_ids: message.artifact_ids,
             author: message.author,
@@ -90,30 +92,24 @@ pub struct PendingSend {
     pub attachments: Vec<String>,
     pub client_id: String,
     pub body: String,
+    pub focus: Option<hirsel_proto::TaskFocus>,
     pub mentions: Vec<u64>,
     pub artifact_ids: Vec<u64>,
     pub timestamp: String,
 }
 
 impl PendingSend {
-    pub(crate) fn new(
-        history_id: String,
-        thread_id: u64,
-        attachments: Vec<String>,
-        client_id: String,
-        body: String,
-        mentions: Vec<u64>,
-        artifact_ids: Vec<u64>,
-    ) -> Self {
+    pub(crate) fn new(request: crate::SendThreadMessageRequest, client_id: String) -> Self {
         Self {
             error: None,
-            history_id,
-            thread_id,
-            attachments,
+            history_id: request.history_id,
+            thread_id: request.thread_id,
+            attachments: request.attachments,
             client_id,
-            body,
-            mentions,
-            artifact_ids,
+            body: request.body,
+            focus: request.focus,
+            mentions: request.mentions,
+            artifact_ids: request.artifact_ids,
             timestamp: Utc::now().to_rfc3339(),
         }
     }
@@ -271,6 +267,17 @@ impl LocalStore {
                     return None;
                 };
                 Some((client_id, history_id, title, *kind, *parent_thread_id))
+            })
+    }
+
+    pub fn pending_home_projects(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.pending_ops
+            .iter()
+            .filter_map(|(client_id, operation)| {
+                let PendingOp::EnsureHomeProject { history_id } = operation else {
+                    return None;
+                };
+                Some((client_id, history_id))
             })
     }
 
@@ -566,6 +573,9 @@ pub(crate) enum PendingOp {
         title: String,
         kind: hirsel_proto::ThreadKind,
         parent_thread_id: Option<u64>,
+    },
+    EnsureHomeProject {
+        history_id: String,
     },
     OpenThread {
         thread_id: u64,

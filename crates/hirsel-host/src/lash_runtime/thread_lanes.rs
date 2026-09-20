@@ -81,6 +81,7 @@ impl ThreadRuntimeRegistry {
         // Thread names its own directory.
         let cwd = std::fs::canonicalize(std::env::current_dir()?)?;
         let default = crate::storage::ThreadExecution::Native {
+            tool_profile: crate::storage::ToolProfile::Worker,
             provider_id,
             model,
             cwd,

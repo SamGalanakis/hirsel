@@ -20,7 +20,8 @@ mod turn;
 mod view;
 
 pub use chat::{
-    Blob, ChatAuthor, ChatMessage, MessageOrigin, ProcessOutcome, ToolCallSummary, TriggerLabel,
+    Blob, ChatAuthor, ChatMessage, MessageOrigin, ProcessOutcome, TaskFocus, ToolCallSummary,
+    TriggerLabel,
 };
 pub use client::{AgentSlot, ClientToHost, HelloAuth, PushPlatform, SendMode};
 pub use host::HostToClient;

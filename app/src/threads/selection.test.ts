@@ -17,12 +17,13 @@ beforeEach(() => {
 });
 afterEach(() => { disconnectThreads(); vi.unstubAllGlobals(); });
 describe("explicit Thread selection", () => {
-  it("opens no recipient from an empty or populated forest without a saved selection", () => {
-    hello([]); expect(threadState.focusedId).toBeNull(); expect(frames).toEqual([]);
-    hello([0,1,2]); expect(threadState.focusedId).toBeNull(); expect(frames).toEqual([]);
+  it("requests Home from an empty or populated forest without a saved project", () => {
+    hello([]); expect(threadState.focusedId).toBeNull(); expect(frames).toContainEqual(expect.objectContaining({type:"ensure_home_project"}));
+    frames.length = 0;
+    hello([0,1,2]); expect(threadState.focusedId).toBeNull(); expect(frames).toContainEqual(expect.objectContaining({type:"ensure_home_project"}));
   });
   it("prioritizes an explicit ordinary zero route over saved and focused IDs", () => {
-    localStorage.setItem("hirsel.last-thread.ab123456-1234-5678-9abc-123456789abc", "2");
+    localStorage.setItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc", "2");
     history.replaceState(null, "", "/t/0?history=ab123456-1234-5678-9abc-123456789abc");
     hello([0,1,2]);
     expect(threadState.focusedId).toBe(0);
@@ -30,21 +31,21 @@ describe("explicit Thread selection", () => {
     expect(routeThreadId("/t/9007199254740993")).toBeNull();
   });
   it("restores only a valid selection from this history", () => {
-    localStorage.setItem("hirsel.last-thread.another-history", "1");
-    localStorage.setItem("hirsel.last-thread.ab123456-1234-5678-9abc-123456789abc", "99");
-    hello([1,2]); expect(threadState.focusedId).toBeNull();
-    localStorage.setItem("hirsel.last-thread.ab123456-1234-5678-9abc-123456789abc", "2");
+    localStorage.setItem("hirsel.last-project.another-history", "1");
+    localStorage.setItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc", "99");
+    hello([1,2]); expect(threadState.focusedId).toBeNull(); expect(frames).toContainEqual(expect.objectContaining({type:"ensure_home_project"}));
+    localStorage.setItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc", "2");
     hello([1,2]); expect(threadState.focusedId).toBe(2); expect(location.pathname).toBe("/t/2");
   });
   it("never redirects a missing explicit destination to saved or pinned work", () => {
-    localStorage.setItem("hirsel.last-thread.ab123456-1234-5678-9abc-123456789abc", "1");
+    localStorage.setItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc", "1");
     history.replaceState(null, "", "/t/99?history=ab123456-1234-5678-9abc-123456789abc");
     hello([1,2]); expect(threadState.focusedId).toBeNull(); expect(threadState.linkError).toContain("unavailable"); expect(location.pathname).toBe("/t/99");
   });
-  it("keeps an explicitly unselected overview unaddressed after reconnect", () => {
+  it("restores the last project after returning to the route-free entry", () => {
     hello([1]); flush(() => focusThread(1)); flush(() => focusThread(null));
     frames.length = 0;
-    hello([1]); expect(threadState.focusedId).toBeNull(); expect(frames).toEqual([]);
+    hello([1]); expect(threadState.focusedId).toBe(1); expect(frames).toContainEqual(expect.objectContaining({type:"open_thread",thread_id:1}));
     flush(() => setThreadState(draft => { draft.focusedId = 1; }));
     flush(() => resetThreads()); expect(threadState.focusedId).toBeNull();
   });
@@ -55,7 +56,7 @@ describe("explicit Thread selection", () => {
     hello([1]); expect(threadState.focusedId).toBeNull(); expect(frames).toEqual([]);
   });
   it("resolves an unqualified route against the connected history and still refuses unknown IDs",()=>{
-    localStorage.setItem("hirsel.last-thread.ab123456-1234-5678-9abc-123456789abc","1");
+    localStorage.setItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc","1");
     history.replaceState(null,"","/t/1"); hello([1]);
     expect(threadState.focusedId).toBe(1); expect(threadState.linkError).toBeNull();
     expect(location.search).toContain("ab123456-1234-5678-9abc-123456789abc");
@@ -85,10 +86,10 @@ describe("explicit Thread selection", () => {
   });
 
   it("does not restore an archived selection from an authoritative snapshot", () => {
-    localStorage.setItem("hirsel.last-thread.ab123456-1234-5678-9abc-123456789abc", "2");
+    localStorage.setItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc", "2");
     helloThreads([makeThread(1), makeThread(2, { archived_at: "2026-09-10T10:00:00Z" })]);
     expect(threadState.focusedId).toBeNull();
-    expect(localStorage.getItem("hirsel.last-thread.ab123456-1234-5678-9abc-123456789abc")).toBeNull();
+    expect(localStorage.getItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc")).toBeNull();
     expect(location.pathname).toBe("/");
   });
 
@@ -98,7 +99,7 @@ describe("explicit Thread selection", () => {
     history.replaceState(null, "", "/");
     helloThreads([makeThread(2, { archived_at: "2026-09-10T10:00:00Z", revision: 2 })]);
     expect(threadState.focusedId).toBeNull();
-    expect(localStorage.getItem("hirsel.last-thread.ab123456-1234-5678-9abc-123456789abc")).toBeNull();
+    expect(localStorage.getItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc")).toBeNull();
     expect(location.pathname).toBe("/");
   });
 

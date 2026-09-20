@@ -15,6 +15,14 @@ impl SubagentDriver for ToolCallingPeer {
     async fn spawn(&self, spec: SpawnSpec) -> DriverResult<SessionHandle> {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
+        assert!(
+            spec.prompt.contains(
+                "Role: Worker — do the work for this Task; read its brief and current state."
+            ),
+            "CLI worker prompt omitted the Host-derived role: {}",
+            spec.prompt
+        );
+
         let capability = tokio::fs::read_to_string(&spec.scoped_mcp.capability_file)
             .await
             .unwrap();
@@ -113,6 +121,7 @@ async fn fake_cli_tools_publish_and_replay_structured_events_with_bounded_progre
             &state.tools,
             request,
             crate::storage::ThreadExecution::Cli {
+                tool_profile: crate::storage::ToolProfile::Worker,
                 agent: AgentKind::Claude,
                 model: "fixture".into(),
                 variant: "fixture".into(),
@@ -198,6 +207,7 @@ async fn bridge_mcp_telemetry_wins_over_duplicate_cli_tool_events() {
             &state.tools,
             request,
             crate::storage::ThreadExecution::Cli {
+                tool_profile: crate::storage::ToolProfile::Worker,
                 agent: AgentKind::Claude,
                 model: "fixture".into(),
                 variant: "fixture".into(),
@@ -308,6 +318,7 @@ async fn request(state: &crate::AppState) -> OwnerTurn {
         report_triggered: false,
         client_id: "delivery-input".into(),
         body: "Test delivery".into(),
+        focus: None,
         anchor: None,
         attachments: vec![],
         mode: hirsel_proto::SendMode::Send,
@@ -332,6 +343,7 @@ fn start(
             &tools,
             request,
             crate::storage::ThreadExecution::Cli {
+                tool_profile: crate::storage::ToolProfile::Worker,
                 agent: AgentKind::Claude,
                 model: "fixture".into(),
                 variant: "fixture".into(),
@@ -495,6 +507,7 @@ async fn cli_tool_telemetry_retains_integrity_failure_until_failed_terminal() {
             &tools,
             failed_request,
             crate::storage::ThreadExecution::Cli {
+                tool_profile: crate::storage::ToolProfile::Worker,
                 agent: AgentKind::Claude,
                 model: "fixture".into(),
                 variant: "fixture".into(),

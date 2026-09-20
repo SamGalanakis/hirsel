@@ -29,6 +29,7 @@ async fn fresh_store_is_current_and_reopen_keeps_identity() {
         "process_deliveries",
         "thread_process_sessions",
         "thread_process_authorities",
+        "message_task_focus",
     ] {
         assert!(names.iter().any(|name| name == required));
     }
@@ -37,6 +38,35 @@ async fn fresh_store_is_current_and_reopen_keeps_identity() {
         [], |row| Ok((row.get(0)?, row.get(1)?)),
     ).unwrap();
     assert_eq!(icon_foreign_key, ("blobs".into(), "id".into()));
+    let focus_columns = conn
+        .prepare("SELECT name,type,\"notnull\" FROM pragma_table_xinfo('message_task_focus') ORDER BY cid")
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        focus_columns,
+        vec![
+            ("message_id".into(), "INTEGER".into(), false),
+            ("task_thread_id".into(), "INTEGER".into(), true),
+            ("snapshot_json".into(), "TEXT".into(), true),
+        ]
+    );
+    let focus_foreign_keys = conn
+        .prepare(r#"SELECT "from","table","to" FROM pragma_foreign_key_list('message_task_focus') ORDER BY "from""#)
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        focus_foreign_keys,
+        vec![
+            ("message_id".into(), "chat_messages".into(), "id".into()),
+            ("task_thread_id".into(), "threads".into(), "id".into()),
+        ]
+    );
     let push_columns = conn
         .prepare("SELECT name FROM pragma_table_xinfo('push_tokens') ORDER BY cid")
         .unwrap()
@@ -180,12 +210,12 @@ async fn previous_schema_version_is_refused_without_in_place_evolution() {
             .await
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        13
+        14
     );
     drop(storage);
     let path = dir.path().join("hirsel.sqlite");
     let conn = Connection::open(&path).unwrap();
-    conn.pragma_update(None, "user_version", 11).unwrap();
+    conn.pragma_update(None, "user_version", 13).unwrap();
     drop(conn);
     let before = std::fs::read(&path).unwrap();
     assert!(Storage::open(dir.path()).await.is_err());
@@ -213,9 +243,9 @@ async fn unknown_current_layouts_and_bad_identity_are_untouched() {
 
 #[tokio::test]
 async fn branch_specific_schema_seven_layouts_are_refused_without_modification() {
-    // 10 is a stale version number; 13 is the current one carrying a layout
+    // 10 is a stale version number; 14 is the current one carrying a layout
     // that is not the current one.
-    for version in [10, 13] {
+    for version in [10, 14] {
         for layout in [
             include_str!("icons-only-v7.sql"),
             include_str!("processes-only-v7.sql"),

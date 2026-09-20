@@ -416,6 +416,20 @@ where
                 .send(&HostToClient::ThreadCreated { client_id, thread })
                 .await?;
         }
+        ClientToHost::EnsureHomeProject {
+            client_id,
+            history_id,
+        } => {
+            let (thread, inserted) = state.storage.ensure_home_project(&history_id).await?;
+            if inserted {
+                state.broadcast(HostToClient::ThreadUpsert {
+                    thread: thread.clone(),
+                });
+            }
+            channel
+                .send(&HostToClient::ThreadCreated { client_id, thread })
+                .await?;
+        }
         ClientToHost::OpenThread {
             client_id,
             thread_id,
@@ -509,13 +523,14 @@ where
             history_id,
             thread_id,
             body,
+            focus,
             attachments,
             mentions,
             mode,
             artifact_ids,
         } => {
             let submission = state
-                .submit_addressed_thread_message(
+                .submit_addressed_thread_message_with_focus(
                     &history_id,
                     client_id,
                     thread_id,
@@ -524,6 +539,7 @@ where
                     mentions,
                     mode,
                     artifact_ids,
+                    focus,
                 )
                 .await?;
             if !submission.inserted {

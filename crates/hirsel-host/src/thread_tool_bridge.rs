@@ -81,7 +81,8 @@ impl ThreadToolBridge {
             .storage()
             .bind_thread_execution(history_id, &launch, &launch, turn_id)
             .await?;
-        let catalog = crate::lash_runtime::scoped_mcp_catalog(&tools);
+        let profile = tools.storage().turn_tool_profile(turn_id).await?;
+        let catalog = crate::lash_runtime::scoped_mcp_catalog(&tools, profile);
         let expected_tools = catalog
             .iter()
             .filter_map(|v| v["name"].as_str().map(str::to_owned))

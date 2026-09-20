@@ -19,6 +19,7 @@ type ServerSocket = WebSocketStream<TcpStream>;
 fn chat(id: u64, author: ChatAuthor, body: &str) -> ChatMessage {
     ChatMessage {
         origin: None,
+        focus: None,
         artifact_ids: Vec::new(),
         thread_id: 0,
         client_id: None,
@@ -446,13 +447,18 @@ async fn offline_queue_flushes_in_order_on_same_store_reconnect() {
     })
     .await
     .expect("client did not report offline");
-    let first_receipt = client
-        .send_message(SendThreadMessageRequest::new(
-            "test-store-a".into(),
-            0,
-            "first offline".into(),
-        ))
-        .unwrap();
+    let focus = hirsel_proto::TaskFocus {
+        task_thread_id: 5,
+        snapshot: serde_json::json!({
+            "title": "Focused task",
+            "brief": "Preserve this through reconnect",
+            "instrument_summary": null,
+        }),
+    };
+    let mut first_request =
+        SendThreadMessageRequest::new("test-store-a".into(), 0, "first offline".into());
+    first_request.focus = Some(focus.clone());
+    let first_receipt = client.send_message(first_request).unwrap();
     let second_receipt = client
         .send_message(SendThreadMessageRequest::new(
             "test-store-a".into(),
@@ -482,13 +488,17 @@ async fn offline_queue_flushes_in_order_on_same_store_reconnect() {
         }
     );
     let ClientToHost::SendThreadMessage {
-        client_id, body, ..
+        client_id,
+        body,
+        focus: first_focus,
+        ..
     } = first_send
     else {
         panic!("expected first queued send");
     };
     assert_eq!(client_id, first_receipt.client_id);
     assert_eq!(body, "first offline");
+    assert_eq!(first_focus, Some(focus));
     let ClientToHost::SendThreadMessage {
         client_id, body, ..
     } = second_send
@@ -759,6 +769,70 @@ async fn native_thread_commands_roundtrip_revision_and_ownership() {
     assert!(
         matches!(&snapshot.messages[0],hirsel_client_core::ChatEntry::Confirmed(m) if m.thread_id==5)
     );
+    release_tx.send(()).unwrap();
+    client.disconnect().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn home_project_creation_is_correlated_like_an_ordinary_thread() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (release_tx, release_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        receive_client(&mut socket).await;
+        send_hello(&mut socket, vec![], vec![], vec![]).await;
+        let ClientToHost::EnsureHomeProject {
+            client_id,
+            history_id,
+        } = receive_client(&mut socket).await
+        else {
+            panic!("ensure Home");
+        };
+        assert_eq!(history_id, "test-store-a");
+        let mut home = thread(7, false, false);
+        home.kind = ThreadKind::Space;
+        home.title = "Home".into();
+        send_server(
+            &mut socket,
+            &HostToClient::ThreadCreated {
+                client_id,
+                thread: home,
+            },
+        )
+        .await;
+        let _ = release_rx.await;
+    });
+    let client = Client::new(test_config(address)).unwrap();
+    client.connect().await.unwrap();
+    wait_for_snapshot(&client, |snapshot| {
+        snapshot.history_id.as_deref() == Some("test-store-a")
+    })
+    .await;
+    let receipt = client
+        .ensure_home_project("test-store-a".into())
+        .expect("current history accepts Home bootstrap");
+    let snapshot = wait_for_snapshot(&client, |snapshot| {
+        snapshot
+            .created_threads
+            .iter()
+            .any(|created| created.client_id == receipt.client_id)
+    })
+    .await;
+    assert!(
+        snapshot
+            .created_threads
+            .iter()
+            .any(|created| { created.client_id == receipt.client_id && created.thread_id == 7 })
+    );
+    assert!(snapshot.threads.iter().any(|thread| {
+        thread.id == 7
+            && thread.kind == ThreadKind::Space
+            && thread.parent_thread_id.is_none()
+            && thread.title == "Home"
+    }));
     release_tx.send(()).unwrap();
     client.disconnect().await;
     server.await.unwrap();

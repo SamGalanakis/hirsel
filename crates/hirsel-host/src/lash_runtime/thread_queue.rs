@@ -137,6 +137,7 @@ impl LashAgentRuntime {
             provider_id,
             model,
             cwd,
+            ..
         } = execution
         else {
             anyhow::bail!("CLI turn must run on the CLI lane");

@@ -151,6 +151,7 @@ fn event(id: u64, name: &str, description: &str) -> hirsel_proto::Thread {
 fn chat(id: u64, author: ChatAuthor, body: &str) -> ChatMessage {
     ChatMessage {
         origin: None,
+        focus: None,
         artifact_ids: Vec::new(),
         thread_id: 1,
         client_id: None,

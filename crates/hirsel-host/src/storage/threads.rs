@@ -242,6 +242,51 @@ pub(crate) fn validate_thread_description(description: &str) -> anyhow::Result<(
 }
 
 impl Storage {
+    /// Return the one ordinary top-level Space used as the empty-history
+    /// landing project. The meta pointer and Thread are committed together;
+    /// raw schema initialization remains empty.
+    pub async fn ensure_home_project(
+        &self,
+        expected_history: &str,
+    ) -> anyhow::Result<(Thread, bool)> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        super::thread_scope::validate_history(&tx, expected_history)?;
+        if let Some(id) = tx
+            .query_row(
+                "SELECT value FROM meta WHERE key='project_chat:home_thread_id'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            let id = id.parse::<u64>()?;
+            let thread = get(&tx, id)?;
+            anyhow::ensure!(
+                thread.kind == ThreadKind::Space && thread.parent_thread_id.is_none(),
+                "Home project metadata does not name a top-level Space"
+            );
+            tx.commit()?;
+            return Ok((thread, false));
+        }
+        let (thread, _) = create_in_transaction(
+            &tx,
+            &format!("project_chat:home:{expected_history}"),
+            "Home",
+            "",
+            None,
+            ThreadAttention::Quiet,
+            ThreadKind::Space,
+            None,
+        )?;
+        tx.execute(
+            "INSERT INTO meta(key,value) VALUES('project_chat:home_thread_id',?1)",
+            [thread.id.to_string()],
+        )?;
+        tx.commit()?;
+        Ok((thread, true))
+    }
+
     pub(crate) async fn current_thread_publication(
         &self,
         id: u64,
@@ -553,6 +598,16 @@ impl Storage {
                 current.settled_at.is_none(),
                 "reopen a settled Task before converting it to a Space"
             );
+            if current.parent_thread_id.is_none() {
+                let execution = super::thread_execution::select(&tx, id, None)?;
+                anyhow::ensure!(
+                    execution.is_none_or(|execution| matches!(
+                        execution,
+                        super::ThreadExecution::Native { .. }
+                    )),
+                    "Project chats run on Native execution; choose Native before converting this top-level Task to a Space"
+                );
+            }
             if let Some(parent_id) = current.parent_thread_id {
                 anyhow::ensure!(
                     get(&tx, parent_id)?.kind == ThreadKind::Space,

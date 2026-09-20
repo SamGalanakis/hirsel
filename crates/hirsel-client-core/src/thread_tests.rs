@@ -34,6 +34,7 @@ fn thread(revision: u64) -> Thread {
 fn message(id: u64, thread_id: u64, client_id: Option<&str>) -> ChatMessage {
     ChatMessage {
         origin: None,
+        focus: None,
         artifact_ids: vec![],
         id,
         thread_id,
@@ -48,15 +49,12 @@ fn message(id: u64, thread_id: u64, client_id: Option<&str>) -> ChatMessage {
     }
 }
 fn pending(thread_id: u64, client_id: &str) -> PendingSend {
-    PendingSend::new(
-        "history-a".into(),
-        thread_id,
-        vec!["blob-1".into()],
-        client_id.into(),
-        "same words".into(),
-        vec![9],
-        vec![44],
-    )
+    let mut request =
+        crate::SendThreadMessageRequest::new("history-a".into(), thread_id, "same words".into());
+    request.attachments = vec!["blob-1".into()];
+    request.mentions = vec![9];
+    request.artifact_ids = vec![44];
+    PendingSend::new(request, client_id.into())
 }
 #[test]
 fn ordinary_thread_survives_snapshot_read_and_stale_upsert() {
@@ -349,18 +347,29 @@ fn queued_later_turn_does_not_own_running_stream() {
 }
 
 #[test]
-fn references_survive_retry_snapshot_but_never_history_reset() {
+fn references_and_focus_survive_retry_snapshot_but_never_history_reset() {
     let mut store = LocalStore::default();
     store.apply_hello_ok("old".into(), vec![thread(1)], vec![], "test".into());
-    store.add_optimistic_send(pending(5, "with-artifact"));
+    let focus = hirsel_proto::TaskFocus {
+        task_thread_id: 9,
+        snapshot: serde_json::json!({
+            "title": "Focused task",
+            "brief": "Keep the bounded context",
+            "instrument_summary": null,
+        }),
+    };
+    let mut send = pending(5, "with-artifact");
+    send.focus = Some(focus.clone());
+    store.add_optimistic_send(send);
     let snapshot = store.snapshot();
     let crate::ChatEntry::Pending(saved) = &snapshot.messages[0] else {
         panic!("expected pending")
     };
     assert_eq!(saved.artifact_ids, vec![44]);
+    assert_eq!(saved.focus, Some(focus.clone()));
     let wire = crate::client::pending_to_wire(saved);
     assert!(
-        matches!(wire, ClientToHost::SendThreadMessage { artifact_ids, mentions, .. } if artifact_ids == vec![44] && mentions == vec![9])
+        matches!(wire, ClientToHost::SendThreadMessage { artifact_ids, mentions, focus: Some(actual), .. } if artifact_ids == vec![44] && mentions == vec![9] && actual == focus)
     );
     store.apply_hello_ok("new".into(), vec![thread(1)], vec![], "test".into());
     assert!(store.messages.is_empty());

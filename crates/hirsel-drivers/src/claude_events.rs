@@ -9,11 +9,25 @@ pub(super) struct ClaudeOutput {
     session_id: Option<String>,
     assistant: Option<String>,
     started_tools: BTreeMap<String, String>,
-    assistant_sequence: u64,
+    message_sequence: u64,
+    message_active: bool,
     assistant_message_id: Option<String>,
-    streamed_blocks: BTreeSet<String>,
-    streamed_legacy_prose: bool,
-    streamed_legacy_reasoning: bool,
+    text_blocks: Vec<ClaudeTextBlock>,
+    anonymous_block_sequence: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClaudeTextKind {
+    Prose,
+    Reasoning,
+}
+
+struct ClaudeTextBlock {
+    kind: ClaudeTextKind,
+    index: Option<u64>,
+    text: String,
+    block_id: Option<String>,
+    completed: bool,
 }
 
 impl ClaudeOutput {
@@ -26,11 +40,11 @@ impl ClaudeOutput {
             session_id: None,
             assistant: None,
             started_tools: BTreeMap::new(),
-            assistant_sequence: 0,
+            message_sequence: 0,
+            message_active: false,
             assistant_message_id: None,
-            streamed_blocks: BTreeSet::new(),
-            streamed_legacy_prose: false,
-            streamed_legacy_reasoning: false,
+            text_blocks: Vec::new(),
+            anonymous_block_sequence: 0,
         }
     }
 
@@ -124,7 +138,7 @@ impl ClaudeOutput {
             }
             Some("assistant") => {
                 self.check_session(value)?;
-                self.activate_message(
+                self.reconcile_message_identity(
                     value
                         .pointer("/message/id")
                         .and_then(Value::as_str)
@@ -147,31 +161,37 @@ impl ClaudeOutput {
                     && !text.is_empty())
                 .then_some(text);
                 let api_block_index = value.get("apiBlockIndex").and_then(Value::as_u64);
+                let content_len = content.map_or(0, Vec::len);
                 for (index, block) in content.into_iter().flatten().enumerate() {
-                    let block_id = self.block_id(api_block_index.unwrap_or(index as u64));
+                    // Claude normally emits one assistant envelope per completed
+                    // block. Only a multi-block envelope makes its array position
+                    // an original content-block index; index zero in a singleton
+                    // envelope is not provider identity.
+                    let block_index =
+                        api_block_index.or_else(|| (content_len > 1).then_some(index as u64));
                     match block.get("type").and_then(Value::as_str) {
                         Some("text") => {
                             if let Some(text) = block.get("text").and_then(Value::as_str)
                                 && !text.is_empty()
-                                && !self.streamed_legacy_prose
-                                && !self.streamed_blocks.contains(&block_id)
+                                && let Some((text, block_id)) = self.reconcile_envelope(
+                                    ClaudeTextKind::Prose,
+                                    block_index,
+                                    text,
+                                )
                             {
-                                events.emit(SubagentEvent::ProseDelta {
-                                    text: text.to_string(),
-                                    block_id: Some(block_id),
-                                })?;
+                                events.emit(SubagentEvent::ProseDelta { text, block_id })?;
                             }
                         }
                         Some("thinking") => {
                             if let Some(text) = block.get("thinking").and_then(Value::as_str)
                                 && !text.is_empty()
-                                && !self.streamed_legacy_reasoning
-                                && !self.streamed_blocks.contains(&block_id)
+                                && let Some((text, block_id)) = self.reconcile_envelope(
+                                    ClaudeTextKind::Reasoning,
+                                    block_index,
+                                    text,
+                                )
                             {
-                                events.emit(SubagentEvent::ReasoningDelta {
-                                    text: text.to_string(),
-                                    block_id: Some(block_id),
-                                })?;
+                                events.emit(SubagentEvent::ReasoningDelta { text, block_id })?;
                             }
                         }
                         Some("tool_use") => {
@@ -201,14 +221,11 @@ impl ClaudeOutput {
                         _ => {}
                     }
                 }
-                self.streamed_legacy_prose = false;
-                self.streamed_legacy_reasoning = false;
-                self.assistant_sequence += 1;
             }
             Some("stream_event") => {
                 self.check_session(value)?;
                 if value.pointer("/event/type").and_then(Value::as_str) == Some("message_start") {
-                    self.activate_message(
+                    self.start_message(
                         value
                             .pointer("/event/message/id")
                             .and_then(Value::as_str)
@@ -216,12 +233,11 @@ impl ClaudeOutput {
                     );
                 }
                 if let Some(text) = value.pointer("/event/delta/text").and_then(Value::as_str) {
-                    let block_id = self.stream_block_id(value);
-                    if let Some(block_id) = &block_id {
-                        self.streamed_blocks.insert(block_id.clone());
-                    } else {
-                        self.streamed_legacy_prose = true;
-                    }
+                    let block_id = self.record_stream_delta(
+                        ClaudeTextKind::Prose,
+                        value.pointer("/event/index").and_then(Value::as_u64),
+                        text,
+                    );
                     events.emit(SubagentEvent::ProseDelta {
                         text: text.to_string(),
                         block_id,
@@ -231,12 +247,11 @@ impl ClaudeOutput {
                     .pointer("/event/delta/thinking")
                     .and_then(Value::as_str)
                 {
-                    let block_id = self.stream_block_id(value);
-                    if let Some(block_id) = &block_id {
-                        self.streamed_blocks.insert(block_id.clone());
-                    } else {
-                        self.streamed_legacy_reasoning = true;
-                    }
+                    let block_id = self.record_stream_delta(
+                        ClaudeTextKind::Reasoning,
+                        value.pointer("/event/index").and_then(Value::as_u64),
+                        text,
+                    );
                     events.emit(SubagentEvent::ReasoningDelta {
                         text: text.to_string(),
                         block_id,
@@ -324,25 +339,153 @@ impl ClaudeOutput {
     fn block_id(&self, index: u64) -> String {
         match self.assistant_message_id.as_deref() {
             Some(message_id) => format!("claude:{message_id}:{index}"),
-            None => format!("claude:{}:{index}", self.assistant_sequence),
+            None => format!("claude:{}:{index}", self.message_sequence),
         }
     }
 
-    fn activate_message(&mut self, message_id: Option<&str>) {
+    fn start_message(&mut self, message_id: Option<&str>) {
+        if self.message_active {
+            self.message_sequence += 1;
+        }
+        self.message_active = true;
+        self.assistant_message_id = message_id.map(str::to_owned);
+        self.text_blocks.clear();
+        self.anonymous_block_sequence = 0;
+    }
+
+    fn reconcile_message_identity(&mut self, message_id: Option<&str>) {
+        self.message_active = true;
         let Some(message_id) = message_id else {
             return;
         };
-        if self.assistant_message_id.as_deref() != Some(message_id) {
-            self.assistant_message_id = Some(message_id.to_owned());
-            self.streamed_blocks.clear();
+        match self.assistant_message_id.as_deref() {
+            None => self.assistant_message_id = Some(message_id.to_owned()),
+            Some(current) if current == message_id => {}
+            Some(_) => self.start_message(Some(message_id)),
         }
     }
 
-    fn stream_block_id(&self, value: &Value) -> Option<String> {
-        value
-            .pointer("/event/index")
-            .and_then(Value::as_u64)
-            .map(|index| self.block_id(index))
+    fn record_stream_delta(
+        &mut self,
+        kind: ClaudeTextKind,
+        index: Option<u64>,
+        text: &str,
+    ) -> Option<String> {
+        self.message_active = true;
+        if let Some(index) = index {
+            if let Some(block) =
+                self.text_blocks.iter_mut().rev().find(|block| {
+                    block.kind == kind && block.index == Some(index) && !block.completed
+                })
+            {
+                block.text.push_str(text);
+                return block.block_id.clone();
+            }
+            let block_id = Some(self.block_id(index));
+            self.text_blocks.push(ClaudeTextBlock {
+                kind,
+                index: Some(index),
+                text: text.to_owned(),
+                block_id: block_id.clone(),
+                completed: false,
+            });
+            return block_id;
+        }
+
+        // Without an index we cannot know whether adjacent deltas are chunks
+        // or blocks. Preserve them verbatim as legacy no-id events and let a
+        // later envelope consume the shortest matching prefix of this ledger.
+        self.text_blocks.push(ClaudeTextBlock {
+            kind,
+            index: None,
+            text: text.to_owned(),
+            block_id: None,
+            completed: false,
+        });
+        None
+    }
+
+    fn reconcile_envelope(
+        &mut self,
+        kind: ClaudeTextKind,
+        index: Option<u64>,
+        text: &str,
+    ) -> Option<(String, Option<String>)> {
+        if let Some(index) = index
+            && let Some(position) = self.text_blocks.iter().position(|block| {
+                block.kind == kind && block.index == Some(index) && text.starts_with(&block.text)
+            })
+        {
+            return self.complete_block(position, text);
+        }
+
+        // An absent index is not index zero. Match only an oldest, contiguous
+        // prefix of still-uncompleted streamed text. This handles both a block
+        // split across chunks and legacy streams where every delta lacks an
+        // index, without suppressing an unrelated envelope-only block.
+        let pending = self
+            .text_blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, block)| {
+                block.kind == kind && !block.completed && (index.is_none() || block.index.is_none())
+            })
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>();
+        let mut accumulated = String::new();
+        let mut matched = Vec::new();
+        for position in pending {
+            accumulated.push_str(&self.text_blocks[position].text);
+            if !text.starts_with(&accumulated) {
+                matched.clear();
+                break;
+            }
+            matched.push(position);
+            if accumulated == text {
+                break;
+            }
+        }
+        if !matched.is_empty() && text.starts_with(&accumulated) {
+            let block_id = matched
+                .iter()
+                .map(|position| self.text_blocks[*position].block_id.as_deref())
+                .reduce(|left, right| if left == right { left } else { None })
+                .flatten()
+                .map(str::to_owned);
+            for position in matched {
+                self.text_blocks[position].completed = true;
+            }
+            let suffix = &text[accumulated.len()..];
+            return (!suffix.is_empty()).then(|| (suffix.to_owned(), block_id));
+        }
+
+        let block_id = match index {
+            Some(index) => Some(self.block_id(index)),
+            None => {
+                let sequence = self.anonymous_block_sequence;
+                self.anonymous_block_sequence += 1;
+                Some(match self.assistant_message_id.as_deref() {
+                    Some(message_id) => format!("claude:{message_id}:anonymous-{sequence}"),
+                    None => format!("claude:{}:anonymous-{sequence}", self.message_sequence),
+                })
+            }
+        };
+        self.text_blocks.push(ClaudeTextBlock {
+            kind,
+            index,
+            text: text.to_owned(),
+            block_id: block_id.clone(),
+            completed: true,
+        });
+        Some((text.to_owned(), block_id))
+    }
+
+    fn complete_block(&mut self, position: usize, text: &str) -> Option<(String, Option<String>)> {
+        let block = &mut self.text_blocks[position];
+        block.completed = true;
+        let suffix = text.strip_prefix(&block.text).unwrap_or(text).to_owned();
+        block.text = text.to_owned();
+        (!suffix.is_empty()).then(|| (suffix, block.block_id.clone()))
     }
 
     fn check_session(&self, value: &Value) -> DriverResult<()> {

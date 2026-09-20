@@ -69,56 +69,352 @@ async fn streamed_reasoning_uses_content_indices_as_block_identity() {
     );
 }
 
+#[derive(Clone, Copy)]
+enum ClaudeTextFixtureKind {
+    Prose,
+    Reasoning,
+}
+
+impl ClaudeTextFixtureKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Prose => "prose",
+            Self::Reasoning => "reasoning",
+        }
+    }
+}
+
+struct ClaudeTextCase {
+    name: &'static str,
+    events: Vec<Value>,
+    expected: &'static [&'static str],
+    baseline: &'static [&'static str],
+}
+
+fn claude_message_start(id: Option<&str>) -> Value {
+    json!({
+        "type": "stream_event",
+        "session_id": "claude-session",
+        "event": {"type": "message_start", "message": {"id": id}}
+    })
+}
+
+fn claude_text_delta(kind: ClaudeTextFixtureKind, index: Option<u64>, text: &str) -> Value {
+    let delta = match kind {
+        ClaudeTextFixtureKind::Prose => json!({"type": "text_delta", "text": text}),
+        ClaudeTextFixtureKind::Reasoning => {
+            json!({"type": "thinking_delta", "thinking": text})
+        }
+    };
+    json!({
+        "type": "stream_event",
+        "session_id": "claude-session",
+        "event": {"type": "content_block_delta", "index": index, "delta": delta}
+    })
+}
+
+fn claude_text_envelope(
+    kind: ClaudeTextFixtureKind,
+    id: Option<&str>,
+    index: Option<u64>,
+    text: &str,
+) -> Value {
+    let block = match kind {
+        ClaudeTextFixtureKind::Prose => json!({"type": "text", "text": text}),
+        ClaudeTextFixtureKind::Reasoning => {
+            json!({"type": "thinking", "thinking": text})
+        }
+    };
+    json!({
+        "type": "assistant",
+        "session_id": "claude-session",
+        "apiBlockIndex": index,
+        "message": {"id": id, "content": [block]}
+    })
+}
+
+fn claude_multi_text_envelope(kind: ClaudeTextFixtureKind, id: &str) -> Value {
+    let blocks = match kind {
+        ClaudeTextFixtureKind::Prose => vec![
+            json!({"type": "text", "text": "first"}),
+            json!({"type": "text", "text": "second"}),
+        ],
+        ClaudeTextFixtureKind::Reasoning => vec![
+            json!({"type": "thinking", "thinking": "first"}),
+            json!({"type": "thinking", "thinking": "second"}),
+        ],
+    };
+    json!({
+        "type": "assistant",
+        "session_id": "claude-session",
+        "message": {"id": id, "content": blocks}
+    })
+}
+
+fn claude_tool_envelope() -> Value {
+    json!({
+        "type": "assistant",
+        "session_id": "claude-session",
+        "apiBlockIndex": 1,
+        "message": {
+            "id": "m",
+            "content": [{"type": "tool_use", "id": "t", "name": "read", "input": {}}]
+        }
+    })
+}
+
+fn claude_text_cases(kind: ClaudeTextFixtureKind) -> Vec<ClaudeTextCase> {
+    vec![
+        ClaudeTextCase {
+            // Reviewer probe verbatim: the stream has indices, but its message
+            // identity arrives only in the first completed-block envelope.
+            name: "reviewer original late-identity probe",
+            events: vec![
+                claude_text_delta(kind, Some(0), "first"),
+                claude_text_envelope(kind, Some("same-message"), Some(0), "first"),
+                claude_text_delta(kind, Some(1), "second"),
+                claude_text_envelope(kind, Some("same-message"), Some(1), "second"),
+            ],
+            expected: &["first", "second"],
+            baseline: &["first", "second", "second"],
+        },
+        ClaudeTextCase {
+            name: "full metadata two blocks",
+            events: vec![
+                claude_message_start(Some("m")),
+                claude_text_delta(kind, Some(0), "first"),
+                claude_text_envelope(kind, Some("m"), Some(0), "first"),
+                claude_text_delta(kind, Some(1), "second"),
+                claude_text_envelope(kind, Some("m"), Some(1), "second"),
+            ],
+            expected: &["first", "second"],
+            baseline: &["first", "second", "second"],
+        },
+        ClaudeTextCase {
+            name: "chunked stream tool interleaving and later identified message",
+            events: vec![
+                claude_message_start(Some("m")),
+                claude_text_delta(kind, Some(0), "fi"),
+                claude_text_delta(kind, Some(0), "rst"),
+                claude_text_envelope(kind, Some("m"), Some(0), "first"),
+                claude_tool_envelope(),
+                claude_text_delta(kind, Some(2), "second"),
+                claude_text_envelope(kind, Some("m"), Some(2), "second"),
+                claude_message_start(Some("m2")),
+                claude_text_delta(kind, Some(0), "third"),
+                claude_text_envelope(kind, Some("m2"), Some(0), "third"),
+            ],
+            expected: &["fi", "rst", "second", "third"],
+            baseline: &["fi", "rst", "second", "second", "third"],
+        },
+        ClaudeTextCase {
+            name: "message start without id adopts later envelope identity",
+            events: vec![
+                claude_message_start(None),
+                claude_text_delta(kind, Some(0), "first"),
+                claude_text_envelope(kind, Some("m"), Some(0), "first"),
+                claude_text_delta(kind, Some(1), "second"),
+                claude_text_envelope(kind, Some("m"), Some(1), "second"),
+            ],
+            expected: &["first", "second"],
+            baseline: &["first", "second", "second"],
+        },
+        ClaudeTextCase {
+            name: "subsequent anonymous message resets identified state",
+            events: vec![
+                claude_message_start(Some("m")),
+                claude_text_delta(kind, Some(0), "first"),
+                claude_text_envelope(kind, Some("m"), Some(0), "first"),
+                claude_message_start(None),
+                claude_text_envelope(kind, None, Some(0), "second"),
+            ],
+            expected: &["first", "second"],
+            baseline: &["first", "second"],
+        },
+        ClaudeTextCase {
+            // Reviewer probe verbatim: the second text is envelope-only and
+            // has no apiBlockIndex after an interleaved tool-use envelope.
+            name: "reviewer missing-envelope-index probe",
+            events: vec![
+                claude_message_start(Some("m")),
+                claude_text_delta(kind, Some(0), "first"),
+                claude_text_envelope(kind, Some("m"), Some(0), "first"),
+                claude_tool_envelope(),
+                claude_text_envelope(kind, Some("m"), None, "second"),
+            ],
+            expected: &["first", "second"],
+            baseline: &["first", "second"],
+        },
+        ClaudeTextCase {
+            name: "stream and envelopes all omit block indices",
+            events: vec![
+                claude_message_start(Some("m")),
+                claude_text_delta(kind, None, "first"),
+                claude_text_delta(kind, None, "second"),
+                claude_text_envelope(kind, Some("m"), None, "first"),
+                claude_text_envelope(kind, Some("m"), None, "second"),
+            ],
+            expected: &["first", "second"],
+            baseline: &["first", "second", "second"],
+        },
+        ClaudeTextCase {
+            name: "message ids absent while ordered block indices remain",
+            events: vec![
+                claude_message_start(None),
+                claude_text_delta(kind, Some(0), "first"),
+                claude_text_envelope(kind, None, Some(0), "first"),
+                claude_text_delta(kind, Some(1), "second"),
+                claude_text_envelope(kind, None, Some(1), "second"),
+            ],
+            expected: &["first", "second"],
+            baseline: &["first", "second", "second"],
+        },
+        ClaudeTextCase {
+            name: "message id appears only at start",
+            events: vec![
+                claude_message_start(Some("m")),
+                claude_text_delta(kind, Some(0), "first"),
+                claude_text_envelope(kind, None, Some(0), "first"),
+                claude_text_delta(kind, Some(1), "second"),
+                claude_text_envelope(kind, None, Some(1), "second"),
+            ],
+            expected: &["first", "second"],
+            baseline: &["first", "second"],
+        },
+        ClaudeTextCase {
+            name: "only envelopes carry block indices",
+            events: vec![
+                claude_message_start(Some("m")),
+                claude_text_delta(kind, None, "first"),
+                claude_text_delta(kind, None, "second"),
+                claude_text_envelope(kind, Some("m"), Some(0), "first"),
+                claude_text_envelope(kind, Some("m"), Some(1), "second"),
+            ],
+            expected: &["first", "second"],
+            baseline: &["first", "second", "second"],
+        },
+        ClaudeTextCase {
+            name: "late identity with missing envelope index",
+            events: vec![
+                claude_message_start(None),
+                claude_text_delta(kind, Some(0), "first"),
+                claude_text_envelope(kind, Some("m"), None, "first"),
+                claude_text_envelope(kind, Some("m"), None, "second"),
+            ],
+            expected: &["first", "second"],
+            baseline: &["first", "second"],
+        },
+        ClaudeTextCase {
+            name: "envelope-only blocks use explicit correspondence",
+            events: vec![
+                claude_message_start(Some("m")),
+                claude_text_envelope(kind, Some("m"), Some(0), "first"),
+                claude_text_envelope(kind, Some("m"), None, "second"),
+            ],
+            expected: &["first", "second"],
+            baseline: &["first", "second"],
+        },
+        ClaudeTextCase {
+            name: "multi-block envelope uses content array positions",
+            events: vec![
+                claude_message_start(Some("m")),
+                claude_multi_text_envelope(kind, "m"),
+            ],
+            expected: &["first", "second"],
+            baseline: &["first", "second"],
+        },
+        ClaudeTextCase {
+            name: "completed envelope contributes an unstreamed suffix",
+            events: vec![
+                claude_message_start(Some("m")),
+                claude_text_delta(kind, Some(0), "fi"),
+                claude_text_envelope(kind, Some("m"), Some(0), "first"),
+            ],
+            expected: &["fi", "rst"],
+            baseline: &["fi"],
+        },
+        ClaudeTextCase {
+            name: "several identified and anonymous messages share one turn",
+            events: vec![
+                claude_message_start(Some("m1")),
+                claude_text_delta(kind, Some(0), "first"),
+                claude_text_envelope(kind, Some("m1"), Some(0), "first"),
+                claude_message_start(Some("m2")),
+                claude_text_envelope(kind, Some("m2"), Some(0), "second"),
+                claude_message_start(None),
+                claude_text_delta(kind, None, "third"),
+                claude_text_envelope(kind, None, None, "third"),
+            ],
+            expected: &["first", "second", "third"],
+            baseline: &["first", "second", "third"],
+        },
+    ]
+}
+
 #[tokio::test]
-async fn completed_block_envelopes_do_not_duplicate_streamed_reasoning() {
+async fn text_correlation_matrix_preserves_every_model_byte_exactly_once() {
+    for kind in [
+        ClaudeTextFixtureKind::Reasoning,
+        ClaudeTextFixtureKind::Prose,
+    ] {
+        for case in claude_text_cases(kind) {
+            let (mut output, events) = initialized_claude_output();
+            for value in case.events {
+                output.handle(&value, &events).unwrap();
+            }
+            events
+                .complete(
+                    TerminalOutcome::Done {
+                        summary: String::new(),
+                    },
+                    None,
+                )
+                .unwrap();
+            let emitted = events
+                .stream()
+                .unwrap()
+                .filter_map(|event| async move {
+                    match event {
+                        SubagentEvent::ProseDelta { text, .. }
+                        | SubagentEvent::ReasoningDelta { text, .. } => Some(text),
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>()
+                .await;
+
+            assert_eq!(
+                emitted,
+                case.expected,
+                "{} case `{}`; pre-lane baseline emitted {:?}",
+                kind.name(),
+                case.name,
+                case.baseline,
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn identified_message_keeps_original_block_indices_on_emitted_chunks() {
     let (mut output, events) = initialized_claude_output();
-    let captured = [
-        json!({
-            "type": "stream_event",
-            "session_id": "claude-session",
-            "event": {
-                "type": "message_start",
-                "message": {"id": "msg_01", "content": []}
-            }
-        }),
-        json!({
-            "type": "stream_event",
-            "session_id": "claude-session",
-            "event": {
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {"type": "thinking_delta", "thinking": "first"}
-            }
-        }),
-        json!({
-            "type": "assistant",
-            "session_id": "claude-session",
-            "apiBlockIndex": 0,
-            "message": {
-                "id": "msg_01",
-                "content": [{"type": "thinking", "thinking": "first"}]
-            }
-        }),
-        json!({
-            "type": "stream_event",
-            "session_id": "claude-session",
-            "event": {
-                "type": "content_block_delta",
-                "index": 1,
-                "delta": {"type": "thinking_delta", "thinking": "second"}
-            }
-        }),
-        json!({
-            "type": "assistant",
-            "session_id": "claude-session",
-            "apiBlockIndex": 1,
-            "message": {
-                "id": "msg_01",
-                "content": [{"type": "thinking", "thinking": "second"}]
-            }
-        }),
-    ];
-    for value in captured {
+    for value in [
+        claude_message_start(Some("msg_01")),
+        claude_text_delta(ClaudeTextFixtureKind::Reasoning, Some(0), "first"),
+        claude_text_envelope(
+            ClaudeTextFixtureKind::Reasoning,
+            Some("msg_01"),
+            Some(0),
+            "first",
+        ),
+        claude_text_delta(ClaudeTextFixtureKind::Reasoning, Some(1), "second"),
+        claude_text_envelope(
+            ClaudeTextFixtureKind::Reasoning,
+            Some("msg_01"),
+            Some(1),
+            "second",
+        ),
+    ] {
         output.handle(&value, &events).unwrap();
     }
     events

@@ -8,7 +8,9 @@ fn showcase_edits_reject_reused_thread_identity_after_history_change() {
     let thread: hirsel_proto::Thread = serde_json::from_value(json!({
         "id":5,"kind":"space","parent_thread_id":null,"pinned_at":null,"title":"Same ID",
         "icon":{"kind":"symbol","name":"rocket","tint":"blue"},
-        "description":"","instrument":null,"attention":"quiet","settled_at":null,
+        "description":"","instrument":null,
+        "state":{"revision":1,"headline":"Space ready","own_headline":"Space ready","findings":[],"artifact_ids":[],"checkpoint_at":null,"steering_revision":0},
+        "attention":"quiet","settled_at":null,
         "archived_at":null,"snoozed_until":null,"read":false,
         "created_at":"2026-09-10T10:00:00Z","updated_at":"2026-09-10T10:00:00Z","revision":7,
         "running_turn":null,"queued_turn_count":0,"last_finished_turn":null,

@@ -775,16 +775,16 @@ fn a_boot_notice_is_absent_from_the_wire_until_there_is_one() {
 
 #[test]
 fn artifact_content_frames_and_optional_message_references_round_trip() {
-    let value = json!({"type":"artifact_opened","client_id":"open-1","artifact":{"id":7,"title":"Result","kind":"solid","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[0,2],"content":"export default function App(){return <p>Hello</p>}"}});
+    let value = json!({"type":"artifact_opened","client_id":"open-1","artifact":{"id":7,"revision":3,"title":"Result","kind":"solid","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[0,2],"content":"export default function App(){return <p>Hello</p>}"}});
     let frame: HostToClient = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(frame).unwrap(), value);
     // Variant data travels flat beside its tag, so one field decides the mode.
-    let file = json!({"type":"artifact_opened","client_id":"open-2","artifact":{"id":8,"title":"Notes","kind":"file","mime":"text/plain","filename":"notes.txt","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[1],"content":"plain"}});
+    let file = json!({"type":"artifact_opened","client_id":"open-2","artifact":{"id":8,"revision":1,"title":"Notes","kind":"file","mime":"text/plain","filename":"notes.txt","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[1],"content":"plain"}});
     let frame: HostToClient = serde_json::from_value(file.clone()).unwrap();
     assert_eq!(serde_json::to_value(frame).unwrap(), file);
     // `openui` is a tag with no data of its own: the wire word matches the
     // stored tag exactly, because the store reassembles the kind from it.
-    let openui = json!({"type":"artifact_opened","client_id":"open-3","artifact":{"id":11,"title":"Dashboard","kind":"openui","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[3],"content":"root = Stack([lede])\nlede = Heading(\"Live\", 2)"}});
+    let openui = json!({"type":"artifact_opened","client_id":"open-3","artifact":{"id":11,"revision":2,"title":"Dashboard","kind":"openui","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[3],"content":"root = Stack([lede])\nlede = Heading(\"Live\", 2)"}});
     let frame: HostToClient = serde_json::from_value(openui.clone()).unwrap();
     assert_eq!(serde_json::to_value(frame).unwrap(), openui);
     assert_eq!(ArtifactKind::OpenUi.tag(), "openui");
@@ -802,7 +802,7 @@ fn artifact_content_frames_and_optional_message_references_round_trip() {
     );
     assert!(ArtifactKind::TAGS.contains(&"openui"));
 
-    let image = json!({"id":9,"title":"Cat","kind":"image","mime":"image/svg+xml","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[]});
+    let image = json!({"id":9,"revision":1,"title":"Cat","kind":"image","mime":"image/svg+xml","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[]});
     let summary: ArtifactSummary = serde_json::from_value(image.clone()).unwrap();
     assert_eq!(
         summary.kind,
@@ -811,7 +811,7 @@ fn artifact_content_frames_and_optional_message_references_round_trip() {
         }
     );
     assert_eq!(serde_json::to_value(summary).unwrap(), image);
-    assert!(serde_json::from_value::<ArtifactSummary>(json!({"id":9,"title":"Cat","kind":"scroll","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[]})).is_err());
+    assert!(serde_json::from_value::<ArtifactSummary>(json!({"id":9,"revision":1,"title":"Cat","kind":"scroll","created_at":"2026-09-09T00:00:00Z","updated_at":"2026-09-09T00:00:00Z","thread_ids":[]})).is_err());
     let list: ClientToHost =
         serde_json::from_value(json!({"type":"list_artifacts","client_id":"all"})).unwrap();
     assert!(matches!(
@@ -826,6 +826,26 @@ fn artifact_content_frames_and_optional_message_references_round_trip() {
     )
     .unwrap();
     assert!(message.artifact_ids.is_empty());
+}
+
+#[test]
+fn material_thread_state_round_trips_with_independent_revisions() {
+    let state = ThreadState {
+        revision: 7,
+        headline: "2 children · #4 running".into(),
+        own_headline: "Release evidence ready".into(),
+        findings: vec!["Linux passed".into(), "Android remains".into()],
+        artifact_ids: vec![3, 9],
+        checkpoint_at: Some("2026-09-20T12:00:00Z".parse().unwrap()),
+        steering_revision: 2,
+    };
+    let encoded = serde_json::to_value(&state).unwrap();
+    assert_eq!(encoded["revision"], 7);
+    assert_eq!(encoded["steering_revision"], 2);
+    assert_eq!(
+        serde_json::from_value::<ThreadState>(encoded).unwrap(),
+        state
+    );
 }
 
 #[test]

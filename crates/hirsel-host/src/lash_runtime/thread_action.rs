@@ -67,6 +67,15 @@ mod tests {
         current["queued_turn_count"] = json!(3);
         current["last_finished_turn"] = Value::Null;
         current["last_activity_at"] = json!("2026-09-09T12:00:00Z");
+        current["state"] = json!({
+            "revision": 1,
+            "headline": "Task ready",
+            "own_headline": "Task ready",
+            "findings": [],
+            "artifact_ids": [],
+            "checkpoint_at": null,
+            "steering_revision": 0
+        });
         let thread: Thread = serde_json::from_value(current.clone()).unwrap();
         let captured = ThreadActionSnapshot::from(thread);
         assert_eq!(serde_json::to_value(&captured).unwrap(), original);

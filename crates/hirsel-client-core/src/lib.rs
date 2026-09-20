@@ -23,7 +23,7 @@ pub use hirsel_proto::{
     AgentActivityState, Blob, ChatAuthor, ChatMessage, EffectAction, HelloAuth, ProcessInfo,
     ProcessState, Thread, ThreadActivity, ThreadAttention, ThreadEffect, ThreadEffectKind,
     ThreadEffectReceipt, ThreadEffectRefusal, ThreadEffectTarget, ThreadIcon, ThreadKind,
-    ThreadRelatedItem, ThreadRelatedTarget, ThreadTint, ThreadTurn, ThreadTurnState,
+    ThreadRelatedItem, ThreadRelatedTarget, ThreadState, ThreadTint, ThreadTurn, ThreadTurnState,
     ToolCallSummary,
 };
 

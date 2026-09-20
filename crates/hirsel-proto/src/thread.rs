@@ -56,6 +56,9 @@ pub struct Thread {
     #[serde(default)]
     pub execution: Option<ThreadExecutionTarget>,
     pub instrument: Option<serde_json::Value>,
+    /// Durable material state. Its revision is independent of the Thread
+    /// metadata revision above.
+    pub state: ThreadState,
     pub attention: ThreadAttention,
     pub settled_at: Option<DateTime<Utc>>,
     pub archived_at: Option<DateTime<Utc>>,
@@ -72,6 +75,17 @@ pub struct Thread {
     /// Latest factual conversation/execution activity, falling back to creation.
     /// Reading or changing lifecycle metadata does not advance this timestamp.
     pub last_activity_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadState {
+    pub revision: u64,
+    pub headline: String,
+    pub own_headline: String,
+    pub findings: Vec<String>,
+    pub artifact_ids: Vec<u64>,
+    pub checkpoint_at: Option<DateTime<Utc>>,
+    pub steering_revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

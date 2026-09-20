@@ -133,6 +133,7 @@ fn image_mime_for(filename: &str) -> Option<&'static str> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactSummary {
     pub id: u64,
+    pub revision: u64,
     pub title: String,
     #[serde(flatten)]
     pub kind: ArtifactKind,

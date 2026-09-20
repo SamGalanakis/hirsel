@@ -14,6 +14,7 @@ export type ArtifactKind =
   | { kind: "file"; mime: string; filename?: string | null };
 export type ArtifactSummary = ArtifactKind & {
   id: number;
+  revision: number;
   title: string;
   created_at: string;
   updated_at: string;

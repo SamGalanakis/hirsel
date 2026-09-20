@@ -721,6 +721,7 @@ async fn kind_conversion_is_revision_guarded_atomic_and_preserves_identity() {
         Some(blocked.id),
     )
     .await;
+    let blocked = storage.thread(blocked.id).await.unwrap().unwrap();
     assert!(
         storage
             .set_addressed_thread_kind(&history, blocked.id, ThreadKind::Task, blocked.revision,)

@@ -72,6 +72,13 @@ pub(crate) enum ThreadMutation {
         instrument: Option<Option<Value>>,
         attention: Option<ThreadAttention>,
     },
+    State {
+        thread: ThreadRef,
+        expected_state_revision: u64,
+        headline: String,
+        findings: Option<Vec<String>>,
+        artifact_ids: Option<Vec<u64>>,
+    },
     Activity {
         thread: ThreadRef,
         kind: String,
@@ -208,6 +215,11 @@ impl Storage {
                 let (symbol, tint, blob_id) = icon_columns(icon.as_ref());
                 tx.execute("INSERT INTO threads(client_id,kind,parent_thread_id,title,description,instrument,attention,read,created_at,updated_at,revision,icon_symbol,icon_tint,icon_blob_id) VALUES(?1,?2,?3,?4,?5,?6,?7,0,?8,?8,1,?9,?10,?11)",params![key,threads::kind_name(*kind),parent,title.trim(),description,instrument.as_ref().map(serde_json::to_string).transpose()?,threads::attention(*attention),now,symbol,tint,blob_id])?;
                 let thread = threads::get(&tx, tx.last_insert_rowid() as u64)?;
+                crate::thread_rollups::refresh_ancestors(
+                    &tx,
+                    thread.id,
+                    super::thread_state::StateActor::thread(caller),
+                )?;
                 json!({"thread_id":thread.id,"thread":thread})
             }
             ThreadMutation::Update {
@@ -238,6 +250,15 @@ impl Storage {
                 }
                 let (symbol, tint, blob_id) = icon_columns(icon.as_ref().and_then(Option::as_ref));
                 tx.execute("UPDATE threads SET title=COALESCE(?2,title),description=COALESCE(?3,description),instrument=CASE WHEN ?13 THEN ?4 ELSE instrument END,attention=COALESCE(?5,attention),icon_symbol=CASE WHEN ?7 THEN ?8 ELSE icon_symbol END,icon_tint=CASE WHEN ?7 THEN ?9 ELSE icon_tint END,icon_blob_id=CASE WHEN ?7 THEN ?10 ELSE icon_blob_id END,showcased_artifact_id=CASE WHEN ?11 THEN ?12 ELSE showcased_artifact_id END,updated_at=?6,revision=revision+1,read=0 WHERE id=?1",params![id,title,description,instrument.as_ref().and_then(Option::as_ref).map(serde_json::to_string).transpose()?,attention.map(threads::attention),now,icon.is_some(),symbol,tint,blob_id,showcased_artifact_id.is_some(),showcased_artifact_id.flatten(),instrument.is_some()])?;
+                if instrument.is_some() || showcased_artifact_id.is_some() || attention.is_some() {
+                    super::thread_state::touch(
+                        &tx,
+                        id,
+                        super::thread_state::StateActor::thread(caller),
+                        "thread_material_updated",
+                        false,
+                    )?;
+                }
                 let mut result = json!({"thread_id":id,"thread":threads::get(&tx,id)?});
                 if let Some(new) = showcased_artifact_id {
                     super::thread_showcase::touch_artifacts(
@@ -249,6 +270,24 @@ impl Storage {
                         json!(previous_showcased_artifact_id);
                 }
                 result
+            }
+            ThreadMutation::State {
+                thread,
+                expected_state_revision,
+                headline,
+                findings,
+                artifact_ids,
+            } => {
+                let id = thread_scope::resolve(&tx, caller.thread_id, thread)?;
+                super::thread_state::update(
+                    &tx,
+                    caller,
+                    id,
+                    *expected_state_revision,
+                    headline,
+                    findings.as_deref(),
+                    artifact_ids.as_deref(),
+                )?
             }
             ThreadMutation::Activity { thread, kind, data } => {
                 let id = thread_scope::resolve(&tx, caller.thread_id, thread)?;
@@ -298,7 +337,9 @@ impl Storage {
                 serde_json::to_value(super::thread_grants::revoke(&tx, id, *target)?)?
             }
         };
-        if let Some(id) = result.get("thread_id").and_then(Value::as_u64) {
+        if result.get("conflict") != Some(&Value::Bool(true))
+            && let Some(id) = result.get("thread_id").and_then(Value::as_u64)
+        {
             result["history_id"] = json!(caller.history_id);
             result["reference_url"] = json!(thread_scope::reference_url(&caller.history_id, id));
             let (tool, effect, request_client_id) = match mutation {
@@ -336,6 +377,11 @@ impl Storage {
                 ),
                 ThreadMutation::Update { .. } => (
                     "threads_update",
+                    hirsel_proto::ThreadEffectKind::Edited,
+                    None,
+                ),
+                ThreadMutation::State { .. } => (
+                    "threads_state",
                     hirsel_proto::ThreadEffectKind::Edited,
                     None,
                 ),

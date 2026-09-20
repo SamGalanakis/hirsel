@@ -261,7 +261,8 @@ pub(super) fn authorize_artifact(
         &format!("{REACH_CTE}
         SELECT EXISTS(SELECT 1 FROM message_artifacts r JOIN chat_messages m ON m.id=r.message_id JOIN scope s ON s.id=m.thread_id WHERE r.artifact_id=?2
         UNION ALL SELECT 1 FROM activity_artifacts r JOIN thread_activities a ON a.id=r.activity_id JOIN scope s ON s.id=a.thread_id WHERE r.artifact_id=?2
-        UNION ALL SELECT 1 FROM threads t JOIN scope s ON s.id=t.id WHERE t.showcased_artifact_id=?2)"),
+        UNION ALL SELECT 1 FROM threads t JOIN scope s ON s.id=t.id WHERE t.showcased_artifact_id=?2
+        UNION ALL SELECT 1 FROM thread_state_artifacts r JOIN scope s ON s.id=r.thread_id WHERE r.artifact_id=?2)"),
         params![caller, artifact_id],
         |r| r.get(0),
     )?;

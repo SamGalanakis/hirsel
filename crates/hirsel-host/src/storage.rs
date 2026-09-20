@@ -25,6 +25,7 @@ mod thread_events;
 mod thread_execution;
 mod thread_icons;
 mod thread_showcase;
+pub(crate) mod thread_state;
 pub(crate) use thread_showcase::parse_showcase;
 mod thread_messages;
 mod thread_requests;
@@ -105,6 +106,7 @@ impl Storage {
                 DELETE FROM message_artifacts;
                 DELETE FROM message_task_focus;
                 DELETE FROM activity_artifacts;
+                DELETE FROM thread_state_artifacts;
                 DELETE FROM artifacts;
                 DELETE FROM thread_related_receipts;
                 DELETE FROM thread_action_receipts;
@@ -115,6 +117,7 @@ impl Storage {
                 DELETE FROM thread_turn_execution;
                 DELETE FROM thread_mutation_receipts;
                 DELETE FROM thread_effect_receipts;
+                DELETE FROM thread_state_changes;
                 DELETE FROM thread_process_authorities;
                 DELETE FROM thread_process_sessions;
                 DELETE FROM thread_execution_bindings;
@@ -128,10 +131,11 @@ impl Storage {
                 DELETE FROM client_messages;
                 DELETE FROM process_deliveries;
                 DELETE FROM chat_messages;
+                DELETE FROM thread_state;
                 DELETE FROM threads;
                 DELETE FROM blobs;
                 DELETE FROM sqlite_sequence
-                WHERE name IN ('chat_messages', 'threads', 'thread_turns', 'thread_activities', 'thread_related_items', 'thread_effect_receipts');
+                WHERE name IN ('chat_messages', 'threads', 'thread_turns', 'thread_activities', 'thread_related_items', 'thread_effect_receipts', 'thread_state_changes');
                 ",
             )?;
             tx.execute(

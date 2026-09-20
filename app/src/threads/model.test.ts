@@ -15,6 +15,11 @@ describe("durable thread inventory", () => {
     expect(upsertThread(rows, makeThread())).toBe(rows);
     expect(upsertThread(rows, makeThread(1, { title: "Current", revision: 3, queued_turn_count: 2 }))[0].queued_turn_count).toBe(2);
   });
+  it("accepts material state changes independently of the Thread metadata revision", () => {
+    const rows = [makeThread(1, { revision: 3, state: { ...makeThread().state, revision: 4, headline: "Earlier checkpoint" } })];
+    const updated = makeThread(1, { revision: 3, state: { ...makeThread().state, revision: 5, headline: "Release evidence ready" } });
+    expect(upsertThread(rows, updated)[0].state).toEqual(updated.state);
+  });
   it("keeps settlement explicit and snooze time-bound", () => {
     const now = Date.parse("2026-09-09T10:00:00Z");
     expect(threadSection(makeThread(1, { read: true }), now)).toBe("active");

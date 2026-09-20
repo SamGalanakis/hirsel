@@ -96,6 +96,13 @@ impl Storage {
             "INSERT INTO thread_activity_keys(key,activity_id) VALUES(?1,?2)",
             params![key, tx.last_insert_rowid()],
         )?;
+        super::thread_state::touch(
+            &tx,
+            thread_id,
+            super::thread_state::StateActor::host(),
+            "work_queued",
+            false,
+        )?;
         let turn = get(&tx, turn_id)?;
         tx.commit()?;
         Ok(turn)
@@ -130,35 +137,53 @@ impl Storage {
         tx.execute("INSERT INTO thread_turns(thread_id,owner_message_id,state,accepted_at,requester_thread_id) VALUES(?1,?2,'queued',?3,(SELECT parent_thread_id FROM threads WHERE id=?1))",params![thread_id,owner_message_id,chrono::Utc::now().to_rfc3339()])?;
         let id = tx.last_insert_rowid() as u64;
         super::thread_execution::capture(&tx, thread_id, id, None)?;
+        super::thread_state::touch(
+            &tx,
+            thread_id,
+            super::thread_state::StateActor::host(),
+            "work_queued",
+            false,
+        )?;
         let t = get(&tx, id)?;
         tx.commit()?;
         Ok(t)
     }
     pub async fn run_thread_turn(&self, id: u64) -> anyhow::Result<ThreadTurn> {
-        let c = self.conn.lock().await;
-        let t = get(&c, id)?;
+        let mut c = self.conn.lock().await;
+        let tx = c.transaction()?;
+        let t = get(&tx, id)?;
         if matches!(t.state, ThreadTurnState::Queued) {
-            let claimed = c.execute(
+            let claimed = tx.execute(
                 "UPDATE thread_turns SET state='running',started_at=?2 WHERE id=?1 AND state='queued' AND cancel_requested_at IS NULL",
                 params![id, chrono::Utc::now().to_rfc3339()],
             )?;
             anyhow::ensure!(claimed == 1, "queued turn was cancelled before admission");
+            super::thread_state::touch(
+                &tx,
+                t.thread_id,
+                super::thread_state::StateActor::host(),
+                "work_started",
+                false,
+            )?;
         }
-        get(&c, id)
+        let turn = get(&tx, id)?;
+        tx.commit()?;
+        Ok(turn)
     }
     pub async fn start_thread_turn(
         &self,
         thread_id: u64,
         owner_message_id: Option<u64>,
     ) -> anyhow::Result<ThreadTurn> {
-        let c = self.conn.lock().await;
-        threads::get(&c, thread_id)?;
+        let mut c = self.conn.lock().await;
+        let tx = c.transaction()?;
+        threads::get(&tx, thread_id)?;
         if let Some(mid) = owner_message_id {
             anyhow::ensure!(
-                super::chat::get_chat_message(&c, mid)?.thread_id == thread_id,
+                super::chat::get_chat_message(&tx, mid)?.thread_id == thread_id,
                 "turn message belongs to another thread"
             );
-            if let Some(id) = c
+            if let Some(id) = tx
                 .query_row(
                     "SELECT id FROM thread_turns WHERE owner_message_id=?1",
                     [mid],
@@ -166,13 +191,24 @@ impl Storage {
                 )
                 .optional()?
             {
-                return get(&c, id);
+                let turn = get(&tx, id)?;
+                tx.commit()?;
+                return Ok(turn);
             }
         }
-        c.execute("INSERT INTO thread_turns(thread_id,owner_message_id,state,accepted_at,started_at,requester_thread_id) VALUES(?1,?2,'running',?3,?3,(SELECT parent_thread_id FROM threads WHERE id=?1))",params![thread_id,owner_message_id,chrono::Utc::now().to_rfc3339()])?;
-        let id = c.last_insert_rowid() as u64;
-        super::thread_execution::capture(&c, thread_id, id, None)?;
-        get(&c, id)
+        tx.execute("INSERT INTO thread_turns(thread_id,owner_message_id,state,accepted_at,started_at,requester_thread_id) VALUES(?1,?2,'running',?3,?3,(SELECT parent_thread_id FROM threads WHERE id=?1))",params![thread_id,owner_message_id,chrono::Utc::now().to_rfc3339()])?;
+        let id = tx.last_insert_rowid() as u64;
+        super::thread_execution::capture(&tx, thread_id, id, None)?;
+        super::thread_state::touch(
+            &tx,
+            thread_id,
+            super::thread_state::StateActor::host(),
+            "work_started",
+            false,
+        )?;
+        let turn = get(&tx, id)?;
+        tx.commit()?;
+        Ok(turn)
     }
     pub async fn finish_thread_turn(
         &self,
@@ -349,6 +385,13 @@ pub(super) fn finish_with_failure(
     }
     let status = serde_json::to_value(state)?;
     c.execute("UPDATE thread_turns SET state=?2,agent_message_id=COALESCE(?3,agent_message_id),finished_at=?4 WHERE id=?1",params![id,status.as_str(),agent_message_id,chrono::Utc::now().to_rfc3339()])?;
+    super::thread_state::touch(
+        c,
+        previous.thread_id,
+        super::thread_state::StateActor::host(),
+        status.as_str().unwrap_or("terminal"),
+        false,
+    )?;
     let turn = get(c, id)?;
     if turn.requester_thread_id.is_some() {
         let message = turn

@@ -31,6 +31,7 @@ pub mod templates;
 mod thread_commands;
 pub(crate) mod thread_identity;
 pub mod thread_instrument;
+pub(crate) mod thread_rollups;
 pub mod thread_tool_bridge;
 pub mod tools;
 pub mod ws;

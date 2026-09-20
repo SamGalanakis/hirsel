@@ -185,6 +185,15 @@ pub(super) fn hirsel_tool_definitions(
             "update",
         ),
         tool_definition(
+            "hirsel.threads_state",
+            "threads_state",
+            "Checkpoint a Task's durable material state with a short headline, bounded findings and explicit artifact references. This does not edit the instrument or complete the Task. Reload after a structured revision conflict.",
+            thread_state_schema(),
+            json!({"type":"object"}),
+            ["threads"],
+            "state",
+        ),
+        tool_definition(
             "hirsel.threads_list",
             "threads_list",
             "List authorized descendants, direct children by default. `under: 0` stands at the top of the tree and lists every root-level Thread — that takes root reach. Lifecycle is independent of hierarchy.",

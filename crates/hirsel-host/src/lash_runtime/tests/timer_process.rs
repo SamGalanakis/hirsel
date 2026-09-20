@@ -6,6 +6,123 @@ async fn timer_triggered_typescript_process_calls_hirsel_tool_and_delivers_messa
 }
 
 #[tokio::test]
+async fn directly_started_typescript_process_calls_hirsel_tool() {
+    use lash_core::{LlmOutputPart, llm::types::LlmResponse};
+
+    const DRAIN: &str = "direct-process-drain";
+    let source = r#"<typescript>
+const direct_shell_check = defineProcess({
+  name: "direct_shell_check",
+  signals: {},
+  run: async () => {
+    const output = await shell.run({ cmd: "printf direct-primitive-ok" });
+    return output.stdout;
+  }
+});
+const result = await start(direct_shell_check);
+finish(result);
+</typescript>"#;
+    let provider = lash_core::testing::TestProvider::builder()
+        .kind("hirsel-direct-process-e2e")
+        .complete(move |_request| async move {
+            Ok(LlmResponse {
+                parts: vec![LlmOutputPart::Text {
+                    text: source.to_string(),
+                    response_meta: None,
+                }],
+                ..LlmResponse::default()
+            })
+        })
+        .build()
+        .into_handle();
+    let (executor, storage, _log, _dir) = test_event_executor().await;
+    let route = executor.anchors.lock().await.active.clone().unwrap();
+    let session_id = storage
+        .reconcile_agent_tool_surface(
+            route.thread_id,
+            "direct-process-surface",
+            &["shell_run".to_string()],
+        )
+        .await
+        .unwrap()
+        .session_id;
+    storage
+        .bind_thread_execution(
+            &storage.history_id().await.unwrap(),
+            &session_id,
+            DRAIN,
+            route.thread_turn_id,
+        )
+        .await
+        .unwrap();
+    let protocol = lash_protocol_rlm::RlmProtocolPluginFactory::new(
+        hirsel_rlm_config(),
+        Arc::new(lash::persistence::InMemoryLashlangArtifactStore::new()),
+    );
+    let core = lash::LashCore::rlm_builder(lash::TurnBudget::Unbounded, protocol)
+        .with_native_queued_work()
+        .provider(provider)
+        .model(provider_rebind_test_model("hirsel-direct-process-model"))
+        .store_factory(Arc::new(
+            lash_core::facade_support::InMemorySessionStoreFactory::new(),
+        ))
+        .effect_host(Arc::new(lash::durability::NativeEffectHost::default()))
+        .attachment_store(Arc::new(lash::persistence::InMemoryAttachmentStore::new()))
+        .process_env_store(Arc::new(
+            lash::persistence::InMemoryProcessExecutionEnvStore::new(),
+        ))
+        .process_registry(Arc::new(lash_core::TestLocalProcessRegistry::default()))
+        .trigger_store(Arc::new(
+            lash_core::facade_support::InMemoryTriggerStore::default(),
+        ))
+        .tools(Arc::new(HirselToolProvider {
+            executor,
+            coding: Arc::new(NativeCodingBinding::new(
+                std::env::current_dir().unwrap().canonicalize().unwrap(),
+            )),
+        }))
+        .plugin(Arc::new(HirselPluginFactory))
+        .commit_budget(lash::CommitBudget::bounded(1024 * 1024, 512))
+        .queued_work_batching(lash::QueuedWorkBatchingConfig::new(1))
+        .build(lash_core::testing::runtime_lease_owner())
+        .unwrap();
+    let session = core
+        .session(&session_id)
+        .plugin_option(
+            RLM_PROTOCOL_PLUGIN_ID,
+            RlmCreateExtras {
+                dialect: Some(AGENT_RLM_DIALECT),
+                ..RlmCreateExtras::default()
+            },
+        )
+        .unwrap()
+        .open()
+        .await
+        .unwrap();
+    session
+        .enqueue(lash::TurnInput::text("start the process directly"))
+        .id("direct-process-input")
+        .ingress(TurnInputIngress::next_turn())
+        .send()
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        session.queued_turn().turn_id(DRAIN).run(),
+    )
+    .await
+    .expect("direct process turn completes")
+    .unwrap()
+    .expect("direct process turn");
+
+    assert_eq!(
+        result.final_value(),
+        Some(&json!("direct-primitive-ok")),
+        "directly started process must execute its Hirsel tool: {result:#?}"
+    );
+}
+
+#[tokio::test]
 async fn absolute_timer_retires_after_delivery() {
     timer_process_case("at: \"2030-01-01T00:00:00Z\"", true).await;
 }

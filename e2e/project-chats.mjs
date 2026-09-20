@@ -69,6 +69,34 @@ try {
   assert.deepEqual(homeDetail.detail.grants, [], "Home received an automatic reach grant");
 
   await page.getByRole("button", { name: "New Space or Task", exact: true }).first().click();
+  const nestedCreate = page.getByRole("dialog", { name: "New Space or Task", exact: true });
+  await nestedCreate.waitFor({ state: "visible" });
+  const nestedTitle = `Nested Space ${crypto.randomUUID().slice(0, 8)}`;
+  await nestedCreate.getByLabel("New space or task title", { exact: true }).fill(nestedTitle);
+  await nestedCreate.getByRole("button", { name: "Inside: Top level", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Home", exact: true }).click();
+  await nestedCreate.getByRole("button", { name: "Create Space", exact: true }).click();
+  const nested = await poll("nested Space creation", () => received(frames, frame =>
+    frame.type === "thread_created"
+      && frame.thread?.title === nestedTitle
+      && frame.thread.kind === "space"
+      && frame.thread.parent_thread_id === home.id
+  )?.thread, 10_000);
+  await page.locator(`main[data-thread-id="${nested.id}"]`).waitFor({ state: "visible" });
+  await page.getByRole("textbox", { name: `Message Space chat ${nestedTitle}`, exact: true }).waitFor();
+  assert.match(await contextText(page), new RegExp(`Space\\s+${nestedTitle}`));
+  assert.match(await contextText(page), /Worker\s+None/);
+  assert.equal(
+    await page.getByRole("textbox", { name: `Step in with worker ${nestedTitle}`, exact: true }).count(),
+    0,
+    "nested Space was presented as a worker",
+  );
+  const nestedDrawerTrigger = page.getByRole("button", { name: "Spaces and Tasks", exact: true });
+  if (await nestedDrawerTrigger.getAttribute("aria-expanded") === "false") await nestedDrawerTrigger.click();
+  await page.locator(`[data-thread-row="${home.id}"]`).click();
+  await page.locator(`main[data-thread-id="${home.id}"]`).waitFor({ state: "visible" });
+
+  await page.getByRole("button", { name: "New Space or Task", exact: true }).first().click();
   const create = page.getByRole("dialog", { name: "New Space or Task", exact: true });
   await create.waitFor({ state: "visible" });
   const taskTitle = `Space contract ${crypto.randomUUID().slice(0, 8)}`;
@@ -243,6 +271,7 @@ try {
   Object.assign(evidence, {
     historyId: hello.history_id,
     homeId: home.id,
+    nestedSpaceId: nested.id,
     taskId: task.id,
     delegatedTaskId: delegated.id,
     queuedTurnId: queuedTurn.id,

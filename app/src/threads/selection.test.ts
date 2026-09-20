@@ -36,6 +36,29 @@ describe("explicit Thread selection", () => {
     expect(threadState.focusedId).toBe(2);
     expect(location.pathname).toBe("/t/2");
   });
+  it("addresses a nested Space as a Space chat instead of pairing it as a worker", () => {
+    const home = makeThread(1, { title: "Home", kind: "space", parent_thread_id: null });
+    const nested = makeThread(2, { title: "Planning", kind: "space", parent_thread_id: home.id });
+    helloThreads([home, nested]);
+
+    flush(() => focusThread(nested.id));
+
+    expect(threadState.focusedId).toBe(nested.id);
+    expect(projectState).toMatchObject({ projectRecipientId: nested.id, workerPairingId: null });
+    expect(localStorage.getItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc")).toBe(String(home.id));
+  });
+  it("pairs a Task with its nearest containing Space chat", () => {
+    const home = makeThread(1, { title: "Home", kind: "space", parent_thread_id: null });
+    const nested = makeThread(2, { title: "Planning", kind: "space", parent_thread_id: home.id });
+    const task = makeThread(3, { title: "Draft", kind: "task", parent_thread_id: nested.id });
+    helloThreads([home, nested, task]);
+
+    flush(() => focusThread(task.id));
+
+    expect(threadState.focusedId).toBe(task.id);
+    expect(projectState).toMatchObject({ projectRecipientId: nested.id, workerPairingId: task.id });
+    expect(localStorage.getItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc")).toBe(String(home.id));
+  });
   it("prioritizes an explicit ordinary zero route over saved and focused IDs", () => {
     localStorage.setItem("hirsel.last-project.ab123456-1234-5678-9abc-123456789abc", "2");
     history.replaceState(null, "", "/t/0?history=ab123456-1234-5678-9abc-123456789abc");

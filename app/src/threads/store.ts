@@ -204,7 +204,7 @@ export function focusThread(id: number | null, updateUrl = true, currentHistory 
     const thread = threadState.threads.find(candidate => candidate.id === id);
     const project = thread ? projectForThread(threadState.threads, id) : null;
     if (project) rememberProject(project.id, currentHistory);
-    if (thread?.parent_thread_id === null && thread.kind === "space") enterProject(thread.id, reconcileSelection);
+    if (thread?.kind === "space") enterProject(thread.id, reconcileSelection);
     else if (thread) stepIntoWorker(threadState.threads, thread.id);
     if (sendFrame) void openThread(id).catch(() => {});
   }

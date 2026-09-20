@@ -587,7 +587,12 @@ describe("nested Thread workspace", () => {
     const ancestry = view.getByRole("navigation", { name: "Thread ancestry" });
     // The ancestor is one chip: its name is the Thread's, the id only its label.
     expect(within(ancestry).getByRole("link", { name: "Thread #2 · Holiday" })).toHaveTextContent("Holiday");
-    expect(view.getByRole("textbox", { name: "Step in with worker Review" })).toBeInTheDocument();
+    expect(view.getByRole("textbox", { name: "Message Space chat Review" })).toBeInTheDocument();
+    expect(view.queryByRole("textbox", { name: "Step in with worker Review" })).toBeNull();
+    const context = view.container.querySelector('[data-slot="composer-context"]')!;
+    expect(context).toHaveTextContent("SpaceReview");
+    expect(context).toHaveTextContent("WorkerNone");
+    expect(projectState).toMatchObject({ projectRecipientId: 9, workerPairingId: null });
   });
   it("pins a top-level Thread first once within its lifecycle filter", async () => {
     const view = render(() => <ThreadShell />);

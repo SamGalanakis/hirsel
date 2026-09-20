@@ -5,7 +5,7 @@ import type { Thread } from "../threads/types";
 import { ancestorsIn, threadIndex } from "../threads/tree";
 
 interface ProjectState {
-  /** The top-level Space whose conversation receives Space-chat messages. */
+  /** The Space whose conversation receives Space-chat messages. */
   projectRecipientId: number | null;
   /** The bounded Task snapshot explicitly staged for the next Space-chat message. */
   taskFocus: TaskFocus | null;
@@ -31,6 +31,15 @@ export function projectForThread(threads: Thread[], threadId: number): Thread | 
   return path.find(candidate => candidate.parent_thread_id === null && candidate.kind === "space") ?? null;
 }
 
+/** The nearest Space chat that contains this Thread. */
+export function spaceForThread(threads: Thread[], threadId: number): Thread | null {
+  const index = threadIndex(threads);
+  const thread = index.get(threadId);
+  if (!thread) return null;
+  if (thread.kind === "space") return thread;
+  return [...ancestorsIn(index, threadId)].reverse().find(candidate => candidate.kind === "space") ?? null;
+}
+
 export function enterProject(projectId: number, preserveStagedFocus = false): void {
   setProjectState(draft => { Object.assign(draft, {
     projectRecipientId: projectId,
@@ -40,7 +49,7 @@ export function enterProject(projectId: number, preserveStagedFocus = false): vo
 }
 
 export function stepIntoWorker(threads: Thread[], threadId: number): void {
-  const project = projectForThread(threads, threadId);
+  const project = spaceForThread(threads, threadId);
   setProjectState(draft => { Object.assign(draft, {
     projectRecipientId: project?.id ?? null,
     taskFocus: null,
@@ -69,8 +78,8 @@ function instrumentSummary(instrument: Thread["instrument"]): string | null {
 export function stageTaskFocus(threads: Thread[], threadId: number, brief: string, recipientId?: number): number | null {
   const task = threads.find(candidate => candidate.id === threadId && candidate.kind === "task");
   const project = recipientId === undefined
-    ? task ? projectForThread(threads, threadId) : null
-    : threads.find(candidate => candidate.id === recipientId && candidate.kind === "space" && candidate.parent_thread_id === null) ?? null;
+    ? task ? spaceForThread(threads, threadId) : null
+    : threads.find(candidate => candidate.id === recipientId && candidate.kind === "space") ?? null;
   if (!task || !project) return null;
   setProjectState(draft => { Object.assign(draft, {
     projectRecipientId: project.id,

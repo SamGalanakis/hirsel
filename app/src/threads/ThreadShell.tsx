@@ -43,7 +43,7 @@ import { getClient } from "../ws/client";
 import { ThreadNavigation, type ThreadNavigationMode } from "./ThreadNavigation";
 import { threadNavigationOpen as navigationOpen, threadNavigationIntent, openThreadNavigation, closeThreadNavigation, popThreadVisit, previousThread, recordThreadVisit } from "./navigation";
 import { artifactState } from "../artifacts/store";
-import { consumeTaskFocus, projectForThread, projectState, stageTaskFocus } from "../projects/store";
+import { consumeTaskFocus, projectState, spaceForThread, stageTaskFocus } from "../projects/store";
 import type { Thread } from "./types";
 import { captureThreadNavigation, ensureHomeProject, focusThread, followThreadLocation, openThread, retryThreadMessage, sendThreadMessage, threadAction, threadNavigationIsCurrent, threadState } from "./store";
 
@@ -107,8 +107,8 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
   };
   const attachments = props.attachments;
   const current = () => threadState.threads.find(t => t.id === props.id);
-  const project = () => projectForThread(threadState.threads, props.id);
-  const projectChat = () => current()?.kind === "space" && current()?.parent_thread_id === null;
+  const project = () => spaceForThread(threadState.threads, props.id);
+  const spaceChat = () => current()?.kind === "space";
   const history = () => threadState.histories[props.id];
   const messages = () => history()?.messages ?? [];
   const entries = createMemo(() => conversationEntries(history() ?? emptyHistory()));
@@ -206,18 +206,18 @@ function ThreadConversation(props: { id: number; historyId: string; attachments:
     </div>
     <ThreadError threadId={props.id} />
     <Show when={writable()}>
-    <Composer artifactContext={draftArtifact(props.id)} onRemoveArtifactContext={() => stageDraftArtifact(props.id, null)} onConsumeArtifactContext={id => consumeDraftArtifact(props.id, id)} ariaLabel={projectChat() ? `Message Space chat ${current()?.title ?? "this Space"}` : `Step in with worker ${current()?.title ?? "this Task"}`} draftKey={`${historyId()}:thread-${props.id}`} attachments={attachments} thinking={thinking()} focused threads={threadState.threads}
+    <Composer artifactContext={draftArtifact(props.id)} onRemoveArtifactContext={() => stageDraftArtifact(props.id, null)} onConsumeArtifactContext={id => consumeDraftArtifact(props.id, id)} ariaLabel={spaceChat() ? `Message Space chat ${current()?.title ?? "this Space"}` : `Step in with worker ${current()?.title ?? "this Task"}`} draftKey={`${historyId()}:thread-${props.id}`} attachments={attachments} thinking={thinking()} focused threads={threadState.threads}
       context={{
         projectRecipient: projectState.projectRecipientId !== null
           ? threadState.threads.find(thread => thread.id === projectState.projectRecipientId)?.title ?? `Space #${projectState.projectRecipientId}`
           : "No Space",
-        taskFocus: projectChat() && projectState.taskFocus ? threadState.threads.find(thread => thread.id === projectState.taskFocus?.task_thread_id)?.title ?? `Task #${projectState.taskFocus.task_thread_id}` : null,
+        taskFocus: spaceChat() && projectState.taskFocus ? threadState.threads.find(thread => thread.id === projectState.taskFocus?.task_thread_id)?.title ?? `Task #${projectState.taskFocus.task_thread_id}` : null,
         workerPairing: projectState.workerPairingId !== null
           ? threadState.threads.find(thread => thread.id === projectState.workerPairingId)?.title ?? `Thread #${projectState.workerPairingId}`
           : null,
       }}
       onSend={(body, mode, blobs, mentions, artifactIds) => {
-        const focus = projectChat() ? projectState.taskFocus : null;
+        const focus = spaceChat() ? projectState.taskFocus : null;
         sendThreadMessage(props.historyId, props.id, body, mode, blobs, mentions, artifactIds, focus);
         if (focus) consumeTaskFocus();
       }}

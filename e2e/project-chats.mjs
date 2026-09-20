@@ -167,6 +167,36 @@ try {
   )?.turn, 10_000);
   assert.ok(queuedCompleted.agent_message_id, "queued worker turn completed without an Agent reply");
 
+  const cancelBody = `slow:5 cancellation ${crypto.randomUUID()}`;
+  await workerComposer.fill(cancelBody);
+  const cancelOffset = frames.length;
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  const cancelSend = await poll("cancellable worker send", () => sent(frames.slice(cancelOffset), frame =>
+    frame.type === "send_thread_message"
+      && frame.thread_id === task.id
+      && frame.body === cancelBody
+  ), 10_000);
+  const cancelEcho = await poll("cancellable worker identity", () => received(frames.slice(cancelOffset), frame =>
+    frame.type === "msg"
+      && frame.message.client_id === cancelSend.client_id
+      && frame.message.thread_id === task.id
+      && frame.message.author === "owner"
+  )?.message, 10_000);
+  const cancelTurn = await poll("cancellable worker turn", () => received(frames.slice(cancelOffset), frame =>
+    frame.type === "thread_turn"
+      && frame.turn.thread_id === task.id
+      && frame.turn.owner_message_id === cancelEcho.id
+      && frame.turn.state === "running"
+  )?.turn, 10_000);
+  const stop = page.getByRole("button", { name: "Stop the agent", exact: true });
+  await stop.waitFor({ state: "visible" });
+  await stop.click();
+  await poll("cancelled worker terminal state", () => received(frames.slice(cancelOffset), frame =>
+    frame.type === "thread_turn"
+      && frame.turn.id === cancelTurn.id
+      && ["cancelled", "interrupted"].includes(frame.turn.state)
+  )?.turn, 10_000);
+
   await page.getByRole("button", { name: "Project chat", exact: true }).click();
   await page.locator(`main[data-thread-id="${home.id}"]`).waitFor({ state: "visible" });
   const delegationBody = `Please delegate this scripted check ${crypto.randomUUID()}`;
@@ -216,6 +246,7 @@ try {
     taskId: task.id,
     delegatedTaskId: delegated.id,
     queuedTurnId: queuedTurn.id,
+    cancelledTurnId: cancelTurn.id,
     delegatedTurnId: delegatedTurn.id,
     focusedSend,
     browserErrors: errors,
@@ -225,7 +256,7 @@ try {
     await writeFile(`${evidenceDir}/project-chats.json`, `${JSON.stringify(evidence, null, 2)}\n`);
   }
   await page.close();
-  console.log("Project landing, explicit focus, worker pairing, queued send and delegation passed.");
+  console.log("Project landing, explicit focus, worker pairing, queued send, cancellation and delegation passed.");
 } finally {
   await browser.close();
 }

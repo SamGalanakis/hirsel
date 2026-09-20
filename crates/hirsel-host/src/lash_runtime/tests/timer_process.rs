@@ -2,20 +2,46 @@ use super::*;
 
 #[tokio::test]
 async fn timer_triggered_typescript_process_calls_hirsel_tool_and_delivers_message() {
-    timer_process_case("in_secs: 1", true).await;
+    timer_process_case("in_secs: 1", true, None).await;
 }
 
 #[tokio::test]
 async fn absolute_timer_retires_after_delivery() {
-    timer_process_case("at: \"2030-01-01T00:00:00Z\"", true).await;
+    timer_process_case("at: \"2030-01-01T00:00:00Z\"", true, None).await;
 }
 
 #[tokio::test]
 async fn recurring_timer_retains_subscription_after_delivery() {
-    timer_process_case("every_secs: 60", false).await;
+    timer_process_case("every_secs: 60", false, None).await;
 }
 
-async fn timer_process_case(schedule: &str, retire: bool) {
+#[tokio::test]
+async fn delayed_process_dispatch_keeps_project_authority_after_conversion_and_restart() {
+    timer_process_case(
+        "every_secs: 60",
+        false,
+        Some(ProfileConversion::ProjectToWorker),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn delayed_process_dispatch_keeps_worker_authority_after_conversion_and_restart() {
+    timer_process_case(
+        "every_secs: 60",
+        false,
+        Some(ProfileConversion::WorkerToProject),
+    )
+    .await;
+}
+
+#[derive(Clone, Copy)]
+enum ProfileConversion {
+    ProjectToWorker,
+    WorkerToProject,
+}
+
+async fn timer_process_case(schedule: &str, retire: bool, conversion: Option<ProfileConversion>) {
     use lash_core::{LlmOutputPart, llm::types::LlmResponse};
 
     const DRAIN: &str = "process-e2e-drain";
@@ -62,8 +88,46 @@ finish("registered");
         })
         .build()
         .into_handle();
-    let (executor, storage, _log, _dir) = test_event_executor().await;
-    let route = executor.anchors.lock().await.active.clone().unwrap();
+    let (mut executor, storage, _log, directory) = test_event_executor().await;
+    let mut route = executor.anchors.lock().await.active.clone().unwrap();
+    if conversion.is_some() {
+        storage
+            .complete_thread_turn(
+                &storage.history_id().await.unwrap(),
+                route.thread_turn_id,
+                hirsel_proto::ThreadTurnState::Completed,
+                None,
+            )
+            .await
+            .unwrap();
+        storage
+            .set_native_execution_default(&crate::storage::ThreadExecution::Native {
+                tool_profile: crate::storage::ToolProfile::Worker,
+                provider_id: "process-authority-test".into(),
+                model: provider_rebind_test_model("process-authority-model"),
+                cwd: directory.path().to_path_buf(),
+            })
+            .await
+            .unwrap();
+        if matches!(conversion, Some(ProfileConversion::ProjectToWorker)) {
+            let current = storage.thread(route.thread_id).await.unwrap().unwrap();
+            storage
+                .set_addressed_thread_kind(
+                    &storage.history_id().await.unwrap(),
+                    route.thread_id,
+                    hirsel_proto::ThreadKind::Space,
+                    current.revision,
+                )
+                .await
+                .unwrap();
+        }
+        let origin = storage
+            .start_thread_turn(route.thread_id, None)
+            .await
+            .unwrap();
+        route.thread_turn_id = origin.id;
+        executor.anchors.lock().await.active = Some(route.clone());
+    }
     let session_id = storage
         .reconcile_agent_tool_surface(
             route.thread_id,
@@ -82,7 +146,15 @@ finish("registered");
         )
         .await
         .unwrap();
-    let trigger_store = Arc::new(lash_core::facade_support::InMemoryTriggerStore::default());
+    let trigger_store = Arc::new(
+        super::super::authority_trigger_store::AuthorityTriggerStore::new(
+            Arc::new(lash_core::facade_support::InMemoryTriggerStore::default()),
+            storage.clone(),
+            session_id.clone(),
+            Arc::clone(&executor.anchors),
+        ),
+    ) as Arc<dyn TriggerStore>;
+    executor.trigger_store = Arc::clone(&trigger_store);
     let process_registry = Arc::new(lash_core::TestLocalProcessRegistry::default());
     let protocol = lash_protocol_rlm::RlmProtocolPluginFactory::new(
         hirsel_rlm_config(),
@@ -147,6 +219,60 @@ finish("registered");
         "registration output: {registration:#?}"
     );
 
+    if let Some(conversion) = conversion {
+        storage
+            .complete_thread_turn(
+                &storage.history_id().await.unwrap(),
+                route.thread_turn_id,
+                hirsel_proto::ThreadTurnState::Completed,
+                None,
+            )
+            .await
+            .unwrap();
+        let current = storage.thread(route.thread_id).await.unwrap().unwrap();
+        let new_kind = match conversion {
+            ProfileConversion::ProjectToWorker => hirsel_proto::ThreadKind::Task,
+            ProfileConversion::WorkerToProject => hirsel_proto::ThreadKind::Space,
+        };
+        storage
+            .set_addressed_thread_kind(
+                &storage.history_id().await.unwrap(),
+                route.thread_id,
+                new_kind,
+                current.revision,
+            )
+            .await
+            .unwrap();
+        let later = storage
+            .start_thread_turn(route.thread_id, None)
+            .await
+            .unwrap();
+        storage.run_thread_turn(later.id).await.unwrap();
+        storage
+            .bind_thread_execution(
+                &storage.history_id().await.unwrap(),
+                &session_id,
+                "later-profile-turn",
+                later.id,
+            )
+            .await
+            .unwrap();
+        executor.anchors.lock().await.active = Some(TurnAnchors {
+            request_id: None,
+            thread_id: route.thread_id,
+            thread_turn_id: later.id,
+        });
+
+        // Reopen Hirsel's database before the process makes its first tool
+        // call. The executor must recover from the durable trigger snapshot
+        // and the registration-time authority marker, never the later turn.
+        let reopened = Storage::open(directory.path()).await.unwrap();
+        *executor
+            .authority_storage
+            .write()
+            .expect("authority storage poisoned") = reopened;
+    }
+
     let subscriptions = trigger_store
         .list_subscriptions(TriggerSubscriptionFilter::for_session(&session_id))
         .await
@@ -198,11 +324,19 @@ finish("registered");
     })
     .await
     .expect("process completes");
+    let expected_success = !matches!(conversion, Some(ProfileConversion::ProjectToWorker));
     assert_eq!(
         item.process.lifecycle,
-        lash_core::ProcessStatus::Completed,
+        if expected_success {
+            lash_core::ProcessStatus::Completed
+        } else {
+            lash_core::ProcessStatus::Failed
+        },
         "terminal process: {item:#?}"
     );
+    if !expected_success {
+        return;
+    }
     // The production timer loop tombstones one-shot subscriptions immediately
     // after emission. Projection must use the retained delivery snapshot.
     // Failed/empty emissions must preserve the schedule for a later attempt.

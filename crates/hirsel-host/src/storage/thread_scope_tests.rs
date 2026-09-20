@@ -176,9 +176,38 @@ async fn durable_process_authority_survives_the_registering_turn() {
         .unwrap();
     let turn = s.start_thread_turn(id, None).await.unwrap();
     let history = s.history_id().await.unwrap();
+    s.bind_thread_execution(
+        &history,
+        &session.session_id,
+        "registration-execution",
+        turn.id,
+    )
+    .await
+    .unwrap();
     s.complete_thread_turn(&history, turn.id, ThreadTurnState::Completed, None)
         .await
         .unwrap();
+    s.bind_trigger_operation_authority(&session.session_id, "actor-1", turn.id)
+        .await
+        .unwrap();
+    s.bind_trigger_authority(
+        &session.session_id,
+        "subscription-1",
+        "incarnation-1",
+        1,
+        "actor-1",
+    )
+    .await
+    .unwrap();
+    s.bind_process_trigger_authority(
+        &session.session_id,
+        "process-1",
+        "subscription-1",
+        "incarnation-1",
+        1,
+    )
+    .await
+    .unwrap();
 
     let first = s
         .process_caller(&session.session_id, "process-1", "scope-1")
@@ -228,6 +257,22 @@ async fn process_authority_keeps_the_profile_of_its_own_session() {
     s.complete_thread_turn(&history, project_turn.id, ThreadTurnState::Completed, None)
         .await
         .unwrap();
+    s.bind_trigger_operation_authority(
+        &project_session.session_id,
+        "project-actor",
+        project_turn.id,
+    )
+    .await
+    .unwrap();
+    s.bind_trigger_authority(
+        &project_session.session_id,
+        "project-subscription",
+        "project-incarnation",
+        1,
+        "project-actor",
+    )
+    .await
+    .unwrap();
 
     let worker = s
         .set_addressed_thread_kind(
@@ -249,6 +294,16 @@ async fn process_authority_keeps_the_profile_of_its_own_session() {
         &worker_session.session_id,
         "worker-execution",
         worker_turn.id,
+    )
+    .await
+    .unwrap();
+
+    s.bind_process_trigger_authority(
+        &project_session.session_id,
+        "project-process",
+        "project-subscription",
+        "project-incarnation",
+        1,
     )
     .await
     .unwrap();

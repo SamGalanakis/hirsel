@@ -30,14 +30,24 @@ Settling and reloading must not reorder or duplicate anything.
    different turns open independently.
 6. After both turns settle, reload preserves the full per-turn event sequence:
    stable event/call identities, ordering, kind, and available payload—not only
-   the outer message and turn IDs.
+   the outer message and turn IDs. How long a step took is the one thing the
+   Host does not own: the client measures it between the arrival of that step's
+   own start and done frames, so a replayed trace carries no clock and shows
+   none. A reloaded step row must therefore read exactly as the live row did
+   minus that one duration, and never a changed subject, outcome or payload.
+7. Each reasoning phrase the turn emitted is rendered once, with its own block
+   boundary intact. This is the same gate `artifact-presentation` states, and
+   the same [Ascending-AI/lash#1769](https://github.com/Ascending-AI/lash/issues/1769)
+   Native blocker applies to it: a Native turn that emits two or more reasoning
+   summaries fails here until the Lash pin carries block identity. Hirsel does
+   not work around it and the gate is not loosened.
 
 ## Phase 0 — start empty
 
 **Do:** Run `just product-runbook chat-chronology`. The runner boots an empty
 owned Host, opens `/`, and creates one Space chat named with the run nonce.
 
-**Expect:** the route-free open lands in the bootstrapped **Home** Space chat
+**Expect:** the route-free open lands in the client-created ordinary **Home** Space chat
 with the composer's one recipient label shown; the new Space
 chat's composer reads `Message Space chat <name>`. `00-empty.png` shows the
 selected empty Thread, and DOM, wire, and SQLite extracts contain no messages
@@ -90,7 +100,8 @@ available payload; equality of only the four message IDs is insufficient. Save
 | Inline work | turn events are visible without a whole-turn disclosure | | `20-*`, `30-*` |
 | Tool identity | collapsed rows retain distinct subjects; the status mark announces `ok`; the open panel leads with payload and keeps Raw result | | `30-*`, `31-*` |
 | Settled identity | two Owner + two Agent messages and two terminal turns agree across surfaces | | `30-*` |
-| Reload timeline | event/call identities, order, kind, and available payload are equal before and after reload | | `30-*`, `31-*`, `result.json` |
+| Reasoning integrity | each reasoning phrase renders once with its block boundary intact | | `30-*`, `result.json` |
+| Reload timeline | event/call identities, order, kind, and available payload are equal before and after reload, a step row differing only by the client-measured duration | | `30-*`, `31-*`, `result.json` |
 
 **Aggregate:** did the conversation remain a truthful chronological timeline
 through queueing, handoff, settlement, and reload?

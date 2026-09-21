@@ -18,7 +18,7 @@ ordinary Artifact preview and a Thread showcase at desktop and phone widths.
 
 ## Scenario
 
-The route-free open lands in the bootstrapped **Home** Space chat, with its one
+The route-free open lands in the client-created ordinary **Home** Space chat, with its one
 recipient labelled in the composer; the scenario creates its
 own Space chat and works there. All four `artifacts.create` calls belong to one
 turn, which shares one payload panel, so each call is opened and captured in

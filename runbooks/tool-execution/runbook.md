@@ -26,7 +26,7 @@ failure.
 
 **Do:** Run `just product-runbook tool-execution`.
 
-**Expect:** the route-free open lands in the bootstrapped **Home** Space chat
+**Expect:** the route-free open lands in the client-created ordinary **Home** Space chat
 with its one recipient labelled in the composer; the scenario
 then creates its own Space chat. `00-empty.png` and the baseline extracts show
 that Thread empty on DOM, wire, and disk.

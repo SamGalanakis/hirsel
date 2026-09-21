@@ -43,12 +43,14 @@ surfaces is a failure even if each surface looks internally consistent.
 ## Where a scenario starts
 
 A route-free open no longer rests on an overview. It lands in a **Space chat**:
-the last top-level Space this history used, or the ordinary Space named **Home**
-when it has none. Every scenario begins from that landing, checks that the
-composer labels its actual recipient and identifies a Task recipient as a worker,
-and then creates its own Space chat through the ordinary creation control.
-The bootstrapped Home Space is part of the isolated store and is never the
-Thread a scenario talks to.
+the last top-level Space this history used, then the first active top-level
+Space by ID, and when the isolated store has neither, the client creates the
+ordinary Space named **Home** through the same `create_thread` path an Owner
+uses — the Host bootstraps nothing. Every scenario begins from that landing,
+checks that the composer labels its actual recipient and identifies a Task
+recipient as a worker, and then creates its own Space chat through the ordinary
+creation control. That Home Space is an ordinary Thread in the isolated store
+and is never the Thread a scenario talks to.
 
 ## Reading a turn
 

@@ -43,7 +43,7 @@ that final acceptance gate.
 
 **Do:** Run `just product-runbook artifact-creation`.
 
-**Expect:** the route-free open lands in the bootstrapped **Home** Space chat
+**Expect:** the route-free open lands in the client-created ordinary **Home** Space chat
 with its one recipient labelled; the scenario's own Space chat
 then has no artifacts, messages or turns. Capture `00-empty.png` and all
 baseline extracts.

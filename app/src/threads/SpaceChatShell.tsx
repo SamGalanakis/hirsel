@@ -28,7 +28,7 @@ export function SpaceChatShell(props: { spaceId: number; conversation: () => JSX
   const boardId = `space-board-${props.spaceId}`;
   return <div ref={node => { workspace = node; }} data-slot="space-workspace" class={`flex min-h-0 min-w-0 flex-1 gap-2 ${beside() ? "flex-row" : "flex-col"}`}>
     <Show when={!beside()}><div data-slot="space-view-tabs" class="flex min-h-11 shrink-0 rounded-lg border border-border p-1" role="tablist" aria-label="Space view"><button class="min-h-11 flex-1 rounded-md text-sm aria-selected:bg-muted" role="tab" aria-controls={chatId} aria-selected={tab() === "chat" ? "true" : "false"} onClick={() => setTab("chat")}>Chat</button><button class="min-h-11 flex-1 rounded-md text-sm aria-selected:bg-muted" role="tab" aria-controls={boardId} aria-selected={tab() === "board" ? "true" : "false"} onClick={() => setTab("board")}>Board</button></div></Show>
-    <Show when={chatVisible()}><div id={chatId} role={!beside() ? "tabpanel" : undefined} class="flex min-h-0 min-w-0 flex-1">{props.conversation()}</div></Show>
+    <Show when={chatVisible()}><div id={chatId} role={!beside() ? "tabpanel" : undefined} class={`flex min-h-0 min-w-0 flex-1 ${beside() ? "min-w-[26rem]" : ""}`}>{props.conversation()}</div></Show>
     <div id={boardId} role={!beside() ? "tabpanel" : undefined} data-slot="space-board-pane" class={`${boardVisible() ? "flex" : "hidden"} min-h-0 min-w-0 flex-1 ${beside() ? "min-w-80" : ""}`}><ThreadBoard spaceId={props.spaceId} visible={boardVisible} /></div>
   </div>;
 }

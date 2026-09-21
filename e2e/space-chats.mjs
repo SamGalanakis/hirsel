@@ -69,21 +69,30 @@ async function assertOpenSpaceLayout(page, width, threadId) {
         const box = node.getBoundingClientRect();
         return { left: box.left, right: box.right, width: box.width };
       };
+      const mainNode = document.querySelector(`main[data-thread-id="${id}"]`);
       const main = bounds(`main[data-thread-id="${id}"]`);
       const board = bounds('aside[aria-label="Space board"]');
+      const workspace = bounds('[data-slot="space-workspace"]');
+      const boardTabs = document.querySelector('[data-slot="space-view-tabs"]')?.checkVisibility() ?? false;
       const remove = document.querySelector(`main[data-thread-id="${id}"] [data-slot="composer-artifact-context"] button[aria-label^="Remove artifact context:"]`);
       const removeBounds = remove?.getBoundingClientRect();
       const hit = removeBounds ? document.elementFromPoint(removeBounds.left + removeBounds.width / 2, removeBounds.top + removeBounds.height / 2) : null;
+      const edgeHit = main && removeBounds ? document.elementFromPoint(main.right - 1, removeBounds.top + removeBounds.height / 2) : null;
       return {
         main,
         board,
+        workspace,
+        boardTabs,
         overlap: main && board ? Math.max(0, main.right - board.left) : null,
         composerControlHit: remove instanceof HTMLElement && hit instanceof Node ? remove.contains(hit) : false,
+        conversationEdgeHit: mainNode instanceof HTMLElement && edgeHit instanceof Node ? mainNode.contains(edgeHit) : false,
       };
     }, threadId);
-    assert(metrics.main && metrics.board, `${width}: conversation or board is absent`);
+    assert(metrics.main && metrics.board && metrics.workspace, `${width}: conversation, board or Space workspace is absent`);
+    assert.equal(metrics.boardTabs, false, `${width}: board unexpectedly collapsed to tabs`);
     assert.equal(metrics.overlap, 0, `${width}: board overlaps the open conversation`);
     assert.equal(metrics.composerControlHit, true, `${width}: composer artifact control is covered without a showcase`);
+    assert.equal(metrics.conversationEdgeHit, true, `${width}: board intercepts the conversation's right edge`);
     return metrics;
   }, 5_000);
 }
@@ -359,6 +368,9 @@ try {
   const contextRemove = homeMain.locator('[data-slot="composer-artifact-context"] button[aria-label^="Remove artifact context:"]');
   await contextRemove.waitFor({ state: "visible" });
   const openLayout = await assertOpenSpaceLayout(page, 1440, home.id);
+  const boundaryLayout = await assertOpenSpaceLayout(page, 1108, home.id);
+  assert(boundaryLayout.workspace.width >= 744 && boundaryLayout.workspace.width <= 839, `1108: expected a near-threshold admitted Space allocation, got ${boundaryLayout.workspace.width}px`);
+  if (evidenceDir) await page.screenshot({ path: `${evidenceDir}/space-board-boundary-1108.png`, fullPage: true });
   const conversationArtifact = homeMain.locator(`[data-artifact-ref="${layoutArtifact.id}"]`).first();
   await conversationArtifact.waitFor({ state: "visible" });
   await conversationArtifact.locator("..").getByRole("button", { name: "Open with", exact: true }).click();
@@ -381,6 +393,7 @@ try {
     delegatedTurnId: delegatedTurn.id,
     focusedSend,
     openLayout,
+    boundaryLayout,
     showcaseLayouts,
     browserErrors: errors,
   });

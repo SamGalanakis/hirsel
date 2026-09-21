@@ -414,14 +414,18 @@ function assertReloadedTimeline(after, before) {
 }
 
 /** A finished run rests as a collapsed card; its trace is what these oracles
- * read, so every card is opened before the DOM is projected. */
+ * read, so EVERY card is opened before the DOM is projected. The set shrinks
+ * as the cards open, so the loop asks again each time rather than counting the
+ * closed cards once: counting once opened the first card and then stopped,
+ * leaving every later turn's trace out of the projection entirely. */
 async function expandRunCards(page) {
   const headers = page.locator('[data-slot="run-card-header"][aria-expanded="false"]');
-  for (let index = 0; index < await headers.count(); index += 1) {
-    const header = headers.nth(0);
-    if (await header.count() === 0) break;
+  for (let guard = 0; guard < 32; guard += 1) {
+    const header = headers.first();
+    if (await header.count() === 0) return;
     await header.click();
   }
+  assert.equal(await headers.count(), 0, "run cards are still closed after 32 opens");
 }
 
 /** The trace opens one step at a time: the payload panel belongs to whichever

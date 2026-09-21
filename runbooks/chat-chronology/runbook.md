@@ -129,3 +129,30 @@ found in what ran**.
 **Aggregate.** Everything the run reached was a truthful chronological
 timeline, and the queued state was honest on all three surfaces before and
 after reload. The abort was a stale runner expectation, not a product fault.
+
+## Judged run — 2026-09-21
+
+Source `227d48e` (two unrelated runbook files carried judged-run text in the
+tree; the runner and this scenario were clean), provider `codex`, model
+`gpt-5.6-sol` reasoning variant `medium` from `hello_ok`, two model turns after
+a runner fix — four for the day, the first two lost to the runner opening only
+one run card. Evidence: `runbook-evidence-2/chronology-run2/chat-chronology`.
+Objective result: **OBJECTIVE_PASS**. Judged verdict: **pass — the conversation
+stayed a truthful chronological timeline through queueing, handoff, settlement
+and reload**.
+
+| Item | Verdict | What passed it |
+|---|---|---|
+| Space chat landing | PASS | `result.json` `landedSpaceChatId: 1`; the route-free open resolved to `/t/1` and the composer's context row read `Recipient` / `Home`, with the new Space chat's composer named `Message Space chat Runbook chatchro-868fa8a7` |
+| Empty scope | PASS | `00-empty-dom.json` `entries: []`, `00-empty-thread.json` no messages or turns, `00-empty-store.json` no rows at `schemaVersion 18` |
+| Real queue | PASS | the second message was sent with the composer's `Send after current turn` control while `Stop the agent` stood beside it and turn 1 was still `running`; `thread_upsert.queued_turn_count` rose before any terminal turn frame |
+| Queued reload | PASS | `11-queued-reloaded-dom.json` entry 3: `data-execution-turn="2"`, `data-outcome="queued"`, run-card header accessible name `queued`, visible text `·queued` — after a reload, and with turn 1 still `running` in entry 1. The same `{owner_message_id: 2, state: "queued"}` stands on the `open_thread` snapshot and in SQLite |
+| Handoff chronology | PASS | `20-handoff-dom.json` order is Owner 1, Owner 2, Agent message 3 (`HIRSEL-CHAT-FIRST-…`), then the running turn 2 row — the older reply precedes the newer working row, and the queued Owner message correctly precedes both |
+| Inline work | PASS | every entry `traceGated: false` in `10-*`, `20-*`, `30-*`; the running turn showed its steps in place |
+| Tool identity | PASS | both settled cards reopened and kept distinct subjects: `shell_run cmd: sleep 8; printf 'HIRSEL-CHAT-FIRST-chatchro-868fa8a7'` and `… 'HIRSEL-CHAT-SECOND-…'`, each `statusLabel: "ok"` with no `ok status 0`. Each open panel leads `Output\n<marker>\n\nExit status\n0`, then `Input`, and keeps the bounded wire envelope under `Raw result` |
+| Settled identity | PASS | two Owner and two Agent messages, turns 1 and 2 both `completed`, on DOM, `open_thread` and SQLite alike; the Agent bodies are exactly the two markers |
+| Reasoning integrity | PASS | one reasoning block per turn — `Confirming single shell.run execution` and `Planning variable naming for call result` — each rendered once. Two single-block turns, so [lash#1769](https://github.com/Ascending-AI/lash/issues/1769) did not bite; it remains a blocker for any turn that emits two or more summaries |
+| Reload timeline | PASS | live frames, the `open_thread` timelines and the SQLite `thread_turn_events` rows are identical and strictly ordered for both turns (5 events each: reasoning, code_start, tool_start, tool_done, code_done). The browser projection was finally compared too: every entry, row identity, status mark, open state and payload is equal before and after reload, and the only text that changed is the four measured durations (`8.2s`, `8.0s`, `3.1s`, `3.0s`), which the client times from its own frames and a replayed trace does not carry |
+
+**Aggregate.** Yes. Nothing reordered, nothing duplicated, and everything the
+Host owns came back identical after a reload.

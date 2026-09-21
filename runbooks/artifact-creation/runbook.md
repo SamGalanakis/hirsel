@@ -127,3 +127,32 @@ regression, which this run did not put to the test**.
 artifact rather than a prose claim, and the cat request produced a genuine
 rendered image. The one gate still owed is the cat request with nothing
 attached to it.
+
+## Judged run — 2026-09-21
+
+Source `e565e97` with a clean tree, provider `codex`, model `gpt-5.6-sol`
+reasoning variant `medium` from `hello_ok`, two model turns. Evidence:
+`runbook-evidence-2/all-run1/artifact-creation`. Objective result:
+**OBJECTIVE_PASS**. Judged verdict: **pass, and the named natural-language
+regression is now genuinely proven**.
+
+| Item | Verdict | What passed it |
+|---|---|---|
+| Space chat landing | PASS | `result.json` `landedSpaceChatId: 1`; the composer named `Home` as its one recipient with no worker, and the scenario's own Space chat opened empty on DOM, wire and SQLite at `schemaVersion 18` |
+| Real creation | PASS | one matched `artifacts_create` `tool_start`/`tool_done` with `ok: true` in the addressed turn, call id `…:resource_operation:051c1f4af2d6915a9721c945:1` |
+| Exact stored result | PASS | SQLite row 1: title `Runbook receipt artifact-47f34873`, kind `file`, mime `text/plain`, filename `receipt-artifact-47f34873.txt`, content `HIRSEL-ARTIFACT-artifact-47f34873\n` — identical on the `artifact_upsert` frame and the `open_thread` snapshot |
+| Conversation reference | PASS | Agent message 2 of turn 1 carries `artifact_ids: [1]` and renders `Artifact: Runbook receipt artifact-47f34873` with its card, above the turn's closing message 3 |
+| Global listing | PASS | `20-listed.png` shows exactly one matching row in the All artifacts pane |
+| Preview/download | PASS | `21-preview.png` shows the exact content; the download's suggested filename was `receipt-artifact-47f34873.txt` and the retained bytes equal the requested content |
+| Reload identity | PASS | `30-reloaded-*` keep message 2, card and artifact id 1 and the same content after reload |
+| Natural cat | PASS | the regression finally ran alone: `41-natural-cat-thread.json` Owner message 4 is exactly `Make a picture of a cat artifact` with **no** `artifact_ids`, because the staged composer context was cleared through its own visible Remove control first. Turn 2 emitted one matched `artifacts_create` pair, `ok: true`, creating exactly one new artifact — SQLite row 2 `Moonlit Cat`, kind `image`, mime `image/svg+xml` — referenced by Agent message 5, and `40-natural-cat-preview.png` shows it drawn as a real SVG cat, not escaped source |
+
+**Aggregate.** Yes. An ordinary chat request produced a real, exact, reusable
+artifact, and the bare sentence `Make a picture of a cat artifact` — with
+nothing attached to soften it — produced a genuine rendered picture.
+
+**Noted beside the scenario, not a gate here.** `40-natural-cat-preview.png`
+also shows the Space board painted over the right ~117px of the Space chat
+while the artifact preview pane stands beside it at 1440x900: the Owner's own
+bubble, the run card trace and the composer are all sliced. The same fault
+aborts `artifact-presentation`; it is recorded there.

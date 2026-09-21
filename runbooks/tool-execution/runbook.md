@@ -96,3 +96,25 @@ re-run**.
 both directions. The two aborts were stale runner expectations: the payload now
 lives in the run card's shared panel, and the readable payload and the bounded
 Raw result both match the marker, which the wait did not allow for.
+
+## Judged run — 2026-09-21
+
+Source `e565e97` with a clean tree (`result.json` `dirty: ""`), provider
+`codex`, model `gpt-5.6-sol` reasoning variant `medium` from `hello_ok`, two
+model turns. Evidence: `runbook-evidence-2/all-run1/tool-execution`. Objective
+result: **OBJECTIVE_PASS**. Judged verdict: **pass — the Owner saw what was
+really invoked, what it returned, and a reply that matches it in both
+directions**.
+
+| Item | Verdict | What passed it |
+|---|---|---|
+| Space chat landing | PASS | `result.json` `landedSpaceChatId: 1`; the route-free open resolved to `/t/1`, the composer's context row read `Recipient` / `Home` with no worker, and the scenario's own Space chat answered to `Message Space chat Runbook toolexec-ea623f35` |
+| Success attempt | PASS | one `tool_start`/`tool_done` pair on call id `…:resource_operation:20cffbace8eb0d989fce6bb1:1` with `ok: true`; `30-crosscheck-dom.json` renders it as `shell_run cmd: printf 'HIRSEL-TOOL-SUCCESS-toolexec-ea623f35'` with `statusLabel: "ok"` and no transport status |
+| Success content | PASS | the open panel reads `Output\nHIRSEL-TOOL-SUCCESS-toolexec-ea623f35\n\nExit status\n0`, and Agent message 2's body is exactly `HIRSEL-TOOL-SUCCESS-toolexec-ea623f35` |
+| Failure attempt | PASS | `tool_done.ok: false` on call id `…:resource_operation:de21372da098a55ba1c6a5ed:1`; the row renders `shell_run cmd: pwd` with `statusLabel: "failed"` |
+| Honest failure | PASS | the open panel carries the typed envelope `{"outcome":{"payload":{"class":"execution","code":"tool_error","message":"No such file or directory (os error 2)","retry":{"type":"never"},"source":"tool"},"status":"failure"}}` over the exact `cwd`, and Agent message 4's body is exactly `HIRSEL-TOOL-EXPECTED-FAILURE-toolexec-ea623f35` with no success claim |
+| Inline ordering | PASS | both entries are `traceGated: false` and read reasoning, the Agent's own code cell, then the tool row, in event order inside the run card, above the reply |
+| Durable agreement | PASS | `30-crosscheck-store.json` at `schemaVersion 18`: two Owner and two Agent messages, turns 1 and 2 both `completed`; the durable `tool_calls` on messages 2 and 4 carry the same two call ids with `ok: true` and `ok: false`, matching the streamed frames and the `open_thread` timelines exactly |
+
+**Aggregate.** Yes. Both attempts were real, both results were the tool's own,
+and each reply stated exactly what its tool did.

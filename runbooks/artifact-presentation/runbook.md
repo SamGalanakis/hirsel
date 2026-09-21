@@ -88,3 +88,61 @@ product fault in how consecutive reasoning blocks are rendered**.
 **Aggregate.** Creation, storage and the trace are truthful. The turn's thinking
 is not: three distinct thoughts are presented as one sentence. That is a
 rendering fault, not a runbook expectation that drifted.
+
+## Judged run — 2026-09-21
+
+Source `e565e97` with a clean tree, provider `codex`, model `gpt-5.6-sol`
+reasoning variant `medium` from `hello_ok`, one model turn. Evidence:
+`runbook-evidence-2/all-run1/artifact-presentation`, with the no-model sweep in
+`runbook-evidence-2/probes`. Objective result: **ABORT**, in the desktop
+showcase sweep. Judged verdict: **FAIL — a product fault in the Space chat's
+own layout, not a runbook expectation that drifted**.
+
+This turn emitted a single reasoning summary, so the
+[lash#1769](https://github.com/Ascending-AI/lash/issues/1769) blocker did not
+bite and the reasoning-integrity gate passed on its own terms. It remains a
+blocker for any turn that emits two or more.
+
+| Item | Verdict | What passed it |
+|---|---|---|
+| Space chat landing | PASS | `result.json` `landedSpaceChatId: 1`; the scenario's own Space chat opened empty on all three surfaces at `schemaVersion 18` |
+| Four real creations | PASS | exactly four `artifacts_create` `tool_start`/`tool_done` pairs, all `ok`, and exactly four `artifact_upsert` frames, all inside one turn |
+| Exact stored formats | PASS | SQLite: `markdown`/null/null, `image`/`image/svg+xml`/null, `solid`/null/null, `html`/null/null, each holding its exact content including the leading space and the trailing newline |
+| Rendered trace | PASS | `10-created-formats.png` shows the run card's steps — one Agent code cell and four `artifacts_create` rows in arrival order, each with its own content summary, `ok` mark and duration — matching the canonical events exactly, `traceGated: false` |
+| Per-call payload | PASS | `10-created-formats-call-0..3` each opened one call in turn, and its `tool_start.input` and `tool_done.result` text appeared in the shared panel for that call id |
+| Reasoning integrity | PASS | the turn streamed one reasoning block, `**Planning four exact artifact creations**` under a single `block_id`, rendered once |
+| Desktop preview sweep | PASS for the formats reached | HTML and Markdown both defaulted to `Rendered`, rendered their actual result, switched to `Source` by keyboard with focus retained, showed the byte-exact stored content with no iframe and no side effect, downloaded identical bytes under the original name from both modes, and reset to `Rendered` on reopen |
+| Desktop showcase sweep | **FAIL** | the HTML showcase passed; the run then aborted opening the second artifact's **Open with**. Playwright's own log names the cause: `<aside aria-label="Space board">… intercepts pointer events`. Once any pane stands to the right of a Space chat at 1440x900, the board is laid over the conversation instead of sharing the width with it |
+| Phone sweep | NOT REACHED | the run aborted before 390x844 |
+
+**Aggregate.** Creation, storage, the trace and the presentation contract itself
+are truthful for everything the run reached. The Space chat's layout is not: a
+Space chat beside any right-hand pane loses the right edge of its own
+conversation to the board.
+
+### The layout fault, exactly
+
+Reproduced with no model at all (`probes/probe-overlap.mjs`, evidence
+`probes/overlap1/`), at 1440x900 with the inventory docked:
+
+| | `main[data-thread-id]` | `aside[aria-label="Space board"]` | overlap |
+|---|---|---|---|
+| no right-hand pane | x 352 → 886 | x 894 → 1428 | 0px |
+| showcase open | x 352 → 768 | x **651** → 943 | **117px** |
+
+The Space chat column has to give width to the showcase, the conversation
+refuses to shrink past its 26rem reading minimum (`split:min-w-[26rem]`), and
+it overflows underneath `ThreadBoard`, which paints on top. `overlap1/
+with-showcase.png` shows the result: the board's own heading overprints the
+chat header, and the composer's `Remove artifact context` control is covered —
+`document.elementFromPoint` over its centre returns the board, a real click
+never lands, while the same button dispatched programmatically works. The same
+picture appears in two real-model runs that had nothing to do with each other:
+`all-run1/artifact-presentation/desktop-html-showcase-source.png` and
+`all-run1/artifact-creation/40-natural-cat-preview.png`.
+
+Stage: client rendering/layout. `SpaceChatShell` gives the chat and the board
+one flex row each with `flex-1`, and `ThreadShell`'s pane budget
+(`sideCollapsed`, `fourPanes`) only ever weighs the utility region against the
+showcase — the board was added to the row without a share of that budget. Not
+worked around here, and no oracle was relaxed to get past it.

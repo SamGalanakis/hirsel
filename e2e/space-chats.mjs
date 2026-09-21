@@ -21,6 +21,73 @@ async function contextText(page) {
   return page.locator('[data-slot="composer-context"]').innerText();
 }
 
+async function assertShowcaseSpaceLayout(page, width, threadId) {
+  await page.setViewportSize({ width, height: 900 });
+  return poll(`${width}px showcased Space layout`, async () => {
+    const metrics = await page.evaluate(id => {
+      const box = node => {
+        if (!(node instanceof HTMLElement) || !node.checkVisibility()) return null;
+        const bounds = node.getBoundingClientRect();
+        return { left: bounds.left, right: bounds.right, width: bounds.width };
+      };
+      const mainNode = document.querySelector(`main[data-thread-id="${id}"]`);
+      const boardNode = document.querySelector('aside[aria-label="Space board"]');
+      const showcaseNode = document.querySelector('[data-slot="thread-showcase"]');
+      const remove = mainNode?.querySelector('[data-slot="composer-artifact-context"] button[aria-label^="Remove artifact context:"]');
+      const main = box(mainNode);
+      const board = box(boardNode);
+      const showcase = box(showcaseNode);
+      const removeBounds = remove?.getBoundingClientRect();
+      const hit = removeBounds ? document.elementFromPoint(removeBounds.left + removeBounds.width / 2, removeBounds.top + removeBounds.height / 2) : null;
+      return {
+        main,
+        board,
+        showcase,
+        boardTabs: document.querySelector('[data-slot="space-view-tabs"]')?.checkVisibility() ?? false,
+        mainBoardOverlap: main && board ? Math.max(0, main.right - board.left) : 0,
+        mainShowcaseOverlap: main && showcase ? Math.max(0, main.right - showcase.left) : null,
+        composerControlHit: remove instanceof HTMLElement && hit instanceof Node ? remove.contains(hit) : false,
+      };
+    }, threadId);
+    assert(metrics.main && metrics.showcase, `${width}: conversation or showcase is absent`);
+    assert.equal(metrics.board, null, `${width}: board did not yield its pane to the showcase`);
+    assert.equal(metrics.boardTabs, true, `${width}: collapsed Board destination is absent`);
+    assert.equal(metrics.mainBoardOverlap, 0, `${width}: board overlaps the conversation`);
+    assert.equal(metrics.mainShowcaseOverlap, 0, `${width}: showcase overlaps the conversation`);
+    assert.equal(metrics.composerControlHit, true, `${width}: composer artifact control is covered`);
+    return metrics;
+  }, 5_000);
+}
+
+async function assertOpenSpaceLayout(page, width, threadId) {
+  await page.setViewportSize({ width, height: 900 });
+  return poll(`${width}px open Space layout`, async () => {
+    const metrics = await page.evaluate(id => {
+      const bounds = selector => {
+        const node = document.querySelector(selector);
+        if (!(node instanceof HTMLElement) || !node.checkVisibility()) return null;
+        const box = node.getBoundingClientRect();
+        return { left: box.left, right: box.right, width: box.width };
+      };
+      const main = bounds(`main[data-thread-id="${id}"]`);
+      const board = bounds('aside[aria-label="Space board"]');
+      const remove = document.querySelector(`main[data-thread-id="${id}"] [data-slot="composer-artifact-context"] button[aria-label^="Remove artifact context:"]`);
+      const removeBounds = remove?.getBoundingClientRect();
+      const hit = removeBounds ? document.elementFromPoint(removeBounds.left + removeBounds.width / 2, removeBounds.top + removeBounds.height / 2) : null;
+      return {
+        main,
+        board,
+        overlap: main && board ? Math.max(0, main.right - board.left) : null,
+        composerControlHit: remove instanceof HTMLElement && hit instanceof Node ? remove.contains(hit) : false,
+      };
+    }, threadId);
+    assert(metrics.main && metrics.board, `${width}: conversation or board is absent`);
+    assert.equal(metrics.overlap, 0, `${width}: board overlaps the open conversation`);
+    assert.equal(metrics.composerControlHit, true, `${width}: composer artifact control is covered without a showcase`);
+    return metrics;
+  }, 5_000);
+}
+
 const browser = await launchBrowser();
 const evidence = {};
 try {
@@ -263,6 +330,45 @@ try {
     1,
     "Home bootstrap was not idempotent",
   );
+  const layoutArtifactResponse = await fetch(`${url}/debug/publish-artifact`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      operation_id: crypto.randomUUID(),
+      thread_id: home.id,
+      draft: {
+        title: "Space layout probe",
+        kind: "html",
+        content: "<!doctype html><html><body><main><h1>Space layout probe</h1></main></body></html>\n",
+      },
+    }),
+  });
+  const layoutArtifactBody = await layoutArtifactResponse.text();
+  assert.equal(layoutArtifactResponse.status, 200, layoutArtifactBody);
+  const layoutArtifact = JSON.parse(layoutArtifactBody);
+  await page.getByRole("button", { name: "All artifacts", exact: true }).click();
+  const layoutArtifactRef = page.locator(`[data-slot="artifact-list"] [data-artifact-ref="${layoutArtifact.id}"]`);
+  await layoutArtifactRef.waitFor({ state: "visible" });
+  await layoutArtifactRef.click();
+  const preview = page.locator('[data-slot="artifact-preview"]');
+  await preview.waitFor({ state: "visible" });
+  await preview.getByRole("button", { name: "Back to conversation", exact: true }).click();
+  await page.getByRole("button", { name: "Close All artifacts", exact: true }).click();
+  const homeMain = page.locator(`main[data-thread-id="${home.id}"]`);
+  await homeMain.waitFor({ state: "visible" });
+  const contextRemove = homeMain.locator('[data-slot="composer-artifact-context"] button[aria-label^="Remove artifact context:"]');
+  await contextRemove.waitFor({ state: "visible" });
+  const openLayout = await assertOpenSpaceLayout(page, 1440, home.id);
+  const conversationArtifact = homeMain.locator(`[data-artifact-ref="${layoutArtifact.id}"]`).first();
+  await conversationArtifact.waitFor({ state: "visible" });
+  await conversationArtifact.locator("..").getByRole("button", { name: "Open with", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Showcase in this thread", exact: true }).click();
+  await page.locator('[data-slot="thread-showcase"]').waitFor({ state: "visible" });
+  const showcaseLayouts = [];
+  for (const width of [1440, 1280]) {
+    showcaseLayouts.push({ width, ...await assertShowcaseSpaceLayout(page, width, home.id) });
+    if (evidenceDir) await page.screenshot({ path: `${evidenceDir}/space-board-showcase-${width}.png`, fullPage: true });
+  }
   assert.deepEqual(errors, []);
   Object.assign(evidence, {
     historyId: hello.history_id,
@@ -274,6 +380,8 @@ try {
     cancelledTurnId: cancelTurn.id,
     delegatedTurnId: delegatedTurn.id,
     focusedSend,
+    openLayout,
+    showcaseLayouts,
     browserErrors: errors,
   });
   if (evidenceDir) {

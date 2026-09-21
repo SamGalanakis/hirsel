@@ -379,6 +379,40 @@ function timelineProjection(dom) {
   }));
 }
 
+/** One elapsed value in the app's own vocabulary (`app/src/lib/duration.ts`):
+ * milliseconds under a second, one decimal under ten, whole seconds under a
+ * minute, then space-joined `h m s` with zero parts dropped. */
+const MEASURED_DURATION = /^(?:\d+ms|\d+\.\ds|\d{1,2}s|(?:\d+h)?(?: ?\d+m)?(?: ?\d+s)?)$/;
+
+/** Reload keeps the timeline the Host owns: event and call identity, order,
+ * kind and every available payload. A step row also ends in how long it took,
+ * and that number is NOT the Host's — the client measures it between the
+ * arrival of the step's own start and done frames, and a replayed timeline
+ * carries no clock and deliberately shows none (`app/src/components/chat/
+ * timeline.ts`, `Timeline.tsx`). So the comparison demands equality of
+ * everything else and, where a step row differs, that the reloaded text is the
+ * live text minus exactly one well-formed duration — never a changed subject,
+ * outcome or payload. */
+function assertReloadedTimeline(after, before) {
+  assert.equal(after.length, before.length, "reload changed the number of conversation entries");
+  for (const [index, entry] of after.entries()) {
+    const live = before[index];
+    assert.deepEqual({ ...entry, timeline: null }, { ...live, timeline: null }, `entry ${index} lost its identity across reload`);
+    assert.equal(entry.timeline.length, live.timeline.length, `entry ${index} changed its number of trace rows across reload`);
+    for (const [rowIndex, row] of entry.timeline.entries()) {
+      const liveRow = live.timeline[rowIndex];
+      assert.deepEqual({ ...row, text: null }, { ...liveRow, text: null }, `entry ${index} row ${rowIndex} changed across reload`);
+      if (row.text === liveRow.text) continue;
+      assert(
+        row.slot === "timeline-tool" || row.slot === "timeline-code",
+        `entry ${index} row ${rowIndex} (${row.slot}) changed its text across reload`,
+      );
+      assert(liveRow.text.startsWith(row.text), `step ${row.toolCallId ?? row.codeId} changed beyond its measured duration across reload`);
+      assert.match(liveRow.text.slice(row.text.length), MEASURED_DURATION, `step ${row.toolCallId ?? row.codeId} lost more than its measured duration across reload`);
+    }
+  }
+}
+
 /** A finished run rests as a collapsed card; its trace is what these oracles
  * read, so every card is opened before the DOM is projected. */
 async function expandRunCards(page) {
@@ -630,7 +664,7 @@ async function runChat(context) {
   await expandInlineTools(page, [firstTool.started.event.id, secondTool.started.event.id]);
   const reloaded = await capture("31-reloaded", context);
   const after = timelineProjection(reloaded.dom);
-  assert.deepEqual(after, before);
+  assertReloadedTimeline(after, before);
   assert.deepEqual(reloaded.detail.turn_timelines, settledExpanded.detail.turn_timelines);
   assert.deepEqual(reloaded.store.timelineEvents, settledExpanded.store.timelineEvents);
   assertTimelineSurfaces(reloaded, frames, [first.turnId, secondTurn.id]);

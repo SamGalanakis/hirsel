@@ -1261,6 +1261,11 @@ unsafe fn serve(run: *mut RunShared, exec: &Exec) -> bool {
     // SAFETY: caller contract.
     unsafe { post_deferred(run, exec) };
     unsafe { free::saved(run, exec) };
+    #[cfg(all(feature = "tsan", target_arch = "x86_64"))]
+    if matches!(exec.kind, Kind::Scoped(_)) {
+        // SAFETY: serve owns this scoped worker's idle stack, with no role.
+        unsafe { free::double_claim::idle() };
+    }
     let execs = unsafe { (*(*run).execs.get()).as_deref().unwrap() };
     if exec.exit_pending.get() && exec.foreign_frames.load(Ordering::Acquire) == 0 {
         free::retire(execs, exec);

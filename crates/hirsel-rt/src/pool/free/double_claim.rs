@@ -3,7 +3,7 @@
 //! shared cell. No duplicate reaches cleanup: the campaign requires TSan exit 66.
 use super::{Image, Queued};
 use crate::TaskCtx;
-use std::sync::{Barrier, Condvar, Mutex, OnceLock};
+use std::sync::{Barrier, Mutex, OnceLock};
 
 #[derive(Default)]
 struct State {
@@ -20,7 +20,6 @@ static STATE: Mutex<State> = Mutex::new(State {
     ordinary: false,
     claimed: false,
 });
-static READY: Condvar = Condvar::new();
 static ENTER: Barrier = Barrier::new(2);
 
 fn enabled() -> bool {
@@ -44,15 +43,22 @@ pub(super) unsafe fn dispatch(queued: &Queued<Image>) {
         // SAFETY: the queue token has not been started. Keep only its context
         // address, not a borrow of the image, across the real owner's start.
         state.ctx = ctx as usize;
+    }
+}
+
+/// An idle scoped worker may duplicate only an already saved mapper. Blocking
+/// before its first dispatch would prevent the canonical startup rendezvous.
+/// # Safety
+/// Called on a scoped worker's idle stack, without a scheduler role or borrow.
+pub(crate) unsafe fn idle() {
+    if !enabled() {
         return;
     }
-    if state.stolen || state.ctx == ctx as usize {
+    let mut state = STATE.lock().unwrap();
+    if state.sp == 0 || state.stolen {
         return;
     }
     state.stolen = true;
-    while state.sp == 0 {
-        state = READY.wait(state).unwrap();
-    }
     let sp = state.sp as *mut u8;
     drop(state);
     ENTER.wait();
@@ -79,8 +85,8 @@ pub(crate) unsafe fn mapper(ctx: *mut TaskCtx, sp: *mut u8) {
         return;
     }
     state.sp = sp as usize;
-    READY.notify_one();
     drop(state);
+    super::super::cpu_scoped::tsan_wake(super::super::execs(ctx));
     ENTER.wait();
 }
 

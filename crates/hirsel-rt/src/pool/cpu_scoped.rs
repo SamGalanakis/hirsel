@@ -964,6 +964,15 @@ pub(super) unsafe fn tsan_job(ctx: *mut TaskCtx) -> bool {
         .is_some_and(|workers| workers.caller_task != unsafe { (*ctx).task_id })
 }
 
+#[cfg(all(feature = "tsan", target_arch = "x86_64"))]
+pub(super) fn tsan_wake(execs: &Execs) {
+    if let Some(workers) = execs.scoped.lock().unwrap().as_ref() {
+        for exec in &workers.execs {
+            super::wake(exec);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

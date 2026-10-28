@@ -5,16 +5,17 @@ import io
 import os
 from pathlib import Path
 import runpy
+import signal
 import subprocess
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'workers-tsan'
 
 
 class NativeQualification(unittest.TestCase):
-    def run_gate(self, width, stderr, status=0, controls=True):
+    def run_gate(self, width, stderr, status=0, controls=True, timeout=False):
         if controls:
             stderr += "".join(
                 f"MUTANT {policy} {backend} W{width}: exit 66, emitted mapper race\n"
@@ -22,13 +23,23 @@ class NativeQualification(unittest.TestCase):
                 for policy in ["tasks.free@1", "tasks.cooperative@1"]
                 for backend in ["llvm", "cranelift"])
         result = subprocess.CompletedProcess([], status, '4 passed\n', stderr)
+        process = Mock(returncode=status, pid=12345)
+        if timeout:
+            process.communicate.side_effect = [subprocess.TimeoutExpired('native', 180),
+                                               (result.stdout, result.stderr)]
+        else:
+            process.communicate.return_value = (result.stdout, result.stderr)
         output = io.StringIO()
         with patch.dict(os.environ, {'HIRSEL_NATIVE_CPU_HARNESS': 'unused-harness'}), \
                 patch.object(sys, 'argv', [str(SCRIPT), '--native', str(width)]), \
-                patch.object(subprocess, 'run', return_value=result), \
+                patch.object(subprocess, 'Popen', return_value=process) as spawn, \
+                patch.object(os, 'killpg') as kill_group, \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             with self.assertRaises(SystemExit) as exit:
                 runpy.run_path(str(SCRIPT), run_name='__main__')
+        self.output = output.getvalue()
+        self.killed = kill_group.call_args_list
+        self.spawn = spawn.call_args
         return exit.exception.code
 
     def witnesses(self, width):
@@ -53,6 +64,13 @@ class NativeQualification(unittest.TestCase):
 
     def test_full_width_witnesses_without_double_claim_detection_are_not_qualification(self):
         self.assertNotEqual(self.run_gate(4, ''.join(self.witnesses(4)), controls=False), 0)
+
+    def test_timeout_keeps_output_and_kills_the_owned_native_process_group(self):
+        self.assertNotEqual(self.run_gate(4, ''.join(self.witnesses(4)), timeout=True), 0)
+        self.assertIn('4 passed', self.output)
+        self.assertIn('emitted mapper race', self.output)
+        self.assertEqual(self.killed, [call(12345, signal.SIGKILL)])
+        self.assertTrue(self.spawn.kwargs['start_new_session'])
 
     def test_sanitizer_failure_status_is_preserved_even_with_witnesses(self):
         self.assertEqual(self.run_gate(8, ''.join(self.witnesses(8)), 66), 66)

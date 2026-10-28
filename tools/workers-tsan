@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import resource
+import signal
 from pathlib import Path
 import subprocess
 import tempfile
@@ -25,10 +26,21 @@ if "HIRSEL_NATIVE_CPU_HARNESS" in os.environ:
     # Each fixture checks a double-claimed mapper and then the same executable
     # with exclusive claims, retaining its value and physical-overlap checks.
     name = "native_tsan_"
-    result = subprocess.run([binary, name, "--nocapture", "--test-threads=1", *libtest],
-                            cwd=root / "crates/hirsel-cli", timeout=180,
-                            env=os.environ | {"TSAN_OPTIONS": "symbolize=0:halt_on_error=1:exitcode=66"},
-                            capture_output=True, text=True)
+    process = subprocess.Popen([binary, name, "--nocapture", "--test-threads=1", *libtest],
+                               cwd=root / "crates/hirsel-cli", start_new_session=True,
+                               env=os.environ | {"TSAN_OPTIONS": "symbolize=0:halt_on_error=1:exitcode=66"},
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        stdout, stderr = process.communicate(timeout=180)
+    except subprocess.TimeoutExpired:
+        # The process group contains only this harness and its native children.
+        # Killing just libtest would leave a hung mapper holding its pipes open.
+        os.killpg(process.pid, signal.SIGKILL)
+        stdout, stderr = process.communicate()
+        print(stdout, end="", flush=True)
+        print(stderr, end="", file=sys.stderr, flush=True)
+        raise SystemExit("native CPU TSan campaign timed out after 180 seconds")
+    result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
     print(result.stdout, end="", flush=True)
     print(result.stderr, end="", file=sys.stderr, flush=True)
     if result.returncode == 0:

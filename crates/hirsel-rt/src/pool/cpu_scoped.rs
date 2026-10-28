@@ -948,10 +948,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_cpu_map_scoped(
             value,
         );
     }
-    #[cfg(all(feature = "tsan", target_arch = "x86_64"))]
-    if action == 3 && value == 0 {
-        unsafe { super::free::double_claim::claimed(ctx) };
-    }
     unsafe { out.write(value) };
     crate::STATUS_OK
 }

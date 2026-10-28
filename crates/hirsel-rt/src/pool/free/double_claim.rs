@@ -11,14 +11,12 @@ struct State {
     stolen: bool,
     sp: usize,
     ordinary: bool,
-    claimed: bool,
 }
 static STATE: Mutex<State> = Mutex::new(State {
     ctx: 0,
     stolen: false,
     sp: 0,
     ordinary: false,
-    claimed: false,
 });
 static ENTER: Barrier = Barrier::new(2);
 
@@ -96,7 +94,8 @@ pub(crate) struct Switch {
     to: *mut u8,
 }
 
-/// Prepare the ordinary scalar save after a successful canonical CPU claim.
+/// Save the ordinary CPU worker at its first mapper fuel refill. Free has no
+/// Ordered claim receipt; the emitted-PC oracle verifies the resumed mapper.
 /// # Safety
 /// The running context owns this worker. The naked caller must tail-jump to
 /// fiber_switch after refill returns, without retaining any Rust frame.
@@ -105,11 +104,11 @@ pub(crate) unsafe extern "C" fn ordinary_prepare(ctx: *mut TaskCtx) -> Switch {
         save: std::ptr::null_mut(),
         to: std::ptr::null_mut(),
     };
-    if !enabled() {
+    if !enabled() || !unsafe { (*ctx).ahead_physical.is_null() } {
         return none;
     }
     let mut state = STATE.lock().unwrap();
-    if state.ctx != ctx as usize || !state.claimed || state.sp != 0 || state.ordinary {
+    if state.ctx != ctx as usize || state.sp != 0 || state.ordinary {
         return none;
     }
     state.ordinary = true;
@@ -135,15 +134,4 @@ pub(super) unsafe fn ordinary_saved(ctx: *mut TaskCtx) -> Option<*mut u8> {
     let sp = unsafe { (*ctx).task_sp };
     unsafe { mapper(ctx, sp) };
     Some(sp)
-}
-
-/// # Safety
-/// The current CPU worker has just successfully claimed its canonical job.
-pub(crate) unsafe fn claimed(ctx: *mut TaskCtx) {
-    if enabled() {
-        let mut state = STATE.lock().unwrap();
-        if state.ctx == ctx as usize {
-            state.claimed = true;
-        }
-    }
 }

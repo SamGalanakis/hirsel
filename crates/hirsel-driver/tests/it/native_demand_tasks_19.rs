@@ -68,12 +68,14 @@ fn native_demand_tasks_import_and_reuse_actual_settled_source_without_a_controll
                 .original_context
                 .reader(facts.originals.iter().map(|product| (**product).clone()))
                 .unwrap();
-            let originals = facts
+            let scoped_originals = facts
                 .originals
                 .iter()
-                .map(|product| {
-                    Arc::downgrade(reader.read(&product.definition).unwrap().definition())
-                })
+                .map(|product| reader.read(&product.definition).unwrap())
+                .collect::<Vec<_>>();
+            let originals = scoped_originals
+                .iter()
+                .map(|body| Arc::downgrade(body.definition()))
                 .collect::<Vec<_>>();
             drop(facts);
             let inputs = NativeInstanceInputs::from_products(declarations, reader).unwrap();
@@ -195,6 +197,7 @@ fn native_demand_tasks_import_and_reuse_actual_settled_source_without_a_controll
             drop(task);
             drop(factory);
             drop(tasks);
+            drop(scoped_originals);
             assert!(originals.iter().all(|body| body.upgrade().is_none()));
         }
     });

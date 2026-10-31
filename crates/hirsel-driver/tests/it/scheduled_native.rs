@@ -138,7 +138,6 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
                     .any(|(_, work)| work.validation_runs > 0),
                 verify == Verify::On
             );
-            assert_eq!(front.live_body_count(), 0);
             let actual_codec = NativeRecords::new(program.engine.types().clone(), store.clone());
             let anchors = NativeRecordContext::capture(&program.engine);
             let signatures = lower.signatures();
@@ -170,6 +169,8 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
                     assert!(Arc::ptr_eq(body.definition(), &live.output().value));
                 }
             }
+            runtime.evict_to(0);
+            assert_eq!(front.live_body_count(), 0);
             runtime.shutdown();
             drop(runtime);
             assert!(
@@ -201,7 +202,15 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
                 .body
                 .retained_metadata_bytes()
                 .unwrap();
-            let retained = payload + metadata;
+            let retained = main_output
+                .product
+                .product
+                .as_ref()
+                .unwrap()
+                .archive(ArchiveAdmission::Retained)
+                .unwrap()
+                .retained_bytes()
+                + metadata;
             // Reuse settled producers, but give a fresh native owner exactly
             // one payload's allowance. A byte less must refuse publication.
             for (available, accepts) in [(retained - 1, false), (retained, true)] {
@@ -390,6 +399,8 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
             "fn a()->u8{1u8}\nfn b()->u8{1u8}\npub fn main()->u8{0u8}\n",
         )
         .unwrap();
+        let manifest = directory.path().join("hirsel.json");
+        std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"native_pressure","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
         let mut limit = 8 << 20;
         for mode in 0..3 {
             let store = Arc::new(MemStore::default());
@@ -400,13 +411,17 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
                     ..Default::default()
                 })
                 .with_owned_engines()
-                .load_program(&path)
+                .load_program(&manifest)
                 .unwrap();
             let definitions = ["a", "b"].map(|name| {
                 let mut path = program.entry.clone();
                 path.0.name = name.into();
                 path
             });
+            let native_inputs = program
+                .engine
+                .front_native_definition_inputs(&definitions, 8 << 20)
+                .unwrap();
             let budget = ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
@@ -414,10 +429,15 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
                 scratch: 8 << 20,
                 stack: 0,
             };
-            let mut runtime = AdmittedRuntime::new(
+            let entries = definitions.len() * 6;
+            let runtime_bytes = hirsel_intern::jobs::COMPILER_STACK_BYTES as u64
+                + 2 * weight.scratch
+                + AdmittedRuntime::query_capacity_bytes(entries).unwrap();
+            let mut runtime = AdmittedRuntime::with_query_capacity(
                 hirsel_intern::jobs::Jobs::ONE,
-                budget.reserve(128 << 20).unwrap(),
+                budget.reserve(runtime_bytes).unwrap(),
                 errors,
+                entries,
             )
             .unwrap();
             let front = program
@@ -442,10 +462,10 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
                 .unwrap();
             let native = program
                 .engine
-                .front_native_definition_queries(
-                    &definitions,
+                .front_native_definition_queries_with_inputs(
                     front.clone(),
                     lower.clone(),
+                    native_inputs,
                     weight,
                     budget.reserve(8 << 20).unwrap(),
                     errors,
@@ -519,6 +539,16 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
             let request = runtime.request(&[lower.query(&definitions[0]).unwrap()]);
             let recomputed = runtime.wait(request).unwrap().pop().unwrap();
             assert_eq!(recomputed.action, action);
+            let rebound = lower.native_product(recomputed.clone()).unwrap();
+            assert!(
+                original.same_binding(&rebound),
+                "ordinary identity survives Lower eviction"
+            );
+            let mut stale = rebound.clone();
+            stale.signature = hirsel_syntax::ContentHash::of_bytes(b"stale signature");
+            assert!(!original.same_binding(&stale));
+            assert!(native.original_context().reader([stale]).is_err());
+            drop(rebound);
             assert_eq!(recomputed.lower_value().unwrap().reads(), &reads);
             assert_eq!(
                 records

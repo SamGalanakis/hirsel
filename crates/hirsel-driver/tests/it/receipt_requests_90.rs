@@ -108,7 +108,20 @@ pub fn inspect(root: List[u64]) -> u64 { forward(root)+forward_again(root) }
         let products: std::collections::BTreeMap<_, _> = facts
             .originals
             .iter()
-            .map(|product| (product.definition.clone(), (**product).clone()))
+            .map(|original| {
+                let selected = facts
+                    .catalogue
+                    .iter()
+                    .find(|product| product.source.definition == original.definition)
+                    .unwrap()
+                    .product
+                    .clone()
+                    .unwrap();
+                (
+                    original.definition.clone(),
+                    (selected, (**original).clone()),
+                )
+            })
             .collect();
         let reader = facts
             .original_context
@@ -195,9 +208,7 @@ pub fn inspect(root: List[u64]) -> u64 { forward(root)+forward_again(root) }
                 INSTANCE_INPUT_KIND, InstanceTaskFactory, InstanceTasks,
             };
             use hirsel_driver::native::queries::source_inputs::NativeFrontLower;
-            use runtime::{
-                MemoryWeight, ProcessBudget, ProductRef, QueryFactory, QueryId, QueryPoll,
-            };
+            use runtime::{MemoryWeight, ProcessBudget, QueryFactory, QueryId, QueryPoll};
             let bindings = products
                 .iter()
                 .map(|(path, product)| {
@@ -205,19 +216,14 @@ pub fn inspect(root: List[u64]) -> u64 { forward(root)+forward_again(root) }
                         path.clone(),
                         QueryId {
                             kind: 0x7c90,
-                            address: product.body.live().expect("selected live Lower").address(),
+                            address: product.0.address,
                         },
                     )
                 })
                 .collect::<std::collections::BTreeMap<_, _>>();
             let rows = bindings
                 .iter()
-                .map(|(path, query)| {
-                    (
-                        *query,
-                        ProductRef::lower(products[path].body.live().expect("selected live Lower")),
-                    )
-                })
+                .map(|(path, query)| (*query, products[path].0.clone()))
                 .collect();
             let mut delayed = read.clone();
             delayed.0.name = "read".into();
@@ -416,7 +422,7 @@ pub fn inspect(root:List[u64])->u64 {forward(root)+forward_again(root)}
     });
 }
 
-struct LowerRows(std::collections::BTreeMap<DefPath, NativeOriginalProduct>);
+struct LowerRows(std::collections::BTreeMap<DefPath, (runtime::ProductRef, NativeOriginalProduct)>);
 impl hirsel_driver::native::queries::source_inputs::NativeLowerProducts for LowerRows {
     fn lower_product(
         &self,
@@ -425,13 +431,8 @@ impl hirsel_driver::native::queries::source_inputs::NativeLowerProducts for Lowe
     ) -> Result<NativeOriginalProduct, String> {
         self.0
             .get(path)
-            .filter(|product| {
-                product
-                    .body
-                    .live()
-                    .is_some_and(|live| selected == runtime::ProductRef::lower(live))
-            })
-            .cloned()
+            .filter(|(product, _)| *product == selected)
+            .map(|(_, original)| original.clone())
             .ok_or_else(|| "unselected test Lower".into())
     }
 }

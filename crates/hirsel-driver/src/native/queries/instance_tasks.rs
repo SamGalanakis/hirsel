@@ -29,7 +29,7 @@ struct Registered {
     key: InstanceAddress,
     request: Request,
     input: OnceLock<ProductRef>,
-    source: OnceLock<(ProductRef, hirsel_engine::NativeOriginalProduct)>,
+    source: OnceLock<((Address, Action), hirsel_engine::NativeOriginalProduct)>,
     output: OnceLock<Arc<DiscoveredInstance>>,
 }
 struct Registry {
@@ -422,8 +422,8 @@ impl InstanceTasks {
                         .source
                         .get()
                         .ok_or("completed source instance has no settled Lower selection")?;
-                    if let Some((previous, _)) = selected.get(path) {
-                        if previous != product {
+                    if let Some((previous, previous_original)) = selected.get(path) {
+                        if previous != product || !original.same_binding(previous_original) {
                             return Err("source instances selected different Lower outputs".into());
                         }
                     } else {
@@ -702,13 +702,22 @@ impl QueryTask for InstanceTask {
                             return Err("front Lower names another source definition".into());
                         }
                         if path == owner {
-                            if let Some((previous, _)) = self.entry.source.get() {
-                                if *previous != selected {
+                            if let Some((previous, previous_original)) = self.entry.source.get() {
+                                if *previous != (selected.address, selected.action)
+                                    || !product.same_binding(previous_original)
+                                {
                                     return Err("front Lower changed within a native input".into());
                                 }
                             } else {
                                 let mut weight = hirsel_engine::NativeMetadataWeight::default();
                                 weight.path(&product.definition);
+                                weight.add(
+                                    product
+                                        .body
+                                        .retained_metadata_bytes()
+                                        .and_then(|bytes| usize::try_from(bytes).ok())
+                                        .ok_or("native source binding metadata overflow")?,
+                                );
                                 let mut registry = self
                                     .tasks
                                     .registry
@@ -720,9 +729,12 @@ impl QueryTask for InstanceTask {
                                     .filter(|total| *total <= self.tasks.allowance.bytes())
                                     .ok_or("native source binding exceeds retained allowance")?;
                                 drop(registry);
-                                self.entry.source.set((selected, product.clone())).map_err(
-                                    |_| "front Lower completion raced within one task".to_owned(),
-                                )?;
+                                self.entry
+                                    .source
+                                    .set(((selected.address, selected.action), product.clone()))
+                                    .map_err(|_| {
+                                        "front Lower completion raced within one task".to_owned()
+                                    })?;
                             }
                         }
                         receipt_products.push(product);

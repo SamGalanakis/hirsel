@@ -22,6 +22,27 @@ pub struct NativeOriginalProduct {
     pub verified: Option<hirsel_validate::VerifiedDefinitionOutput>,
 }
 
+impl NativeOriginalProduct {
+    /// Complete ordinary identity across Lower eviction and recomputation.
+    /// Source binding and V acceptance still belong to the context's reader.
+    pub fn same_binding(&self, other: &Self) -> bool {
+        self.definition == other.definition
+            && self.implementation_revision == other.implementation_revision
+            && self.signature == other.signature
+            && self.verified == other.verified
+            && match (&self.body.input, &other.body.input) {
+                (OriginalInput::Bound(a), OriginalInput::Bound(b)) => {
+                    a.reference == b.reference && a.context.bindings_hold(&b.context)
+                }
+                (OriginalInput::Archive(a), OriginalInput::Archive(b)) => {
+                    a.reference() == b.reference()
+                }
+                (OriginalInput::Scalar(a), OriginalInput::Scalar(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
+    }
+}
+
 /// An immutable source binding. Catalogue rows retain no decoded Lower body.
 #[derive(Clone)]
 pub struct NativeOriginalHandle {

@@ -818,6 +818,9 @@ struct AnalyzedValue {
     diagnostic_phases: Vec<(hirsel_diag::Diagnostic, String)>,
 }
 impl LiveAnalyzedProduct {
+    pub(crate) fn summary(&self) -> &LiveSummaryProduct {
+        &self.0.value.summary
+    }
     pub(super) fn cache_only(&self) -> bool {
         Arc::strong_count(&self.0) == 1 && Arc::strong_count(&self.0.value.output) == 1
     }
@@ -932,9 +935,6 @@ impl LiveAnalyzedProduct {
 impl WeakAnalyzedProduct {
     pub(crate) fn upgrade(&self) -> Option<LiveAnalyzedProduct> {
         self.0.upgrade().map(LiveAnalyzedProduct)
-    }
-    pub(crate) fn matches(&self, product: &LiveAnalyzedProduct) -> bool {
-        self.0.ptr_eq(&Arc::downgrade(&product.0))
     }
 }
 

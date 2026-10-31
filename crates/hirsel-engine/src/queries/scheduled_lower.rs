@@ -1537,11 +1537,11 @@ impl FrontLowerQueries {
             None if selected.is_ok() => {
                 let materialize = self
                     .front
-                    .body_query(path)
+                    .body_task(path)
                     .ok_or(QueryError::NotImplemented)?;
                 let product = source
                     .reads
-                    .read_consuming(materialize)
+                    .compose(materialize)
                     .await
                     .map_err(|error| source.refused(error))?;
                 self.front

@@ -892,10 +892,7 @@ impl FrontBodyQueries {
                 (product.action == primary.action
                     && analyzed.address() == product.address
                     && analyzed.action() == product.action
-                    && outcome
-                        .body_publication
-                        .as_ref()
-                        .is_some_and(|current| current.matches(analyzed)))
+                    && analyzed.summary().same_owner(primary.summary_value()?))
                 .then_some(key)
             }
         }
@@ -940,6 +937,19 @@ impl FrontBodyQueries {
                 [query.address.0.0.as_slice()],
             )),
         })
+    }
+    /// Materialize through the compact Check latch in the consumer's admitted
+    /// continuation, without allocating another scheduler node.
+    pub(crate) fn body_task(self: &Arc<Self>, definition: &DefPath) -> Option<Box<dyn QueryTask>> {
+        let query = self.query(definition)?;
+        Some(Box::new(BodyTask {
+            queries: self.clone(),
+            query,
+            input: query.address.0,
+            materialize: true,
+            weight: self.inputs.get(&query.address.0)?.weight,
+            terminal: None,
+        }))
     }
     pub fn factory(self: &Arc<Self>) -> Arc<dyn QueryFactory> {
         Arc::new(Factory(self.clone()))
@@ -1439,6 +1449,18 @@ impl BodyTask {
             && let Some(product) = self.queries.completed_product(self.query)
         {
             return product;
+        }
+        if self.materialize
+            && let Some(product) = self
+                .queries
+                .outcomes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&self.input)
+                .and_then(|outcome| outcome.body_publication.as_ref()?.upgrade())
+            && product.address() == self.query.address
+        {
+            return Ok(ProductRef::analyzed(product));
         }
         if self.materialize
             && let Some(body) = self.restore_body(cx)

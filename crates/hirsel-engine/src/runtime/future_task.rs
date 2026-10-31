@@ -25,16 +25,70 @@ enum Eviction {
 }
 struct Reads {
     eviction: Eviction,
+    composed: Composed,
+    working: MemoryWeight,
     requested: BTreeMap<Key, QueryId>,
     completed: BTreeMap<Key, Outcome>,
     limit: usize,
     resource: Reference,
+}
+#[derive(Default)]
+enum Composed {
+    #[default]
+    Idle,
+    Requested(Box<dyn QueryTask>),
+    Completed(Outcome),
+}
+impl Composed {
+    fn slots(&self) -> usize {
+        match self {
+            Self::Idle => 0,
+            Self::Requested(task) => 1usize.saturating_add(
+                task.weight().retained.div_ceil(512).min(usize::MAX as u64) as usize,
+            ),
+            Self::Completed(_) => 1,
+        }
+    }
 }
 /// Task-local dependency mailbox. Clone only shares the one bounded mailbox;
 /// reads use QueryContext on the next poll and never block a compiler worker.
 #[derive(Clone)]
 pub struct QueryReads(Rc<RefCell<Reads>>);
 impl QueryReads {
+    /// Poll one producer under this continuation's working grant. Its reads
+    /// subscribe to the existing graph; the composed producer claims no node.
+    /// Its frame consumes mailbox capacity until destruction.
+    pub(crate) async fn compose(&self, task: Box<dyn QueryTask>) -> Outcome {
+        let mut task = Some(task);
+        poll_fn(|_| {
+            let mut reads = self.0.borrow_mut();
+            if let Some(task) = task.take() {
+                let weight = task.weight();
+                let composed = Composed::Requested(task);
+                if !matches!(reads.composed, Composed::Idle)
+                    || weight.scratch > reads.working.scratch
+                    || weight.stack > reads.working.stack
+                    || reads
+                        .completed
+                        .len()
+                        .saturating_add(reads.requested.len())
+                        .saturating_add(composed.slots())
+                        > reads.limit
+                {
+                    return Poll::Ready(Err(reads.resource));
+                }
+                reads.composed = composed;
+            }
+            match std::mem::take(&mut reads.composed) {
+                Composed::Completed(result) => Poll::Ready(result),
+                pending => {
+                    reads.composed = pending;
+                    Poll::Pending
+                }
+            }
+        })
+        .await
+    }
     /// Retry a producer admission using the runtime's existing unpinned-body
     /// eviction policy. The request and result stay in this bounded mailbox.
     pub(crate) async fn evict_body(&self) -> bool {
@@ -72,7 +126,8 @@ impl QueryReads {
             return Poll::Ready(result);
         }
         if !reads.requested.contains_key(&key(query)) {
-            if reads.completed.len() + reads.requested.len() >= reads.limit {
+            if reads.completed.len() + reads.requested.len() + reads.composed.slots() >= reads.limit
+            {
                 return Poll::Ready(Err(reads.resource));
             }
             reads.requested.insert(key(query), query);
@@ -97,11 +152,13 @@ impl LocalFutureTask {
     /// Future plus bounded mailbox allocation, excluding producer-owned data.
     /// Each row covers both B-tree nodes and temporary ready-list metadata.
     pub fn retained_bytes_for(future_bytes: usize, reads: usize) -> Option<u64> {
+        let mailbox = std::mem::size_of::<Reads>().checked_add(4 * std::mem::size_of::<usize>())?;
         u64::try_from(reads)
             .ok()?
             .checked_mul(512)?
             .checked_add(u64::try_from(future_bytes).ok()?)?
-            .checked_add(std::mem::size_of::<Self>() as u64 + 256)
+            .checked_add(std::mem::size_of::<Self>() as u64)?
+            .checked_add(mailbox as u64)
     }
     /// A namespace limit cannot preallocate beyond the admitted task frame.
     /// Actual reads exceeding either limit return the normal resource refusal.
@@ -120,6 +177,8 @@ impl LocalFutureTask {
             .ok_or(errors.resource)?;
         let reads = QueryReads(Rc::new(RefCell::new(Reads {
             eviction: Eviction::Idle,
+            composed: Composed::Idle,
+            working: weight,
             requested: BTreeMap::new(),
             completed: BTreeMap::new(),
             limit: max_reads,
@@ -163,6 +222,19 @@ impl LocalFutureTask {
             if !waiting.is_empty() {
                 return QueryPoll::Waiting(waiting);
             }
+            let composed = std::mem::take(&mut self.reads.0.borrow_mut().composed);
+            let composed = match composed {
+                Composed::Requested(mut task) => match task.poll(cx) {
+                    QueryPoll::Waiting(dependencies) => {
+                        self.reads.0.borrow_mut().composed = Composed::Requested(task);
+                        return QueryPoll::Waiting(dependencies);
+                    }
+                    QueryPoll::Complete(product) => Composed::Completed(Ok(product)),
+                    QueryPoll::Failed(error) => Composed::Completed(Err(error)),
+                },
+                other => other,
+            };
+            self.reads.0.borrow_mut().composed = composed;
             match self
                 .future
                 .as_mut()
@@ -174,6 +246,7 @@ impl LocalFutureTask {
                 }
                 Poll::Pending
                     if self.reads.0.borrow().requested.is_empty()
+                        && !matches!(self.reads.0.borrow().composed, Composed::Requested(_))
                         && !matches!(self.reads.0.borrow().eviction, Eviction::Requested) =>
                 {
                     // External async operations cannot wake the query graph.
@@ -243,11 +316,77 @@ mod tests {
     fn reads() -> QueryReads {
         QueryReads(Rc::new(RefCell::new(Reads {
             eviction: Eviction::Idle,
+            composed: Composed::Idle,
+            working: MemoryWeight::default(),
             requested: BTreeMap::new(),
             completed: BTreeMap::new(),
             limit: 0,
             resource: error(),
         })))
+    }
+    #[test]
+    fn composed_producer_uses_existing_reads_and_checks_its_grant() {
+        struct Producer(MemoryWeight);
+        impl QueryTask for Producer {
+            fn id(&self) -> QueryId {
+                query(2)
+            }
+            fn weight(&self) -> MemoryWeight {
+                self.0
+            }
+            fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+                match cx.read(query(1)) {
+                    Poll::Pending => QueryPoll::Waiting(vec![query(1)]),
+                    Poll::Ready(result) => finish(result),
+                }
+            }
+        }
+        async fn compose(reads: QueryReads, weight: MemoryWeight) -> Outcome {
+            reads.compose(Box::new(Producer(weight))).await
+        }
+        struct PendingOnce(bool);
+        impl QueryContext for PendingOnce {
+            fn read(&mut self, id: QueryId) -> Poll<Outcome> {
+                assert_eq!(id, query(1), "only the original dependency is requested");
+                if std::mem::replace(&mut self.0, false) {
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(product(id)))
+                }
+            }
+        }
+        for (slots, scratch, accepted) in [(2, 8, true), (1, 8, false), (2, 9, false)] {
+            let producer = MemoryWeight {
+                retained: 64,
+                scratch,
+                stack: 0,
+            };
+            let frame = std::mem::size_of_val(&compose(reads(), producer));
+            let mut task = LocalFutureTask::new(
+                query(0),
+                MemoryWeight {
+                    retained: LocalFutureTask::retained_bytes_for(frame, slots).unwrap(),
+                    scratch: 8,
+                    stack: 0,
+                },
+                slots,
+                errors(),
+                move |reads| compose(reads, producer),
+            )
+            .unwrap();
+            let mut cx = PendingOnce(true);
+            if accepted {
+                assert!(
+                    matches!(task.poll(&mut cx), QueryPoll::Waiting(ids) if ids == vec![query(1)])
+                );
+                assert!(
+                    matches!(task.poll(&mut cx), QueryPoll::Complete(value) if value == product(query(1)))
+                );
+            } else {
+                assert!(matches!(task.poll(&mut cx), QueryPoll::Failed(value) if value == error()));
+                assert!(cx.0, "a refused grant executes no producer work");
+            }
+        }
     }
     async fn computation(reads: QueryReads, count: u8) -> Outcome {
         for n in 1..=count {

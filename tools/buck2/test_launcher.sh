@@ -111,6 +111,11 @@ materialize_native_inputs() {
   export LLVM_SYS_231_PREFIX
   export PATH="$LLVM_SYS_231_PREFIX/bin:$PATH"
   export LD_LIBRARY_PATH="$LLVM_SYS_231_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  if [ -n "${HIRSEL_RUNTIME_ARCHIVES:-}" ]; then
+    cp -RL --reflink=auto --preserve=mode,timestamps -- "$HIRSEL_RUNTIME_ARCHIVES" "$private_native_inputs/runtime"
+    HIRSEL_RUNTIME_ARCHIVES="$private_native_inputs/runtime"
+    export HIRSEL_RUNTIME_ARCHIVES
+  fi
 }
 export PATH="$LLVM_SYS_231_PREFIX/bin:${PATH:-/usr/bin:/bin}"
 export LD_LIBRARY_PATH="$LLVM_SYS_231_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

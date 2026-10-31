@@ -198,7 +198,7 @@ impl CompilerRequests {
             .zip(lower)
             .filter(|_| config.verify_store == hirsel_engine::store::VerifyStore::Off)
             .map(|(front, lower)| super::source_graph::Carry { front, lower });
-        let graphs = super::host_selector::GraphSelections::new(&budget);
+        let graphs = super::host_selector::GraphSelections::new(&budget, config.hold_bytes != 0);
         let ledger =
             super::inspection::InspectionLedger::new(budget.clone(), limits.snapshot_bytes / 8);
         Self {
@@ -218,12 +218,14 @@ impl CompilerRequests {
     /// Physical request transport policy, captured before any source read.
     pub fn with_scratch_parent(mut self, parent: std::path::PathBuf) -> Self {
         self.scratch_parent = parent;
-        self.graphs = super::host_selector::GraphSelections::new(&self.budget);
+        self.graphs =
+            super::host_selector::GraphSelections::new(&self.budget, self.config.hold_bytes != 0);
         self
     }
     pub fn with_toolchain(mut self, toolchain: Arc<crate::native::Toolchain>) -> Self {
         self.toolchain = Some(toolchain);
-        self.graphs = super::host_selector::GraphSelections::new(&self.budget);
+        self.graphs =
+            super::host_selector::GraphSelections::new(&self.budget, self.config.hold_bytes != 0);
         self
     }
     pub fn compiler(&self) -> &Compiler {

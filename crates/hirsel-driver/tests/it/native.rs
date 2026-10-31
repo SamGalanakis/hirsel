@@ -17,7 +17,7 @@ use hirsel_engine::{
 };
 use std::path::PathBuf;
 
-fn admitted_native_store(
+pub(super) fn admitted_native_store(
     backend: std::sync::Arc<dyn hirsel_engine::store::ResultStore>,
 ) -> std::sync::Arc<dyn hirsel_engine::store::ResultStore> {
     let budget = hirsel_engine::runtime::ProcessBudget::new(64 << 20);
@@ -2211,7 +2211,9 @@ fn generated_body_debug_preserves_nested_body_sites() {
     with_compiler_stack(|| {
         for (name, source, _, line, column) in generated_failure_sources().into_iter().skip(2) {
             let store: std::sync::Arc<dyn hirsel_engine::store::ResultStore> =
-                std::sync::Arc::new(hirsel_engine::store::MemStore::default());
+                admitted_native_store(std::sync::Arc::new(
+                    hirsel_engine::store::MemStore::default(),
+                ));
             let (facts, _) = generated_request_products(&source, store.clone());
             for backend in [Backend::Cranelift, Backend::Llvm] {
                 let sources = std::cell::RefCell::new(None);

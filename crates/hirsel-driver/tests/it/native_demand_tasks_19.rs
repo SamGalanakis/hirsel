@@ -40,8 +40,9 @@ impl QueryContext for Pending {
 fn native_demand_tasks_import_and_reuse_actual_settled_source_without_a_controller() {
     with_compiler_stack(|| {
         let dir = tempfile::tempdir().unwrap();
-        let store: Arc<dyn ResultStore> =
-            Arc::new(store::DirStore::new(dir.path().join("products")));
+        let store: Arc<dyn ResultStore> = crate::native::admitted_native_store(Arc::new(
+            store::DirStore::new(dir.path().join("products")),
+        ));
         let target = hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu();
         let policy =
             hirsel_syntax::ContentHash::of_bytes(b"native demand task current source control");
@@ -77,7 +78,8 @@ fn native_demand_tasks_import_and_reuse_actual_settled_source_without_a_controll
             drop(facts);
             let inputs = NativeInstanceInputs::from_products(declarations, reader).unwrap();
             drop(engine);
-            assert!(originals.iter().all(|body| body.upgrade().is_none()));
+            crate::native_front_fixture::release_host();
+            assert!(originals.iter().all(|body| body.upgrade().is_some()));
             let runtime_bytes = hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + (64 << 20);
             let budget = ProcessBudget::new(runtime_bytes + (16 << 20));
             let trace = hirsel_lir::construction::ValueTrace::default();
@@ -187,6 +189,13 @@ fn native_demand_tasks_import_and_reuse_actual_settled_source_without_a_controll
                 );
                 expected = Some(outputs);
             }
+            drop(completed);
+            drop(runtime);
+            drop(traced);
+            drop(task);
+            drop(factory);
+            drop(tasks);
+            assert!(originals.iter().all(|body| body.upgrade().is_none()));
         }
     });
 }

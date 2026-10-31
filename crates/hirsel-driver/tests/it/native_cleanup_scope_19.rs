@@ -9,7 +9,8 @@ use std::sync::Arc;
 #[test]
 fn same_source_call_receipt_survives_the_complete_source_inventory() {
     with_compiler_stack(|| {
-        let store: Arc<dyn ResultStore> = Arc::new(store::MemStore::default());
+        let store: Arc<dyn ResultStore> =
+            crate::native::admitted_native_store(Arc::new(store::MemStore::default()));
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
             .with_result_store(store.clone());
         let file = engine

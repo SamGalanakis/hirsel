@@ -22,7 +22,8 @@ fn original_retained_owners_match_at_one_two_eight_under_both_validation_policie
                 let mut baseline = None;
                 for workers in [1, 2, 8] {
                     for validation in [native::Validation::Ready, native::Validation::EveryStage] {
-                        let store: Arc<dyn ResultStore> = Arc::new(MemStore::default());
+                        let store: Arc<dyn ResultStore> =
+                            crate::native::admitted_native_store(Arc::new(MemStore::default()));
                         let mut engine =
                             QueryEngine::new(default_environment(), compiler_adapters())
                                 .with_result_store(store.clone());

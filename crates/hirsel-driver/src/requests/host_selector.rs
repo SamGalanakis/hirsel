@@ -357,6 +357,7 @@ impl GraphBudget {
 const ADMISSION_STALL: std::time::Duration = std::time::Duration::from_secs(600);
 pub(super) struct GraphSelections {
     retention: Arc<GraphBudget>,
+    retain_idle: bool,
     live: Vec<Weak<InstalledGraph>>,
     outputs: OutputLeases,
 }
@@ -367,9 +368,10 @@ impl Drop for GraphSelections {
     }
 }
 impl GraphSelections {
-    pub fn new(budget: &Arc<ProcessBudget>) -> Self {
+    pub fn new(budget: &Arc<ProcessBudget>, retain_idle: bool) -> Self {
         Self {
             retention: GraphBudget::shared(budget),
+            retain_idle,
             live: vec![],
             outputs: Arc::new(Mutex::new(vec![])),
         }
@@ -433,7 +435,9 @@ impl GraphSelections {
         let failed_graph = graph.clone();
         let ready_outputs = self.outputs.clone();
         let failed_outputs = self.outputs.clone();
-        self.retention.keep(graph.clone());
+        if self.retain_idle {
+            self.retention.keep(graph.clone());
+        }
         Ok(hirsel_engine::requests::SelectedRequest {
             runtime: graph.runtime.clone(),
             roots,
@@ -758,8 +762,8 @@ mod tests {
         };
         let bytes = hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + 4096;
         let budget = ProcessBudget::new(bytes + 3);
-        let mut first = GraphSelections::new(&budget);
-        let mut second = GraphSelections::new(&budget);
+        let mut first = GraphSelections::new(&budget, true);
+        let mut second = GraphSelections::new(&budget, true);
         assert!(Arc::ptr_eq(&first.retention, &second.retention));
         let create = |owner: &GraphBudget, request: &CompileRequest| {
             let admission = owner.admit(
@@ -847,7 +851,7 @@ mod tests {
         // A later request by this same selector must refuse admission instead
         // of waiting for the output its own caller is holding.
         let budget = ProcessBudget::new(bytes + 2);
-        let mut selector = GraphSelections::new(&budget);
+        let mut selector = GraphSelections::new(&budget, true);
         let active = selector
             .select(&request, |owner, _| create(owner, &request))
             .unwrap();

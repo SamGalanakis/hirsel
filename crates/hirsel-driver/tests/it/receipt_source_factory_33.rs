@@ -90,6 +90,7 @@ fn actual_v_observation_preserves_original_modes_and_releases_the_body() {
         );
         drop(original);
         drop(reader);
+        crate::native_front_fixture::release_host();
         assert!(
             weak.upgrade().is_none(),
             "compact observations retain no source body"

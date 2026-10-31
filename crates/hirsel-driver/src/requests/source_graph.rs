@@ -994,8 +994,8 @@ impl Plan {
         } else {
             slack / 8
         };
-        // Check's grant only admits its fixed input rows; beyond them a
-        // receipt needs just its captured headers from this partition.
+        // Check admits its fixed rows, retained data and archive separately.
+        // A receipt also captures its headers within this partition.
         let check_slack = if needs_ownership {
             slack / 48
         } else if needs_receipt {
@@ -1121,13 +1121,12 @@ impl Plan {
             .ok_or_else(|| {
                 ToolError::Runtime("compiler Lower continuation exceeds admission".into())
             })?;
-        // A receipt captures headers from Check's partition before installing
-        // its root. Leave room for those headers instead of promising the
-        // entire partition to the root continuation as well.
+        // Check retains data and its archive under separate bounds. A receipt
+        // also captures headers from this same partition before installing it.
         let check_continuation = if needs_receipt {
-            check_slack / 2
+            check_slack / 3
         } else {
-            check_slack
+            check_slack / 2
         };
         let root_retained = growth_slack.min(check_continuation).min(root_bound);
         if root_retained == 0 {

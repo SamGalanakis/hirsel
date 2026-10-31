@@ -141,7 +141,12 @@ impl FrontCheckScope {
                 message: "original decode/clone buffers exceed caller admission".into(),
             }));
         }
-        let input = self.checked_product_input(&headers, entry)?;
+        let mut input = self.checked_product_input(&headers, entry)?;
+        // Live Lower shares its bodies. This input's pre-admitted clone grant
+        // owns the copy that the consuming export builder subsequently moves.
+        for definition in input.definitions.values_mut() {
+            Arc::make_mut(definition);
+        }
         Ok(FrontCheckedInput {
             input,
             _scope: self.clone(),

@@ -122,6 +122,7 @@ fn actual_closure_sites_keep_distinct_capture_accounts_without_retaining_the_bod
         );
         drop(original);
         drop(reader);
+        crate::native_front_fixture::release_host();
         drop(engine);
         assert!(weak.upgrade().is_none());
         assert_eq!(observed[1].entry().source_identity(), source);

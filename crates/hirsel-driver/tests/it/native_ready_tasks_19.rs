@@ -40,6 +40,15 @@ impl QueryTask for TracedTask {
         self.0.poll(cx)
     }
 }
+struct OriginalBodies(Vec<std::sync::Weak<hirsel_tir::Definition>>);
+impl Drop for OriginalBodies {
+    fn drop(&mut self) {
+        crate::native_front_fixture::release_host();
+        if !std::thread::panicking() {
+            assert!(self.0.iter().all(|body| body.upgrade().is_none()));
+        }
+    }
+}
 struct Pending;
 impl QueryContext for Pending {
     fn read(&mut self, _: QueryId) -> Poll<Result<ProductRef, store::Reference>> {
@@ -272,9 +281,10 @@ fn ready_case_inner_mutation(
             drop(facts);
             let manifest = declarations.manifest().unwrap();
             let input = declarations.program.input.clone();
+            let originals = OriginalBodies(originals);
             let inputs = NativeInstanceInputs::from_products(declarations, reader).unwrap();
             drop(engine);
-            assert!(originals.iter().all(|body| body.upgrade().is_none()));
+            assert!(originals.0.iter().all(|body| body.upgrade().is_some()));
             let runtime_bytes = hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + (64 << 20);
             let budget = ProcessBudget::new(runtime_bytes + (32 << 20));
             let trace = hirsel_lir::construction::ValueTrace::default();

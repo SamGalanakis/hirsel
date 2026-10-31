@@ -417,8 +417,14 @@ impl FrontProofExport {
                 "PS9 input decode/clone buffers exceed admission",
             ));
         }
+        let mut input = self.input(product)?;
+        // Live Lower shares its bodies. This input's pre-admitted clone grant
+        // owns the copy that the consuming export builder subsequently moves.
+        for definition in input.definitions.values_mut() {
+            Arc::make_mut(definition);
+        }
         Ok(FrontProofInput {
-            input: self.input(product)?,
+            input,
             _owner: self.clone(),
             _allowance: allowance
                 .split(layout.retained)

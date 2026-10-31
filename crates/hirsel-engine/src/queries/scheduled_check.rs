@@ -147,8 +147,8 @@ impl FrontCheckQueries {
         Ok(self)
     }
 
-    /// Ordered file/path cursors and product-reference rows. The actual
-    /// definition bodies remain charged to their own producer owners.
+    /// Ordered file/path cursors, product-reference rows and separate retained
+    /// data/archive bounds. Bodies keep their own producer admission.
     pub fn input_bytes(definitions: &[DefPath], files: usize, weight: MemoryWeight) -> Option<u64> {
         let path_slot = (std::mem::size_of::<(DefPath, bool)>()
             + 2 * std::mem::size_of::<(DefPath, ProductRef)>()
@@ -158,6 +158,7 @@ impl FrontCheckQueries {
             + 128) as u64;
         let base = weight
             .retained
+            .checked_mul(2)?
             .checked_add(
                 (files as u64).checked_mul((2 * std::mem::size_of::<FileInput>() + 128) as u64)?,
             )?
@@ -1036,7 +1037,7 @@ impl QueryEngine {
             failures: Mutex::new(BTreeMap::new()),
             weight,
             errors,
-            retention: Arc::new(Mutex::new(allowance.bytes() - required)),
+            retention: Arc::new(Mutex::new(allowance.bytes() - required + weight.retained)),
             _allowance: Arc::new(allowance),
         }))
     }

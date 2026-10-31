@@ -81,6 +81,7 @@ fn check_size_instances(nested: bool) {
                 let request = runtime.request(&[stage.query(scaled).unwrap()]);
                 let products = runtime.wait(request).unwrap();
                 let output = stage.outcome(products[0].clone()).unwrap();
+                drop(products);
                 program
                     .engine
                     .accept_front_staged(&output, budget.reserve(64 << 10).unwrap())
@@ -212,6 +213,7 @@ fn check_size_instances(nested: bool) {
                     lower.settled_constant(&hidden, &[3]).is_err(),
                     "an unselected instance stays absent"
                 );
+                drop(products);
                 runtime.shutdown();
                 drop(runtime);
                 drop(lower);

@@ -60,6 +60,7 @@ impl FrontGrowthQueries {
             .unwrap_or(0);
         (std::mem::size_of::<Self>() as u64)
             .checked_add((2 * std::mem::size_of::<usize>()) as u64)?
+            .checked_add(MemoryReservationPool::metadata_bytes())?
             .checked_add(package as u64)?
             .checked_add(
                 (definitions.len() as u64).checked_mul(std::mem::size_of::<QueryId>() as u64)?,

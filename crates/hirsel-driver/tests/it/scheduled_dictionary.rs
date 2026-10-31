@@ -111,6 +111,7 @@ fn admitted_dictionary_matches_scalar_named_callables_and_resumes_data_dependenc
                 actual_bytes,
                 expected_codec.encode(&cold.engine, &expected).unwrap()
             );
+            drop(products);
             drop(actual);
             runtime.shutdown();
             assert!(runtime.stats().peak_bytes <= 512 << 20);

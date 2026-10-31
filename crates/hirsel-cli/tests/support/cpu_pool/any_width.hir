@@ -1,4 +1,4 @@
-fn batch(tasks: Tasks, width: u32, start: u64, count: u64) -> Result[List[u64], CpuPoolError] {
+pub fn batch(tasks: Tasks, width: u32, start: u64, count: u64) -> Result[List[u64], CpuPoolError] {
   core@1/cpu.map_scoped(tasks, width,
     fn() -> List[u64] uses {} {
       failure.check(start <= 32u64, Bounds())

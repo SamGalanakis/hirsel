@@ -125,13 +125,16 @@ impl TypeRecords {
             row.kind.visit_graph_edges(|_| {
                 edges = edges.and_then(|count| count.checked_add(1));
             });
-            row.kind.visit_graph_edges(|edge| pending.push(edge.ty));
             encoding.require(
                 TYPE_NODE_WORKING
                     .checked_add(edges?.checked_mul(TYPE_EDGE_WORKING)?)?
                     .checked_add(label.checked_mul(TYPE_LABEL_COPIES)?)?,
             )?;
             encoding.nodes.insert(id, label);
+            encoding
+                .row(id)?
+                .kind
+                .visit_graph_edges(|edge| pending.push(edge.ty));
         }
         Some(encoding)
     }

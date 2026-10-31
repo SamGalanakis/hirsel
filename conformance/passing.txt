@@ -7426,3 +7426,4 @@ conformance/CAP/CAP-3-cpu-shared-thaw-ok.hir
 conformance/CAP/CAP-3-cpu-local-resource-bad.hir
 conformance/CAP/CAP-3-cpu-helper-value-bad.hir
 conformance/CAP/CAP-3-cpu-indirect-operation-bad.hir
+conformance/OWN/OWN-3-conditional-return-loop-borrow-run.hir

@@ -838,7 +838,10 @@ impl QueryEngine {
         let result = budget
             .reserve(self.standalone_inference_bytes())
             .ok()
-            .map(|reservation| self.standalone_inference(reservation, false));
+            .map(|reservation| {
+                self.standalone_inference(reservation)
+                    .map(|bootstrap| bootstrap.is_some())
+            });
         drop(shared);
         let result = match result {
             Some(Ok(false)) => Ok(()),
@@ -852,12 +855,20 @@ impl QueryEngine {
                 // Source registration can grow beyond the initial footprint.
                 // Drain shared inference before lending the existing remainder
                 // to that retry or to generated-source bootstrap.
-                let _exclusive = ADMISSION.write().unwrap_or_else(|error| error.into_inner());
-                let available = budget.limit().saturating_sub(budget.reserved());
-                match budget.reserve(available) {
-                    Ok(reservation) => self.standalone_inference(reservation, true).map(|_| ()),
-                    Err(_) => Ok(()),
-                }
+                let prepared = {
+                    let _exclusive = ADMISSION.write().unwrap_or_else(|error| error.into_inner());
+                    let available = budget.limit().saturating_sub(budget.reserved());
+                    match budget.reserve(available) {
+                        Ok(reservation) => self.standalone_inference(reservation),
+                        Err(_) => Ok(None),
+                    }
+                };
+                // Bootstrap can demand private headers through a fresh engine.
+                // Keep its budget reservation, but release admission before any
+                // such request can acquire the same process-wide lock.
+                prepared.and_then(|reservation| {
+                    reservation.map_or(Ok(()), |reservation| self.standalone_bootstrap(reservation))
+                })
             }
         };
         self.private_bootstrap_active = false;
@@ -886,12 +897,10 @@ impl QueryEngine {
     fn standalone_inference(
         &mut self,
         reservation: MemoryReservation,
-        bootstrap: bool,
-    ) -> Result<bool, QueryError> {
-        let mut reservation =
-            self.prepare_private_inference_with_registrations(reservation, &[])?;
+    ) -> Result<Option<MemoryReservation>, QueryError> {
+        let reservation = self.prepare_private_inference_with_registrations(reservation, &[])?;
         if self.private_inference_hosted {
-            return Ok(false);
+            return Ok(None);
         }
         let definitions = self.front_source_roots();
         let generators = self.front_generator_roots(&definitions)?;
@@ -903,11 +912,16 @@ impl QueryEngine {
             })
         });
         if !missing {
-            return Ok(false);
+            return Ok(None);
         }
-        if !bootstrap {
-            return Ok(true);
-        }
+        Ok(Some(reservation))
+    }
+    fn standalone_bootstrap(
+        &mut self,
+        mut reservation: MemoryReservation,
+    ) -> Result<(), QueryError> {
+        let definitions = self.front_source_roots();
+        let generators = self.front_generator_roots(&definitions)?;
         let refused = || {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "private generated inference".into(),
@@ -956,7 +970,7 @@ impl QueryEngine {
             errors,
         );
         self.result_store = previous;
-        result.map(|_| false).map_err(|error| match error {
+        result.map(|_| ()).map_err(|error| match error {
             FrontInstanceBootstrapError::Bootstrap(FrontRegistrationBootstrapError::Admission(
                 error,
             ))

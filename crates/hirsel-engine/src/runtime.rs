@@ -34,6 +34,8 @@ pub struct RequestId(pub u64);
 
 mod published;
 pub use published::ProductRef;
+mod dependencies;
+pub use dependencies::LiveDependencyProduct;
 
 #[cfg(test)]
 pub(crate) fn test_product(

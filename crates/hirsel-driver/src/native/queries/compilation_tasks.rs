@@ -509,46 +509,29 @@ impl CompilationTasks {
         if !self.emit_only {
             hirsel_intern::memory::checkpoint("link complete");
         }
-        let bytes = serde_json::to_vec(
-            &outputs
-                .iter()
-                .map(|product| {
-                    Ok((
-                        product.address.0,
-                        product
-                            .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
-                            .map_err(|e| e.to_string())?
-                            .reference(),
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()?,
-        )
-        .map_err(|e| e.to_string())?;
-        let domain = Domain {
-            kind: COMPILATION_KIND,
-            schema: 1,
-        };
-        let store = self.instances.selected_store();
-        let record = store
-            .put_content(domain, &bytes)
-            .ok_or("native compilation descriptor transport failed")?;
-        if domain.reference(&bytes) != Some(record) {
-            return Err("native compilation content identity differs".into());
-        }
         let action = Action(ContentHash::of_parts(
-            "hirsel.native.compilation-action.v1",
-            [
-                self.query.address.0.0.as_slice(),
-                record.output.0.0.as_slice(),
-            ],
+            "hirsel.native.compilation-action.v2",
+            std::iter::once(self.query.address.0.0.as_slice()).chain(outputs.iter().flat_map(
+                |product| {
+                    [
+                        product.address.0.0.as_slice(),
+                        product.action.0.0.as_slice(),
+                    ]
+                },
+            )),
         ));
-        store.associate_product(self.query.address, action, record);
-        let product = ProductRef::import_archive(
-            self.query.address,
-            action,
-            store
-                .admit_product_archive(record, bytes.into())
-                .ok_or("native product archive is unavailable or exceeds admission")?,
+        let product = ProductRef::dependencies(
+            LiveDependencyProduct::new(
+                self.instances.selected_store().as_ref(),
+                self.query.address,
+                action,
+                Domain {
+                    kind: COMPILATION_KIND,
+                    schema: 2,
+                },
+                outputs.clone(),
+            )
+            .map_err(|e| format!("native compilation completion admission: {e}"))?,
         );
         if let Err(other) = self.completed.set((product.clone(), outputs))
             && self.completed.get().unwrap().0 != other.0

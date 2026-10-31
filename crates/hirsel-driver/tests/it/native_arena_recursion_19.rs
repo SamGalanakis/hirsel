@@ -152,6 +152,18 @@ fn observe(store: Arc<dyn ResultStore>, text: &str, fresh: bool, jobs: usize) ->
         )
     });
     let graph = arenas.graph((outputs[1]).clone()).unwrap();
+    let live = outputs[1].dependency_value().unwrap();
+    let summaries = graph
+        .candidates
+        .iter()
+        .chain(&graph.chosen)
+        .map(|summary| summary.product.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(live.reads(), summaries);
+    assert!(outputs[1].archive(ArchiveAdmission::Retained).is_err());
+    let mut stale = outputs[1].clone();
+    stale.action = store::Action(hirsel_syntax::ContentHash::of_bytes(b"stale arena graph"));
+    assert!(arenas.graph(stale).is_err());
     for summaries in [&graph.candidates, &graph.chosen] {
         assert!(
             summaries.iter().any(|summary| {

@@ -171,47 +171,56 @@ impl<T> Owner<T> {
         if let Some(archive) = &*archive {
             return Ok(archive.clone());
         }
-        let ArchiveAdmission::Materialize {
-            scratch,
-            working_bytes: required,
-        } = admission
-        else {
-            return Err(io::Error::from(io::ErrorKind::OutOfMemory));
-        };
-        let mut grant = scratch
-            .split(required)
-            .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
-        // The owning codec declares its complete temporary working bound and
-        // runs only under that partition. No encoding occurs during admission.
-        let result = publish(&self.value, &self.source, &grant).and_then(|bytes| {
-            let bytes = bytes.into_boxed_slice();
-            let retained = archive_bytes(bytes.len())
-                .ok_or_else(|| io::Error::other("live product archive layout overflow"))?;
-            if retained > grant.bytes() {
-                return Err(io::Error::from(io::ErrorKind::OutOfMemory));
-            }
-            let reference = self
-                .domain
-                .reference(&bytes)
-                .ok_or_else(|| io::Error::other("live product archive exceeds the record limit"))?;
-            let reservation = grant
-                .split(retained)
-                .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
-            Ok(ProductArchive(ArchiveBacking::Materialized(Arc::new(
-                ArchiveOwner {
-                    bytes,
-                    reference,
-                    _reservation: reservation,
-                },
-            ))))
-        });
-        if scratch.join(grant).is_err() {
-            return Err(io::Error::other("live product archive partition changed"));
-        }
-        let materialized = result?;
+        let materialized = materialize_archive(self.domain, admission, |grant| {
+            publish(&self.value, &self.source, grant)
+        })?;
         *archive = Some(materialized.clone());
         Ok(materialized)
     }
+}
+
+pub(super) fn materialize_archive(
+    domain: Domain,
+    admission: ArchiveAdmission<'_>,
+    publish: impl FnOnce(&MemoryReservation) -> io::Result<Vec<u8>>,
+) -> io::Result<ProductArchive> {
+    let ArchiveAdmission::Materialize {
+        scratch,
+        working_bytes: required,
+    } = admission
+    else {
+        return Err(io::Error::from(io::ErrorKind::OutOfMemory));
+    };
+    let mut grant = scratch
+        .split(required)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
+    // The owning codec declares its complete temporary working bound and
+    // runs only under that partition. No encoding occurs during admission.
+    let result = publish(&grant).and_then(|bytes| {
+        let bytes = bytes.into_boxed_slice();
+        let retained = archive_bytes(bytes.len())
+            .ok_or_else(|| io::Error::other("live product archive layout overflow"))?;
+        if retained > grant.bytes() {
+            return Err(io::Error::from(io::ErrorKind::OutOfMemory));
+        }
+        let reference = domain
+            .reference(&bytes)
+            .ok_or_else(|| io::Error::other("live product archive exceeds the record limit"))?;
+        let reservation = grant
+            .split(retained)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        Ok(ProductArchive(ArchiveBacking::Materialized(Arc::new(
+            ArchiveOwner {
+                bytes,
+                reference,
+                _reservation: reservation,
+            },
+        ))))
+    });
+    if scratch.join(grant).is_err() {
+        return Err(io::Error::other("live product archive partition changed"));
+    }
+    result
 }
 
 /// Canonical bytes and their reference share their full backing admission.

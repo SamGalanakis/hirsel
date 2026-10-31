@@ -209,6 +209,19 @@ impl hirsel_validate::VerifierRows for RequestVerifierRows {
     }
 }
 impl ResultStore for RequestStore {
+    fn admit_product_memory(&self, bytes: u64) -> Option<Arc<dyn Send + Sync>> {
+        let bytes =
+            bytes.checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                ArchiveLease,
+            >::uninit()))?;
+        if !self.memory.charge(bytes) {
+            return None;
+        }
+        Some(Arc::new(ArchiveLease {
+            memory: self.memory.clone(),
+            bytes,
+        }))
+    }
     fn cache_product(&self, address: Address, action: Action, domain: Domain, bytes: &[u8]) {
         self.backend.cache_product(address, action, domain, bytes);
     }

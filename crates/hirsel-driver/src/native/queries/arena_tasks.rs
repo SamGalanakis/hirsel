@@ -187,54 +187,44 @@ impl ArenaTasks {
         let mut graph = plan.queries.finish(selected)?;
         let bytes = graph.retained_index_bytes();
         self.charge(bytes)?;
-        let rows = plan
+        let reads = plan
             .ids
             .iter()
             .enumerate()
             .map(|(index, id)| {
-                selected
+                let summary = selected
                     .get(&index)
-                    .ok_or_else(|| "arena component has not completed".to_owned())
-                    .and_then(|summary| {
-                        Ok((
-                            id.kind,
-                            id.address.0,
-                            summary
-                                .product
-                                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
-                                .map_err(|e| e.to_string())?
-                                .reference(),
-                        ))
-                    })
+                    .ok_or("arena component has not completed")?;
+                if summary.product.address != id.address || summary.product.domain().kind != id.kind
+                {
+                    return Err("arena component differs from selected query");
+                }
+                Ok(summary.product.clone())
             })
-            .collect::<Result<Vec<_>, String>>()?;
-        let bytes = serde_json::to_vec(&rows).map_err(|e| e.to_string())?;
-        let domain = Domain {
-            kind: ARENA_GRAPH_KIND,
-            schema: 1,
-        };
-        let record = self
-            .store
-            .put_content(domain, &bytes)
-            .ok_or("arena graph publication failed")?;
-        if domain.reference(&bytes) != Some(record) {
-            return Err("arena graph content identity differs".into());
-        }
+            .collect::<Result<Vec<_>, _>>()?;
         let action = Action(ContentHash::of_parts(
-            "hirsel.native.arena-graph-action.v1",
-            [
-                self.query.address.0.0.as_slice(),
-                record.output.0.0.as_slice(),
-            ],
+            "hirsel.native.arena-graph-action.v2",
+            std::iter::once(self.query.address.0.0.as_slice()).chain(reads.iter().flat_map(
+                |product| {
+                    [
+                        product.address.0.0.as_slice(),
+                        product.action.0.0.as_slice(),
+                    ]
+                },
+            )),
         ));
-        self.store
-            .associate_product(self.query.address, action, record);
-        let product = ProductRef::import_archive(
-            self.query.address,
-            action,
-            self.store
-                .admit_product_archive(record, bytes.into())
-                .ok_or("native product archive is unavailable or exceeds admission")?,
+        let product = ProductRef::dependencies(
+            LiveDependencyProduct::new(
+                self.store.as_ref(),
+                self.query.address,
+                action,
+                Domain {
+                    kind: ARENA_GRAPH_KIND,
+                    schema: 2,
+                },
+                reads,
+            )
+            .map_err(|e| format!("arena graph completion admission: {e}"))?,
         );
         if let Err(other) = self.completed.set((product.clone(), graph))
             && self.completed.get().unwrap().0 != other.0

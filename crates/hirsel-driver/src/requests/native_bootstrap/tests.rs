@@ -301,6 +301,11 @@ fn bootstrap_link_refusal(test_table: bool, emit_only: bool) {
                 };
                 let (compilation, product, _) = bootstrap.outcome(complete[0].clone()).unwrap();
                 assert_eq!(
+                    complete[0].dependency_value().unwrap().reads(),
+                    std::slice::from_ref(&product),
+                );
+                assert!(complete[0].archive(ArchiveAdmission::Retained).is_err());
+                assert_eq!(
                     calls.load(Ordering::SeqCst),
                     0,
                     "emit-only must not call Link"

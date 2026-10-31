@@ -638,6 +638,12 @@ fn run_program_case_with_frame(
             )
         })[0]
             .clone();
+        assert_eq!(
+            selected.dependency_value().unwrap().reads(),
+            compilation.outputs(selected.clone()).unwrap(),
+            "completion retains the exact admitted outputs",
+        );
+        assert!(selected.archive(ArchiveAdmission::Retained).is_err());
         let from_compilation = observation_only.then(|| {
             let before = trace.totals();
             let metadata = compilation.observation(selected.clone()).unwrap();

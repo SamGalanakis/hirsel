@@ -27,7 +27,7 @@ use std::{
 pub(super) const KIND: u32 = 0x5200_0030;
 const OUTPUT: Domain = Domain {
     kind: 0x5200_0031,
-    schema: 1,
+    schema: 2,
 };
 const FAILURE: Domain = Domain {
     kind: 0x5200_0032,
@@ -496,37 +496,24 @@ impl NativeBootstrap {
             .ok_or("native dispatch is unavailable")?
             .compilation
             .outputs(compilation.clone())?;
-        let bytes = serde_json::to_vec(&(
-            compilation.address.0,
-            compilation.action.0,
-            compilation
-                .archive(ArchiveAdmission::Retained)
-                .map_err(|e| e.to_string())?
-                .reference(),
-        ))
-        .map_err(|e| e.to_string())?;
-        let record = self
-            .store
-            .put_content(OUTPUT, &bytes)
-            .ok_or("native bootstrap transport exhausted")?;
-        if OUTPUT.reference(&bytes) != Some(record) {
-            return Err("native bootstrap content identity differs".into());
-        }
-        let product = ProductRef::import_archive(
-            self.query.address,
-            Action(ContentHash::of_parts(
-                "hirsel.host.native-bootstrap-action.v1",
-                [
-                    self.query.address.0.0.as_slice(),
-                    record.output.0.0.as_slice(),
-                ],
-            )),
-            self.store
-                .open_product_archive(record)
-                .ok_or("native publication archive exceeds admission")?,
+        let action = Action(ContentHash::of_parts(
+            "hirsel.host.native-bootstrap-action.v2",
+            [
+                self.query.address.0.0.as_slice(),
+                compilation.address.0.0.as_slice(),
+                compilation.action.0.0.as_slice(),
+            ],
+        ));
+        let product = ProductRef::dependencies(
+            LiveDependencyProduct::new(
+                self.store.as_ref(),
+                self.query.address,
+                action,
+                OUTPUT,
+                vec![compilation.clone()],
+            )
+            .map_err(|e| format!("native bootstrap completion admission: {e}"))?,
         );
-        self.store
-            .associate_product(product.address, product.action, record);
         self.completed
             .set(Completed {
                 product: product.clone(),

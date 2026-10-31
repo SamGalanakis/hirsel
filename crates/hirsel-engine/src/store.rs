@@ -54,6 +54,11 @@ impl EntryKey {
 /// A content-keyed byte store. Implementations never fail a compile: a
 /// missing, unreadable or corrupt entry is a miss.
 pub trait ResultStore: Send + Sync {
+    /// Retain an immutable live value in this request's existing partition.
+    /// Its charge survives the producer and returns after the final reader.
+    fn admit_product_memory(&self, _bytes: u64) -> Option<Arc<dyn Send + Sync>> {
+        None
+    }
     /// Independent operation handle for a provider with mutable physical
     /// epoch state. Nested producers use the returned provider directly.
     fn for_operation(&self) -> Option<Arc<dyn ResultStore>> {

@@ -1,5 +1,6 @@
 use super::{
-    ArchiveAdmission, LiveAnalyzedProduct, LiveLowerProduct, LiveSummaryProduct, ProductArchive,
+    ArchiveAdmission, LiveAnalyzedProduct, LiveDependencyProduct, LiveLowerProduct,
+    LiveSummaryProduct, ProductArchive,
 };
 use hirsel_artifact_store::{Action, Address, Domain};
 use std::{fmt, io};
@@ -18,10 +19,24 @@ enum Value {
     Summary(LiveSummaryProduct),
     Analyzed(LiveAnalyzedProduct),
     Lower(LiveLowerProduct),
+    Dependencies(LiveDependencyProduct),
     Imported(ProductArchive),
 }
 
 impl ProductRef {
+    pub fn dependencies(value: LiveDependencyProduct) -> Self {
+        Self {
+            address: value.address(),
+            action: value.action(),
+            value: Value::Dependencies(value),
+        }
+    }
+    pub fn dependency_value(&self) -> Option<&LiveDependencyProduct> {
+        match &self.value {
+            Value::Dependencies(value) => Some(value),
+            _ => None,
+        }
+    }
     pub fn summary(value: LiveSummaryProduct) -> Self {
         Self {
             address: value.address(),
@@ -56,6 +71,7 @@ impl ProductRef {
             Value::Summary(value) => value.domain(),
             Value::Analyzed(value) => value.domain(),
             Value::Lower(value) => value.domain(),
+            Value::Dependencies(value) => value.domain(),
             Value::Imported(archive) => archive.reference().domain,
         }
     }
@@ -84,6 +100,7 @@ impl ProductRef {
             Value::Summary(value) => value.archive_with(admission),
             Value::Analyzed(value) => value.archive_with(admission),
             Value::Lower(value) => value.archive_with(admission),
+            Value::Dependencies(value) => value.archive(admission),
             Value::Imported(archive) => Ok(archive.clone()),
         }
     }
@@ -98,6 +115,7 @@ impl PartialEq for ProductRef {
             (Value::Summary(a), Value::Summary(b)) => a.same_owner(b),
             (Value::Analyzed(a), Value::Analyzed(b)) => a.same_owner(b),
             (Value::Lower(a), Value::Lower(b)) => a.same_owner(b),
+            (Value::Dependencies(a), Value::Dependencies(b)) => a.equivalent(b),
             (Value::Imported(a), Value::Imported(b)) => a.reference() == b.reference(),
             _ => false,
         }

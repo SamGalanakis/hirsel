@@ -9,6 +9,21 @@ pub enum TirView<'a> {
     Live(&'a Definition),
     Archived(&'a CheckedTir),
 }
+impl<'a> From<&'a Definition> for TirView<'a> {
+    fn from(value: &'a Definition) -> Self {
+        Self::Live(value)
+    }
+}
+impl<'a> From<&'a DefinitionRef> for TirView<'a> {
+    fn from(value: &'a DefinitionRef) -> Self {
+        Self::Live(value)
+    }
+}
+impl<'a> From<&'a CheckedTir> for TirView<'a> {
+    fn from(value: &'a CheckedTir) -> Self {
+        Self::Archived(value)
+    }
+}
 impl<'a> TirView<'a> {
     pub fn header(self) -> Option<TirHeader> {
         match self {

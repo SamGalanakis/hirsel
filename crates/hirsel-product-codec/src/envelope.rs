@@ -367,6 +367,9 @@ impl BoundIndexedEnvelope {
     pub fn envelope(&self) -> &IndexedEnvelope {
         &self.envelope
     }
+    pub(crate) fn uses_types(&self, types: &hirsel_types::TypeInterner) -> bool {
+        std::ptr::eq(types, &*self.types.records.types)
+    }
     pub(crate) fn matches_bindings(
         &self,
         types: &std::sync::Arc<hirsel_types::TypeInterner>,

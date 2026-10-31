@@ -121,8 +121,14 @@ impl FrontLowerQueries {
             {
                 return None;
             }
-            let decoded = decode_definition(self, body)?;
-            if decoded.path != definition {
+            let source = Arc::new(self.anchors.clone());
+            let decoded = Arc::new(self.records.open_tir(
+                source.clone(),
+                self.store.get_content(body)?,
+                body,
+                source,
+            )?);
+            if decoded.header()?.path != definition {
                 return None;
             }
             self.store.get_content(materialized)?;
@@ -132,12 +138,12 @@ impl FrontLowerQueries {
                 if self.lowering.is_none() {
                     let output = self.store.verifier()?.definition_output(
                         persistent::evaluation_subject(key, &descriptor),
-                        decoded.path,
+                        definition,
                         self.snapshot.types(),
                         self.snapshot.source_verification_policy(),
                         self.snapshot.validation(&path.0.package),
                     )?;
-                    if !output.matches_definition(
+                    if !output.matches_archive(
                         &decoded,
                         self.snapshot.types().clone(),
                         |anchor| self.anchors.record_owner(anchor),

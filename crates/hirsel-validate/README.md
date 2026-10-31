@@ -48,8 +48,12 @@ live input or checked indexed TIR. A missing source or type binding returns
 reconstructs all structural, typing, ownership and flow obligations and records
 its own signature reads. Demanded leaf rows remain in a temporary cache for
 that validation. No archived `Definition` or `Body` is reconstructed.
-`Artifact::archived` computes the established complete artifact identity from
+`Artifact::new(TirView, ...)` computes the established complete artifact identity from
 rows; only the existing verifier receipt path can issue acceptance.
+`validate_definition` accepts an immutable live Definition owner or a checked
+archive owner through `DefinitionInput`. Local evidence weakly binds that exact
+owner and interner. Stored Lower validates rows directly and publishes through
+the same evidence path, without rebuilding a Definition for V.
 
 The report contains only `violations`. `hirsel_validate::assert_valid`
 panics for violations and returns unit; it is the helper for lowering's tests.

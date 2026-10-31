@@ -507,6 +507,10 @@ impl CheckedTir {
     ) -> bool {
         self.source.matches_bindings(types, anchor)
     }
+    /// Whether numeric type IDs are bound to this exact consumer interner.
+    pub fn uses_types(&self, types: &hirsel_types::TypeInterner) -> bool {
+        self.source.uses_types(types)
+    }
     pub fn backing(&self) -> &Bytes {
         self.source.envelope().backing()
     }

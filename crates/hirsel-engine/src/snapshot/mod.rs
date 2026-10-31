@@ -308,9 +308,9 @@ impl SignatureSnapshot {
             [self.verifier_policy.0.as_slice()],
         )
     }
-    pub(crate) fn validate_source_artifact(
+    pub(crate) fn validate_source_artifact<'input>(
         &self,
-        definition: &hirsel_tir::DefinitionRef,
+        definition: impl Into<hirsel_validate::DefinitionInput<'input>>,
         owner: impl FnMut(hirsel_span::Anchor) -> Option<(DefPath, u32)>,
     ) -> (
         hirsel_validate::Validation,
@@ -318,11 +318,18 @@ impl SignatureSnapshot {
         Option<hirsel_validate::AcceptedArtifact>,
         Option<hirsel_validate::VerifiedDefinition>,
     ) {
+        let definition = definition.into();
+        let path = match definition {
+            hirsel_validate::DefinitionInput::Live(value) => value.path,
+            hirsel_validate::DefinitionInput::Archived(value) => {
+                value.header().expect("checked TIR header").path
+            }
+        };
         hirsel_validate::validate_definition(
             definition,
             self.types.clone(),
             owner,
-            self.validation(&definition.path.path().0.package),
+            self.validation(&path.path().0.package),
             self.source_verification_policy(),
             self.verifier.as_deref(),
         )

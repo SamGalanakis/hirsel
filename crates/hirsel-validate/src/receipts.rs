@@ -20,12 +20,62 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
+/// An immutable raw owner supplied to the existing V algorithm. Neither live
+/// ownership nor checked archive framing grants acceptance.
+#[derive(Clone, Copy)]
+pub enum DefinitionInput<'a> {
+    Live(&'a hirsel_tir::DefinitionRef),
+    Archived(&'a Arc<hirsel_product_codec::CheckedTir>),
+}
+impl<'a> From<&'a hirsel_tir::DefinitionRef> for DefinitionInput<'a> {
+    fn from(value: &'a hirsel_tir::DefinitionRef) -> Self {
+        Self::Live(value)
+    }
+}
+impl<'a> From<&'a Arc<hirsel_product_codec::CheckedTir>> for DefinitionInput<'a> {
+    fn from(value: &'a Arc<hirsel_product_codec::CheckedTir>) -> Self {
+        Self::Archived(value)
+    }
+}
+impl<'a> DefinitionInput<'a> {
+    fn view(self) -> hirsel_product_codec::TirView<'a> {
+        match self {
+            Self::Live(value) => hirsel_product_codec::TirView::Live(value),
+            Self::Archived(value) => hirsel_product_codec::TirView::Archived(value),
+        }
+    }
+    fn downgrade(self) -> DefinitionBinding {
+        match self {
+            Self::Live(value) => DefinitionBinding::Live(Arc::downgrade(value)),
+            Self::Archived(value) => DefinitionBinding::Archived(Arc::downgrade(value)),
+        }
+    }
+}
+#[derive(Clone, Debug)]
+enum DefinitionBinding {
+    Live(Weak<Definition>),
+    Archived(Weak<hirsel_product_codec::CheckedTir>),
+}
+impl DefinitionBinding {
+    fn holds(&self, input: DefinitionInput<'_>) -> bool {
+        match (self, input) {
+            (Self::Live(bound), DefinitionInput::Live(value)) => {
+                bound.ptr_eq(&Arc::downgrade(value))
+            }
+            (Self::Archived(bound), DefinitionInput::Archived(value)) => {
+                bound.ptr_eq(&Arc::downgrade(value))
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Local evidence for one immutable source Definition, minted only by V.
 /// A weak binding preserves retention limits; copying reads cannot create it.
 /// This capability is deliberately neither serializable nor deserializable.
 #[derive(Debug)]
 pub struct VerifiedDefinition {
-    definition: Weak<Definition>,
+    definition: DefinitionBinding,
     owner: hirsel_syntax::DefId,
     types: Weak<TypeInterner>,
     policy: ContentHash,
@@ -47,14 +97,14 @@ impl Clone for VerifiedDefinition {
     }
 }
 impl VerifiedDefinition {
-    pub fn holds<'a>(
+    pub fn holds<'a, 'input>(
         &self,
-        definition: &hirsel_tir::DefinitionRef,
+        definition: impl Into<DefinitionInput<'input>>,
         types: &Arc<TypeInterner>,
         policy: ContentHash,
         signatures: impl Into<crate::SignatureInputs<'a>>,
     ) -> bool {
-        self.definition.ptr_eq(&Arc::downgrade(definition))
+        self.definition.holds(definition.into())
             && self.types.ptr_eq(&Arc::downgrade(types))
             && self.environment_holds(policy, signatures)
     }
@@ -110,8 +160,8 @@ impl VerifiedDefinition {
 
 /// The ordinary receipt query, additionally binding local evidence to the
 /// immutable input. Misses run the existing validator exactly once.
-pub fn validate_definition<'a>(
-    definition: &hirsel_tir::DefinitionRef,
+pub fn validate_definition<'a, 'input>(
+    definition: impl Into<DefinitionInput<'input>>,
     types: Arc<TypeInterner>,
     owner: impl FnMut(Anchor) -> Option<(DefPath, u32)>,
     signatures: impl Into<crate::SignatureInputs<'a>>,
@@ -123,14 +173,19 @@ pub fn validate_definition<'a>(
     Option<AcceptedArtifact>,
     Option<VerifiedDefinition>,
 ) {
+    let definition = definition.into();
     let signatures = signatures.into();
     let mut reads = vec![];
-    let artifact = Artifact::new(definition, types.clone(), owner);
+    let artifact = Artifact::new(definition.view(), types.clone(), owner);
     let (report, ran, accepted) =
         validate_with_receipt(&artifact, signatures.lookup(), policy, cache, &mut reads);
     let evidence = report.violations.is_empty().then(|| VerifiedDefinition {
-        definition: Arc::downgrade(definition),
-        owner: definition.path,
+        definition: definition.downgrade(),
+        owner: artifact
+            .definition
+            .header()
+            .expect("validated TIR header")
+            .path,
         types: Arc::downgrade(&types),
         policy,
         accepted: accepted.clone(),
@@ -171,16 +226,11 @@ pub struct Artifact<'a> {
 }
 impl<'a> Artifact<'a> {
     pub fn new(
-        definition: &'a Definition,
+        definition: impl Into<hirsel_product_codec::TirView<'a>>,
         types: Arc<TypeInterner>,
         owner: impl FnMut(Anchor) -> Option<(DefPath, u32)>,
     ) -> Self {
-        Self::identify(
-            hirsel_product_codec::TirView::Live(definition),
-            types,
-            owner,
-            None,
-        )
+        Self::identify(definition.into(), types, owner, None)
     }
     /// Identify a private artifact and its exact replacement signature in one
     /// pass. The ordinary body identity is not an intermediate product.
@@ -197,27 +247,23 @@ impl<'a> Artifact<'a> {
             Some(signature),
         )
     }
-    /// Raw indexed input acquires no verifier authority here. This independently
-    /// identifies its complete content; validate_with_receipt alone issues acceptance.
-    pub fn archived(
-        definition: &'a hirsel_product_codec::CheckedTir,
-        types: Arc<TypeInterner>,
-        owner: impl FnMut(Anchor) -> Option<(DefPath, u32)>,
-    ) -> Option<Self> {
-        definition.bind_types()?;
-        Some(Self::identify(
-            hirsel_product_codec::TirView::Archived(definition),
-            types,
-            owner,
-            None,
-        ))
-    }
     fn identify(
         definition: hirsel_product_codec::TirView<'a>,
         types: Arc<TypeInterner>,
         mut owner: impl FnMut(Anchor) -> Option<(DefPath, u32)>,
         overlay: Option<hirsel_types::SignatureRef>,
     ) -> Self {
+        if let hirsel_product_codec::TirView::Archived(archive) = definition
+            && (!archive.uses_types(&types) || archive.bind_types().is_none())
+        {
+            return Self {
+                definition,
+                types,
+                identity: None,
+                owners: Default::default(),
+                overlay,
+            };
+        }
         let mut owners = std::collections::BTreeMap::new();
         let mut bind = |anchor| {
             let value = owner(anchor)?;

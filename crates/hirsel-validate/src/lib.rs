@@ -56,7 +56,7 @@ mod origin_types;
 mod proofs;
 mod receipts;
 pub use receipts::{
-    AcceptedArtifact, Artifact, ExecutionReceipt, Installation, ReplayEnvironment,
+    AcceptedArtifact, Artifact, DefinitionInput, ExecutionReceipt, Installation, ReplayEnvironment,
     SourceInvocation, StoredDefinitionOutput, VerifiedDefinition, VerifiedDefinitionOutput,
     VerifiedInvocations, VerifierCache, VerifierRows, validate_cached, validate_definition,
     validate_with_receipt,
@@ -201,11 +201,32 @@ pub fn validate(
     signatures: &dyn SignatureLookup,
     reads: &mut Vec<VRead>,
 ) -> Validation {
-    // Opt-in per-definition profiling, independent of the driver's phase
-    // accounting (including V invoked by import and compile-time execution).
+    validate_rows(
+        hirsel_product_codec::TirView::Live(definition),
+        t,
+        signatures,
+        reads,
+    )
+    .expect("live TIR bindings are present")
+}
+
+/// Independently validate live or checked indexed TIR. Missing immutable source
+/// or type bindings are a read failure. Every semantic obligation and recorded
+/// signature read uses the same checker as ordinary live input.
+pub fn validate_rows(
+    definition: hirsel_product_codec::TirView<'_>,
+    t: &TypeInterner,
+    signatures: &dyn SignatureLookup,
+    reads: &mut Vec<VRead>,
+) -> Option<Validation> {
+    if let hirsel_product_codec::TirView::Archived(archive) = definition
+        && !archive.uses_types(t)
+    {
+        return None;
+    }
     let started = profile_start();
+    let definition = ReadDefinition::new(definition)?;
     let reader = Reader::new(t, signatures);
-    let definition = ReadDefinition::live(definition);
     let mut validation = validate_input(&definition, t, &reader);
     validation.violations.extend(reader.input_errors());
     reader.finish(reads);
@@ -218,23 +239,6 @@ pub fn validate(
             validation.violations.len()
         );
     }
-    validation
-}
-
-/// Independently validate live or checked indexed TIR. Missing immutable source
-/// or type bindings are a read failure. Every semantic obligation and recorded
-/// signature read uses the same checker as ordinary live input.
-pub fn validate_rows(
-    definition: hirsel_product_codec::TirView<'_>,
-    t: &TypeInterner,
-    signatures: &dyn SignatureLookup,
-    reads: &mut Vec<VRead>,
-) -> Option<Validation> {
-    let definition = ReadDefinition::new(definition)?;
-    let reader = Reader::new(t, signatures);
-    let mut validation = validate_input(&definition, t, &reader);
-    validation.violations.extend(reader.input_errors());
-    reader.finish(reads);
     Some(validation)
 }
 

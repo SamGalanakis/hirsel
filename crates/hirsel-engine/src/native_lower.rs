@@ -724,23 +724,11 @@ impl NativeOriginalReader {
         };
         let verification_ran = if output.is_none() && self.verify == Verify::On {
             let _time = hirsel_intern::timings::phase(hirsel_intern::timings::Phase::Verify);
-            let artifact = match &raw {
-                NativeOriginalValue::Archive(archive) => hirsel_validate::Artifact::archived(
-                    archive,
-                    self.verified.anchors.record_types().clone(),
-                    |anchor| self.verified.anchors.record_owner(anchor),
-                )?,
-                NativeOriginalValue::Live(live) => hirsel_validate::Artifact::new(
-                    &live.output().value,
-                    self.verified.anchors.record_types().clone(),
-                    |anchor| self.verified.anchors.record_owner(anchor),
-                ),
-                NativeOriginalValue::Scalar(value) => hirsel_validate::Artifact::new(
-                    &value.definition,
-                    self.verified.anchors.record_types().clone(),
-                    |anchor| self.verified.anchors.record_owner(anchor),
-                ),
-            };
+            let artifact = hirsel_validate::Artifact::new(
+                raw.view(),
+                self.verified.anchors.record_types().clone(),
+                |anchor| self.verified.anchors.record_owner(anchor),
+            );
             let (report, ran, _) = hirsel_validate::validate_with_receipt(
                 &artifact,
                 self.verified.signatures.validation(&path.0.package),

@@ -22,6 +22,172 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
+    fn shared_input_binds_local_evidence_to_exact_live_and_archive_owners() {
+        let mut fixture = Fixture::unit();
+        owner_sig(&mut fixture, &[]);
+        let definition = Arc::new(fixture.definition.clone());
+        let cache = VerifierCache::default();
+        let policy = ContentHash::of_bytes(b"shared verifier input");
+        let records = cache.records(session());
+        let bytes = records
+            .encode_tir(&definition, |_| Some((path("main"), 0)))
+            .unwrap();
+        let reference = hirsel_product_codec::CheckedTir::DOMAIN
+            .reference(&bytes)
+            .unwrap();
+        let archive = Arc::new(
+            hirsel_product_codec::CheckedTir::open(bytes.into(), reference, records, |_, _| {
+                Some(Anchor::default())
+            })
+            .unwrap(),
+        );
+        let (live_report, live_ran, live_accepted, live_evidence) = validate_definition(
+            &definition,
+            session(),
+            |_| Some((path("main"), 0)),
+            &fixture.signatures,
+            policy,
+            Some(&cache),
+        );
+        assert!(live_report.violations.is_empty());
+        assert!(live_ran);
+        let (report, ran, accepted, evidence) = validate_definition(
+            &archive,
+            session(),
+            |_| Some((path("main"), 0)),
+            &fixture.signatures,
+            policy,
+            None,
+        );
+        assert!(report.violations.is_empty());
+        assert!(ran, "an archive without local authority still runs V");
+        assert_eq!(accepted, live_accepted);
+        let evidence = evidence.unwrap();
+        let live_evidence = live_evidence.unwrap();
+        assert_eq!(evidence.reads(), live_evidence.reads());
+        assert!(!evidence.reads().is_empty());
+        assert!(evidence.holds(&archive, &session(), policy, &fixture.signatures));
+        assert!(!evidence.holds(&definition, &session(), policy, &fixture.signatures));
+        assert!(!live_evidence.holds(&archive, &session(), policy, &fixture.signatures));
+        assert!(!evidence.holds(
+            &Arc::new((*archive).clone()),
+            &session(),
+            policy,
+            &fixture.signatures
+        ));
+        assert!(!evidence.holds(
+            &archive,
+            &session(),
+            ContentHash::default(),
+            &fixture.signatures
+        ));
+        let live_output = cache
+            .definition_output_from_evidence(
+                &definition,
+                session(),
+                policy,
+                &fixture.signatures,
+                &live_evidence,
+            )
+            .unwrap();
+        let archived_output = cache
+            .publish_definition(
+                policy,
+                &archive,
+                session(),
+                policy,
+                &fixture.signatures,
+                &evidence,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(live_output, archived_output);
+        let (cached, ran, _, _) = validate_definition(
+            &archive,
+            session(),
+            |_| Some((path("main"), 0)),
+            &fixture.signatures,
+            policy,
+            Some(&cache),
+        );
+        assert!(cached.violations.is_empty());
+        assert!(!ran, "the same local receipt serves either raw owner");
+        let mut changed = fixture.signatures.clone();
+        changed
+            .get_mut(definition.path)
+            .unwrap()
+            .metadata
+            .visibility = hirsel_syntax::Visibility::Public;
+        assert!(!evidence.holds(&archive, &session(), policy, &changed));
+        let weak = Arc::downgrade(&archive);
+        drop(archive);
+        assert!(
+            weak.upgrade().is_none(),
+            "V evidence must not retain an admitted archive"
+        );
+    }
+
+    #[test]
+    fn shared_archive_input_refuses_foreign_interner_and_malformed_body() {
+        let fixture = Fixture::unit();
+        let cache = VerifierCache::default();
+        let policy = ContentHash::of_bytes(b"shared archive refusal");
+        for malformed in [false, true] {
+            let mut definition = fixture.definition.clone();
+            if malformed {
+                definition.entry = hirsel_tir::BodyId(u32::MAX);
+            }
+            let records = cache.records(session());
+            let bytes = records
+                .encode_tir(&definition, |_| Some((path("main"), 0)))
+                .unwrap();
+            let reference = hirsel_product_codec::CheckedTir::DOMAIN
+                .reference(&bytes)
+                .unwrap();
+            let archive = Arc::new(
+                hirsel_product_codec::CheckedTir::open(bytes.into(), reference, records, |_, _| {
+                    Some(Anchor::default())
+                })
+                .unwrap(),
+            );
+            let (report, ran, accepted, evidence) = validate_definition(
+                &archive,
+                session(),
+                |_| Some((path("main"), 0)),
+                &fixture.signatures,
+                policy,
+                Some(&cache),
+            );
+            assert!(ran);
+            assert_eq!(
+                report.violations,
+                crate::validate(&definition, &session(), &fixture.signatures, &mut vec![])
+                    .violations
+            );
+            assert_eq!(accepted.is_some(), !malformed);
+            assert_eq!(evidence.is_some(), !malformed);
+            let foreign = TypeInterner::new(None);
+            let artifact = Artifact::new(&*archive, foreign.clone(), |_| Some((path("main"), 0)));
+            assert!(artifact.identity.is_none());
+            let (report, ran, accepted, evidence) = validate_definition(
+                &archive,
+                foreign,
+                |_| Some((path("main"), 0)),
+                &fixture.signatures,
+                policy,
+                Some(&cache),
+            );
+            assert!(
+                ran,
+                "a locally cached receipt cannot bind foreign numeric IDs"
+            );
+            assert!(!report.violations.is_empty());
+            assert!(accepted.is_none());
+            assert!(evidence.is_none());
+        }
+    }
+
+    #[test]
     fn checked_replay_rows_preserve_identity_and_refuse_changed_or_missing_children() {
         let fixture = Fixture::unit();
         let definition = Arc::new(fixture.definition.clone());
@@ -57,7 +223,7 @@ mod tests {
                 Arc::new(()),
             )
             .unwrap();
-        let raw = Artifact::archived(&archive, session(), |_| Some((path("main"), 0))).unwrap();
+        let raw = Artifact::new(&archive, session(), |_| Some((path("main"), 0)));
         assert_eq!(
             raw.identity,
             Artifact::new(&definition, session(), |_| Some((path("main"), 0))).identity
@@ -105,7 +271,7 @@ mod tests {
             |_, _| Some(anchor),
         )
         .unwrap();
-        let raw = Artifact::archived(&malformed, session(), |_| Some((path("main"), 0))).unwrap();
+        let raw = Artifact::new(&malformed, session(), |_| Some((path("main"), 0)));
         let (refused, ran, accepted_raw) =
             validate_with_receipt(&raw, &fixture.signatures, policy, None, &mut vec![]);
         assert!(ran);
@@ -715,11 +881,17 @@ struct SourceInvocations {
 }
 impl SourceInvocations {
     fn observe(
-        definition: &hirsel_tir::Definition,
+        definition: hirsel_product_codec::TirView<'_>,
         types: &TypeInterner,
         signatures: &dyn SignatureLookup,
     ) -> Option<Self> {
-        let coverage = crate::invocation_coverage(types, definition, signatures).ok()?;
+        let definition = crate::ReadDefinition::new(definition)?;
+        let coverage = crate::invocations::coverage(
+            types,
+            &definition,
+            &crate::input::Reader::new(types, signatures),
+        )
+        .ok()?;
         let calls = coverage
             .into_iter()
             .map(|(body, block, statement, restart)| {
@@ -884,8 +1056,7 @@ impl VerifiedDefinitionOutput {
                 .reads
                 .iter()
                 .all(|read| crate::input::read_holds_for_types(&types, read, signatures))
-            && Artifact::archived(archive, types, owner)
-                .is_some_and(|artifact| artifact.identity == Some(self.artifact))
+            && Artifact::new(archive, types, owner).identity == Some(self.artifact)
     }
     /// Query metadata remains producer data; the query owner checks it.
     pub fn metadata(&self) -> &[u8] {
@@ -992,10 +1163,10 @@ impl VerifierCache {
     }
     /// V encodes the actual immutable body, rather than accepting a caller's
     /// claimed body reference. The subject is only its query lookup address.
-    pub fn publish_definition<'a>(
+    pub fn publish_definition<'a, 'input>(
         &self,
         subject: ContentHash,
-        definition: &hirsel_tir::DefinitionRef,
+        definition: impl Into<DefinitionInput<'input>>,
         types: Arc<TypeInterner>,
         policy: ContentHash,
         signatures: impl Into<crate::SignatureInputs<'a>>,
@@ -1003,7 +1174,7 @@ impl VerifierCache {
         metadata: &[u8],
     ) -> Option<VerifiedDefinitionOutput> {
         let output = self.definition_output_with_metadata(
-            definition,
+            definition.into(),
             types,
             policy,
             signatures.into(),
@@ -1029,16 +1200,16 @@ impl VerifierCache {
     /// Return V's output for an actual completed validation, without looking up
     /// or publishing an ordinary query. The empty metadata is not a cutoff
     /// receipt: the caller must already have completed its real Lower demand.
-    pub fn definition_output_from_evidence<'a>(
+    pub fn definition_output_from_evidence<'a, 'input>(
         &self,
-        definition: &hirsel_tir::DefinitionRef,
+        definition: impl Into<DefinitionInput<'input>>,
         types: Arc<TypeInterner>,
         policy: ContentHash,
         signatures: impl Into<crate::SignatureInputs<'a>>,
         evidence: &VerifiedDefinition,
     ) -> Option<VerifiedDefinitionOutput> {
         self.definition_output_with_metadata(
-            definition,
+            definition.into(),
             types,
             policy,
             signatures.into(),
@@ -1046,9 +1217,9 @@ impl VerifierCache {
             &[],
         )
     }
-    fn definition_output_with_metadata(
+    fn definition_output_with_metadata<'input>(
         &self,
-        definition: &hirsel_tir::DefinitionRef,
+        definition: DefinitionInput<'input>,
         types: Arc<TypeInterner>,
         policy: ContentHash,
         signatures: crate::SignatureInputs<'_>,
@@ -1071,14 +1242,14 @@ impl VerifierCache {
             return None;
         }
         Some(VerifiedDefinitionOutput {
-            owner: definition.path,
+            owner: definition.view().header()?.path,
             reference,
             artifact: identity,
             policy,
             reads: evidence.reads.clone().into(),
             metadata: metadata.into(),
             invocations: Arc::new(SourceInvocations::observe(
-                definition,
+                definition.view(),
                 &types,
                 signatures.lookup(),
             )?),

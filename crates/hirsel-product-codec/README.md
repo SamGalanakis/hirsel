@@ -89,3 +89,19 @@ and previous root requests cannot change those positions. `StoredRecord` retains
 the checked backing and reads its source/type directories directly; it retains no
 copied source-path or type-reference arrays. Raw byte-slice transformation callers
 use transient reference/anchor handles under the same framing and child checks.
+
+Bounded record readers admit a lazy base component before provider access using
+its allocation-free `rows_bytes` bound. That bound includes backing, label
+materialization, canonical SCC validation, member and alias copies, and the
+reader's row index. It also includes malformed-label sequence-hint scratch. Loading scratch is reused
+between demands; only the returned rows and their index remain charged.
+`RecordEncoding::read_row` uses the same checked component open and base-row
+checks as eager loading. All required SCC members remain in this reader, checked
+once, without populating the shared base. An admission refusal allocates nothing;
+corrupt loads publish nothing and can be retried. Unrelated rows stay unloaded.
+Transformation tables and final canonical encoding read the same admitted rows.
+The native encoder borrows its caller's actual working reservation for its whole
+lifetime; dropping it frees its rows before that partition returns. There is no
+process-wide lazy-row cache. This reuses the rkyv/Cap'n Proto validation structure
+cited above; the deviation is reader-owned Hirsel SCC rows rather than pointers
+or shared-base publication. Container integrity still supplies no V authority.

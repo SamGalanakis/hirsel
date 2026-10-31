@@ -52,6 +52,26 @@ struct Source {
     members: HashMap<(hirsel_syntax::ContentHash, u64), Vec<(u32, u32)>>,
 }
 impl TypeBaseSource for Source {
+    fn rows_bytes(&self, position: u32) -> Option<hirsel_types::TypeRowBytes> {
+        let reference = *self.index.references.get(position as usize)?;
+        if reference.len > hirsel_artifact_store::MAX_RECORD as u64 {
+            return None;
+        }
+        let aliases = u64::try_from(self.members.get(&reference.key())?.len()).ok()?;
+        // Bound decoded labels, SCC validation/canonical numbering, all member
+        // rows, alias copies, and the reader's row index simultaneously. Each
+        // scalar/edge occupies wire bytes; empty rows still have descriptors.
+        // Admission precedes even fetching the component backing.
+        let row = reference.len.checked_add(256)?.checked_mul(256)?;
+        let retained = row.checked_mul(aliases)?;
+        let working = retained
+            .checked_add(row.checked_mul(2)?)?
+            // Serde's cautious sequence hints can allocate up to 1 MiB per
+            // nested vector even when a malformed short label then fails.
+            // Type labels have fewer than four simultaneously nested vectors.
+            .checked_add(4 << 20)?;
+        Some(hirsel_types::TypeRowBytes { retained, working })
+    }
     fn rows(&self, position: u32, base: &TypeBase) -> Option<Vec<(u32, Type)>> {
         let reference = *self.index.references.get(position as usize)?;
         let component = types::component(self.store.as_ref(), reference)?;

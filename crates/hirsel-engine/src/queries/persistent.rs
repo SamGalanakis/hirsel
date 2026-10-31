@@ -153,23 +153,23 @@ struct Body {
 }
 impl Body {
     fn capture(types: &Arc<hirsel_types::TypeInterner>, body: &AnalyzedBody) -> Self {
+        Self::capture_with(body, |id| {
+            let (table, _) = hirsel_types::encode_table(types, &[id]);
+            bincode::serialize(&table).expect("type table")
+        })
+    }
+    fn capture_with(body: &AnalyzedBody, key: impl Fn(TypeId) -> Vec<u8>) -> Self {
         fn ordered(
-            types: &hirsel_types::TypeInterner,
             set: &std::collections::HashSet<TypeId>,
+            key: &impl Fn(TypeId) -> Vec<u8>,
         ) -> Vec<TypeId> {
-            let mut entries: Vec<_> = set
-                .iter()
-                .map(|id| {
-                    let (table, _) = hirsel_types::encode_table(types, &[*id]);
-                    (bincode::serialize(&table).expect("type table"), *id)
-                })
-                .collect();
+            let mut entries: Vec<_> = set.iter().map(|id| (key(*id), *id)).collect();
             entries.sort_by(|a, b| a.0.cmp(&b.0));
             entries.into_iter().map(|(_, id)| id).collect()
         }
         let mut ownership = body.ownership.clone();
-        let plain = ordered(types, &ownership.plain_types);
-        let silent = ordered(types, &ownership.silent_drop_types);
+        let plain = ordered(&ownership.plain_types, &key);
+        let silent = ordered(&ownership.silent_drop_types, &key);
         ownership.plain_types.clear();
         ownership.silent_drop_types.clear();
         Self {
@@ -832,8 +832,10 @@ pub(crate) fn encode_live_analyzed(
             .iter()
             .chain(&value.ownership.silent_drop_types)
             .copied(),
-        || QueryOutput {
-            value: Body::capture(source.record_types(), value),
+        |encoding| QueryOutput {
+            value: Body::capture_with(value, |id| {
+                bincode::serialize(&encoding.type_table(id)).expect("admitted type table")
+            }),
             diagnostics: output.diagnostics.clone(),
             dependencies: output.dependencies.clone(),
         },

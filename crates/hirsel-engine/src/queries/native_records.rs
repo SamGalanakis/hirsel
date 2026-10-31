@@ -377,7 +377,7 @@ impl NativeRecordEncoder<'_> {
         &mut self,
         bytes: u64,
         types: impl IntoIterator<Item = hirsel_types::TypeId>,
-        capture: impl FnOnce() -> T,
+        capture: impl FnOnce(&hirsel_product_codec::RecordEncoding<'_>) -> T,
     ) -> Option<T> {
         self.encoding.capture(bytes, types, capture)
     }

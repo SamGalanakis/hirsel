@@ -89,7 +89,24 @@ pub fn closure(t: &TypeInterner, roots: impl IntoIterator<Item = TypeId>) -> Arc
 /// Encode the graphs of `roots` as a canonical table, and the table position
 /// of each root (`u32::MAX` for an id with no row).
 pub fn encode_table(t: &TypeInterner, roots: &[TypeId]) -> (TypeTable, Vec<u32>) {
-    let order = closure(t, roots.iter().copied());
+    encode_table_rows(roots, |id| t.get(id))
+}
+/// Encode through a reader's admitted rows without demanding a shared lazy
+/// source. Missing rows have the same representation as `encode_table`.
+pub fn encode_table_rows<'a>(
+    roots: &[TypeId],
+    get: impl Fn(TypeId) -> Option<&'a Type>,
+) -> (TypeTable, Vec<u32>) {
+    let mut seen = std::collections::HashSet::new();
+    let mut order = Vec::new();
+    let mut pending: Vec<_> = roots.iter().rev().copied().collect();
+    while let Some(id) = pending.pop() {
+        let Some(row) = get(id) else { continue };
+        if seen.insert(id) {
+            order.push(id);
+            pending.extend(row.kind.graph_edges().into_iter().rev().map(|e| e.ty));
+        }
+    }
     let index: HashMap<TypeId, u32> = order
         .iter()
         .enumerate()
@@ -99,7 +116,7 @@ pub fn encode_table(t: &TypeInterner, roots: &[TypeId]) -> (TypeTable, Vec<u32>)
     let rows = order
         .iter()
         .map(|id| {
-            let mut row = t.row(*id).clone();
+            let mut row = get(*id).expect("collected type row").clone();
             row.kind = row.kind.map_edges(|edge| TypeId::raw(position(edge)));
             row
         })

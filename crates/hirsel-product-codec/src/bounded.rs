@@ -2,7 +2,7 @@ use crate::{TypeRecords, indexed_types};
 use bincode::Options;
 use hirsel_span::{Anchor, AnchorCodec};
 use hirsel_syntax::DefPath;
-use hirsel_types::TypeId;
+use hirsel_types::{Type, TypeId};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
@@ -15,6 +15,13 @@ const TYPE_LABEL_COPIES: u64 = 32;
 const SOURCE_COPIES: u64 = 32;
 const PAYLOAD_COPIES: u64 = 4;
 
+/// A reader refusal contains no allocated diagnostic or cached failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ArchiveRowRefusal {
+    Admission,
+    Invalid,
+}
+
 pub struct RecordEncoding<'a> {
     records: &'a TypeRecords,
     limit: u64,
@@ -23,6 +30,7 @@ pub struct RecordEncoding<'a> {
     roots: usize,
     owners: Vec<(Anchor, DefPath, u32)>,
     nodes: HashMap<TypeId, u64>,
+    loaded: HashMap<TypeId, Type>,
 }
 
 fn serialized_size<T: Serialize + ?Sized>(value: &T, limit: u64) -> Option<u64> {
@@ -89,6 +97,7 @@ impl TypeRecords {
             roots: roots.len(),
             owners: Vec::with_capacity(anchors.len()),
             nodes: HashMap::new(),
+            loaded: HashMap::new(),
         };
         for anchor in anchors {
             let (path, occurrence) = owner(anchor)?;
@@ -106,7 +115,7 @@ impl TypeRecords {
             if encoding.nodes.contains_key(&id) {
                 continue;
             }
-            let row = self.types.get_if_loaded(id)?;
+            let row = encoding.read_row(id).ok()?;
             let label = indexed_types::inline_names(|| {
                 hirsel_types::with_session_ids(|| {
                     serialized_size(row, hirsel_artifact_store::MAX_RECORD as u64)
@@ -116,19 +125,51 @@ impl TypeRecords {
             row.kind.visit_graph_edges(|_| {
                 edges = edges.and_then(|count| count.checked_add(1));
             });
+            row.kind.visit_graph_edges(|edge| pending.push(edge.ty));
             encoding.require(
                 TYPE_NODE_WORKING
                     .checked_add(edges?.checked_mul(TYPE_EDGE_WORKING)?)?
                     .checked_add(label.checked_mul(TYPE_LABEL_COPIES)?)?,
             )?;
             encoding.nodes.insert(id, label);
-            row.kind.visit_graph_edges(|edge| pending.push(edge.ty));
         }
         Some(encoding)
     }
 }
 
 impl RecordEncoding<'_> {
+    /// Read one row and the component members required by its integrity check.
+    /// Admission precedes provider access; failed checks publish nothing and
+    /// leave the reader's remaining allowance available for another demand.
+    pub fn read_row(&mut self, id: TypeId) -> Result<&Type, ArchiveRowRefusal> {
+        if self.row(id).is_none() {
+            let load = self
+                .records
+                .types
+                .prepare_row_load(id)
+                .ok_or(ArchiveRowRefusal::Invalid)?;
+            self.required
+                .checked_add(load.working_bytes())
+                .filter(|required| *required <= self.limit)
+                .ok_or(ArchiveRowRefusal::Admission)?;
+            let required = self
+                .required
+                .checked_add(load.retained_bytes())
+                .filter(|required| *required <= self.limit)
+                .ok_or(ArchiveRowRefusal::Admission)?;
+            let rows = load.load().ok_or(ArchiveRowRefusal::Invalid)?;
+            for (id, row) in rows {
+                self.loaded.insert(id, row);
+            }
+            self.required = required;
+        }
+        self.row(id).ok_or(ArchiveRowRefusal::Invalid)
+    }
+    fn row(&self, id: TypeId) -> Option<&Type> {
+        self.loaded
+            .get(&id)
+            .or_else(|| self.records.types.get_if_loaded(id))
+    }
     fn require(&mut self, bytes: u64) -> Option<()> {
         let required = self.required.checked_add(bytes)?;
         if required > self.limit {
@@ -156,9 +197,7 @@ impl RecordEncoding<'_> {
             if bytes > self.limit {
                 return None;
             }
-            self.records
-                .types
-                .get_if_loaded(id)?
+            self.row(id)?
                 .kind
                 .visit_graph_edges(|edge| pending.push(edge.ty));
         }
@@ -169,7 +208,7 @@ impl RecordEncoding<'_> {
         &mut self,
         physical_bytes: u64,
         type_tables: impl IntoIterator<Item = TypeId>,
-        capture: impl FnOnce() -> T,
+        capture: impl FnOnce(&Self) -> T,
     ) -> Option<T> {
         self.require(physical_bytes)?;
         let mut seen = HashSet::new();
@@ -179,7 +218,13 @@ impl RecordEncoding<'_> {
             self.require(bytes.checked_mul(4)?.checked_add(ROOT_WORKING)?)?;
         }
         drop((seen, pending));
-        Some(indexed_types::inline_names(capture))
+        Some(indexed_types::inline_names(|| capture(self)))
+    }
+
+    /// Canonical transformation table over the already admitted row closure.
+    /// Call only from `capture`, after admitting that table's clone/key work.
+    pub fn type_table(&self, root: TypeId) -> hirsel_types::TypeTable {
+        hirsel_types::encode_table_rows(&[root], |id| self.row(id)).0
     }
 
     pub fn encode<T: Serialize>(self, value: &T) -> Option<Vec<u8>> {
@@ -193,7 +238,7 @@ impl RecordEncoding<'_> {
         }
         let records = TypeRecords::new(self.records.types.clone(), self.records.store.clone());
         records
-            .indexed_record(
+            .indexed_record_rows(
                 &roots,
                 AnchorCodec::Collect(anchors),
                 |anchor| {
@@ -207,6 +252,7 @@ impl RecordEncoding<'_> {
                     bincode::serialize_into(&mut payload, value).ok()?;
                     Some(payload)
                 },
+                |id| self.row(id),
             )
             .map(|(bytes, _)| bytes)
     }

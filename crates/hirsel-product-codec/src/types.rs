@@ -78,6 +78,13 @@ impl TypeRecords {
         })
     }
     pub fn encode(&self, roots: &[TypeId]) -> Option<Vec<TypeRef>> {
+        self.encode_rows(roots, |id| self.types.get(id))
+    }
+    pub(super) fn encode_rows<'a>(
+        &self,
+        roots: &[TypeId],
+        row: impl Fn(TypeId) -> Option<&'a hirsel_types::Type>,
+    ) -> Option<Vec<TypeRef>> {
         let mut known = self.encoded.lock().unwrap_or_else(|e| e.into_inner());
         let mut nodes = Vec::new();
         let mut numbers = HashMap::new();
@@ -87,16 +94,16 @@ impl TypeRecords {
             if known.contains_key(&id) || numbers.contains_key(&id) {
                 continue;
             }
-            let row = self.types.get(id)?;
+            let value = row(id)?;
             numbers.insert(id, nodes.len());
             nodes.push(id);
-            todo.extend(row.kind.graph_edges().into_iter().rev().map(|e| e.ty));
+            todo.extend(value.kind.graph_edges().into_iter().rev().map(|e| e.ty));
         }
         let graph: Vec<Vec<usize>> = nodes
             .iter()
             .map(|id| {
-                self.types
-                    .row(*id)
+                row(*id)
+                    .expect("collected type row")
                     .kind
                     .graph_edges()
                     .iter()
@@ -112,8 +119,8 @@ impl TypeRecords {
             let keys = hirsel_graph::scc_keys(
                 &component_nodes,
                 |id| {
-                    self.types
-                        .row(id)
+                    row(id)
+                        .expect("collected type row")
                         .kind
                         .graph_edges()
                         .iter()
@@ -124,9 +131,10 @@ impl TypeRecords {
                 },
                 |id, writer| {
                     writer.bytes(
-                        &crate::indexed_types::label(self.types.row(id)).expect("type label"),
+                        &crate::indexed_types::label(row(id).expect("collected type row"))
+                            .expect("type label"),
                     );
-                    for edge in self.types.row(id).kind.graph_edges() {
+                    for edge in row(id).expect("collected type row").kind.graph_edges() {
                         match known.get(&edge.ty) {
                             Some(reference) => {
                                 writer.bytes(&[1]);
@@ -142,8 +150,8 @@ impl TypeRecords {
                 &component_nodes,
                 &keys,
                 |id| {
-                    self.types
-                        .row(id)
+                    row(id)
+                        .expect("collected type row")
                         .kind
                         .graph_edges()
                         .iter()
@@ -156,7 +164,7 @@ impl TypeRecords {
                         })
                         .collect()
                 },
-                |id| crate::indexed_types::label(self.types.row(id)),
+                |id| crate::indexed_types::label(row(id).expect("collected type row")),
             )?;
             let root = *numbers.get(order.first()?)?;
             let mut positions: HashMap<_, _> = order
@@ -167,7 +175,7 @@ impl TypeRecords {
             let mut dependencies = Vec::new();
             let mut external = HashMap::new();
             for &id in &order {
-                for edge in self.types.row(id).kind.graph_edges() {
+                for edge in row(id).expect("collected type row").kind.graph_edges() {
                     if positions.contains_key(&edge.ty) {
                         continue;
                     }
@@ -180,7 +188,10 @@ impl TypeRecords {
                     positions.insert(edge.ty, position);
                 }
             }
-            let rows: Vec<_> = order.iter().map(|id| self.types.row(*id)).collect();
+            let rows: Vec<_> = order
+                .iter()
+                .map(|id| row(*id).expect("collected type row"))
+                .collect();
             let bytes = CheckedTypeComponent::encode(
                 &rows,
                 &positions,

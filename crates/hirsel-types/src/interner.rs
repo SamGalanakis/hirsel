@@ -108,6 +108,46 @@ fn row_hash(row: &Type) -> u64 {
 pub trait TypeBaseSource: Send + Sync {
     fn rows(&self, position: u32, base: &TypeBase) -> Option<Vec<(u32, Type)>>;
     fn candidates(&self, row: &Type, base: &TypeBase) -> Vec<u32>;
+    /// Allocation-free upper bound for loading and checking this component,
+    /// including returned rows and temporary provider/validation storage.
+    /// Sources without an admission bound cannot serve detached readers.
+    fn rows_bytes(&self, _position: u32) -> Option<TypeRowBytes> {
+        None
+    }
+}
+
+/// Loading scratch is reusable; returned rows and the reader index remain
+/// charged until their owner drops. `working` includes `retained`.
+pub struct TypeRowBytes {
+    pub retained: u64,
+    pub working: u64,
+}
+
+/// A lazy component selected without reading its provider. The caller admits
+/// `working_bytes` before loading and `retained_bytes` while returned rows live.
+pub struct TypeRowLoad<'a> {
+    base: &'a TypeBase,
+    position: u32,
+    bytes: TypeRowBytes,
+}
+impl TypeRowLoad<'_> {
+    pub fn working_bytes(&self) -> u64 {
+        self.bytes.working
+    }
+    pub fn retained_bytes(&self) -> u64 {
+        self.bytes.retained
+    }
+    /// Check the same complete component as the shared eager path, but return
+    /// its rows to this reader instead of publishing into the shared base.
+    pub fn load(self) -> Option<Vec<(TypeId, Type)>> {
+        let rows = self.base.source.as_ref()?.rows(self.position, self.base)?;
+        self.base.check_rows(self.position, &rows)?;
+        Some(
+            rows.into_iter()
+                .map(|(p, row)| (TypeBase::id(p), row))
+                .collect(),
+        )
+    }
 }
 
 /// An immutable shared prefix. A source-backed base loads only demanded
@@ -189,28 +229,29 @@ impl TypeBase {
         let _loading = self.loading.lock().unwrap_or_else(PoisonError::into_inner);
         if slot.get().is_none() {
             let rows = self.source.as_ref()?.rows(position, self)?;
-            let mut seen = std::collections::HashSet::new();
-            if !rows.iter().any(|(p, _)| *p == position)
-                || rows.iter().any(|(p, row)| {
-                    self.id_at(*p).is_none()
-                        || !seen.insert(*p)
-                        || row
-                            .kind
-                            .graph_edges()
-                            .iter()
-                            .any(|e| self.position(e.ty).is_none())
-                        || self.entries[*p as usize]
-                            .get()
-                            .is_some_and(|e| e.row != *row)
-                })
-            {
-                return None;
-            }
+            self.check_rows(position, &rows)?;
             for (p, row) in rows {
                 self.entries[p as usize].get_or_init(|| Entry::new(row));
             }
         }
         slot.get()
+    }
+    fn check_rows(&self, position: u32, rows: &[(u32, Type)]) -> Option<()> {
+        let mut seen = std::collections::HashSet::new();
+        (rows.iter().any(|(p, _)| *p == position)
+            && rows.iter().all(|(p, row)| {
+                self.id_at(*p).is_some()
+                    && seen.insert(*p)
+                    && row
+                        .kind
+                        .graph_edges()
+                        .iter()
+                        .all(|e| self.position(e.ty).is_some())
+                    && self.entries[*p as usize]
+                        .get()
+                        .is_none_or(|e| e.row == *row)
+            }))
+        .then_some(())
     }
     fn find(&self, hash: u64, row: &Type) -> Option<TypeId> {
         if let Some(source) = &self.source {
@@ -496,6 +537,17 @@ impl TypeInterner {
         } else {
             self.local_entry(position).map(|entry| &entry.row)
         }
+    }
+    /// Prepare a reader-owned lazy load. This performs no provider I/O and
+    /// leaves the shared base unchanged, including after a refused load.
+    pub fn prepare_row_load(&self, id: TypeId) -> Option<TypeRowLoad<'_>> {
+        let base = self.base.as_ref()?;
+        let position = base.position(id)?;
+        Some(TypeRowLoad {
+            base,
+            position,
+            bytes: base.source.as_ref()?.rows_bytes(position)?,
+        })
     }
     /// The row of `id`, or None for an id this interner never assigned.
     pub fn get(&self, id: TypeId) -> Option<&Type> {

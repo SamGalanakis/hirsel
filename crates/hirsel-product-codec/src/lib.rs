@@ -5,7 +5,7 @@ hirsel_guard::install!();
 
 mod base;
 mod bounded;
-pub use bounded::RecordEncoding;
+pub use bounded::{ArchiveRowRefusal, RecordEncoding};
 mod envelope;
 mod indexed_types;
 pub use envelope::{AnchorRow, BoundIndexedEnvelope, IndexedEnvelope};
@@ -275,10 +275,20 @@ impl TypeRecords {
         &self,
         roots: &[TypeId],
         anchors: AnchorCodec,
-        mut owner: impl FnMut(Anchor) -> Option<(DefPath, u32)>,
+        owner: impl FnMut(Anchor) -> Option<(DefPath, u32)>,
         write: impl FnOnce() -> Option<Vec<u8>>,
     ) -> Option<(Vec<u8>, u64)> {
-        let references = self.encode(roots)?;
+        self.indexed_record_rows(roots, anchors, owner, write, |id| self.types.get(id))
+    }
+    pub(crate) fn indexed_record_rows<'a>(
+        &self,
+        roots: &[TypeId],
+        anchors: AnchorCodec,
+        mut owner: impl FnMut(Anchor) -> Option<(DefPath, u32)>,
+        write: impl FnOnce() -> Option<Vec<u8>>,
+        row: impl Fn(TypeId) -> Option<&'a hirsel_types::Type>,
+    ) -> Option<(Vec<u8>, u64)> {
+        let references = self.encode_rows(roots, row)?;
         let mut unique_types = Vec::new();
         let mut reference_positions = std::collections::HashMap::new();
         let mut type_positions = std::collections::HashMap::new();

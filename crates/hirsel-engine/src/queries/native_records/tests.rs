@@ -469,3 +469,271 @@ fn a_foreign_source_map_cannot_restore_unplaced_declaration_anchors() {
     assert!(current.record_source_anchor(&path, 0).is_none());
     assert!(records.decode::<Row>(&current, &bytes).is_none());
 }
+
+struct LazyRowsContents {
+    memory: hirsel_artifact_store::Memory,
+    reads: std::sync::atomic::AtomicUsize,
+    corrupt: std::sync::Mutex<Option<hirsel_artifact_store::Reference>>,
+}
+impl hirsel_artifact_store::Contents for LazyRowsContents {
+    fn get_content(
+        &self,
+        reference: hirsel_artifact_store::Reference,
+    ) -> Option<hirsel_artifact_store::Bytes> {
+        use std::sync::atomic::Ordering;
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        let bytes = self.memory.get_content(reference)?;
+        if *self.corrupt.lock().unwrap() == Some(reference) {
+            let mut bytes = bytes.to_vec();
+            bytes[0] ^= 1;
+            Some(bytes.into())
+        } else {
+            Some(bytes)
+        }
+    }
+    fn put_content(
+        &self,
+        domain: hirsel_artifact_store::Domain,
+        bytes: &[u8],
+    ) -> Option<hirsel_artifact_store::Reference> {
+        self.memory.put_content(domain, bytes)
+    }
+}
+struct LazyRowsFixture {
+    store: Arc<LazyRowsContents>,
+    eager: Arc<hirsel_types::TypeInterner>,
+    records: NativeRecords,
+    context: NativeRecordContext,
+    ids: Vec<hirsel_types::TypeId>,
+    references: Vec<hirsel_product_codec::TypeRef>,
+}
+fn lazy_rows_fixture() -> LazyRowsFixture {
+    use hirsel_product_codec::{BaseIndex, SharedTypes};
+    use hirsel_types::{Type, TypeInterner, TypeKind};
+    let store = Arc::new(LazyRowsContents {
+        memory: Default::default(),
+        reads: Default::default(),
+        corrupt: Default::default(),
+    });
+    let eager = TypeInterner::new(None);
+    let unit = eager.intern(Type::unit());
+    let cycle = eager.intern_graph(2, |ids| {
+        vec![
+            Type::with_kind(TypeKind::Box(ids[1])),
+            Type::with_kind(TypeKind::Tuple(vec![ids[0], unit].into())),
+        ]
+    });
+    let large = eager.intern(Type::with_kind(TypeKind::Named {
+        definition: hirsel_syntax::DefId::intern(&DefPath::core(&"x".repeat(32768))),
+        arguments: Default::default(),
+    }));
+    let boolean = eager.intern(Type::boolean());
+    let roots = [unit, cycle[0], cycle[1], large, boolean, unit];
+    let records = TypeRecords::new(eager.clone(), store.clone());
+    let references = records.encode(&roots).unwrap();
+    let index = BaseIndex::capture(&records, &roots).unwrap();
+    let shared = SharedTypes::open(index, store.clone()).unwrap();
+    let ids = (0..roots.len())
+        .map(|p| shared.base.id_at(p as u32).unwrap())
+        .collect();
+    let lazy = TypeInterner::new(Some(shared.base));
+    let engine =
+        QueryEngine::new(crate::default_environment(), Default::default()).with_types(lazy.clone());
+    LazyRowsFixture {
+        store,
+        eager,
+        records: NativeRecords::new(lazy, Arc::new(crate::store::MemStore::default())),
+        context: NativeRecordContext::capture(&engine),
+        ids,
+        references,
+    }
+}
+
+#[test]
+fn lazy_archive_rows_equal_eager_bytes_and_values_without_publishing_shared_rows() {
+    use std::sync::atomic::Ordering;
+    let f = lazy_rows_fixture();
+    let budget = crate::runtime::ProcessBudget::new(16 << 20);
+    let grant = budget.reserve(16 << 20).unwrap();
+    let value = &f.ids[..3];
+    let mut reader = f
+        .records
+        .prepare_encoding(&f.context, &value, &grant, 0)
+        .unwrap();
+    assert_eq!(
+        f.store.reads.load(Ordering::Relaxed),
+        2,
+        "unit and one complete SCC"
+    );
+    for &id in value {
+        assert_eq!(reader.encoding.read_row(id).unwrap(), f.eager.row(id));
+        assert!(f.records.types.get_if_loaded(id).is_none());
+    }
+    assert_eq!(
+        reader.encoding.read_row(f.ids[5]).unwrap(),
+        &hirsel_types::Type::unit()
+    );
+    assert_eq!(
+        f.store.reads.load(Ordering::Relaxed),
+        2,
+        "checked once per reader"
+    );
+    let keys = reader
+        .capture(0, value.iter().copied(), |rows| {
+            value
+                .iter()
+                .map(|&id| rows.type_table(id))
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
+    for (&id, key) in value.iter().zip(keys) {
+        assert_eq!(key, hirsel_types::encode_table(&f.eager, &[id]).0);
+        assert!(
+            f.records.types.get_if_loaded(id).is_none(),
+            "capture must use its admitted rows"
+        );
+    }
+    let actual = reader.encode(&value).unwrap();
+    let eager = TypeRecords::new(f.eager.clone(), f.store.clone());
+    let expected = eager.encode_record(&value, |_| None).unwrap();
+    assert_eq!(actual, expected, "complete canonical bytes");
+    let decoder = TypeRecords::new(hirsel_types::TypeInterner::new(None), f.store.clone());
+    let restored: Vec<hirsel_types::TypeId> = decoder.decode_record(&actual, |_, _| None).unwrap();
+    assert_eq!(
+        decoder.encode_record(&restored, |_| None).unwrap(),
+        expected
+    );
+    assert_eq!(f.store.reads.load(Ordering::Relaxed), 4);
+    drop(grant);
+    assert_eq!(budget.reserved(), 0);
+}
+
+#[test]
+fn lazy_archive_corruption_is_checked_on_demand_and_failure_does_not_poison_reader() {
+    use hirsel_product_codec::ArchiveRowRefusal;
+    use std::sync::atomic::Ordering;
+    let f = lazy_rows_fixture();
+    let budget = crate::runtime::ProcessBudget::new(16 << 20);
+    let grant = budget.reserve(16 << 20).unwrap();
+    *f.store.corrupt.lock().unwrap() = Some(f.references[1].reference());
+    let mut reader = f
+        .records
+        .prepare_encoding(&f.context, &0u32, &grant, 0)
+        .unwrap();
+    assert_eq!(
+        f.store.reads.load(Ordering::Relaxed),
+        0,
+        "opening leaves unrelated children unloaded"
+    );
+    assert_eq!(
+        reader.encoding.read_row(f.ids[0]).unwrap(),
+        &hirsel_types::Type::unit()
+    );
+    assert_eq!(
+        reader.encoding.read_row(f.ids[1]),
+        Err(ArchiveRowRefusal::Invalid)
+    );
+    assert!(f.records.types.get_if_loaded(f.ids[1]).is_none());
+    *f.store.corrupt.lock().unwrap() = None;
+    assert_eq!(
+        reader.encoding.read_row(f.ids[1]).unwrap(),
+        f.eager.row(f.ids[1])
+    );
+    assert_eq!(f.store.reads.load(Ordering::Relaxed), 3);
+    *f.store.corrupt.lock().unwrap() = Some(f.references[1].reference());
+    assert_eq!(
+        reader.encoding.read_row(f.ids[2]).unwrap(),
+        f.eager.row(f.ids[2])
+    );
+    assert_eq!(
+        f.store.reads.load(Ordering::Relaxed),
+        3,
+        "same checked immutable component"
+    );
+}
+
+#[test]
+fn lazy_archive_row_over_reservation_refuses_without_allocation_or_io_and_reader_stays_usable() {
+    use hirsel_product_codec::ArchiveRowRefusal;
+    use std::sync::atomic::Ordering;
+    let f = lazy_rows_fixture();
+    let budget = crate::runtime::ProcessBudget::new(16 << 20);
+    let grant = budget.reserve(16 << 20).unwrap();
+    let mut reader = f
+        .records
+        .prepare_encoding(&f.context, &0u32, &grant, 0)
+        .unwrap();
+    assert_eq!(
+        reader.encoding.read_row(f.ids[0]).unwrap(),
+        &hirsel_types::Type::unit()
+    );
+    let reads = f.store.reads.load(Ordering::Relaxed);
+    let (refused, allocated) =
+        crate::test_alloc::measured(|| reader.encoding.read_row(f.ids[3]).map(|_| ()));
+    assert_eq!(refused, Err(ArchiveRowRefusal::Admission));
+    assert_eq!(allocated.allocations, 0);
+    assert_eq!(f.store.reads.load(Ordering::Relaxed), reads);
+    assert_eq!(
+        reader.encoding.read_row(f.ids[4]).unwrap(),
+        &hirsel_types::Type::boolean()
+    );
+    assert_eq!(
+        reader.encoding.read_row(f.ids[0]).unwrap(),
+        &hirsel_types::Type::unit()
+    );
+    assert!(f.records.types.get_if_loaded(f.ids[3]).is_none());
+}
+
+#[test]
+fn lazy_archive_reader_drop_releases_rows_and_returns_exact_borrowed_partition() {
+    use crate::runtime::{MemoryReservationPool, ProcessBudget};
+    use std::sync::atomic::Ordering;
+    let f = lazy_rows_fixture();
+    let bytes = (16 << 20) + MemoryReservationPool::metadata_bytes();
+    let budget = ProcessBudget::new(bytes);
+    let pool = MemoryReservationPool::new(budget.reserve(bytes).unwrap())
+        .ok()
+        .unwrap();
+    let grant = pool.take(16 << 20).unwrap();
+    let mut reader = f
+        .records
+        .prepare_encoding(&f.context, &0u32, &grant, 0)
+        .unwrap();
+    let (_, allocations) = crate::test_alloc::measured(|| {
+        reader.encoding.read_row(f.ids[1]).unwrap();
+    });
+    assert!(allocations.live > 0);
+    assert!(allocations.peak <= grant.bytes() as isize);
+    let (_, released) = crate::test_alloc::measured(|| drop(reader));
+    assert_eq!(
+        released.live, -allocations.live,
+        "all loaded rows and their index drop with the reader"
+    );
+    assert!(
+        f.ids
+            .iter()
+            .all(|&id| f.records.types.get_if_loaded(id).is_none())
+    );
+    assert_eq!(
+        pool.available_bytes(),
+        0,
+        "the borrowed partition remains held until its owner drops"
+    );
+    drop(grant);
+    assert_eq!(pool.available_bytes(), 16 << 20);
+    let grant = pool.take(16 << 20).unwrap();
+    let mut reader = f
+        .records
+        .prepare_encoding(&f.context, &0u32, &grant, 0)
+        .unwrap();
+    reader.encoding.read_row(f.ids[1]).unwrap();
+    assert_eq!(
+        f.store.reads.load(Ordering::Relaxed),
+        2,
+        "no cross-owner row cache"
+    );
+    drop(reader);
+    drop(grant);
+    drop(pool);
+    assert_eq!(budget.reserved(), 0);
+}

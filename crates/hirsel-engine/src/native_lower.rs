@@ -7,7 +7,7 @@ use crate::{
 use hirsel_syntax::{ContentHash, DefPath};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 /// A settled front Lower result. The ordinary payload is always available;
@@ -18,8 +18,187 @@ pub struct NativeOriginalProduct {
     pub definition: DefPath,
     pub implementation_revision: ContentHash,
     pub signature: ContentHash,
-    pub body: NativeOriginalValue,
+    pub body: NativeOriginalHandle,
     pub verified: Option<hirsel_validate::VerifiedDefinitionOutput>,
+}
+
+/// An immutable source binding. Catalogue rows retain no decoded Lower body.
+#[derive(Clone)]
+pub struct NativeOriginalHandle {
+    input: OriginalInput,
+    _admission: Option<Arc<OriginalLease>>,
+}
+#[derive(Clone)]
+enum OriginalInput {
+    Bound(Arc<BoundOriginal>),
+    Scalar(Arc<NativeScalarLower>),
+    Archive(hirsel_product_codec::CheckedTir),
+}
+struct BoundOriginal {
+    definition: hirsel_syntax::DefId,
+    live: crate::runtime::WeakLowerProduct,
+    reference: hirsel_artifact_store::Reference,
+    context: Arc<NativeRecordContext>,
+    source: Arc<dyn Send + Sync>,
+    records: crate::NativeRecords,
+    store: Arc<dyn crate::store::ResultStore>,
+    working_bytes: u64,
+    implementation_revision: ContentHash,
+    signature: ContentHash,
+    verified: Option<hirsel_validate::VerifiedDefinitionOutput>,
+}
+#[derive(Clone)]
+pub(crate) struct OriginalAdmission {
+    pub _allowance: Arc<crate::runtime::MemoryReservation>,
+    pub remaining: Arc<Mutex<u64>>,
+}
+struct OriginalLease {
+    admission: OriginalAdmission,
+    bytes: u64,
+}
+impl Drop for OriginalLease {
+    fn drop(&mut self) {
+        *self
+            .admission
+            .remaining
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) += self.bytes;
+    }
+}
+impl OriginalAdmission {
+    fn reserve(&self, bytes: u64) -> Option<Arc<OriginalLease>> {
+        let mut remaining = self.remaining.lock().unwrap_or_else(|e| e.into_inner());
+        *remaining = remaining.checked_sub(bytes)?;
+        Some(Arc::new(OriginalLease {
+            admission: self.clone(),
+            bytes,
+        }))
+    }
+}
+impl From<hirsel_product_codec::CheckedTir> for NativeOriginalHandle {
+    fn from(value: hirsel_product_codec::CheckedTir) -> Self {
+        Self {
+            input: OriginalInput::Archive(value),
+            _admission: None,
+        }
+    }
+}
+impl NativeOriginalHandle {
+    pub(crate) fn bound(
+        live: &crate::runtime::LiveLowerProduct,
+        reference: hirsel_artifact_store::Reference,
+        context: Arc<NativeRecordContext>,
+        records: crate::NativeRecords,
+        source: Arc<dyn Send + Sync>,
+        working_bytes: u64,
+    ) -> Self {
+        let observations = live.observations();
+        Self {
+            input: OriginalInput::Bound(Arc::new(BoundOriginal {
+                definition: live.output().value.path,
+                live: live.downgrade(),
+                reference,
+                context,
+                records,
+                source,
+                store: observations.store().clone(),
+                working_bytes,
+                implementation_revision: observations.implementation_revision,
+                signature: observations.signature,
+                verified: observations.verified.clone(),
+            })),
+            _admission: None,
+        }
+    }
+    /// Upgrade only an already admitted live payload. The caller pins it.
+    pub fn live(&self) -> Option<crate::runtime::LiveLowerProduct> {
+        match &self.input {
+            OriginalInput::Bound(input) => input.live.upgrade(),
+            _ => None,
+        }
+    }
+    /// Catalogue backing charged once, independently of any scoped body lease.
+    pub fn retained_metadata_bytes(&self) -> Option<u64> {
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(size_of::<NativeOriginalProduct>() + 2 * size_of::<usize>());
+        if let OriginalInput::Bound(input) = &self.input {
+            weight.add(size_of::<BoundOriginal>() + 2 * size_of::<usize>());
+            weight.add(size_of::<OriginalLease>() + 2 * size_of::<usize>());
+            weight.path(input.definition.path());
+            weight.add(crate::runtime::WeakLowerProduct::metadata_bytes());
+            weight.add(size_of::<NativeRecordContext>() + 2 * size_of::<usize>());
+            if let Some(output) = &input.verified {
+                weight.add(output.retained_bytes()?.try_into().ok()?);
+            }
+        }
+        Some(weight.bytes())
+    }
+    pub(crate) fn admit(mut self, admission: &OriginalAdmission) -> Option<Self> {
+        self._admission = Some(admission.reserve(self.retained_metadata_bytes()?)?);
+        Some(self)
+    }
+    fn reference(&self) -> Option<hirsel_artifact_store::Reference> {
+        match &self.input {
+            OriginalInput::Bound(input) => Some(input.reference),
+            OriginalInput::Archive(value) => Some(value.reference()),
+            OriginalInput::Scalar(_) => None,
+        }
+    }
+    fn open(&self, admission: Option<&OriginalAdmission>) -> Option<NativeOriginalValue> {
+        match &self.input {
+            OriginalInput::Scalar(value) => Some(NativeOriginalValue::Scalar(value.clone())),
+            OriginalInput::Archive(value) => Some(NativeOriginalValue::Archive(value.clone())),
+            OriginalInput::Bound(input) => {
+                if let Some(live) = input.live.upgrade() {
+                    return Some(NativeOriginalValue::Live(live));
+                }
+                let owner_bytes = size_of::<OriginalLease>()
+                    + size_of::<(Arc<OriginalLease>, Arc<dyn Send + Sync>)>()
+                    + 4 * size_of::<usize>();
+                let lease =
+                    admission?.reserve(input.working_bytes.checked_add(owner_bytes as u64)?)?;
+                // Reserve before provider access, opening, or materialization.
+                let bytes = input.store.get_content(input.reference)?;
+                let archive = input.records.open_tir(
+                    input.context.clone(),
+                    bytes,
+                    input.reference,
+                    Arc::new((lease, input.source.clone())),
+                )?;
+                Some(NativeOriginalValue::Archive(archive))
+            }
+        }
+    }
+    fn matches(&self, product: &NativeOriginalProduct, context: &NativeRecordContext) -> bool {
+        match &self.input {
+            OriginalInput::Bound(input) => {
+                input.definition.path() == &product.definition
+                    && input.reference.domain == NATIVE_ORIGINAL_BODY
+                    && input.context.bindings_hold(context)
+                    && input.implementation_revision == product.implementation_revision
+                    && input.signature == product.signature
+                    && product
+                        .verified
+                        .as_ref()
+                        .is_none_or(|output| input.verified.as_ref() == Some(output))
+            }
+            OriginalInput::Scalar(value) => {
+                value.definition.path.path() == &product.definition
+                    && value.definition.signature_hash == product.signature
+                    && value.implementation_revision == product.implementation_revision
+                    && value.signature == product.signature
+                    && value._context.bindings_hold(context)
+            }
+            OriginalInput::Archive(value) => {
+                value.header().is_some_and(|header| {
+                    header.path.path() == &product.definition
+                        && header.signature_hash == product.signature
+                }) && value.matches_bindings(context.record_types(), |path, occurrence| {
+                    context.record_source_anchor(path, occurrence)
+                })
+            }
+        }
+    }
 }
 
 /// Raw input with its original immutable owner. Neither variant grants V or C.
@@ -54,18 +233,13 @@ impl NativeOriginalValue {
             Self::Archive(value) => Some(Arc::new(value.materialize()?)),
         }
     }
-    fn reference(&self) -> Option<hirsel_artifact_store::Reference> {
-        match self {
-            Self::Archive(value) => Some(value.reference()),
-            _ => None,
-        }
-    }
 }
 
 /// Source bindings captured before Lower tasks run. This contains no source
 /// Definition or Lower output; sparse readers consume only settled demands.
 pub struct NativeOriginalContext {
     owner: Option<Arc<dyn Send + Sync>>,
+    admission: Option<OriginalAdmission>,
     anchors: Arc<NativeRecordContext>,
     signatures: Arc<SignatureSnapshot>,
     cache: Option<Arc<hirsel_validate::VerifierCache>>,
@@ -76,7 +250,12 @@ pub struct NativeOriginalContext {
     reuse: bool,
 }
 impl NativeOriginalContext {
-    pub(crate) fn retain_owner(mut self, owner: Arc<dyn Send + Sync>) -> Self {
+    pub(crate) fn retain_owner(
+        mut self,
+        owner: Arc<dyn Send + Sync>,
+        admission: OriginalAdmission,
+    ) -> Self {
+        self.admission = Some(admission);
         self.owner = Some(owner);
         self
     }
@@ -91,25 +270,11 @@ impl NativeOriginalContext {
         let mut ordinary = BTreeMap::new();
         let mut seen = BTreeSet::new();
         for product in products {
-            let path = product.definition;
+            let path = product.definition.clone();
             if !seen.insert(path.clone())
                 || self.expected.get(&path)
                     != Some(&(product.implementation_revision, product.signature))
-                || product.body.view().header().is_none_or(|header| {
-                    header.path.path() != &path || header.signature_hash != product.signature
-                })
-                || matches!(&product.body, NativeOriginalValue::Live(live) if
-                    !live.bindings_hold(&self.anchors)
-                    || live.observations().implementation_revision != product.implementation_revision
-                    || live.observations().signature != product.signature
-                    || product.verified.as_ref().is_some_and(|output| live.observations().verified.as_ref() != Some(output)))
-                || matches!(&product.body, NativeOriginalValue::Scalar(value) if
-                    value.implementation_revision != product.implementation_revision
-                    || value.signature != product.signature
-                    || !value._context.bindings_hold(&self.anchors))
-                || matches!(&product.body, NativeOriginalValue::Archive(value) if
-                    !value.matches_bindings(self.anchors.record_types(), |path, occurrence|
-                        self.anchors.record_source_anchor(path, occurrence)))
+                || !product.body.matches(&product, &self.anchors)
                 || product
                     .verified
                     .as_ref()
@@ -151,6 +316,7 @@ impl NativeOriginalContext {
         }
         Ok(NativeOriginalReader {
             owner: self.owner.clone(),
+            admission: self.admission.clone(),
             verified: NativeLowerReader {
                 anchors: self.anchors.clone(),
                 signatures: self.signatures.clone(),
@@ -188,6 +354,7 @@ impl QueryEngine {
         }
         Ok(NativeOriginalContext {
             owner: None,
+            admission: None,
             anchors: Arc::new(NativeRecordContext::capture(self)),
             signatures: self.signature_snapshot(),
             cache: self.product_store().and_then(|store| store.verifier()),
@@ -348,7 +515,7 @@ impl QueryEngine {
 
 /// Selected raw data and its immutable owner, independent of V authority.
 struct OrdinarySource {
-    value: NativeOriginalValue,
+    value: NativeOriginalHandle,
     implementation_revision: ContentHash,
     signature: ContentHash,
 }
@@ -356,6 +523,7 @@ pub const NATIVE_ORIGINAL_BODY: hirsel_artifact_store::Domain =
     hirsel_product_codec::CheckedTir::DOMAIN;
 pub struct NativeOriginalReader {
     owner: Option<Arc<dyn Send + Sync>>,
+    admission: Option<OriginalAdmission>,
     verified: NativeLowerReader,
     ordinary: BTreeMap<DefPath, OrdinarySource>,
     verify: Verify,
@@ -410,7 +578,18 @@ impl NativeOriginalReader {
         weight.map(&self.verified.selected, |weight, path, _| weight.path(path));
         weight.map(&self.ordinary, |weight, path, source| {
             weight.path(path);
-            if let NativeOriginalValue::Scalar(value) = &source.value {
+            if source.value._admission.is_none()
+                && matches!(&source.value.input, OriginalInput::Bound(_))
+            {
+                weight.add(
+                    source
+                        .value
+                        .retained_metadata_bytes()
+                        .and_then(|bytes| usize::try_from(bytes).ok())
+                        .unwrap_or(usize::MAX),
+                );
+            }
+            if let OriginalInput::Scalar(value) = &source.value.input {
                 weight.arc(value);
                 weight.source_snapshot(&value._sources);
             }
@@ -454,7 +633,7 @@ impl NativeOriginalReader {
     /// Raw selected input retaining its original owner, without V acceptance.
     pub fn raw(&self, path: &DefPath) -> Option<NativeOriginalValue> {
         if let Some(source) = self.ordinary.get(path) {
-            return Some(source.value.clone());
+            return source.value.open(self.admission.as_ref());
         }
         let retained: Arc<dyn Send + Sync> =
             Arc::new((self.verified.anchors.clone(), self.owner.clone()));
@@ -479,7 +658,7 @@ impl NativeOriginalReader {
                 verification_ran: false,
             });
         };
-        let raw = source.value.clone();
+        let raw = source.value.open(self.admission.as_ref())?;
         let view = raw.view();
         let header = view.header()?;
         if header.path.path() != path
@@ -608,14 +787,17 @@ impl QueryEngine {
             ordinary.insert(
                 path.clone(),
                 OrdinarySource {
-                    value: NativeOriginalValue::Scalar(Arc::new(NativeScalarLower {
-                        definition,
-                        _entry: self.native_lower_owner(path),
-                        _sources: self.sources.clone(),
-                        _context: context,
-                        implementation_revision: revision,
-                        signature,
-                    })),
+                    value: NativeOriginalHandle {
+                        input: OriginalInput::Scalar(Arc::new(NativeScalarLower {
+                            definition,
+                            _entry: self.native_lower_owner(path),
+                            _sources: self.sources.clone(),
+                            _context: context,
+                            implementation_revision: revision,
+                            signature,
+                        })),
+                        _admission: None,
+                    },
                     implementation_revision: revision,
                     signature,
                 },
@@ -623,6 +805,7 @@ impl QueryEngine {
         }
         Ok(NativeOriginalReader {
             owner: None,
+            admission: None,
             verified: NativeLowerReader {
                 anchors: Arc::new(NativeRecordContext::capture(self)),
                 signatures: self.signature_snapshot(),
@@ -697,6 +880,7 @@ impl QueryEngine {
         }
         Ok(NativeOriginalReader {
             owner: None,
+            admission: None,
             verified: NativeLowerReader {
                 anchors,
                 signatures,

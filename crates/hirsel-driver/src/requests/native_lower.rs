@@ -252,7 +252,7 @@ mod tests {
             let mut crossed_body = product;
             let reference = store.put_content(NATIVE_ORIGINAL_BODY, &bytes).unwrap();
             let context = reader.record_context();
-            crossed_body.body = NativeOriginalValue::Archive(
+            crossed_body.body = NativeOriginalHandle::from(
                 records
                     .open_tir(
                         context.clone(),

@@ -205,10 +205,7 @@ pub fn inspect(root: List[u64]) -> u64 { forward(root)+forward_again(root) }
                         path.clone(),
                         QueryId {
                             kind: 0x7c90,
-                            address: match &product.body {
-                                NativeOriginalValue::Live(live) => live.address(),
-                                _ => panic!("selected live Lower"),
-                            },
+                            address: product.body.live().expect("selected live Lower").address(),
                         },
                     )
                 })
@@ -218,10 +215,7 @@ pub fn inspect(root: List[u64]) -> u64 { forward(root)+forward_again(root) }
                 .map(|(path, query)| {
                     (
                         *query,
-                        match &products[path].body {
-                            NativeOriginalValue::Live(live) => ProductRef::lower(live.clone()),
-                            _ => panic!("selected live Lower"),
-                        },
+                        ProductRef::lower(products[path].body.live().expect("selected live Lower")),
                     )
                 })
                 .collect();
@@ -432,7 +426,10 @@ impl hirsel_driver::native::queries::source_inputs::NativeLowerProducts for Lowe
         self.0
             .get(path)
             .filter(|product| {
-                matches!(&product.body, NativeOriginalValue::Live(live) if selected == runtime::ProductRef::lower(live.clone()))
+                product
+                    .body
+                    .live()
+                    .is_some_and(|live| selected == runtime::ProductRef::lower(live))
             })
             .cloned()
             .ok_or_else(|| "unselected test Lower".into())

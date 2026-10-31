@@ -598,6 +598,9 @@ pub struct LiveLowerProduct(Arc<Owner<LowerValue>>);
 #[derive(Clone)]
 pub(crate) struct WeakLowerProduct(Weak<Owner<LowerValue>>);
 impl WeakLowerProduct {
+    pub(crate) fn metadata_bytes() -> usize {
+        size_of::<Owner<LowerValue>>() + 2 * size_of::<usize>()
+    }
     pub(crate) fn upgrade(&self) -> Option<LiveLowerProduct> {
         self.0.upgrade().map(LiveLowerProduct)
     }

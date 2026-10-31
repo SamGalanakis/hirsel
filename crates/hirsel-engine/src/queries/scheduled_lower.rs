@@ -1022,13 +1022,29 @@ impl FrontLowerQueries {
             Ok(product.clone()),
         )?;
         let live = product.lower_value()?.clone();
+        let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
+        let (_, outcome, _) = outcomes.get(&(FRONT_LOWER_KIND, product.address.0))?;
+        let Ok(Value::Lower(lower)) = &outcome.result else {
+            return None;
+        };
+        let body = crate::NativeOriginalHandle::bound(
+            &live,
+            lower.body,
+            Arc::new(self.anchors.clone()),
+            self.records.clone(),
+            self.source.clone(),
+            lower
+                .definition_decode_layout
+                .total()?
+                .checked_add(lower.body.len)?,
+        );
         let observations = live.observations();
         Some(crate::NativeOriginalProduct {
             definition: live.output().value.path.path().clone(),
             implementation_revision: observations.implementation_revision,
             signature: observations.signature,
             verified: observations.verified.clone(),
-            body: crate::NativeOriginalValue::Live(live),
+            body,
         })
     }
     /// Complete settled query observations for Check. This retains the existing

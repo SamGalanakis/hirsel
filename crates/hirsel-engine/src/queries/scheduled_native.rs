@@ -335,6 +335,16 @@ impl Task {
                 Poll::Ready(Ok(p)) => p,
             };
             ordinary = owner.lower.native_product(selected.clone());
+            if let Some(original) = ordinary.as_mut() {
+                let admission = crate::native_lower::OriginalAdmission {
+                    _allowance: owner._ownership._allowance.clone(),
+                    remaining: owner.remaining.clone(),
+                };
+                let Some(body) = original.body.clone().admit(&admission) else {
+                    return Poll::Ready(Err(owner.errors.resource));
+                };
+                original.body = body;
+            }
             let Some(output) = owner.lower.outcome(selected) else {
                 return Poll::Ready(Err(owner.errors.protocol));
             };
@@ -856,7 +866,14 @@ impl QueryEngine {
             _lower: lower.clone(),
             _allowance: Arc::new(allowance),
         });
-        let original_context = Arc::new(original_context.retain_owner(ownership.clone()));
+        let remaining = Arc::new(Mutex::new(output_budget));
+        let original_context = Arc::new(original_context.retain_owner(
+            ownership.clone(),
+            crate::native_lower::OriginalAdmission {
+                _allowance: ownership._allowance.clone(),
+                remaining: remaining.clone(),
+            },
+        ));
         Ok(Arc::new(FrontNativeDefinitionQueries {
             selection: None,
             inputs,
@@ -869,7 +886,7 @@ impl QueryEngine {
             store,
             completed: Mutex::new(BTreeMap::new()),
             failures: Mutex::new(BTreeMap::new()),
-            remaining: Arc::new(Mutex::new(output_budget)),
+            remaining,
             weight,
             errors,
             _ownership: ownership,

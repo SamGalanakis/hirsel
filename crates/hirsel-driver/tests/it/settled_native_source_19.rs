@@ -34,7 +34,7 @@ fn settled_lower_binds_without_eager_bodies_and_independently_refuses_corruption
         let ordinary = publish(&body);
         let retained = Arc::new(NativeRecordContext::capture(&engine));
         let open = |reference| {
-            NativeOriginalValue::Archive(
+            NativeOriginalHandle::from(
                 records
                     .open_tir(
                         retained.clone(),

@@ -57,45 +57,59 @@ fn seeded_bounded_json_fuzz_matches_python_policy_and_exact_numbers() {
 }
 
 fn native_measurement(source: &str, label: &str) -> String {
-    use hirsel_driver::native::{
-        self, OptLevel, Options, Partition, RuntimeBuild, TargetSpec, Toolchain,
+    use hirsel_driver::{
+        native::{self, OptLevel, RuntimeBuild, TargetSpec, Toolchain},
+        requests::*,
     };
-    let mut loaded =
-        load_program_source(&fixture("corpus"), Some(source)).unwrap_or_else(|e| panic!("{e}"));
-    loaded
-        .check_for_execution()
-        .unwrap_or_else(|e| panic!("{e}"));
-    let snapshot = loaded.engine.export_native_input().unwrap();
-    let validated = loaded.engine.import_native_input(snapshot).unwrap();
-    let target = TargetSpec::x86_64_unknown_linux_gnu();
-    let mut options = Options::new(target.clone());
-    options.regions = false;
-    let ready = native::build(&validated, &options).unwrap();
+    use std::sync::Arc;
     let dir_scratch = tempfile::Builder::new()
         .prefix(&format!("hirsel-json-{label}-"))
         .tempdir()
         .unwrap();
-    let dir = dir_scratch.path().to_path_buf();
-    let tools = Toolchain::in_tree_with_runtime(
-        &dir.join("runtime"),
-        &[&target],
-        RuntimeBuild {
-            measurement: true,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let exe = native::link(
-        &ready,
-        &loaded.entry,
-        OptLevel::Speed,
-        Partition::Whole,
-        &tools,
-        &dir,
-    )
-    .unwrap();
+    let dir = dir_scratch.path();
+    let path = dir.join("main.hir");
+    std::fs::write(&path, source).unwrap();
+    let target = TargetSpec::x86_64_unknown_linux_gnu();
+    let tools = Arc::new(
+        Toolchain::in_tree_with_runtime(
+            &dir.join("runtime"),
+            &[&target],
+            RuntimeBuild {
+                measurement: true,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let compiler = COMPILER.with_owned_engines();
+    let mut selector = CompilerRequests::for_host(compiler.clone(), compiler.configuration())
+        .with_toolchain(tools);
+    let output = selector
+        .execute(
+            &path,
+            CompileOperation::NativeBuild(NativeRequest {
+                definition: None,
+                test_entries: vec![],
+                supplemental_sources: vec![],
+                output: NativeOutput::Executable,
+                optimization: Some(OptLevel::Speed),
+                regions: Some(false),
+                backend: native::Backend::Llvm,
+                profile: native::BuildProfile::Default,
+                target,
+                validation: native::Validation::EveryStage,
+                launch: Default::default(),
+                run: None,
+                fuel: false,
+                evidence: None,
+            }),
+        )
+        .unwrap_or_else(|error| panic!("native JSON request: {error}"));
+    let CompileResult::Native(execution) = &output.result else {
+        panic!("native JSON request did not produce an executable");
+    };
     let totals = dir.join("totals");
-    let result = Command::new(exe)
+    let result = Command::new(&execution.executable)
         .env_clear()
         .env("HIRSEL_RT_MEASUREMENT", &totals)
         .output()
@@ -105,9 +119,7 @@ fn native_measurement(source: &str, label: &str) -> String {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let report = std::fs::read_to_string(totals).unwrap();
-    std::fs::remove_dir_all(dir).unwrap();
-    report
+    std::fs::read_to_string(totals).unwrap()
 }
 fn allocations(report: &str) -> u64 {
     report

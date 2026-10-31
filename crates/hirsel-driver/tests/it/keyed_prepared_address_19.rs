@@ -46,6 +46,7 @@ fn native_upsert_initializer_preserves_prepared_map_entry_addresses() {
                     supplemental_sources: vec![],
                     output: NativeOutput::Objects { roots: vec![entry] },
                     optimization: Some(native::OptLevel::None),
+                    regions: None,
                     backend,
                     profile: native::BuildProfile::Default,
                     target: target.clone(),

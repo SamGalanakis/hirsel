@@ -740,6 +740,7 @@ fn cli_request_builds_define_and_adopt_ahead_on_both_backends() {
                     supplemental_sources: vec![],
                     output: NativeOutput::Executable,
                     optimization: Some(OptLevel::Default),
+                    regions: None,
                     backend,
                     profile: native::BuildProfile::Default,
                     target: native::TargetSpec::x86_64_unknown_linux_gnu(),

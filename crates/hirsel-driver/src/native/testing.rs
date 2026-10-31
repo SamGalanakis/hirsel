@@ -98,6 +98,7 @@ impl Executable {
                 backend,
                 profile: super::BuildProfile::Default,
                 optimization: Some(optimization),
+                regions: None,
                 output: crate::requests::NativeOutput::Executable,
                 target,
                 validation: super::Validation::EveryStage,

@@ -206,6 +206,7 @@ pub fn build_path_native_backend_with_validation(
             supplemental_sources: vec![],
             output: crate::requests::NativeOutput::Executable,
             optimization: None,
+            regions: None,
             fuel,
             evidence: evidence.cloned().map(std::sync::Arc::new),
         }),

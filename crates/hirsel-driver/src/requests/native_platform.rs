@@ -75,10 +75,10 @@ pub(super) fn profile_options(
         native::OptLevel::Default => 1,
         native::OptLevel::Speed => 2,
     };
-    let bytes = serde_json::to_vec(&(profile, request.fuel, opt))
+    let bytes = serde_json::to_vec(&(profile, request.fuel, opt, request.regions))
         .map_err(|error| NativeError::new(StageName::Emission, error.to_string()))?;
     Ok(ContentHash::of_parts(
-        "hirsel.host.native-profile.v2",
+        "hirsel.host.native-profile.v3",
         [bytes.as_slice()],
     ))
 }
@@ -138,6 +138,9 @@ impl NativePlatformSelection {
             }
             let profile_options = profile_options(request, inputs.purpose)?;
             let mut options = request.profile.options(target.clone());
+            if let Some(regions) = request.regions {
+                options.regions = regions;
+            }
             options.validation = request.validation;
             return Ok(Self {
                 plan: NativePlan {
@@ -263,6 +266,9 @@ impl NativePlatformSelection {
         .map_err(failed)?;
         let profile_options = profile_options(request, inputs.purpose)?;
         let mut options = request.profile.options(target.clone());
+        if let Some(regions) = request.regions {
+            options.regions = regions;
+        }
         options.validation = request.validation;
         options.launch = request.launch.clone();
         Ok(Self {
@@ -307,6 +313,7 @@ mod tests {
                 supplemental_sources: Vec::new(),
                 output: super::super::NativeOutput::Executable,
                 optimization: None,
+                regions: None,
                 backend,
                 profile: BuildProfile::Default,
                 target: native::TargetSpec::x86_64_unknown_linux_gnu(),
@@ -345,6 +352,13 @@ mod tests {
                 profile_options(&request, NativePurpose::Build).unwrap()
             );
             let unfueled = profile_options(&request, NativePurpose::Run).unwrap();
+            request.regions = Some(false);
+            assert_ne!(
+                unfueled,
+                profile_options(&request, NativePurpose::Run).unwrap(),
+                "placement overrides cannot reuse another Codegen policy"
+            );
+            request.regions = None;
             request.fuel = true;
             assert_ne!(
                 unfueled,

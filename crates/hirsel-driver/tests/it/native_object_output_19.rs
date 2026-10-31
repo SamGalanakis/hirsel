@@ -59,6 +59,7 @@ fn object_requests_emit_generic_helpers_without_link_or_launch() {
                     }],
                     output: NativeOutput::Objects { roots: vec![first, second] },
                     optimization: Some(native::OptLevel::None),
+                    regions: None,
                     backend, profile: native::BuildProfile::Default,
                     target: target.clone(), validation: native::Validation::EveryStage,
                     launch: Default::default(), run: None, fuel: false, evidence: None,

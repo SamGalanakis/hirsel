@@ -979,6 +979,7 @@ fn native_bootstrap_policy_case(bind_run: bool) {
                 supplemental_sources: Vec::new(),
                 output: crate::requests::NativeOutput::Executable,
                 optimization: None,
+                regions: None,
                 backend,
                 profile: native::BuildProfile::Default,
                 target: target.clone(),

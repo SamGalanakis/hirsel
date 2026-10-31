@@ -114,6 +114,8 @@ pub struct NativeRequest {
     pub supplemental_sources: Vec<NativeSourceText>,
     pub output: NativeOutput,
     pub optimization: Option<crate::native::OptLevel>,
+    /// Override region placement; None keeps the selected profile's policy.
+    pub regions: Option<bool>,
     pub backend: Backend,
     pub profile: BuildProfile,
     pub target: TargetSpec,

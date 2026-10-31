@@ -163,6 +163,7 @@ pub fn run_path_native_backend_with_trace_events(
                 supplemental_sources: vec![],
                 output: crate::requests::NativeOutput::Executable,
                 optimization: None,
+                regions: None,
             },
         ))?;
         match &selected.result {

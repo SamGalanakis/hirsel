@@ -84,6 +84,33 @@ pub(super) fn infer(
         };
         headers.insert(header.definition, Arc::new(header));
     }
+    // A same-module callee without a checked body has no current proof.
+    // Its retained declaration is usable, but its earlier body proof is not.
+    for (body, signature) in bodies {
+        for call in &body.checked.calls {
+            let hirsel_types::CallTarget::Definition(path) = &call.target else {
+                continue;
+            };
+            let id = DefId::intern(path);
+            if !hirsel_types::unique_summary::same_module(path, signature.definition.path())
+                || headers.contains_key(&id)
+            {
+                continue;
+            }
+            let declared = match provider.signature(id) {
+                Ok(declared) => declared,
+                Err(QueryError::Diagnostics(_) | QueryError::NotImplemented) => continue,
+                Err(error) => return Err(error),
+            };
+            if declared.metadata.visibility == hirsel_syntax::Visibility::Private
+                && matches!(declared.kind, hirsel_types::SignatureKind::Function(_))
+            {
+                let mut header = (*declared).clone();
+                header.metadata.inferred_unique = UniqueSummary::default();
+                headers.insert(id, Arc::new(header));
+            }
+        }
+    }
     let graph: Vec<Vec<usize>> = bodies
         .iter()
         .map(|(body, signature)| {
@@ -103,6 +130,7 @@ pub(super) fn infer(
         })
         .collect();
     let mut failures = BTreeMap::new();
+    let mut rejected = std::collections::BTreeSet::new();
     for component in hirsel_graph::components(&graph) {
         let cyclic = component.len() > 1 || graph[component[0]].contains(&component[0]);
         let mut previous = BTreeMap::<usize, BTreeMap<DefId, SignatureRef>>::new();
@@ -144,9 +172,13 @@ pub(super) fn infer(
                             .iter()
                             .any(|d| d.severity == hirsel_diag::Severity::Error) =>
                     {
+                        rejected.remove(&declared.definition);
                         output.value.ownership.inferred_unique
                     }
-                    Ok(_) | Err(QueryError::Diagnostics(_)) => UniqueSummary::default(),
+                    Ok(_) | Err(QueryError::Diagnostics(_)) => {
+                        rejected.insert(declared.definition);
+                        UniqueSummary::default()
+                    }
                     Err(error) => return Err(error),
                 };
                 let mut next = signature.metadata.inferred_unique.clone();
@@ -168,9 +200,15 @@ pub(super) fn infer(
             }
         }
     }
-    nonretention::infer(t, bodies, &mut headers, provider)?;
+    let accepted: Vec<_> = bodies
+        .iter()
+        .filter(|(_, signature)| !rejected.contains(&signature.definition))
+        .cloned()
+        .collect();
+    nonretention::infer(t, &accepted, &mut headers, provider)?;
     Ok(headers
         .into_iter()
+        .filter(|(id, _)| positions.contains_key(id))
         .map(|(id, header)| {
             (
                 id,

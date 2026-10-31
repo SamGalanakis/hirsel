@@ -121,6 +121,9 @@ impl HeaderProducts {
         let module = candidate.module;
         private.modules[&module]
             .get_or_init(|| {
+                if let Some(error) = &self.failure {
+                    return Err(error.clone());
+                }
                 let working = private.working.load(Ordering::Relaxed);
                 if working == 0 {
                     return Err(private_refusal());

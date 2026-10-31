@@ -5,11 +5,23 @@ use std::sync::Arc;
 
 #[test]
 fn failed_representation_edit_withholds_other_file_lower_obligations_like_cold() {
+    rejected_representation_edit_matches_cold(
+        "pub opaque type Secret: data uses {} { level:u64 }\nfn view(x:Secret)->u64{x.level}\npub fn main()->u64{1}\n",
+    );
+}
+
+#[test]
+fn failed_callee_representation_edit_drops_callers_cached_nonretaining_proof_like_cold() {
+    rejected_representation_edit_matches_cold(
+        "pub opaque type Secret: data uses {} { level:u64 }\nfn view(x:Secret)->u64{x.level}\nfn relay(x:Secret)->u64{view(x)}\npub fn main()->u64{1}\n",
+    );
+}
+
+fn rejected_representation_edit_matches_cold(text: &str) {
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("main.hir");
         let manifest = directory.path().join("hirsel.json");
-        let text = "pub opaque type Secret: data uses {} { level:u64 }\nfn view(x:Secret)->u64{x.level}\npub fn main()->u64{1}\n";
         std::fs::write(&source, text).unwrap();
         std::fs::write(
             directory.path().join("values.hir"),

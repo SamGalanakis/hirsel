@@ -178,7 +178,12 @@ impl Inference {
                 observed.iter().chain(signature_reads.iter()),
                 &candidates,
             );
-            if let Some(checked) = done.checked.and_then(|p| p.result().ok()) {
+            if let Some(checked) = done.checked.and_then(|p| p.result().ok())
+                && !checked
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.severity == hirsel_diag::Severity::Error)
+            {
                 bodies.push((
                     Arc::new(checked.value.clone()),
                     input.signature.value.clone(),
@@ -219,9 +224,19 @@ impl Inference {
             }
             other => other,
         })?;
+        let mut proofs: BTreeMap<_, _> = proofs.into_iter().collect();
+        // Rejection is a conservative publication, not absence of an update.
+        // Otherwise a retained header can supply an earlier revision's proof.
+        for input in &self.inputs {
+            let id = input.signature.value.definition;
+            proofs.entry(id).or_insert_with(|| UniqueInference {
+                summary: Default::default(),
+                failures: vec![],
+            });
+        }
         self.record_reads(&mut reads, observed.iter(), &candidates);
         Ok(Facts {
-            proofs,
+            proofs: proofs.into_iter().collect(),
             reads: reads.finish().map_err(|e| {
                 QueryError::Operational(hirsel_types::OperationalFailure {
                     operation: "private inference reads".into(),

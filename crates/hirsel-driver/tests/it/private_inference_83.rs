@@ -633,6 +633,50 @@ pub fn main() -> u8 { 0u8 }
 }
 
 #[test]
+fn rejected_representation_retracts_leaf_and_caller_proofs_and_records_the_private_view() {
+    with_compiler_stack(|| {
+        let context = default_context();
+        let source = "pub opaque type Secret: data uses {} { level:u64 }\nfn view(x:Secret)->u64{x.level}\nfn relay(x:Secret)->u64{view(x)}\npub fn main()->u64{1}\n";
+        let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
+            .with_result_store(Arc::new(MemStore::default()));
+        let budget = ProcessBudget::new(512 << 20);
+        let mut representation = entry_path(&context);
+        representation.0.name = "Secret".into();
+        let representation = hirsel_syntax::DefId::intern(&representation);
+        for (text, expected) in [
+            (source.to_owned(), vec![hirsel_types::ParamId(0)]),
+            (source.replace("level:u64", "level:u32"), vec![]),
+            (source.to_owned(), vec![hirsel_types::ParamId(0)]),
+        ] {
+            let file = engine.sources.add("rejected-proof.hir", text).unwrap();
+            engine.parse_file(file, &context).unwrap();
+            let reservation = engine
+                .prepare_private_inference(budget.reserve(256 << 20).unwrap())
+                .unwrap();
+            for name in ["view", "relay"] {
+                let mut path = entry_path(&context);
+                path.0.name = name.into();
+                let signature = engine.item_signature(&path).unwrap().value;
+                assert_eq!(
+                    signature.metadata.inferred_unique.nonretaining, expected,
+                    "{name}"
+                );
+                let reads = engine
+                    .memo_reads(&path, QueryKind::PrivateInference)
+                    .unwrap();
+                assert!(
+                    reads
+                        .iter()
+                        .any(|(key, _)| *key == memo::ReadKey::Representation(representation))
+                );
+            }
+            drop(reservation);
+            assert_eq!(budget.reserved(), 0);
+        }
+    });
+}
+
+#[test]
 fn cross_module_declared_reads_reuse_proofs_before_private_headers_are_demanded() {
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();

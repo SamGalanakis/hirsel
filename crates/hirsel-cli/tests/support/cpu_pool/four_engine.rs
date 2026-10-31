@@ -94,6 +94,7 @@ fn cpu_fixture_four_engine_source_grant(
                 ..Default::default()
             };
             let run = run_observed_snapshot(&mut engine, &config, (&fixture).into()).unwrap();
+            assert!(run.observation.is_some(), "W{width} Free={free}: {run:?}");
             let reference = native::Observation::of_reference(run.observation.as_ref().unwrap());
             assert_eq!(
                 reference.output, expected_output,

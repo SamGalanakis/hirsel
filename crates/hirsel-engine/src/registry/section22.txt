@@ -162,7 +162,9 @@ fn cpu.map_scoped[J: sendable + inert, R: sendable + inert](tasks: Tasks, width:
 // CPU callbacks require locally visible closures with closed calls. Captures,
 // jobs and results contain no capabilities, resources, synchronization handles,
 // pointers or opaque function values. Immutable Shared reads and thaw are allowed.
-// Free requires io.cpu cpu.scoped@1, width 1/4/8/16 and at most 2*width jobs.
+// Free requires io.cpu cpu.scoped@1. Width ranges from 1 through the granted
+// max_workers, and batches contain at most 2*width jobs. Width 0 returns
+// InvalidWidth; a width above the grant returns WidthUnavailable.
 // Preparation runs on worker 0 after all fresh workers are ready. All workers
 // join before results return in input order; language failures retain FAIL-2.
 // InvalidWidth, NotGranted, Busy, WidthUnavailable, NestedPool, BatchTooLarge,

@@ -1,13 +1,15 @@
 fn batch(tasks: Tasks, width: u32, start: u64, count: u64) -> Result[List[u64], CpuPoolError] {
   core@1/cpu.map_scoped(tasks, width,
     fn() -> List[u64] uses {} {
+      failure.check(start <= 32u64, Bounds())
       let mut jobs: List[u64] = []
       for i in 0u64..count { list.push(mut jobs, start + i) }
       take jobs
     },
     fn(take job: u64) -> u64 uses {} {
+      failure.check(job < 32u64, Bounds())
       let mut value = job
-      for i in 0u64..(33u64 - job) {
+      for i in 0u64..(3u64 - job % 3u64) {
         value = int.wrapping_add(int.wrapping_mul(value, 6364136223846793005u64), i)
       }
       value
@@ -34,22 +36,12 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
         failure.check(rows[i] == reference[i], Arithmetic())
       }
     }
-    let oversized = core@1/cpu.map_scoped(tasks, width,
-      fn() -> List[u64] uses {} {
-        let mut jobs: List[u64] = []
-        for i in 0u64..(bound + 1u64) { list.push(mut jobs, i) }
-        take jobs
-      },
-      fn(take job: u64) -> u64 uses {} { failure.check(false, Bounds()); job })
+    let oversized = batch(tasks, width, 32u64, bound + 1u64)
     failure.check(oversized == Error(BatchTooLarge()), Bounds())
   }
-  let invalid = core@1/cpu.map_scoped(tasks, 0u32,
-    fn() -> List[u64] uses {} { failure.check(false, Bounds()); [1] },
-    fn(take job: u64) -> u64 uses {} { failure.check(false, Bounds()); job })
+  let invalid = batch(tasks, 0u32, 33u64, 1u64)
   failure.check(invalid == Error(InvalidWidth()), Bounds())
-  let unavailable = core@1/cpu.map_scoped(tasks, 17u32,
-    fn() -> List[u64] uses {} { failure.check(false, Bounds()); [1] },
-    fn(take job: u64) -> u64 uses {} { failure.check(false, Bounds()); job })
+  let unavailable = batch(tasks, 17u32, 33u64, 1u64)
   failure.check(unavailable == Error(WidthUnavailable()), Bounds())
   let _ = out.print(io.stdout(rt)?, "cpu-any-width-ok\n")
   Ok(())

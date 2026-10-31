@@ -192,11 +192,10 @@ impl FrontCheckScope {
         for path in self.lowered() {
             // The guard is checked before any decoder touches a failed root.
             if !self.failed_lowered().contains(path) {
-                definitions.insert(
-                    path.clone(),
-                    self.definition(path)
-                        .map_err(|error| receipt_input_failure("original body", path, error))?,
-                );
+                let definition = self
+                    .definition(path)
+                    .map_err(|error| receipt_input_failure("original body", path, error))?;
+                definitions.insert(path.clone(), Arc::new(Arc::unwrap_or_clone(definition)));
             }
         }
         let mut required = BTreeSet::new();

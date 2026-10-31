@@ -522,7 +522,9 @@ impl FrontProofExport {
             }
             signatures.insert(path.clone(), section);
             if self.executable.contains(path) {
-                definitions.insert(path.clone(), self.run.lower.settled_definition(path)?);
+                let definition = self.run.lower.settled_definition(path)?;
+                // The input grant covers a copy that PS9 consumes while Lower keeps its original.
+                definitions.insert(path.clone(), Arc::new(Arc::unwrap_or_clone(definition)));
             }
             if let Some(rows) = self.annotations.get(path) {
                 annotations.extend(rows.iter().cloned());

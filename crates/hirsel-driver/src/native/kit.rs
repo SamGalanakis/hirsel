@@ -186,7 +186,9 @@ impl Kit {
         static_foreign: bool,
         loader: Option<(PathBuf, PathBuf)>,
     ) -> Result<Kind, NativeError> {
-        if loader.is_none() && static_foreign && self.has_static(triple)? {
+        // TSan requires PIE and dynamic libc: clang.llvm.org/docs/ThreadSanitizer.html#limitations.
+        let tsan = hirsel_llvm::NATIVE_TSAN || hirsel_cranelift::NATIVE_TSAN;
+        if !tsan && loader.is_none() && static_foreign && self.has_static(triple)? {
             Ok(Kind::StaticExecutable)
         } else {
             Ok(Kind::Executable { loader })

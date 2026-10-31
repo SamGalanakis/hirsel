@@ -183,7 +183,7 @@ impl Library {
         } = request;
         Ok(match action {
             0 | 4 => {
-                if !matches!(width, 1 | 4 | 8 | 16) {
+                if width == 0 {
                     1
                 } else if self.simulation.config.cpu.is_none() {
                     2

@@ -83,6 +83,14 @@ fn ordered_allocating_jobs_match_serial_reference_and_replay() {
 
 include!("support/cpu_pool/four_engine.rs");
 #[test]
+fn every_granted_width_and_bounded_job_count_matches_width_one() {
+    cpu_fixture_four_engine_source(
+        16,
+        include_str!("support/cpu_pool/any_width.hir").into(),
+        b"cpu-any-width-ok\n",
+    );
+}
+#[test]
 fn ordered_allocating_fixture_agrees_across_four_engines_width_16() {
     cpu_fixture_allocating_four_engine_agreement(16);
 }

@@ -20,10 +20,7 @@ fn cpu_job_stage_rows(text: &str) -> Result<BTreeMap<String, Vec<String>>, Strin
         let [task, batch, width, ordinal] = values[..] else {
             unreachable!()
         };
-        if task >> 32 == 0
-            || batch >> 32 == 0
-            || !matches!(width, 1 | 4 | 8 | 16)
-            || ordinal >= 2 * width
+        if task >> 32 == 0 || batch >> 32 == 0 || !(1..=16).contains(&width) || ordinal >= 2 * width
         {
             return Err(format!("invalid generation or ordinal: {line}"));
         }

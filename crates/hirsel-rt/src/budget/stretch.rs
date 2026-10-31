@@ -254,7 +254,7 @@ pub struct Jobs {
 impl Jobs {
     /// One bounded CPU batch (at most twice its admitted width).
     pub fn new(width: u32, count: usize, settled: Settled) -> Self {
-        assert!(matches!(width, 1 | 4 | 8 | 16), "admitted CPU width");
+        assert!(width > 0, "admitted CPU width");
         assert!(count <= width as usize * 2, "bounded CPU batch");
         Self {
             pending: vec![None; count],
@@ -815,7 +815,7 @@ mod tests {
 
     #[test]
     fn native_cpu_publications_wait_for_each_global_retirement_without_duplicate_charge() {
-        for width in [1, 4, 8, 16] {
+        for width in 1..=16 {
             let mut state = Settled {
                 level: 0,
                 limit: 100,
@@ -886,7 +886,7 @@ mod tests {
 
     #[test]
     fn withdrawing_younger_summaries_returns_owner_charges_without_settling_them() {
-        for width in [1, 4, 8, 16] {
+        for width in 1..=16 {
             let mut state = Settled {
                 level: 0,
                 limit: 100,

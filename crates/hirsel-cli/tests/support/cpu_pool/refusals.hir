@@ -1,6 +1,6 @@
 pub fn main(rt: Io) -> Result[(), GrantError] {
   let tasks = io.tasks(rt)?
-  let invalid = core@1/cpu.map_scoped(tasks, 2u32,
+  let invalid = core@1/cpu.map_scoped(tasks, 0u32,
     fn() -> List[u64] uses {} { failure.check(false, Bounds()); [1] },
     fn(take job: u64) -> u64 uses {} { failure.check(false, Bounds()); job })
   failure.check(invalid == Error(InvalidWidth()), Bounds())

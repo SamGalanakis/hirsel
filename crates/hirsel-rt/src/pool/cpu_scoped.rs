@@ -77,7 +77,7 @@ impl Permits {
         width: u32,
         execs: Vec<Arc<Exec>>,
     ) -> Result<(Reservation, Controllers), Refusal> {
-        if !matches!(width, 1 | 4 | 8 | 16) {
+        if width == 0 {
             return Err(Refusal::InvalidWidth);
         }
         let mut state = self.state.lock().unwrap();
@@ -556,7 +556,7 @@ pub(super) fn forget(execs: &mut Execs) -> Vec<*mut Worker> {
 /// A running physical-dispatch task holds the scheduler role. Its selected
 /// policy supports the scoped operation; replay uses its serial path instead.
 pub(crate) unsafe fn enter(ctx: *mut TaskCtx, width: u32) -> Result<(), Refusal> {
-    if !matches!(width, 1 | 4 | 8 | 16) {
+    if width == 0 {
         return Err(Refusal::InvalidWidth);
     }
     if crate::tasks::cpu_scoped(ctx) {
@@ -839,7 +839,7 @@ pub unsafe extern "C" fn hirsel_rt_v2_cpu_map_scoped(
     let live = || unsafe {
         match action {
             0 | 4 => {
-                if !matches!(width, 1 | 4 | 8 | 16) {
+                if width == 0 {
                     return 1;
                 }
                 let Some(grant) = (*ctx).run_ref().cpu_grant.as_ref() else {
@@ -1109,7 +1109,7 @@ mod tests {
             );
             let run = (*ctx).run_ptr();
             let execs = super::super::init_execs(ctx);
-            for width in [1, 4, 8, 16] {
+            for width in 1..=16 {
                 let permits = Arc::new(Permits::new(width));
                 for fail_at in (0..width).map(Some).chain([None]) {
                     let reservation = permits.try_reserve(width).unwrap();
@@ -1345,16 +1345,18 @@ mod tests {
     }
 
     #[test]
-    fn invalid_widths_and_insufficient_capacity_leave_no_partial_reservation() {
-        for width in [0, 2, 3, 17, u32::MAX] {
-            let permits = Arc::new(Permits::new(16));
+    fn zero_width_and_insufficient_capacity_leave_no_partial_reservation() {
+        let permits = Arc::new(Permits::new(16));
+        assert!(matches!(permits.try_reserve(0), Err(Refusal::InvalidWidth)));
+        assert_eq!(permits.available(), 16);
+        for width in [17, u32::MAX] {
             assert!(matches!(
                 permits.try_reserve(width),
-                Err(Refusal::InvalidWidth)
+                Err(Refusal::WidthUnavailable { requested, available: 16 }) if requested == width
             ));
             assert_eq!(permits.available(), 16);
         }
-        for width in [1, 4, 8, 16] {
+        for width in 1..=16 {
             let permits = Arc::new(Permits::new(width - 1));
             assert!(
                 matches!(permits.try_reserve(width), Err(Refusal::WidthUnavailable { requested, available }) if requested == width && available == width - 1)
@@ -1370,7 +1372,7 @@ mod tests {
 
     #[test]
     fn parent_releases_before_reserving_and_can_resume_after_every_rollback_prefix() {
-        for width in [1, 4, 8, 16] {
+        for width in 1..=16 {
             for started in 0..=width {
                 let permits = Arc::new(Permits::new(width));
                 let parent = exec();

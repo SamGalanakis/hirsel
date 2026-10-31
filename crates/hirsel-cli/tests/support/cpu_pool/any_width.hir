@@ -1,0 +1,56 @@
+fn batch(tasks: Tasks, width: u32, start: u64, count: u64) -> Result[List[u64], CpuPoolError] {
+  core@1/cpu.map_scoped(tasks, width,
+    fn() -> List[u64] uses {} {
+      let mut jobs: List[u64] = []
+      for i in 0u64..count { list.push(mut jobs, start + i) }
+      take jobs
+    },
+    fn(take job: u64) -> u64 uses {} {
+      let mut value = job
+      for i in 0u64..(33u64 - job) {
+        value = int.wrapping_add(int.wrapping_mul(value, 6364136223846793005u64), i)
+      }
+      value
+    })
+}
+
+pub fn main(rt: Io) -> Result[(), GrantError] {
+  let tasks = io.tasks(rt)?
+  let mut reference: List[u64] = []
+  for pair in 0u64..16u64 {
+    let Ok(rows) = batch(tasks, 1u32, pair * 2u64, 2u64) else {
+      failure.check(false, Bounds()); return Ok(())
+    }
+    for i in 0u64..2u64 { list.push(mut reference, rows[i]) }
+  }
+  for width in 1u32..17u32 {
+    let bound: u64 = int.widen(width) * 2u64
+    for count in 0u64..(bound + 1u64) {
+      let Ok(rows) = batch(tasks, width, 0u64, count) else {
+        failure.check(false, Bounds()); return Ok(())
+      }
+      failure.check(list.len(rows) == count, Bounds())
+      for i in 0u64..count {
+        failure.check(rows[i] == reference[i], Arithmetic())
+      }
+    }
+    let oversized = core@1/cpu.map_scoped(tasks, width,
+      fn() -> List[u64] uses {} {
+        let mut jobs: List[u64] = []
+        for i in 0u64..(bound + 1u64) { list.push(mut jobs, i) }
+        take jobs
+      },
+      fn(take job: u64) -> u64 uses {} { failure.check(false, Bounds()); job })
+    failure.check(oversized == Error(BatchTooLarge()), Bounds())
+  }
+  let invalid = core@1/cpu.map_scoped(tasks, 0u32,
+    fn() -> List[u64] uses {} { failure.check(false, Bounds()); [1] },
+    fn(take job: u64) -> u64 uses {} { failure.check(false, Bounds()); job })
+  failure.check(invalid == Error(InvalidWidth()), Bounds())
+  let unavailable = core@1/cpu.map_scoped(tasks, 17u32,
+    fn() -> List[u64] uses {} { failure.check(false, Bounds()); [1] },
+    fn(take job: u64) -> u64 uses {} { failure.check(false, Bounds()); job })
+  failure.check(unavailable == Error(WidthUnavailable()), Bounds())
+  let _ = out.print(io.stdout(rt)?, "cpu-any-width-ok\n")
+  Ok(())
+}

@@ -222,7 +222,8 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 }
 "#;
     for (width, cpu, prepared, expected) in [
-        ("3u32", Some(grant(1)), false, "InvalidWidth()"),
+        ("0u32", Some(grant(1)), false, "InvalidWidth()"),
+        ("3u32", Some(grant(1)), false, "WidthUnavailable()"),
         ("1u32", None, false, "NotGranted()"),
         ("4u32", Some(grant(1)), false, "WidthUnavailable()"),
         ("1u32", Some(grant(1)), true, "BatchTooLarge()"),

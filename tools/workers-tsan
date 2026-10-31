@@ -43,6 +43,8 @@ if "HIRSEL_NATIVE_CPU_HARNESS" in os.environ:
     result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
     print(result.stdout, end="", flush=True)
     print(result.stderr, end="", file=sys.stderr, flush=True)
+    if any(argument in {"--list", "--help", "-h"} for argument in libtest):
+        raise SystemExit(result.returncode)
     if result.returncode == 0:
         passed = set()
         for line in result.stdout.splitlines():

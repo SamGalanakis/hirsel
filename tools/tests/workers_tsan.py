@@ -15,14 +15,15 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'workers-tsan'
 
 
 class NativeQualification(unittest.TestCase):
-    def run_gate(self, width, stderr, status=0, controls=True, timeout=False):
+    def run_gate(self, width, stderr, status=0, controls=True, timeout=False, listing=False):
         if controls:
             stderr += "".join(
                 f"MUTANT {policy} {backend} W{width}: exit 66, emitted mapper race\n"
                 f"PRODUCTION {policy} {backend} W{width}: exit 0, no race, values checked\n"
                 for policy in ["tasks.free@1", "tasks.cooperative@1"]
                 for backend in ["llvm", "cranelift"])
-        result = subprocess.CompletedProcess([], status, '4 passed\n', stderr)
+        stdout = (f'native_tsan_ordered_cranelift_width_{width}: test\n' if listing else '4 passed\n')
+        result = subprocess.CompletedProcess([], status, stdout, stderr)
         process = Mock(returncode=status, pid=12345)
         if timeout:
             process.communicate.side_effect = [subprocess.TimeoutExpired('native', 180),
@@ -31,7 +32,7 @@ class NativeQualification(unittest.TestCase):
             process.communicate.return_value = (result.stdout, result.stderr)
         output = io.StringIO()
         with patch.dict(os.environ, {'HIRSEL_NATIVE_CPU_HARNESS': 'unused-harness'}), \
-                patch.object(sys, 'argv', [str(SCRIPT), '--native', str(width)]), \
+                patch.object(sys, 'argv', [str(SCRIPT), '--native', str(width), *(['--list'] if listing else [])]), \
                 patch.object(subprocess, 'Popen', return_value=process) as spawn, \
                 patch.object(os, 'killpg') as kill_group, \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
@@ -46,6 +47,13 @@ class NativeQualification(unittest.TestCase):
         return [f'CPU {policy} {backend} P({width}): switch-free overlap, ownership=Ok(...)\n'
                 for policy in ['tasks.free@1', 'tasks.cooperative@1']
                 for backend in ['llvm', 'cranelift']]
+
+    def test_discovery_lists_cells_without_claiming_qualification(self):
+        for width in [4, 8]:
+            with self.subTest(width=width):
+                self.assertEqual(self.run_gate(width, '', controls=False, listing=True), 0)
+                self.assertIn(f'native_tsan_ordered_cranelift_width_{width}: test', self.output)
+                self.assertIn('--list', self.spawn.args[0])
 
     def test_value_passes_without_exclusive_cpu_ownership_are_not_qualification(self):
         for width in [4, 8]:

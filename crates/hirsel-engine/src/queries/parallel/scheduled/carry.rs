@@ -413,7 +413,7 @@ impl FrontBodyQueries {
                 (memos.capacity() * std::mem::size_of::<(crate::memo::MemoKey, Arc<Reads>)>())
                     as u64,
             )?;
-        let (allowance, backing) = self.owner_grant(cx, charge)?;
+        let (allowance, backing) = self.owner_grant(cx, charge, "cached compact facts")?;
         backing.add(allowance)?;
         let owner = Arc::new(FrontFacts {
             reference,

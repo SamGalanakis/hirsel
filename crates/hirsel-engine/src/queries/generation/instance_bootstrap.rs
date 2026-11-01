@@ -438,7 +438,7 @@ impl QueryEngine {
                         .ok_or_else(|| refused("front root missing"))?,
                 );
             }
-            for roots in queries.chunks(16) {
+            for roots in queries.chunks(1) {
                 let request = executor.request(roots);
                 drop(executor.wait(request).map_err(|reference| {
                     Failure::Front {

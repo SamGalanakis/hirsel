@@ -52,8 +52,8 @@ pub use generation::{
 };
 pub use parallel::{
     FRONT_BODY_KIND, FRONT_STORAGE_KIND, FrontBodyOutput, FrontBodyQueries, FrontCarry,
-    FrontCheckedOutput, FrontInputFootprint, FrontStorageOutput, FrontStorageQueries, ModeResult,
-    PublishedDefinition, PublishedResult,
+    FrontCheckedOutput, FrontInputFootprint, FrontMemoryRefusal, FrontStorageOutput,
+    FrontStorageQueries, ModeResult, PublishedDefinition, PublishedResult,
 };
 pub use s1::{LoweringResult, S1LowerWork};
 pub use scheduled_growth::{FRONT_GROWTH_KIND, FrontGrowthOutput, FrontGrowthQueries};

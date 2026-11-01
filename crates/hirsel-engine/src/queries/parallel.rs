@@ -13,7 +13,8 @@ pub(crate) use compact::CompactCompleted;
 use compact::{FrontResult, WorkerCompleted};
 pub use scheduled::{
     FRONT_BODY_KIND, FRONT_STORAGE_KIND, FrontBodyOutput, FrontBodyQueries, FrontCarry,
-    FrontCheckedOutput, FrontInputFootprint, FrontStorageOutput, FrontStorageQueries,
+    FrontCheckedOutput, FrontInputFootprint, FrontMemoryRefusal, FrontStorageOutput,
+    FrontStorageQueries,
 };
 pub(in crate::queries) use scheduled::{SpecializationDependencies, load_scheduled_publication};
 

@@ -177,6 +177,12 @@ struct FrontObservations {
     memos: Box<[(crate::memo::MemoKey, Arc<Reads>)]>,
     _backing: Arc<LiveSourceBacking>,
 }
+#[derive(Clone, Copy, Debug)]
+pub struct FrontMemoryRefusal {
+    pub owner: &'static str,
+    pub required: u64,
+    pub available: u64,
+}
 struct Input {
     definition: DefId,
     syntax: Reference,
@@ -280,6 +286,7 @@ pub struct FrontBodyQueries {
     /// marked nor scanned, so inspection does not count them as touched.
     clean_memos: Mutex<BTreeSet<crate::memo::MemoKey>>,
     errors: RuntimeErrors,
+    refusal: Mutex<Option<FrontMemoryRefusal>>,
     retention: Arc<Mutex<u64>>,
     // Own immutable snapshot and output metadata admission until every task and
     // external output reader releases this view.
@@ -572,7 +579,7 @@ impl FrontBodyQueries {
                     as u64,
             )?
             .checked_add(dead_arms.map_or(0, LintFacts::capture_bytes))?;
-        let (allowance, backing) = self.owner_grant(cx, charge)?;
+        let (allowance, backing) = self.owner_grant(cx, charge, "compact facts")?;
         // The complete payload and its lease are one owner. No later failure
         // can consume a debit without retaining the corresponding reservation.
         backing.add(allowance)?;
@@ -625,15 +632,30 @@ impl FrontBodyQueries {
         outcomes.remove(&key);
         true
     }
+    pub fn memory_refusal(&self) -> Option<FrontMemoryRefusal> {
+        *self.refusal.lock().unwrap_or_else(|e| e.into_inner())
+    }
     fn owner_grant(
         &self,
         cx: &mut dyn QueryContext,
         value_bytes: u64,
+        owner: &'static str,
     ) -> Option<(MemoryReservation, Arc<LiveSourceBacking>)> {
         let backing_bytes =
             crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<LiveSourceBacking>::uninit());
         let charge = value_bytes.checked_add(backing_bytes)?;
-        self.make_room(cx, charge)?;
+        if self.make_room(cx, charge).is_none() {
+            let available = *self.retention.lock().unwrap_or_else(|e| e.into_inner());
+            self.refusal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_or_insert(FrontMemoryRefusal {
+                    owner,
+                    required: charge,
+                    available,
+                });
+            return None;
+        }
         let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
         let next = remaining.checked_sub(charge)?;
         let mut allowance = self._allowance.allowance.take(charge)?;
@@ -668,6 +690,7 @@ impl FrontBodyQueries {
         let (mut allowance, backing) = self.owner_grant(
             cx,
             LiveSummaryProduct::shared_owner_bytes().checked_add(tuple_bytes)?,
+            "Summary publication",
         )?;
         let tuple_grant = allowance.split(tuple_bytes)?;
         backing.add(tuple_grant)?;
@@ -731,8 +754,11 @@ impl FrontBodyQueries {
         outcome: ModeResult,
         summary: LiveSummaryProduct,
     ) -> Option<ProductRef> {
-        let (mut allowance, backing) =
-            self.owner_grant(cx, LiveAnalyzedProduct::shared_required_bytes(&outcome)?)?;
+        let (mut allowance, backing) = self.owner_grant(
+            cx,
+            LiveAnalyzedProduct::shared_required_bytes(&outcome)?,
+            "analyzed body",
+        )?;
         let product = LiveAnalyzedProduct::new(
             (address, action),
             outcome,
@@ -1000,13 +1026,25 @@ impl FrontBodyQueries {
         else {
             return Ok(None);
         };
-        if self.checked_definition(path).is_none() {
+        if self.checked_definition(path).is_none()
+            && self
+                .archived
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(
+                    &self
+                        .query(path)
+                        .ok_or(QueryError::NotImplemented)?
+                        .address
+                        .0,
+                )
+        {
             let mut context = DetachedFrontContext {
                 queries: self,
                 scratch,
             };
             let query = self.query(path).ok_or(QueryError::NotImplemented)?;
-            let task = BodyTask {
+            let mut task = BodyTask {
                 queries: self.clone(),
                 query,
                 input: query.address.0,
@@ -1017,11 +1055,24 @@ impl FrontBodyQueries {
                 },
                 terminal: None,
             };
-            if let Some(Err(reference)) = task.load_evicted(&mut context) {
+            let restored = task
+                .load_evicted(&mut context)
+                .unwrap_or_else(|| task.run(&mut context));
+            if let Err(reference) = restored {
                 return Err(self
                     .outcome(Err(reference))
                     .and_then(|o| o.outcome.result.err())
-                    .unwrap_or(QueryError::NotImplemented));
+                    .unwrap_or_else(|| {
+                        QueryError::Operational(hirsel_types::OperationalFailure {
+                            operation: "generated instance discovery".into(),
+                            message: format!(
+                                "Front restoration refused: {:?}; retained {}/{} bytes",
+                                self.memory_refusal(),
+                                self.retained_bytes(),
+                                self.admitted_bytes()
+                            ),
+                        })
+                    }));
             }
         }
         let Some(output) = self.checked_definition(path) else {
@@ -2328,6 +2379,7 @@ impl QueryEngine {
             memo_operations: AtomicU64::new(0),
             verify_store: self.verify_store,
             errors,
+            refusal: Mutex::new(None),
             retention,
             read_pool: std::sync::OnceLock::new(),
             _allowance: backing,

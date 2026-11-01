@@ -414,7 +414,7 @@ impl HeaderProducts {
             **grant = grant.checked_sub(bytes).ok_or_else(|| {
                 QueryError::Operational(hirsel_types::OperationalFailure {
                     operation: "header admission".into(),
-                    message: "demanded header exceeds the existing front partition".into(),
+                    message: format!("demanded header exceeds the existing front partition; required {bytes} bytes, available {} bytes", **grant),
                 })
             })?;
         }

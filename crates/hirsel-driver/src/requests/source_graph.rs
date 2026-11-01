@@ -855,11 +855,12 @@ impl SourceProducts {
             }
             let message = if reference == errors.resource {
                 return ToolError::Runtime(format!(
-                    "compiler query allowance exhausted; Front retained {}/{}B, Lower retained {}/{}B",
+                    "compiler query allowance exhausted; Front retained {}/{}B, Lower retained {}/{}B; Front refusal {:?}",
                     front.retained_bytes(),
                     front.admitted_bytes(),
                     lower.retained_bytes(),
                     lower.admitted_bytes(),
+                    front.memory_refusal(),
                 ));
             } else if reference == errors.cycle {
                 "compiler query dependency cycle"
@@ -2519,7 +2520,7 @@ fn instance_bootstrap_error(
                 QueryError::Operational(hirsel_types::OperationalFailure {
                     operation: "instance bootstrap".into(),
                     message: if reference == errors.resource {
-                        format!("a front task exceeded its admitted resources; Front retained {} of {} bytes", owner.retained_bytes(), owner.admitted_bytes())
+                        format!("a front task exceeded its admitted resources; Front retained {} of {} bytes; refusal {:?}", owner.retained_bytes(), owner.admitted_bytes(), owner.memory_refusal())
                     } else if reference == errors.cycle {
                         "a front task has a query dependency cycle".into()
                     } else if reference == errors.cancelled {

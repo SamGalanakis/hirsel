@@ -12,6 +12,7 @@ pub use products::FrontCheckedInput;
 mod scope;
 pub use scope::FrontCheckScope;
 pub const FRONT_CHECK_KIND: u32 = 0x4600_000a;
+const FRONT_WINDOW: usize = 1;
 const OUTPUT: Domain = Domain {
     kind: 0x4600_000b,
     schema: 3,
@@ -366,7 +367,8 @@ impl Task {
                             continue;
                         }
                         let mut pending = Vec::new();
-                        for (path, _) in file.input.paths.iter().skip(self.root).take(16) {
+                        for (path, _) in file.input.paths.iter().skip(self.root).take(FRONT_WINDOW)
+                        {
                             let id = self
                                 .queries
                                 .plan
@@ -479,7 +481,7 @@ impl Task {
                             .instances
                             .iter()
                             .skip(self.instance_front)
-                            .take(16)
+                            .take(FRONT_WINDOW)
                         {
                             let id = self
                                 .queries
@@ -494,7 +496,8 @@ impl Task {
                         if !pending.is_empty() {
                             return Ok(Some(pending));
                         }
-                        let end = (self.instance_front + 16).min(self.queries.instances.len());
+                        let end =
+                            (self.instance_front + FRONT_WINDOW).min(self.queries.instances.len());
                         for path in &self.queries.instances[self.instance_front..end] {
                             cx.release_body(
                                 self.queries

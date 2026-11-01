@@ -203,6 +203,15 @@ struct FrontSourceBacking {
     admitted: u64,
     allowance: MemoryReservationPool,
     _sources: SourceMap,
+    headers: Option<std::sync::Weak<header_products::HeaderProducts>>,
+}
+impl Drop for FrontSourceBacking {
+    fn drop(&mut self) {
+        // No header lease this partition lent outlives it.
+        if let Some(headers) = self.headers.as_ref().and_then(std::sync::Weak::upgrade) {
+            headers.release_expired_leases();
+        }
+    }
 }
 impl header_products::HeaderAllowance for FrontSourceBacking {
     fn take_header(&self, bytes: u64) -> Option<MemoryReservation> {
@@ -2435,6 +2444,7 @@ impl QueryEngine {
             admitted,
             allowance: pool,
             _sources: self.sources.clone(),
+            headers: snapshot.header_products().map(Arc::downgrade),
         });
         let header_allowance = snapshot
             .header_products()

@@ -35,7 +35,9 @@ struct HeaderAdmission {
 struct HeaderLease {
     remaining: Arc<std::sync::Mutex<u64>>,
     bytes: u64,
-    _allowance: Option<crate::runtime::MemoryReservation>,
+    /// The Front partition that lent `allowance`.
+    source: Weak<dyn HeaderAllowance>,
+    allowance: std::sync::Mutex<Option<crate::runtime::MemoryReservation>>,
 }
 impl Drop for HeaderLease {
     fn drop(&mut self) {
@@ -554,7 +556,8 @@ impl HeaderProducts {
         let lease = admission.as_ref().map(|admission| HeaderLease {
             remaining: admission.remaining.clone(),
             bytes,
-            _allowance: header_allowance,
+            source: admission.source.clone(),
+            allowance: std::sync::Mutex::new(header_allowance),
         });
         drop(grant);
         Ok((standalone, lease))
@@ -651,6 +654,28 @@ impl HeaderProducts {
             return true;
         }
         false
+    }
+    /// A Front partition ended: no charge it lent outlives it. A row the
+    /// engine keeps returns its bytes, like every engine-retained signature.
+    pub(crate) fn release_expired_leases(&self) {
+        for cell in self.rows.values() {
+            let Some(product) = cell.get() else {
+                continue;
+            };
+            if let Some(lease) = product
+                ._lease
+                .as_ref()
+                .filter(|lease| lease.source.strong_count() == 0)
+            {
+                drop(
+                    lease
+                        .allowance
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .take(),
+                );
+            }
+        }
     }
     pub(crate) fn pending_recomputes(&self, id: DefId) -> usize {
         self.ready(id)

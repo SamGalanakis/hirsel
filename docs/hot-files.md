@@ -33,7 +33,7 @@ reuses the removal rule from `sorted_stretch`
 (`tools/buck2/merging.py` at `37dae771`, lines 193–194), over the entire file so Git's conflict-hunk boundaries cannot change its result.
 It retains ours' line order followed by new lines from theirs, removes identical
 duplicates and writes final newlines. Declaration and ledger row order has no
-semantics. Different rows with the same ledger ID remain visible to validation.
+semantics. After each ticket rebase, `tools/land` commits one row per ledger ID: the latest date wins, with ties preferring the ticket's added row; unrelated rows keep their order.
 `tools/check-hot-files`, run by `tools/land` on every rebased tree including
 push-only retries, rejects duplicate declarations and duplicate ledger IDs.
 The ledger uses main-runs' existing four-column/date validation. Do not add
@@ -72,7 +72,7 @@ is excluded: its edits are not independent registrations.
 | --- | ---: | --- |
 | `conformance/passing.txt` | 176 | Path-set merge accepts unsorted appends/comments; preserves removals |
 | `third-party/NOTICES.md` | 96 | Existing append-only merge driver; preserve notice prose/attribution |
-| `tools/known-failures.tsv` | 84 | Three-way line set; removals survive; land rejects duplicate IDs |
+| `tools/known-failures.tsv` | 84 | Three-way line set; removals survive; land resolves IDs by date, then incoming row |
 | `docs/api.md` | 42 | Existing main-runs generator; legacy rebase conflicts keep main's writer |
 | `crates/hirsel-engine/src/registry/review-table.txt` | 35 | Existing semantic sorted-list merge |
 | `BUCK` | 31 | Already removed from Git, generated on demand |

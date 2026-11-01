@@ -48,7 +48,7 @@ buck2.chmod(0o755)
 ''',
     'tools/buck2/sync.py': '',
     'tools/check-hot-files': '',
-    'tools/buck2/event_logs.py': '',
+    'tools/buck2/event_logs.py': "PASS, SKIP, OMITTED = 'PASS', 'SKIP', 'OMITTED'\n",
     # The first Clippy run lands another lane's commit on origin, as a lane landing meanwhile would.
     'tools/buck2/clippy.py': '''import os, subprocess
 other = os.environ.get('FAKE_OTHER_LANE')
@@ -81,8 +81,10 @@ class Land(unittest.TestCase):
         files = dict(FAKES, **{'tools/land': (ROOT / 'tools/land').read_text(),
                                'tools/buck2/generated.py': (ROOT / 'tools/buck2/generated.py').read_text(),
                                'tools/buck2/merging.py': (ROOT / 'tools/buck2/merging.py').read_text(),
+                               'tools/main-runs': (ROOT / 'tools/main-runs').read_text(),
+                               'tools/buck2/run_failures.py': (ROOT / 'tools/buck2/run_failures.py').read_text(),
                                'tools/buck2/rust_environment.py': (ROOT / 'tools/buck2/rust_environment.py').read_text(),
-                               '.gitignore': '.buck2/\n'})
+                               '.gitignore': '.buck2/\n__pycache__/\n'})
         for name, text in files.items():
             (self.lane / name).parent.mkdir(parents=True, exist_ok=True)
             (self.lane / name).write_text(text)
@@ -106,6 +108,86 @@ class Land(unittest.TestCase):
 
     def main_log(self):
         return self.git(self.origin, 'log', '--format=%s', 'main').split('\n')[:-1]
+
+    def ledger_checks(self, text=''):
+        (self.lane / 'tools/check-hot-files').write_text((ROOT / 'tools/check-hot-files').read_text())
+        (self.lane / '.gitattributes').write_text('tools/known-failures.tsv merge=hirsel\n')
+        (self.lane / 'tools/known-failures.tsv').write_text(text)
+        self.git(self.lane, 'add', '-A')
+        self.git(self.lane, 'commit', '-qm', 'ledger checks')
+
+    def ledger_batch(self, first, second, expected):
+        self.ledger_checks('# failures\nkeep\treason\towner\t2026-10-30\n')
+        prefix = (self.lane / 'tools/known-failures.tsv').read_text()
+        checks, lanes, lands, holder = self.batch_lanes(2, edits={
+            0: ('tools/known-failures.tsv', prefix + first),
+            1: ('tools/known-failures.tsv', prefix + second),
+        })
+        holder.unlink()
+        outputs = [self.finish_land(land) for land in lands]
+        self.assertIn('batch of 2 tickets', outputs[0])
+        self.assertEqual(self.git(self.origin, 'show', 'main:tools/known-failures.tsv'), prefix + expected)
+        self.assertEqual(len((checks / 'received').read_text().splitlines()), 1)
+        self.assertIn('Resolve known-failures identities: red', self.main_log())
+
+    def test_two_tickets_keep_the_later_failure_date(self):
+        self.ledger_batch('red\told\tfirst\t2026-10-30\n', 'red\tnew\tsecond\t2026-11-01\n',
+                          'red\tnew\tsecond\t2026-11-01\n')
+
+    def test_an_older_incoming_failure_does_not_replace_the_later_date(self):
+        self.ledger_batch('red\tnew\tfirst\t2026-11-01\n', 'red\told\tsecond\t2026-10-30\n',
+                          'red\tnew\tfirst\t2026-11-01\n')
+
+    def test_equal_date_failure_rows_prefer_the_incoming_ticket(self):
+        self.ledger_batch('red\tfirst\tfirst\t2026-11-01\n', 'red\tsecond\tsecond\t2026-11-01\n',
+                          'red\tsecond\tsecond\t2026-11-01\n')
+
+    def test_rerecording_a_main_failure_preserves_unrelated_rows_and_order(self):
+        prefix = '# failures\nzed\treason\towner\t2026-10-30\n'
+        old = 'red\told\tmain\t2026-11-01\n'
+        suffix = '\nalpha\treason\towner\t2026-10-30\n'
+        new = 'red\tnew\tincoming\t2026-11-01\n'
+        self.ledger_checks(prefix + old + suffix)
+        self.git(self.lane, 'push', '-q', 'origin', 'HEAD:main')
+        with (self.lane / 'tools/known-failures.tsv').open('a') as out:
+            out.write(new)
+        self.git(self.lane, 'commit', '-qam', 'rerecord red')
+        landed = self.land()
+        self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
+        self.assertEqual(self.git(self.origin, 'show', 'main:tools/known-failures.tsv'), prefix + new + suffix)
+        self.assertEqual(self.main_log()[0], 'Resolve known-failures identities: red')
+
+    def test_a_ticket_resolves_its_own_duplicate_failures(self):
+        self.ledger_checks('red\tnew\towner\t2026-11-01\n'
+                           'other\treason\towner\t2026-10-30\n'
+                           'red\told\towner\t2026-10-30\n')
+        landed = self.land()
+        self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
+        self.assertEqual(self.git(self.origin, 'show', 'main:tools/known-failures.tsv'),
+                         'red\tnew\towner\t2026-11-01\nother\treason\towner\t2026-10-30\n')
+
+    def test_an_unterminated_winning_row_does_not_join_its_neighbor(self):
+        self.ledger_checks('red\told\towner\t2026-10-30\n'
+                           'other\treason\towner\t2026-10-30\n'
+                           'red\tnew\towner\t2026-11-01')
+        landed = self.land()
+        self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
+        self.assertEqual(self.git(self.origin, 'show', 'main:tools/known-failures.tsv'),
+                         'red\tnew\towner\t2026-11-01\nother\treason\towner\t2026-10-30\n')
+
+    def test_malformed_failure_rows_still_refuse_landing(self):
+        valid = 'red\tvalid\towner\t2026-11-01\nred\told\towner\t2026-10-30\n'
+        self.ledger_checks(valid)
+        for malformed in ('red\tmissing date\towner\n', 'red\t\towner\t2026-11-01\n',
+                          'red\tbad date\towner\t2026-02-30\n', 'red\tbad format\towner\t2026-1-01\n'):
+            with self.subTest(row=malformed):
+                (self.lane / 'tools/known-failures.tsv').write_text(valid + malformed)
+                self.git(self.lane, 'commit', '-qam', 'malformed failure')
+                refused = self.land()
+                self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+                self.assertIn('FAIL  independent line lists', refused.stdout)
+                self.assertIn(malformed, (self.lane / 'tools/known-failures.tsv').read_text())
+                self.assertEqual(self.main_log(), ['base'])
 
     def test_slot_preparation_finds_cargo_without_it_on_the_leaders_path(self):
         cargo_bin = self.top / 'cargo-home/bin'
@@ -186,7 +268,11 @@ for line in sys.stdin:
 """)
         hook.chmod(0o755)
         for name, stage in [('event_logs', 'build'), ('clippy', 'clippy'), ('fmt', 'fmt')]:
-            (self.lane / f'tools/buck2/{name}.py').write_text('STAGE = ' + repr(stage) + '\n' + RECORD)
+            text = 'STAGE = ' + repr(stage) + '\n' + RECORD
+            if name == 'event_logs':
+                text = FAKES['tools/buck2/event_logs.py'] + "if __name__ == '__main__':\n" + ''.join(
+                    '    ' + line + '\n' for line in text.splitlines())
+            (self.lane / f'tools/buck2/{name}.py').write_text(text)
         self.git(self.lane, 'add', 'tools/buck2')
         self.git(self.lane, 'commit', '-qm', 'record checks')
         return checks

@@ -165,6 +165,7 @@ export_file(name = "workspace-metadata.json", mode = "reference", visibility = [
     "merging.py",
     "clippy.py",
     "fmt.py",
+    "run_failures.py",
     "rust_environment.py",
 ]]
 

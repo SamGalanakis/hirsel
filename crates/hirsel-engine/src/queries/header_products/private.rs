@@ -29,11 +29,7 @@ pub(super) struct PrivateProducts {
 impl PrivateProducts {
     pub(super) fn index_bytes(engine: &QueryEngine) -> u64 {
         let paths = Self::candidate_paths(engine);
-        let modules = paths
-            .iter()
-            .map(module_of)
-            .collect::<BTreeSet<_>>()
-            .len();
+        let modules = paths.iter().map(module_of).collect::<BTreeSet<_>>().len();
         let mut weight = crate::NativeMetadataWeight::default();
         weight.add(size_of::<Self>() + 4 * size_of::<usize>());
         weight.tree::<DefId, Candidate>(paths.len());
@@ -110,7 +106,9 @@ impl PrivateProducts {
     fn product(&self, id: DefId) -> Option<Arc<ModuleProduct>> {
         proof(self.modules.get(&self.candidates.get(&id)?.module)?)
     }
-    fn products(&self) -> impl Iterator<Item = (&Module, Option<Result<Arc<ModuleProduct>, QueryError>>)> {
+    fn products(
+        &self,
+    ) -> impl Iterator<Item = (&Module, Option<Result<Arc<ModuleProduct>, QueryError>>)> {
         self.modules.iter().map(|(module, slot)| {
             let cell = slot.lock().unwrap_or_else(|e| e.into_inner()).clone();
             (module, cell.get().cloned())

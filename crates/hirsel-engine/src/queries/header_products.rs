@@ -526,9 +526,10 @@ impl HeaderProducts {
         let Some(bytes) = crate::memo::retained::retained_signature_entry_bytes(&entry) else {
             return;
         };
-        let bytes = bytes.saturating_add(crate::memo::retained_arc_bytes(
-            &std::mem::MaybeUninit::<HeaderProduct>::uninit(),
-        ));
+        let bytes =
+            bytes.saturating_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                HeaderProduct,
+            >::uninit()));
         let Ok((standalone, lease)) = self.admit(bytes) else {
             return;
         };

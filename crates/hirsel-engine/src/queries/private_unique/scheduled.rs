@@ -330,7 +330,7 @@ impl QueryEngine {
         id: DefId,
     ) -> Option<hirsel_types::UniqueSummary> {
         if let Some(summary) = self.private_summary(id) {
-            return Some(summary.clone());
+            return Some(summary);
         }
         // A body-free consumer can validate the producer's complete module
         // reads and adopt its proof without installing a Modes adapter.

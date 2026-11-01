@@ -6,10 +6,14 @@ pub(super) struct ModuleProduct {
     facts: Facts,
     complete: bool,
     work: BTreeMap<(DefId, QueryKind), usize>,
-    pub(super) signatures: hirsel_syntax::DefMap<Arc<Entry<hirsel_types::SignatureRef>>>,
+    /// The identity of each settled signature this proof covers. Payloads
+    /// live only in the admitted header rows; a miss recomputes there.
+    pub(super) identities: hirsel_syntax::DefMap<ContentHash>,
     accounted: AtomicBool,
     _standalone: Option<Arc<crate::runtime::MemoryReservation>>,
 }
+/// One module's proof attempt. A stale proof is replaced, never patched.
+type ProofCell = Arc<OnceLock<Result<Arc<ModuleProduct>, QueryError>>>;
 struct Candidate {
     module: Module,
     declared: Option<Arc<Entry<hirsel_types::SignatureRef>>>,
@@ -17,32 +21,33 @@ struct Candidate {
 }
 pub(super) struct PrivateProducts {
     candidates: hirsel_syntax::DefMap<Candidate>,
-    modules: BTreeMap<Module, OnceLock<Result<ModuleProduct, QueryError>>>,
+    modules: BTreeMap<Module, Mutex<ProofCell>>,
     working: AtomicU64,
     registrations: OnceLock<Vec<Arc<AcceptedFrontRegistration>>>,
     retention: OnceLock<Arc<Mutex<u64>>>,
 }
 impl PrivateProducts {
-    pub(super) fn index_bytes(definitions: usize) -> u64 {
+    pub(super) fn index_bytes(engine: &QueryEngine) -> u64 {
+        let paths = Self::candidate_paths(engine);
+        let modules = paths
+            .iter()
+            .map(module_of)
+            .collect::<BTreeSet<_>>()
+            .len();
         let mut weight = crate::NativeMetadataWeight::default();
         weight.add(size_of::<Self>() + 4 * size_of::<usize>());
-        weight.tree::<DefId, Candidate>(definitions);
-        weight.tree::<Module, OnceLock<Result<ModuleProduct, QueryError>>>(definitions);
+        weight.tree::<DefId, Candidate>(paths.len());
+        weight.tree::<Module, Mutex<ProofCell>>(modules);
+        weight.add(
+            modules
+                * (size_of::<OnceLock<Result<Arc<ModuleProduct>, QueryError>>>()
+                    + 2 * size_of::<usize>()),
+        );
         weight.bytes()
     }
-    pub(super) fn capture(engine: &QueryEngine) -> Option<Self> {
-        if engine.private_summary_active
-            || engine.private_summary_revision == Some(engine.graph.revision())
-            || engine
-                .adapters
-                .modes
-                .as_ref()
-                .is_none_or(|m| !m.infers_private_unique())
-        {
-            return None;
-        }
+    fn candidate_paths(engine: &QueryEngine) -> Vec<DefPath> {
         let declarations = engine.declarations.frozen();
-        let candidates = engine
+        engine
             .source_paths()
             .into_iter()
             .filter(|path| {
@@ -55,11 +60,23 @@ impl PrivateProducts {
                         (f.body || f.generator) && !f.constant && !f.instance_bodied
                     })
             })
+            .collect()
+    }
+    pub(super) fn capture(engine: &QueryEngine) -> Option<Self> {
+        if engine.private_summary_active
+            || engine.private_summary_revision == Some(engine.graph.revision())
+            || engine
+                .adapters
+                .modes
+                .as_ref()
+                .is_none_or(|m| !m.infers_private_unique())
+        {
+            return None;
+        }
+        let candidates = Self::candidate_paths(engine)
+            .into_iter()
             .map(|path| {
-                let module = (
-                    crate::memo::PackageKey::of(&path.0.package),
-                    crate::memo::ModuleKey::of(&path.0.modules),
-                );
+                let module = module_of(&path);
                 let id = DefId::intern(&path);
                 let declared = engine
                     .unmarked_signature(id)
@@ -77,7 +94,7 @@ impl PrivateProducts {
             .collect::<hirsel_syntax::DefMap<_>>();
         let modules = candidates
             .values()
-            .map(|candidate| (candidate.module, OnceLock::new()))
+            .map(|candidate| (candidate.module, Mutex::default()))
             .collect();
         Some(Self {
             candidates,
@@ -90,9 +107,30 @@ impl PrivateProducts {
     pub(super) fn requires_proof(&self, id: DefId) -> bool {
         self.candidates.contains_key(&id)
     }
-    fn product(&self, id: DefId) -> Option<&Result<ModuleProduct, QueryError>> {
-        self.modules.get(&self.candidates.get(&id)?.module)?.get()
+    fn product(&self, id: DefId) -> Option<Arc<ModuleProduct>> {
+        proof(self.modules.get(&self.candidates.get(&id)?.module)?)
     }
+    fn products(&self) -> impl Iterator<Item = (&Module, Option<Result<Arc<ModuleProduct>, QueryError>>)> {
+        self.modules.iter().map(|(module, slot)| {
+            let cell = slot.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            (module, cell.get().cloned())
+        })
+    }
+}
+fn module_of(path: &DefPath) -> Module {
+    (
+        crate::memo::PackageKey::of(&path.0.package),
+        crate::memo::ModuleKey::of(&path.0.modules),
+    )
+}
+fn proof(slot: &Mutex<ProofCell>) -> Option<Arc<ModuleProduct>> {
+    let cell = slot.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    cell.get()?.as_ref().ok().cloned()
+}
+/// The value a signature read observes: what equal-output cutoff and
+/// invalidation compare.
+pub(super) fn identity(result: &SignatureOutput) -> ContentHash {
+    memos::signature_value(result.as_ref().ok().map(|output| output.value.fingerprint))
 }
 impl HeaderProducts {
     pub(crate) fn configure_private(
@@ -110,7 +148,7 @@ impl HeaderProducts {
     pub(super) fn private_product(
         self: &Arc<Self>,
         id: DefId,
-    ) -> Result<Option<&ModuleProduct>, QueryError> {
+    ) -> Result<Option<Arc<ModuleProduct>>, QueryError> {
         let Some(private) = &self.private else {
             return Ok(None);
         };
@@ -118,7 +156,12 @@ impl HeaderProducts {
             return Ok(None);
         };
         let module = candidate.module;
-        private.modules[&module]
+        let cell = private.modules[&module]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut settled = Vec::new();
+        let product = cell
             .get_or_init(|| {
                 if let Some(error) = &self.failure {
                     return Err(error.clone());
@@ -164,11 +207,12 @@ impl HeaderProducts {
                         weight.add(failure.message.capacity())
                     });
                 }
-                let signatures: hirsel_syntax::DefMap<_> = engine
+                let signatures: Vec<_> = engine
                     .signatures
                     .iter()
                     .filter(|(definition, entry)| {
                         complete
+                            && self.store.as_ref().is_some_and(|store| store.enabled())
                             && private
                                 .candidates
                                 .get(definition)
@@ -187,13 +231,11 @@ impl HeaderProducts {
                     })
                     .map(|(definition, entry)| (*definition, project(entry)))
                     .collect();
-                for entry in signatures.values() {
-                    weight.add(
-                        crate::memo::retained::retained_signature_entry_bytes(entry)
-                            .ok_or_else(private_refusal)? as usize,
-                    );
-                }
-                weight.tree::<DefId, Arc<Entry<hirsel_types::SignatureRef>>>(signatures.len());
+                let identities: hirsel_syntax::DefMap<_> = signatures
+                    .iter()
+                    .map(|(definition, entry)| (*definition, identity(&entry.result())))
+                    .collect();
+                weight.tree::<DefId, ContentHash>(identities.len());
                 let work: BTreeMap<_, _> = engine
                     .recomputes
                     .iter()
@@ -215,42 +257,60 @@ impl HeaderProducts {
                     return Err(private_refusal());
                 };
                 self.generation.fetch_add(1, Ordering::Relaxed);
-                Ok(ModuleProduct {
+                settled = signatures;
+                Ok(Arc::new(ModuleProduct {
                     facts,
                     complete,
                     work,
-                    signatures,
+                    identities,
                     accounted: AtomicBool::new(false),
                     _standalone: standalone,
-                })
+                }))
             })
-            .as_ref()
-            .map(Some)
-            .map_err(Clone::clone)
+            .clone()?;
+        // Offer the payloads to the admitted header rows outside the proof's
+        // initialization. A row that is not admitted recomputes on demand.
+        for (definition, entry) in settled {
+            self.seed(definition, entry);
+        }
+        Ok(Some(product))
     }
-    pub(super) fn demanded_summary(&self, id: DefId) -> Option<&hirsel_types::UniqueSummary> {
+    /// Replace a proof whose identity disagrees with its recomputed payload.
+    pub(super) fn invalidate_private(&self, id: DefId, stale: &Arc<ModuleProduct>) {
+        let Some(private) = &self.private else {
+            return;
+        };
+        let Some(candidate) = private.candidates.get(&id) else {
+            return;
+        };
+        let mut slot = private.modules[&candidate.module]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if slot
+            .get()
+            .and_then(|result| result.as_ref().ok())
+            .is_some_and(|product| Arc::ptr_eq(product, stale))
+        {
+            *slot = ProofCell::default();
+        }
+    }
+    pub(super) fn demanded_summary(&self, id: DefId) -> Option<hirsel_types::UniqueSummary> {
         self.private
             .as_ref()?
             .product(id)?
-            .as_ref()
-            .ok()?
             .facts
             .proofs
             .iter()
             .find(|(definition, _)| *definition == id)
-            .map(|(_, proof)| &proof.summary)
+            .map(|(_, proof)| proof.summary.clone())
     }
     pub(crate) fn unique_failure(
         &self,
         id: DefId,
         claim: hirsel_types::UniqueClaim,
     ) -> Option<hirsel_types::UniqueFailure> {
-        let proof = self
-            .private
-            .as_ref()?
-            .product(id)?
-            .as_ref()
-            .ok()?
+        let product = self.private.as_ref()?.product(id)?;
+        let proof = product
             .facts
             .proofs
             .iter()
@@ -286,12 +346,13 @@ impl HeaderProducts {
             .private_summary_reads
             .retain(|id, _| private.candidates.contains_key(id));
         let mut changed = inferred.len() != engine.private_summaries.len();
-        for (module, cell) in &private.modules {
-            let Some(Ok(product)) = cell.get() else {
+        let products: Vec<_> = private.products().collect();
+        for (module, product) in &products {
+            let Some(Ok(product)) = product else {
                 continue;
             };
             for (id, candidate) in &private.candidates {
-                if candidate.module == *module {
+                if candidate.module == **module {
                     inferred.remove(id);
                     engine.private_summary_reads.remove(id);
                 }
@@ -313,8 +374,9 @@ impl HeaderProducts {
         }
         if changed {
             engine.publish_private_summaries(inferred)?;
-            if private.modules.values().all(|cell| {
-                cell.get()
+            if products.iter().all(|(_, result)| {
+                result
+                    .as_ref()
                     .is_some_and(|result| result.as_ref().is_ok_and(|product| product.complete))
             }) {
                 engine.private_summary_revision = Some(engine.graph.revision());
@@ -324,12 +386,10 @@ impl HeaderProducts {
     }
     pub(in crate::queries) fn private_work(&self, work: &mut Vec<(DefPath, QueryKind, u64)>) {
         if let Some(private) = &self.private {
-            for product in private
-                .modules
-                .values()
-                .filter_map(OnceLock::get)
-                .filter_map(|r| r.as_ref().ok())
-            {
+            for (_, product) in private.products() {
+                let Some(Ok(product)) = product else {
+                    continue;
+                };
                 work.extend(
                     product
                         .work

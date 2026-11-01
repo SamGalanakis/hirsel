@@ -255,9 +255,9 @@ impl HeaderProducts {
     pub(crate) fn source_facts(&self, id: DefId) -> Option<catalog::SourceFacts> {
         self.syntax.facts(id)
     }
-    pub(crate) fn source_fact_index_bytes(definitions: usize, private: bool) -> u64 {
-        HeaderSources::facts_index_bytes(definitions).saturating_add(if private {
-            private::PrivateProducts::index_bytes(definitions)
+    pub(crate) fn source_fact_index_bytes(engine: &QueryEngine, private: bool) -> u64 {
+        HeaderSources::facts_index_bytes(engine.source_paths().len()).saturating_add(if private {
+            private::PrivateProducts::index_bytes(engine)
         } else {
             0
         })
@@ -296,11 +296,11 @@ impl HeaderProducts {
         self.syntax
             .archive(self.types.clone(), self.owners.clone(), store)
     }
-    pub(super) fn summary(&self, id: DefId) -> Option<&hirsel_types::UniqueSummary> {
+    pub(super) fn summary(&self, id: DefId) -> Option<hirsel_types::UniqueSummary> {
         if self.private.is_some() {
             self.demanded_summary(id)
         } else {
-            self.summaries.get(&id)
+            self.summaries.get(&id).cloned()
         }
     }
     pub(crate) fn owners(&self) -> &Arc<crate::NativeRecordContext> {
@@ -337,21 +337,7 @@ impl HeaderProducts {
         cell.get()
     }
     pub(crate) fn demand(self: &Arc<Self>, engine: &mut QueryEngine, id: DefId) -> SignatureOutput {
-        let module = self.private_product(id)?;
-        if let Some(entry) = module.and_then(|module| module.signatures.get(&id)) {
-            let cell = &self.rows[&id];
-            let _ = cell.set(HeaderProduct {
-                result: entry.result(),
-                entry: Some(entry.clone()),
-                recomputes: 0,
-                graph_work: 0,
-                publication: false,
-                _standalone: None,
-                _lease: None,
-                origin: Weak::new(),
-                accounted: AtomicBool::new(true),
-            });
-        }
+        let mut proof = self.private_product(id)?;
         if engine.header_products.is_none() {
             self.adopt_private_products(engine)?;
         }
@@ -371,19 +357,40 @@ impl HeaderProducts {
             return engine.signature_query_local(id);
         }
         if let Some(product) = cell.get() {
-            if engine.header_products.is_none() {
-                engine.adopt_header_product(id, &product);
-            } else if let Some(entry) = &product.entry {
-                engine.graph.adopt(
-                    entry.memo.key,
-                    entry.memo.reads.clone(),
-                    entry.memo.durability,
-                );
-                engine.signatures.insert(id, entry.clone());
-            }
-            return product.result.clone();
+            return self.use_product(engine, id, &product);
         }
         let result = engine.signature_query_local(id);
+        if let Some(stale) = proof.take().filter(|proof| {
+            proof
+                .identities
+                .get(&id)
+                .is_some_and(|expected| *expected != private::identity(&result))
+        }) {
+            // The recomputed payload disagrees with the proof that named it.
+            // Recompute the proof once; a second disagreement is a fault.
+            self.invalidate_private(id, &stale);
+            let fresh = self.private_product(id)?;
+            if engine.header_products.is_none() {
+                self.adopt_private_products(engine)?;
+            }
+            if let Some(product) = cell.get() {
+                return self.use_product(engine, id, &product);
+            }
+            if fresh.is_some_and(|proof| {
+                proof
+                    .identities
+                    .get(&id)
+                    .is_some_and(|expected| *expected != private::identity(&result))
+            }) {
+                return Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                    operation: "private signature identity".into(),
+                    message: format!(
+                        "{} recomputes to a different signature than its module proof",
+                        id.path()
+                    ),
+                }));
+            }
+        }
         let source = engine.signatures.get(&id);
         let local = engine.header_products.is_none();
         let origin = source
@@ -400,6 +407,58 @@ impl HeaderProducts {
             .saturating_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
                 HeaderProduct,
             >::uninit()));
+        let (standalone, lease) = self.admit(bytes)?;
+        if cell
+            .set(HeaderProduct {
+                result,
+                entry,
+                recomputes,
+                graph_work: if local { 0 } else { recomputes },
+                publication: self.provisional,
+                _standalone: standalone,
+                _lease: lease,
+                origin,
+                accounted: AtomicBool::new(local),
+            })
+            .is_ok()
+        {
+            self.generation.fetch_add(1, Ordering::Relaxed);
+        }
+        cell.get()
+            .expect("a completed producer publishes its row")
+            .result
+            .clone()
+    }
+    fn use_product(
+        &self,
+        engine: &mut QueryEngine,
+        id: DefId,
+        product: &HeaderProduct,
+    ) -> SignatureOutput {
+        if engine.header_products.is_none() {
+            engine.adopt_header_product(id, product);
+        } else if let Some(entry) = &product.entry {
+            engine.graph.adopt(
+                entry.memo.key,
+                entry.memo.reads.clone(),
+                entry.memo.durability,
+            );
+            engine.signatures.insert(id, entry.clone());
+        }
+        product.result.clone()
+    }
+    /// Charge one settled row to the front's header grant, evicting unpinned
+    /// rows first. A refusal is a resource failure, never a row verdict.
+    fn admit(
+        &self,
+        bytes: u64,
+    ) -> Result<
+        (
+            Option<Arc<crate::runtime::MemoryReservation>>,
+            Option<HeaderLease>,
+        ),
+        QueryError,
+    > {
         let admission = self
             .admission
             .lock()
@@ -454,26 +513,36 @@ impl HeaderProducts {
             _allowance: header_allowance,
         });
         drop(grant);
-        if cell
-            .set(HeaderProduct {
-                result,
-                entry,
-                recomputes,
-                graph_work: if local { 0 } else { recomputes },
-                publication: self.provisional,
-                _standalone: standalone,
-                _lease: lease,
-                origin,
-                accounted: AtomicBool::new(local),
-            })
-            .is_ok()
-        {
-            self.generation.fetch_add(1, Ordering::Relaxed);
+        Ok((standalone, lease))
+    }
+    /// Retain a payload a module proof settled, when the header grant admits it.
+    fn seed(&self, id: DefId, entry: Arc<Entry<hirsel_types::SignatureRef>>) {
+        let Some(cell) = self.rows.get(&id) else {
+            return;
+        };
+        if cell.get().is_some() {
+            return;
         }
-        cell.get()
-            .expect("a completed producer publishes its row")
-            .result
-            .clone()
+        let Some(bytes) = crate::memo::retained::retained_signature_entry_bytes(&entry) else {
+            return;
+        };
+        let bytes = bytes.saturating_add(crate::memo::retained_arc_bytes(
+            &std::mem::MaybeUninit::<HeaderProduct>::uninit(),
+        ));
+        let Ok((standalone, lease)) = self.admit(bytes) else {
+            return;
+        };
+        let _ = cell.set(HeaderProduct {
+            result: entry.result(),
+            entry: Some(entry),
+            recomputes: 0,
+            graph_work: 0,
+            publication: false,
+            _standalone: standalone,
+            _lease: lease,
+            origin: Weak::new(),
+            accounted: AtomicBool::new(true),
+        });
     }
     pub(crate) fn ready(&self, id: DefId) -> Option<Arc<HeaderProduct>> {
         self.rows.get(&id)?.get()

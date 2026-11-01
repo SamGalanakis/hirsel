@@ -158,7 +158,7 @@ impl QueryEngine {
             .checked_add(owner_bytes)
             .ok_or_else(refused)?
             .checked_add(header_products::HeaderProducts::source_fact_index_bytes(
-                self.source_paths().len(),
+                self,
                 self.adapters
                     .modes
                     .as_ref()

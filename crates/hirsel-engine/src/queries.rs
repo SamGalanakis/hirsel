@@ -1066,7 +1066,7 @@ impl QueryEngine {
                 self.private_summary(id).is_none_or(|summary| {
                     entry
                         .result()
-                        .is_ok_and(|output| output.value.metadata.inferred_unique == *summary)
+                        .is_ok_and(|output| output.value.metadata.inferred_unique == summary)
                 })
             }) {
                 self.signatures.insert(id, entry.clone());

@@ -119,7 +119,12 @@ pub fn resident_watched() -> Vec<PathBuf> {
 }
 /// Whether a file of any kept session changed since it was last used.
 pub fn resident_changed() -> bool {
-    RESIDENT.with(|r| r.borrow().sessions.iter().any(|(_, s)| !s.poll().is_empty()))
+    RESIDENT.with(|r| {
+        r.borrow()
+            .sessions
+            .iter()
+            .any(|(_, s)| !s.poll().is_empty())
+    })
 }
 
 /// Fresh and resident callers use the same immutable request selector. The

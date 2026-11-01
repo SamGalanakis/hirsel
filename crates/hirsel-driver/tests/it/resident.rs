@@ -106,8 +106,14 @@ fn path_requests_reuse_one_session_per_thread_and_observe_edits() {
         else {
             panic!("the edited source was not observed");
         };
-        let rendered: Vec<_> = diagnostics.iter().map(|d| d.render_human(&sources)).collect();
-        assert!(rendered.iter().any(|d| d.contains("missing")), "{rendered:?}");
+        let rendered: Vec<_> = diagnostics
+            .iter()
+            .map(|d| d.render_human(&sources))
+            .collect();
+        assert!(
+            rendered.iter().any(|d| d.contains("missing")),
+            "{rendered:?}"
+        );
         assert_eq!(session::opened() - before, 1);
     });
 }

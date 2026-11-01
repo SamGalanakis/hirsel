@@ -172,20 +172,14 @@ impl CompilerRequests {
 
     pub fn new(
         compiler: Compiler,
-        mut config: CompileConfig,
+        config: CompileConfig,
         budget: Arc<ProcessBudget>,
         limits: RequestLimits,
     ) -> Self {
         // Every provider can evict ordinary products. Compact front and Lower
-        // facts therefore have the same bounded carry regardless of provider.
-        // An off provider also gets a transient byte store within this bound.
+        // facts therefore have the same bounded carry regardless of provider;
+        // with no store, they and the memo graph are a session's only reuse.
         let quarter = limits.transport_bytes / 4;
-        if !config.store.transports() {
-            config.store = Arc::new(super::resident_store::ResidentStore::new(
-                budget.clone(),
-                limits.transport_bytes - 2 * quarter,
-            ));
-        }
         let front = budget
             .reserve(quarter)
             .ok()

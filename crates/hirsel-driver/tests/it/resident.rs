@@ -669,6 +669,45 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
             assert!(results.iter().all(|r| r.result.is_ok()));
             assert_eq!(compact.export_tir(&path("main")).unwrap(), scalar_tir);
         }
+        // A session over the off provider encodes nothing into any byte store
+        // (Off panics on every read and write), yet a body edit still reuses
+        // the unedited definitions from the session's live owners: `view`
+        // reads no other body, so its Resolve and Check never rerun.
+        let fixture = crate::image_fixture::Fixture::new();
+        let entry = fixture.0.join("main.hir");
+        let initial = "fn view() -> u64 { 7 }\nfn a() -> u64 { 1 }\npub fn main() -> u64 { a() }\n";
+        std::fs::write(&entry, initial).unwrap();
+        let config = CompileConfig {
+            retention: memo::Retention::Resident,
+            store: Arc::new(Off),
+            ..CompileConfig::default()
+        };
+        let mut session = session::Session::open_configured(&entry, config.clone());
+        assert!(session.check_applied().unwrap().diagnostics.is_empty());
+        let mut view = session.logical_entry().unwrap().clone();
+        view.0.name = "view".into();
+        let queries = [QueryKind::Resolve, QueryKind::Check].map(|kind| (view.clone(), kind));
+        let before = session.recompute_counts(queries.to_vec()).unwrap();
+        assert!(before.iter().all(|(_, _, count)| *count == 1), "{before:?}");
+        let edited = initial.replace("{ 1 }", "{ 2 }");
+        std::fs::write(&entry, &edited).unwrap();
+        session.apply(vec![session::FileChange {
+            path: entry.clone(),
+            bytes: Some(edited.into_bytes()),
+        }]);
+        let actual = session.check_applied().unwrap();
+        assert_eq!(session.stats().loads, 1);
+        assert_eq!(session.recompute_counts(queries.to_vec()).unwrap(), before);
+        let expected = hirsel_driver::COMPILER
+            .clone()
+            .with_config(config)
+            .with_owned_engines()
+            .load_program(&entry)
+            .unwrap()
+            .check_configured()
+            .unwrap();
+        assert_eq!(diagnostics(&actual), diagnostics(&expected));
+        assert_eq!(actual.completion, expected.completion);
     });
 }
 

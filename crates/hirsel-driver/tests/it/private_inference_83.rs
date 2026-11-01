@@ -354,7 +354,11 @@ fn a_changed_registration_reinfers_only_the_modules_that_read_it() {
                     name: "registration_reset".into(),
                     version: "1".into(),
                 },
-                modules: if module.is_empty() { vec![] } else { vec![module.into()] },
+                modules: if module.is_empty() {
+                    vec![]
+                } else {
+                    vec![module.into()]
+                },
                 name: name.into(),
             })
         };
@@ -389,6 +393,21 @@ fn a_changed_registration_reinfers_only_the_modules_that_read_it() {
         // Only the root module reads the changed registration.
         assert!(second[0] > first[0], "{first:?} {second:?}");
         assert_eq!(second[1..], first[1..], "{first:?} {second:?}");
+        // The retained proofs are the ones a cold compiler infers. The export
+        // carries every signature's unique summary; read receipts differ by path.
+        let warm = session.checked_products(true).unwrap();
+        let mut cold = COMPILER
+            .with_config(CompileConfig {
+                store: Arc::new(MemStore::default()),
+                hold_bytes: 0,
+                ..Default::default()
+            })
+            .with_owned_engines()
+            .load_program(session.entry())
+            .unwrap();
+        cold.check(session.configuration().lowering).unwrap();
+        let cold = cold.engine.checked_products(&cold.entry).unwrap();
+        assert_eq!(warm.canonical, cold.canonical);
     });
 }
 
@@ -441,6 +460,21 @@ fn changed_private_result_proofs_invalidate_unchanged_callers() {
             fingerprint
         );
         engine.lower_to_tir(&entry).unwrap();
+
+        // Moving `code` changes only its cited text: its module proof is
+        // inferred again rather than revalidated, and the equal proof keeps
+        // its unchanged caller.
+        let inferred = engine.recompute_count(&code, QueryKind::PrivateInference);
+        let before = engine.recompute_count(&entry, QueryKind::Modes);
+        let moved = check(&mut engine, &source.replace("fn code", "\nfn code"));
+        assert!(moved.diagnostics.is_empty(), "{:?}", moved.diagnostics);
+        engine.lower_to_tir(&entry).unwrap();
+        assert!(engine.recompute_count(&code, QueryKind::PrivateInference) > inferred);
+        assert_eq!(engine.recompute_count(&entry, QueryKind::Modes), before);
+        assert_eq!(
+            engine.item_signature(&code).unwrap().value.fingerprint,
+            fingerprint
+        );
     });
 }
 

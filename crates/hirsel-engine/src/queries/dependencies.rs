@@ -63,10 +63,7 @@ impl QueryEngine {
     /// The texts an execution engine's header capture observed for a
     /// definition that is neither materialized nor cataloged here: the
     /// capturing engine had materialized it, so both engines read one value.
-    pub(crate) fn captured_text(
-        &self,
-        path: &DefPath,
-    ) -> Option<header_products::CapturedText> {
+    pub(crate) fn captured_text(&self, path: &DefPath) -> Option<header_products::CapturedText> {
         if self.items.contains_key(path) || self.catalog.body(path).is_some() {
             return None;
         }

@@ -1045,6 +1045,36 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         }
         // The same pressure law applies to compact P owners, including a
         // detached checked-only consumer that does not hold a ProductRef.
+        struct EvictCompact(QueryId, MemoryWeight);
+        impl QueryFactory for EvictCompact {
+            fn create(
+                &self,
+                _: QueryId,
+            ) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference> {
+                Ok(Box::new(EvictCompact(self.0, self.1)))
+            }
+        }
+        impl QueryTask for EvictCompact {
+            fn id(&self) -> QueryId {
+                self.0
+            }
+            fn weight(&self) -> MemoryWeight {
+                self.1
+            }
+            fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+                assert!(cx.evict_body());
+                QueryPoll::Complete(synthetic_fixture(
+                    self.0.address,
+                    hirsel_engine::store::Action(self.0.address.0),
+                    Domain {
+                        kind: 0x281,
+                        schema: 1,
+                    },
+                    b"evicted",
+                ))
+            }
+        }
+        let mut single_compact_limit = 8 << 20;
         let mut compact_limit = 8 << 20;
         for mode in 0..5 {
             let mut program = COMPILER
@@ -1067,7 +1097,11 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     &definitions,
                     weight,
                     budget
-                        .reserve(compact_limit - u64::from(mode == 4))
+                        .reserve(if mode == 4 {
+                            single_compact_limit - 1
+                        } else {
+                            compact_limit
+                        })
                         .unwrap(),
                     errors(),
                 )
@@ -1112,7 +1146,32 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
             }
             let a = result.unwrap().pop().unwrap();
             if mode == 0 {
-                compact_limit = front.retained_bytes();
+                single_compact_limit = front.retained_bytes();
+                drop(a);
+                let evict = QueryId {
+                    kind: 0x281,
+                    address: summaries[0].address,
+                };
+                runtime
+                    .register(
+                        evict.kind,
+                        Arc::new(EvictCompact(
+                            evict,
+                            MemoryWeight {
+                                scratch: weight.scratch,
+                                ..Default::default()
+                            },
+                        )),
+                    )
+                    .unwrap();
+                let request = runtime.request(&[evict]);
+                drop(runtime.wait(request).unwrap());
+                let observations = front.retained_bytes() - initial;
+                assert!(
+                    single_compact_limit - initial > 2 * observations,
+                    "a full compact value exceeds both roots' read-only observations"
+                );
+                compact_limit = single_compact_limit + 2 * observations;
                 continue;
             }
             let mut scratch = budget.reserve(2 << 20).unwrap();
@@ -1166,8 +1225,8 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 assert_eq!(front.live_body_count(), 0);
                 assert_eq!(
                     front.recompute_count(&definitions[0], QueryKind::Modes),
-                    1,
-                    "complete compact facts restore without executing or opening a body"
+                    2,
+                    "a disabled cache recomputes through the ordinary producer"
                 );
             }
         }

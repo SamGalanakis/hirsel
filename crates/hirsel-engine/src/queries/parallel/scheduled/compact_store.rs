@@ -111,6 +111,51 @@ impl FrontBodyQueries {
         outcome: &FrontOutcome,
         scratch: u64,
     ) -> Option<ArchivedFront> {
+        let observations = if let Some(previous) = self
+            .archived
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+        {
+            previous.observations.clone()
+        } else {
+            let mut weight = crate::memo::retained::Weight::default();
+            for (_, reads) in &outcome.memos {
+                weight.reads(reads);
+            }
+            let charge = weight
+                .bytes
+                .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                    FrontObservations,
+                >::uninit(
+                )))?
+                .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                    LiveSourceBacking,
+                >::uninit(
+                )))?;
+            let backing = outcome._backing.as_ref()?.split(charge)?;
+            Arc::new(FrontObservations {
+                memos: outcome.memos.clone().into_boxed_slice(),
+                _backing: backing,
+            })
+        };
+        // Optional cache publication never consumes the request's required
+        // transport. Missing or evicted provider bytes take the ordinary miss.
+        let facts = self.archive_cached_facts(key, outcome, scratch);
+        Some(ArchivedFront {
+            facts,
+            observations,
+        })
+    }
+    fn archive_cached_facts(
+        &self,
+        key: Key,
+        outcome: &FrontOutcome,
+        scratch: u64,
+    ) -> Option<Reference> {
+        if !self.store.query_cache_enabled() {
+            return None;
+        }
         let temporary = outcome
             .dead_arms
             .as_ref()
@@ -134,8 +179,6 @@ impl FrontBodyQueries {
             lowering: &outcome.lowering,
             table_keys: outcome.table_keys.as_ref(),
         };
-        // The existing bounded codec admits its collection/type/source tables
-        // before the ordinary encoder materializes the canonical record.
         drop(self.records.prepare_record_encoding(
             &facts,
             |anchor| self.anchors.record_owner_ref(anchor),
@@ -155,8 +198,8 @@ impl FrontBodyQueries {
             decode_bytes,
             facts: &facts_bytes,
         };
-        let encoded = bincode::serialized_size(&record).ok()?;
-        if encoded
+        if bincode::serialized_size(&record)
+            .ok()?
             .checked_mul(8)?
             .checked_add(decode_bytes)?
             .checked_add(temporary)?
@@ -165,35 +208,12 @@ impl FrontBodyQueries {
             return None;
         }
         let bytes = bincode::serialize(&record).ok()?;
-        let reference = self.store.put_content(OUTPUT, &bytes)?;
-        drop(bytes);
-        drop(facts_bytes);
-        drop(facts);
-        drop(dead_arms);
-        let mut memos = [None; 3];
-        for (memo, reads) in &outcome.memos {
-            let index = FRONT_MEMO_PHASES
-                .iter()
-                .position(|phase| *phase == memo.kind)?;
-            if reads.encoding_working_bytes()? > scratch {
-                return None;
-            }
-            let bytes = self.input_records.encode(&*self.anchors, &**reads)?;
-            if (bytes.len() as u64).checked_mul(8)? > scratch {
-                return None;
-            }
-            memos[index] = Some(self.store.put_content(
-                Domain {
-                    kind: 0x4600_0038,
-                    schema: 1,
-                },
-                &bytes,
-            )?);
-        }
-        Some(ArchivedFront {
-            facts: reference,
-            memos,
-        })
+        let reference = OUTPUT.reference(&bytes)?;
+        let input = self.inputs.get(&key)?;
+        let action = crate::store::query_action(&input.key, input.key.1, &outcome.reads);
+        self.store
+            .cache_product(address(key), action, OUTPUT, &bytes);
+        Some(reference)
     }
 }
 impl BodyTask {
@@ -201,13 +221,14 @@ impl BodyTask {
         &self,
         cx: &mut dyn QueryContext,
     ) -> Option<Result<ProductRef, Reference>> {
-        let reference = *self
+        let reference = self
             .queries
             .archived
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&self.input)?;
-        self.load_compact_reference(cx, reference.facts)
+            .get(&self.input)?
+            .facts?;
+        self.load_compact_reference(cx, reference)
     }
     fn load_compact_reference(
         &self,

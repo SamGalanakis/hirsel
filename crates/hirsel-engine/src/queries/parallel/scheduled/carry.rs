@@ -413,11 +413,8 @@ impl FrontBodyQueries {
                 (memos.capacity() * std::mem::size_of::<(crate::memo::MemoKey, Arc<Reads>)>())
                     as u64,
             )?;
-        let (allowance, mut backing) = self.owner_grant(cx, charge)?;
-        Arc::get_mut(&mut backing)?
-            ._allowance
-            .join(allowance)
-            .ok()?;
+        let (allowance, backing) = self.owner_grant(cx, charge)?;
+        backing.add(allowance)?;
         let owner = Arc::new(FrontFacts {
             reference,
             definition: self.inputs.get(&key)?.definition,

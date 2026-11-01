@@ -168,12 +168,15 @@ impl FrontOutcome {
         }
     }
 }
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ArchivedFront {
-    facts: Reference,
-    memos: [Option<Reference>; 3],
+    facts: Option<Reference>,
+    observations: Arc<FrontObservations>,
 }
-const FRONT_MEMO_PHASES: [QueryKind; 3] = [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes];
+struct FrontObservations {
+    memos: Box<[(crate::memo::MemoKey, Arc<Reads>)]>,
+    _backing: Arc<LiveSourceBacking>,
+}
 struct Input {
     definition: DefId,
     syntax: Reference,
@@ -195,13 +198,50 @@ struct FrontSourceBacking {
 struct LiveSourceBacking {
     _source: Arc<FrontSourceBacking>,
     retention: Arc<Mutex<u64>>,
+    debit: Mutex<FrontDebit>,
+}
+struct FrontDebit {
     charge: u64,
-    _allowance: MemoryReservation,
+    allowance: MemoryReservation,
+    observation: Option<Arc<LiveSourceBacking>>,
+}
+impl LiveSourceBacking {
+    fn add(&self, allowance: MemoryReservation) -> Option<()> {
+        self.debit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .allowance
+            .join(allowance)
+            .ok()
+    }
+    fn split(&self, bytes: u64) -> Option<Arc<Self>> {
+        let mut debit = self.debit.lock().unwrap_or_else(|e| e.into_inner());
+        let next = debit.charge.checked_sub(bytes)?;
+        let allowance = debit.allowance.split(bytes)?;
+        debit.charge = next;
+        let observation = Arc::new(Self {
+            _source: self._source.clone(),
+            retention: self.retention.clone(),
+            debit: Mutex::new(FrontDebit {
+                charge: bytes,
+                allowance,
+                observation: None,
+            }),
+        });
+        // The original value also keeps the transferred read charge until its
+        // last alias drops. The child owns no reference back to this lease.
+        debit.observation = Some(observation.clone());
+        Some(observation)
+    }
 }
 impl Drop for LiveSourceBacking {
     fn drop(&mut self) {
         let mut retention = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-        *retention += self.charge;
+        *retention += self
+            .debit
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .charge;
     }
 }
 pub struct FrontBodyQueries {
@@ -428,6 +468,7 @@ impl FrontBodyQueries {
                 (std::mem::size_of::<Input>()
                     + std::mem::size_of::<FrontOutcome>()
                     + std::mem::size_of::<ArchivedFront>()
+                    + 3 * std::mem::size_of::<(crate::memo::MemoKey, Arc<Reads>)>()
                     + 8 * std::mem::size_of::<crate::memo::MemoKey>()
                     + 32 * std::mem::size_of::<usize>()
                     + std::mem::size_of::<(DefId, Key)>()
@@ -531,13 +572,10 @@ impl FrontBodyQueries {
                     as u64,
             )?
             .checked_add(dead_arms.map_or(0, LintFacts::capture_bytes))?;
-        let (allowance, mut backing) = self.owner_grant(cx, charge)?;
+        let (allowance, backing) = self.owner_grant(cx, charge)?;
         // The complete payload and its lease are one owner. No later failure
         // can consume a debit without retaining the corresponding reservation.
-        Arc::get_mut(&mut backing)?
-            ._allowance
-            .join(allowance)
-            .ok()?;
+        backing.add(allowance)?;
         Some(backing)
     }
     /// Actual phase invocations, including failed or discarded producers.
@@ -607,8 +645,11 @@ impl FrontBodyQueries {
             Arc::new(LiveSourceBacking {
                 _source: self._allowance.clone(),
                 retention: self.retention.clone(),
-                charge,
-                _allowance: backing_allowance,
+                debit: Mutex::new(FrontDebit {
+                    charge,
+                    allowance: backing_allowance,
+                    observation: None,
+                }),
             }),
         ))
     }
@@ -624,15 +665,12 @@ impl FrontBodyQueries {
             Arc<FrontFacts>,
             Arc<LiveSourceBacking>,
         )>::uninit());
-        let (mut allowance, mut backing) = self.owner_grant(
+        let (mut allowance, backing) = self.owner_grant(
             cx,
             LiveSummaryProduct::shared_owner_bytes().checked_add(tuple_bytes)?,
         )?;
         let tuple_grant = allowance.split(tuple_bytes)?;
-        Arc::get_mut(&mut backing)?
-            ._allowance
-            .join(tuple_grant)
-            .ok()?;
+        backing.add(tuple_grant)?;
         let backing = Arc::new((facts, backing));
         let product = LiveSummaryProduct::new_backed(
             (address, action),
@@ -892,19 +930,13 @@ impl FrontBodyQueries {
     /// Actual completed phase reads. This inspection executes no query.
     pub fn memo_keys(&self) -> Vec<crate::memo::MemoKey> {
         let mut keys = BTreeSet::new();
-        for (key, archived) in self
-            .archived
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-        {
-            let definition = self.inputs[key].definition;
-            for (phase, reference) in FRONT_MEMO_PHASES.iter().zip(archived.memos) {
-                if reference.is_some() {
-                    keys.insert(crate::memo::MemoKey::new(*phase, definition));
-                }
-            }
-        }
+        keys.extend(
+            self.archived
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .flat_map(|archived| archived.observations.memos.iter().map(|(key, _)| *key)),
+        );
         keys.extend(
             self.outcomes
                 .lock()
@@ -915,28 +947,14 @@ impl FrontBodyQueries {
         keys.into_iter().collect()
     }
     pub fn memo_snapshot(&self) -> Option<Vec<(crate::memo::MemoKey, Arc<Reads>)>> {
-        let archived = self
-            .archived
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
         let mut rows = BTreeMap::new();
-        for (key, archived) in archived {
-            let input = self.inputs.get(&key)?;
-            for (phase, reference) in FRONT_MEMO_PHASES.iter().zip(archived.memos) {
-                if let Some(reference) = reference {
-                    if reference.len.checked_mul(8)? > input.weight.scratch {
-                        return None;
-                    }
-                    let bytes = self.store.get_content(reference)?;
-                    let reads: Reads = self.input_records.decode(&*self.anchors, &bytes)?;
-                    rows.insert(
-                        crate::memo::MemoKey::new(*phase, input.definition),
-                        Arc::new(reads),
-                    );
-                }
-            }
-        }
+        rows.extend(
+            self.archived
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .flat_map(|archived| archived.observations.memos.iter().cloned()),
+        );
         rows.extend(
             self.outcomes
                 .lock()

@@ -1539,7 +1539,7 @@ impl QueryEngine {
     ) -> Option<hirsel_validate::ExecutionReceipt> {
         let cache = self.result_store.as_ref()?.verifier()?;
         let snapshot = self.signature_snapshot();
-        cache.execution(subject, |package| snapshot.validation_input_digest(package))
+        cache.execution(subject, |package| snapshot.validation_input_digest(package).ok())
     }
     fn load_execution_receipt(
         &mut self,
@@ -2963,16 +2963,13 @@ impl QueryEngine {
         let snapshot = self.signature_snapshot();
         let policy = self.source_verification_policy();
         if let Some(evidence) = self.lowered_verification(definition.path)
-            && evidence.holds(
-                definition,
-                &self.types,
-                policy,
-                snapshot.validation(&definition.path.path().0.package),
-            )
+            && snapshot
+                .validation(&definition.path.path().0.package)
+                .is_ok_and(|views| evidence.holds(definition, &self.types, policy, views))
         {
             return Ok(Some(evidence.clone()));
         }
-        let (report, evidence) = self.validate_lowered_artifact(definition);
+        let (report, evidence) = self.validate_lowered_artifact(definition)?;
         if let Some(error) = hirsel_validate::tooling_limit_error(&report) {
             return Err(error);
         }
@@ -2995,12 +2992,15 @@ impl QueryEngine {
     pub(crate) fn validate_lowered_artifact(
         &mut self,
         definition: &hirsel_tir::DefinitionRef,
-    ) -> (
-        hirsel_validate::Validation,
-        Option<Arc<hirsel_validate::VerifiedDefinition>>,
-    ) {
+    ) -> Result<
+        (
+            hirsel_validate::Validation,
+            Option<Arc<hirsel_validate::VerifiedDefinition>>,
+        ),
+        hirsel_validate::ViewRefusal,
+    > {
         if self.verify == Verify::Off {
-            return (hirsel_validate::Validation::default(), None);
+            return Ok((hirsel_validate::Validation::default(), None));
         }
         let cache = self
             .result_store
@@ -3012,7 +3012,7 @@ impl QueryEngine {
             let package = definition.path.path().0.package.clone();
             self.record_evaluation_validation(
                 package.clone(),
-                snapshot.validation_input_digest(&package),
+                snapshot.validation_input_digest(&package)?,
             );
         }
         let _time = timings::phase(Phase::Verify);
@@ -3020,10 +3020,10 @@ impl QueryEngine {
             definition,
             self.types.clone(),
             |anchor| self.record_anchor_owner(anchor),
-            snapshot.validation(&definition.path.path().0.package),
+            snapshot.validation(&definition.path.path().0.package)?,
             policy,
             cache.as_deref(),
-        );
+        )?;
         if executed {
             timings::count(Count::VRuns);
         }
@@ -3035,7 +3035,7 @@ impl QueryEngine {
                 .entry(definition.path)
                 .or_default() += 1;
         }
-        (report, evidence)
+        Ok((report, evidence))
     }
     /// A body-free native cutoff over the same ordinary Lower query. Metadata
     /// and private execution are checked before V's own body envelope is used.
@@ -3076,7 +3076,7 @@ impl QueryEngine {
                 &lowered.value,
                 self.types.clone(),
                 self.source_verification_policy(),
-                snapshot.validation(&path.0.package),
+                snapshot.validation(&path.0.package)?,
                 &evidence,
             )
         } else {
@@ -3100,7 +3100,7 @@ impl QueryEngine {
             self.types.clone(),
             |path, occurrence| self.record_anchor(path, occurrence),
             self.source_verification_policy(),
-            snapshot.validation(&output.owner().path().0.package),
+            snapshot.validation(&output.owner().path().0.package).ok()?,
         )
     }
     fn verified_lower_output_inner(
@@ -3127,7 +3127,7 @@ impl QueryEngine {
             DefId::intern(path),
             &self.types,
             policy,
-            snapshot.validation(&path.0.package),
+            snapshot.validation(&path.0.package).ok()?,
         )?;
         let metadata: LowerIdentityMetadata = self.decode_record(output.metadata())?;
         if metadata.depth.first.len() != self.depth_limit() as usize + 1
@@ -3259,15 +3259,18 @@ impl QueryEngine {
             entry.verification.lock().unwrap().clone(),
         ) {
             let snapshot = self.signature_snapshot();
-            cache.publish_definition(
-                evaluation_subject(&key, &payload),
-                &definition,
-                self.types.clone(),
-                self.source_verification_policy(),
-                snapshot.validation(&path.0.package),
-                &evidence,
-                &metadata,
-            );
+            // A refused universe publishes no output; the body stays local.
+            if let Ok(views) = snapshot.validation(&path.0.package) {
+                cache.publish_definition(
+                    evaluation_subject(&key, &payload),
+                    &definition,
+                    self.types.clone(),
+                    self.source_verification_policy(),
+                    views,
+                    &evidence,
+                    &metadata,
+                );
+            }
         }
         EncodedWriter {
             types: self.type_records().expect("enabled lower types"),

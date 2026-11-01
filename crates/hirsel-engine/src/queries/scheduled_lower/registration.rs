@@ -293,7 +293,7 @@ impl FrontRegistrationQueries {
         let acceptance = if self.lower.verify == Verify::On {
             Some(self.lower.store.verifier()?.execution(
                 persistent::evaluation_subject(&key, &variant.payload),
-                |package| self.lower.snapshot.validation_input_digest(package),
+                |package| self.lower.snapshot.validation_input_digest(package).ok(),
             )?)
         } else {
             None

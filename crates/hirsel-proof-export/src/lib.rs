@@ -983,7 +983,8 @@ fn validate(export: &Export) -> Result<(), ImportError> {
             signatures
         });
         let validation =
-            hirsel_validate::validate(&definition.tir, &export.types, view, &mut vec![]);
+            hirsel_validate::validate(&definition.tir, &export.types, view, &mut vec![])
+                .map_err(|refusal| refuse(definition.path.to_string(), refusal.to_string()))?;
         if let Some(violation) = validation.violations.first() {
             return Err(refuse(
                 definition.path.to_string(),

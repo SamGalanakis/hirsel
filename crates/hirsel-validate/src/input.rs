@@ -41,7 +41,58 @@ pub struct IdentifiedSignature {
 /// through the cache's ordinary producer; the result must have the same
 /// V digest.
 pub trait SignatureSource: Send + Sync {
-    fn reread(&self, d: DefId) -> Result<hirsel_types::SignatureRef, String>;
+    fn reread(&self, d: DefId) -> Result<hirsel_types::SignatureRef, hirsel_types::QueryError>;
+}
+
+/// Why V could not read a view it holds by identity. A refusal is never a
+/// verdict on the view: no check that met one keeps its result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ViewRefusal {
+    /// The source could not produce the evicted payload again.
+    Unreadable {
+        definition: DefId,
+        cause: hirsel_types::QueryError,
+    },
+    /// The source produced a payload with a different digest: the identity
+    /// V holds is stale.
+    Stale { definition: DefId },
+}
+impl ViewRefusal {
+    pub fn definition(&self) -> DefId {
+        match self {
+            Self::Unreadable { definition, .. } | Self::Stale { definition } => *definition,
+        }
+    }
+}
+impl std::fmt::Display for ViewRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreadable { definition, cause } => {
+                write!(f, "V view {} cannot be read again: {cause:?}", definition.path())
+            }
+            Self::Stale { definition } => write!(
+                f,
+                "V view {} recomputed to a different signature",
+                definition.path()
+            ),
+        }
+    }
+}
+/// A refusal is operational: the source's own resource refusal passes through
+/// unchanged, and anything else names the view V could not read.
+impl From<ViewRefusal> for hirsel_types::QueryError {
+    fn from(refusal: ViewRefusal) -> Self {
+        match refusal {
+            ViewRefusal::Unreadable {
+                cause: cause @ hirsel_types::QueryError::Operational(_),
+                ..
+            } => cause,
+            refusal => Self::Operational(hirsel_types::OperationalFailure {
+                operation: "V view read".into(),
+                message: refusal.to_string(),
+            }),
+        }
+    }
 }
 #[derive(Clone)]
 enum Payload {
@@ -111,39 +162,40 @@ impl IdentifiedSignature {
         }
     }
     /// A scoped view of the payload: it pins the source's row only while held.
-    pub fn signature(&self) -> hirsel_types::SignatureRef {
+    /// An evicted row is produced again; a source that refuses, or produces
+    /// a different view, refuses the read.
+    pub fn signature(&self) -> Result<hirsel_types::SignatureRef, ViewRefusal> {
         match &self.payload {
-            Payload::Held(signature) => signature.clone(),
+            Payload::Held(signature) => Ok(signature.clone()),
             Payload::Sourced { last, source } => {
                 let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(signature) = last.upgrade() {
-                    return signature;
+                    return Ok(signature);
                 }
-                let d = self.definition;
-                let signature = source.reread(d).unwrap_or_else(|error| {
-                    panic!("V view {} cannot be read again: {error}", d.path())
-                });
+                let definition = self.definition;
+                let signature = source
+                    .reread(definition)
+                    .map_err(|cause| ViewRefusal::Unreadable { definition, cause })?;
                 // The cache recomputed the row: it must be the same view.
-                assert_eq!(
-                    digest(&self.types, &signature),
-                    self.digest,
-                    "V view {} recomputed to a different signature",
-                    d.path()
-                );
+                if digest(&self.types, &signature) != self.digest {
+                    return Err(ViewRefusal::Stale { definition });
+                }
                 *last = Arc::downgrade(&signature);
-                signature
+                Ok(signature)
             }
         }
     }
     pub fn digest(&self) -> ValidationDigest {
         self.digest
     }
+    /// V's input of this view. Its digest is known without the payload;
+    /// a sourced payload is read only when the input's signature is.
     pub fn input(&self) -> ViewInput<'_> {
         ViewInput {
             types: &self.types,
-            signature: match &self.payload {
-                Payload::Held(signature) => Pin::Borrowed(signature),
-                Payload::Sourced { .. } => Pin::Scoped(self.signature()),
+            payload: match &self.payload {
+                Payload::Held(signature) => ViewPayload::Borrowed(signature),
+                Payload::Sourced { .. } => ViewPayload::Sourced(self),
             },
             digest: self.digest,
         }
@@ -162,8 +214,13 @@ impl IdentifiedSignature {
 #[derive(Clone)]
 pub struct ViewInput<'a> {
     types: &'a TypeInterner,
-    signature: Pin<'a>,
+    payload: ViewPayload<'a>,
     digest: ValidationDigest,
+}
+#[derive(Clone)]
+enum ViewPayload<'a> {
+    Borrowed(&'a Signature),
+    Sourced(&'a IdentifiedSignature),
 }
 /// A view's payload: borrowed from a universe that holds it, or a scoped
 /// view that pins a cache row only while this input is held.
@@ -185,14 +242,16 @@ impl<'a> ViewInput<'a> {
     pub(crate) fn for_types(&self, types: &TypeInterner) -> bool {
         std::ptr::eq(self.types, types)
     }
-    pub fn signature(&self) -> &Signature {
-        &self.signature
+    /// The view's payload: borrowed, or a scoped view of a sourced row,
+    /// read again if it was evicted.
+    pub fn signature(&self) -> Result<Pin<'a>, ViewRefusal> {
+        match self.payload {
+            ViewPayload::Borrowed(signature) => Ok(Pin::Borrowed(signature)),
+            ViewPayload::Sourced(identified) => identified.signature().map(Pin::Scoped),
+        }
     }
     pub fn digest(&self) -> ValidationDigest {
         self.digest
-    }
-    pub fn into_parts(self) -> (Pin<'a>, ValidationDigest) {
-        (self.signature, self.digest)
     }
 }
 
@@ -327,6 +386,9 @@ pub(crate) struct Reader<'a> {
     /// Scoped views this validation read: each pins its cache row until the
     /// validation ends, and never longer.
     pins: RefCell<crate::hashed::HashMap<DefId, hirsel_types::SignatureRef>>,
+    /// The first view this validation could not read. A check that met one
+    /// still runs to its end, but `finish` refuses its result.
+    refused: RefCell<Option<ViewRefusal>>,
 }
 impl<'a> Reader<'a> {
     pub(crate) fn new(types: &'a TypeInterner, signatures: &'a dyn SignatureLookup) -> Self {
@@ -336,6 +398,7 @@ impl<'a> Reader<'a> {
             reads: RefCell::default(),
             foreign: RefCell::default(),
             pins: RefCell::default(),
+            refused: RefCell::default(),
         }
     }
     fn pin(&self, d: DefId, signature: hirsel_types::SignatureRef) -> &Signature {
@@ -354,14 +417,21 @@ impl<'a> Reader<'a> {
                     .insert(VRead::View(d, view.digest()));
                 None
             }
-            Some(view) => {
-                let (signature, digest) = view.into_parts();
-                self.reads.borrow_mut().insert(VRead::View(d, digest));
-                Some(match signature {
-                    Pin::Borrowed(signature) => signature,
-                    Pin::Scoped(signature) => self.pin(d, signature),
-                })
-            }
+            Some(view) => match view.signature() {
+                Ok(signature) => {
+                    self.reads
+                        .borrow_mut()
+                        .insert(VRead::View(d, view.digest()));
+                    Some(match signature {
+                        Pin::Borrowed(signature) => signature,
+                        Pin::Scoped(signature) => self.pin(d, signature),
+                    })
+                }
+                Err(refusal) => {
+                    self.refused.borrow_mut().get_or_insert(refusal);
+                    None
+                }
+            },
             None => {
                 self.reads.borrow_mut().insert(VRead::Missing(d));
                 None
@@ -398,11 +468,16 @@ impl<'a> Reader<'a> {
             .insert(VRead::UniverseErrors(digest));
         errors
     }
-    /// The reads made so far, sorted and without duplicates.
-    pub(crate) fn finish(self, reads: &mut Vec<VRead>) {
+    /// The reads made so far, sorted and without duplicates, or the refusal
+    /// that voids every result computed with this reader.
+    pub(crate) fn finish(self, reads: &mut Vec<VRead>) -> Result<(), ViewRefusal> {
+        if let Some(refusal) = self.refused.into_inner() {
+            return Err(refusal);
+        }
         let mut own: Vec<_> = self.reads.into_inner().into_iter().collect();
         own.sort_unstable();
         reads.extend(own);
+        Ok(())
     }
 }
 
@@ -413,19 +488,20 @@ pub struct ViewVerdict {
     pub reads: Vec<VRead>,
 }
 
-/// V's verdict on the view of `d`, read through `signatures`.
+/// V's verdict on the view of `d`, read through `signatures`, or the
+/// refusal of a view it had to read.
 pub fn check_view(
     t: &TypeInterner,
     d: DefId,
     signature: &Signature,
     signatures: &dyn SignatureLookup,
-) -> ViewVerdict {
+) -> Result<ViewVerdict, ViewRefusal> {
     let reader = Reader::new(t, signatures);
     let error = signature_error(t, d, signature, &reader)
         .or_else(|| reader.input_errors().into_iter().next());
     let mut reads = vec![];
-    reader.finish(&mut reads);
-    ViewVerdict { error, reads }
+    reader.finish(&mut reads)?;
+    Ok(ViewVerdict { error, reads })
 }
 
 /// The signature errors of one universe, with their digest.
@@ -486,21 +562,22 @@ impl ValidatedSignatures {
         t: &TypeInterner,
         d: DefId,
         signatures: &dyn SignatureLookup,
-    ) -> Arc<ViewVerdict> {
+    ) -> Result<Arc<ViewVerdict>, ViewRefusal> {
         self.verdict_from(t, d, signatures, None)
     }
     /// The verdict on view `d` of `signatures`: one this store or `previous`
-    /// holds whose reads still hold, or a new one.
+    /// holds whose reads still hold, or a new one. A refused read keeps
+    /// nothing and refuses the verdict.
     pub fn verdict_from(
         &mut self,
         t: &TypeInterner,
         d: DefId,
         signatures: &dyn SignatureLookup,
         previous: Option<&ValidatedSignatures>,
-    ) -> Arc<ViewVerdict> {
+    ) -> Result<Arc<ViewVerdict>, ViewRefusal> {
         let input = signatures.view(d).expect("a verdict names a view");
         if !input.for_types(t) {
-            return Arc::new(ViewVerdict {
+            return Ok(Arc::new(ViewVerdict {
                 error: Some(Violation {
                     body: None,
                     block: None,
@@ -508,7 +585,7 @@ impl ValidatedSignatures {
                     kind: ViolationKind::InvalidSignature(d.path().clone()),
                 }),
                 reads: vec![],
-            });
+            }));
         }
         let digest = input.digest();
         let holds = |v: &&Arc<ViewVerdict>| {
@@ -521,23 +598,24 @@ impl ValidatedSignatures {
             .get(&digest)
             .and_then(|kept| kept.iter().find(holds))
         {
-            return verdict.clone();
+            return Ok(verdict.clone());
         }
-        let verdict = previous
+        let kept = previous
             .filter(|previous| previous.policy == self.policy)
             .and_then(|previous| previous.verdicts.get(&digest))
-            .and_then(|kept| kept.iter().find(holds).cloned())
-            .unwrap_or_else(|| {
-                self.cache.as_ref().map_or_else(
-                    || Arc::new(check_view(t, d, input.signature(), signatures)),
-                    |cache| cache.view_verdict(t, d, input.clone(), signatures, self.policy),
-                )
-            });
+            .and_then(|kept| kept.iter().find(holds).cloned());
+        let verdict = match kept {
+            Some(verdict) => verdict,
+            None => match &self.cache {
+                None => Arc::new(check_view(t, d, &*input.signature()?, signatures)?),
+                Some(cache) => cache.view_verdict(t, d, input.clone(), signatures, self.policy)?,
+            },
+        };
         self.verdicts
             .entry(digest)
             .or_default()
             .push(verdict.clone());
-        verdict
+        Ok(verdict)
     }
     /// The signature errors of the universe `views` (every view of
     /// `signatures`, in DefPath order).
@@ -546,13 +624,13 @@ impl ValidatedSignatures {
         t: &TypeInterner,
         views: impl IntoIterator<Item = DefId>,
         signatures: &dyn SignatureLookup,
-    ) -> UniverseErrors {
+    ) -> Result<UniverseErrors, ViewRefusal> {
         let _batch = self.publication_batch();
-        let errors = views
-            .into_iter()
-            .filter_map(|d| self.verdict(t, d, signatures).error.clone())
-            .collect();
-        UniverseErrors::new(errors)
+        let mut errors = vec![];
+        for d in views {
+            errors.extend(self.verdict(t, d, signatures)?.error.clone());
+        }
+        Ok(UniverseErrors::new(errors))
     }
     /// How many verdicts the store holds.
     pub fn len(&self) -> usize {
@@ -658,7 +736,7 @@ impl SignatureLookup for SignatureMap {
             let digest = *v.digest.get_or_init(|| digest(&self.types, &v.signature));
             ViewInput {
                 types: &self.types,
-                signature: Pin::Borrowed(&v.signature),
+                payload: ViewPayload::Borrowed(&v.signature),
                 digest,
             }
         })
@@ -678,7 +756,11 @@ impl SignatureLookup for SignatureMap {
             UniverseErrors::new(
                 self.views
                     .iter()
-                    .filter_map(|(d, v)| check_view(&self.types, *d, &v.signature, self).error)
+                    .filter_map(|(d, v)| {
+                        check_view(&self.types, *d, &v.signature, self)
+                            .expect("a held map has no sourced view to refuse")
+                            .error
+                    })
                     .collect(),
             )
         });

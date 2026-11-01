@@ -109,16 +109,20 @@ impl ValidatedEvaluation {
         site: Span,
     ) -> DependencyProduct<Self> {
         let mut reads = ReadsBuilder::new();
-        if verify == Verify::On {
+        // A refused universe read refuses the evaluation it would identify.
+        let universe = if verify == Verify::On {
             FrozenProvider::new(
                 snapshot,
                 prepared.definition.path.path().0.package.clone(),
                 &mut reads,
             )
-            .validation_universe();
-        }
+            .validation_universe()
+            .map(drop)
+        } else {
+            Ok(())
+        };
         DependencyProduct {
-            result: Self::new(prepared, Some(snapshot), verify, site),
+            result: universe.and_then(|()| Self::new(prepared, Some(snapshot), verify, site)),
             reads: reads.finish().expect("one immutable validation universe"),
         }
     }

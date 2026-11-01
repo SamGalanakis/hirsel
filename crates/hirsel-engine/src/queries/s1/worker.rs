@@ -1096,16 +1096,17 @@ impl<'a, S: TirSource + ?Sized> TaskWorker<'a, S> {
         }
         let mut reads = ReadsBuilder::new();
         FrozenProvider::new(&inputs.snapshot, path.0.package.clone(), &mut reads)
-            .validation_universe();
+            .validation_universe()?;
         self.merge(&reads.finish().expect("one immutable validation universe"));
+        let views = inputs
+            .snapshot
+            .validation(&definition.path.path().0.package)?;
         if let Some(verification) = verification.filter(|evidence| {
             evidence.holds(
                 definition,
                 inputs.snapshot.types(),
                 inputs.snapshot.source_verification_policy(),
-                inputs
-                    .snapshot
-                    .validation(&definition.path.path().0.package),
+                views,
             )
         }) {
             let acceptance = verification.accepted_artifact();
@@ -1115,7 +1116,7 @@ impl<'a, S: TirSource + ?Sized> TaskWorker<'a, S> {
         let _time = timings::phase(Phase::Verify);
         let (report, ran, acceptance, verification) = inputs
             .snapshot
-            .validate_source_artifact(definition, |anchor| self.source.anchor_owner(anchor));
+            .validate_source_artifact(definition, |anchor| self.source.anchor_owner(anchor))?;
         self.record_acceptance(acceptance.clone());
         if ran {
             timings::count(Count::VRuns);

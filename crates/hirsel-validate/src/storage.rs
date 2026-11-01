@@ -1,7 +1,7 @@
 //! Independent whole-program storage proof from executable TIR. No source CFG
 //! or producer behavior participates in reconstruction. Declared profiles are
 //! checked only after the executable fixed point and read obligations settle.
-use crate::{Reader, SignatureLookup, VRead, typing, validate_structure};
+use crate::{Reader, VRead, typing, validate_structure};
 use hirsel_syntax::{ContentHash, DefId, DefPath, NameSite, PassingMode, UnaryOp};
 use hirsel_tir as tir;
 use hirsel_type_analysis::storage::{StorageDomain, program};
@@ -53,7 +53,7 @@ pub struct StorageValidation {
 pub fn validate_program(
     types: &TypeInterner,
     definitions: &[tir::DefinitionRef],
-    signatures: &dyn SignatureLookup,
+    signatures: &crate::SignatureMap,
     constants: &BTreeMap<DefPath, tir::Materialized>,
     instances: &tir::InstanceBodies,
     declared: &[CallableStorageProfile],
@@ -68,7 +68,9 @@ pub fn validate_program(
         instances,
         &mut validation,
     );
-    reader.finish(&mut validation.reads.declarations);
+    reader
+        .finish(&mut validation.reads.declarations)
+        .expect("a held map has no sourced view to refuse");
     let mut claims = BTreeMap::new();
     for claim in declared {
         if claims.insert(claim.callable, &claim.profile).is_some() {

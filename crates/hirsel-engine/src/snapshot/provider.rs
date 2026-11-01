@@ -88,48 +88,51 @@ impl<'a> FrozenProvider<'a> {
         Ok(view.clone())
     }
     /// V's digest of `d`'s view in the owner's universe, recording
-    /// `ValidationView(d)`.
-    pub fn validation_view(&mut self, d: DefId) -> Option<hirsel_validate::ValidationDigest> {
+    /// `ValidationView(d)`. A refused universe records no read.
+    pub fn validation_view(
+        &mut self,
+        d: DefId,
+    ) -> Result<Option<hirsel_validate::ValidationDigest>, QueryError> {
         let digest = self
             .snapshot
-            .validation(&self.owner)
+            .validation(&self.owner)?
             .view(d)
             .map(|input| input.digest());
         self.reads.record(
             ReadKey::ValidationView(d),
             digest.map_or_else(ContentHash::default, |digest| digest.0),
         );
-        digest
+        Ok(digest)
     }
     /// Every view in the originating package's base V universe. This is a
     /// separate receipt from its errors: an unchanged error-free base can
     /// have a different verdict when an evaluation replaces its owner.
-    pub fn validation_universe(&mut self) -> ContentHash {
-        let digest = self.snapshot.validation_input_digest(&self.owner);
+    pub fn validation_universe(&mut self) -> Result<ContentHash, QueryError> {
+        let digest = self.snapshot.validation_input_digest(&self.owner)?;
         self.reads.record(
             ReadKey::ValidationUniverse(PackageKey::of(&self.owner)),
             digest,
         );
-        digest
+        Ok(digest)
     }
     /// The owner universe's V errors, recording `UniverseErrors`.
-    pub fn universe_errors(&mut self) -> ContentHash {
-        let (digest, _) = self.snapshot.validation(&self.owner).universe_errors();
+    pub fn universe_errors(&mut self) -> Result<ContentHash, QueryError> {
+        let (digest, _) = self.snapshot.validation(&self.owner)?.universe_errors();
         self.reads.record(ReadKey::UniverseErrors, digest);
-        digest
+        Ok(digest)
     }
     /// The owner universe's first heap role, recording `FirstHeap`.
-    pub fn first_heap(&mut self) -> Option<DefId> {
+    pub fn first_heap(&mut self) -> Result<Option<DefId>, QueryError> {
         let heap = self
             .snapshot
-            .validation(&self.owner)
+            .validation(&self.owner)?
             .first_heap()
             .map(|(d, _)| d);
         self.reads.record(
             ReadKey::FirstHeap,
             heap.map_or_else(ContentHash::default, |d| d.path().fingerprint()),
         );
-        heap
+        Ok(heap)
     }
     /// `DeclarationCandidates(d)`, recorded.
     pub fn declaration_candidates(&mut self, d: DefId) -> Option<ContentHash> {

@@ -81,7 +81,8 @@ mod variant_brands;
 use input::Reader;
 pub use input::{
     IdentifiedSignature, Pin, SignatureLookup, SignatureMap, SignatureSource, UniverseErrors,
-    VRead, ValidatedSignatures, ValidationDigest, ViewInput, ViewVerdict, check_view, digest,
+    VRead, ValidatedSignatures, ValidationDigest, ViewInput, ViewRefusal, ViewVerdict, check_view,
+    digest,
     errors_digest, read_holds,
 };
 pub use instances::{
@@ -196,42 +197,45 @@ pub enum ViolationKind {
 /// violations, never assumed valid. Call and owner-origin relationships are
 /// checked from executable producer edges. Unit bodies without parameters need
 /// no owner snapshot; if supplied, its result and parameter types are checked too.
-/// Every view V reads is appended to `reads` (`input`).
+/// Every view V reads is appended to `reads` (`input`). A view V cannot read
+/// refuses the validation: it is never a verdict.
 pub fn validate(
     definition: &Definition,
     t: &TypeInterner,
     signatures: &dyn SignatureLookup,
     reads: &mut Vec<VRead>,
-) -> Validation {
-    validate_rows(
+) -> Result<Validation, ViewRefusal> {
+    Ok(validate_rows(
         hirsel_product_codec::TirView::Live(definition),
         t,
         signatures,
         reads,
-    )
-    .expect("live TIR bindings are present")
+    )?
+    .expect("live TIR bindings are present"))
 }
 
 /// Independently validate live or checked indexed TIR. Missing immutable source
-/// or type bindings are a read failure. Every semantic obligation and recorded
-/// signature read uses the same checker as ordinary live input.
+/// or type bindings are a read failure (`Ok(None)`). Every semantic obligation
+/// and recorded signature read uses the same checker as ordinary live input.
 pub fn validate_rows(
     definition: hirsel_product_codec::TirView<'_>,
     t: &TypeInterner,
     signatures: &dyn SignatureLookup,
     reads: &mut Vec<VRead>,
-) -> Option<Validation> {
+) -> Result<Option<Validation>, ViewRefusal> {
     if let hirsel_product_codec::TirView::Archived(archive) = definition
         && !archive.uses_types(t)
     {
-        return None;
+        return Ok(None);
     }
     let started = profile_start();
-    let definition = ReadDefinition::new(definition)?;
+    let Some(definition) = ReadDefinition::new(definition) else {
+        return Ok(None);
+    };
     let reader = Reader::new(t, signatures);
     let mut validation = validate_input(&definition, t, &reader);
     validation.violations.extend(reader.input_errors());
-    reader.finish(reads);
+    reader.finish(reads)?;
     if let Some(started) = started {
         eprintln!(
             "hirsel-validate-profile\t{}\t{}\t{}\t{}",
@@ -241,7 +245,7 @@ pub fn validate_rows(
             validation.violations.len()
         );
     }
-    Some(validation)
+    Ok(Some(validation))
 }
 
 /// Independent scoped proof qualification in addition to ordinary V acceptance.
@@ -252,7 +256,7 @@ pub fn qualify_scoped_transport(
     t: &TypeInterner,
     signatures: &dyn SignatureLookup,
     reads: &mut Vec<VRead>,
-) -> Validation {
+) -> Result<Validation, ViewRefusal> {
     let reader = Reader::new(t, signatures);
     let definition = ReadDefinition::live(definition);
     let mut result = validate_input(&definition, t, &reader);
@@ -262,8 +266,8 @@ pub fn qualify_scoped_transport(
             .extend(scoped_transport::check(&definition, t, &reader));
     }
     result.violations.extend(reader.input_errors());
-    reader.finish(reads);
-    result
+    reader.finish(reads)?;
+    Ok(result)
 }
 
 fn profile_start() -> Option<std::time::Instant> {
@@ -743,7 +747,8 @@ fn format_association(t: &TypeInterner, signature: &Signature, signatures: &Read
 /// boundary, without introducing a dependency on the interpreter.
 #[track_caller]
 pub fn assert_valid(definition: &Definition, t: &TypeInterner, signatures: &dyn SignatureLookup) {
-    let result = validate(definition, t, signatures, &mut vec![]);
+    let result = validate(definition, t, signatures, &mut vec![])
+        .unwrap_or_else(|refusal| panic!("lowering test universe refused a read: {refusal}"));
     assert!(
         result.violations.is_empty(),
         "invalid typed IR: {:#?}",

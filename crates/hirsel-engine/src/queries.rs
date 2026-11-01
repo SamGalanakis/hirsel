@@ -2337,23 +2337,31 @@ impl QueryEngine {
         // compiling it does not itself execute it in this receipt's context.
         let (_, acceptance, selections) = self.end_evaluation_validation();
         let mut verification = None;
-        if let Ok(lowered) = &result {
-            if self.verify == Verify::On
-                && self.lower_requires_execution(definition, &Reads::empty())
-            {
-                let package = definition.0.package.clone();
-                let digest = self.signature_snapshot().validation_input_digest(&package);
-                self.record_evaluation_validation(package, digest);
+        if result.is_ok()
+            && self.verify == Verify::On
+            && self.lower_requires_execution(definition, &Reads::empty())
+        {
+            let package = definition.0.package.clone();
+            match self.signature_snapshot().validation_input_digest(&package) {
+                Ok(digest) => self.record_evaluation_validation(package, digest),
+                Err(refusal) => result = Err(refusal.into()),
             }
-            let (report, evidence) = self.validate_lowered_artifact(&lowered.value);
-            verification = evidence;
-            if let Some(error) = hirsel_validate::tooling_limit_error(&report) {
-                result = Err(error);
-            } else if !report.violations.is_empty() {
-                result = Err(QueryError::Operational(hirsel_types::OperationalFailure {
-                    operation: "TIR validation".into(),
-                    message: format!("{definition:?}: {:?}", report.violations),
-                }));
+        }
+        if let Ok(lowered) = &result {
+            match self.validate_lowered_artifact(&lowered.value) {
+                // A refused read is no verdict: the body is not kept as lowered.
+                Err(refusal) => result = Err(refusal.into()),
+                Ok((report, evidence)) => {
+                    verification = evidence;
+                    if let Some(error) = hirsel_validate::tooling_limit_error(&report) {
+                        result = Err(error);
+                    } else if !report.violations.is_empty() {
+                        result = Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                            operation: "TIR validation".into(),
+                            message: format!("{definition:?}: {:?}", report.violations),
+                        }));
+                    }
+                }
             }
         }
         let executed = self
@@ -2821,7 +2829,7 @@ pub(crate) fn runtime_type_catalog<V: Into<hirsel_interp::aggregate::SerializedV
     for (view, _) in &views {
         nominals.extend(hirsel_interp::aggregate::Nominal::of(
             &types,
-            &view.signature(),
+            &view.signature()?,
             &mut finalizer,
         )?);
     }

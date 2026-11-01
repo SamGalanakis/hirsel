@@ -135,27 +135,30 @@ impl FrontLowerQueries {
             let mut verified = None;
             let mut acceptance = None;
             if self.verify == Verify::On {
+                // A refused universe reads no stored body: it is a miss.
+                let views = self.snapshot.validation(&path.0.package).ok()?;
                 if self.lowering.is_none() {
                     let output = self.store.verifier()?.definition_output(
                         persistent::evaluation_subject(key, &descriptor),
                         definition,
                         self.snapshot.types(),
                         self.snapshot.source_verification_policy(),
-                        self.snapshot.validation(&path.0.package),
+                        views,
                     )?;
                     if !output.matches_archive(
                         &decoded,
                         self.snapshot.types().clone(),
                         |anchor| self.anchors.record_owner(anchor),
                         self.snapshot.source_verification_policy(),
-                        self.snapshot.validation(&path.0.package),
+                        views,
                     ) {
                         return None;
                     }
                 }
                 let (report, ran, accepted, evidence) = self
                     .snapshot
-                    .validate_source_artifact(&decoded, |anchor| self.anchors.record_owner(anchor));
+                    .validate_source_artifact(&decoded, |anchor| self.anchors.record_owner(anchor))
+                    .ok()?;
                 if ran {
                     timings::count(Count::VRuns);
                     self.count(path, |work| work.validation_runs += 1);
@@ -173,7 +176,7 @@ impl FrontLowerQueries {
                         &decoded,
                         self.snapshot.types().clone(),
                         self.snapshot.source_verification_policy(),
-                        self.snapshot.validation(&path.0.package),
+                        views,
                         &evidence,
                         &[],
                     )
@@ -239,7 +242,7 @@ impl FrontLowerQueries {
                 self.store
                     .verifier()?
                     .execution(execution_subject, |package| {
-                        self.snapshot.validation_input_digest(package)
+                        self.snapshot.validation_input_digest(package).ok()
                     })?,
             )
         } else {

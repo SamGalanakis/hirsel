@@ -23,10 +23,11 @@ pub struct Nominal {
 /// innermost open recording, so the evaluation that read it can be retired
 /// when the view changes, an opaque owner's private shape included.
 /// A declared view held by identity: each read is a scoped view of the
-/// signature from its cache, which may have evicted and recomputed it.
+/// signature from its cache, which may have evicted and recomputed it, or
+/// the cache's refusal to produce it again.
 pub trait ViewIdentity: Send + Sync + std::fmt::Debug {
     fn definition(&self) -> hirsel_syntax::DefId;
-    fn signature(&self) -> hirsel_types::SignatureRef;
+    fn signature(&self) -> Result<hirsel_types::SignatureRef, hirsel_types::QueryError>;
 }
 /// One declared view a serialization names: held, or by identity.
 #[derive(Clone, Debug)]
@@ -36,9 +37,9 @@ pub enum SerializedView {
 }
 impl SerializedView {
     /// A scoped view of the signature, pinning its cache row only while held.
-    pub fn signature(&self) -> hirsel_types::SignatureRef {
+    pub fn signature(&self) -> Result<hirsel_types::SignatureRef, hirsel_types::QueryError> {
         match self {
-            Self::Held(signature) => signature.clone(),
+            Self::Held(signature) => Ok(signature.clone()),
             Self::Identified(identity) => identity.signature(),
         }
     }
@@ -119,7 +120,7 @@ impl Views {
         let Some((view, digest)) = rows.view(path)? else {
             return Ok(None);
         };
-        let nominal = Nominal::of(types, &view.signature(), |drop| rows.finalizer(drop))?;
+        let nominal = Nominal::of(types, &view.signature()?, |drop| rows.finalizer(drop))?;
         Ok(Some(Arc::new(Row {
             view,
             digest,
@@ -218,7 +219,8 @@ impl Serialization {
         }
     }
     /// A scoped view of `path`'s signature, recording the read. A row that
-    /// fails records nothing: the evaluation that read it fails with it.
+    /// A scoped view of `path`'s signature, recording the read. A row that
+    /// fails, or a view its cache refuses to produce again, refuses the read.
     pub fn get(&self, path: &DefPath) -> Result<Option<hirsel_types::SignatureRef>, QueryError> {
         let view = self.views.get(path)?;
         if let Some(recording) = self.recordings.lock().unwrap().last_mut() {
@@ -227,7 +229,7 @@ impl Serialization {
                 view.as_ref().map_or_else(ContentHash::default, |v| v.1),
             );
         }
-        Ok(view.map(|(view, _)| view.signature()))
+        view.map(|(view, _)| view.signature()).transpose()
     }
     /// `path`'s nominal facts from a demanded row; a held table has none.
     fn nominal(&self, path: &DefPath) -> Result<Option<Nominal>, QueryError> {

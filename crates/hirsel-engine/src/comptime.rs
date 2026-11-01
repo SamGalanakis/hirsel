@@ -245,7 +245,7 @@ pub(crate) fn validate_evaluation(
     let (report, acceptance) = match verify {
         Verify::On => {
             let _timing = timings::phase(Phase::Verify);
-            snapshot.validate_private_artifact(definition, Arc::new(artifact), origin)
+            snapshot.validate_private_artifact(definition, Arc::new(artifact), origin)?
         }
         Verify::Off => (hirsel_validate::Validation::default(), None),
     };
@@ -841,7 +841,7 @@ impl crate::queries::s1::DependencySource for EngineDependencies<'_> {
             if engine.verify == Verify::On && !engine.evaluation_validation.is_empty() {
                 let digest = engine
                     .signature_snapshot()
-                    .validation_input_digest(&path.0.package);
+                    .validation_input_digest(&path.0.package)?;
                 engine.record_evaluation_validation(path.0.package.clone(), digest);
             }
             let signature = engine.item_signature(path)?.value;
@@ -949,7 +949,12 @@ impl QueryEngine {
             receipt
                 .contexts()
                 .iter()
-                .all(|(package, digest)| snapshot.validation_input_digest(package) == *digest)
+                .all(|(package, digest)| {
+                    // A refused read does not hold: the evaluation runs again.
+                    snapshot
+                        .validation_input_digest(package)
+                        .is_ok_and(|current| current == *digest)
+                })
         })
     }
     pub(crate) fn merge_lower_acceptance(
@@ -982,9 +987,11 @@ impl QueryEngine {
         }
         if let Some(rows) = validation {
             let snapshot = self.signature_snapshot();
-            return rows
-                .iter()
-                .all(|(package, digest)| snapshot.validation_input_digest(package) == *digest);
+            return rows.iter().all(|(package, digest)| {
+                snapshot
+                    .validation_input_digest(package)
+                    .is_ok_and(|current| current == *digest)
+            });
         }
         executed
             .iter()
@@ -1409,7 +1416,7 @@ impl QueryEngine {
             let package = &prepared.definition.path.path().0.package;
             self.record_evaluation_validation(
                 package.clone(),
-                snapshot.validation_input_digest(package),
+                snapshot.validation_input_digest(package)?,
             );
         }
         let validated = crate::queries::s1::ValidatedEvaluation::new(

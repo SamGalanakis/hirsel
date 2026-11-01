@@ -32,8 +32,8 @@ impl ViewIdentity for Identity {
     fn definition(&self) -> DefId {
         self.0.definition()
     }
-    fn signature(&self) -> SignatureRef {
-        self.0.signature()
+    fn signature(&self) -> Result<SignatureRef, QueryError> {
+        self.0.signature().map_err(QueryError::from)
     }
 }
 use hirsel_interp::aggregate::ViewIdentity;
@@ -281,7 +281,8 @@ impl SignatureSnapshot {
         previous: Option<&SignatureSnapshot>,
     ) -> Self {
         let snapshot = Self::build(epoch, types, signatures, private, previous);
-        snapshot.validation_state();
+        // A refused build publishes nothing; its first reader builds it again.
+        let _ = snapshot.validation_state();
         snapshot
     }
     fn build(
@@ -367,7 +368,7 @@ impl SignatureSnapshot {
         pending.unwrap_or_else(|| {
             // An initializer has taken the inputs but has not yet published.
             // Join that initializer after releasing the short input lock.
-            self.validation_state();
+            let _ = self.validation_state();
             ValidationCandidates {
                 previous: self.validation.get().cloned(),
             }
@@ -416,11 +417,11 @@ impl SignatureSnapshot {
             Box::new(rows),
         ))
     }
-    fn validation_state(&self) -> &ValidationState {
-        let state = self.validation_universe();
+    fn validation_state(&self) -> Result<&ValidationState, hirsel_validate::ViewRefusal> {
+        let state = self.validation_universe()?;
         self.published
             .get_or_init(|| self.publish_dependency_universes(state));
-        state
+        Ok(state)
     }
     /// Publish the summary of every source dependency this snapshot computed
     /// from its full table. A dependency is never under check here: its
@@ -463,17 +464,34 @@ impl SignatureSnapshot {
             );
         }
     }
-    fn validation_universe(&self) -> &ValidationState {
-        self.validation.get_or_init(|| {
+    /// V's universe of this snapshot, built once. A build that meets a
+    /// refused view read publishes nothing and keeps its inputs, so the next
+    /// demand builds it again.
+    fn validation_universe(&self) -> Result<&ValidationState, hirsel_validate::ViewRefusal> {
+        if let Some(state) = self.validation.get() {
+            return Ok(&**state);
+        }
+        // The input lock serializes builders; a later one finds the state.
+        let mut inputs = self.validation_inputs.lock().unwrap();
+        if let Some(state) = self.validation.get() {
+            return Ok(&**state);
+        }
+        let previous = inputs
+            .as_ref()
+            .expect("validation inputs remain until a universe is published")
+            .previous
+            .clone();
+        let state = self.build_validation(previous.as_deref())?;
+        *inputs = None;
+        Ok(&**self.validation.get_or_init(|| state))
+    }
+    fn build_validation(
+        &self,
+        previous: Option<&ValidationState>,
+    ) -> Result<Arc<ValidationState>, hirsel_validate::ViewRefusal> {
+        {
             let _timing = hirsel_intern::timings::phase(hirsel_intern::timings::Phase::Verify);
             let t = &self.types;
-            let ValidationCandidates { previous } = self
-                .validation_inputs
-                .lock()
-                .unwrap()
-                .take()
-                .expect("OnceLock consumes validation inputs once");
-            let previous = previous.as_deref();
             let old = previous.map(|p| &p.validated);
             let mut validated =
                 ValidatedSignatures::with_cache(self.verifier.clone(), self.verifier_policy);
@@ -526,7 +544,7 @@ impl SignatureSnapshot {
                     ),
                     validated,
                     old,
-                );
+                )?;
                 let heap = |package: &PackageId| {
                     let closure = self.visible(package)?;
                     let views = checked
@@ -548,7 +566,7 @@ impl SignatureSnapshot {
                     .iter()
                     .all(|(package, _)| heap(package) == Some(first))
                 {
-                    return table;
+                    return Ok(table);
                 }
                 ViewTable::from_views(
                     t,
@@ -561,7 +579,7 @@ impl SignatureSnapshot {
                     old,
                 )
             };
-            let views = Arc::new(universe(None, &mut validated));
+            let views = Arc::new(universe(None, &mut validated)?);
             // Dependency packages cannot observe their importers. Keep every
             // selected dependency and registry row in each actual V universe,
             // including valid rows, private replacements and heap/error inputs.
@@ -583,7 +601,7 @@ impl SignatureSnapshot {
                 {
                     views.clone()
                 } else {
-                    Arc::new(universe(Some(&visible), &mut validated))
+                    Arc::new(universe(Some(&visible), &mut validated)?)
                 };
                 bases.insert(package.clone(), base);
             }
@@ -632,20 +650,20 @@ impl SignatureSnapshot {
                 .into_iter()
                 .map(|(package, replaced)| {
                     let base = bases.get(&package).unwrap_or(&views).clone();
-                    (
+                    Ok((
                         package,
-                        PackageViews::new(t, base, replaced, &mut validated, old),
-                    )
+                        PackageViews::new(t, base, replaced, &mut validated, old)?,
+                    ))
                 })
-                .collect();
-            Arc::new(ValidationState {
+                .collect::<Result<_, hirsel_validate::ViewRefusal>>()?;
+            Ok(Arc::new(ValidationState {
                 views,
                 bases,
                 packages,
                 installed: installed_universes,
                 validated,
-            })
-        })
+            }))
+        }
     }
     pub(crate) fn with_lookup(mut self, lookup: LookupInput) -> Self {
         self.lookup = lookup;
@@ -670,12 +688,15 @@ impl SignatureSnapshot {
         &self,
         definition: impl Into<hirsel_validate::DefinitionInput<'input>>,
         owner: impl FnMut(hirsel_span::Anchor) -> Option<(DefPath, u32)>,
-    ) -> (
-        hirsel_validate::Validation,
-        bool,
-        Option<hirsel_validate::AcceptedArtifact>,
-        Option<hirsel_validate::VerifiedDefinition>,
-    ) {
+    ) -> Result<
+        (
+            hirsel_validate::Validation,
+            bool,
+            Option<hirsel_validate::AcceptedArtifact>,
+            Option<hirsel_validate::VerifiedDefinition>,
+        ),
+        hirsel_validate::ViewRefusal,
+    > {
         let definition = definition.into();
         let path = match definition {
             hirsel_validate::DefinitionInput::Live(value) => value.path,
@@ -687,7 +708,7 @@ impl SignatureSnapshot {
             definition,
             self.types.clone(),
             owner,
-            self.validation(&path.path().0.package),
+            self.validation(&path.path().0.package)?,
             self.source_verification_policy(),
             self.verifier.as_deref(),
         )
@@ -697,11 +718,14 @@ impl SignatureSnapshot {
         definition: &hirsel_tir::Definition,
         signature: SignatureRef,
         origin: Option<&(hirsel_span::Anchor, DefPath, u32)>,
-    ) -> (
-        hirsel_validate::Validation,
-        Option<hirsel_validate::AcceptedArtifact>,
-    ) {
-        let views = self.validation_with(&definition.path.path().0.package, signature.clone());
+    ) -> Result<
+        (
+            hirsel_validate::Validation,
+            Option<hirsel_validate::AcceptedArtifact>,
+        ),
+        hirsel_validate::ViewRefusal,
+    > {
+        let views = self.validation_with(&definition.path.path().0.package, signature.clone())?;
         let artifact = hirsel_validate::Artifact::private(
             definition,
             self.types.clone(),
@@ -718,11 +742,11 @@ impl SignatureSnapshot {
             self.verifier_policy,
             self.verifier.as_deref(),
             &mut vec![],
-        );
+        )?;
         if ran {
             hirsel_intern::timings::count(hirsel_intern::timings::Count::VRuns);
         }
-        (report, acceptance)
+        Ok((report, acceptance))
     }
     /// Resolve a provider lookup as the engine's provider does: a path naming
     /// a definition this snapshot holds (or a source builtin), else a bare
@@ -847,8 +871,9 @@ impl SignatureSnapshot {
         self: &Arc<Self>,
         entry: Option<hirsel_tir::BodyId>,
     ) -> hirsel_interp::aggregate::RuntimeTypes {
-        // Rows name V's identities, so V settles before the first row.
-        self.validation_state();
+        // Rows name V's identities, so V settles before the first row. A
+        // refused universe publishes nothing; a row that reads it builds it again.
+        let _ = self.validation_state();
         crate::queries::runtime_types_over(
             self.types.clone(),
             hirsel_interp::aggregate::Serialization::demanded(
@@ -866,10 +891,12 @@ impl SignatureSnapshot {
         &self,
         d: DefId,
     ) -> Option<Result<(SignatureRef, ValidationDigest), QueryError>> {
-        Some(
-            self.representation_identity(d)?
-                .map(|view| (view.signature(), view.digest())),
-        )
+        Some(self.representation_identity(d)?.and_then(|view| {
+            Ok((
+                view.signature().map_err(QueryError::from)?,
+                view.digest(),
+            ))
+        }))
     }
     /// The identity of that view: holding it never pins a header row.
     pub(crate) fn representation_identity(
@@ -916,30 +943,39 @@ impl SignatureSnapshot {
         Some(Ok(product.identified().clone()))
     }
     /// V's verdicts on this snapshot's views.
-    pub fn validated(&self) -> &ValidatedSignatures {
-        &self.validation_state().validated
+    pub fn validated(&self) -> Result<&ValidatedSignatures, hirsel_validate::ViewRefusal> {
+        Ok(&self.validation_state()?.validated)
     }
     /// The universe V validates `package`'s bodies against.
-    pub fn validation(&self, package: &PackageId) -> &dyn hirsel_validate::CheckedEnvironment {
-        let state = self.validation_state();
-        match state.packages.get(package) {
+    pub fn validation(
+        &self,
+        package: &PackageId,
+    ) -> Result<&dyn hirsel_validate::CheckedEnvironment, hirsel_validate::ViewRefusal> {
+        let state = self.validation_state()?;
+        Ok(match state.packages.get(package) {
             Some(views) => views,
             None => &**state.base(package),
-        }
+        })
     }
     /// The complete input of a package's base V universe. Artifact overlays
     /// record this before replacing an owner, preserving their source context.
-    pub fn validation_input_digest(&self, package: &PackageId) -> ContentHash {
-        let state = self.validation_state();
-        match state.packages.get(package) {
+    pub fn validation_input_digest(
+        &self,
+        package: &PackageId,
+    ) -> Result<ContentHash, hirsel_validate::ViewRefusal> {
+        let state = self.validation_state()?;
+        Ok(match state.packages.get(package) {
             Some(views) => views.input_digest(),
             None => state.base(package).input_digest(),
-        }
+        })
     }
     /// The summary of `package`'s V universe: its input identity, errors and
     /// first heap role, as installed packages publish them for importers.
-    pub fn package_universe(&self, package: &PackageId) -> hirsel_validate::PackageUniverse {
-        self.validation_state().universe(package)
+    pub fn package_universe(
+        &self,
+        package: &PackageId,
+    ) -> Result<hirsel_validate::PackageUniverse, hirsel_validate::ViewRefusal> {
+        Ok(self.validation_state()?.universe(package))
     }
     /// What importers' universes hold of `package`'s public views.
     pub(crate) fn exported_universe(
@@ -966,9 +1002,13 @@ impl SignatureSnapshot {
     }
     /// `package`'s universe with `signature` in place of its declared view:
     /// compile-time evaluation validates a materialized owner against it.
-    pub fn validation_with(&self, package: &PackageId, signature: SignatureRef) -> PackageViews {
+    pub fn validation_with(
+        &self,
+        package: &PackageId,
+        signature: SignatureRef,
+    ) -> Result<PackageViews, hirsel_validate::ViewRefusal> {
         let t = &self.types;
-        let state = self.validation_state();
+        let state = self.validation_state()?;
         let mut store =
             ValidatedSignatures::with_cache(self.verifier.clone(), self.verifier_policy);
         if state.installed.contains_key(package) {
@@ -1015,7 +1055,8 @@ impl hirsel_validate::ReplayEnvironment for SignatureSnapshot {
         self.definitions()
             .into_iter()
             .any(|id| id.path().0.package == *package)
-            .then(|| self.validation_input_digest(package))
+            .then(|| self.validation_input_digest(package).ok())
+            .flatten()
     }
     fn views(
         &self,
@@ -1023,9 +1064,10 @@ impl hirsel_validate::ReplayEnvironment for SignatureSnapshot {
         overlay: Option<SignatureRef>,
     ) -> Option<Box<dyn SignatureLookup + '_>> {
         self.base_digest(package)?;
+        // A refused universe replays nothing: the execution runs again.
         Some(match overlay {
-            Some(signature) => Box::new(self.validation_with(package, signature)),
-            None => Box::new(self.validation(package)),
+            Some(signature) => Box::new(self.validation_with(package, signature).ok()?),
+            None => Box::new(self.validation(package).ok()?),
         })
     }
 }
@@ -1036,7 +1078,8 @@ impl QueryEngine {
     pub fn signature_snapshot(&mut self) -> Arc<SignatureSnapshot> {
         self.prepare_private_summaries();
         let snapshot = self.signature_inputs();
-        snapshot.validation_state();
+        // A refused build publishes nothing; its first reader builds it again.
+        let _ = snapshot.validation_state();
         self.adopt_completed_headers();
         snapshot
     }

@@ -1036,18 +1036,27 @@ impl FrontBodyQueries {
                 .or_else(|| self.candidates.get(&id).copied())
                 .unwrap_or_else(memos::no_candidates),
             ReadKey::Environment => self.environment,
+            // A refused V universe observes nothing: the read does not hold.
             ReadKey::ValidationView(id) => self
                 .snapshot
                 .validation(package)
+                .ok()?
                 .view(id)
                 .map_or_else(ContentHash::default, |input| input.digest().0),
             ReadKey::ValidationUniverse(package) => {
-                self.snapshot.validation_input_digest(&package.id())
+                self.snapshot.validation_input_digest(&package.id()).ok()?
             }
-            ReadKey::UniverseErrors => self.snapshot.validation(package).universe_errors().0,
+            ReadKey::UniverseErrors => {
+                self.snapshot
+                    .validation(package)
+                    .ok()?
+                    .universe_errors()
+                    .0
+            }
             ReadKey::FirstHeap => self
                 .snapshot
                 .validation(package)
+                .ok()?
                 .first_heap()
                 .map_or_else(ContentHash::default, |(id, _)| id.path().fingerprint()),
             // A front product must not execute a dependency to decide a hit.

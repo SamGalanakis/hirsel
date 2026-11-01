@@ -171,14 +171,14 @@ fn source_qualifies(program: &Program) -> bool {
             .values()
             .filter(|d| !d.bodies.is_empty() && &d.path.path().0.package == package)
         {
+            // The universe is held, so V reads every view it names.
             if !hirsel_validate::qualify_scoped_transport(
                 definition,
                 &program.types,
                 &signatures,
                 &mut vec![],
             )
-            .violations
-            .is_empty()
+            .is_ok_and(|qualified| qualified.violations.is_empty())
             {
                 return false;
             }

@@ -167,18 +167,21 @@ pub fn validate_definition<'a, 'input>(
     signatures: impl Into<crate::SignatureInputs<'a>>,
     policy: ContentHash,
     cache: Option<&VerifierCache>,
-) -> (
-    Validation,
-    bool,
-    Option<AcceptedArtifact>,
-    Option<VerifiedDefinition>,
-) {
+) -> Result<
+    (
+        Validation,
+        bool,
+        Option<AcceptedArtifact>,
+        Option<VerifiedDefinition>,
+    ),
+    crate::ViewRefusal,
+> {
     let definition = definition.into();
     let signatures = signatures.into();
     let mut reads = vec![];
     let artifact = Artifact::new(definition.view(), types.clone(), owner);
     let (report, ran, accepted) =
-        validate_with_receipt(&artifact, signatures.lookup(), policy, cache, &mut reads);
+        validate_with_receipt(&artifact, signatures.lookup(), policy, cache, &mut reads)?;
     let evidence = report.violations.is_empty().then(|| VerifiedDefinition {
         definition: definition.downgrade(),
         owner: artifact
@@ -196,7 +199,7 @@ pub fn validate_definition<'a, 'input>(
                 .map_or_else(Weak::new, |stamp| Arc::downgrade(&stamp.identity)),
         ),
     });
-    (report, ran, accepted, evidence)
+    Ok((report, ran, accepted, evidence))
 }
 
 const VIEW_DOMAIN: Domain = Domain {
@@ -617,9 +620,9 @@ impl VerifierCache {
         input: crate::ViewInput<'_>,
         signatures: &dyn SignatureLookup,
         policy: ContentHash,
-    ) -> Arc<crate::ViewVerdict> {
+    ) -> Result<Arc<crate::ViewVerdict>, crate::ViewRefusal> {
         if !input.for_types(types) {
-            return Arc::new(crate::ViewVerdict {
+            return Ok(Arc::new(crate::ViewVerdict {
                 error: Some(crate::Violation {
                     body: None,
                     block: None,
@@ -627,7 +630,7 @@ impl VerifierCache {
                     kind: crate::ViolationKind::InvalidSignature(definition.path().clone()),
                 }),
                 reads: vec![],
-            });
+            }));
         }
         let digest = input.digest();
         let key = view_key(digest, policy);
@@ -639,12 +642,12 @@ impl VerifierCache {
                 .iter()
                 .all(|read| crate::input::read_holds_for_types(types, read, signatures))
         {
-            return Arc::new(crate::ViewVerdict {
+            return Ok(Arc::new(crate::ViewVerdict {
                 error: None,
                 reads: receipt.reads,
-            });
+            }));
         }
-        let verdict = crate::check_view(types, definition, input.signature(), signatures);
+        let verdict = crate::check_view(types, definition, &*input.signature()?, signatures)?;
         if verdict.error.is_none() {
             self.publish(
                 key,
@@ -656,7 +659,7 @@ impl VerifierCache {
                 },
             );
         }
-        Arc::new(verdict)
+        Ok(Arc::new(verdict))
     }
     fn contents(&self) -> Arc<dyn hirsel_artifact_store::Contents> {
         match &self.0 {
@@ -865,7 +868,8 @@ impl VerifierCache {
                             VRead::FirstHeap(Some(previous)) => {
                                 let old = views
                                     .view(*previous)
-                                    .and_then(|view| view.signature().metadata.roles.heap.clone());
+                                    .and_then(|view| view.signature().ok())
+                                    .and_then(|view| view.metadata.roles.heap.clone());
                                 let current = views.first_heap().map(|(_, role)| role);
                                 old.is_some() && old == current
                             }
@@ -885,8 +889,10 @@ impl VerifierCache {
                     owners: replay.owners,
                     overlay: replay.overlay,
                 };
+                // A refused read revalidates nothing: the execution runs again.
                 let (report, _, refreshed) =
-                    validate_with_receipt(&exact, &*views, replay.policy, Some(self), &mut vec![]);
+                    validate_with_receipt(&exact, &*views, replay.policy, Some(self), &mut vec![])
+                        .ok()?;
                 if !report.violations.is_empty() || refreshed.as_ref() != Some(&accepted) {
                     return None;
                 }
@@ -935,7 +941,7 @@ impl VerifierCache {
     pub fn execution(
         &self,
         subject: ContentHash,
-        mut current: impl FnMut(&PackageId) -> ContentHash,
+        mut current: impl FnMut(&PackageId) -> Option<ContentHash>,
     ) -> Option<ExecutionReceipt> {
         let record: ExecutionRecord = self.load(execution_key(subject), EXECUTION_DOMAIN)?;
         if record.subject != subject
@@ -945,7 +951,7 @@ impl VerifierCache {
             || !record
                 .contexts
                 .iter()
-                .all(|(package, digest)| current(package) == *digest)
+                .all(|(package, digest)| current(package) == Some(*digest))
         {
             return None;
         }
@@ -1082,9 +1088,9 @@ pub fn validate_cached(
     policy: ContentHash,
     cache: Option<&VerifierCache>,
     reads: &mut Vec<VRead>,
-) -> (Validation, bool) {
-    let (report, ran, _) = validate_with_receipt(artifact, signatures, policy, cache, reads);
-    (report, ran)
+) -> Result<(Validation, bool), crate::ViewRefusal> {
+    let (report, ran, _) = validate_with_receipt(artifact, signatures, policy, cache, reads)?;
+    Ok((report, ran))
 }
 /// The same validation path, retaining the opaque evidence for composition
 /// with dependent private/source artifacts after successful execution.
@@ -1094,7 +1100,7 @@ pub fn validate_with_receipt(
     policy: ContentHash,
     cache: Option<&VerifierCache>,
     reads: &mut Vec<VRead>,
-) -> (Validation, bool, Option<AcceptedArtifact>) {
+) -> Result<(Validation, bool, Option<AcceptedArtifact>), crate::ViewRefusal> {
     let key = artifact.identity.map(|identity| {
         ContentHash::of_parts(
             "hirsel.validate.receipt.v2",
@@ -1113,17 +1119,17 @@ pub fn validate_with_receipt(
     {
         cache.retain_artifact(artifact, policy);
         reads.extend(receipt.reads);
-        return (
+        return Ok((
             Validation::default(),
             false,
             Some(AcceptedArtifact {
                 artifact: identity,
                 policy,
             }),
-        );
+        ));
     }
     let mut own = vec![];
-    let report = crate::validate_rows(artifact.definition, &artifact.types, signatures, &mut own)
+    let report = crate::validate_rows(artifact.definition, &artifact.types, signatures, &mut own)?
         .unwrap_or_else(|| Validation {
             violations: vec![crate::Violation {
                 body: None,
@@ -1157,7 +1163,7 @@ pub fn validate_with_receipt(
         })
         .flatten();
     reads.extend(own);
-    (report, true, accepted)
+    Ok((report, true, accepted))
 }
 
 #[cfg(test)]
@@ -1717,10 +1723,10 @@ mod tests {
         let subject = ContentHash::of_bytes(b"complete evaluated value and action");
         cache.publish_execution(subject, &receipt);
         let reopened = VerifierCache::directory(directory.0.clone());
-        assert!(reopened.execution(subject, |_| contexts[0].1).is_some());
+        assert!(reopened.execution(subject, |_| Some(contexts[0].1)).is_some());
         assert!(
             reopened
-                .execution(subject, |_| ContentHash::default())
+                .execution(subject, |_| Some(ContentHash::default()))
                 .is_none()
         );
         assert!(
@@ -1738,7 +1744,7 @@ mod tests {
             .unwrap();
         assert!(
             VerifierCache::directory(imported.0.clone())
-                .execution(subject, |_| contexts[0].1)
+                .execution(subject, |_| Some(contexts[0].1))
                 .is_none()
         );
     }
@@ -1803,18 +1809,18 @@ mod tests {
         };
         // A retained clone cannot refresh context: V must receive current views.
         assert!(replay(&environment).is_none());
-        assert!(cache.execution(subject, |_| new).is_none());
+        assert!(cache.execution(subject, |_| Some(new)).is_none());
         environment.package.name = "wrong-package".into();
         assert!(replay(&environment).is_none());
         environment.package = package.clone();
         let empty = crate::SignatureMap::new(session());
         environment.signatures = Some(&empty);
         assert!(replay(&environment).is_none());
-        assert!(cache.execution(subject, |_| new).is_none());
+        assert!(cache.execution(subject, |_| Some(new)).is_none());
         environment.signatures = Some(&f.signatures);
         assert!(replay(&environment).is_some());
         assert!(environment.calls.get() >= 2);
-        assert!(cache.execution(subject, |_| new).is_some());
+        assert!(cache.execution(subject, |_| Some(new)).is_some());
         let mut other = package.clone();
         other.name = "uncovered".into();
         let mut contexts = vec![(package, old), (other, old)];
@@ -1873,7 +1879,7 @@ mod tests {
         );
         assert!(
             cache
-                .execution(subject, |_| ContentHash::of_bytes(b"new"))
+                .execution(subject, |_| Some(ContentHash::of_bytes(b"new")))
                 .is_none()
         );
     }
@@ -1968,7 +1974,7 @@ mod tests {
             hirsel_syntax::Visibility::Public;
         assert!(attempt(&stale).is_none());
         assert!(attempt(&current).is_some());
-        assert!(cache.execution(subject, |_| new).is_some());
+        assert!(cache.execution(subject, |_| Some(new)).is_some());
     }
 
     #[test]

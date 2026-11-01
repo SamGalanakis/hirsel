@@ -546,23 +546,28 @@ impl QueryEngine {
             ReadKey::CitedText(d) => self.cited_value(d.path()),
             ReadKey::DeclarationCandidates(d) => self.candidates_value(d.path()),
             ReadKey::Environment => self.environment_value(),
+            // A refused V universe observes nothing: the read does not hold.
             ReadKey::ValidationView(d) => self
                 .signature_snapshot()
                 .validation(&owner.0.package)
+                .ok()?
                 .view(d)
                 .map_or_else(ContentHash::default, |input| input.digest().0),
             ReadKey::ValidationUniverse(package) => self
                 .signature_snapshot()
-                .validation_input_digest(&package.id()),
+                .validation_input_digest(&package.id())
+                .ok()?,
             ReadKey::UniverseErrors => {
                 self.signature_snapshot()
                     .validation(&owner.0.package)
+                    .ok()?
                     .universe_errors()
                     .0
             }
             ReadKey::FirstHeap => self
                 .signature_snapshot()
                 .validation(&owner.0.package)
+                .ok()?
                 .first_heap()
                 .map_or_else(ContentHash::default, |(d, _)| d.path().fingerprint()),
             ReadKey::NameSet(package, module) => {

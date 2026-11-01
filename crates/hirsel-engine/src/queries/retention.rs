@@ -170,10 +170,13 @@ impl QueryEngine {
                 return Ok(false);
             };
             let snapshot = self.signature_snapshot();
-            if !evidence.environment_holds(
-                self.source_verification_policy(),
-                snapshot.validation(&path.0.package),
-            ) {
+            // A refused universe holds nothing: the receipt is not reused.
+            if !snapshot
+                .validation(&path.0.package)
+                .is_ok_and(|views| {
+                    evidence.environment_holds(self.source_verification_policy(), views)
+                })
+            {
                 return Ok(false);
             }
         }
@@ -209,10 +212,11 @@ impl QueryEngine {
             };
             let snapshot = self.signature_snapshot();
             if evidence.owner() != DefId::intern(path)
-                || !evidence.environment_holds(
-                    snapshot.source_verification_policy(),
-                    snapshot.validation(&path.0.package),
-                )
+                || !snapshot
+                    .validation(&path.0.package)
+                    .is_ok_and(|views| {
+                        evidence.environment_holds(snapshot.source_verification_policy(), views)
+                    })
             {
                 return false;
             }

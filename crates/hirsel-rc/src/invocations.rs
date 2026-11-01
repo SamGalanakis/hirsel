@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 pub fn source_rows(
     types: &TypeInterner,
     definition: &Definition,
-    signatures: &dyn hirsel_validate::SignatureLookup,
+    signatures: &hirsel_validate::SignatureMap,
     operations: &BTreeMap<DefPath, OperationId>,
 ) -> Result<Vec<ReferenceInvocation>, &'static str> {
     hirsel_validate::invocation_coverage(types, definition, signatures).map(|coverage| {
@@ -90,7 +90,7 @@ pub fn bind_source(
 pub fn source_instance(
     types: &TypeInterner,
     original: &Definition,
-    signatures: &dyn hirsel_validate::SignatureLookup,
+    signatures: &hirsel_validate::SignatureMap,
     operations: &BTreeMap<DefPath, OperationId>,
     selected: &Symbol,
     body: BodyId,

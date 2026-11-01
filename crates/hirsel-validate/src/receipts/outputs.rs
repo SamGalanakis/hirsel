@@ -886,12 +886,10 @@ impl SourceInvocations {
         signatures: &dyn SignatureLookup,
     ) -> Option<Self> {
         let definition = crate::ReadDefinition::new(definition)?;
-        let coverage = crate::invocations::coverage(
-            types,
-            &definition,
-            &crate::input::Reader::new(types, signatures),
-        )
-        .ok()?;
+        let reader = crate::input::Reader::new(types, signatures);
+        let coverage = crate::invocations::coverage(types, &definition, &reader).ok()?;
+        // A refused view read leaves no observation behind, never a partial one.
+        reader.finish(&mut vec![]).ok()?;
         let calls = coverage
             .into_iter()
             .map(|(body, block, statement, restart)| {

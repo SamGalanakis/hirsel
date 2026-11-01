@@ -146,7 +146,10 @@ impl LowerProduct {
             .load(
                 &cache,
                 owner.snapshot.types(),
-                owner.snapshot.validation(&self.definition.path().0.package),
+                owner
+                    .snapshot
+                    .validation(&self.definition.path().0.package)
+                    .ok()?,
                 &bytes,
                 owner.weight.scratch,
             )
@@ -1173,7 +1176,8 @@ impl FrontLowerQueries {
             if self.verify == Verify::On {
                 let mut observed = ReadsBuilder::new();
                 FrozenProvider::new(&self.snapshot, path.0.package.clone(), &mut observed)
-                    .validation_universe();
+                    .validation_universe()
+                    .map_err(|_| self.errors.resource)?;
                 source.merge(&observed.finish().map_err(|_| self.errors.protocol)?);
             }
             Err(source.overflow(self.inputs[&path].site))
@@ -1305,16 +1309,22 @@ impl FrontLowerQueries {
             if working > self.weight.scratch {
                 return Err(self.errors.resource);
             }
-            lower.verified = cache
-                .publish_definition(
-                    execution_subject,
-                    &definition,
-                    self.snapshot.types().clone(),
-                    self.snapshot.source_verification_policy(),
-                    self.snapshot.validation(&path.0.package),
-                    &evidence,
-                    &[],
-                )
+            // A refused universe publishes no output; the body stays local.
+            lower.verified = self
+                .snapshot
+                .validation(&path.0.package)
+                .ok()
+                .and_then(|views| {
+                    cache.publish_definition(
+                        execution_subject,
+                        &definition,
+                        self.snapshot.types().clone(),
+                        self.snapshot.source_verification_policy(),
+                        views,
+                        &evidence,
+                        &[],
+                    )
+                })
                 .and_then(|output| {
                     let (authority, bytes) = cache.compact_definition_output(&output)?;
                     if bytes.len() as u64 > self.weight.scratch {
@@ -1571,7 +1581,8 @@ impl FrontLowerQueries {
         if self.verify == Verify::On {
             let mut observed = ReadsBuilder::new();
             FrozenProvider::new(&self.snapshot, path.0.package.clone(), &mut observed)
-                .validation_universe();
+                .validation_universe()
+                .map_err(|_| source.refused(self.errors.resource))?;
             source.merge(
                 &observed
                     .finish()
@@ -1755,12 +1766,15 @@ impl FrontLowerQueries {
         let mut acceptance = None;
         if self.verify == Verify::On {
             let mut observed = ReadsBuilder::new();
+            // A refused V read refuses this producer: nothing it computed is kept.
             FrozenProvider::new(&self.snapshot, path.0.package.clone(), &mut observed)
-                .validation_universe();
+                .validation_universe()
+                .map_err(|_| source.refused(self.errors.resource))?;
             source.merge(&observed.finish().map_err(|_| QueryError::NotImplemented)?);
             let (report, ran, accepted, evidence) = self
                 .snapshot
-                .validate_source_artifact(&definition, |anchor| self.anchors.record_owner(anchor));
+                .validate_source_artifact(&definition, |anchor| self.anchors.record_owner(anchor))
+                .map_err(|_| source.refused(self.errors.resource))?;
             acceptance = accepted;
             source.evidence.borrow_mut().accepted(acceptance.clone());
             if ran {

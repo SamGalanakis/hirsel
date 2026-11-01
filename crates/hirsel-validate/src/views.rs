@@ -8,8 +8,8 @@
 //! owner's signature in place of its declared one. Only the replaced views and
 //! the verdicts that read them are checked again.
 use crate::{
-    SignatureLookup, UniverseErrors, VRead, ValidatedSignatures, ValidationDigest, ViewVerdict,
-    Violation,
+    SignatureLookup, UniverseErrors, VRead, ValidatedSignatures, ValidationDigest, ViewRefusal,
+    ViewVerdict, Violation,
 };
 use hirsel_syntax::{ContentHash, DefId, DefMap, PackageId};
 use hirsel_types::{HeapRole, SignatureRef, TypeInterner};
@@ -65,8 +65,8 @@ impl View {
     pub fn identified(&self) -> &Arc<crate::IdentifiedSignature> {
         &self.input
     }
-    /// A scoped view of this view's payload.
-    pub fn signature(&self) -> SignatureRef {
+    /// A scoped view of this view's payload, or the refusal to read it again.
+    pub fn signature(&self) -> Result<SignatureRef, ViewRefusal> {
         self.input.signature()
     }
     pub fn digest(&self) -> ValidationDigest {
@@ -202,14 +202,14 @@ pub struct ViewTable {
 impl ViewTable {
     /// The table of `signatures` (one per path), reusing the digests of
     /// `previous` for unchanged views and the verdicts of `store`'s previous
-    /// revision whose reads still hold.
+    /// revision whose reads still hold. A view V cannot read refuses the table.
     pub fn new(
         t: &Arc<TypeInterner>,
         signatures: impl IntoIterator<Item = SignatureRef>,
         previous: Option<&ViewTable>,
         store: &mut ValidatedSignatures,
         old: Option<&ValidatedSignatures>,
-    ) -> Self {
+    ) -> Result<Self, ViewRefusal> {
         Self::from_views(
             t,
             signatures.into_iter().map(|signature| {
@@ -227,7 +227,7 @@ impl ViewTable {
         views: impl IntoIterator<Item = View>,
         store: &mut ValidatedSignatures,
         old: Option<&ValidatedSignatures>,
-    ) -> Self {
+    ) -> Result<Self, ViewRefusal> {
         Self::with_installed(t, views, None, store, old)
     }
     /// A universe of `views`, which V checks, beside `installed` packages,
@@ -239,7 +239,7 @@ impl ViewTable {
         installed: Option<Installed>,
         store: &mut ValidatedSignatures,
         old: Option<&ValidatedSignatures>,
-    ) -> Self {
+    ) -> Result<Self, ViewRefusal> {
         let _batch = store.publication_batch();
         let mut views: Vec<View> = views.into_iter().collect();
         views.sort_by_key(|view| view.d);
@@ -273,7 +273,7 @@ impl ViewTable {
             .views
             .iter()
             .map(|v| store.verdict_from(t, v.d, &table, old))
-            .collect();
+            .collect::<Result<_, _>>()?;
         for (i, verdict) in verdicts.iter().enumerate() {
             for d in read_views(verdict).collect::<BTreeSet<_>>() {
                 table.readers.entry(d).or_default().push(i as u32);
@@ -285,7 +285,7 @@ impl ViewTable {
         table.errors =
             UniverseErrors::new(verdicts.iter().filter_map(|v| v.error.clone()).collect());
         table.verdicts = verdicts;
-        table
+        Ok(table)
     }
     pub fn get(&self, d: DefId) -> Option<&View> {
         match self.index.get(&d) {
@@ -432,7 +432,7 @@ impl PackageViews {
         replacements: impl IntoIterator<Item = View>,
         store: &mut ValidatedSignatures,
         old: Option<&ValidatedSignatures>,
-    ) -> Self {
+    ) -> Result<Self, ViewRefusal> {
         let replaced: DefMap<View> = replacements.into_iter().map(|v| (v.d, v)).collect();
         Self::over(t, base, replaced, &DefMap::default(), store, old)
     }
@@ -444,7 +444,7 @@ impl PackageViews {
         signature: SignatureRef,
         store: &mut ValidatedSignatures,
         old: Option<&ValidatedSignatures>,
-    ) -> Self {
+    ) -> Result<Self, ViewRefusal> {
         let view = View::new(t, signature, None);
         let mut replaced = self.replaced.clone();
         replaced.insert(view.d, view);
@@ -488,7 +488,7 @@ impl PackageViews {
         checked: &DefMap<Arc<ViewVerdict>>,
         store: &mut ValidatedSignatures,
         old: Option<&ValidatedSignatures>,
-    ) -> Self {
+    ) -> Result<Self, ViewRefusal> {
         // The universe in DefPath order: the base's views and new ones.
         // An installed view's readers are not known, so none is replaced.
         assert!(
@@ -538,8 +538,8 @@ impl PackageViews {
         };
         let verdicts: DefMap<_> = again
             .iter()
-            .map(|&d| (d, store.verdict_from(t, d, &views, old)))
-            .collect();
+            .map(|&d| Ok((d, store.verdict_from(t, d, &views, old)?)))
+            .collect::<Result<_, ViewRefusal>>()?;
         let errors = order
             .iter()
             .filter_map(|d| match verdicts.get(d) {
@@ -549,7 +549,7 @@ impl PackageViews {
             .collect();
         views.errors = UniverseErrors::new(errors);
         views.verdicts = verdicts;
-        views
+        Ok(views)
     }
 }
 impl SignatureLookup for PackageViews {

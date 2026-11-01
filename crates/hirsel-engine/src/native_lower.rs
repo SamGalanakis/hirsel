@@ -318,11 +318,16 @@ impl NativeOriginalContext {
                 && self.reuse
                 && self.cache.is_some()
                 && let Some(output) = product.verified.filter(|output| {
-                    output.environment_holds(
-                        self.anchors.record_types(),
-                        self.policy,
-                        self.signatures.validation(&path.0.package),
-                    )
+                    // A refused universe holds nothing: the body is read again.
+                    self.signatures
+                        .validation(&path.0.package)
+                        .is_ok_and(|views| {
+                            output.environment_holds(
+                                self.anchors.record_types(),
+                                self.policy,
+                                views,
+                            )
+                        })
                 })
             {
                 selected.insert(
@@ -434,7 +439,7 @@ impl NativeLowerReader {
             self.anchors.record_types().clone(),
             |owner, occurrence| self.anchors.record_source_anchor(owner, occurrence),
             self.policy,
-            self.signatures.validation(&path.0.package),
+            self.signatures.validation(&path.0.package).ok()?,
             owner,
         )?;
         (archive.header()?.signature_hash == selected.signature).then_some(archive)
@@ -694,6 +699,8 @@ impl NativeOriginalReader {
         {
             return None;
         }
+        // A refused V universe reads no body: neither reuse nor V can run.
+        let views = || self.verified.signatures.validation(&path.0.package).ok();
         let output = if self.verify == Verify::On && self.reuse {
             if let Some((output, _, _)) = self.verified.input(path) {
                 let matches = match &raw {
@@ -702,14 +709,14 @@ impl NativeOriginalReader {
                         self.verified.anchors.record_types().clone(),
                         |anchor| self.verified.anchors.record_owner(anchor),
                         self.verified.policy,
-                        self.verified.signatures.validation(&path.0.package),
+                        views()?,
                     ),
                     _ => output.matches_definition(
                         &raw.definition()?,
                         self.verified.anchors.record_types().clone(),
                         |anchor| self.verified.anchors.record_owner(anchor),
                         self.verified.policy,
-                        self.verified.signatures.validation(&path.0.package),
+                        views()?,
                     ),
                 };
                 if !matches {
@@ -731,11 +738,12 @@ impl NativeOriginalReader {
             );
             let (report, ran, _) = hirsel_validate::validate_with_receipt(
                 &artifact,
-                self.verified.signatures.validation(&path.0.package),
+                views()?,
                 self.verified.policy,
                 self.verified.cache.as_deref(),
                 &mut vec![],
-            );
+            )
+            .ok()?;
             if ran {
                 hirsel_intern::timings::count(hirsel_intern::timings::Count::VRuns);
             }
@@ -852,7 +860,7 @@ impl QueryEngine {
         let policy = self.source_verification_policy();
         let mut selected = BTreeMap::new();
         for (path, definition) in &input.definitions {
-            let view = signatures.validation(&path.0.package);
+            let view = signatures.validation(&path.0.package)?;
             let (report, _, _, evidence) = hirsel_validate::validate_definition(
                 definition,
                 input.types.clone(),
@@ -860,7 +868,7 @@ impl QueryEngine {
                 view,
                 policy,
                 Some(cache.as_ref()),
-            );
+            )?;
             if !report.violations.is_empty() {
                 return Err(source_transport(&format!(
                     "sealed source snapshot validation: {:?}",

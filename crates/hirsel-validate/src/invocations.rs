@@ -1,7 +1,7 @@
 //! Admission coverage reconstructed from types and control flow, without tail claims.
 use crate::ReadDefinition;
 use crate::{
-    SignatureLookup,
+    SignatureMap,
     input::Reader,
     tail::{verify_constructor_hole, verify_self_tail},
     typing,
@@ -13,10 +13,11 @@ use hirsel_types::{TypeInterner, UseKind};
 /// (body, call block, source statement ordinal, eligible self restart).
 /// The definition and any primitive declaration identity come from the independently
 /// supplied declaration universe, never an asserted lowering event count.
+/// The universe is held, so no read of it is refused.
 pub fn invocation_coverage(
     types: &TypeInterner,
     definition: &Definition,
-    signatures: &dyn SignatureLookup,
+    signatures: &SignatureMap,
 ) -> Result<Vec<(u32, u32, u32, bool)>, &'static str> {
     coverage(
         types,

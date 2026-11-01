@@ -1,13 +1,12 @@
 //! Native products retain their host-selected cache independently of front results.
-use hirsel_engine::{ToolError, runtime::ProcessBudget, store::*};
+use hirsel_engine::{ToolError, runtime::MemoryReservation, store::*};
 use std::{path::Path, sync::Arc};
 
 pub(super) fn capture(
     source: Arc<dyn ResultStore>,
     request: &super::NativeRequest,
     purpose: super::native_platform::NativePurpose,
-    budget: &Arc<ProcessBudget>,
-    transport: u64,
+    allowance: MemoryReservation,
     scratch: &Path,
     disk: u64,
 ) -> Result<Arc<dyn ResultStore>, ToolError> {
@@ -46,11 +45,6 @@ pub(super) fn capture(
         }
     };
     let backend = Arc::new(NativeStore { source, cache });
-    let allowance = budget.reserve(transport).map_err(|error| {
-        ToolError::Runtime(format!(
-            "native object transport exceeds the shared process budget: {error}",
-        ))
-    })?;
     let store =
         RequestStore::with_scratch_and_verifier_transport(backend, allowance, scratch, disk)
             .map_err(ToolError::Io)?;

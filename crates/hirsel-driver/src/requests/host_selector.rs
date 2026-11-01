@@ -34,6 +34,7 @@ pub(super) struct GraphAdmission {
     pub growth: MemoryReservation,
     pub run: MemoryReservation,
     pub transport: MemoryReservation,
+    pub native_transport: MemoryReservation,
 }
 impl GraphAdmission {
     pub fn reserve(
@@ -68,6 +69,7 @@ impl GraphAdmission {
             transport: budget
                 .reserve(limits.transport_bytes)
                 .map_err(ToolError::Io)?,
+            native_transport: budget.reserve(0).map_err(ToolError::Io)?,
         })
     }
 }
@@ -79,9 +81,14 @@ pub(super) struct LoadingAdmission {
     runtime: MemoryReservation,
     snapshot: MemoryReservation,
     transport: MemoryReservation,
+    native_transport: MemoryReservation,
 }
 impl LoadingAdmission {
-    fn reserve(budget: &Arc<ProcessBudget>, limits: RequestLimits) -> Result<Self, ToolError> {
+    fn reserve(
+        budget: &Arc<ProcessBudget>,
+        limits: RequestLimits,
+        native_transport: u64,
+    ) -> Result<Self, ToolError> {
         Ok(Self {
             runtime: budget
                 .reserve(limits.runtime_bytes)
@@ -92,6 +99,7 @@ impl LoadingAdmission {
             transport: budget
                 .reserve(limits.transport_bytes)
                 .map_err(ToolError::Io)?,
+            native_transport: budget.reserve(native_transport).map_err(ToolError::Io)?,
         })
     }
     /// Transfer the already admitted transport before S0 uses the provider.
@@ -149,9 +157,15 @@ impl LoadingAdmission {
             check,
             run,
             transport: self.transport,
+            native_transport: self.native_transport,
         })
     }
-    pub fn failed(self, error: ToolError) -> ToolError {
+    pub fn failed(mut self, error: ToolError) -> ToolError {
+        let unused = self
+            .native_transport
+            .split(self.native_transport.bytes())
+            .unwrap();
+        drop(unused);
         retain_error(error, Arc::new(self.snapshot))
     }
 }
@@ -246,21 +260,24 @@ impl GraphBudget {
         &self,
         limits: RequestLimits,
         may_wait: bool,
+        native_transport: u64,
     ) -> Result<LoadingAdmission, ToolError> {
         let fits_alone = limits
             .runtime_bytes
             .checked_add(limits.snapshot_bytes)
             .and_then(|bytes| bytes.checked_add(limits.transport_bytes))
+            .and_then(|bytes| bytes.checked_add(native_transport))
             .is_some_and(|bytes| bytes <= self.budget.limit());
         let mut seen = self.budget.reserved();
         let mut moved = std::time::Instant::now();
         loop {
-            let error = match LoadingAdmission::reserve(&self.budget, limits) {
+            let error = match LoadingAdmission::reserve(&self.budget, limits, native_transport) {
                 Ok(admission) => return Ok(admission),
                 Err(error) => error,
             };
             self.release_idle();
-            if let Ok(admission) = LoadingAdmission::reserve(&self.budget, limits) {
+            if let Ok(admission) = LoadingAdmission::reserve(&self.budget, limits, native_transport)
+            {
                 return Ok(admission);
             }
             let reserved = self.budget.reserved();
@@ -564,7 +581,7 @@ mod tests {
             snapshot_bytes: 64,
             transport_bytes: 8192,
         };
-        let mut loading = LoadingAdmission::reserve(&budget, limits).unwrap();
+        let mut loading = LoadingAdmission::reserve(&budget, limits, 0).unwrap();
         let store = Arc::new(RequestStore::new(
             Arc::new(NoneStore),
             loading.take_transport(),
@@ -606,7 +623,7 @@ mod tests {
             transport_bytes: 20,
         };
         let budget = ProcessBudget::new(100);
-        let loading = LoadingAdmission::reserve(&budget, limits).unwrap();
+        let loading = LoadingAdmission::reserve(&budget, limits, 0).unwrap();
         assert_eq!(budget.reserved(), 100);
         assert!(budget.reserve(1).is_err());
         let graph = loading
@@ -641,7 +658,7 @@ mod tests {
             },
         ] {
             assert!(
-                LoadingAdmission::reserve(&budget, limits)
+                LoadingAdmission::reserve(&budget, limits, 0)
                     .unwrap()
                     .finish(plan)
                     .is_err()
@@ -650,7 +667,7 @@ mod tests {
         }
         let mut sources = hirsel_span::SourceMap::default();
         let file = sources.add("failed.hir", "bad source".into()).unwrap();
-        let error = LoadingAdmission::reserve(&budget, limits)
+        let error = LoadingAdmission::reserve(&budget, limits, 0)
             .unwrap()
             .failed(ToolError::Query {
                 error: hirsel_engine::QueryError::NotImplemented,
@@ -874,6 +891,7 @@ mod tests {
                                 transport_bytes: 0,
                             },
                             may_wait,
+                            0,
                         )?;
                         drop(loading);
                         create(owner, changed)
@@ -934,4 +952,46 @@ mod tests {
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts["diagnostics"], b"incomplete: TIR lowering\n");
     }
+}
+#[test]
+fn native_transport_is_admitted_before_source_work_and_transfers_without_a_second_reservation() {
+    let budget = ProcessBudget::new(100);
+    let owner = GraphBudget::shared(&budget);
+    let limits = RequestLimits {
+        runtime_bytes: 10,
+        snapshot_bytes: 50,
+        transport_bytes: 10,
+    };
+    let mut loading = owner.begin(limits, false, 20).unwrap();
+    let source_transport = loading.take_transport();
+    assert_eq!(budget.reserved(), 90);
+    assert!(
+        budget.reserve(20).is_err(),
+        "a late native reservation would exceed the cap"
+    );
+    let mut graph = loading
+        .finish(SnapshotPlan {
+            source: 10,
+            front: 10,
+            lower: 10,
+            check: 10,
+            growth: 5,
+            run: 5,
+        })
+        .unwrap();
+    let native_transport = graph.native_transport.split(20).unwrap();
+    assert_eq!(native_transport.bytes(), 20);
+    assert_eq!(budget.reserved(), 90);
+    drop(graph);
+    assert_eq!(budget.reserved(), 30);
+    drop(source_transport);
+    assert_eq!(budget.reserved(), 20);
+    drop(native_transport);
+    assert_eq!(budget.reserved(), 0);
+    assert!(owner.begin(limits, false, 40).is_err());
+    assert_eq!(
+        budget.reserved(),
+        0,
+        "a refused whole admission releases every partial grant"
+    );
 }

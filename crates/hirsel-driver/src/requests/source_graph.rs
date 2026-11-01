@@ -1229,7 +1229,18 @@ pub(super) fn install(
     );
     // The loader reads exactly the supplied immutable observations. Declaration
     // indexing/signature metadata is S0; no P body or Lower task runs here.
-    let mut loading = budget.begin(limits, may_wait)?;
+    // Reserve both transports while admission may wait without holding a graph.
+    // Native selection transfers this grant instead of reserving again after S0.
+    let native_transport_bytes = if host_toolchain
+        && matches!(
+            request.operation,
+            CompileOperation::NativeBuild(_) | CompileOperation::NativeRun(_)
+        ) {
+        limits.transport_bytes
+    } else {
+        0
+    };
+    let mut loading = budget.begin(limits, may_wait, native_transport_bytes)?;
     let disk_bytes = limits
         .runtime_bytes
         .checked_add(limits.snapshot_bytes)
@@ -1598,6 +1609,7 @@ pub(super) fn install(
         mut growth,
         check,
         transport,
+        native_transport,
         mut run,
     } = loading.finish(plan.snapshots)?;
     program.engine.admit_private_inference(runtime);
@@ -2047,8 +2059,7 @@ pub(super) fn install(
                                 store.clone(),
                                 native_request,
                                 purpose,
-                                &budget.process_budget(),
-                                limits.transport_bytes,
+                                native_transport,
                                 scratch_parent,
                                 disk_bytes,
                             )?

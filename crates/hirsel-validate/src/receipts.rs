@@ -629,7 +629,7 @@ impl VerifierCache {
                 reads: vec![],
             });
         }
-        let (signature, digest) = input.into_parts();
+        let digest = input.digest();
         let key = view_key(digest, policy);
         if let Some(receipt) = self.load::<ViewReceipt>(key, VIEW_DOMAIN)
             && receipt.digest == digest
@@ -644,7 +644,7 @@ impl VerifierCache {
                 reads: receipt.reads,
             });
         }
-        let verdict = crate::check_view(types, definition, signature, signatures);
+        let verdict = crate::check_view(types, definition, input.signature(), signatures);
         if verdict.error.is_none() {
             self.publish(
                 key,
@@ -865,9 +865,9 @@ impl VerifierCache {
                             VRead::FirstHeap(Some(previous)) => {
                                 let old = views
                                     .view(*previous)
-                                    .and_then(|view| view.signature().metadata.roles.heap.as_ref());
+                                    .and_then(|view| view.signature().metadata.roles.heap.clone());
                                 let current = views.first_heap().map(|(_, role)| role);
-                                old.is_some() && old == current.as_ref()
+                                old.is_some() && old == current
                             }
                             _ => false,
                         }
@@ -1395,7 +1395,7 @@ mod tests {
         }
         impl SignatureLookup for Views<'_> {
             fn view(&self, d: hirsel_syntax::DefId) -> Option<crate::ViewInput<'_>> {
-                if d == self.foreign.signature().definition {
+                if d == self.foreign.definition() {
                     Some(self.foreign.input())
                 } else {
                     self.original.view(d)

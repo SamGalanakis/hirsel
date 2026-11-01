@@ -860,7 +860,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         };
         let mut limit = 8 << 20;
         // First measure the complete metadata and one body through the same harness.
-        for mode in 0..7 {
+        for mode in 0..8 {
             let mut program = COMPILER
                 .with_config(CompileConfig {
                     store: Arc::new(Transport(MemStore::default())),
@@ -894,7 +894,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 )
                 .unwrap();
             runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
-            let _header_pins = definitions
+            let mut header_pins = definitions
                 .iter()
                 .map(|definition| {
                     front
@@ -1007,7 +1007,20 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     ))
                 }
             }
-            let request = if mode == 3 || mode == 5 {
+            // V's universe holds header rows by identity: `a`'s row is held
+            // only by it, `b`'s also by a live view.
+            let universe = (mode == 7).then(|| {
+                let signatures = front.signatures();
+                let package = &definitions[0].0.package;
+                let digest = signatures
+                    .validation(package)
+                    .view(hirsel_syntax::DefId::intern(&definitions[0]))
+                    .unwrap()
+                    .digest();
+                header_pins.remove(0);
+                (signatures, digest)
+            });
+            let request = if mode == 3 || mode == 5 || mode == 7 {
                 runtime.request(&[root])
             } else if mode == 4 {
                 runtime.request(&bodies)
@@ -1015,10 +1028,24 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 runtime.request(&[bodies[1]])
             };
             let b = runtime.wait(request);
-            if mode == 3 || mode == 4 {
+            if mode == 3 || mode == 4 || mode == 7 {
                 assert_eq!(b, Err(errors().resource));
                 assert_eq!(runtime.stats().body_evictions, 0);
                 assert_eq!(front.live_body_count(), 1);
+                // Pressure evicts a header row whose identity alone is held,
+                // never one with a live view. V reads the evicted row back
+                // through the ordinary producer as the same view.
+                if let Some((signatures, digest)) = universe {
+                    assert!(!front.header_resident(&definitions[0]));
+                    assert!(front.header_resident(&definitions[1]));
+                    let reread = signatures
+                        .validation(&definitions[0].0.package)
+                        .view(hirsel_syntax::DefId::intern(&definitions[0]))
+                        .unwrap()
+                        .digest();
+                    assert_eq!(reread, digest);
+                    assert!(front.header_resident(&definitions[0]));
+                }
                 continue;
             }
             if let Some(pin) = pin {

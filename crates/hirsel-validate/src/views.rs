@@ -26,25 +26,47 @@ impl View {
     /// A view of `signature`, keeping `previous`'s digest when it is the same view.
     pub fn new(t: &Arc<TypeInterner>, signature: SignatureRef, previous: Option<&View>) -> Self {
         let input = match previous {
-            Some(view)
-                if view.input.belongs_to(t) && Arc::ptr_eq(view.input.signature(), &signature) =>
-            {
+            Some(view) if view.input.belongs_to(t) && view.input.is(&signature) => {
                 view.input.clone()
             }
             _ => Arc::new(crate::IdentifiedSignature::new(t.clone(), signature)),
         };
         Self {
-            d: input.signature().definition,
+            d: input.definition(),
+            input,
+        }
+    }
+    /// The identity of `signature`, whose payload `source` reads again on
+    /// use: the universe holding this view never pins `source`'s row.
+    pub fn sourced(
+        t: &Arc<TypeInterner>,
+        signature: &SignatureRef,
+        source: &Arc<dyn crate::SignatureSource>,
+        previous: Option<&View>,
+    ) -> Self {
+        let input = match previous {
+            Some(view) if view.input.belongs_to(t) && view.input.is(signature) => {
+                view.input.clone()
+            }
+            _ => Arc::new(crate::IdentifiedSignature::sourced(
+                t.clone(),
+                signature,
+                source.clone(),
+            )),
+        };
+        Self {
+            d: input.definition(),
             input,
         }
     }
     pub fn matches(&self, t: &TypeInterner, signature: &SignatureRef) -> bool {
-        self.input.belongs_to(t) && Arc::ptr_eq(self.input.signature(), signature)
+        self.input.belongs_to(t) && self.input.is(signature)
     }
     pub fn identified(&self) -> &Arc<crate::IdentifiedSignature> {
         &self.input
     }
-    pub fn signature(&self) -> &SignatureRef {
+    /// A scoped view of this view's payload.
+    pub fn signature(&self) -> SignatureRef {
         self.input.signature()
     }
     pub fn digest(&self) -> ValidationDigest {
@@ -66,14 +88,9 @@ fn reads_heap(verdict: &ViewVerdict) -> bool {
         .any(|read| matches!(read, VRead::FirstHeap(_)))
 }
 fn first_heap<'a>(views: impl Iterator<Item = &'a View>) -> Option<(DefId, HeapRole)> {
-    views.into_iter().find_map(|v| {
-        v.signature()
-            .metadata
-            .roles
-            .heap
-            .clone()
-            .map(|role| (v.d, role))
-    })
+    views
+        .into_iter()
+        .find_map(|v| v.input.heap().cloned().map(|role| (v.d, role)))
 }
 
 /// The public universe of one snapshot, with V's verdict on every view.

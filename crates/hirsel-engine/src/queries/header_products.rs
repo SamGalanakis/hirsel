@@ -689,6 +689,22 @@ impl HeaderProducts {
     }
 }
 
+/// The header cache as the source of V's sourced views: a settled row is
+/// read as it is, and an evicted one is produced again under admission.
+pub(crate) struct RowSource(pub(crate) Arc<HeaderProducts>);
+impl hirsel_validate::SignatureSource for RowSource {
+    fn reread(&self, id: DefId) -> Result<hirsel_types::SignatureRef, String> {
+        let headers = &self.0;
+        let output = match headers.ready(id) {
+            Some(product) => product.result.clone(),
+            None => headers.demand(&mut headers.execution(), id),
+        };
+        output
+            .map(|output| output.value.clone())
+            .map_err(|error| format!("{error:?}"))
+    }
+}
+
 impl QueryEngine {
     pub(crate) fn declared_header_inputs(&self) -> Option<Arc<HeaderProducts>> {
         self.header_products

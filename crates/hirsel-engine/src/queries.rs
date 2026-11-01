@@ -2099,9 +2099,9 @@ impl QueryEngine {
     /// Runtime types over `views` (each with the digest a reflection of it
     /// records). A program's run lowers each owned drop body; compile-time
     /// evaluation names the entry body and lowers a finalizer when it runs.
-    fn build_runtime_types(
+    fn build_runtime_types<V: Into<hirsel_interp::aggregate::SerializedView>>(
         &mut self,
-        views: Vec<(hirsel_types::SignatureRef, ContentHash)>,
+        views: Vec<(V, ContentHash)>,
         eager: bool,
     ) -> Result<hirsel_interp::aggregate::RuntimeTypes, QueryError> {
         runtime_type_catalog(self.types.clone(), views, |drop| {
@@ -2789,9 +2789,9 @@ pub(crate) fn header_span(syntax: &ItemSyntax) -> Span {
     }
 }
 
-pub(crate) fn runtime_type_catalog(
+pub(crate) fn runtime_type_catalog<V: Into<hirsel_interp::aggregate::SerializedView>>(
     types: Arc<hirsel_types::TypeInterner>,
-    views: Vec<(hirsel_types::SignatureRef, ContentHash)>,
+    views: Vec<(V, ContentHash)>,
     mut finalizer: impl FnMut(&DefPath) -> Result<Option<(DefPath, hirsel_tir::BodyId)>, QueryError>,
 ) -> Result<hirsel_interp::aggregate::RuntimeTypes, QueryError> {
     let mut runtime = hirsel_interp::aggregate::RuntimeTypes {
@@ -2801,12 +2801,14 @@ pub(crate) fn runtime_type_catalog(
         )),
         ..hirsel_interp::aggregate::RuntimeTypes::new(types.clone())
     };
-    runtime.serialization = hirsel_interp::aggregate::Serialization::new(
-        views
-            .iter()
-            .map(|(s, digest)| (s.definition.path().clone(), s.clone(), *digest)),
-    );
-    for (signature, _) in views {
+    let views: Vec<(hirsel_interp::aggregate::SerializedView, ContentHash)> = views
+        .into_iter()
+        .map(|(view, digest)| (view.into(), digest))
+        .collect();
+    // Each nominal reads its signature through a scoped view; the catalog
+    // keeps only the identities.
+    for (view, _) in &views {
+        let signature = view.signature();
         let hirsel_types::SignatureKind::Type(t) = &signature.kind else {
             continue;
         };
@@ -2834,5 +2836,6 @@ pub(crate) fn runtime_type_catalog(
             representation: t.representation,
         });
     }
+    runtime.serialization = hirsel_interp::aggregate::Serialization::new(views);
     Ok(runtime)
 }

@@ -22,9 +22,46 @@ pub struct Nominal {
 /// of a path records the digest of the view it saw (or its absence) into the
 /// innermost open recording, so the evaluation that read it can be retired
 /// when the view changes, an opaque owner's private shape included.
+/// A declared view held by identity: each read is a scoped view of the
+/// signature from its cache, which may have evicted and recomputed it.
+pub trait ViewIdentity: Send + Sync + std::fmt::Debug {
+    fn definition(&self) -> hirsel_syntax::DefId;
+    fn signature(&self) -> hirsel_types::SignatureRef;
+}
+/// One declared view a serialization names: held, or by identity.
+#[derive(Clone, Debug)]
+pub enum SerializedView {
+    Held(hirsel_types::SignatureRef),
+    Identified(Arc<dyn ViewIdentity>),
+}
+impl SerializedView {
+    /// A scoped view of the signature, pinning its cache row only while held.
+    pub fn signature(&self) -> hirsel_types::SignatureRef {
+        match self {
+            Self::Held(signature) => signature.clone(),
+            Self::Identified(identity) => identity.signature(),
+        }
+    }
+    fn definition(&self) -> hirsel_syntax::DefId {
+        match self {
+            Self::Held(signature) => signature.definition,
+            Self::Identified(identity) => identity.definition(),
+        }
+    }
+}
+impl From<hirsel_types::SignatureRef> for SerializedView {
+    fn from(signature: hirsel_types::SignatureRef) -> Self {
+        Self::Held(signature)
+    }
+}
+impl From<Arc<dyn ViewIdentity>> for SerializedView {
+    fn from(identity: Arc<dyn ViewIdentity>) -> Self {
+        Self::Identified(identity)
+    }
+}
 #[derive(Default)]
 pub struct Serialization {
-    views: std::sync::Arc<BTreeMap<DefPath, (hirsel_types::SignatureRef, ContentHash)>>,
+    views: std::sync::Arc<BTreeMap<DefPath, (SerializedView, ContentHash)>>,
     recordings: std::sync::Mutex<Vec<BTreeMap<DefPath, ContentHash>>>,
 }
 impl Clone for Serialization {
@@ -43,21 +80,19 @@ impl std::fmt::Debug for Serialization {
 }
 impl Serialization {
     /// Each path's view with its digest.
-    pub fn new(
-        views: impl IntoIterator<Item = (DefPath, hirsel_types::SignatureRef, ContentHash)>,
-    ) -> Self {
+    pub fn new(views: impl IntoIterator<Item = (SerializedView, ContentHash)>) -> Self {
         Self {
             views: std::sync::Arc::new(
                 views
                     .into_iter()
-                    .map(|(path, view, digest)| (path, (view, digest)))
+                    .map(|(view, digest)| (view.definition().path().clone(), (view, digest)))
                     .collect(),
             ),
             recordings: Default::default(),
         }
     }
-    /// `path`'s view, recording the read.
-    pub fn get(&self, path: &DefPath) -> Option<&hirsel_types::SignatureRef> {
+    /// A scoped view of `path`'s signature, recording the read.
+    pub fn get(&self, path: &DefPath) -> Option<hirsel_types::SignatureRef> {
         let view = self.views.get(path);
         if let Some(recording) = self.recordings.lock().unwrap().last_mut() {
             recording.insert(
@@ -65,7 +100,7 @@ impl Serialization {
                 view.map_or_else(ContentHash::default, |v| v.1),
             );
         }
-        view.map(|(view, _)| view)
+        view.map(|(view, _)| view.signature())
     }
     /// The digest a read of `path` records: its view's, or the default when
     /// it has none.

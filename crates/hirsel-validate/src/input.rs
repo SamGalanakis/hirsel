@@ -23,26 +23,117 @@ pub struct ValidationDigest(pub ContentHash);
 
 /// An immutable signature independently identified by V. No producer digest
 /// enters this constructor, and the signature cannot be edited through it.
+///
+/// A held signature keeps its payload. A sourced one keeps only its identity
+/// (definition, digest and a weak handle) and reads the payload back from its
+/// cache through a scoped view, so the cache can evict an unpinned row.
 #[derive(Clone, Debug)]
 pub struct IdentifiedSignature {
     types: Arc<TypeInterner>,
-    signature: hirsel_types::SignatureRef,
+    definition: DefId,
+    payload: Payload,
     digest: ValidationDigest,
+    /// Part of the identity: universes select their first heap role without
+    /// reading every payload again.
+    heap: Option<HeapRole>,
+}
+/// The cache a sourced view reads its payload back from. A miss recomputes
+/// through the cache's ordinary producer; the result must have the same
+/// V digest.
+pub trait SignatureSource: Send + Sync {
+    fn reread(&self, d: DefId) -> Result<hirsel_types::SignatureRef, String>;
+}
+#[derive(Clone)]
+enum Payload {
+    Held(hirsel_types::SignatureRef),
+    Sourced {
+        /// Never upgraded into a long-lived handle; it keeps the allocation's
+        /// address unique, so pointer identity stays exact after eviction.
+        last: Arc<std::sync::Mutex<std::sync::Weak<Signature>>>,
+        source: Arc<dyn SignatureSource>,
+    },
+}
+impl std::fmt::Debug for Payload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Held(signature) => f.debug_tuple("Held").field(signature).finish(),
+            Self::Sourced { .. } => f.write_str("Sourced"),
+        }
+    }
 }
 impl IdentifiedSignature {
     pub fn new(types: Arc<TypeInterner>, signature: hirsel_types::SignatureRef) -> Self {
         let digest = digest(&types, &signature);
         Self {
             types,
-            signature,
+            definition: signature.definition,
+            heap: signature.metadata.roles.heap.clone(),
+            payload: Payload::Held(signature),
+            digest,
+        }
+    }
+    /// The identity of `signature`, whose payload `source` supplies again
+    /// when it is next read.
+    pub fn sourced(
+        types: Arc<TypeInterner>,
+        signature: &hirsel_types::SignatureRef,
+        source: Arc<dyn SignatureSource>,
+    ) -> Self {
+        let digest = digest(&types, signature);
+        Self {
+            types,
+            definition: signature.definition,
+            heap: signature.metadata.roles.heap.clone(),
+            payload: Payload::Sourced {
+                last: Arc::new(std::sync::Mutex::new(Arc::downgrade(signature))),
+                source,
+            },
             digest,
         }
     }
     pub fn belongs_to(&self, types: &TypeInterner) -> bool {
         std::ptr::eq(&*self.types, types)
     }
-    pub fn signature(&self) -> &hirsel_types::SignatureRef {
-        &self.signature
+    pub fn definition(&self) -> DefId {
+        self.definition
+    }
+    pub fn heap(&self) -> Option<&HeapRole> {
+        self.heap.as_ref()
+    }
+    /// Whether `signature` is the exact payload this identity was made from.
+    pub fn is(&self, signature: &hirsel_types::SignatureRef) -> bool {
+        match &self.payload {
+            Payload::Held(held) => Arc::ptr_eq(held, signature),
+            Payload::Sourced { last, .. } => std::ptr::eq(
+                last.lock().unwrap_or_else(|e| e.into_inner()).as_ptr(),
+                Arc::as_ptr(signature),
+            ),
+        }
+    }
+    /// A scoped view of the payload: it pins the source's row only while held.
+    pub fn signature(&self) -> hirsel_types::SignatureRef {
+        match &self.payload {
+            Payload::Held(signature) => signature.clone(),
+            Payload::Sourced { last, source } => {
+                let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(signature) = last.upgrade() {
+                    return signature;
+                }
+                let d = self.definition;
+                let signature = source.reread(d).unwrap_or_else(|error| {
+                    panic!("V view {} cannot be read again: {error}", d.path())
+                });
+                // The cache recomputed the row: it must be the same view.
+                assert_eq!(
+                    digest(&self.types, &signature),
+                    self.digest,
+                    "V view {} recomputed to a different signature",
+                    d.path()
+                );
+                *last = Arc::downgrade(&signature);
+                signature
+            }
+        }
     }
     pub fn digest(&self) -> ValidationDigest {
         self.digest
@@ -50,7 +141,10 @@ impl IdentifiedSignature {
     pub fn input(&self) -> ViewInput<'_> {
         ViewInput {
             types: &self.types,
-            signature: &self.signature,
+            signature: match &self.payload {
+                Payload::Held(signature) => Pin::Borrowed(signature),
+                Payload::Sourced { .. } => Pin::Scoped(self.signature()),
+            },
             digest: self.digest,
         }
     }
@@ -65,23 +159,39 @@ impl IdentifiedSignature {
 ///     ViewInput { signature, digest }
 /// }
 /// ```
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ViewInput<'a> {
     types: &'a TypeInterner,
-    signature: &'a Signature,
+    signature: Pin<'a>,
     digest: ValidationDigest,
 }
+/// A view's payload: borrowed from a universe that holds it, or a scoped
+/// view that pins a cache row only while this input is held.
+#[derive(Clone)]
+pub enum Pin<'a> {
+    Borrowed(&'a Signature),
+    Scoped(hirsel_types::SignatureRef),
+}
+impl std::ops::Deref for Pin<'_> {
+    type Target = Signature;
+    fn deref(&self) -> &Signature {
+        match self {
+            Self::Borrowed(signature) => signature,
+            Self::Scoped(signature) => signature,
+        }
+    }
+}
 impl<'a> ViewInput<'a> {
-    pub(crate) fn for_types(self, types: &TypeInterner) -> bool {
+    pub(crate) fn for_types(&self, types: &TypeInterner) -> bool {
         std::ptr::eq(self.types, types)
     }
-    pub fn signature(self) -> &'a Signature {
-        self.signature
+    pub fn signature(&self) -> &Signature {
+        &self.signature
     }
-    pub fn digest(self) -> ValidationDigest {
+    pub fn digest(&self) -> ValidationDigest {
         self.digest
     }
-    pub fn into_parts(self) -> (&'a Signature, ValidationDigest) {
+    pub fn into_parts(self) -> (Pin<'a>, ValidationDigest) {
         (self.signature, self.digest)
     }
 }
@@ -214,6 +324,9 @@ pub(crate) struct Reader<'a> {
     /// each once.
     reads: RefCell<crate::hashed::HashSet<VRead>>,
     foreign: RefCell<BTreeSet<DefId>>,
+    /// Scoped views this validation read: each pins its cache row until the
+    /// validation ends, and never longer.
+    pins: RefCell<crate::hashed::HashMap<DefId, hirsel_types::SignatureRef>>,
 }
 impl<'a> Reader<'a> {
     pub(crate) fn new(types: &'a TypeInterner, signatures: &'a dyn SignatureLookup) -> Self {
@@ -222,9 +335,16 @@ impl<'a> Reader<'a> {
             signatures,
             reads: RefCell::default(),
             foreign: RefCell::default(),
+            pins: RefCell::default(),
         }
     }
-    pub(crate) fn get(&self, d: impl Into<DefId>) -> Option<&'a Signature> {
+    fn pin(&self, d: DefId, signature: hirsel_types::SignatureRef) -> &Signature {
+        let pointer = Arc::as_ptr(self.pins.borrow_mut().entry(d).or_insert(signature));
+        // SAFETY: a pinned Arc is never removed or replaced while this reader
+        // lives, and an Arc's payload never moves, so it outlives `&self`.
+        unsafe { &*pointer }
+    }
+    pub(crate) fn get(&self, d: impl Into<DefId>) -> Option<&Signature> {
         let d = d.into();
         match self.signatures.view(d) {
             Some(view) if !view.for_types(self.types) => {
@@ -237,7 +357,10 @@ impl<'a> Reader<'a> {
             Some(view) => {
                 let (signature, digest) = view.into_parts();
                 self.reads.borrow_mut().insert(VRead::View(d, digest));
-                Some(signature)
+                Some(match signature {
+                    Pin::Borrowed(signature) => signature,
+                    Pin::Scoped(signature) => self.pin(d, signature),
+                })
             }
             None => {
                 self.reads.borrow_mut().insert(VRead::Missing(d));
@@ -387,7 +510,7 @@ impl ValidatedSignatures {
                 reads: vec![],
             });
         }
-        let (signature, digest) = input.into_parts();
+        let digest = input.digest();
         let holds = |v: &&Arc<ViewVerdict>| {
             v.reads
                 .iter()
@@ -406,8 +529,8 @@ impl ValidatedSignatures {
             .and_then(|kept| kept.iter().find(holds).cloned())
             .unwrap_or_else(|| {
                 self.cache.as_ref().map_or_else(
-                    || Arc::new(check_view(t, d, signature, signatures)),
-                    |cache| cache.view_verdict(t, d, input, signatures, self.policy),
+                    || Arc::new(check_view(t, d, input.signature(), signatures)),
+                    |cache| cache.view_verdict(t, d, input.clone(), signatures, self.policy),
                 )
             });
         self.verdicts
@@ -535,7 +658,7 @@ impl SignatureLookup for SignatureMap {
             let digest = *v.digest.get_or_init(|| digest(&self.types, &v.signature));
             ViewInput {
                 types: &self.types,
-                signature: &v.signature,
+                signature: Pin::Borrowed(&v.signature),
                 digest,
             }
         })

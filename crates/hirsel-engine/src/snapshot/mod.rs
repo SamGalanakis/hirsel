@@ -25,6 +25,19 @@ pub use provider::FrozenProvider;
 
 pub use views::{PackageViews, View, ViewTable};
 
+/// V's identity of a declared view, as compile-time evaluation names it.
+#[derive(Debug)]
+struct Identity(Arc<hirsel_validate::IdentifiedSignature>);
+impl ViewIdentity for Identity {
+    fn definition(&self) -> DefId {
+        self.0.definition()
+    }
+    fn signature(&self) -> SignatureRef {
+        self.0.signature()
+    }
+}
+use hirsel_interp::aggregate::ViewIdentity;
+
 /// One revision's signatures, private views and V verdicts.
 pub struct SignatureSnapshot {
     epoch: Revision,
@@ -157,6 +170,20 @@ impl SignatureSnapshot {
         self.headers = Some(headers);
         self
     }
+    /// V's view of `d`'s public signature `s`. A header row is held by
+    /// identity and read again from the header cache, which may evict it.
+    fn view_of(&self, d: DefId, s: &SignatureRef, previous: Option<&View>) -> View {
+        match self.headers.as_ref().filter(|headers| headers.contains(d)) {
+            Some(headers) => View::sourced(
+                &self.types,
+                s,
+                &(Arc::new(crate::queries::header_products::RowSource(headers.clone()))
+                    as Arc<dyn hirsel_validate::SignatureSource>),
+                previous,
+            ),
+            None => View::new(&self.types, s.clone(), previous),
+        }
+    }
     pub(crate) fn header_products(
         &self,
     ) -> Option<&Arc<crate::queries::header_products::HeaderProducts>> {
@@ -192,13 +219,15 @@ impl SignatureSnapshot {
             let old = previous.map(|p| &p.validated);
             let mut validated =
                 ValidatedSignatures::with_cache(self.verifier.clone(), self.verifier_policy);
+            // The universe holds identities; each read of a payload is a
+            // scoped view, so the header cache can evict a row it only names.
             let views = Arc::new(ViewTable::from_views(
                 t,
                 self.definitions().into_iter().filter_map(|d| {
                     self.signature(d).and_then(Result::ok).map(|s| {
                         self.public_views[&d]
                             .get_or_init(|| {
-                                View::new(t, s.clone(), previous.and_then(|p| p.views.get(d)))
+                                self.view_of(d, &s, previous.and_then(|p| p.views.get(d)))
                             })
                             .clone()
                     })
@@ -242,14 +271,13 @@ impl SignatureSnapshot {
                 {
                     views.clone()
                 } else {
-                    Arc::new(ViewTable::new(
+                    Arc::new(ViewTable::from_views(
                         t,
                         views
                             .views()
                             .iter()
                             .filter(|v| visible.contains(&v.d.path().0.package))
-                            .map(|v| v.signature().clone()),
-                        Some(&views),
+                            .cloned(),
                         &mut validated,
                         old,
                     ))
@@ -489,8 +517,11 @@ impl SignatureSnapshot {
         self.validation_state();
         let mut views = Vec::new();
         for id in self.definitions() {
-            match self.representation(id) {
-                Some(Ok((view, digest))) => views.push((view.clone(), digest.0)),
+            match self.representation_identity(id) {
+                Some(Ok(view)) => {
+                    let digest = view.digest().0;
+                    views.push((Arc::new(Identity(view)) as Arc<dyn ViewIdentity>, digest));
+                }
                 Some(Err(error)) => return Err(error.clone()),
                 None => {}
             }
@@ -515,18 +546,28 @@ impl SignatureSnapshot {
     pub fn representation(
         &self,
         d: DefId,
-    ) -> Option<Result<(&SignatureRef, ValidationDigest), QueryError>> {
+    ) -> Option<Result<(SignatureRef, ValidationDigest), QueryError>> {
+        Some(
+            self.representation_identity(d)?
+                .map(|view| (view.signature(), view.digest())),
+        )
+    }
+    /// The identity of that view: holding it never pins a header row.
+    pub(crate) fn representation_identity(
+        &self,
+        d: DefId,
+    ) -> Option<Result<Arc<hirsel_validate::IdentifiedSignature>, QueryError>> {
         if let Some(state) = self.validation.get() {
             if let Some(view) = state
                 .packages
                 .get(&d.path().0.package)
                 .and_then(|p| p.replacement(d))
             {
-                return Some(Ok((view.signature(), view.digest())));
+                return Some(Ok(view.identified().clone()));
             }
             let view = state.views.get(d);
             return match self.signature(d)? {
-                Ok(_) => view.map(|v| Ok((v.signature(), v.digest()))),
+                Ok(_) => view.map(|v| Ok(v.identified().clone())),
                 Err(error) => Some(Err(error)),
             };
         }
@@ -538,15 +579,16 @@ impl SignatureSnapshot {
                 Err(error) => return Some(Err(error)),
             }
         };
-        let products = if self.private_view(d).is_some() {
-            &self.private_views
+        let product = if self.private_view(d).is_some() {
+            self.private_views
+                .get(&d)?
+                .get_or_init(|| View::new(&self.types, view.clone(), None))
         } else {
-            &self.public_views
+            self.public_views
+                .get(&d)?
+                .get_or_init(|| self.view_of(d, &view, None))
         };
-        let product = products
-            .get(&d)?
-            .get_or_init(|| View::new(&self.types, view.clone(), None));
-        Some(Ok((product.signature(), product.digest())))
+        Some(Ok(product.identified().clone()))
     }
     /// V's verdicts on this snapshot's views.
     pub fn validated(&self) -> &ValidatedSignatures {

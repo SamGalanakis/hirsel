@@ -52,6 +52,7 @@ fn scalar(runtime: &RuntimeTypes, ty: TypeId) -> bool {
                 let signature = runtime.serialization.get(definition.path());
                 let default_roles = hirsel_types::NominalRoles::default();
                 let roles = signature
+                    .as_ref()
                     .map(|s| &*s.metadata.roles)
                     .unwrap_or(&default_roles);
                 hirsel_types::substitute(

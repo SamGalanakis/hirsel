@@ -128,7 +128,7 @@ fn core_graph_schema(
         &runtime.types,
         root,
         &hirsel_types::GenericDeclarations::default(),
-        &mut |d: hirsel_syntax::DefId| Ok(runtime.serialization.get(d.path()).cloned()),
+        &mut |d: hirsel_syntax::DefId| Ok(runtime.serialization.get(d.path())),
     )
     .map_err(Error::Query)?
     .ok_or_else(|| invalid("a core type has no codec schema"))

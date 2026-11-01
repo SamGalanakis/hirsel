@@ -353,6 +353,7 @@ fn shape(runtime: &RuntimeTypes, mut ty: TypeId) -> Result<TypeKind, Error> {
             .ok_or_else(|| invalid("opaque retained payload lacks representation"))?;
         let default_roles = hirsel_types::NominalRoles::default();
         let roles = signature
+            .as_ref()
             .map(|s| &*s.metadata.roles)
             .unwrap_or(&default_roles);
         ty = hirsel_types::substitute(

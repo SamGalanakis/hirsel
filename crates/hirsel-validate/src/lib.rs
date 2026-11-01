@@ -79,8 +79,9 @@ mod typing;
 mod variant_brands;
 use input::Reader;
 pub use input::{
-    IdentifiedSignature, SignatureLookup, SignatureMap, UniverseErrors, VRead, ValidatedSignatures,
-    ValidationDigest, ViewInput, ViewVerdict, check_view, digest, errors_digest, read_holds,
+    IdentifiedSignature, Pin, SignatureLookup, SignatureMap, SignatureSource, UniverseErrors,
+    VRead, ValidatedSignatures, ValidationDigest, ViewInput, ViewVerdict, check_view, digest,
+    errors_digest, read_holds,
 };
 pub use instances::{
     InstanceViolation, validate_instance_bodies, validate_instance_catalog, validate_instance_rows,

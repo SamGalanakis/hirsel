@@ -876,6 +876,13 @@ impl FrontBodyQueries {
             .is_some_and(|headers| headers.module_proof_resident(DefId::intern(definition)))
     }
 
+    /// Whether `definition`'s settled header row is retained in the admitted cache.
+    pub fn header_resident(&self, definition: &DefPath) -> bool {
+        self.snapshot
+            .header_products()
+            .is_some_and(|headers| headers.ready(DefId::intern(definition)).is_some())
+    }
+
     /// Immutable producer grant, including input rows and retained outcomes.
     pub fn admitted_bytes(&self) -> u64 {
         self._allowance.admitted

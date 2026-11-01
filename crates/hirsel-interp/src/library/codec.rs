@@ -23,7 +23,7 @@ pub(super) fn call(
         call.types,
         *ty,
         &GenericDeclarations::default(),
-        &mut |d: hirsel_syntax::DefId| Ok(call.runtime.serialization.get(d.path()).cloned()),
+        &mut |d: hirsel_syntax::DefId| Ok(call.runtime.serialization.get(d.path())),
     )
     .map_err(Error::Query)?
     .ok_or_else(|| invalid("codec requires a checked concrete serializable schema"))?;
@@ -65,7 +65,7 @@ pub(super) fn schema(call: &OperationCall<'_>, ty: hirsel_types::TypeId) -> R<Se
         call.types,
         ty,
         &GenericDeclarations::default(),
-        &mut |d: hirsel_syntax::DefId| Ok(call.runtime.serialization.get(d.path()).cloned()),
+        &mut |d: hirsel_syntax::DefId| Ok(call.runtime.serialization.get(d.path())),
     )
     .map_err(Error::Query)?
     .ok_or_else(|| invalid("a runner call requires checked concrete serializable schemas"))

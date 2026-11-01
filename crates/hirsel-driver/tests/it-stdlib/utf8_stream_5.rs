@@ -12,7 +12,7 @@ fn interpret(path: &Path, steps: u64) {
         path,
         SimulationConfig::default(),
         Some(steps),
-        Verify::On,
+        hirsel_driver::session::Policy::default(),
         &mut Vec::new(),
         &mut Vec::new(),
     )
@@ -112,7 +112,7 @@ fn native_fixture(path: &Path, backend: native::Backend) {
             stdout: &mut stdout,
             stderr: &mut stderr,
         },
-        Verify::On,
+        hirsel_driver::session::Policy::default(),
         native::Validation::EveryStage,
     )
     .unwrap()

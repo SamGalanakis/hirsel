@@ -32,7 +32,7 @@ fn fixed_for_mode(backend: Option<native::Backend>, entries: &[&str], checked_on
                         stdout: &mut Vec::new(),
                         stderr: &mut Vec::new(),
                     },
-                    Verify::On,
+                    hirsel_driver::session::Policy::default(),
                 )
                 .unwrap()
                 .unwrap();
@@ -216,7 +216,7 @@ fn public_case(file: &str, backend: Option<native::Backend>) {
                     stdout: &mut Vec::new(),
                     stderr: &mut Vec::new(),
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
             )
             .unwrap()
             .unwrap()

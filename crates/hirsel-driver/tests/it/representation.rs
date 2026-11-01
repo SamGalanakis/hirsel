@@ -218,7 +218,7 @@ fn opaque_package_controls_preserve_private_operations_and_diagnostic_sites() {
             "client-alias-chain-ok",
         ] {
             let path = root.join(format!("conformance/PROG/PROG-2-opaque-{slug}.hir"));
-            let checked = check_path(&path).unwrap();
+            let checked = check_path(&path, hirsel_driver::session::Policy::default()).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{slug}: {:?}",
@@ -293,7 +293,7 @@ fn opaque_package_controls_preserve_private_operations_and_diagnostic_sites() {
             let path = root.join(format!(
                 "conformance/PROG/PROG-2-opaque-client-{slug}-bad.hir"
             ));
-            let checked = check_path(&path).unwrap();
+            let checked = check_path(&path, hirsel_driver::session::Policy::default()).unwrap();
             let diagnostic = &checked.diagnostics[0];
             assert_eq!(
                 diagnostic.rule.as_str(),

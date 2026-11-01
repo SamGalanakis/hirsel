@@ -16,7 +16,7 @@ fn run_vector(name: &str) {
             &path,
             SimulationConfig::default(),
             Some(10_000_000),
-            hirsel_engine::Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut stdout,
             &mut stderr,
         )

@@ -143,7 +143,7 @@ fn map_and_set_drains_inspect_linearly_many_entries() {
                     &path,
                     SimulationConfig::default(),
                     None,
-                    hirsel_engine::Verify::On,
+                    hirsel_driver::session::Policy::default(),
                     &mut vec![],
                     &mut vec![],
                 )

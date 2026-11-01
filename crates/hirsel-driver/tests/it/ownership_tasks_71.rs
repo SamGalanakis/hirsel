@@ -47,7 +47,7 @@ fn child_local_source(source_text: &str, expected_tasks: usize, require_spawn_bi
                     revocations: None,
                 },
                 Some(100_000),
-                hirsel_engine::Verify::On,
+                hirsel_driver::session::Policy::default(),
                 checked,
                 1000,
             )

@@ -730,8 +730,10 @@ fn cli_request_builds_define_and_adopt_ahead_on_both_backends() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("main.hir");
         std::fs::write(&source, SOURCE.replace("..64u64", "..1000000u64")).unwrap();
-        let mut session =
-            hirsel_driver::session::Session::open(&source, hirsel_engine::Verify::default());
+        let mut session = hirsel_driver::session::Session::open(
+            &source,
+            hirsel_driver::session::Policy::default(),
+        );
         for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
             let selected = session
                 .request(CompileOperation::NativeBuild(NativeRequest {

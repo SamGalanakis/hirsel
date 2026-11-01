@@ -69,7 +69,7 @@ fn reject_missing(direction: &str) {
         let path = root().join(format!(
             "crates/hirsel-driver/tests/fixtures/schema-recipe-11/missing-{direction}.hir"
         ));
-        let mut session = Session::open(&path, hirsel_engine::Verify::On);
+        let mut session = Session::open(&path, hirsel_driver::session::Policy::default());
         let (diagnostics, sources) = match session.request(CompileOperation::Check {
             lowering: LoweringPolicy::Comptime,
         }) {

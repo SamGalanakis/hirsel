@@ -46,7 +46,7 @@ fn build(source: &Path, dir: &Path, target: &TargetSpec, profile: BuildProfile) 
             Backend::Llvm,
             None,
             false,
-            hirsel_engine::Verify::On,
+            hirsel_driver::session::Policy::default(),
             hirsel_driver::native::Validation::EveryStage,
         )
     })

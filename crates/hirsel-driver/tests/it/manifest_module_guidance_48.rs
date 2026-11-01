@@ -4,7 +4,7 @@
 //! (MIT OR Apache-2.0). No discovery, filename aliases or CreateFile fixes.
 use crate::image_fixture::{Fixture, load};
 use hirsel_driver::session::Session;
-use hirsel_engine::{CheckCompletion, CheckOutput, LoweringPolicy, Verify, with_compiler_stack};
+use hirsel_engine::{CheckCompletion, CheckOutput, LoweringPolicy, with_compiler_stack};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -468,7 +468,7 @@ fn manifest_module_guidance_48_resident_manifest_remap_and_file_rename() {
             &[("main.hir", &[]), ("odd_name.hir", &["api"])],
             vec![],
         );
-        let mut session = Session::open(&path, Verify::On);
+        let mut session = Session::open(&path, hirsel_driver::session::Policy::default());
         let first = session.check().unwrap();
         assert_eq!(
             guidance(&first, "odd_name.value"),

@@ -27,11 +27,11 @@ pub fn run_resources_on_host(
     path: &Path,
     launch: HostLaunch<'_>,
     max_steps: Option<u64>,
-    verify: hirsel_engine::Verify,
+    policy: crate::session::Policy,
     checked: bool,
     event_limit: usize,
 ) -> Result<ResourceRun, ToolError> {
-    run_on_host(path, launch, max_steps, verify, checked, event_limit, false)
+    run_on_host(path, launch, max_steps, policy, checked, event_limit, false)
 }
 
 /// Observe supported owned leaves under the same admitted source, grants and
@@ -40,18 +40,18 @@ pub fn run_owned_on_host(
     path: &Path,
     launch: HostLaunch<'_>,
     max_steps: Option<u64>,
-    verify: hirsel_engine::Verify,
+    policy: crate::session::Policy,
     checked: bool,
     event_limit: usize,
 ) -> Result<ResourceRun, ToolError> {
-    run_on_host(path, launch, max_steps, verify, checked, event_limit, true)
+    run_on_host(path, launch, max_steps, policy, checked, event_limit, true)
 }
 
 fn run_on_host(
     path: &Path,
     launch: HostLaunch<'_>,
     max_steps: Option<u64>,
-    verify: hirsel_engine::Verify,
+    policy: crate::session::Policy,
     checked: bool,
     event_limit: usize,
     owned_data: bool,
@@ -63,7 +63,7 @@ fn run_on_host(
         trace: None,
     };
     let selection = crate::launch_binding::LaunchSelection::read(launch)?;
-    let input = crate::request_tir(path, verify, selection.entry().cloned())?;
+    let input = crate::request_tir(path, policy, selection.entry().cloned())?;
     let (outcome, _) = crate::tir_execution::run_tir_on_host_traced(
         &input,
         launch,

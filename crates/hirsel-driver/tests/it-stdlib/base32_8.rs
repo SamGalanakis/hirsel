@@ -13,7 +13,7 @@ fn fixture(name: &str) {
                 &path,
                 SimulationConfig::default(),
                 Some(steps),
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
                 &mut Vec::new(),
                 &mut Vec::new(),
             )
@@ -48,7 +48,7 @@ fn fixture(name: &str) {
                     stdout: &mut stdout,
                     stderr: &mut stderr,
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
                 native::Validation::EveryStage,
             )
             .unwrap()

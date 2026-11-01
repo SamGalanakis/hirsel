@@ -454,7 +454,7 @@ fn replay_batch(path: &std::path::Path) {
                     request["tape"].as_str().unwrap(),
                 )),
                 Some(1_000_000),
-                hirsel_engine::Verify::On,
+                hirsel_driver::session::Policy::default(),
             );
             drop(saved);
             let outcome = outcome.unwrap_or_else(|e| panic!("{e}"));

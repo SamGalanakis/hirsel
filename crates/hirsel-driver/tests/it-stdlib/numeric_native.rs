@@ -21,7 +21,7 @@ pub fn check(arguments: &[String], context: &str) {
         std::fs::write(dir.join("grants.json"), "{}").unwrap();
         let binary = dir.join("vectors");
         native::build_path_native_backend_with_validation(&source, &binary, TargetSpec::x86_64_unknown_linux_gnu(),
-            BuildProfile::Release, native::Backend::Llvm, None, false, hirsel_engine::Verify::On, native::Validation::EveryStage).unwrap().unwrap();
+            BuildProfile::Release, native::Backend::Llvm, None, false, hirsel_driver::session::Policy::default(), native::Validation::EveryStage).unwrap().unwrap();
         let _ = dir_scratch.keep();
         binary
     });

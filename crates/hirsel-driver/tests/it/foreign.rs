@@ -127,7 +127,7 @@ fn the_root_selects_unsafe_ffi_and_check_reports_it() {
         let dir_scratch = fixture("root", deterministic_add());
         let dir = dir_scratch.path().to_path_buf();
         let path = launch(&dir, json!([select_lib()]));
-        let output = check_path(&path).unwrap();
+        let output = check_path(&path, hirsel_driver::session::Policy::default()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let [package] = output.unsafe_ffi.as_slice() else {
             panic!("expected one unsafe ffi package: {:?}", output.unsafe_ffi);
@@ -538,7 +538,7 @@ fn native_c_fixture(
         backend,
         None,
         false,
-        hirsel_engine::Verify::On,
+        hirsel_driver::session::Policy::default(),
         hirsel_driver::native::Validation::EveryStage,
     )
     .unwrap();
@@ -592,7 +592,7 @@ fn native_calls_c_with_scalars_a_byte_view_and_a_released_handle() {
                 stdout: &mut Vec::new(),
                 stderr: &mut Vec::new(),
             },
-            hirsel_engine::Verify::On,
+            hirsel_driver::session::Policy::default(),
             native::Validation::EveryStage,
         );
         let Err(ToolError::Runtime(message)) = refused else {

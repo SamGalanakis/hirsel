@@ -30,6 +30,8 @@ pub struct Compiler {
     hold_bytes: Option<u64>,
     lowering: LoweringPolicy,
     result_store: Option<Arc<dyn crate::store::ResultStore>>,
+    /// The store opened when no explicit provider is configured.
+    results: Results,
     verify_store: crate::store::VerifyStore,
     comptime_limits: Option<crate::ComptimeLimits>,
 }
@@ -47,6 +49,7 @@ impl Compiler {
             hold_bytes: None,
             lowering: LoweringPolicy::Comptime,
             result_store: None,
+            results: Results::Off,
             verify_store: crate::store::VerifyStore::Off,
             comptime_limits: None,
         }
@@ -54,6 +57,11 @@ impl Compiler {
     /// This compiler with V `verify` (`--no-verify` selects `Verify::Off`).
     pub const fn with_verify(mut self, verify: Verify) -> Self {
         self.verify = verify;
+        self
+    }
+    /// The store this compiler opens when no explicit provider is configured.
+    pub const fn with_results(mut self, results: Results) -> Self {
+        self.results = results;
         self
     }
     /// Retain intermediate front bodies only for an explicit resident host.
@@ -85,28 +93,38 @@ impl Compiler {
         config.verify_store = self.verify_store;
         if let Some(store) = &self.result_store {
             config.store = store.clone();
-        } else if crate::policy::uses_persistent_results() {
-            let name = std::env::var("HIRSEL_RESULTS").unwrap_or_else(|_| "dir@1".into());
-            if crate::policy::verifies_cached_results()
-                || std::env::var_os("HIRSEL_VERIFY_CACHE").is_some_and(|v| v != "0")
-            {
+        } else {
+            let (store, recompute) = self.default_store();
+            if recompute {
                 config.verify_store = crate::store::VerifyStore::Recompute;
             }
-            if let Ok(store) = crate::store::store_by_name(
-                &name,
-                std::env::var_os("HIRSEL_RESULTS_DIR")
-                    .filter(|v| !v.is_empty())
-                    .map(Into::into),
-            ) {
+            if let Some(store) = store {
                 config.store = store;
             }
-        } else if let Ok(store) = crate::store::store_by_name("none@1", None) {
-            config.store = store;
         }
         if let Some(store) = config.store.for_compiler(self.identity()) {
             config.store = store;
         }
         config
+    }
+    /// The default provider (`Results`) and whether its hits are recomputed
+    /// (`--verify-cache` or `HIRSEL_VERIFY_CACHE`).
+    fn default_store(&self) -> (Option<Arc<dyn crate::store::ResultStore>>, bool) {
+        match self.results {
+            Results::Off => (crate::store::store_by_name("none@1", None).ok(), false),
+            Results::Host => {
+                let name = std::env::var("HIRSEL_RESULTS").unwrap_or_else(|_| "dir@1".into());
+                let recompute = crate::policy::verifies_cached_results()
+                    || std::env::var_os("HIRSEL_VERIFY_CACHE").is_some_and(|v| v != "0");
+                let directory = std::env::var_os("HIRSEL_RESULTS_DIR")
+                    .filter(|v| !v.is_empty())
+                    .map(Into::into);
+                (
+                    crate::store::store_by_name(&name, directory).ok(),
+                    recompute,
+                )
+            }
+        }
     }
     /// Engines opened by a library host always reclaim their private domains,
     /// even if a CLI has selected process-exit reclamation globally.
@@ -142,23 +160,14 @@ impl Compiler {
         engine.store_identity = self.identity();
         if let Some(store) = &self.result_store {
             engine = engine.with_result_store(store.clone());
-        } else if crate::policy::uses_persistent_results() {
-            let name = std::env::var("HIRSEL_RESULTS").unwrap_or_else(|_| "dir@1".into());
-            if crate::policy::verifies_cached_results()
-                || std::env::var_os("HIRSEL_VERIFY_CACHE").is_some_and(|v| v != "0")
-            {
+        } else {
+            let (store, recompute) = self.default_store();
+            if recompute {
                 engine.verify_store = crate::store::VerifyStore::Recompute;
             }
-            if let Ok(store) = crate::store::store_by_name(
-                &name,
-                std::env::var_os("HIRSEL_RESULTS_DIR")
-                    .filter(|v| !v.is_empty())
-                    .map(Into::into),
-            ) {
+            if let Some(store) = store {
                 engine = engine.with_result_store(store);
             }
-        } else if let Ok(store) = crate::store::store_by_name("none@1", None) {
-            engine = engine.with_result_store(store);
         }
         if let Some(store) = engine
             .product_store()

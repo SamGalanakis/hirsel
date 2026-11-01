@@ -83,7 +83,10 @@ fn reject(
 ) {
     with_compiler_stack(|| {
         let dir = fixture(source, dependency);
-        let mut program = Session::open(&dir.path().join("hirsel.json"), hirsel_engine::Verify::On);
+        let mut program = Session::open(
+            &dir.path().join("hirsel.json"),
+            hirsel_driver::session::Policy::default(),
+        );
         let output = checked(&mut program);
         assert_eq!(output.completion, hirsel_engine::CheckCompletion::Complete);
         let errors: Vec<_> = output
@@ -270,7 +273,10 @@ fn schema_hook_diagnostics_17_cross_package_module() {
 fn schema_hook_diagnostics_17_handwritten_missing_name_unaffected() {
     with_compiler_stack(|| {
         let dir = fixture("fn ordinary() { missing_hook() }", None);
-        let mut program = Session::open(&dir.path().join("hirsel.json"), hirsel_engine::Verify::On);
+        let mut program = Session::open(
+            &dir.path().join("hirsel.json"),
+            hirsel_driver::session::Policy::default(),
+        );
         let output = checked(&mut program);
         assert_eq!(output.diagnostics.len(), 1, "{:?}", output.diagnostics);
         let d = &output.diagnostics[0];
@@ -324,20 +330,21 @@ pub fn main() -> Result[(), String] uses {} {
 "#;
         let dir = fixture(source, None);
         let path = dir.path().join("hirsel.json");
-        let prepared = hirsel_driver::request_tir(&path, hirsel_engine::Verify::On, None)
-            .unwrap_or_else(|e| match e {
-                hirsel_engine::ToolError::Query {
-                    error: hirsel_engine::QueryError::Diagnostics(ds),
-                    sources,
-                    ..
-                } => panic!(
-                    "{}",
-                    ds.iter()
-                        .map(|d| d.render_human(&sources))
-                        .collect::<String>()
-                ),
-                e => panic!("{e}"),
-            });
+        let prepared =
+            hirsel_driver::request_tir(&path, hirsel_driver::session::Policy::default(), None)
+                .unwrap_or_else(|e| match e {
+                    hirsel_engine::ToolError::Query {
+                        error: hirsel_engine::QueryError::Diagnostics(ds),
+                        sources,
+                        ..
+                    } => panic!(
+                        "{}",
+                        ds.iter()
+                            .map(|d| d.render_human(&sources))
+                            .collect::<String>()
+                    ),
+                    e => panic!("{e}"),
+                });
         let config = hirsel_engine::RunConfiguration {
             entry: prepared.entry.clone(),
             hash_seed: 0,
@@ -369,7 +376,7 @@ pub fn main() -> Result[(), String] uses {} {
                 backend,
                 None,
                 false,
-                hirsel_engine::Verify::On,
+                hirsel_driver::session::Policy::default(),
             )
             .unwrap();
             assert!(built.is_ok(), "{built:?}");
@@ -409,8 +416,10 @@ fn schema_hook_diagnostics_17_cross_package_manual_twins() {
                 .replace("service: Service", "service: helper@0/model.Service");
             let helper = "pub type Service { name: String }\npub fn service_schema_decode(wire: json.Value, mut check: schema.CheckState) -> Result[unique Service, schema.SchemaError] uses {} { match wire { Text(s) => Ok(Service(name: unique s)), _ => Error(schema.scalar_error(mut check, \"String\")) } }\npub fn service_schema_encode(value: Service, mut check: schema.CheckState) -> Result[unique json.Value, schema.SchemaError] uses {} { Ok(Text(unique value.name)) }\n";
             let dir = fixture(&s, Some(helper));
-            let mut program =
-                Session::open(&dir.path().join("hirsel.json"), hirsel_engine::Verify::On);
+            let mut program = Session::open(
+                &dir.path().join("hirsel.json"),
+                hirsel_driver::session::Policy::default(),
+            );
             let output = checked(&mut program);
             assert_eq!(output.completion, hirsel_engine::CheckCompletion::Complete);
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);

@@ -477,7 +477,7 @@ fn rpc_lineage_59_actual_two_equal_credit_source_without_rpc_mapping_is_unproven
                     revocations: None,
                 },
                 Some(100_000),
-                hirsel_engine::Verify::On,
+                hirsel_driver::session::Policy::default(),
                 checked,
                 100,
             )

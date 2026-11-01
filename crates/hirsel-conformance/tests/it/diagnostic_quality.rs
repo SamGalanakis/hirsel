@@ -8,7 +8,11 @@ fn root() -> PathBuf {
 }
 
 fn checked(relative: &str) -> CheckOutput {
-    hirsel_driver::check_path(&root().join(relative)).unwrap()
+    hirsel_driver::check_path(
+        &root().join(relative),
+        hirsel_driver::session::Policy::default(),
+    )
+    .unwrap()
 }
 
 fn core_source(dir: &Path, name: &str, source: &str) -> PathBuf {
@@ -65,7 +69,9 @@ fn mechanical_json_repairs_recheck_and_preserve_primary_sites() {
             // These vectors use core declarations only. Keep their original
             // bytes without repeatedly checking an unused std dependency.
             let case_path = core_source(&dir, "case", &source);
-            let output = hirsel_driver::check_path(&case_path).unwrap();
+            let output =
+                hirsel_driver::check_path(&case_path, hirsel_driver::session::Policy::default())
+                    .unwrap();
             let d = output.diagnostics.first().unwrap();
             assert_eq!(d.rule.as_str(), rule, "{case}");
             assert_eq!(
@@ -102,7 +108,9 @@ fn mechanical_json_repairs_recheck_and_preserve_primary_sites() {
             let mut repaired = source.clone();
             repaired.replace_range(start..end, fix["replacement"].as_str().unwrap());
             let path = core_source(&dir, "repair", &repaired);
-            let accepted = hirsel_driver::check_path(&path).unwrap();
+            let accepted =
+                hirsel_driver::check_path(&path, hirsel_driver::session::Policy::default())
+                    .unwrap();
             assert!(
                 !accepted
                     .diagnostics
@@ -114,7 +122,11 @@ fn mechanical_json_repairs_recheck_and_preserve_primary_sites() {
             // Existing accepted twins remain independently checked. The repair
             // need not be textually identical to the twin.
             let twin_source = std::fs::read_to_string(root().join(twin)).unwrap();
-            let twin = hirsel_driver::check_path(&core_source(&dir, "twin", &twin_source)).unwrap();
+            let twin = hirsel_driver::check_path(
+                &core_source(&dir, "twin", &twin_source),
+                hirsel_driver::session::Policy::default(),
+            )
+            .unwrap();
             assert!(
                 !twin
                     .diagnostics
@@ -186,7 +198,9 @@ fn near_miss_help_and_json_fixes_recheck_corpus() {
                 )
                 .unwrap();
             }
-            let repaired = hirsel_driver::check_path(&path).unwrap();
+            let repaired =
+                hirsel_driver::check_path(&path, hirsel_driver::session::Policy::default())
+                    .unwrap();
             assert!(
                 !repaired
                     .diagnostics

@@ -39,7 +39,7 @@ fn reuseaddr(backend: Option<hirsel_driver::native::Backend>) {
                 backend,
                 None,
                 false,
-                hirsel_engine::Verify::On,
+                hirsel_driver::session::Policy::default(),
                 hirsel_driver::native::Validation::EveryStage,
             )
             .unwrap()
@@ -66,7 +66,7 @@ fn reuseaddr(backend: Option<hirsel_driver::native::Backend>) {
                     revocations: None,
                 },
                 None,
-                hirsel_engine::Verify::On,
+                hirsel_driver::session::Policy::default(),
             )
             .unwrap();
             assert!(

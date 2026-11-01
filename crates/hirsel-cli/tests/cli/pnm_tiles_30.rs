@@ -327,7 +327,7 @@ fn pnm_tiles_30_native_record_replay() {
                             &manifest,
                             hirsel_driver::HostLaunch::Replay(&tape),
                             Some(bound),
-                            hirsel_engine::Verify::On,
+                            hirsel_driver::session::Policy::default(),
                         )
                         .unwrap();
                         assert!(

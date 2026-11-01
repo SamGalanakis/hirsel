@@ -170,8 +170,9 @@ fn scripted(boundaries: bool) {
         let path = package(&root);
         seal_tools(&root);
         let cases = cases(&root, boundaries);
-        let prepared = hirsel_driver::request_tir(&path, hirsel_engine::Verify::On, None)
-            .unwrap_or_else(|e| panic!("{e}"));
+        let prepared =
+            hirsel_driver::request_tir(&path, hirsel_driver::session::Policy::default(), None)
+                .unwrap_or_else(|e| panic!("{e}"));
         let run = RunConfiguration {
             entry: prepared.entry.clone(),
             hash_seed: 0,
@@ -949,7 +950,9 @@ fn chunk_backup_31_fragmentation_and_reset_real_splitter() {
             .push(serde_json::json!({"path":"fragment.hir","module":[]}));
         fs::write(&path, config.to_string()).unwrap();
         seal_tools(&root);
-        let prepared = hirsel_driver::request_tir(&path, hirsel_engine::Verify::On, None).unwrap();
+        let prepared =
+            hirsel_driver::request_tir(&path, hirsel_driver::session::Policy::default(), None)
+                .unwrap();
         let run = RunConfiguration {
             entry: prepared.entry.clone(),
             hash_seed: 0,

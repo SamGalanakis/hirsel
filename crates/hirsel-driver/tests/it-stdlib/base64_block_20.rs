@@ -85,7 +85,7 @@ fn native_union(name: &str) {
                     stdout: &mut stdout,
                     stderr: &mut stderr,
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
                 native::Validation::EveryStage,
             )
             .unwrap()

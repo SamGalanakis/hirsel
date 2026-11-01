@@ -15,7 +15,8 @@ fn rendered(path: &str) -> String {
         .find_map(|line| line.strip_prefix("// expect: reject "))
         .expect("snapshot fixture must expect rejection");
     let (rule, line) = expected.split_once(" at line ").unwrap();
-    let output = hirsel_driver::check_path(&path).expect("checked");
+    let output = hirsel_driver::check_path(&path, hirsel_driver::session::Policy::default())
+        .expect("checked");
     let first = output.diagnostics.first().expect("expected rejection");
     assert_eq!(first.rule.as_str(), rule);
     assert_eq!(
@@ -102,7 +103,8 @@ fn concurrency_boundaries_name_both_causes_and_keep_their_twins() {
     ] {
         let path = Path::new("../../conformance/CONC");
         let bad = path.join(format!("{stem}-bad.hir"));
-        let rejected = hirsel_driver::check_path(&bad).unwrap();
+        let rejected =
+            hirsel_driver::check_path(&bad, hirsel_driver::session::Policy::default()).unwrap();
         let first = &rejected.diagnostics[0];
         let text = std::fs::read_to_string(&bad).unwrap();
         let expected = text
@@ -126,7 +128,11 @@ fn concurrency_boundaries_name_both_causes_and_keep_their_twins() {
             "{stem}: {first:?}"
         );
         assert!(first.message.contains(", but "), "{stem}: {first:?}");
-        let accepted = hirsel_driver::check_path(&path.join(format!("{stem}-ok.hir"))).unwrap();
+        let accepted = hirsel_driver::check_path(
+            &path.join(format!("{stem}-ok.hir")),
+            hirsel_driver::session::Policy::default(),
+        )
+        .unwrap();
         assert!(
             accepted.diagnostics.is_empty(),
             "{stem}: {:?}",
@@ -147,9 +153,10 @@ fn for_item_brand_diagnostic_names_the_declared_owner_without_internal_markers()
         let text = rendered("PROV/PROV-1-for-item-find-reject.hir");
         assert!(!text.contains('\u{1}'), "{text}");
         assert!(text.contains("of other"), "{text}");
-        let output = hirsel_driver::check_path(Path::new(
-            "../../conformance/PROV/PROV-1-for-item-find-run.hir",
-        ))
+        let output = hirsel_driver::check_path(
+            Path::new("../../conformance/PROV/PROV-1-for-item-find-run.hir"),
+            hirsel_driver::session::Policy::default(),
+        )
         .unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     });

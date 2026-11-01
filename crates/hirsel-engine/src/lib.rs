@@ -75,9 +75,7 @@ mod package;
 pub mod requests;
 pub use store::release_shared_caches;
 mod policy;
-pub use policy::{
-    LoweringPolicy, Verify, free_sessions, persistent_results, verify_cached_results,
-};
+pub use policy::{LoweringPolicy, Results, Verify, free_sessions, verify_cached_results};
 mod admission;
 mod proof_export;
 mod queries;

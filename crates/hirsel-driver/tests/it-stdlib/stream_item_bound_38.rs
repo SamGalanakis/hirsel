@@ -2,7 +2,7 @@
 //! library/coretests/tests/iter/adapters/take.rs:103-128. Overflow/error/drop
 //! traces are Hirsel-specific additions; the oracle never calls an adapter.
 use hirsel_driver::{native::*, *};
-use hirsel_engine::{RunConfiguration, Verify, with_compiler_stack};
+use hirsel_engine::{RunConfiguration, with_compiler_stack};
 use std::{fmt::Write, path::PathBuf};
 
 fn report<T>(error: hirsel_engine::ToolError) -> T {
@@ -644,7 +644,7 @@ fn unique_stream_payloads_four_engines() {
                     stdout: &mut stdout,
                     stderr: &mut stderr,
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
                 Validation::EveryStage,
             )
             .unwrap()

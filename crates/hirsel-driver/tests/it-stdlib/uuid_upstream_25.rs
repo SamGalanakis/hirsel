@@ -572,7 +572,7 @@ fn effects(group: &str) {
                     stdout: &mut stdout,
                     stderr: &mut stderr,
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
                 Validation::EveryStage,
             )
             .expect("native source check")

@@ -46,7 +46,7 @@ fn run_expanded(case_name: &str, replacements: &[(&str, &str)]) {
                 stdout: &mut stdout,
                 stderr: &mut stderr,
             },
-            hirsel_engine::Verify::On,
+            hirsel_driver::session::Policy::default(),
         )
         .unwrap()
         .unwrap();

@@ -256,8 +256,9 @@ fn reference_checked_baselines(
     path: &Path,
     part: usize,
 ) -> (BTreeMap<String, Vec<u8>>, Vec<String>) {
-    let prepared = hirsel_driver::request_tir(path, hirsel_engine::Verify::On, None)
-        .unwrap_or_else(|e| panic!("{e}"));
+    let prepared =
+        hirsel_driver::request_tir(path, hirsel_driver::session::Policy::default(), None)
+            .unwrap_or_else(|e| panic!("{e}"));
     let run = RunConfiguration {
         entry: prepared.entry.clone(),
         hash_seed: 0,

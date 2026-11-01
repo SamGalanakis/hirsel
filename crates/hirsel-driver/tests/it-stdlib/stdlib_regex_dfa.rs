@@ -89,7 +89,7 @@ fn private_check(backend: Option<native::Backend>) {
                         &path,
                         SimulationConfig::default(),
                         Some(200_000_000),
-                        Verify::On,
+                        hirsel_driver::session::Policy::default(),
                         &mut Vec::new(),
                         &mut Vec::new(),
                     )
@@ -113,7 +113,7 @@ fn private_check(backend: Option<native::Backend>) {
                     stdout: &mut Vec::new(),
                     stderr: &mut Vec::new(),
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
             )
             .unwrap()
             .unwrap(),
@@ -168,7 +168,7 @@ fn regex_dfa_corpus_llvm() {
                     stdout: &mut Vec::new(),
                     stderr: &mut Vec::new(),
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
             )
             .unwrap()
             .unwrap();

@@ -251,7 +251,7 @@ fn four_engine_lines_cursor_and_offline_replay() {
         let entry = loaded.entry.clone();
         drop(validated);
         drop(loaded);
-        let prepared = request_tir(&path, hirsel_engine::Verify::On, None).unwrap();
+        let prepared = request_tir(&path, hirsel_driver::session::Policy::default(), None).unwrap();
         let sites = Sites::new(&input);
         let dir = retained("matrix");
         let tools = Toolchain::in_tree_with_runtime(
@@ -548,7 +548,12 @@ fn refusal_controls(
 fn underlying_input_error_kinds_and_limit_precedence() {
     with_compiler_stack(|| {
         use hirsel_interp::library::simulation::Fault;
-        let prepared = request_tir(&fixture("main"), hirsel_engine::Verify::On, None).unwrap();
+        let prepared = request_tir(
+            &fixture("main"),
+            hirsel_driver::session::Policy::default(),
+            None,
+        )
+        .unwrap();
         for (id, fault, expected) in [
             (
                 "fault",

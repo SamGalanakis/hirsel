@@ -1,6 +1,6 @@
 //! Public fresh build readiness through the compiler-owned native query graph.
 use hirsel_driver::native::{self, Backend, BuildProfile, TargetSpec};
-use hirsel_engine::{Verify, with_compiler_stack};
+use hirsel_engine::with_compiler_stack;
 
 #[test]
 fn public_native_build_produces_runnable_outputs_on_both_backends() {
@@ -19,7 +19,7 @@ fn public_native_build_produces_runnable_outputs_on_both_backends() {
                 backend,
                 None,
                 false,
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
                 native::Validation::EveryStage,
             )
             .unwrap();
@@ -59,7 +59,7 @@ fn public_native_run_binds_and_launches_on_both_backends() {
                     stdout: &mut stdout,
                     stderr: &mut stderr,
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
                 native::Validation::EveryStage,
             )
             .unwrap()
@@ -97,7 +97,7 @@ fn public_record_replay(backend: Backend) {
                     stdout: &mut stdout,
                     stderr: &mut stderr,
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
                 native::Validation::EveryStage,
             );
             (outcome, stdout, stderr)

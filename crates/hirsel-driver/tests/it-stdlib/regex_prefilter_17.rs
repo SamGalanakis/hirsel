@@ -137,7 +137,7 @@ fn regex_prefilter_17_admitted_unicode_folds_after_ascii_skip() {
             &path,
             SimulationConfig::default(),
             Some(1_000_000),
-            Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -159,7 +159,7 @@ fn regex_prefilter_17_admitted_unicode_folds_after_ascii_skip() {
                     stdout: &mut Vec::new(),
                     stderr: &mut Vec::new(),
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
             )
             .unwrap()
             .unwrap();
@@ -208,7 +208,7 @@ fn byte_candidate(entry: &str) {
                 &path,
                 SimulationConfig::default(),
                 Some(1_000_000),
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
                 &mut Vec::new(),
                 &mut Vec::new(),
             )
@@ -230,7 +230,7 @@ fn byte_candidate(entry: &str) {
                         stdout: &mut Vec::new(),
                         stderr: &mut Vec::new(),
                     },
-                    Verify::On,
+                    hirsel_driver::session::Policy::default(),
                 )
                 .unwrap()
                 .unwrap();

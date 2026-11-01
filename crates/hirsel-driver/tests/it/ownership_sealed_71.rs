@@ -22,7 +22,8 @@ arena.seal(take a,take root)})
     .unwrap();
     let path = directory.path().join("hirsel.json");
     std::fs::write(&path,r#"{"schema":1,"package":{"name":"ownership","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
-    let accepted = hirsel_driver::check_path(&path).unwrap();
+    let accepted =
+        hirsel_driver::check_path(&path, hirsel_driver::session::Policy::default()).unwrap();
     assert_eq!(
         accepted.completion,
         hirsel_engine::CheckCompletion::Complete,
@@ -41,7 +42,7 @@ arena.seal(take a,take root)})
                 revocations: None,
             },
             Some(100_000),
-            hirsel_engine::Verify::On,
+            hirsel_driver::session::Policy::default(),
             checked,
             1000,
         )

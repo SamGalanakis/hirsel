@@ -12,7 +12,7 @@ fn regex_captures_deep_groups_and_exhausted_work_are_bounded() {
             &path,
             SimulationConfig::default(),
             Some(100_000_000),
-            Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -34,7 +34,7 @@ fn regex_captures_deep_groups_and_exhausted_work_are_bounded() {
                     stdout: &mut Vec::new(),
                     stderr: &mut Vec::new(),
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
             )
             .unwrap()
             .unwrap();

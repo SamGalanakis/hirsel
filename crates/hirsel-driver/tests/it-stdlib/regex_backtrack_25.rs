@@ -35,7 +35,7 @@ fn engines_for_budget(backend: Option<native::Backend>, entries: &[&str], steps:
                         stdout: &mut Vec::new(),
                         stderr: &mut Vec::new(),
                     },
-                    Verify::On,
+                    hirsel_driver::session::Policy::default(),
                 )
                 .unwrap()
                 .unwrap();
@@ -47,7 +47,8 @@ fn engines_for_budget(backend: Option<native::Backend>, entries: &[&str], steps:
                     "{entry} {backend:?}: {outcome:?}"
                 );
             } else {
-                let prepared = request_tir(&path, Verify::On, None).unwrap();
+                let prepared =
+                    request_tir(&path, hirsel_driver::session::Policy::default(), None).unwrap();
                 let limits = hirsel_interp::Limits {
                     steps: Some(steps),
                     ..Default::default()

@@ -337,10 +337,10 @@ impl Fixture {
             backend,
             None,
             false,
-            hirsel_engine::Verify::On,
+            hirsel_driver::session::Policy::default(),
         )
         .map_err(|error| {
-            let diagnostics = check_path(&self.manifest)
+            let diagnostics = check_path(&self.manifest, hirsel_driver::session::Policy::default())
                 .map(|output| {
                     output
                         .diagnostics
@@ -617,7 +617,8 @@ fn threads_is_a_trusted_manifest_member() {
             "manifest",
             "pub fn main(u: Unsafe) -> Result[(), ()] {\n  Ok(())\n}\n",
         );
-        let output = check_path(&fixture.manifest).unwrap();
+        let output =
+            check_path(&fixture.manifest, hirsel_driver::session::Policy::default()).unwrap();
         let reported: Vec<_> = output
             .unsafe_ffi
             .iter()

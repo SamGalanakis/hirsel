@@ -20,7 +20,7 @@ fn ownership_host_reference_and_checked_h_agree_on_real_source_lifetimes() {
                 revocations: None,
             },
             Some(100_000),
-            Verify::On,
+            hirsel_driver::session::Policy::default(),
             checked,
             100,
         )
@@ -66,10 +66,22 @@ fn ownership_host_trace_overflow_does_not_change_the_source_outcome() {
         record: None,
         revocations: None,
     };
-    let ordinary = hirsel_driver::run_path_on_host(&source, launch(), Some(100_000), Verify::On)
-        .unwrap_or_else(|error| panic!("source fixture: {error}"));
-    let traced = run_resources_on_host(&source, launch(), Some(100_000), Verify::On, false, 0)
-        .unwrap_or_else(|error| panic!("source fixture: {error}"));
+    let ordinary = hirsel_driver::run_path_on_host(
+        &source,
+        launch(),
+        Some(100_000),
+        hirsel_driver::session::Policy::default(),
+    )
+    .unwrap_or_else(|error| panic!("source fixture: {error}"));
+    let traced = run_resources_on_host(
+        &source,
+        launch(),
+        Some(100_000),
+        hirsel_driver::session::Policy::default(),
+        false,
+        0,
+    )
+    .unwrap_or_else(|error| panic!("source fixture: {error}"));
     assert_eq!(ordinary, traced.outcome);
     assert!(traced.trace.is_err());
 }
@@ -89,12 +101,22 @@ fn ownership_host_plain_builtin_calls_preserve_live_resource_custody_in_both_eng
             record: None,
             revocations: None,
         };
-        let ordinary =
-            hirsel_driver::run_path_on_host(&source, launch(), Some(100_000), Verify::On)
-                .unwrap_or_else(|error| panic!("source fixture: {error}"));
-        let traced =
-            run_resources_on_host(&source, launch(), Some(100_000), Verify::On, checked, 100)
-                .unwrap_or_else(|error| panic!("source fixture: {error}"));
+        let ordinary = hirsel_driver::run_path_on_host(
+            &source,
+            launch(),
+            Some(100_000),
+            hirsel_driver::session::Policy::default(),
+        )
+        .unwrap_or_else(|error| panic!("source fixture: {error}"));
+        let traced = run_resources_on_host(
+            &source,
+            launch(),
+            Some(100_000),
+            hirsel_driver::session::Policy::default(),
+            checked,
+            100,
+        )
+        .unwrap_or_else(|error| panic!("source fixture: {error}"));
         assert_eq!(traced.outcome, ordinary);
         let trace = traced.trace.unwrap();
         let analysis = trace.analyze(traced.program, 100).unwrap();
@@ -832,7 +854,7 @@ fn observed_native_source(body: &str, created: u64, expect_calls: bool) {
                     revocations: None,
                 },
                 Some(100_000),
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
                 checked,
                 1000,
             )

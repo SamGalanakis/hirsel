@@ -62,7 +62,8 @@ fn session_rechecks_edits_and_recovers_from_invalid_sources() {
         let f = crate::image_fixture::Fixture::new();
         let source = f.0.join("main.hir");
         std::fs::write(&source, "fn main() {}\n").unwrap();
-        let mut session = session::Session::open(&source, Verify::On);
+        let mut session =
+            session::Session::open(&source, hirsel_driver::session::Policy::default());
         assert!(session.check().unwrap().diagnostics.is_empty());
         assert!(session.check().unwrap().diagnostics.is_empty());
         assert_eq!(session.stats().loads, 1);
@@ -75,7 +76,7 @@ fn session_rechecks_edits_and_recovers_from_invalid_sources() {
         ] {
             std::fs::write(&source, text).unwrap();
             let actual = session.check();
-            let cold = check_path(&source);
+            let cold = check_path(&source, hirsel_driver::session::Policy::default());
             match (actual, cold) {
                 (Ok(a), Ok(b)) => assert_eq!(diagnostics(&a), diagnostics(&b)),
                 (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string()),
@@ -94,15 +95,15 @@ fn path_requests_reuse_one_session_per_thread_and_observe_edits() {
         let source = f.0.join("main.hir");
         std::fs::write(&source, "fn main() {}\n").unwrap();
         let before = session::opened();
-        request_tir(&source, Verify::On, None).unwrap();
-        request_tir(&source, Verify::On, None).unwrap();
+        request_tir(&source, hirsel_driver::session::Policy::default(), None).unwrap();
+        request_tir(&source, hirsel_driver::session::Policy::default(), None).unwrap();
         assert_eq!(session::opened() - before, 1);
         std::fs::write(&source, "fn main() { missing }\n").unwrap();
         let Err(ToolError::Query {
             error: QueryError::Diagnostics(diagnostics),
             sources,
             ..
-        }) = request_tir(&source, Verify::On, None)
+        }) = request_tir(&source, hirsel_driver::session::Policy::default(), None)
         else {
             panic!("the edited source was not observed");
         };
@@ -392,7 +393,8 @@ fn manifest_session_preserves_the_cold_loader_syntax_error_boundary() {
     with_compiler_stack(|| {
         let (fixture, manifest) = manifest_check_fixture();
         let source = fixture.path().join("main.hir");
-        let mut session = session::Session::open(&manifest, Verify::On);
+        let mut session =
+            session::Session::open(&manifest, hirsel_driver::session::Policy::default());
         let valid = assert_manifest_check_parity(&mut session);
         assert!(valid.diagnostics.is_empty());
         assert_eq!(valid.completion, CheckCompletion::Complete);
@@ -440,7 +442,8 @@ fn manifest_session_preserves_the_cold_loader_syntax_error_boundary() {
 fn manifest_session_missing_source_remains_an_io_error() {
     with_compiler_stack(|| {
         let (fixture, manifest) = manifest_check_fixture();
-        let mut session = session::Session::open(&manifest, Verify::On);
+        let mut session =
+            session::Session::open(&manifest, hirsel_driver::session::Policy::default());
         assert!(session.check().unwrap().diagnostics.is_empty());
         std::fs::remove_file(fixture.path().join("main.hir")).unwrap();
         for result in [
@@ -466,7 +469,8 @@ fn manifest_session_malformed_manifest_remains_a_tool_error() {
     with_compiler_stack(|| {
         let (_fixture, manifest) = manifest_check_fixture();
         let bytes = std::fs::read(&manifest).unwrap();
-        let mut session = session::Session::open(&manifest, Verify::On);
+        let mut session =
+            session::Session::open(&manifest, hirsel_driver::session::Policy::default());
         assert!(session.check().unwrap().diagnostics.is_empty());
         std::fs::write(&manifest, "{").unwrap();
         for result in [
@@ -1024,7 +1028,8 @@ fn compact_program_front_refreshes_only_changed_definitions_and_signature_subscr
             text.push_str(&format!("fn unrelated{i}() -> u8 {{ 1u8 }}\n"));
         }
         std::fs::write(&source, &text).unwrap();
-        let mut session = session::Session::open(&source, Verify::On);
+        let mut session =
+            session::Session::open(&source, hirsel_driver::session::Policy::default());
         assert!(session.check().unwrap().diagnostics.is_empty());
         let caller = path("caller");
         let before = session
@@ -1040,7 +1045,7 @@ fn compact_program_front_refreshes_only_changed_definitions_and_signature_subscr
         let touched = session.stats().touched;
         assert_eq!(
             diagnostics(&actual),
-            diagnostics(&check_path(&source).unwrap())
+            diagnostics(&check_path(&source, hirsel_driver::session::Policy::default()).unwrap())
         );
         assert!(
             touched < 100,
@@ -1062,7 +1067,7 @@ fn compact_program_front_refreshes_only_changed_definitions_and_signature_subscr
         assert!(!actual.diagnostics.is_empty());
         assert_eq!(
             diagnostics(&actual),
-            diagnostics(&check_path(&source).unwrap())
+            diagnostics(&check_path(&source, hirsel_driver::session::Policy::default()).unwrap())
         );
         assert!(
             session.stats().touched < 200,
@@ -1074,13 +1079,13 @@ fn compact_program_front_refreshes_only_changed_definitions_and_signature_subscr
         assert!(accepted.diagnostics.is_empty());
         assert_eq!(
             diagnostics(&accepted),
-            diagnostics(&check_path(&source).unwrap())
+            diagnostics(&check_path(&source, hirsel_driver::session::Policy::default()).unwrap())
         );
         let removed = body.replace("fn caller() -> u8 { leaf(1u8) }\n", "");
         std::fs::write(&source, &removed).unwrap();
         assert_eq!(
             diagnostics(&session.check().unwrap()),
-            diagnostics(&check_path(&source).unwrap())
+            diagnostics(&check_path(&source, hirsel_driver::session::Policy::default()).unwrap())
         );
     });
 }
@@ -1097,7 +1102,8 @@ fn compact_program_lower_products_keep_execution_subscriptions_without_scanning_
             text.push_str(&format!("const C{i}:u8 = 2u8\n"));
         }
         std::fs::write(&source, &text).unwrap();
-        let mut session = session::Session::open(&source, Verify::On);
+        let mut session =
+            session::Session::open(&source, hirsel_driver::session::Policy::default());
         let first = session.check().unwrap();
         assert!(first.diagnostics.is_empty(), "{:?}", diagnostics(&first));
         for expression in ["(1u8 / 0u8)", "3u8"] {
@@ -1105,7 +1111,7 @@ fn compact_program_lower_products_keep_execution_subscriptions_without_scanning_
             std::fs::write(&source, edited).unwrap();
             let actual = session.check().unwrap();
             let touched = session.stats().touched;
-            let cold = check_path(&source).unwrap();
+            let cold = check_path(&source, hirsel_driver::session::Policy::default()).unwrap();
             assert_eq!(diagnostics(&actual), diagnostics(&cold));
             assert_eq!(actual.completion, cold.completion);
             assert_eq!(actual.diagnostics.is_empty(), expression == "3u8");
@@ -1157,7 +1163,8 @@ fn compact_dead_arm_inputs_follow_edits_without_scanning_unchanged_body_memos() 
             text.push_str(&format!("fn unrelated{i}() -> u8 {{ 1u8 }}\n"));
         }
         std::fs::write(&source, &text).unwrap();
-        let mut session = session::Session::open(&source, Verify::On);
+        let mut session =
+            session::Session::open(&source, hirsel_driver::session::Policy::default());
         let first = session.check().unwrap();
         assert_eq!(first.diagnostics.len(), 1, "{:?}", diagnostics(&first));
         assert!(first.diagnostics[0].message.contains("`Stale`"));
@@ -1177,7 +1184,7 @@ fn compact_dead_arm_inputs_follow_edits_without_scanning_unchanged_body_memos() 
             std::fs::write(&source, &edited).unwrap();
             let actual = session.check().unwrap();
             let touched = session.stats().touched;
-            let cold = check_path(&source).unwrap();
+            let cold = check_path(&source, hirsel_driver::session::Policy::default()).unwrap();
             assert_eq!(diagnostics(&actual), diagnostics(&cold));
             assert_eq!(actual.completion, cold.completion);
             let lint: Vec<_> = actual
@@ -2602,7 +2609,8 @@ fn explicitly_delivered_changes_check_the_applied_snapshot_without_repolling_dis
         let source = fixture.0.join("main.hir");
         let initial = b"fn main() {}\n";
         std::fs::write(&source, initial).unwrap();
-        let mut session = session::Session::open(&source, Verify::On);
+        let mut session =
+            session::Session::open(&source, hirsel_driver::session::Policy::default());
         assert!(session.check().unwrap().diagnostics.is_empty());
         let edited = b"fn main() { missing }\n".to_vec();
         session.apply(vec![session::FileChange {
@@ -2644,7 +2652,8 @@ fn accepted_ten_thousand_definition_body_edit_reports_actual_index_and_aggregate
             text.push_str(&format!("fn unrelated{i}()->u8 {{ 1u8 }}\n"));
         }
         std::fs::write(&source, &text).unwrap();
-        let mut session = session::Session::open(&source, Verify::On);
+        let mut session =
+            session::Session::open(&source, hirsel_driver::session::Policy::default());
         assert!(session.check().unwrap().diagnostics.is_empty());
         let before = session.work_stats();
         assert!(
@@ -2676,7 +2685,7 @@ fn accepted_ten_thousand_definition_body_edit_reports_actual_index_and_aggregate
             serde_json::to_string(&work).unwrap()
         );
         std::fs::write(&source, edit).unwrap();
-        let cold = check_path(&source).unwrap();
+        let cold = check_path(&source, hirsel_driver::session::Policy::default()).unwrap();
         assert_eq!(diagnostics(&output), diagnostics(&cold));
         assert_eq!(output.completion, cold.completion);
     });
@@ -2738,7 +2747,8 @@ fn first_failed_manifest_load_keeps_the_invalid_import_as_a_watched_input() {
             .to_string(),
         )
         .unwrap();
-        let mut session = session::Session::open(&manifest, Verify::On);
+        let mut session =
+            session::Session::open(&manifest, hirsel_driver::session::Policy::default());
         let rejected = assert_manifest_check_parity(&mut session);
         assert!(rejected.diagnostics.iter().any(|diagnostic| {
             diagnostic.rule.as_str() == "LANG-1"
@@ -2796,7 +2806,8 @@ fn library_session_checks_every_source_and_cannot_launch() {
                        {"path":"other.hir", "module":["other"]}], "dependencies":[]
         });
         std::fs::write(&manifest, value.to_string()).unwrap();
-        let mut session = session::Session::open(&manifest, Verify::On);
+        let mut session =
+            session::Session::open(&manifest, hirsel_driver::session::Policy::default());
         let rejected = session.check().unwrap();
         assert!(
             rejected

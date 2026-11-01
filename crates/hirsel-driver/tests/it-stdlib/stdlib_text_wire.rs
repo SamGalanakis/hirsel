@@ -45,7 +45,7 @@ fn source_codec(name: &str, module: &str, functions: &[&str]) {
             &path,
             SimulationConfig::default(),
             steps,
-            Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -70,7 +70,7 @@ fn flate_large_vectors_execute_std_source() {
             &path,
             SimulationConfig::default(),
             Some(5_000_000),
-            hirsel_engine::Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -94,7 +94,7 @@ fn zip_large_vectors_execute_std_source() {
             &path,
             SimulationConfig::default(),
             Some(5_000_000),
-            hirsel_engine::Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -123,7 +123,7 @@ fn zip_big_directory_executes_std_source() {
             &path,
             simulation,
             Some(5_000_000),
-            hirsel_engine::Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -153,7 +153,7 @@ fn tar_large_pax_header_executes_std_source() {
             &path,
             simulation,
             Some(5_000_000),
-            hirsel_engine::Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -178,7 +178,7 @@ fn zip_invalid_zeros_execute_std_source() {
             &path,
             SimulationConfig::default(),
             Some(10_000_000),
-            hirsel_engine::Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -203,7 +203,7 @@ fn diff_large_vectors_execute_std_source() {
             &path,
             SimulationConfig::default(),
             Some(1_000_000_000),
-            hirsel_engine::Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -237,7 +237,7 @@ fn full_gate_deflate_matches_zlib_native() {
                 stdout: &mut stdout,
                 stderr: &mut stderr,
             },
-            Verify::On,
+            hirsel_driver::session::Policy::default(),
             native::Validation::EveryStage,
         )
         .unwrap()
@@ -260,7 +260,7 @@ fn uuid_v7_reads_the_wall_clock() {
     with_compiler_stack(|| {
         let path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/uuid-v7-clock.hir");
-        let prepared = request_tir(&path, Verify::On, None).unwrap();
+        let prepared = request_tir(&path, hirsel_driver::session::Policy::default(), None).unwrap();
         for (wall, expected) in [
             (
                 1_645_557_742_123_456_789i64,
@@ -364,7 +364,7 @@ fn jwt_verify_reads_the_wall_clock() {
                 &path,
                 simulation,
                 Some(5_000_000),
-                hirsel_engine::Verify::On,
+                hirsel_driver::session::Policy::default(),
                 &mut Vec::new(),
                 &mut Vec::new(),
             )
@@ -403,7 +403,7 @@ fn cli_error_context_5_example_prints_explicitly() {
             &path,
             SimulationConfig::default(),
             None,
-            Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut stdout,
             &mut stderr,
         )
@@ -546,7 +546,7 @@ fn yaml_large_fixture(fixture: &str) {
             &path,
             SimulationConfig::default(),
             Some(5_000_000),
-            hirsel_engine::Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -586,7 +586,7 @@ fn telemetry_limits_agree_on_both_native_backends() {
             &limits,
             SimulationConfig::default(),
             Some(20_000_000),
-            Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -620,7 +620,7 @@ fn telemetry_limits_agree_on_both_native_backends() {
                     stdout: &mut stdout,
                     stderr: &mut stderr,
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
                 hirsel_driver::native::Validation::EveryStage,
             )
             .unwrap()

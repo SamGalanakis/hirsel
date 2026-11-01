@@ -55,7 +55,7 @@ pub fn run_path_native_with_config(
         evidence,
         super::Backend::Llvm,
         output,
-        hirsel_engine::Verify::On,
+        crate::session::Policy::default(),
     )
 }
 
@@ -67,7 +67,7 @@ pub fn run_path_native_backend(
     evidence: Option<&super::Evidence>,
     backend: super::Backend,
     output: Output<'_>,
-    verify: hirsel_engine::Verify,
+    policy: crate::session::Policy,
 ) -> Result<Result<RunOutcome, NativeError>, ToolError> {
     run_path_native_backend_with_validation(
         path,
@@ -75,7 +75,7 @@ pub fn run_path_native_backend(
         evidence,
         backend,
         output,
-        verify,
+        policy,
         super::Validation::Ready,
     )
 }
@@ -87,11 +87,11 @@ pub fn run_path_native_backend_with_validation(
     evidence: Option<&super::Evidence>,
     backend: super::Backend,
     output: Output<'_>,
-    verify: hirsel_engine::Verify,
+    policy: crate::session::Policy,
     validation: super::Validation,
 ) -> Result<Result<RunOutcome, NativeError>, ToolError> {
     run_path_native_backend_with_trace_events(
-        path, launch, evidence, backend, output, verify, validation, None,
+        path, launch, evidence, backend, output, policy, validation, None,
     )
 }
 
@@ -103,7 +103,7 @@ pub fn run_path_native_backend_with_trace_events(
     evidence: Option<&super::Evidence>,
     backend: super::Backend,
     output: Output<'_>,
-    verify: hirsel_engine::Verify,
+    policy: crate::session::Policy,
     validation: super::Validation,
     trace_events: Option<&Path>,
 ) -> Result<Result<RunOutcome, NativeError>, ToolError> {
@@ -114,7 +114,7 @@ pub fn run_path_native_backend_with_trace_events(
     }
     let selection = crate::launch_binding::LaunchSelection::read(launch)?;
     let definition = selection.entry().cloned();
-    crate::session::with_session(path, verify, |session| {
+    crate::session::with_session(path, policy, |session| {
         // Source launch facts and native roots select exactly the same frozen
         // observations. Do not poll disk between binding and native selection.
         let selected_facts = session.request(crate::requests::CompileOperation::Tir {

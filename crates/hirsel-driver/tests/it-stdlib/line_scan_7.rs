@@ -27,7 +27,7 @@ fn interpret(path: &Path) {
         path,
         SimulationConfig::default(),
         Some(1_000_000),
-        Verify::On,
+        hirsel_driver::session::Policy::default(),
         &mut Vec::new(),
         &mut Vec::new(),
     )
@@ -52,7 +52,7 @@ fn native_fixture(path: &Path, backend: native::Backend) {
             stdout: &mut stdout,
             stderr: &mut stderr,
         },
-        Verify::On,
+        hirsel_driver::session::Policy::default(),
         native::Validation::EveryStage,
     )
     .unwrap()
@@ -281,7 +281,7 @@ fn rust_oracle_all_partitions_and_raw_limits() {
             &generated,
             SimulationConfig::default(),
             Some(60_000_000),
-            Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut Vec::new(),
             &mut Vec::new(),
         )

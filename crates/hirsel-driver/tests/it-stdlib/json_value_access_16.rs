@@ -15,7 +15,7 @@ fn vectors_interpreter() {
             &fixture("vectors"),
             SimulationConfig::default(),
             Some(1_000_000),
-            Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut Vec::new(),
             &mut Vec::new(),
         )

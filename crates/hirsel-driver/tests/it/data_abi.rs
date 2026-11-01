@@ -162,7 +162,7 @@ impl Fixture {
             backend,
             None,
             false,
-            Verify::On,
+            hirsel_driver::session::Policy::default(),
         )
         .map_err(|error| format!("{error}"))?
         .map_err(|error| error.message)?;

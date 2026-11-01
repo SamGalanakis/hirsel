@@ -95,7 +95,7 @@ fn check_entry(engine: u8, entry: &str, additional: &str) {
                     &path,
                     SimulationConfig::default(),
                     Some(100_000_000),
-                    Verify::On,
+                    hirsel_driver::session::Policy::default(),
                     &mut Vec::new(),
                     &mut Vec::new(),
                 )
@@ -114,7 +114,7 @@ fn check_entry(engine: u8, entry: &str, additional: &str) {
                         stdout: &mut Vec::new(),
                         stderr: &mut Vec::new(),
                     },
-                    Verify::On,
+                    hirsel_driver::session::Policy::default(),
                 )
                 .unwrap()
                 .unwrap()

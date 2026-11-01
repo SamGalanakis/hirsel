@@ -36,7 +36,7 @@ fn engines_for(backend: Option<native::Backend>, entries: &[&str]) {
                         stdout: &mut Vec::new(),
                         stderr: &mut Vec::new(),
                     },
-                    Verify::On,
+                    hirsel_driver::session::Policy::default(),
                 )
                 .unwrap()
                 .unwrap();

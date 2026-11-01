@@ -288,7 +288,11 @@ unit selection and every exported function's definition again.
 
 `Session::open_configured(entry, CompileConfig)` carries an explicit result-store
 provider, worker count, retention, lowering and total hold budget through reloads.
-`Session::open(entry, Verify)` keeps the ordinary Resident defaults. A configured
+`Session::open(entry, Policy)` keeps the ordinary Resident defaults under the
+command's V and result-store choice (`Results`); the CLI selects `Results::Host`
+for check, build, run and serve. Path entry points take the same `Policy`, and
+the thread's session registry keeps sessions by working directory, entry and
+policy, so no session is reused under another store choice. A configured
 Compiler is Clone: clones share the selected provider and create separate engines.
 
 `native::receipt_source::factory::NamedGraph::declarations` publishes receipt

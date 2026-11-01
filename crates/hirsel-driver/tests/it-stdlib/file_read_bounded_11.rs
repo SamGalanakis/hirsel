@@ -86,7 +86,7 @@ fn controls_max_u64_errors_and_owned_result() {
             &path,
             SimulationConfig::default(),
             Some(1_000_000),
-            Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut Vec::new(),
             &mut Vec::new(),
         )
@@ -112,7 +112,7 @@ fn controls_max_u64_errors_and_owned_result() {
                     stdout: &mut Vec::new(),
                     stderr: &mut Vec::new(),
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
                 native::Validation::EveryStage,
             )
             .unwrap()
@@ -223,7 +223,7 @@ fn filesystem_boundaries_cursor_requests_and_cross_engine_replay() {
                             revocations: None,
                         },
                         Some(20_000_000),
-                        Verify::On,
+                        hirsel_driver::session::Policy::default(),
                     )
                     .unwrap());
                 } else {

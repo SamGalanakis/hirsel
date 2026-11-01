@@ -118,8 +118,9 @@ fn task_set_signal_suspensions_replay_exact_readiness() {
             &dir.join("reference.tape"),
             &grants,
         );
-        let prepared = hirsel_driver::request_tir(&manifest, hirsel_engine::Verify::On, None)
-            .unwrap_or_else(|error| panic!("{error}"));
+        let prepared =
+            hirsel_driver::request_tir(&manifest, hirsel_driver::session::Policy::default(), None)
+                .unwrap_or_else(|error| panic!("{error}"));
         let run = hirsel_engine::RunConfiguration {
             entry: prepared.entry.clone(),
             hash_seed: 0,

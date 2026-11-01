@@ -960,7 +960,7 @@ pub fn main(rt: Io) -> Result[(), FileError] {
                     revocations: None,
                 },
                 Some(1_000_000),
-                hirsel_engine::Verify::On,
+                crate::session::Policy::default(),
                 Some(&mut live),
             )
             .unwrap();

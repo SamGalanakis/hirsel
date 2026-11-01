@@ -285,7 +285,8 @@ fn native(group: &str, live: bool) {
         .collect();
     with_compiler_stack(|| {
         let prepared =
-            hirsel_driver::request_tir(&manifest, hirsel_engine::Verify::On, None).unwrap();
+            hirsel_driver::request_tir(&manifest, hirsel_driver::session::Policy::default(), None)
+                .unwrap();
         for path in report["tapes"].as_array().unwrap() {
             let tape = Path::new(path["path"].as_str().unwrap());
             let steps = path["steps"].as_u64().unwrap_or(STEPS);

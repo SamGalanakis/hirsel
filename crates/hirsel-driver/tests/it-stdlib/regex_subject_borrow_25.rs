@@ -93,7 +93,7 @@ fn run(engine: &str, partition: usize) {
                     stdout: &mut Vec::new(),
                     stderr: &mut Vec::new(),
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
             )
             .unwrap()
             .unwrap();

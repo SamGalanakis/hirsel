@@ -76,7 +76,7 @@ fn source_calls_selected(
                     revocations: None,
                 },
                 Some(100_000),
-                hirsel_engine::Verify::On,
+                hirsel_driver::session::Policy::default(),
                 checked,
                 1000,
             )

@@ -1,7 +1,7 @@
 //! Filesystem and event delivery over the shared immutable compiler graph.
 //! Sessions retain observations, policy and work metadata. Semantic retention
 //! and invalidation belong to engine-selected queries for fresh and resident use.
-use hirsel_engine::Verify;
+use hirsel_engine::{Results, Verify};
 use std::{
     cell::RefCell,
     path::{Path, PathBuf},
@@ -41,13 +41,39 @@ pub struct SessionInputWork {
 /// The ordinary host facade over the engine-owned compiler request selector.
 pub type Session = crate::resident::ObservedSession<crate::requests::CompilerRequests>;
 
+/// The per-command choices a path entry point compiles under: V, and the
+/// result store the CLI selects for the command. Sessions are kept by policy,
+/// so a session opened under one policy is never reused under another.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Policy {
+    pub verify: Verify,
+    pub results: Results,
+}
+impl Policy {
+    /// The library default (no result store) with V `verify`.
+    pub fn verify(verify: Verify) -> Self {
+        Self {
+            verify,
+            ..Self::default()
+        }
+    }
+    /// The driver's compiler under this policy.
+    pub fn compiler(self) -> hirsel_engine::Compiler {
+        crate::COMPILER
+            .with_verify(self.verify)
+            .with_results(self.results)
+    }
+}
+
 impl Session {
     /// Capture host policy now; observe source inputs lazily on first request.
-    pub fn open(entry: &Path, verify: Verify) -> Self {
-        let compiler = crate::COMPILER
-            .with_verify(verify)
-            .with_retention(hirsel_engine::memo::Retention::Resident);
-        Self::open_configured(entry, compiler.configuration())
+    pub fn open(entry: &Path, policy: Policy) -> Self {
+        Self::open_with_compiler(
+            entry,
+            policy
+                .compiler()
+                .with_retention(hirsel_engine::memo::Retention::Resident),
+        )
     }
     /// Explicit stores, lowering, jobs and zero-byte policies remain exact.
     pub fn open_configured(entry: &Path, config: hirsel_engine::CompileConfig) -> Self {
@@ -72,9 +98,7 @@ impl Session {
     }
 }
 
-/// The sessions this thread keeps, by (working directory, entry as given,
-/// verification), most recently used last. The entry keeps its spelling: a
-/// standalone source's diagnostics print the path as given.
+/// The sessions this thread keeps, unique by key, most recently used last.
 struct Registry {
     sessions: Vec<(Key, Session)>,
     limit: usize,
@@ -129,28 +153,45 @@ pub fn resident_changed() -> bool {
 
 /// Fresh and resident callers use the same immutable request selector. The
 /// registry changes only the lifetime of the input cursor and shared host.
-pub(crate) fn with_session<R>(path: &Path, verify: Verify, f: impl FnOnce(&mut Session) -> R) -> R {
-    let mut session = take(path, verify);
+pub(crate) fn with_session<R>(path: &Path, policy: Policy, f: impl FnOnce(&mut Session) -> R) -> R {
+    // Without a working directory no key identifies the program: it runs unkept.
+    let Ok(directory) = std::env::current_dir() else {
+        return f(&mut Session::open(path, policy));
+    };
+    let key = Key {
+        directory,
+        entry: path.to_path_buf(),
+        policy,
+    };
+    let mut session = take(&key);
     let result = f(&mut session);
-    put(path, verify, session);
+    put(key, session);
     result
 }
 
 pub(crate) fn request(
     path: &Path,
-    verify: Verify,
+    policy: Policy,
     operation: crate::requests::CompileOperation,
 ) -> Result<std::sync::Arc<crate::requests::CompileOutput>, hirsel_engine::ToolError> {
-    with_session(path, verify, |session| session.request(operation))
+    with_session(path, policy, |session| session.request(operation))
 }
 
-/// `path`'s session out of the registry, or a new one. A session is taken
+/// A kept session's identity: the working directory, the entry as given (a
+/// standalone source's diagnostics print the path as given) and the policy.
+#[derive(Eq, PartialEq)]
+struct Key {
+    directory: PathBuf,
+    entry: PathBuf,
+    policy: Policy,
+}
+
+/// `key`'s session out of the registry, or a new one. A session is taken
 /// while in use so a nested lease of the same program loads its own.
-fn take(path: &Path, verify: Verify) -> Session {
-    let key = key(path, verify);
+fn take(key: &Key) -> Session {
     let kept = RESIDENT.with(|r| {
         let mut registry = r.borrow_mut();
-        let index = registry.sessions.iter().position(|(k, _)| *k == key);
+        let index = registry.sessions.iter().position(|(k, _)| k == key);
         match index {
             Some(i) => Some(registry.sessions.remove(i).1),
             None => {
@@ -159,19 +200,49 @@ fn take(path: &Path, verify: Verify) -> Session {
             }
         }
     });
-    kept.unwrap_or_else(|| Session::open(path, verify))
+    kept.unwrap_or_else(|| Session::open(&key.entry, key.policy))
 }
-fn put(path: &Path, verify: Verify, session: Session) {
-    let key = key(path, verify);
+/// Keep `session` under `key`, replacing a nested lease's session of the same key.
+fn put(key: Key, session: Session) {
     RESIDENT.with(|r| {
         let mut registry = r.borrow_mut();
+        registry.sessions.retain(|(k, _)| *k != key);
         registry.sessions.push((key, session));
         let over = registry.sessions.len().saturating_sub(registry.limit);
         registry.sessions.drain(..over);
     });
 }
-type Key = (PathBuf, PathBuf, bool);
-fn key(path: &Path, verify: Verify) -> Key {
-    let directory = std::env::current_dir().unwrap_or_default();
-    (directory, path.to_path_buf(), verify == Verify::On)
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The CLI chooses a store per command; one process may serve commands
+    /// with different choices. A kept session carries its policy's store, so
+    /// a lease under another policy must open its own session, and a lease
+    /// under the first policy again must get the first session back.
+    #[test]
+    fn leases_under_different_store_choices_never_share_a_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let entry = directory.path().join("main.hir");
+        std::fs::write(&entry, "pub fn main() {}\n").unwrap();
+        keep_sessions(2);
+        let off = Policy::default();
+        let host = Policy {
+            results: Results::Host,
+            ..off
+        };
+        let store = |policy| {
+            with_session(&entry, policy, |session| {
+                std::sync::Arc::as_ptr(&session.configuration().store).cast::<()>()
+            })
+        };
+        let before = opened();
+        let first = store(off);
+        let other = store(host);
+        let again = store(off);
+        assert_ne!(first, other, "a Host lease reused the Off session");
+        assert_eq!(first, again, "the Off session was not kept");
+        assert_eq!(opened() - before, 2);
+    }
 }

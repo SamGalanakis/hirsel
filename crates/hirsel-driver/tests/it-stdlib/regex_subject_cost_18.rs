@@ -68,7 +68,7 @@ fn check_subject(backend: Option<native::Backend>, entries: &[&str]) {
                     &path,
                     SimulationConfig::default(),
                     Some(100_000_000),
-                    Verify::On,
+                    hirsel_driver::session::Policy::default(),
                     &mut Vec::new(),
                     &mut Vec::new(),
                 )
@@ -82,7 +82,7 @@ fn check_subject(backend: Option<native::Backend>, entries: &[&str]) {
                         stdout: &mut Vec::new(),
                         stderr: &mut Vec::new(),
                     },
-                    Verify::On,
+                    hirsel_driver::session::Policy::default(),
                 )
                 .unwrap()
                 .unwrap(),

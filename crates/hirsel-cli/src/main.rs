@@ -1109,9 +1109,6 @@ fn execute(mut args: Vec<OsString>, start: std::time::Instant) -> u8 {
     } else {
         hirsel_engine::store::VerifyStore::Off
     });
-    hirsel_engine::persistent_results(
-        command.is_some_and(|c| matches!(c, "check" | "build" | "run" | "serve")),
-    );
     if args.first().is_some_and(|a| a == "serve") && !args.iter().any(|a| a == "--host") {
         return serve::serve(&args[1..]);
     }
@@ -1192,6 +1189,18 @@ fn execute_command(args: Vec<OsString>, verify: Verify) -> u8 {
         eprintln!("--no-verify applies only to run, test and build");
         return usage_for(topic.as_deref().and_then(|arg| arg.to_str()));
     }
+    // check, build, run and serve keep their results in the host's store.
+    let results = match command {
+        Command::Build { .. }
+        | Command::Run { .. }
+        | Command::Simulation { .. }
+        | Command::Serve { .. }
+        | Command::Source {
+            command: "check", ..
+        } => hirsel_engine::Results::Host,
+        _ => hirsel_engine::Results::Off,
+    };
+    let policy = hirsel_driver::session::Policy { verify, results };
     let (command, flag, file) = match command {
         Command::Ctl { path, cores } => {
             use std::io::{Read, Write};
@@ -1632,7 +1641,7 @@ fn execute_command(args: Vec<OsString>, verify: Verify) -> u8 {
                 backend,
                 evidence.as_ref(),
                 fuel,
-                verify,
+                policy,
                 validation,
             ) {
                 Ok(Ok(report)) => {
@@ -1742,7 +1751,7 @@ fn execute_command(args: Vec<OsString>, verify: Verify) -> u8 {
             let served = hirsel_driver::serve::serve(
                 Path::new(&file),
                 Path::new(&host),
-                verify,
+                policy,
                 &mut |endpoint| eprintln!("hirsel serve: listening on {endpoint}"),
             );
             return match served {
@@ -1768,11 +1777,12 @@ fn execute_command(args: Vec<OsString>, verify: Verify) -> u8 {
                     Path::new(&file),
                     simulation,
                     max_steps,
-                    verify,
+                    policy,
                     &mut std::io::stdout().lock(),
                     &mut std::io::stderr().lock(),
                 ),
                 Path::new(&file),
+                policy,
                 json,
             );
         }
@@ -1794,7 +1804,7 @@ fn execute_command(args: Vec<OsString>, verify: Verify) -> u8 {
                     Path::new(&file),
                     launch.host(arguments.as_deref()),
                     backend.unwrap_or(hirsel_driver::native::Backend::Cranelift),
-                    verify,
+                    policy,
                     Path::new(&sidecar),
                     json,
                 );
@@ -1813,18 +1823,18 @@ fn execute_command(args: Vec<OsString>, verify: Verify) -> u8 {
                 // `run --native` is the edit loop's: Cranelift unless LLVM is asked for.
                 backend.unwrap_or(hirsel_driver::native::Backend::Cranelift),
                 hirsel_driver::native::Output::Inherit { json },
-                verify,
+                policy,
                 validation,
                 trace_events.as_deref().map(Path::new),
             ) {
                 // The native driver already wrote the complete failure chain.
                 Ok(Ok(outcome @ RunOutcome::Failed { .. })) => outcome.exit_code() as u8,
-                Ok(Ok(outcome)) => run_result_for_path(Ok(outcome), Path::new(&file), json),
+                Ok(Ok(outcome)) => run_result_for_path(Ok(outcome), Path::new(&file), policy, json),
                 Ok(Err(error)) => {
                     eprintln!("hirsel: {error}");
                     RunOutcome::Tooling(error.to_string()).exit_code() as u8
                 }
-                Err(error) => run_result_for_path(Err(error), Path::new(&file), json),
+                Err(error) => run_result_for_path(Err(error), Path::new(&file), policy, json),
             };
         }
         Command::Run {
@@ -1844,7 +1854,7 @@ fn execute_command(args: Vec<OsString>, verify: Verify) -> u8 {
                 Path::new(&file),
                 launch.host(arguments.as_deref()),
                 max_steps,
-                verify,
+                policy,
                 Path::new(&sidecar),
                 json,
             );
@@ -1867,9 +1877,10 @@ fn execute_command(args: Vec<OsString>, verify: Verify) -> u8 {
                     Path::new(&file),
                     launch.host(arguments.as_deref()),
                     max_steps,
-                    verify,
+                    policy,
                 ),
                 Path::new(&file),
+                policy,
                 json,
             );
         }
@@ -1883,9 +1894,9 @@ fn execute_command(args: Vec<OsString>, verify: Verify) -> u8 {
     let json = flag == Some("--json");
     match command {
         "check" => match if flag == Some("--safe") {
-            hirsel_driver::check_safe_path(path)
+            hirsel_driver::check_safe_path(path, policy)
         } else {
-            hirsel_driver::check_path(path).map(|output| (output, None))
+            hirsel_driver::check_path(path, policy).map(|output| (output, None))
         } {
             Ok((output, verdict)) => {
                 for d in &output.diagnostics {
@@ -2107,12 +2118,19 @@ fn read_simulation(path: &Path) -> Result<hirsel_engine::SimulationConfig, Strin
     simulation_world::read(path)
 }
 
-fn run_result_for_path(result: Result<RunOutcome, ToolError>, path: &Path, json: bool) -> u8 {
+/// `policy` is the run's, so the run's own session renders its failures.
+fn run_result_for_path(
+    result: Result<RunOutcome, ToolError>,
+    path: &Path,
+    policy: hirsel_driver::session::Policy,
+    json: bool,
+) -> u8 {
     if let Ok(outcome @ RunOutcome::Failed { .. }) = &result {
         return match hirsel_driver::report_runtime_failures(
             path,
             outcome,
             json,
+            policy,
             &mut std::io::stderr().lock(),
         ) {
             Ok(()) => outcome.exit_code() as u8,
@@ -2128,7 +2146,7 @@ fn run_result_for_path(result: Result<RunOutcome, ToolError>, path: &Path, json:
     let code = run_result(result, json);
     if refused
         && !json
-        && let Ok(grants) = hirsel_driver::entry_grants_hint(path)
+        && let Ok(grants) = hirsel_driver::entry_grants_hint(path, policy)
     {
         eprintln!("hirsel: grant the entry's requested roots with --grants '{grants}'");
     }

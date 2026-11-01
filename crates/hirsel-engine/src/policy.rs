@@ -43,12 +43,18 @@ pub(crate) fn frees_sessions() -> bool {
     FREE_SESSIONS.load(Ordering::Relaxed) || hirsel_intern::memory::metered()
 }
 
-static PERSISTENT_RESULTS: AtomicBool = AtomicBool::new(false);
-static VERIFY_RESULTS: AtomicBool = AtomicBool::new(false);
-/// Enable the CLI's disk result store for compiler-created sessions.
-pub fn persistent_results(enabled: bool) {
-    PERSISTENT_RESULTS.store(enabled, Ordering::Relaxed);
+/// Which result store a compiler without an explicit provider opens. The CLI
+/// chooses per command: `Host` for check, build, run and serve, `Off` otherwise.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Results {
+    /// none@1: nothing is read or persisted.
+    #[default]
+    Off,
+    /// The host's store: `HIRSEL_RESULTS` (default dir@1) under `HIRSEL_RESULTS_DIR`.
+    Host,
 }
+
+static VERIFY_RESULTS: AtomicBool = AtomicBool::new(false);
 /// Select independent recomputation for sessions using the CLI's default
 /// result provider. An explicit CompileConfig retains its own store policy.
 pub fn verify_cached_results(verify: crate::store::VerifyStore) {
@@ -59,7 +65,4 @@ pub fn verify_cached_results(verify: crate::store::VerifyStore) {
 }
 pub(crate) fn verifies_cached_results() -> bool {
     VERIFY_RESULTS.load(Ordering::Relaxed)
-}
-pub(crate) fn uses_persistent_results() -> bool {
-    PERSISTENT_RESULTS.load(Ordering::Relaxed)
 }

@@ -40,7 +40,7 @@ pub fn trial_tapes(
         .as_ref()
         .and_then(|binding| binding.instance)
         .ok_or_else(|| refused(format!("{} records no runner calls", tape.display())))?;
-    let mut session = session::Session::open(candidate, hirsel_engine::Verify::On);
+    let mut session = session::Session::open(candidate, session::Policy::default());
     let initial = session.request(requests::CompileOperation::Tir { definition: None })?;
     let requests::CompileResult::Tir(input) = &initial.result else {
         return Err(refused("TIR request returned another operation".into()));

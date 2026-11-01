@@ -81,13 +81,14 @@ pub fn load_program_source(
     COMPILER.load_program_source(path, replacement)
 }
 /// A partial pipeline can produce rejection diagnostics, but never a clean acceptance.
-pub fn check_path(path: &Path) -> Result<CheckOutput, ToolError> {
-    session::with_session(path, hirsel_engine::Verify::On, session::Session::check)
+pub fn check_path(path: &Path, policy: session::Policy) -> Result<CheckOutput, ToolError> {
+    session::with_session(path, policy, session::Session::check)
 }
 /// `check_path`, then the escape from capability checking an accepted program's
 /// entry reaches (CAP-6).
 pub fn check_safe_path(
     path: &Path,
+    policy: session::Policy,
 ) -> Result<
     (
         CheckOutput,
@@ -95,11 +96,7 @@ pub fn check_safe_path(
     ),
     ToolError,
 > {
-    session::with_session(
-        path,
-        hirsel_engine::Verify::On,
-        session::Session::check_safe,
-    )
+    session::with_session(path, policy, session::Session::check_safe)
 }
 
 pub fn format_path(path: &Path) -> Result<String, ToolError> {
@@ -112,8 +109,8 @@ pub fn prepare_format_path(path: &Path) -> Result<Vec<hirsel_engine::FormattedSo
 }
 pub fn run_path(path: &Path, stdout: &mut dyn Write) -> Result<RunOutcome, ToolError> {
     run_simulation(
-        COMPILER,
         path,
+        session::Policy::default(),
         SimulationConfig::default(),
         None,
         stdout,
@@ -126,7 +123,14 @@ pub fn run_path_with_simulation(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<RunOutcome, ToolError> {
-    run_simulation(COMPILER, path, simulation, None, stdout, stderr)
+    run_simulation(
+        path,
+        session::Policy::default(),
+        simulation,
+        None,
+        stdout,
+        stderr,
+    )
 }
 /// Execute simulated inputs with an explicit step budget; None is unbounded.
 /// Ordinary driver/conformance entry points retain their adapter defaults.
@@ -134,13 +138,13 @@ pub fn run_path_with_step_budget(
     path: &Path,
     simulation: SimulationConfig,
     max_steps: Option<u64>,
-    verify: hirsel_engine::Verify,
+    policy: session::Policy,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<RunOutcome, ToolError> {
     run_simulation(
-        COMPILER.with_verify(verify),
         path,
+        policy,
         simulation,
         Some(hirsel_interp::Limits {
             steps: max_steps,
@@ -151,14 +155,14 @@ pub fn run_path_with_step_budget(
     )
 }
 fn run_simulation(
-    compiler: Compiler,
     path: &Path,
+    policy: session::Policy,
     simulation: SimulationConfig,
     limits: Option<hirsel_interp::Limits>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<RunOutcome, ToolError> {
-    let input = request_tir(path, compiler.verify(), None)?;
+    let input = request_tir(path, policy, None)?;
     let run = hirsel_tir::RunConfiguration {
         entry: input.entry.clone(),
         hash_seed: 0,
@@ -220,7 +224,7 @@ fn run_simulation(
 pub fn export_tir_path(path: &Path) -> Result<String, ToolError> {
     let output = session::request(
         path,
-        hirsel_engine::Verify::On,
+        session::Policy::default(),
         requests::CompileOperation::ExportTir,
     )?;
     match &output.result {
@@ -236,7 +240,7 @@ pub fn export_tir_path(path: &Path) -> Result<String, ToolError> {
 pub fn hash_path(path: &Path) -> Result<String, ToolError> {
     let output = session::request(
         path,
-        hirsel_engine::Verify::On,
+        session::Policy::default(),
         requests::CompileOperation::Hashes { package: None },
     )?;
     let requests::CompileResult::Hashes(hashes) = &output.result else {
@@ -262,7 +266,7 @@ pub fn hash_path(path: &Path) -> Result<String, ToolError> {
 pub fn expand_path(path: &Path) -> Result<String, ToolError> {
     let output = session::request(
         path,
-        hirsel_engine::Verify::On,
+        session::Policy::default(),
         requests::CompileOperation::Expand,
     )?;
     match &output.result {
@@ -274,7 +278,7 @@ pub fn expand_path(path: &Path) -> Result<String, ToolError> {
 }
 /// Narrow conformance adapter returns diagnostics with revision-1 completion.
 pub fn check_file(path: &Path) -> Result<CheckOutput, NotImplemented> {
-    check_path(path).map_err(|_| NotImplemented)
+    check_path(path, crate::session::Policy::default()).map_err(|_| NotImplemented)
 }
 pub fn run_file(path: &Path, stdout: &mut dyn Write) -> Result<RunOutcome, NotImplemented> {
     run_path(path, stdout).map_err(|_| NotImplemented)
@@ -282,8 +286,8 @@ pub fn run_file(path: &Path, stdout: &mut dyn Write) -> Result<RunOutcome, NotIm
 
 /// A minimal inline template for the entry's requested roots, for launch hints.
 /// Io selects stdout only; no directory or other projection is implied.
-pub fn entry_grants_hint(path: &Path) -> Result<String, ToolError> {
-    let input = request_tir(path, hirsel_engine::Verify::On, None)?;
+pub fn entry_grants_hint(path: &Path, policy: session::Policy) -> Result<String, ToolError> {
+    let input = request_tir(path, policy, None)?;
     let launch = hirsel_engine::entry_launch_kind(&input.runtime.types, &input.signature)
         .map_err(ToolError::Launch)?;
     let roots = hirsel_engine::entry_roots(&input.runtime.types, &input.signature, launch)
@@ -308,7 +312,7 @@ pub fn entry_grants_hint(path: &Path) -> Result<String, ToolError> {
 
 /// Export the semantic binding and denial defaults; callers explicitly select grants.
 pub fn export_run_path(path: &Path) -> Result<Vec<u8>, ToolError> {
-    let input = request_tir(path, hirsel_engine::Verify::On, None)?;
+    let input = request_tir(path, session::Policy::default(), None)?;
     let launch = hirsel_engine::entry_launch_kind(&input.runtime.types, &input.signature)
         .map_err(ToolError::Launch)?;
     let revision = &input.revision;
@@ -500,23 +504,25 @@ pub fn run_path_on_host(
     path: &Path,
     launch: HostLaunch<'_>,
     max_steps: Option<u64>,
-    verify: hirsel_engine::Verify,
+    policy: session::Policy,
 ) -> Result<RunOutcome, ToolError> {
-    run_path_on_host_observed(path, launch, max_steps, verify, None)
+    run_path_on_host_observed(path, launch, max_steps, policy, None)
 }
 
 /// Render canonical failure sites against the current source snapshot. Stored
 /// outcomes keep logical paths; human and JSON diagnostics use physical paths.
+/// `policy` is the run's, so the run's own session renders them.
 pub fn report_runtime_failures(
     path: &Path,
     outcome: &RunOutcome,
     json: bool,
+    policy: session::Policy,
     stderr: &mut dyn Write,
 ) -> Result<(), ToolError> {
     let RunOutcome::Failed { primary, causes } = outcome else {
         return Ok(());
     };
-    let input = request_tir(path, hirsel_engine::Verify::On, None)?;
+    let input = request_tir(path, policy, None)?;
     let sources = &input.sources;
     {
         let physical = |site: &hirsel_run_schema::Site| {
@@ -555,7 +561,7 @@ pub fn replay_observations(
         path,
         HostLaunch::Replay(tape),
         max_steps,
-        hirsel_engine::Verify::On,
+        session::Policy::default(),
         Some(&mut observed),
     )?;
     replay_observation(observed, &outcome)
@@ -571,7 +577,7 @@ pub fn replay_observations_checked(
     let mut observed = None;
     let (outcome, _) = run_request_on_host(
         path,
-        hirsel_engine::Verify::On,
+        session::Policy::default(),
         HostLaunch::Replay(tape),
         max_steps,
         Some(&mut observed),
@@ -595,7 +601,7 @@ pub fn record_fixture_observations(
         record: Some(tape),
         revocations: None,
     })?;
-    let input = request_tir(path, hirsel_engine::Verify::On, selection.entry().cloned())?;
+    let input = request_tir(path, session::Policy::default(), selection.entry().cloned())?;
     record_prepared_fixture_observations(&input, run, fixture, tape, checked)
 }
 
@@ -721,10 +727,10 @@ fn run_path_on_host_observed(
     path: &Path,
     launch: HostLaunch<'_>,
     max_steps: Option<u64>,
-    verify: hirsel_engine::Verify,
+    policy: session::Policy,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
 ) -> Result<RunOutcome, ToolError> {
-    run_request_on_host(path, verify, launch, max_steps, observed, None, false)
+    run_request_on_host(path, policy, launch, max_steps, observed, None, false)
         .map(|(outcome, _)| outcome)
 }
 
@@ -733,10 +739,10 @@ fn run_path_on_host_observed(
 /// `None` selects the manifest entry; an explicit definition binds that entry.
 pub fn request_tir(
     path: &Path,
-    verify: hirsel_engine::Verify,
+    policy: session::Policy,
     definition: Option<hirsel_syntax::DefPath>,
 ) -> Result<std::sync::Arc<requests::TirExecution>, ToolError> {
-    let output = session::request(path, verify, requests::CompileOperation::Tir { definition })?;
+    let output = session::request(path, policy, requests::CompileOperation::Tir { definition })?;
     match &output.result {
         requests::CompileResult::Tir(input) => Ok(input.clone()),
         _ => Err(ToolError::Runtime(
@@ -747,7 +753,7 @@ pub fn request_tir(
 
 pub(crate) fn run_request_on_host(
     path: &Path,
-    verify: hirsel_engine::Verify,
+    policy: session::Policy,
     launch: HostLaunch<'_>,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
@@ -755,7 +761,7 @@ pub(crate) fn run_request_on_host(
     checked: bool,
 ) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
     let selection = launch_binding::LaunchSelection::read(launch)?;
-    let input = request_tir(path, verify, selection.entry().cloned())?;
+    let input = request_tir(path, policy, selection.entry().cloned())?;
     tir_execution::run_tir_on_host(
         &input, launch, selection, max_steps, observed, cancel, checked,
     )

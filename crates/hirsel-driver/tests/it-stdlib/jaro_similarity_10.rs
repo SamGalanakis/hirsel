@@ -79,7 +79,7 @@ fn run(name: &str, backend: Option<native::Backend>) {
                     stdout: &mut stdout,
                     stderr: &mut stderr,
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
                 native::Validation::EveryStage,
             )
             .unwrap_or_else(|error| panic!("{error}"))
@@ -89,7 +89,7 @@ fn run(name: &str, backend: Option<native::Backend>) {
                 &fixture(name),
                 SimulationConfig::default(),
                 Some(20_000_000),
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
                 &mut stdout,
                 &mut stderr,
             )

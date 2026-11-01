@@ -98,7 +98,7 @@ pub fn build_path_native(
         super::Backend::Llvm,
         evidence,
         false,
-        hirsel_engine::Verify::On,
+        crate::session::Policy::default(),
     )
 }
 
@@ -112,7 +112,7 @@ pub fn build_path_native_backend(
     backend: super::Backend,
     evidence: Option<&super::Evidence>,
     fuel: bool,
-    verify: hirsel_engine::Verify,
+    policy: crate::session::Policy,
 ) -> Result<Result<Vec<String>, NativeError>, ToolError> {
     build_path_native_backend_with_validation(
         source,
@@ -122,7 +122,7 @@ pub fn build_path_native_backend(
         backend,
         evidence,
         fuel,
-        verify,
+        policy,
         super::Validation::Ready,
     )
 }
@@ -180,7 +180,7 @@ pub fn build_path_native_backend_with_validation(
     backend: super::Backend,
     evidence: Option<&super::Evidence>,
     fuel: bool,
-    verify: hirsel_engine::Verify,
+    policy: crate::session::Policy,
     validation: super::Validation,
 ) -> Result<Result<Vec<String>, NativeError>, ToolError> {
     if matches!(profile, BuildProfile::Release | BuildProfile::ReleaseLto)
@@ -193,7 +193,7 @@ pub fn build_path_native_backend_with_validation(
     }
     let selected = crate::session::request(
         source,
-        verify,
+        policy,
         crate::requests::CompileOperation::NativeBuild(crate::requests::NativeRequest {
             backend,
             profile,

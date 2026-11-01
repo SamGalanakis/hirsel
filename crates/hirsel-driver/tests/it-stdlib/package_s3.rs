@@ -1,6 +1,6 @@
 //! Published SigV4 vectors execute more than the corpus's 1M source steps.
 use hirsel_driver::run_path_with_step_budget;
-use hirsel_engine::{RunOutcome, SimulationConfig, Verify, with_compiler_stack};
+use hirsel_engine::{RunOutcome, SimulationConfig, with_compiler_stack};
 use std::path::PathBuf;
 
 #[test]
@@ -15,7 +15,7 @@ fn published_aws_sigv4_vectors_execute_package_source() {
                 &path,
                 SimulationConfig::default(),
                 Some(5_000_000),
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
                 &mut stdout,
                 &mut stderr,
             )

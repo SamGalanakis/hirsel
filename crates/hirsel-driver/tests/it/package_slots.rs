@@ -211,7 +211,7 @@ fn an_omitted_slot_takes_its_default_and_selects_its_provider() {
                 .iter()
                 .any(|p| p.ends_with("prov/prov.hir"))
         );
-        let output = check_path(&path).unwrap();
+        let output = check_path(&path, hirsel_driver::session::Policy::default()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     });
 }
@@ -494,7 +494,7 @@ fn maps_equal_after_normalization_are_one_selection() {
         let program = load_program(&path).unwrap();
         assert_eq!(slot(&program, &mac(), "H"), prov("fast"));
         assert_eq!(slot(&program, &package("fwd"), "R"), prov("fast"));
-        let output = check_path(&path).unwrap();
+        let output = check_path(&path, hirsel_driver::session::Policy::default()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         // Separately named equal-body implementations stay distinct.
         fixture.other(json!({"H": implementation("prov", "slow")}));
@@ -661,7 +661,7 @@ fn observed(fixture: &Fixture, actual: &str) -> (String, String, Vec<u8>, String
     .unwrap()
     .unwrap();
     let run = export_run_path(&path).unwrap();
-    let grants = entry_grants_hint(&path).unwrap();
+    let grants = entry_grants_hint(&path, hirsel_driver::session::Policy::default()).unwrap();
     let mut stdout = Vec::new();
     let outcome = run_path(&path, &mut stdout).unwrap();
     (

@@ -1,6 +1,5 @@
 //! Named arena callbacks use the source-selected target and lexical boundary.
 use hirsel_driver::{HostLaunch, LaunchConfig, ownership_trace::run_resources_on_host};
-use hirsel_engine::Verify;
 
 #[test]
 fn named_arena_callback_preserves_outer_resource_on_reference_and_checked_h() {
@@ -19,14 +18,18 @@ fn named_arena_callback_preserves_outer_resource_on_reference_and_checked_h() {
             record: None,
             revocations: None,
         };
-        let ordinary =
-            hirsel_driver::run_path_on_host(&manifest, launch(), Some(100_000), Verify::On)
-                .unwrap();
+        let ordinary = hirsel_driver::run_path_on_host(
+            &manifest,
+            launch(),
+            Some(100_000),
+            hirsel_driver::session::Policy::default(),
+        )
+        .unwrap();
         let observed = run_resources_on_host(
             &manifest,
             launch(),
             Some(100_000),
-            Verify::On,
+            hirsel_driver::session::Policy::default(),
             checked,
             1000,
         )

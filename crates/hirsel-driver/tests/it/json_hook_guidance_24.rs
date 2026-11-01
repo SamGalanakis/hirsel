@@ -71,7 +71,10 @@ fn reject(
 ) {
     with_compiler_stack(|| {
         let dir = fixture(source, helper);
-        let mut program = Session::open(&dir.path().join("hirsel.json"), hirsel_engine::Verify::On);
+        let mut program = Session::open(
+            &dir.path().join("hirsel.json"),
+            hirsel_driver::session::Policy::default(),
+        );
         let output = checked(&mut program);
         assert_eq!(output.completion, hirsel_engine::CheckCompletion::Complete);
         let errors: Vec<_> = output
@@ -266,7 +269,10 @@ fn json_hook_guidance_24_cross_module_nominal() {
         let helper = "pub type Service { name: String }\npub fn service_to_json(value: Service) -> json.Value uses {} = comptime derive.json_value(shape(Service))\npub fn service_from_json(value: json.Value) -> Result[Service, String] uses {} = comptime derive.from_json(shape(Service))\n";
         with_compiler_stack(|| {
             let dir = fixture(&s, Some(helper));
-            let mut p = Session::open(&dir.path().join("hirsel.json"), hirsel_engine::Verify::On);
+            let mut p = Session::open(
+                &dir.path().join("hirsel.json"),
+                hirsel_driver::session::Policy::default(),
+            );
             let output = checked(&mut p);
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         });
@@ -318,20 +324,21 @@ pub fn main() -> Result[(), String] uses {} {
         );
         let dir = fixture(&source, None);
         let path = dir.path().join("hirsel.json");
-        let prepared = hirsel_driver::request_tir(&path, hirsel_engine::Verify::On, None)
-            .unwrap_or_else(|e| match e {
-                hirsel_engine::ToolError::Query {
-                    error: hirsel_engine::QueryError::Diagnostics(ds),
-                    sources,
-                    ..
-                } => panic!(
-                    "{}",
-                    ds.iter()
-                        .map(|d| d.render_human(&sources))
-                        .collect::<String>()
-                ),
-                e => panic!("{e}"),
-            });
+        let prepared =
+            hirsel_driver::request_tir(&path, hirsel_driver::session::Policy::default(), None)
+                .unwrap_or_else(|e| match e {
+                    hirsel_engine::ToolError::Query {
+                        error: hirsel_engine::QueryError::Diagnostics(ds),
+                        sources,
+                        ..
+                    } => panic!(
+                        "{}",
+                        ds.iter()
+                            .map(|d| d.render_human(&sources))
+                            .collect::<String>()
+                    ),
+                    e => panic!("{e}"),
+                });
         let config = hirsel_engine::RunConfiguration {
             entry: prepared.entry.clone(),
             hash_seed: 0,
@@ -367,7 +374,7 @@ pub fn main() -> Result[(), String] uses {} {
                 backend,
                 None,
                 false,
-                hirsel_engine::Verify::On,
+                hirsel_driver::session::Policy::default(),
             )
             .unwrap();
             assert!(built.is_ok(), "{built:?}");

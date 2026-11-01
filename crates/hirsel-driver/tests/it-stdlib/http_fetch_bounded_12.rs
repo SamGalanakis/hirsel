@@ -116,7 +116,7 @@ fn scripted_error_precedence_body_send_and_resource_replay() {
                     stdout: &mut Vec::new(),
                     stderr: &mut Vec::new(),
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
                 native::Validation::EveryStage,
             )
             .unwrap()
@@ -405,7 +405,7 @@ fn loopback_boundaries_decoding_legacy_and_offline_replay() {
         let path = fixture("main");
         // Each live row arms a 30 s accept window. Check the program before any
         // is armed, so every run of this path reuses its session.
-        check_safe_path(&path).unwrap();
+        check_safe_path(&path, hirsel_driver::session::Policy::default()).unwrap();
         let mut loaded = checked(&path);
         let program = ready(&mut loaded);
         let retain = std::env::var_os("HTTP_FETCH_BOUNDED_12_EVIDENCE");
@@ -626,7 +626,7 @@ fn loopback_boundaries_decoding_legacy_and_offline_replay() {
                             revocations: None,
                         },
                         Some(20_000_000),
-                        Verify::On,
+                        hirsel_driver::session::Policy::default(),
                     );
                     returned.store(true, Ordering::Release);
                     ok(outcome.unwrap());

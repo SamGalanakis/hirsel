@@ -144,7 +144,7 @@ fn interpret(path: &Path) -> RunOutcome {
         path,
         SimulationConfig::default(),
         Some(10_000_000),
-        Verify::On,
+        hirsel_driver::session::Policy::default(),
         &mut Vec::new(),
         &mut Vec::new(),
     )
@@ -169,7 +169,7 @@ fn native(path: &Path, backend: native::Backend) -> RunOutcome {
             stdout: &mut stdout,
             stderr: &mut stderr,
         },
-        Verify::On,
+        hirsel_driver::session::Policy::default(),
         native::Validation::EveryStage,
     )
     .unwrap()

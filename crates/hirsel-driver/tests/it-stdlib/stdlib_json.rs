@@ -250,7 +250,7 @@ fn execute_native_source(name: &str, source: &str) {
                 backend,
                 None,
                 false,
-                hirsel_engine::Verify::On,
+                hirsel_driver::session::Policy::default(),
                 native::Validation::EveryStage,
             )
             .unwrap()

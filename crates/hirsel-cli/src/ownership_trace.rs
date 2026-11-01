@@ -17,7 +17,7 @@ pub(super) fn run(
     path: &Path,
     launch: hirsel_driver::HostLaunch<'_>,
     max_steps: Option<u64>,
-    verify: hirsel_engine::Verify,
+    policy: hirsel_driver::session::Policy,
     sidecar: &Path,
     json: bool,
 ) -> u8 {
@@ -25,14 +25,14 @@ pub(super) fn run(
         path,
         launch,
         max_steps,
-        verify,
+        policy,
         false,
         EVENT_LIMIT,
     ) {
         Ok(run) => run,
-        Err(error) => return super::run_result_for_path(Err(error), path, json),
+        Err(error) => return super::run_result_for_path(Err(error), path, policy, json),
     };
-    let code = super::run_result_for_path(Ok(run.outcome), path, json);
+    let code = super::run_result_for_path(Ok(run.outcome), path, policy, json);
     let written = run
         .trace
         .map_err(|error| error.to_string())
@@ -140,7 +140,7 @@ pub(super) fn run_native(
     path: &Path,
     launch: hirsel_driver::HostLaunch<'_>,
     backend: hirsel_driver::native::Backend,
-    verify: hirsel_engine::Verify,
+    policy: hirsel_driver::session::Policy,
     sidecar: &Path,
     json: bool,
 ) -> u8 {
@@ -148,12 +148,12 @@ pub(super) fn run_native(
         path,
         launch,
         backend,
-        verify,
+        policy,
         EVENT_LIMIT,
     ) {
         Ok(Ok(run)) => run,
         Ok(Err(error)) => return tooling(error.to_string()),
-        Err(error) => return super::run_result_for_path(Err(error), path, json),
+        Err(error) => return super::run_result_for_path(Err(error), path, policy, json),
     };
     let _ = std::io::stdout().write_all(&run.execution.stdout);
     let _ = std::io::stderr().write_all(&run.execution.stderr);

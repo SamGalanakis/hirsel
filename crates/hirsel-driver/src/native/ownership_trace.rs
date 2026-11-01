@@ -648,14 +648,14 @@ impl LeafObjects {
 pub fn run_path(
     path: &std::path::Path,
     backend: Backend,
-    verify: hirsel_engine::Verify,
+    policy: crate::session::Policy,
     event_limit: usize,
 ) -> Result<Result<LeafExecution, NativeError>, crate::ToolError> {
     run_path_with_launch(
         path,
         crate::HostLaunch::empty(),
         backend,
-        verify,
+        policy,
         event_limit,
     )
 }
@@ -666,7 +666,7 @@ pub fn run_path_with_launch(
     path: &std::path::Path,
     launch: crate::HostLaunch<'_>,
     backend: Backend,
-    verify: hirsel_engine::Verify,
+    policy: crate::session::Policy,
     event_limit: usize,
 ) -> Result<Result<LeafExecution, NativeError>, crate::ToolError> {
     hirsel_engine::with_compiler_stack(|| {
@@ -681,7 +681,7 @@ pub fn run_path_with_launch(
         let selection = crate::launch_binding::LaunchSelection::read_for_compilation(launch)?;
         let (inputs, fuel) = selection.compiler_inputs()?;
         let definition = selection.entry().cloned();
-        let compiler = crate::COMPILER.with_verify(verify).with_owned_engines();
+        let compiler = policy.compiler().with_owned_engines();
         let config = compiler.configuration();
         let selector = CompilerRequests::for_host(compiler.clone(), config.clone());
         let limits = selector.input_limits();

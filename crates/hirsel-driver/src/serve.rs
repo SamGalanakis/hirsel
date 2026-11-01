@@ -119,7 +119,7 @@ fn read(path: &str, what: &str) -> Result<Vec<u8>, ToolError> {
 pub fn serve(
     program: &Path,
     config: &Path,
-    verify: hirsel_engine::Verify,
+    policy: crate::session::Policy,
     ready: &mut dyn FnMut(&str),
 ) -> Result<(), ToolError> {
     let bytes = std::fs::read(config).map_err(|e| {
@@ -137,7 +137,7 @@ pub fn serve(
             "only 1 callee run at a time is supported",
         ));
     }
-    let mut session = crate::session::Session::open(program, verify);
+    let mut session = crate::session::Session::open(program, policy);
     let initial = session.request(crate::requests::CompileOperation::Tir { definition: None })?;
     let crate::requests::CompileResult::Tir(input) = &initial.result else {
         return Err(host_error(

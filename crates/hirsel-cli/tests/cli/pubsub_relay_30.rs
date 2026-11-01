@@ -117,8 +117,9 @@ fn scripted(boundaries: bool) {
             .unwrap();
         let root = scratch.keep();
         let manifest = package(&root);
-        let prepared = hirsel_driver::request_tir(&manifest, Verify::On, None)
-            .unwrap_or_else(|e| panic!("{e}"));
+        let prepared =
+            hirsel_driver::request_tir(&manifest, hirsel_driver::session::Policy::default(), None)
+                .unwrap_or_else(|e| panic!("{e}"));
         let run = RunConfiguration {
             entry: prepared.entry.clone(),
             hash_seed: 0,
@@ -575,8 +576,9 @@ fn pubsub_relay_30_permit_drop_and_binding_controls() {
         )
         .unwrap();
         fs::write(&manifest, config.to_string()).unwrap();
-        let prepared = hirsel_driver::request_tir(&manifest, Verify::On, None)
-            .unwrap_or_else(|e| panic!("{e}"));
+        let prepared =
+            hirsel_driver::request_tir(&manifest, hirsel_driver::session::Policy::default(), None)
+                .unwrap_or_else(|e| panic!("{e}"));
         let run = RunConfiguration {
             entry: prepared.entry.clone(),
             hash_seed: 0,

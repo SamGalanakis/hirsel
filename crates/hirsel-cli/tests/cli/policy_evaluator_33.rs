@@ -736,8 +736,12 @@ fn policy_evaluator_33_cell() {
             };
             native(&mut loaded, &root, &row, &recipe, &expected);
         } else {
-            let prepared = hirsel_driver::request_tir(&manifest, hirsel_engine::Verify::On, None)
-                .unwrap_or_else(|e| panic!("{e}"));
+            let prepared = hirsel_driver::request_tir(
+                &manifest,
+                hirsel_driver::session::Policy::default(),
+                None,
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
             if simulation(&prepared, &row, &recipe).is_none() {
                 return;
             }

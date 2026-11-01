@@ -50,7 +50,8 @@ fn scripted(caps: bool) {
         let scratch = scratch("batchrun-27-script-");
         let selection = package(scratch.path());
         let prepared =
-            hirsel_driver::request_tir(&selection, hirsel_engine::Verify::On, None).unwrap();
+            hirsel_driver::request_tir(&selection, hirsel_driver::session::Policy::default(), None)
+                .unwrap();
         let config = hirsel_engine::RunConfiguration {
             entry: prepared.entry.clone(),
             hash_seed: 0,

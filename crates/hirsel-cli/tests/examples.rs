@@ -444,7 +444,7 @@ fn httpget() {
             &fixture.0.join("hirsel.json"),
             simulation,
             Some(DEFAULT_RUN_MAX_STEPS),
-            hirsel_engine::Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut output,
             &mut Vec::new(),
         )
@@ -1237,7 +1237,7 @@ impl Example {
                 hirsel_driver::native::Backend::Llvm,
                 None,
                 false,
-                hirsel_engine::Verify::On,
+                hirsel_driver::session::Policy::default(),
                 hirsel_driver::native::Validation::EveryStage,
             )
         })
@@ -1258,7 +1258,7 @@ impl Example {
                 &self.dir.join("hirsel.json"),
                 simulation,
                 Some(DEFAULT_RUN_MAX_STEPS),
-                hirsel_engine::Verify::On,
+                hirsel_driver::session::Policy::default(),
                 &mut stdout,
                 &mut stderr,
             )

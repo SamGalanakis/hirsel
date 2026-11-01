@@ -13,7 +13,7 @@ fn regex_large_invalid(line: u16) {
             &path,
             SimulationConfig::default(),
             Some(5_000_000),
-            hirsel_engine::Verify::On,
+            hirsel_driver::session::Policy::default(),
             &mut Vec::new(),
             &mut Vec::new(),
         )

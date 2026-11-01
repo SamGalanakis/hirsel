@@ -143,8 +143,9 @@ fn scripted(caps: bool) {
         let scratch = scratch("suite-runner-29-script-");
         let root = scratch.path();
         let selection = package(root);
-        let prepared = hirsel_driver::request_tir(&selection, hirsel_engine::Verify::On, None)
-            .unwrap_or_else(|error| panic!("{error}"));
+        let prepared =
+            hirsel_driver::request_tir(&selection, hirsel_driver::session::Policy::default(), None)
+                .unwrap_or_else(|error| panic!("{error}"));
         let config = hirsel_engine::RunConfiguration {
             entry: prepared.entry.clone(),
             hash_seed: 0,

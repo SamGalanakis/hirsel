@@ -68,7 +68,8 @@ fn dagbuild_29_reference_checked_workflows() {
         let scratch = scratch("dagbuild-29-semantic-");
         let selection = package(scratch.path());
         let prepared =
-            hirsel_driver::request_tir(&selection, hirsel_engine::Verify::On, None).unwrap();
+            hirsel_driver::request_tir(&selection, hirsel_driver::session::Policy::default(), None)
+                .unwrap();
         let config = hirsel_engine::RunConfiguration {
             entry: prepared.entry.clone(),
             hash_seed: 0,

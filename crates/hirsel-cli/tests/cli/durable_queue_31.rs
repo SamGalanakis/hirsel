@@ -89,8 +89,9 @@ fn durable_queue_31_reference_checked() {
     with_compiler_stack(|| {
         let root = evidence();
         let manifest = package(&root);
-        let prepared = hirsel_driver::request_tir(&manifest, Verify::On, None)
-            .unwrap_or_else(|e| panic!("{e}"));
+        let prepared =
+            hirsel_driver::request_tir(&manifest, hirsel_driver::session::Policy::default(), None)
+                .unwrap_or_else(|e| panic!("{e}"));
         let run = RunConfiguration {
             entry: prepared.entry.clone(),
             hash_seed: 0,
@@ -635,7 +636,9 @@ fn durable_queue_31_existing_tapes_and_refusal_controls() {
     with_compiler_stack(|| {
         let root = PathBuf::from(std::env::var_os("DURABLE_QUEUE_31_TAPES").unwrap());
         let manifest = root.join("hirsel.json");
-        let prepared = hirsel_driver::request_tir(&manifest, Verify::On, None).unwrap();
+        let prepared =
+            hirsel_driver::request_tir(&manifest, hirsel_driver::session::Policy::default(), None)
+                .unwrap();
         let selected: Vec<Value> =
             serde_json::from_slice(&fs::read(root.join("tape-index.json")).unwrap()).unwrap();
         let controls = root.join("controls");

@@ -850,7 +850,7 @@ fn http2_250_concurrent_streams_and_refusals_agree_on_all_engines() {
                     stdout: &mut stdout,
                     stderr: &mut stderr,
                 },
-                Verify::On,
+                hirsel_driver::session::Policy::default(),
             )
             .unwrap()
             .unwrap();

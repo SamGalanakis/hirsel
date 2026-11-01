@@ -403,4 +403,51 @@ mod tests {
         assert_eq!(changed, second);
         assert_ne!(accepted.get(&key), changed.get(&key));
     }
+    #[test]
+    fn tracked_receipts_refuse_n_minus_one_and_refund_only_the_last_array_owner() {
+        let reads = Reads::from_vec(vec![(
+            ReadKey::Environment,
+            ContentHash::of_bytes(b"tracked"),
+        )])
+        .unwrap();
+        let budget = ProcessBudget::new(1 << 20);
+        let mut allowance = budget.reserve(1 << 20).unwrap();
+        let mut pool = ReadPool::default();
+        let required = pool.required_tracked_bytes(&reads).unwrap();
+        let remaining = Arc::new(std::sync::Mutex::new(required - 1));
+        let before = allowance.bytes();
+        assert!(
+            pool.intern_tracked(
+                &reads,
+                &mut allowance,
+                &mut remaining.lock().unwrap(),
+                remaining.clone()
+            )
+            .is_none()
+        );
+        assert_eq!(*remaining.lock().unwrap(), required - 1);
+        assert_eq!(allowance.bytes(), before);
+        assert!(pool.rows.is_empty());
+        *remaining.lock().unwrap() = before;
+        let receipt = pool
+            .intern_tracked(
+                &reads,
+                &mut allowance,
+                &mut remaining.lock().unwrap(),
+                remaining.clone(),
+            )
+            .unwrap();
+        let after = *remaining.lock().unwrap();
+        assert_eq!(before - after, required);
+        let array_bytes = pool.required_tracked_bytes(&reads).unwrap();
+        let held = receipt.clone();
+        drop(receipt);
+        assert_eq!(*remaining.lock().unwrap(), after);
+        assert_eq!(held, reads);
+        drop(held);
+        assert_eq!(*remaining.lock().unwrap(), after + array_bytes);
+        drop(pool);
+        drop(allowance);
+        assert_eq!(budget.reserved(), 0);
+    }
 }

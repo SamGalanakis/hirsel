@@ -828,3 +828,33 @@ fn demanded_private_headers_preserve_canonical_records_under_cache_verification(
         }
     });
 }
+
+#[test]
+fn private_module_proofs_preserve_unique_results_through_public_helpers() {
+    with_compiler_stack(|| {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = directory.path().join("hirsel.json");
+        std::fs::write(
+            directory.path().join("main.hir"),
+            r#"
+@preserves_unique(builder)
+pub fn finish(take builder: List[u8]) -> String uses {} {
+    match core@1/string.from_bytes(core@1/bytes.from_list(take builder)) {
+        Ok(text) => take text,
+        Error(_) => "",
+    }
+}
+fn value() -> String uses {} {
+    let builder: List[u8] = [65u8]
+    finish(take builder)
+}
+pub fn main() -> unique String uses {} { value() }
+"#,
+        )
+        .unwrap();
+        std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"header_proof","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
+        COMPILER
+            .precompute_package(&manifest, &directory.path().join("products"))
+            .unwrap();
+    });
+}

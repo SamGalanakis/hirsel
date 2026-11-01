@@ -204,9 +204,12 @@ impl HeaderProducts {
                     Some(self.reserve_standalone(weight.bytes())?)
                 } else if let Some(retention) = private.retention.get() {
                     let mut remaining = retention.lock().unwrap_or_else(|e| e.into_inner());
-                    *remaining = remaining
-                        .checked_sub(weight.bytes())
-                        .ok_or_else(private_refusal)?;
+                    *remaining = remaining.checked_sub(weight.bytes()).ok_or_else(|| {
+                        QueryError::Operational(hirsel_types::OperationalFailure {
+                            operation: "private inference admission".into(),
+                            message: format!("demanded module proof exceeds its existing front partition; owner {}; required {} bytes, available {} bytes", id.path(), weight.bytes(), *remaining),
+                        })
+                    })?;
                     None
                 } else {
                     return Err(private_refusal());
@@ -350,7 +353,10 @@ impl HeaderProducts {
         crate::queries::private_unique::scheduled::standalone_budget()
             .reserve(bytes)
             .map(Arc::new)
-            .map_err(|_| private_refusal())
+            .map_err(|error| QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "private inference admission".into(),
+                message: format!("demanded module proof exceeds its existing front partition; standalone header owner: {error}"),
+            }))
     }
     fn declared(&self) -> Arc<Self> {
         Arc::new(Self {

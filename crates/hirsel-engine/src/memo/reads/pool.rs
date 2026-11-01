@@ -151,6 +151,7 @@ impl ReadPool {
             _credit: credit.map(|remaining| ReadCredit {
                 remaining,
                 bytes: shared_bytes,
+                owner: std::sync::OnceLock::new(),
             }),
             _allowance: allowance
                 .split(shared_bytes)
@@ -168,6 +169,7 @@ impl ReadPool {
 struct ReadCredit {
     remaining: Arc<std::sync::Mutex<u64>>,
     bytes: u64,
+    owner: std::sync::OnceLock<std::sync::Weak<Reads>>,
 }
 impl Drop for ReadCredit {
     fn drop(&mut self) {
@@ -180,6 +182,21 @@ pub(super) struct SharedRows {
     _credit: Option<ReadCredit>,
 }
 
+impl Reads {
+    pub(crate) fn bind_tracked_owner(this: &Arc<Self>) {
+        if let Rows::Shared(rows) = &this.rows
+            && let Some(credit) = &rows._credit
+        {
+            let _ = credit.owner.set(Arc::downgrade(this));
+        }
+    }
+    pub(crate) fn tracked_by(this: &Arc<Self>, remaining: &Arc<std::sync::Mutex<u64>>) -> bool {
+        this.indices.is_none()
+            && matches!(&this.rows, Rows::Shared(rows) if rows._credit.as_ref().is_some_and(|credit| {
+                Arc::ptr_eq(&credit.remaining, remaining) && credit.owner.get().is_some_and(|owner| std::ptr::eq(owner.as_ptr(), Arc::as_ptr(this)))
+            }))
+    }
+}
 impl std::fmt::Debug for SharedRows {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.values.fmt(f)
@@ -429,18 +446,30 @@ mod tests {
         assert_eq!(allowance.bytes(), before);
         assert!(pool.rows.is_empty());
         *remaining.lock().unwrap() = before;
-        let receipt = pool
-            .intern_tracked(
+        let receipt = Arc::new(
+            pool.intern_tracked(
                 &reads,
                 &mut allowance,
                 &mut remaining.lock().unwrap(),
                 remaining.clone(),
             )
-            .unwrap();
+            .unwrap(),
+        );
+        Reads::bind_tracked_owner(&receipt);
+        assert!(Reads::tracked_by(&receipt, &remaining));
+        assert!(Reads::tracked_by(&receipt.clone(), &remaining));
+        assert!(!Reads::tracked_by(
+            &receipt,
+            &Arc::new(std::sync::Mutex::new(0))
+        ));
+        let copied_wrapper = Arc::new((*receipt).clone());
+        assert!(!Reads::tracked_by(&copied_wrapper, &remaining));
+        assert_eq!(*copied_wrapper, reads);
+        drop(copied_wrapper);
         let after = *remaining.lock().unwrap();
         assert_eq!(before - after, required);
         let array_bytes = pool.required_tracked_bytes(&reads).unwrap();
-        let held = receipt.clone();
+        let held = receipt.as_ref().clone();
         drop(receipt);
         assert_eq!(*remaining.lock().unwrap(), after);
         assert_eq!(held, reads);

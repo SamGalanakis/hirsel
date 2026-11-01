@@ -509,20 +509,30 @@ impl FrontBodyQueries {
         cx: &mut dyn QueryContext,
         reads: &Arc<Reads>,
     ) -> Option<Arc<Reads>> {
+        if Reads::tracked_by(reads, &self.retention) {
+            return Some(reads.clone());
+        }
         let Some(pool) = self.read_pool.get() else {
             return Some(reads.clone());
         };
         let mut pool = pool.lock().unwrap_or_else(|e| e.into_inner());
-        self.make_room(cx, pool.required_tracked_bytes(reads)?)?;
+        let charge = pool.required_tracked_bytes(reads)?;
+        if self.make_room(cx, charge).is_none() {
+            let available = *self.retention.lock().unwrap_or_else(|e| e.into_inner());
+            self.record_refusal("read observations", charge, available);
+            return None;
+        }
         let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
         let available = self._allowance.allowance.available_bytes();
         let mut allowance = self._allowance.allowance.take(available)?;
-        Some(Arc::new(pool.intern_tracked(
+        let retained = Arc::new(pool.intern_tracked(
             reads,
             &mut allowance,
             &mut remaining,
             self.retention.clone(),
-        )?))
+        )?);
+        Reads::bind_tracked_owner(&retained);
+        Some(retained)
     }
     fn pool_completion_reads(
         &self,
@@ -674,6 +684,37 @@ impl FrontBodyQueries {
     pub fn memory_refusal(&self) -> Option<FrontMemoryRefusal> {
         *self.refusal.lock().unwrap_or_else(|e| e.into_inner())
     }
+    fn record_refusal(&self, owner: &'static str, charge: u64, available: u64) {
+        let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
+        let settled = outcomes.len();
+        let pinned = outcomes
+            .values()
+            .filter(|outcome| {
+                Arc::strong_count(&outcome.facts) != 2
+                    || outcome
+                        .publication
+                        .as_ref()
+                        .and_then(ProductRef::summary_value)
+                        .is_none_or(|summary| !summary.cache_owners(1))
+            })
+            .count();
+        let archived = self
+            .archived
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        self.refusal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert(FrontMemoryRefusal {
+                owner,
+                required: charge,
+                available,
+                settled,
+                archived,
+                pinned,
+            });
+    }
     fn owner_grant(
         &self,
         cx: &mut dyn QueryContext,
@@ -685,35 +726,7 @@ impl FrontBodyQueries {
         let charge = value_bytes.checked_add(backing_bytes)?;
         if self.make_room(cx, charge).is_none() {
             let available = *self.retention.lock().unwrap_or_else(|e| e.into_inner());
-            let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
-            let settled = outcomes.len();
-            let pinned = outcomes
-                .values()
-                .filter(|outcome| {
-                    Arc::strong_count(&outcome.facts) != 2
-                        || outcome
-                            .publication
-                            .as_ref()
-                            .and_then(ProductRef::summary_value)
-                            .is_none_or(|summary| !summary.cache_owners(1))
-                })
-                .count();
-            let archived = self
-                .archived
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .len();
-            self.refusal
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get_or_insert(FrontMemoryRefusal {
-                    owner,
-                    required: charge,
-                    available,
-                    settled,
-                    archived,
-                    pinned,
-                });
+            self.record_refusal(owner, charge, available);
             return None;
         }
         let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
@@ -2181,7 +2194,12 @@ impl QueryEngine {
             .result_store
             .clone()
             .filter(|s| s.enabled())
-            .ok_or_else(refusal)?;
+            .ok_or_else(|| {
+                QueryError::Operational(hirsel_types::OperationalFailure {
+                    operation: "front source transport".into(),
+                    message: "source archives require an enabled result provider".into(),
+                })
+            })?;
         // Materialize only the selected ordinary Parse files before capturing
         // their stable source/anchor archive inputs.
         for definition in definitions {

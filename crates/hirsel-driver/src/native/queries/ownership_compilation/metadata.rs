@@ -21,7 +21,7 @@ fn argument(w: &mut Weight, value: &OperationArgument) {
         native_type(w, value);
     }
 }
-fn native_type(w: &mut Weight, value: &NativeType) {
+pub(in crate::native::queries) fn native_type(w: &mut Weight, value: &NativeType) {
     match value {
         NativeType::Primitive(_) | NativeType::Function(_) => (),
         NativeType::Tuple(values) => w.vec(values, native_type),

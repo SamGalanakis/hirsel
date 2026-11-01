@@ -270,6 +270,15 @@ impl Drop for RetainedArchiveLease {
     }
 }
 impl ProductArchive {
+    /// Encode a compiler-owned value only under an explicit boundary grant.
+    /// The resulting checked archive retains its complete backing reservation.
+    pub fn materialize(
+        domain: Domain,
+        admission: ArchiveAdmission<'_>,
+        encode: impl FnOnce(&MemoryReservation) -> io::Result<Vec<u8>>,
+    ) -> io::Result<Self> {
+        materialize_archive(domain, admission, encode)
+    }
     /// Retain a checked archive in an already admitted producer partition.
     /// `remaining` is the same quota used for that partition's other retained
     /// allocations. Only the independent grant survives the producer.

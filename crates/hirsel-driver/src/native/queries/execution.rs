@@ -7,6 +7,9 @@ use hirsel_engine::{
     store::{Action, Address, Domain},
 };
 use std::{collections::BTreeMap, sync::OnceLock, task::Poll};
+mod live;
+pub use live::ExecutionPlan;
+pub(in crate::native) use live::identity;
 
 pub const EXECUTION_KIND: u32 = 0x4e00_0031;
 pub const EXECUTION_OBJECTS_KIND: u32 = 0x4e00_0032;
@@ -21,12 +24,7 @@ const OBJECTS: Domain = Domain {
 
 pub struct ExecutionProduct {
     pub product: ProductRef,
-    pub environments: BTreeMap<ContentHash, Option<hirsel_lir::LayoutId>>,
-    pub binding: hirsel_lir::products::Binding,
-    root: ProductRef,
-    reads: Vec<ProductRef>,
-    pub ahead: hirsel_lir::ahead::AheadPlan,
-    pub continuation: hirsel_lir::continuation::ContinuationPlans,
+    pub plan: Arc<ExecutionPlan>,
 }
 pub struct ExecutionTasks {
     roots: Arc<NativeRootTasks>,
@@ -71,6 +69,28 @@ impl ExecutionTasks {
     pub fn query_id(&self) -> QueryId {
         self.query
     }
+    /// Explicit persistence/remote boundary. A reopened descriptor never
+    /// substitutes for the current request's independently admitted live plan.
+    pub fn archive_plan(
+        &self,
+        product: &ProductRef,
+        admission: ArchiveAdmission<'_>,
+    ) -> Result<ProductArchive, String> {
+        self.roots
+            .native
+            .snapshot
+            .execution
+            .get()
+            .filter(|plan| plan.product == *product)
+            .ok_or("execution archive differs from admitted live owner")?;
+        live::archive_plan(
+            self.roots.native.snapshot.store.as_ref(),
+            product,
+            admission,
+            self.roots.native.snapshot.verify_store,
+        )
+    }
+
     pub fn objects_id(key: &CodegenKey) -> QueryId {
         QueryId {
             kind: EXECUTION_OBJECTS_KIND,
@@ -181,8 +201,6 @@ impl ExecutionTasks {
                     .map_err(|e| e.to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let bytes = serde_json::to_vec(&(ahead.identity, continuation.identity, snapshot.context))
-            .map_err(|e| e.to_string())?;
         let action = Action(ContentHash::of_parts(
             "hirsel.native.execution-action.v1",
             [serde_json::to_vec(&(
@@ -195,19 +213,39 @@ impl ExecutionTasks {
             .map_err(|e| e.to_string())?
             .as_slice()],
         ));
-        let product = self.publish(self.query, PLAN, action, bytes)?;
-        // Bodies belong only to a demanded planner/emitter/checker scope.
-        // Keep one layout binding and capture declarations with the plans.
+        let plan = ExecutionPlan::new(
+            snapshot.store.as_ref(),
+            program.ahead_environments,
+            binding,
+            root,
+            reads.to_vec(),
+            ahead,
+            continuation,
+            snapshot.context,
+        )?;
+        let product = ProductRef::live(self.query.address, action, plan.clone());
+        // An explicitly persisted descriptor is still checked on recomputation.
+        // Compare its checked fields with the live identity without encoding.
+        if snapshot.verify_store == hirsel_engine::store::VerifyStore::Recompute
+            && let Some(previous) = snapshot
+                .store
+                .lookup_product(self.query.address)
+                .filter(|previous| previous.action == action)
+        {
+            let archive = snapshot
+                .store
+                .copy_product_archive(previous.reference)
+                .ok_or("persisted execution plan is unavailable or corrupt")?;
+            let imported = ProductRef::import_archive(self.query.address, action, archive);
+            if identity(&imported)? != identity(&product)? {
+                return Err("recomputed execution product differs from cached output".into());
+            }
+        }
         snapshot
             .execution
             .set(Arc::new(ExecutionProduct {
                 product: product.clone(),
-                environments: program.ahead_environments,
-                binding,
-                root,
-                reads: reads.to_vec(),
-                ahead,
-                continuation,
+                plan,
             }))
             .map_err(|_| "execution plans published twice")?;
         self.completed
@@ -228,8 +266,9 @@ impl ExecutionTasks {
             .ok_or("execution plans have not settled")?;
         let (mut native, root) = self
             .roots
-            .products(execution.root.clone(), &execution.reads)?;
+            .products(execution.plan.root.clone(), &execution.plan.reads)?;
         let products = execution
+            .plan
             .reads
             .iter()
             .map(|read| {
@@ -253,15 +292,9 @@ impl ExecutionTasks {
         self.with_program(|program| {
             let store = snapshot.store.as_ref();
             let action = Action(ContentHash::of_parts(
-                "hirsel.native.execution-objects-action.v1",
+                "hirsel.native.execution-objects-action.v2",
                 [
-                    plan.archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
-                        .map_err(|e| e.to_string())?
-                        .reference()
-                        .output
-                        .0
-                        .0
-                        .as_slice(),
+                    identity(&plan)?.0.as_slice(),
                     snapshot.context.output.0.0.as_slice(),
                 ],
             ));

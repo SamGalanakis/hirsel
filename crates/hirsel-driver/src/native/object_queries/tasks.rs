@@ -87,6 +87,9 @@ pub trait ObjectTaskSnapshot: Send + Sync {
     fn execution_query(&self) -> Option<QueryId> {
         None
     }
+    fn admit_execution(&self, _product: &ProductRef) -> Result<(), Reference> {
+        Ok(())
+    }
     fn ready_descriptor(&self, product: ProductRef) -> Result<ReadyProduct, Reference>;
     /// Resolve each optimizer read's registered native query kind and address.
     fn optimizer_query(&self, product: ProductRef) -> Result<QueryId, Reference>;
@@ -194,7 +197,12 @@ impl<S: ObjectTaskSnapshot> ObjectTask<S> {
         };
         let execution = match cx.read(execution) {
             Poll::Ready(Err(error)) => return Err(QueryPoll::Failed(error)),
-            Poll::Ready(Ok(_)) => return read(cx, ids),
+            Poll::Ready(Ok(product)) => {
+                self.snapshot
+                    .admit_execution(&product)
+                    .map_err(QueryPoll::Failed)?;
+                return read(cx, ids);
+            }
             Poll::Pending => execution,
         };
         // Ready producers can run while the complete execution root waits.

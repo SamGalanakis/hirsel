@@ -49,9 +49,19 @@ impl ResultStore for DiagnosedStore {
         self.0.put(key, bytes);
     }
     fn get_content(&self, reference: store::Reference) -> Option<store::Bytes> {
+        assert_ne!(
+            reference.domain.kind,
+            native::queries::execution::EXECUTION_KIND,
+            "local native compilation read a PLAN archive"
+        );
         self.0.get_content(reference)
     }
     fn put_content(&self, domain: store::Domain, bytes: &[u8]) -> Option<store::Reference> {
+        assert_ne!(
+            domain.kind,
+            native::queries::execution::EXECUTION_KIND,
+            "local native compilation published a PLAN archive"
+        );
         // Exactly DirStore's one physical put: no retry or fallback provider.
         match self.0.local_product_store()?.put(domain, bytes) {
             Ok(reference) => Some(reference),

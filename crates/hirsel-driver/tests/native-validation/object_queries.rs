@@ -706,6 +706,7 @@ fn explicit_recompute_checks_exact_cached_bytes() {
         &key,
         &descriptor,
         &[],
+        None,
         VerifyStore::Recompute,
         || {
             calls.set(calls.get() + 1);
@@ -720,6 +721,7 @@ fn explicit_recompute_checks_exact_cached_bytes() {
         &key,
         &descriptor,
         &[],
+        None,
         VerifyStore::Recompute,
         || {
             let mut changed = object();
@@ -1180,4 +1182,92 @@ fn legacy_blob_schema_one_remains_readable_with_streamed_schema_two() {
     assert_ne!(old.domain, current.domain);
     assert_eq!(link_input_bytes(&store, old).unwrap(), bytes);
     assert_eq!(link_input_bytes(&store, current).unwrap(), bytes);
+}
+
+#[test]
+fn execution_plan_identity_controls_object_hits_and_imported_keys() {
+    let store = admitted(Arc::new(hirsel_engine::store::MemStore::default()));
+    let key = key("main");
+    let ready = ready(&store);
+    let plan_domain = Domain {
+        kind: crate::native::queries::execution::EXECUTION_KIND,
+        schema: 1,
+    };
+    let context = input(&store, "execution context");
+    let make_plan = |ahead, continuation, context, action| {
+        let bytes = serde_json::to_vec(&(ahead, continuation, context)).unwrap();
+        let reference = store.put_content(plan_domain, &bytes).unwrap();
+        crate::fixture_product(&store, Address(hash("plan")), Action(action), reference)
+    };
+    let original = make_plan(
+        hash("ahead"),
+        hash("continuation"),
+        context,
+        hash("first observations"),
+    );
+    let first = codegen_checked(
+        &store,
+        &key,
+        &ready,
+        &[],
+        Some(&original),
+        VerifyStore::Off,
+        || Ok(object()),
+    )
+    .unwrap();
+    let reopened = make_plan(
+        hash("ahead"),
+        hash("continuation"),
+        context,
+        hash("new observations"),
+    );
+    let warm = codegen_checked(
+        &store,
+        &key,
+        &ready,
+        &[],
+        Some(&reopened),
+        VerifyStore::Off,
+        || panic!("equal persisted plan identity missed the object cache"),
+    )
+    .unwrap();
+    assert_eq!(first.product, warm.product);
+    let recomputed = codegen_checked(
+        &store,
+        &key,
+        &ready,
+        &[],
+        Some(&reopened),
+        VerifyStore::Recompute,
+        || Ok(object()),
+    )
+    .unwrap();
+    assert_eq!(first.product, recomputed.product);
+    for (ahead, continuation, context) in [
+        (hash("changed ahead"), hash("continuation"), context),
+        (hash("ahead"), hash("changed continuation"), context),
+        (
+            hash("ahead"),
+            hash("continuation"),
+            input(&store, "changed emission context"),
+        ),
+    ] {
+        let changed = make_plan(ahead, continuation, context, hash("observations"));
+        let calls = Cell::new(0);
+        let output = codegen_checked(
+            &store,
+            &key,
+            &ready,
+            &[],
+            Some(&changed),
+            VerifyStore::Off,
+            || {
+                calls.set(calls.get() + 1);
+                Ok(object())
+            },
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 1, "changed plan reused a stale object action");
+        assert_ne!(first.product.action, output.product.action);
+    }
 }

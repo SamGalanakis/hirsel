@@ -94,14 +94,12 @@ pub(super) fn codegen<N: NativeProducts, L>(
             ready.unit_summary,
         ]);
     }
-    if let Some(product) = queries.native.execution_read() {
-        reads.push(
-            product
-                .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
-                .map_err(|e| e.to_string())?
-                .reference(),
-        );
-    }
+    // This owner retains plans, observations and admission across the action.
+    let execution = queries.native.execution_read();
+    let execution_identity = execution
+        .as_ref()
+        .map(super::super::queries::execution::identity)
+        .transpose()?;
     let summaries = selected
         .iter()
         .map(|ready| ready.unit_summary)
@@ -126,6 +124,7 @@ pub(super) fn codegen<N: NativeProducts, L>(
             address: key.query_id().address,
             owner,
             summary,
+            execution: execution_identity,
         },
         &reads,
         queries.verify_store,

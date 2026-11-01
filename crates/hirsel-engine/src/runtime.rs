@@ -33,7 +33,7 @@ pub struct QueryId {
 pub struct RequestId(pub u64);
 
 mod published;
-pub use published::ProductRef;
+pub use published::{LiveProductValue, ProductRef};
 mod dependencies;
 pub use dependencies::LiveDependencyProduct;
 

@@ -369,12 +369,12 @@ impl RootProducts {
                 Ok(units.iter().map(|u| (*u).clone()).collect::<Vec<_>>())
             })?;
             self.with_link_context(root, products, |program| {
-                if program.table != execution.binding.table {
+                if program.table != execution.plan.binding.table {
                     return Err("execution Link binding differs".into());
                 }
                 let mut program = program.clone();
                 program.units = units;
-                program.ahead_environments = execution.environments.clone();
+                program.ahead_environments = execution.plan.environments.clone();
                 use_context(&program)
             })
         } else {

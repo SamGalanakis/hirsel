@@ -553,6 +553,15 @@ impl ObjectTaskSnapshot for CodegenTasks {
     fn execution_query(&self) -> Option<QueryId> {
         self.execution
     }
+    fn admit_execution(&self, product: &ProductRef) -> Result<(), Reference> {
+        self.native
+            .snapshot
+            .execution
+            .get()
+            .filter(|execution| execution.product == *product)
+            .map(|_| ())
+            .ok_or_else(|| self.failure("Codegen execution plan differs from admitted live owner"))
+    }
     fn store(&self) -> &dyn ResultStore {
         self.native.snapshot.store.as_ref()
     }

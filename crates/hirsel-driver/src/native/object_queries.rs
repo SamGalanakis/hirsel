@@ -233,16 +233,18 @@ where
         // a descriptor. No Value or Ready decoding is needed to decide this hit.
         let selected = self.native.codegen_units(&key.owner, &key.backend)?;
         let ready = selected.first().ok_or("Codegen omitted its owner")?;
-        let mut optimizer = selected[1..]
+        let optimizer = selected[1..]
             .iter()
             .map(|ready| ready.product.clone())
             .collect::<Vec<_>>();
-        optimizer.extend(self.native.execution_read());
+        // Keep the live plan owner through the action, including cache hits.
+        let execution = self.native.execution_read();
         codegen_checked(
             self.store.as_ref(),
             key,
             ready,
             &optimizer,
+            execution.as_ref(),
             self.verify_store,
             || {
                 self.native.with_ready(&selected, |units, inputs| {
@@ -324,7 +326,7 @@ fn codegen(
     ready: &ReadyProduct,
     compute: impl FnOnce() -> Result<ObjectArtifact, String>,
 ) -> Result<FragmentProduct, String> {
-    codegen_checked(store, key, ready, &[], VerifyStore::Off, compute)
+    codegen_checked(store, key, ready, &[], None, VerifyStore::Off, compute)
 }
 
 fn codegen_checked(
@@ -332,6 +334,7 @@ fn codegen_checked(
     key: &CodegenKey,
     ready: &ReadyProduct,
     optimizer: &[ProductRef],
+    execution: Option<&ProductRef>,
     verify_store: VerifyStore,
     compute: impl FnOnce() -> Result<ObjectArtifact, String>,
 ) -> Result<FragmentProduct, String> {
@@ -347,6 +350,9 @@ fn codegen_checked(
         ready.emission_context,
         ready.unit_summary,
     ];
+    let execution = execution
+        .map(super::queries::execution::identity)
+        .transpose()?;
     for product in ready.optimizer_reads.iter().chain(optimizer) {
         reads.push(
             product
@@ -363,6 +369,7 @@ fn codegen_checked(
             address,
             owner: key.owner.instance.encoding().to_vec(),
             summary: ready.unit_summary,
+            execution,
         },
         &reads,
         verify_store,
@@ -374,6 +381,7 @@ struct FragmentIdentity {
     address: Address,
     owner: Vec<u8>,
     summary: Reference,
+    execution: Option<ContentHash>,
 }
 
 fn fragment_checked(
@@ -387,8 +395,16 @@ fn fragment_checked(
         address,
         owner,
         summary,
+        execution,
     } = identity;
-    let action = action("hirsel.codegen.action.v2", address, reads);
+    let base = action("hirsel.codegen.action.v2", address, reads);
+    let action = match execution {
+        Some(plan) => Action(ContentHash::of_parts(
+            "hirsel.codegen.execution-action.v1",
+            [base.0.0.as_slice(), plan.0.as_slice()],
+        )),
+        None => base,
+    };
     let mut cached = None;
     if let Some(previous) = store.lookup_product(address).filter(|p| p.action == action)
         && let Some(archive) = store.copy_product_archive(previous.reference)

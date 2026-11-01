@@ -592,7 +592,7 @@ impl NativeProducts for DemandProducts {
             .map(|(closure, _)| closure)
             .collect::<Vec<_>>();
         let binding = if let Some(execution) = snapshot.execution.get() {
-            execution.binding.clone()
+            execution.plan.binding.clone()
         } else {
             Binding::new(environment.target, &closures)?
         };
@@ -652,8 +652,8 @@ impl NativeProducts for DemandProducts {
         let keys = hirsel_lir::LayoutKeys::new(&binding.table);
         let index = hirsel_lir::LayoutIndex::new(&binding.table);
         let emit = EmitInputs {
-            ahead: snapshot.execution.get().map(|e| &e.ahead),
-            continuation: snapshot.execution.get().map(|e| &e.continuation),
+            ahead: snapshot.execution.get().map(|e| &e.plan.ahead),
+            continuation: snapshot.execution.get().map(|e| &e.plan.continuation),
             alternate: false,
             index: Some(&index),
             input: &snapshot.emission.input,

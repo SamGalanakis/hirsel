@@ -3,7 +3,14 @@ use super::{
     LiveSummaryProduct, ProductArchive,
 };
 use hirsel_artifact_store::{Action, Address, Domain};
-use std::{fmt, io};
+use std::{any::Any, fmt, io, sync::Arc};
+
+/// A compiler-owned immutable value. Implementations retain their complete
+/// observations and allocation admission. This conveys no validation authority.
+pub trait LiveProductValue: Any + Send + Sync {
+    fn domain(&self) -> Domain;
+    fn archive(&self, admission: ArchiveAdmission<'_>) -> io::Result<ProductArchive>;
+}
 
 /// An immutable publication retains its concrete value and admission owners.
 /// Portable bytes are obtained only by explicitly materializing its archive.
@@ -21,9 +28,23 @@ enum Value {
     Lower(LiveLowerProduct),
     Dependencies(LiveDependencyProduct),
     Imported(ProductArchive),
+    Live(Arc<dyn LiveProductValue>),
 }
 
 impl ProductRef {
+    pub fn live(address: Address, action: Action, value: Arc<dyn LiveProductValue>) -> Self {
+        Self {
+            address,
+            action,
+            value: Value::Live(value),
+        }
+    }
+    pub fn live_value<T: LiveProductValue>(&self) -> Option<&T> {
+        match &self.value {
+            Value::Live(value) => (&**value as &dyn Any).downcast_ref(),
+            _ => None,
+        }
+    }
     pub fn dependencies(value: LiveDependencyProduct) -> Self {
         Self {
             address: value.address(),
@@ -73,6 +94,7 @@ impl ProductRef {
             Value::Lower(value) => value.domain(),
             Value::Dependencies(value) => value.domain(),
             Value::Imported(archive) => archive.reference().domain,
+            Value::Live(value) => value.domain(),
         }
     }
     pub fn summary_value(&self) -> Option<&LiveSummaryProduct> {
@@ -102,6 +124,7 @@ impl ProductRef {
             Value::Lower(value) => value.archive_with(admission),
             Value::Dependencies(value) => value.archive(admission),
             Value::Imported(archive) => Ok(archive.clone()),
+            Value::Live(value) => value.archive(admission),
         }
     }
 }
@@ -117,6 +140,7 @@ impl PartialEq for ProductRef {
             (Value::Lower(a), Value::Lower(b)) => a.same_owner(b),
             (Value::Dependencies(a), Value::Dependencies(b)) => a.equivalent(b),
             (Value::Imported(a), Value::Imported(b)) => a.reference() == b.reference(),
+            (Value::Live(a), Value::Live(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }

@@ -182,6 +182,7 @@ impl QueryEngine {
                         // products. Restore or recompute the complete product
                         // under the new proof instead of rewriting that projection.
                         self.signatures.remove(&id);
+                        self.adopted_headers = None;
                         self.private_signature_publications.insert(id);
                         changed.push(id.path().clone());
                         continue;
@@ -213,6 +214,7 @@ impl QueryEngine {
                         next.covered = entry.covered.clone();
                         self.private_signature_publications.insert(id);
                         self.signatures.insert(id, Arc::new(next));
+                        self.adopted_headers = None;
                         if signature_changed || summary != previous {
                             changed.push(id.path().clone());
                         }

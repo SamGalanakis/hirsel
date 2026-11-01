@@ -979,6 +979,7 @@ impl QueryEngine {
         match key.kind {
             QueryKind::Signature => {
                 self.signatures.remove(&key.def);
+                self.adopted_headers = None;
             }
             QueryKind::Resolve => {
                 self.resolutions.remove(&key.def);

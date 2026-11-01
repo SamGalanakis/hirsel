@@ -429,6 +429,7 @@ impl QueryEngine {
             !entry.products.signature_persisted && entry.products.resolution.is_none()
         }) {
             self.signatures.remove(&id);
+            self.adopted_headers = None;
         }
         self.signature_query_id(id)?;
         if let Some(entry) = self.signatures.get(&id).cloned() {

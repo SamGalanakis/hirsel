@@ -540,41 +540,44 @@ impl HeaderProducts {
             }))
     }
     fn declared(&self) -> Arc<Self> {
+        let rows: hirsel_syntax::DefMap<HeaderSlot> = self
+            .rows
+            .iter()
+            .map(|(id, final_cell)| {
+                let cell = HeaderSlot::default();
+                let entry = final_cell
+                    .get()
+                    .and_then(|product| {
+                        product
+                            .entry
+                            .as_ref()
+                            .map(|entry| (entry.clone(), product.publication))
+                    })
+                    .or_else(|| {
+                        let candidate = self.private.as_ref()?.candidates.get(id)?;
+                        Some((candidate.declared.as_ref()?.clone(), candidate.publication))
+                    });
+                if let Some((entry, publication)) = entry {
+                    let _ = cell.set(HeaderProduct {
+                        result: entry.result(),
+                        entry: Some(entry.clone()),
+                        recomputes: 0,
+                        graph_work: 0,
+                        publication,
+                        _standalone: None,
+                        _lease: None,
+                        origin: Weak::new(),
+                        accounted: AtomicBool::new(true),
+                    });
+                }
+                (*id, cell)
+            })
+            .collect();
         Arc::new(Self {
-            rows: self
-                .rows
-                .iter()
-                .map(|(id, final_cell)| {
-                    let cell = HeaderSlot::default();
-                    let entry = final_cell
-                        .get()
-                        .and_then(|product| {
-                            product
-                                .entry
-                                .as_ref()
-                                .map(|entry| (entry.clone(), product.publication))
-                        })
-                        .or_else(|| {
-                            let candidate = self.private.as_ref()?.candidates.get(id)?;
-                            Some((candidate.declared.as_ref()?.clone(), candidate.publication))
-                        });
-                    if let Some((entry, publication)) = entry {
-                        let _ = cell.set(HeaderProduct {
-                            result: entry.result(),
-                            entry: Some(entry.clone()),
-                            recomputes: 0,
-                            graph_work: 0,
-                            publication,
-                            _standalone: None,
-                            _lease: None,
-                            origin: Weak::new(),
-                            accounted: AtomicBool::new(true),
-                        });
-                    }
-                    (*id, cell)
-                })
-                .collect(),
+            failed: AtomicBool::new(super::any_failed(&rows)),
+            rows,
             generation: AtomicU64::new(0),
+            revision: AtomicU64::new(0),
             admission: Mutex::new(None),
             environment: self.environment.clone(),
             adapters: self.adapters.clone(),

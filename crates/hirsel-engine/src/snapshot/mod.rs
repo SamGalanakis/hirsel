@@ -675,7 +675,7 @@ impl QueryEngine {
             && !snapshot
                 .headers
                 .as_ref()
-                .is_some_and(|headers| headers.completed().any(|(_, p)| p.result.is_err()))
+                .is_some_and(|headers| headers.failed())
         {
             return snapshot.clone();
         }

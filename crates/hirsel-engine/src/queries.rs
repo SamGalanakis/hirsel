@@ -284,6 +284,8 @@ pub struct QueryEngine {
     pub(crate) builtins: BTreeMap<DefPath, hirsel_types::SignatureRef>,
     syntax_keys: BTreeMap<(DefPath, QueryKind), ContentHash>,
     signatures: Table<hirsel_types::SignatureRef>,
+    /// Cleared whenever `signatures` changes outside header adoption.
+    adopted_headers: Option<header_products::AdoptedHeaders>,
     header_products: Option<Arc<header_products::HeaderProducts>>,
     resolutions: Table<Resolution>,
     specialization_dependencies: BTreeMap<DefId, parallel::SpecializationDependencies>,
@@ -426,6 +428,7 @@ impl Drop for QueryEngine {
             take(&mut self.specialization_dependencies),
         );
         released("engine: signatures", take(&mut self.signatures));
+        self.adopted_headers = None;
         released("engine: memo graph", take(&mut self.graph));
         released(
             "engine: pending front changes",
@@ -682,6 +685,7 @@ impl QueryEngine {
             builtins: BTreeMap::new(),
             syntax_keys: BTreeMap::new(),
             signatures: Default::default(),
+            adopted_headers: None,
             header_products: None,
             resolutions: Default::default(),
             specialization_dependencies: Default::default(),
@@ -1070,6 +1074,7 @@ impl QueryEngine {
                 })
             }) {
                 self.signatures.insert(id, entry.clone());
+                self.adopted_headers = None;
                 return entry.result();
             }
         }
@@ -1125,6 +1130,7 @@ impl QueryEngine {
         } else {
             self.store_signature(definition, &entry)?;
         }
+        self.adopted_headers = None;
         keep(
             &mut self.signatures,
             &mut self.graph,

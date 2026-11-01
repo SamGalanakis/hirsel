@@ -102,6 +102,12 @@ impl HeaderPhases {
 pub(crate) struct HeaderProducts {
     rows: hirsel_syntax::DefMap<HeaderSlot>,
     generation: AtomicU64,
+    /// Bumped by every row this table publishes after construction. An engine
+    /// adopts the completed rows once per revision, not once per read.
+    revision: AtomicU64,
+    /// Some row holds a failed signature. Rows are published once and only
+    /// settled rows are evicted, so this never clears.
+    failed: AtomicBool,
     admission: std::sync::Mutex<Option<HeaderAdmission>>,
     environment: QueryEnvironment,
     adapters: HeaderPhases,
@@ -182,8 +188,10 @@ impl HeaderProducts {
             .map(|(id, summary)| (*id, summary.clone()))
             .collect();
         Arc::new(Self {
+            failed: AtomicBool::new(any_failed(&rows)),
             rows,
             generation: AtomicU64::new(0),
+            revision: AtomicU64::new(0),
             admission: std::sync::Mutex::new(None),
             environment: engine.environment.clone(),
             adapters: HeaderPhases::capture(&engine.adapters),
@@ -266,6 +274,24 @@ impl HeaderProducts {
     pub(crate) fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
+    }
+    pub(crate) fn failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+    /// Publish one row; a row already present keeps its product.
+    fn publish(&self, cell: &HeaderSlot, product: HeaderProduct) -> bool {
+        let failed = product.result.is_err();
+        if cell.set(product).is_err() {
+            return false;
+        }
+        if failed {
+            self.failed.store(true, Ordering::Release);
+        }
+        self.revision.fetch_add(1, Ordering::AcqRel);
+        true
+    }
     pub(crate) fn source_facts(&self, id: DefId) -> Option<catalog::SourceFacts> {
         self.syntax.facts(id)
     }
@@ -338,17 +364,20 @@ impl HeaderProducts {
         if cell.get().is_none() {
             let mut engine = self.execution();
             if let Err(error) = self.demand(&mut engine, id) {
-                let _ = cell.set(HeaderProduct {
-                    result: Err(error),
-                    entry: None,
-                    recomputes: 0,
-                    graph_work: 0,
-                    publication: false,
-                    _standalone: None,
-                    _lease: None,
-                    origin: Weak::new(),
-                    accounted: AtomicBool::new(false),
-                });
+                self.publish(
+                    cell,
+                    HeaderProduct {
+                        result: Err(error),
+                        entry: None,
+                        recomputes: 0,
+                        graph_work: 0,
+                        publication: false,
+                        _standalone: None,
+                        _lease: None,
+                        origin: Weak::new(),
+                        accounted: AtomicBool::new(false),
+                    },
+                );
             }
         }
         cell.get()
@@ -454,8 +483,9 @@ impl HeaderProducts {
                 HeaderProduct,
             >::uninit()));
         let (standalone, lease) = self.admit(bytes)?;
-        if cell
-            .set(HeaderProduct {
+        if self.publish(
+            cell,
+            HeaderProduct {
                 result,
                 entry,
                 recomputes,
@@ -465,9 +495,8 @@ impl HeaderProducts {
                 _lease: lease,
                 origin,
                 accounted: AtomicBool::new(local),
-            })
-            .is_ok()
-        {
+            },
+        ) {
             self.generation.fetch_add(1, Ordering::Relaxed);
         }
         cell.get()
@@ -490,6 +519,7 @@ impl HeaderProducts {
                 entry.memo.durability,
             );
             engine.signatures.insert(id, entry.clone());
+            engine.adopted_headers = None;
         }
         product.result.clone()
     }
@@ -580,17 +610,20 @@ impl HeaderProducts {
         let Ok((standalone, lease)) = self.admit(bytes) else {
             return;
         };
-        let _ = cell.set(HeaderProduct {
-            result: entry.result(),
-            entry: Some(entry),
-            recomputes: 0,
-            graph_work: 0,
-            publication: false,
-            _standalone: standalone,
-            _lease: lease,
-            origin: Weak::new(),
-            accounted: AtomicBool::new(true),
-        });
+        self.publish(
+            cell,
+            HeaderProduct {
+                result: entry.result(),
+                entry: Some(entry),
+                recomputes: 0,
+                graph_work: 0,
+                publication: false,
+                _standalone: standalone,
+                _lease: lease,
+                origin: Weak::new(),
+                accounted: AtomicBool::new(true),
+            },
+        );
     }
     pub(crate) fn ready(&self, id: DefId) -> Option<Arc<HeaderProduct>> {
         self.rows.get(&id)?.get()
@@ -705,6 +738,16 @@ impl hirsel_validate::SignatureSource for RowSource {
     }
 }
 
+/// The header table an engine last adopted, at the revision it adopted.
+pub(crate) struct AdoptedHeaders {
+    headers: Weak<HeaderProducts>,
+    revision: u64,
+    current: bool,
+}
+fn any_failed(rows: &hirsel_syntax::DefMap<HeaderSlot>) -> bool {
+    rows.values()
+        .any(|cell| cell.get().is_some_and(|product| product.result.is_err()))
+}
 impl QueryEngine {
     pub(crate) fn declared_header_inputs(&self) -> Option<Arc<HeaderProducts>> {
         self.header_products
@@ -721,12 +764,29 @@ impl QueryEngine {
         };
         if current {
             let _ = headers.adopt_private_products(self);
+        }
+        // Adopting a row is idempotent until the table publishes another row
+        // or this engine replaces a signature (which clears the record).
+        let revision = headers.revision();
+        if self.adopted_headers.as_ref().is_some_and(|adopted| {
+            adopted.headers.ptr_eq(&Arc::downgrade(&headers))
+                && adopted.revision == revision
+                && (adopted.current || !current)
+        }) {
+            return;
+        }
+        if current {
             self.adopt_header_products(&headers);
         } else {
             for (id, product) in headers.completed() {
                 self.account_header_work(id, &product);
             }
         }
+        self.adopted_headers = Some(AdoptedHeaders {
+            headers: Arc::downgrade(&headers),
+            revision,
+            current,
+        });
     }
     pub(crate) fn adopt_header_products(&mut self, headers: &header_products::HeaderProducts) {
         for (id, product) in headers.completed() {

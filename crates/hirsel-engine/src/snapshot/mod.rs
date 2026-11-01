@@ -23,7 +23,7 @@ pub(crate) use declarations::{DeclarationHead, DeclarationSiblings, logical};
 pub use declarations::{DeclarationIndex, Declarations, ModuleInputs};
 pub use provider::FrozenProvider;
 
-pub use views::{PackageViews, View, ViewTable};
+pub use views::{PackageUniverse, PackageViews, View, ViewTable};
 
 /// V's identity of a declared view, as compile-time evaluation names it.
 #[derive(Debug)]
@@ -496,7 +496,8 @@ impl SignatureSnapshot {
         let owner = product.entry.as_ref()?.products.representation.as_ref()?;
         Some(owner.body_view(&self.types, public).0.clone())
     }
-    pub(crate) fn definitions(&self) -> Vec<DefId> {
+    /// Every definition in this snapshot's signature table, in path order.
+    pub fn definitions(&self) -> Vec<DefId> {
         self.signatures
             .keys()
             .copied()
@@ -613,6 +614,15 @@ impl SignatureSnapshot {
                 .get(package)
                 .unwrap_or(&state.views)
                 .input_digest(),
+        }
+    }
+    /// The summary of `package`'s V universe: its input identity, errors and
+    /// first heap role, as installed packages publish them for importers.
+    pub fn package_universe(&self, package: &PackageId) -> hirsel_validate::PackageUniverse {
+        let state = self.validation_state();
+        match state.packages.get(package) {
+            Some(views) => views.universe(),
+            None => state.bases.get(package).unwrap_or(&state.views).universe(),
         }
     }
     /// `package`'s universe with `signature` in place of its declared view:

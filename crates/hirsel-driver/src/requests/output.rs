@@ -180,6 +180,13 @@ impl PrecomputedSources {
     pub fn signatures(&self) -> Arc<hirsel_engine::SignatureSnapshot> {
         self.lower.signatures()
     }
+    /// `package`'s universe summary as this precomputation published it.
+    pub fn universe(
+        &self,
+        package: &hirsel_syntax::PackageId,
+    ) -> Option<hirsel_engine::PackageUniverse> {
+        self.run.published_universe(package)
+    }
     pub fn sources(&self) -> &SourceMap {
         self.lower.sources()
     }

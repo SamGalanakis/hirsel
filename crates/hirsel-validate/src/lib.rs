@@ -45,7 +45,8 @@ mod indexed;
 mod input;
 mod views;
 pub use views::{
-    CheckedEnvironment, EnvironmentStamp, PackageViews, SignatureInputs, View, ViewTable,
+    CheckedEnvironment, EnvironmentStamp, PackageUniverse, PackageViews, SignatureInputs, View,
+    ViewTable,
 };
 mod instances;
 mod invocations;

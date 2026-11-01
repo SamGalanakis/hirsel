@@ -64,8 +64,8 @@ mod semantic;
 mod snapshot;
 pub use semantic::*;
 pub use snapshot::{
-    CitationSource, DeclarationIndex, Declarations, FrozenProvider, ModuleInputs, PackageViews,
-    SignatureSnapshot, View, ViewTable,
+    CitationSource, DeclarationIndex, Declarations, FrozenProvider, ModuleInputs, PackageUniverse,
+    PackageViews, SignatureSnapshot, View, ViewTable,
 };
 mod adapters;
 mod facts;

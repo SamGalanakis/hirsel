@@ -93,6 +93,8 @@ impl FrontRunInputs {
 pub struct FrontRunQueries {
     batch: Option<(QueryId, Vec<DefPath>)>,
     precompute: Option<precompute::Selection>,
+    /// The engine environment every address in this namespace is under.
+    environment: ContentHash,
     precomputed: Mutex<Option<(ProductRef, FrontPrecomputeOutput)>>,
     completed_batch: Mutex<Option<(ProductRef, Arc<FrontRunBatchOutput>)>>,
     export_hashes: bool,
@@ -342,6 +344,9 @@ impl QueryFactory for Factory {
             return Ok(task);
         }
         if let Some(task) = precompute::create(&self.0, query) {
+            return Ok(task);
+        }
+        if let Some(task) = precompute::create_universe(&self.0, query) {
             return Ok(task);
         }
         let (root, completed) = if let Some((batch, roots)) = &self.0.batch
@@ -1560,6 +1565,7 @@ impl QueryEngine {
         Ok(Arc::new(FrontRunQueries {
             batch: None,
             precompute: None,
+            environment: self.environment_value(),
             precomputed: Mutex::new(None),
             completed_batch: Mutex::new(None),
             export_hashes: false,

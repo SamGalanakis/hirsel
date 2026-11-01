@@ -191,6 +191,10 @@ impl ViewTable {
     pub fn views(&self) -> &[View] {
         &self.views
     }
+    /// This universe's summary for importers that do not read its views.
+    pub fn universe(&self) -> PackageUniverse {
+        PackageUniverse::of(self.input_digest(), &self.errors, self.first_heap.as_ref())
+    }
     pub fn verdict(&self, d: DefId) -> Option<&Arc<ViewVerdict>> {
         self.index.get(&d).map(|&i| &self.verdicts[i as usize])
     }
@@ -204,6 +208,69 @@ impl SignatureLookup for ViewTable {
     }
     fn universe_errors(&self) -> (ContentHash, &[Violation]) {
         (self.errors.digest, &self.errors.errors)
+    }
+}
+
+/// The facts an importer's V reads from one package's universe without
+/// reading its views: the universe's complete input identity, its signature
+/// errors and its first heap role. A read-only installed package publishes
+/// this summary, so a dependent need not identify every signature again.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageUniverse {
+    pub input: ContentHash,
+    pub errors: (ContentHash, Arc<[Violation]>),
+    pub first_heap: Option<(DefId, HeapRole)>,
+}
+/// The archived form: definitions by path, since `DefId`s are process-local.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ArchivedUniverse {
+    input: ContentHash,
+    errors: ContentHash,
+    first_heap: Option<(hirsel_syntax::DefPath, HeapRole)>,
+}
+impl PackageUniverse {
+    fn of(
+        input: ContentHash,
+        errors: &UniverseErrors,
+        first_heap: Option<&(DefId, HeapRole)>,
+    ) -> Self {
+        Self {
+            input,
+            errors: (errors.digest, errors.errors.iter().cloned().collect()),
+            first_heap: first_heap.cloned(),
+        }
+    }
+    /// The archived bytes of this summary. Violations have no durable codec,
+    /// so only an error-free universe is published; a universe with errors
+    /// stays with the full table its importers rebuild.
+    pub fn encode(&self) -> Option<Vec<u8>> {
+        if !self.errors.1.is_empty() {
+            return None;
+        }
+        bincode::serialize(&ArchivedUniverse {
+            input: self.input,
+            errors: self.errors.0,
+            first_heap: self
+                .first_heap
+                .as_ref()
+                .map(|(d, role)| (d.path().clone(), role.clone())),
+        })
+        .ok()
+    }
+    /// A summary from archived bytes. An archive whose error digest is not
+    /// the empty universe's claims violations it does not carry: refused.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let archived: ArchivedUniverse = bincode::deserialize(bytes).ok()?;
+        if archived.errors != crate::errors_digest(&[]) {
+            return None;
+        }
+        Some(Self {
+            input: archived.input,
+            errors: (archived.errors, Arc::from([])),
+            first_heap: archived
+                .first_heap
+                .map(|(path, role)| (DefId::intern(&path), role)),
+        })
     }
 }
 
@@ -243,6 +310,10 @@ impl PackageViews {
         let mut replaced = self.replaced.clone();
         replaced.insert(view.d, view);
         Self::over(t, self.base.clone(), replaced, &self.verdicts, store, old)
+    }
+    /// This universe's summary, including its private views' effects.
+    pub fn universe(&self) -> PackageUniverse {
+        PackageUniverse::of(self.input_digest(), &self.errors, self.first_heap.as_ref())
     }
     /// The view this universe has in place of `d`'s public one.
     pub fn replacement(&self, d: DefId) -> Option<&View> {

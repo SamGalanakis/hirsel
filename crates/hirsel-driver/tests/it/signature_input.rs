@@ -662,3 +662,58 @@ fn validation_universe_receipts_distinguish_valid_changes_and_originating_privat
         );
     });
 }
+
+#[test]
+fn installed_std_publishes_the_universe_summary_its_full_table_computes() {
+    with_compiler_stack(|| {
+        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
+        use hirsel_validate::{SignatureLookup, ValidatedSignatures};
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stdlib/std@1/hirsel.json")
+            .canonicalize()
+            .unwrap();
+        let config = CompileConfig {
+            store: Arc::new(store::DirStore::new(dir.path().join("products"))),
+            jobs: hirsel_intern::jobs::Jobs::ONE,
+            hold_bytes: 0,
+            ..Default::default()
+        };
+        let mut requests = CompilerRequests::for_host(COMPILER.with_config(config.clone()), config);
+        let output = requests
+            .execute(&manifest, CompileOperation::Precompute)
+            .unwrap();
+        let CompileResult::Precomputed { sources, .. } = &output.result else {
+            panic!("expected precomputed std")
+        };
+        let std = hirsel_syntax::PackageId {
+            name: "std".into(),
+            version: "1".into(),
+        };
+        let published = sources.universe(&std).expect("std publishes its universe");
+        // Oracle: V over the whole table as std's bodies see it, every view
+        // identified afresh, with no previous universe or verdicts to reuse.
+        let snapshot = sources.signatures();
+        let types = snapshot.types();
+        let table = ViewTable::from_views(
+            types,
+            snapshot.definitions().into_iter().filter_map(|d| {
+                let signature = snapshot.body_view(&std, d)?.ok()?;
+                Some(View::new(types, signature, None))
+            }),
+            &mut ValidatedSignatures::default(),
+            None,
+        );
+        assert!(
+            table.views().iter().any(|v| v.d.path().0.package == std),
+            "the full table holds std's rows"
+        );
+        let (errors, violations) = table.universe_errors();
+        assert_eq!(published.input, table.input_digest());
+        assert_eq!(published.errors.0, errors);
+        assert_eq!(&*published.errors.1, violations);
+        assert_eq!(published.first_heap, table.first_heap());
+        assert!(published.first_heap.is_some(), "std declares the heap");
+    });
+}

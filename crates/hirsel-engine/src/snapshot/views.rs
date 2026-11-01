@@ -1,4 +1,4 @@
-pub use hirsel_validate::{PackageViews, View, ViewTable};
+pub use hirsel_validate::{PackageUniverse, PackageViews, View, ViewTable};
 
 #[cfg(test)]
 mod tests {

@@ -208,18 +208,20 @@ impl DependencyReads {
         self.signatures
             .iter()
             .map(|dependency| dependency.definition)
-            .chain(reads.filter_map(|read| match read.as_ref() {
-                hirsel_types::DependencyRead::Signature { definition, .. } => Some(*definition),
-                hirsel_types::DependencyRead::Lookup {
-                    result: Ok(definition),
-                    ..
-                } => Some(DefId::intern(definition.as_ref())),
-                hirsel_types::DependencyRead::ProviderLookup { output, .. } => output
-                    .result
-                    .as_ref()
-                    .ok()
-                    .map(|definition| DefId::intern(definition.as_ref())),
-                _ => None,
+            .chain(reads.filter_map(|read| {
+                match read.as_ref() {
+                    hirsel_types::DependencyRead::Signature { definition, .. } => Some(*definition),
+                    hirsel_types::DependencyRead::Lookup {
+                        result: Ok(definition),
+                        ..
+                    } => Some(DefId::intern(definition.as_ref())),
+                    hirsel_types::DependencyRead::ProviderLookup { output, .. } => output
+                        .result
+                        .as_ref()
+                        .ok()
+                        .map(|definition| DefId::intern(definition.as_ref())),
+                    _ => None,
+                }
             }))
             .chain(self.closure.iter().copied())
     }

@@ -354,10 +354,11 @@ mod tsan {
                     libc::pthread_attr_destroy(&mut attr);
                     let low = low as usize;
                     let fiber = __tsan_get_current_fiber() as usize;
-                    THREADS
-                        .write()
-                        .unwrap()
-                        .insert(low, (low + size, fiber, me));
+                    // Exited threads' ranges overlapping this stack are stale.
+                    let mut threads = THREADS.write().unwrap();
+                    threads.retain(|&other, &mut (high, ..)| other >= low + size || high <= low);
+                    threads.insert(low, (low + size, fiber, me));
+                    drop(threads);
                     RUNNING.lock().unwrap().insert(fiber, me);
                     REGISTERED.set(true);
                 }

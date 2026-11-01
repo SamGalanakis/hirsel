@@ -197,7 +197,6 @@ pub struct DependencyReads {
     pub citations: Vec<(DefPath, Option<Span>)>,
     /// A compact header's semantic closure: the definitions its dropped
     /// signature and resolved lookup observations named.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub closure: Vec<DefId>,
 }
 

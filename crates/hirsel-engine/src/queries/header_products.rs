@@ -25,6 +25,11 @@ pub(crate) struct HeaderProduct {
 pub(crate) trait HeaderAllowance: Send + Sync {
     fn take_header(&self, bytes: u64) -> Option<crate::runtime::MemoryReservation>;
 }
+#[derive(Clone)]
+struct HeaderAdmission {
+    remaining: Arc<std::sync::Mutex<u64>>,
+    source: Weak<dyn HeaderAllowance>,
+}
 struct HeaderLease {
     remaining: Arc<std::sync::Mutex<u64>>,
     bytes: u64,
@@ -93,8 +98,7 @@ impl HeaderPhases {
 pub(crate) struct HeaderProducts {
     rows: hirsel_syntax::DefMap<HeaderSlot>,
     generation: AtomicU64,
-    retention: OnceLock<Arc<std::sync::Mutex<u64>>>,
-    source_backing: OnceLock<Weak<dyn HeaderAllowance>>,
+    admission: std::sync::Mutex<Option<HeaderAdmission>>,
     environment: QueryEnvironment,
     adapters: HeaderPhases,
     sources: SourceMap,
@@ -155,8 +159,7 @@ impl HeaderProducts {
         Arc::new(Self {
             rows,
             generation: AtomicU64::new(0),
-            retention: OnceLock::new(),
-            source_backing: OnceLock::new(),
+            admission: std::sync::Mutex::new(None),
             environment: engine.environment.clone(),
             adapters: HeaderPhases::capture(&engine.adapters),
             sources: engine.sources.clone(),
@@ -397,27 +400,36 @@ impl HeaderProducts {
             .saturating_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
                 HeaderProduct,
             >::uninit()));
-        while self
-            .retention
-            .get()
-            .is_some_and(|grant| *grant.lock().unwrap_or_else(|e| e.into_inner()) < bytes)
-        {
+        let admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        while admission.as_ref().is_some_and(|admission| {
+            *admission
+                .remaining
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                < bytes
+        }) {
             if !self.evict() {
                 break;
             }
         }
-        let standalone = (self.standalone && self.retention.get().is_none())
+        let standalone = (self.standalone && admission.is_none())
             .then(|| self.reserve_standalone(bytes))
             .transpose()?;
-        let mut grant = self
-            .retention
-            .get()
-            .map(|grant| grant.lock().unwrap_or_else(|e| e.into_inner()));
-        let header_allowance = self
-            .source_backing
-            .get()
-            .map(|source| {
-                source
+        let mut grant = admission.as_ref().map(|admission| {
+            admission
+                .remaining
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+        });
+        let header_allowance = admission
+            .as_ref()
+            .map(|admission| {
+                admission
+                    .source
                     .upgrade()
                     .and_then(|source| source.take_header(bytes))
                     .ok_or_else(|| {
@@ -436,8 +448,8 @@ impl HeaderProducts {
                 })
             })?;
         }
-        let lease = self.retention.get().map(|remaining| HeaderLease {
-            remaining: remaining.clone(),
+        let lease = admission.as_ref().map(|admission| HeaderLease {
+            remaining: admission.remaining.clone(),
             bytes,
             _allowance: header_allowance,
         });
@@ -466,13 +478,23 @@ impl HeaderProducts {
     pub(crate) fn ready(&self, id: DefId) -> Option<Arc<HeaderProduct>> {
         self.rows.get(&id)?.get()
     }
-    pub(crate) fn configure_source_backing(&self, backing: Arc<dyn HeaderAllowance>) {
-        let _ = self.source_backing.set(Arc::downgrade(&backing));
-    }
-    pub(crate) fn admission_expired(&self) -> bool {
-        self.source_backing
-            .get()
-            .is_some_and(|source| source.upgrade().is_none())
+    pub(crate) fn configure_source_backing(
+        &self,
+        backing: Arc<dyn HeaderAllowance>,
+        remaining: Arc<std::sync::Mutex<u64>>,
+    ) -> Arc<dyn HeaderAllowance> {
+        let mut admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(source) = admission
+            .as_ref()
+            .and_then(|admission| admission.source.upgrade())
+        {
+            return source;
+        }
+        *admission = Some(HeaderAdmission {
+            remaining,
+            source: Arc::downgrade(&backing),
+        });
+        backing
     }
     pub(crate) fn evict(&self) -> bool {
         for cell in self.rows.values() {

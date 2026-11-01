@@ -101,7 +101,6 @@ impl HeaderProducts {
         registrations: &[Arc<AcceptedFrontRegistration>],
         retention: Arc<Mutex<u64>>,
     ) {
-        let _ = self.retention.set(retention.clone());
         if let Some(private) = &self.private {
             private.working.store(working, Ordering::Relaxed);
             let _ = private.registrations.set(registrations.to_vec());
@@ -389,8 +388,7 @@ impl HeaderProducts {
                 })
                 .collect(),
             generation: AtomicU64::new(0),
-            retention: OnceLock::new(),
-            source_backing: OnceLock::new(),
+            admission: Mutex::new(None),
             environment: self.environment.clone(),
             adapters: self.adapters.clone(),
             sources: self.sources.clone(),

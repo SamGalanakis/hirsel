@@ -300,6 +300,7 @@ pub struct FrontBodyQueries {
     // external output reader releases this view.
     read_pool: std::sync::OnceLock<Mutex<crate::memo::ReadPool>>,
     _allowance: Arc<FrontSourceBacking>,
+    _header_allowance: Option<Arc<dyn header_products::HeaderAllowance>>,
 }
 /// A held output shares its snapshot reservation; dropping the runtime cannot
 /// release admission while a caller still retains the checked body or sources.
@@ -2334,15 +2335,6 @@ impl QueryEngine {
             self.private_summary_revision = None;
             self.retire_snapshot();
         }
-        if self
-            .snapshot
-            .as_ref()
-            .and_then(|(_, snapshot)| snapshot.header_products())
-            .is_some_and(|headers| headers.admission_expired())
-        {
-            self.adopt_completed_headers();
-            self.retire_snapshot();
-        }
         let snapshot = self.signature_inputs();
         let retention = Arc::new(Mutex::new(allowance.bytes() - required));
         if let Some(headers) = snapshot.header_products() {
@@ -2414,9 +2406,9 @@ impl QueryEngine {
             allowance: pool,
             _sources: self.sources.clone(),
         });
-        if let Some(headers) = snapshot.header_products() {
-            headers.configure_source_backing(backing.clone());
-        }
+        let header_allowance = snapshot
+            .header_products()
+            .map(|headers| headers.configure_source_backing(backing.clone(), retention.clone()));
         Ok(Arc::new(FrontBodyQueries {
             inputs,
             by_definition: by_definition.into_boxed_slice(),
@@ -2466,6 +2458,7 @@ impl QueryEngine {
             retention,
             read_pool: std::sync::OnceLock::new(),
             _allowance: backing,
+            _header_allowance: header_allowance,
         }))
     }
 }

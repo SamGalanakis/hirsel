@@ -303,6 +303,9 @@ impl ResultStore for ResidentStore {
         }
         None
     }
+    fn claims_content(&self) -> bool {
+        false
+    }
     fn get_content(&self, reference: Reference) -> Option<Bytes> {
         let bytes = self.bounded.get_bytes(Key::Content(reference.output.0))?;
         (reference.domain.reference(&bytes)? == reference).then_some(bytes)

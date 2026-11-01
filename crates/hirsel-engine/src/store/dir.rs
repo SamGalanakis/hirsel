@@ -276,6 +276,9 @@ impl ResultStore for DirStore {
     fn local_product_store(&self) -> Option<hirsel_artifact_store::Store> {
         self.physical.clone()
     }
+    fn claims_content(&self) -> bool {
+        self.physical.is_some()
+    }
     fn lookup_product(&self, address: super::Address) -> Option<super::Association> {
         // A front QueryId shares its logical address with its variant row.
         // Keep the product index disjoint, as the byte providers do.

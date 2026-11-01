@@ -935,6 +935,16 @@ impl QueryEngine {
                 message: "standalone bootstrap exceeds its existing partition".into(),
             })
         };
+        let available = reservation.bytes();
+        let partitions: u64 = (384 + 2 * 32 + 2 * 16 + 2 * 8) << 20;
+        if available < partitions {
+            return Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "private generated inference".into(),
+                message: format!(
+                    "standalone bootstrap partitions require {partitions} bytes; available {available} bytes of the process query allowance"
+                ),
+            }));
+        }
         let mut split = |bytes| reservation.split(bytes).ok_or_else(refused);
         let admission = FrontInstanceBootstrapAdmission {
             jobs: hirsel_intern::jobs::Jobs::new(1),
@@ -952,21 +962,44 @@ impl QueryEngine {
             discovery: split(8 << 20)?,
             metadata: split(8 << 20)?,
         };
-        let reference = crate::store::Domain {
-            kind: KIND,
-            schema: 1,
-        }
-        .reference(b"private generated inference")
-        .ok_or_else(refused)?;
+        let kinds = ["resource", "cycle", "cancelled", "protocol", "panicked"];
+        let [resource, cycle, cancelled, protocol, panicked] = kinds.map(|kind| {
+            crate::store::Domain {
+                kind: KIND,
+                schema: 1,
+            }
+            .reference(format!("private generated inference: {kind}").as_bytes())
+        });
         let errors = RuntimeErrors {
-            resource: reference,
-            cycle: reference,
-            cancelled: reference,
-            protocol: reference,
-            panicked: reference,
+            resource: resource.ok_or_else(refused)?,
+            cycle: cycle.ok_or_else(refused)?,
+            cancelled: cancelled.ok_or_else(refused)?,
+            protocol: protocol.ok_or_else(refused)?,
+            panicked: panicked.ok_or_else(refused)?,
         };
+        let runtime_failure = |reference: crate::store::Reference| {
+            let kind = [
+                errors.resource,
+                errors.cycle,
+                errors.cancelled,
+                errors.protocol,
+                errors.panicked,
+            ]
+            .iter()
+            .position(|known| *known == reference)
+            .map_or("unknown", |index| kinds[index]);
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "private generated inference".into(),
+                message: format!("standalone bootstrap runtime failure: {kind}"),
+            })
+        };
+        // Front's source archives need a provider that claims content. A
+        // disabled or installed-only provider never does.
         let previous = self.result_store.clone();
-        if previous.is_none() {
+        if previous
+            .as_ref()
+            .is_none_or(|store| !store.claims_content())
+        {
             self.result_store = Some(Arc::new(crate::store::MemStore::default()));
         }
         let result = self.bootstrap_front_instances(
@@ -992,7 +1025,16 @@ impl QueryEngine {
                 error: Some(error),
                 ..
             }) => error,
-            _ => refused(),
+            FrontInstanceBootstrapError::Front {
+                reference,
+                error: None,
+                ..
+            }
+            | FrontInstanceBootstrapError::Bootstrap(FrontRegistrationBootstrapError::Runtime {
+                reference,
+                error: None,
+                ..
+            }) => runtime_failure(reference),
         })
     }
 }

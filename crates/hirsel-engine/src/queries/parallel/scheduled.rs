@@ -2202,12 +2202,10 @@ impl QueryEngine {
         allowance: MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
-        let refusal = || {
+        let refusal = |reason: &str| {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "front query admission".into(),
-                message:
-                    "immutable front inputs exceed admission or need an accepted registration view"
-                        .into(),
+                message: format!("immutable front inputs refused: {reason}"),
             })
         };
         let refused_inputs = |required: u64| {
@@ -2219,16 +2217,21 @@ impl QueryEngine {
                 ),
             })
         };
-        let mut required = FrontBodyQueries::input_bytes(definitions).ok_or_else(refusal)?;
+        let mut required = FrontBodyQueries::input_bytes(definitions)
+            .ok_or_else(|| refusal("input size overflow"))?;
         if required > allowance.bytes() {
             return Err(refused_inputs(required));
         }
-        let store = self.result_store.clone().ok_or_else(|| {
-            QueryError::Operational(hirsel_types::OperationalFailure {
-                operation: "front source transport".into(),
-                message: "source archives require an enabled result provider".into(),
-            })
-        })?;
+        let store = self
+            .result_store
+            .clone()
+            .filter(|s| s.claims_content())
+            .ok_or_else(|| {
+                QueryError::Operational(hirsel_types::OperationalFailure {
+                    operation: "front source transport".into(),
+                    message: "source archives require a result provider that claims content".into(),
+                })
+            })?;
         // Materialize only the selected ordinary Parse files before capturing
         // their stable source/anchor archive inputs.
         for definition in definitions {
@@ -2237,8 +2240,12 @@ impl QueryEngine {
         self.register_specializations(definitions);
         let anchors = Arc::new(crate::NativeRecordContext::capture(self));
         required = required
-            .checked_add(anchors.input_bytes().ok_or_else(refusal)?)
-            .ok_or_else(refusal)?;
+            .checked_add(
+                anchors
+                    .input_bytes()
+                    .ok_or_else(|| refusal("anchor size overflow"))?,
+            )
+            .ok_or_else(|| refusal("anchor size overflow"))?;
         if required > allowance.bytes() {
             return Err(refused_inputs(required));
         }
@@ -2250,7 +2257,7 @@ impl QueryEngine {
         sibling_index.tree::<FileId, Vec<Reference>>(sibling_inputs.len());
         required = required
             .checked_add(sibling_index.bytes())
-            .ok_or_else(refusal)?;
+            .ok_or_else(|| refusal("sibling index overflow"))?;
         for (file, original) in sibling_inputs {
             if let std::collections::btree_map::Entry::Vacant(slot) = siblings.entry(file) {
                 let written = declarations.siblings(&original);
@@ -2258,9 +2265,9 @@ impl QueryEngine {
                     .checked_add(
                         (written.len() as u64)
                             .checked_mul(std::mem::size_of::<Reference>() as u64)
-                            .ok_or_else(refusal)?,
+                            .ok_or_else(|| refusal("sibling size overflow"))?,
                     )
-                    .ok_or_else(refusal)?;
+                    .ok_or_else(|| refusal("sibling size overflow"))?;
                 if required > allowance.bytes() {
                     return Err(refused_inputs(required));
                 }
@@ -2298,12 +2305,14 @@ impl QueryEngine {
                     }
                     let bytes = input_records
                         .encode(&*anchors, &(sibling, sibling.occurrence))
-                        .ok_or_else(refusal)?;
-                    refs.push(
-                        store
-                            .put_content(SOURCE_INPUT, &bytes)
-                            .ok_or_else(refusal)?,
-                    );
+                        .ok_or_else(|| refusal("sibling archive encoding"))?;
+                    refs.push(store.put_content(SOURCE_INPUT, &bytes).ok_or_else(|| {
+                        refusal(&format!(
+                            "the store refuses the {} byte sibling archive of {}",
+                            bytes.len(),
+                            sibling.item.definition
+                        ))
+                    })?);
                 }
                 slot.insert(refs);
             }
@@ -2321,7 +2330,7 @@ impl QueryEngine {
             let declaration = generation::instance_bodied(&original);
             let syntax = if declaration {
                 if registration.is_some() {
-                    return Err(refusal());
+                    return Err(refusal("registration for a generic generated declaration"));
                 }
                 // As in declaration_check_query, a generic generated
                 // declaration checks its header. Only closed instances have
@@ -2332,10 +2341,13 @@ impl QueryEngine {
                 }
                 Arc::new(header)
             } else if generation::generator(&original).is_some() {
-                registration.ok_or_else(refusal)?.syntax.clone()
+                registration
+                    .ok_or_else(|| refusal("generator without an accepted registration view"))?
+                    .syntax
+                    .clone()
             } else {
                 if registration.is_some() {
-                    return Err(refusal());
+                    return Err(refusal("registration for a non-generator"));
                 }
                 original
             };
@@ -2348,7 +2360,7 @@ impl QueryEngine {
                 }
                 None => self
                     .store_key(definition, QueryKind::Modes)
-                    .ok_or_else(refusal)?,
+                    .ok_or_else(|| refusal("store key"))?,
             };
             // Immutable S0 variants provide body reuse. The construction
             // inventory itself must never pin a mutable engine's checked body
@@ -2366,7 +2378,7 @@ impl QueryEngine {
             }
             let syntax = store
                 .put_content(SOURCE_INPUT, &bytes)
-                .ok_or_else(refusal)?;
+                .ok_or_else(|| refusal("syntax archive store"))?;
             selected.push((
                 definition.clone(),
                 syntax,
@@ -2441,8 +2453,9 @@ impl QueryEngine {
             input_records.clone(),
             &mut allowance,
         )
-        .ok_or_else(refusal)?;
-        let pool = MemoryReservationPool::new(allowance).map_err(|_| refusal())?;
+        .ok_or_else(|| refusal("shared product admission"))?;
+        let pool =
+            MemoryReservationPool::new(allowance).map_err(|_| refusal("front allowance pool"))?;
         let backing = Arc::new(FrontSourceBacking {
             products,
             admitted,
@@ -2482,7 +2495,7 @@ impl QueryEngine {
             modes: self.adapters.modes.clone(),
             environment: self.environment_value(),
             candidates,
-            records: self.type_records().ok_or_else(refusal)?,
+            records: self.type_records().ok_or_else(|| refusal("type records"))?,
             input_records,
             anchors,
             store,

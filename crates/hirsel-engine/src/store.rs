@@ -128,6 +128,11 @@ pub trait ResultStore: Send + Sync {
     fn transports(&self) -> bool {
         self.persistence().retains()
     }
+    /// Whether `put_content` can hold this request's new content. A provider
+    /// that only reads installed products, or never claims content, does not.
+    fn claims_content(&self) -> bool {
+        self.transports()
+    }
     fn get(&self, key: &EntryKey) -> Option<Bytes>;
     fn put(&self, key: &EntryKey, value: &[u8]);
     /// The rows a request expects later revisions to adopt first, replacing

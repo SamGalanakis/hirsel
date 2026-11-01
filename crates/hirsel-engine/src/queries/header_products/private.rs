@@ -245,6 +245,11 @@ impl HeaderProducts {
                 let standalone = if self.standalone && private.retention.get().is_none() {
                     Some(self.reserve_standalone(weight.bytes())?)
                 } else if let Some(retention) = private.retention.get() {
+                    // Settled header rows share this partition; evict unpinned
+                    // rows before refusing, never while holding the grant.
+                    while *retention.lock().unwrap_or_else(|e| e.into_inner()) < weight.bytes()
+                        && self.evict()
+                    {}
                     let mut remaining = retention.lock().unwrap_or_else(|e| e.into_inner());
                     *remaining = remaining.checked_sub(weight.bytes()).ok_or_else(|| {
                         QueryError::Operational(hirsel_types::OperationalFailure {

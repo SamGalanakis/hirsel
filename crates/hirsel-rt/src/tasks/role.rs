@@ -6,6 +6,7 @@
 
 use crate::parking::Event;
 use std::cell::Cell;
+use std::panic::Location;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::{TaskCtx, context::RunShared};
@@ -198,10 +199,11 @@ impl Role {
 }
 
 thread_local! {
-    /// Whether this thread is inside a [`with_role`] closure. A table borrow
-    /// is lexical and non-suspending: every host, user, home-call and fiber
-    /// switch boundary checks that none is live.
-    static LENT: Cell<bool> = const { Cell::new(false) };
+    /// The [`with_role`] or [`with_held`] call whose closure this thread is
+    /// inside. A table borrow is lexical and non-suspending: every host, user,
+    /// home-call and fiber switch boundary checks that none is live, and a
+    /// fault names the borrow that spanned it.
+    static LENT: Cell<Option<&'static Location<'static>>> = const { Cell::new(None) };
 }
 
 /// The role-protected task/scope tables, lent to one [`with_role`] closure.
@@ -229,9 +231,10 @@ struct Lent;
 
 impl Lent {
     #[inline(always)]
+    #[track_caller]
     fn new() -> Self {
-        if LENT.with(|lent| lent.replace(true)) {
-            spanned("another role table borrow");
+        if let Some(outer) = LENT.with(|lent| lent.replace(Some(Location::caller()))) {
+            spanned(outer, "another role table borrow");
         }
         Self
     }
@@ -240,13 +243,14 @@ impl Lent {
 impl Drop for Lent {
     #[inline(always)]
     fn drop(&mut self) {
-        LENT.with(|lent| lent.set(false));
+        LENT.with(|lent| lent.set(None));
     }
 }
 
 /// Run `f` with the role's tables, entering the role for `ctx`'s task as a
 /// semantic entry does. The borrow cannot outlive `f`; a nested borrow, or a
 /// boundary reached inside `f`, is an invariant fault.
+#[track_caller]
 pub(crate) fn with_role<T>(ctx: *mut TaskCtx, f: impl FnOnce(&mut RoleTables<'_>) -> T) -> T {
     let tables = super::role_tables(ctx);
     let _lent = Lent::new();
@@ -268,6 +272,7 @@ pub(crate) fn admit(ctx: *mut TaskCtx) {
 /// # Safety
 /// `ctx`'s task holds the role, and the run's tables exist.
 #[inline(always)]
+#[track_caller]
 pub(crate) unsafe fn with_held<T>(
     ctx: *mut TaskCtx,
     f: impl FnOnce(&mut RoleTables<'_>) -> T,
@@ -284,20 +289,20 @@ pub(crate) unsafe fn with_held<T>(
 /// runtime panic, this aborts at the compiled-code boundary.
 #[inline(always)]
 pub(crate) fn unlent(boundary: &str) {
-    if LENT.with(Cell::get) {
-        spanned(boundary);
+    if let Some(lent) = LENT.with(Cell::get) {
+        spanned(lent, boundary);
     }
 }
 
 #[cold]
 #[inline(never)]
-fn spanned(boundary: &str) -> ! {
-    panic!("a role table borrow spans {boundary}")
+fn spanned(lent: &Location<'_>, boundary: &str) -> ! {
+    panic!("a role table borrow at {lent} spans {boundary}")
 }
 
 #[cfg(test)]
 pub(crate) fn lent() -> bool {
-    LENT.with(Cell::get)
+    LENT.with(Cell::get).is_some()
 }
 
 /// Role ownership for an idle callback, independent of any task context.

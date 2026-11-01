@@ -4,7 +4,9 @@
 use super::{
     CompileOperation, CompileOutput, CompileRequest, CompileResult, CompilerReadiness,
     RequestLimits, RequestWork,
-    host_selector::{GraphAdmission, GraphBudget, GraphProducts, InstalledGraph, SnapshotPlan},
+    host_selector::{
+        GraphAdmission, GraphBudget, GraphProducts, InstalledGraph, InstalledMetadata, SnapshotPlan,
+    },
     inspection::{Counters, GraphMeter, InspectionLedger, KINDS, MeterOwner, SourceInspection},
 };
 use hirsel_engine::{
@@ -199,9 +201,68 @@ struct SourceProducts {
     completed_operation: Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
     errors: RuntimeErrors,
     meter: Arc<GraphMeter>,
+    metadata: Arc<InstalledMetadata>,
 }
 
+struct SourceMetadata {
+    entry: DefPath,
+    inputs: FrozenInputs,
+    meter: Arc<GraphMeter>,
+    // Runtime diagnostic references remain owned by their admitted transport.
+    _store: Arc<RequestStore>,
+}
+impl GraphProducts for SourceMetadata {
+    fn accepts(&self, operation: &CompileOperation) -> bool {
+        matches!(
+            operation,
+            CompileOperation::Inspect { .. } | CompileOperation::RecomputeCounts { .. }
+        )
+    }
+    fn select(
+        &self,
+        operation: &CompileOperation,
+    ) -> Result<(Vec<QueryId>, CompilerReadiness), ToolError> {
+        if !self.accepts(operation) {
+            return Err(uninstalled());
+        }
+        let operation = operation.clone();
+        let meter = self.meter.clone();
+        let entry = self.entry.clone();
+        let inputs = self.inputs.clone();
+        Ok((
+            vec![],
+            CompilerReadiness {
+                read_scope: None,
+                materialize: Arc::new(move |products| {
+                    if !products.is_empty() {
+                        return Err(uninstalled());
+                    }
+                    let work = meter.flush()?;
+                    let result = match &operation {
+                        CompileOperation::Inspect { definitions } => {
+                            CompileResult::Inspect(meter.inspect(definitions)?)
+                        }
+                        CompileOperation::RecomputeCounts { queries } => {
+                            CompileResult::RecomputeCounts(meter.counts(queries)?)
+                        }
+                        _ => return Err(uninstalled()),
+                    };
+                    Ok(Arc::new(CompileOutput::new(
+                        entry.clone(),
+                        inputs.clone(),
+                        work,
+                        result,
+                    )))
+                }),
+                failure: Arc::new(|_| uninstalled()),
+            },
+        ))
+    }
+}
 impl GraphProducts for SourceProducts {
+    fn metadata(&self) -> Option<Arc<InstalledMetadata>> {
+        Some(self.metadata.clone())
+    }
     fn check_source_owner(&self) -> Option<Arc<dyn Send + Sync>> {
         // CheckOutput owns diagnostics and contains no producer handles.
         // Its source map keeps the original source/header grant, allowing the
@@ -278,6 +339,12 @@ impl GraphProducts for SourceProducts {
         &self,
         operation: &CompileOperation,
     ) -> Result<(Vec<QueryId>, CompilerReadiness), ToolError> {
+        if matches!(
+            operation,
+            CompileOperation::Inspect { .. } | CompileOperation::RecomputeCounts { .. }
+        ) {
+            return self.metadata.select(operation);
+        }
         let mut store_operation = self
             .initial_operation
             .lock()
@@ -349,7 +416,6 @@ impl GraphProducts for SourceProducts {
                     .1
                     .query(),
             ],
-            CompileOperation::Inspect { .. } | CompileOperation::RecomputeCounts { .. } => vec![],
             CompileOperation::TirBatch { .. } => vec![
                 self.run
                     .as_ref()
@@ -692,12 +758,6 @@ impl GraphProducts for SourceProducts {
                                 facts,
                                 lower.clone(),
                             )?)
-                        }
-                        CompileOperation::Inspect { definitions } if products.is_empty() => {
-                            CompileResult::Inspect(meter.inspect(definitions)?)
-                        }
-                        CompileOperation::RecomputeCounts { queries } if products.is_empty() => {
-                            CompileResult::RecomputeCounts(meter.counts(queries)?)
                         }
                         _ => return Err(uninstalled()),
                     };
@@ -2385,6 +2445,17 @@ pub(super) fn install(
             slot.state = state;
         }
     }
+    let metadata = Arc::new(InstalledMetadata {
+        path: request.path.clone(),
+        inputs: request.inputs.clone(),
+        products: Arc::new(SourceMetadata {
+            entry: program.entry.clone(),
+            inputs: request.inputs.clone(),
+            meter: meter.clone(),
+            _store: store.clone(),
+        }),
+        errors,
+    });
     let products = Arc::new(SourceProducts {
         source_index: source_index.clone(),
         source_generation,
@@ -2414,6 +2485,7 @@ pub(super) fn install(
         completed_operation: Mutex::new(None),
         errors,
         meter,
+        metadata,
     });
     Ok(Arc::new(InstalledGraph {
         path: request.path.clone(),

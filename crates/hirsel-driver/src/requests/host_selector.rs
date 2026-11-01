@@ -176,6 +176,9 @@ pub(super) trait GraphProducts: Send + Sync {
     fn check_source_owner(&self) -> Option<Arc<dyn Send + Sync>> {
         None
     }
+    fn metadata(&self) -> Option<Arc<InstalledMetadata>> {
+        None
+    }
     fn accepts(&self, _operation: &CompileOperation) -> bool {
         true
     }
@@ -189,6 +192,23 @@ pub(super) struct InstalledGraph {
     pub inputs: FrozenInputs,
     pub runtime: Arc<Mutex<AdmittedRuntime>>,
     pub products: Arc<dyn GraphProducts>,
+}
+pub(super) struct InstalledMetadata {
+    pub path: PathBuf,
+    pub inputs: FrozenInputs,
+    pub products: Arc<dyn GraphProducts>,
+    pub errors: RuntimeErrors,
+}
+impl GraphProducts for InstalledMetadata {
+    fn accepts(&self, operation: &CompileOperation) -> bool {
+        self.products.accepts(operation)
+    }
+    fn select(
+        &self,
+        operation: &CompileOperation,
+    ) -> Result<(Vec<QueryId>, CompilerReadiness), ToolError> {
+        self.products.select(operation)
+    }
 }
 struct OutputOwner {
     _products: Arc<dyn GraphProducts>,
@@ -210,6 +230,7 @@ fn lease_output(leases: &OutputLeases, owner: Arc<dyn Send + Sync>) -> Arc<dyn S
 pub(super) struct GraphBudget {
     budget: Arc<ProcessBudget>,
     hot: Mutex<Vec<Arc<InstalledGraph>>>,
+    metadata: Mutex<Vec<Arc<InstalledMetadata>>>,
 }
 type BudgetIndex = Vec<(Weak<ProcessBudget>, Weak<GraphBudget>)>;
 static BUDGETS: OnceLock<Mutex<BudgetIndex>> = OnceLock::new();
@@ -247,6 +268,7 @@ impl GraphBudget {
         let owner = Arc::new(Self {
             budget: budget.clone(),
             hot: Mutex::new(vec![]),
+            metadata: Mutex::new(vec![]),
         });
         budgets.push((Arc::downgrade(budget), Arc::downgrade(&owner)));
         owner
@@ -367,6 +389,23 @@ impl GraphBudget {
             discarded
         };
         drop(discarded);
+        let discarded = {
+            let mut metadata = self
+                .metadata
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let mut discarded = vec![];
+            let mut index = 0;
+            while index < metadata.len() {
+                if Arc::strong_count(&metadata[index]) == 1 {
+                    discarded.push(metadata.remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            discarded
+        };
+        drop(discarded);
     }
 }
 /// How long a waiting admission tolerates a process charge that neither grows
@@ -376,6 +415,7 @@ pub(super) struct GraphSelections {
     retention: Arc<GraphBudget>,
     retain_idle: bool,
     live: Vec<Weak<InstalledGraph>>,
+    metadata: Vec<Weak<InstalledMetadata>>,
     outputs: OutputLeases,
 }
 impl Drop for GraphSelections {
@@ -390,6 +430,7 @@ impl GraphSelections {
             retention: GraphBudget::shared(budget),
             retain_idle,
             live: vec![],
+            metadata: vec![],
             outputs: Arc::new(Mutex::new(vec![])),
         }
     }
@@ -412,6 +453,48 @@ impl GraphSelections {
                     && graph.inputs == request.inputs
                     && graph.products.accepts(&request.operation)
             });
+        self.metadata
+            .retain(|metadata| metadata.strong_count() != 0);
+        let metadata = selected
+            .is_none()
+            .then(|| {
+                self.metadata
+                    .iter()
+                    .rev()
+                    .filter_map(Weak::upgrade)
+                    .find(|metadata| {
+                        metadata.path == request.path
+                            && metadata.inputs == request.inputs
+                            && metadata.products.accepts(&request.operation)
+                    })
+            })
+            .flatten();
+        let selected = match (selected, metadata) {
+            (None, Some(metadata)) => {
+                // Empty roots need only scheduler bookkeeping, with no producer
+                // factories or retained worker stacks from the retired graph.
+                let bytes = hirsel_intern::jobs::COMPILER_STACK_BYTES as u64
+                    + AdmittedRuntime::query_capacity_bytes(16).unwrap();
+                let reservation = GraphBudget::reserve_product(&self.retention.budget, bytes)
+                    .map_err(ToolError::Io)?;
+                let runtime = AdmittedRuntime::with_query_capacity(
+                    hirsel_intern::jobs::Jobs::ONE,
+                    reservation,
+                    metadata.errors,
+                    16,
+                )
+                .map_err(ToolError::Io)?;
+                let graph = Arc::new(InstalledGraph {
+                    path: metadata.path.clone(),
+                    inputs: metadata.inputs.clone(),
+                    runtime: Arc::new(Mutex::new(runtime)),
+                    products: metadata,
+                });
+                self.live.push(Arc::downgrade(&graph));
+                Some(graph)
+            }
+            (selected, _) => selected,
+        };
         let graph = match selected {
             Some(graph) => graph,
             None => {
@@ -433,6 +516,16 @@ impl GraphSelections {
                     ));
                 }
                 self.live.push(Arc::downgrade(&graph));
+                if !self.retain_idle
+                    && let Some(metadata) = graph.products.metadata()
+                {
+                    self.metadata.push(Arc::downgrade(&metadata));
+                    self.retention
+                        .metadata
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(metadata);
+                }
                 graph
             }
         };
@@ -572,6 +665,113 @@ pub(super) fn completed_artifacts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn zero_hold_metadata_outputs_keep_their_index_owner_and_share_pending_runtime() {
+        struct Metadata(MemoryReservation);
+        impl GraphProducts for Metadata {
+            fn accepts(&self, operation: &CompileOperation) -> bool {
+                matches!(operation, CompileOperation::RecomputeCounts { .. })
+            }
+            fn select(
+                &self,
+                _: &CompileOperation,
+            ) -> Result<(Vec<QueryId>, CompilerReadiness), ToolError> {
+                assert_eq!(self.0.bytes(), 1);
+                let (_, inputs) = hirsel_engine::requests::observe_inputs(
+                    hirsel_engine::loader_inputs::InputLimits {
+                        bytes: 0,
+                        operations: 0,
+                    },
+                    1,
+                    |_| Ok::<_, std::io::Error>(()),
+                )
+                .unwrap();
+                Ok((
+                    vec![],
+                    CompilerReadiness {
+                        read_scope: None,
+                        materialize: Arc::new(move |products| {
+                            assert!(products.is_empty());
+                            Ok(Arc::new(CompileOutput::new(
+                                hirsel_engine::entry_path(&hirsel_engine::default_context()),
+                                inputs.clone(),
+                                Default::default(),
+                                CompileResult::RecomputeCounts(vec![]),
+                            )))
+                        }),
+                        failure: Arc::new(|_| {
+                            ToolError::Runtime("unexpected metadata failure".into())
+                        }),
+                    },
+                ))
+            }
+        }
+        let (_, inputs) = hirsel_engine::requests::observe_inputs(
+            hirsel_engine::loader_inputs::InputLimits {
+                bytes: 0,
+                operations: 0,
+            },
+            1,
+            |_| Ok::<_, std::io::Error>(()),
+        )
+        .unwrap();
+        let request = CompileRequest {
+            path: "metadata.hir".into(),
+            inputs: inputs.clone(),
+            operation: CompileOperation::RecomputeCounts { queries: vec![] },
+        };
+        let error = hirsel_engine::store::Domain {
+            kind: 0x4600_00fe,
+            schema: 1,
+        }
+        .reference(b"fixture error")
+        .unwrap();
+        let budget = ProcessBudget::new(2 * hirsel_intern::jobs::COMPILER_STACK_BYTES as u64);
+        let mut selector = GraphSelections::new(&budget, false);
+        let metadata = Arc::new(InstalledMetadata {
+            path: request.path.clone(),
+            inputs,
+            products: Arc::new(Metadata(budget.reserve(1).unwrap())),
+            errors: RuntimeErrors {
+                resource: error,
+                cycle: error,
+                cancelled: error,
+                protocol: error,
+                panicked: error,
+            },
+        });
+        let indexed = Arc::downgrade(&metadata);
+        selector.metadata.push(indexed.clone());
+        selector.retention.metadata.lock().unwrap().push(metadata);
+        let first = selector
+            .select(&request, |_, _| {
+                panic!("metadata must not reinstall source producers")
+            })
+            .unwrap();
+        let second = selector
+            .select(&request, |_, _| panic!("pending metadata must coalesce"))
+            .unwrap();
+        assert!(Arc::ptr_eq(&first.runtime, &second.runtime));
+        let output = (first.output.materialize)(&[]).unwrap();
+        drop(first);
+        drop(second);
+        assert_eq!(
+            budget.reserved(),
+            1,
+            "completed metadata retains no scheduler grant"
+        );
+        selector.retention.release_idle();
+        assert!(
+            indexed.upgrade().is_some(),
+            "a live metadata output keeps its discoverable owner"
+        );
+        drop(output);
+        selector.retention.release_idle();
+        assert!(indexed.upgrade().is_none());
+        drop(selector);
+        assert_eq!(budget.reserved(), 0);
+    }
+
     #[test]
     fn loading_transport_transfer_keeps_one_shared_charge_before_s0() {
         use hirsel_engine::store::{Domain, NoneStore, RequestStore, ResultStore};

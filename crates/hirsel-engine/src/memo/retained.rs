@@ -521,6 +521,7 @@ impl Weight<'_> {
             manifest_lookups,
             resolver,
             citations,
+            closure,
         } = detail;
         if let Some(failure) = operational_failure {
             self.failure(failure);
@@ -532,6 +533,7 @@ impl Weight<'_> {
         self.vec(manifest_lookups, Weight::shared_dependency);
         self.read_log(resolver);
         self.vec(citations, |w, (path, _)| w.def_path(path));
+        self.flat_vec(closure);
     }
     pub(crate) fn add(&mut self, bytes: usize) {
         self.bytes = self.bytes.saturating_add(bytes as u64);

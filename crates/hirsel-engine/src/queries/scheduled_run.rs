@@ -1374,26 +1374,11 @@ impl QueryEngine {
                 });
             }
             if let Some(reads) = self.dependency_reads(&path, QueryKind::Signature) {
-                dependencies.extend(reads.signatures.iter().map(|d| d.definition.path().clone()));
-                for read in reads.resolver.iter().chain(&reads.manifest_lookups) {
-                    match read.as_ref() {
-                        hirsel_types::DependencyRead::Signature { definition, .. } => {
-                            dependencies.insert(definition.path().clone());
-                        }
-                        hirsel_types::DependencyRead::Lookup {
-                            result: Ok(definition),
-                            ..
-                        } => {
-                            dependencies.insert(definition.as_ref().clone());
-                        }
-                        hirsel_types::DependencyRead::ProviderLookup { output, .. } => {
-                            if let Ok(definition) = &output.result {
-                                dependencies.insert(definition.as_ref().clone());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+                dependencies.extend(
+                    reads
+                        .semantic_definitions()
+                        .map(|definition| definition.path().clone()),
+                );
             }
             let mut executable = false;
             let mut generated = false;

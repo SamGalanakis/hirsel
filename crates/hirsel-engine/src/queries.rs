@@ -195,6 +195,34 @@ pub struct DependencyReads {
     pub resolver: Arc<hirsel_types::SharedPath<hirsel_types::SharedRead>>,
     /// Other items' name sites a result cites, as read (`cite_name`).
     pub citations: Vec<(DefPath, Option<Span>)>,
+    /// A compact header's semantic closure: the definitions its dropped
+    /// signature and resolved lookup observations named.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closure: Vec<DefId>,
+}
+
+impl DependencyReads {
+    /// Every definition the semantic closure of this detail names.
+    pub fn semantic_definitions(&self) -> impl Iterator<Item = DefId> + '_ {
+        let reads = self.resolver.iter().chain(&self.manifest_lookups);
+        self.signatures
+            .iter()
+            .map(|dependency| dependency.definition)
+            .chain(reads.filter_map(|read| match read.as_ref() {
+                hirsel_types::DependencyRead::Signature { definition, .. } => Some(*definition),
+                hirsel_types::DependencyRead::Lookup {
+                    result: Ok(definition),
+                    ..
+                } => Some(DefId::intern(definition.as_ref())),
+                hirsel_types::DependencyRead::ProviderLookup { output, .. } => output
+                    .result
+                    .as_ref()
+                    .ok()
+                    .map(|definition| DefId::intern(definition.as_ref())),
+                _ => None,
+            }))
+            .chain(self.closure.iter().copied())
+    }
 }
 
 /// A file's parse result under its package's query environment.

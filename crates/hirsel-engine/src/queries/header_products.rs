@@ -616,8 +616,8 @@ impl QueryEngine {
 fn project(
     entry: &Arc<Entry<hirsel_types::SignatureRef>>,
 ) -> Arc<Entry<hirsel_types::SignatureRef>> {
-    // Keep semantic closure edges even though validity uses the complete memo.
-    // Source positions and duplicate lookup indexes are disposable.
+    // Validity uses the complete memo. Program revision and semantic body
+    // nodes still need the closure, so keep only the definitions it names.
     if entry.products.resolution.is_none()
         && !crate::memo::retained::source_projection(entry).detail
     {
@@ -627,9 +627,13 @@ fn project(
         memo: entry.memo.clone(),
         detail: DependencyReads {
             operational_failure: entry.detail.operational_failure.clone(),
-            signatures: entry.detail.signatures.clone(),
-            manifest_lookups: entry.detail.manifest_lookups.clone(),
-            resolver: entry.detail.resolver.clone(),
+            closure: {
+                let mut closure: Vec<_> = entry.detail.semantic_definitions().collect();
+                closure.sort_unstable();
+                closure.dedup();
+                closure.shrink_to_fit();
+                closure
+            },
             ..Default::default()
         },
         products: Arc::new(PhaseProducts {

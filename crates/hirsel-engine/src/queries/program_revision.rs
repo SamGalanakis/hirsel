@@ -1,7 +1,7 @@
 //! Rooted semantic dependencies, independent of native artifacts and instances.
 use super::*;
 use hirsel_run_schema::{ProgramNode, ProgramRevision};
-use hirsel_types::{DependencyRead, SignatureKind};
+use hirsel_types::SignatureKind;
 
 include!(concat!(env!("OUT_DIR"), "/semantic_runtime.rs"));
 
@@ -277,27 +277,11 @@ impl QueryEngine {
                     self.merge_execution(&reads);
                 }
                 if let Some(reads) = self.dependency_reads(path, kind) {
-                    dependencies
-                        .extend(reads.signatures.iter().map(|d| d.definition.path().clone()));
-                    for read in reads.resolver.iter().chain(&reads.manifest_lookups) {
-                        match read.as_ref() {
-                            DependencyRead::Signature { definition, .. } => {
-                                dependencies.insert(definition.path().clone());
-                            }
-                            DependencyRead::Lookup {
-                                result: Ok(definition),
-                                ..
-                            } => {
-                                dependencies.insert(definition.as_ref().clone());
-                            }
-                            DependencyRead::ProviderLookup { output, .. } => {
-                                if let Ok(definition) = &output.result {
-                                    dependencies.insert(definition.as_ref().clone());
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+                    dependencies.extend(
+                        reads
+                            .semantic_definitions()
+                            .map(|definition| definition.path().clone()),
+                    );
                 }
             }
             // A generated body (CT-5) depends on what its generator executed,

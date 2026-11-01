@@ -394,9 +394,13 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.hir");
+        let body = (0..256)
+            .map(|value| format!("{value}u64"))
+            .collect::<Vec<_>>()
+            .join("+");
         std::fs::write(
             &path,
-            "fn a()->u8{1u8}\nfn b()->u8{1u8}\npub fn main()->u8{0u8}\n",
+            format!("fn a()->u64{{{body}}}\nfn b()->u64{{{body}}}\npub fn main()->u8{{0u8}}\n"),
         )
         .unwrap();
         let manifest = directory.path().join("hirsel.json");
@@ -503,7 +507,9 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
             let second = runtime.wait(request);
             if mode == 0 {
                 second.unwrap();
-                limit = lower.retained_bytes() - bytes;
+                // Publication reserves a conservative whole outcome-table node
+                // before it knows whether that node needs to grow.
+                limit = lower.retained_bytes() - bytes / 2;
                 continue;
             }
             if mode == 2 {
@@ -516,7 +522,14 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
                 drop(pin);
                 continue;
             }
-            second.unwrap();
+            second.unwrap_or_else(|error| {
+                panic!(
+                    "pressure admission: {error:?}, failure={:?}, retained={}/{limit}, body={bytes}, stats={:?}",
+                    native.failure(error),
+                    lower.retained_bytes(),
+                    runtime.stats(),
+                )
+            });
             assert!(
                 original.body.live().is_none(),
                 "settled catalogue is a weak owner"

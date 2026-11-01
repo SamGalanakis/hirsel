@@ -427,7 +427,7 @@ impl InstanceTasks {
                             return Err("source instances selected different Lower outputs".into());
                         }
                     } else {
-                        selected.insert(path.clone(), (product.clone(), original.clone()));
+                        selected.insert(path.clone(), (*product, original.clone()));
                     }
                 }
             }

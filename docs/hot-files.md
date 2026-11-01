@@ -34,6 +34,7 @@ reuses the removal rule from `sorted_stretch`
 It retains ours' line order followed by new lines from theirs, removes identical
 duplicates and writes final newlines. Declaration and ledger row order has no
 semantics. After each ticket rebase, `tools/land` commits one row per ledger ID: the latest date wins, with ties preferring the ticket's added row; unrelated rows keep their order.
+Before that, it drops each ID deleted since the merge base by the ticket, or by main when the ticket left the ID's rows unchanged; a deletion beats a concurrent edit on the other side.
 `tools/check-hot-files`, run by `tools/land` on every rebased tree including
 push-only retries, rejects duplicate declarations and duplicate ledger IDs.
 The ledger uses main-runs' existing four-column/date validation. Do not add

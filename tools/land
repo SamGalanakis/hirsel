@@ -629,8 +629,14 @@ def rebase(base, *selection):
     if ancestor.returncode:
         return ancestor
     path = 'tools/known-failures.tsv'
-    authored = set(git('show', f'{incoming}:{path}').stdout.splitlines()) - set(
-        git('show', f'{ancestor.stdout.strip()}:{path}').stdout.splitlines())
+    sides = [git('show', f'{commit}:{path}').stdout.splitlines()
+             for commit in (ancestor.stdout.strip(), incoming, base)]
+    authored = set(sides[1]) - set(sides[0])
+    origin, ticket, main = (ledger_rows(side) for side in sides)
+    # Deleting an identity is an edit to it: a ticket's deletion beats main's
+    # concurrent row edits, and main's deletion beats a row the ticket left alone.
+    deleted = {identity for identity, rows in origin.items()
+               if identity not in ticket or (identity not in main and ticket[identity] == rows)}
     result = git('rebase', *(['--onto', base, *selection] if selection else [base]))
     while result.returncode:
         conflicts = git('diff', '--name-only', '--diff-filter=U').stdout.splitlines()
@@ -646,12 +652,35 @@ def rebase(base, *selection):
                 return resolved
             say(f'resolved generated conflict in {path}; its generator owns regeneration')
         result = git('-c', 'core.editor=true', 'rebase', '--continue')
-    resolve_known_failures(authored)
+    resolve_known_failures(authored, deleted)
     return result
 
 
-def resolve_known_failures(authored):
-    """Resolve valid ledger rows by date, then the incoming ticket's additions.
+def ledger_identity(row):
+    """A valid ledger row's ID, or None for comments, blanks and malformed rows."""
+    fields = row.split('\t')
+    if (not row.strip() or row.startswith('#') or len(fields) != 4
+            or any(not field.strip() for field in fields)
+            or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', fields[3])):
+        return None
+    try:
+        date.fromisoformat(fields[3])
+    except ValueError:
+        return None
+    return fields[0]
+
+
+def ledger_rows(lines):
+    """Each valid ledger identity's set of rows."""
+    rows = {}
+    for row in lines:
+        if (identity := ledger_identity(row)) is not None:
+            rows.setdefault(identity, set()).add(row)
+    return rows
+
+
+def resolve_known_failures(authored, deleted):
+    """Drop `deleted` identities, then resolve the rest by date, then the incoming ticket's additions.
 
     Keep each identity's first position and all other lines in authored order.
     Malformed rows stay untouched for check-hot-files' strict main-runs parser.
@@ -659,39 +688,36 @@ def resolve_known_failures(authored):
     path = ROOT / 'tools/known-failures.tsv'
     if not path.is_file():
         return
-    lines, winners, duplicates = path.read_text().splitlines(keepends=True), {}, set()
+    lines, winners, duplicates, dropped = path.read_text().splitlines(keepends=True), {}, set(), set()
     identities = {}
     for index, line in enumerate(lines):
         row = line.rstrip('\r\n')
-        if not row.strip() or row.startswith('#'):
+        identity = ledger_identity(row)
+        if identity is None:
             continue
-        fields = row.split('\t')
-        if (len(fields) != 4 or any(not field.strip() for field in fields)
-                or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', fields[3])):
-            continue
-        try:
-            date.fromisoformat(fields[3])
-        except ValueError:
-            continue
-        identity = fields[0]
         identities[index] = identity
-        rank = (fields[3], row in authored)
+        if identity in deleted:
+            dropped.add(identity)
+            continue
+        rank = (row.split('\t')[3], row in authored)
         if identity in winners:
             duplicates.add(identity)
         if identity not in winners or rank >= winners[identity][0]:
             winners[identity] = rank, line
-    if not duplicates:
+    if not duplicates and not dropped:
         return
     output, emitted = [], set()
     for index, line in enumerate(lines):
         identity = identities.get(index)
+        if identity in dropped:
+            continue
         if identity not in duplicates:
             output.append(line)
         elif identity not in emitted:
             output.append(winners[identity][1].rstrip('\r\n') + '\n')
             emitted.add(identity)
     path.write_text(''.join(output))
-    message = 'Resolve known-failures identities: ' + ', '.join(sorted(duplicates))
+    message = 'Resolve known-failures identities: ' + ', '.join(sorted(duplicates | dropped))
     for arguments in (('add', '--', 'tools/known-failures.tsv'), ('commit', '-qm', message)):
         result = git(*arguments)
         if result.returncode:

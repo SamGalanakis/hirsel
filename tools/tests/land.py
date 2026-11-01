@@ -175,6 +175,44 @@ class Land(unittest.TestCase):
         self.assertEqual(self.git(self.origin, 'show', 'main:tools/known-failures.tsv'),
                          'red\tnew\towner\t2026-11-01\nother\treason\towner\t2026-10-30\n')
 
+    def ledger_three_way(self, base, main, ticket, expected):
+        self.ledger_checks(base)
+        self.git(self.lane, 'push', '-q', 'origin', 'HEAD:main')
+        self.git(self.lane, 'checkout', '-q', '-b', 'main-edit')
+        (self.lane / 'tools/known-failures.tsv').write_text(main)
+        self.git(self.lane, 'commit', '-qam', 'main ledger edit')
+        self.git(self.lane, 'push', '-q', 'origin', 'HEAD:main')
+        self.git(self.lane, 'checkout', '-q', 'my-lane')
+        (self.lane / 'tools/known-failures.tsv').write_text(ticket)
+        self.git(self.lane, 'commit', '-qam', 'ticket ledger edit')
+        landed = self.land()
+        self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
+        self.assertEqual(self.git(self.origin, 'show', 'main:tools/known-failures.tsv'), expected)
+
+    def test_a_ticket_deletion_beats_a_concurrent_main_owner_edit(self):
+        self.ledger_three_way('a\tr\tx\t2026-10-30\nred\tr\tx\t2026-10-30\nz\tr\tx\t2026-10-30\n',
+                              'a\tr\tx\t2026-10-30\nred\tr\ty\t2026-11-01\nz\tr\tx\t2026-10-30\n',
+                              'a\tr\tx\t2026-10-30\nz\tr\tx\t2026-10-30\n',
+                              'a\tr\tx\t2026-10-30\nz\tr\tx\t2026-10-30\n')
+
+    def test_a_main_deletion_beats_an_untouched_ticket_row(self):
+        self.ledger_three_way('red\tr\tx\t2026-10-30\nz\tr\tx\t2026-10-30\n',
+                              'z\tr\tx\t2026-10-30\n',
+                              'red\tr\tx\t2026-10-30\nz\tr\tx\t2026-10-30\nnew\tr\tt\t2026-11-01\n',
+                              'z\tr\tx\t2026-10-30\nnew\tr\tt\t2026-11-01\n')
+
+    def test_both_sides_editing_a_row_keep_main_when_it_is_later(self):
+        self.ledger_three_way('red\tr\tx\t2026-10-30\nz\tr\tx\t2026-10-30\n',
+                              'red\tr\tmain\t2026-11-01\nz\tr\tx\t2026-10-30\n',
+                              'red\tr\tticket\t2026-10-31\nz\tr\tx\t2026-10-30\n',
+                              'red\tr\tmain\t2026-11-01\nz\tr\tx\t2026-10-30\n')
+
+    def test_both_sides_editing_a_row_keep_the_ticket_when_it_is_later(self):
+        self.ledger_three_way('red\tr\tx\t2026-10-30\nz\tr\tx\t2026-10-30\n',
+                              'red\tr\tmain\t2026-10-31\nz\tr\tx\t2026-10-30\n',
+                              'red\tr\tticket\t2026-11-01\nz\tr\tx\t2026-10-30\n',
+                              'red\tr\tticket\t2026-11-01\nz\tr\tx\t2026-10-30\n')
+
     def test_malformed_failure_rows_still_refuse_landing(self):
         valid = 'red\tvalid\towner\t2026-11-01\nred\told\towner\t2026-10-30\n'
         self.ledger_checks(valid)

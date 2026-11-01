@@ -17,6 +17,11 @@ import subprocess
 import tempfile
 import sys
 
+# compiler-rt 19 keeps 3 trace parts per thread by default. ReportRace drops a
+# race whose earlier access has left them, then every later race against that
+# thread's epoch (tsan_rtl_report.cpp:771-774), so a mapper's race could go unseen.
+TSAN = "symbolize=0:halt_on_error=1:history_size=7"
+
 if "HIRSEL_NATIVE_CPU_HARNESS" in os.environ:
     parser = argparse.ArgumentParser()
     parser.add_argument("--native", type=int, choices=[4, 8], required=True)
@@ -28,7 +33,7 @@ if "HIRSEL_NATIVE_CPU_HARNESS" in os.environ:
     name = "native_tsan_"
     process = subprocess.Popen([binary, name, "--nocapture", "--test-threads=1", *libtest],
                                cwd=root / "crates/hirsel-cli", start_new_session=True,
-                               env=os.environ | {"TSAN_OPTIONS": "symbolize=0:halt_on_error=1:exitcode=66"},
+                               env=os.environ | {"TSAN_OPTIONS": TSAN + ":exitcode=66"},
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         stdout, stderr = process.communicate(timeout=180)
@@ -80,7 +85,7 @@ if "HIRSEL_WORKERS_TSAN" in os.environ:
         raise SystemExit("CPU pool harness lacks TSan coverage control: " + listed.stdout + listed.stderr)
     result = subprocess.run([binary, "pool::cpu_scoped", "--nocapture", "--test-threads=1"],
                             preexec_fn=shadow_space, timeout=60,
-                            env=os.environ | {"TSAN_OPTIONS": "symbolize=0:halt_on_error=1"})
+                            env=os.environ | {"TSAN_OPTIONS": TSAN})
     raise SystemExit(result.returncode)
 
 root = Path(__file__).resolve().parents[1]
@@ -134,5 +139,5 @@ with tempfile.TemporaryDirectory(prefix="hirsel-workers-tsan-") as scratch:
     # symbolized offline against the executable printed here.
     print("TSan executable:", binary, flush=True)
     result = subprocess.run([binary, "--test-threads=1"], cwd=root, timeout=60,
-                            env=os.environ | {"TSAN_OPTIONS": "symbolize=0:halt_on_error=1"})
+                            env=os.environ | {"TSAN_OPTIONS": TSAN})
     raise SystemExit(result.returncode)

@@ -30,6 +30,7 @@ mod group;
 mod index;
 mod pack;
 pub use pack::{Batch, Request};
+pub mod reapi;
 mod statistics;
 use statistics::Counter;
 pub use statistics::{Statistics, StatisticsSnapshot};

@@ -61,7 +61,6 @@ impl Provider for Front<'_> {
             .ok_or(SourceError::Unsupported(
                 "receipt source signature is unavailable",
             ))?
-            .cloned()
             .map_err(|_| SourceError::Unsupported("receipt source signature failed"))
     }
     fn original(&self, path: &DefPath) -> Result<Arc<NativeOriginalBody>, SourceError> {

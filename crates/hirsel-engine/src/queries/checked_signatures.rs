@@ -230,8 +230,7 @@ impl QueryEngine {
             let owner = snapshot
                 .body_view(&path.0.package, id)
                 .and_then(Result::ok)
-                .filter(|owner| ***owner != *public)
-                .cloned();
+                .filter(|owner| **owner != *public);
             let coverage = self.signature_coverage(&path)?;
             weight.path(&path);
             weight.flat_vec(&coverage);

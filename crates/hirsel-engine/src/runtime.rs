@@ -72,6 +72,11 @@ pub enum QueryPoll {
 }
 
 pub trait QueryContext {
+    /// Working space already admitted for the current poll.
+    fn scratch_bytes(&self) -> u64 {
+        0
+    }
+
     /// The continuation has retained this dependency's complete observations
     /// and released its raw body. Keep the semantic edge and subscriptions;
     /// only its in-flight body pin ends, until the next read.
@@ -101,6 +106,11 @@ pub trait QueryTask: Send {
 
 /// Installed by the engine for one immutable input snapshot, never by clients.
 pub trait QueryFactory: Send + Sync {
+    /// Drop a settled compact cache entry after archiving its complete facts
+    /// within the active producer's already admitted scratch bound.
+    fn evict(&self, _key: QueryId, _product: &ProductRef, _scratch: u64) -> bool {
+        false
+    }
     /// Constructs a continuation without executing its dependencies.
     fn create(&self, key: QueryId) -> Result<Box<dyn QueryTask>, Reference>;
 }

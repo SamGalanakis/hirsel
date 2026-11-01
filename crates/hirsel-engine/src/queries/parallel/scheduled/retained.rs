@@ -156,6 +156,9 @@ mod tests {
             short.clone(),
             selected,
             None,
+            None,
+            vec![],
+            None,
         );
         assert_eq!(row.definition.path(), &short.definition);
     }

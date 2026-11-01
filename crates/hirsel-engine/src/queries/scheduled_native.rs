@@ -737,8 +737,7 @@ impl QueryEngine {
             };
             let signature = snapshot
                 .signature(DefId::intern(path))
-                .ok_or_else(refuse)?
-                .map_err(Clone::clone)?
+                .ok_or_else(refuse)??
                 .clone();
             let representation = self.owner_record(path);
             if let Some(record) = &representation {

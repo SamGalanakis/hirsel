@@ -104,7 +104,150 @@ pub(in crate::queries) fn load_publication(
     )
 }
 
+impl FrontBodyQueries {
+    pub(super) fn archive_facts(
+        &self,
+        key: Key,
+        outcome: &FrontOutcome,
+        scratch: u64,
+    ) -> Option<ArchivedFront> {
+        let temporary = outcome
+            .dead_arms
+            .as_ref()
+            .map_or(0, LintFacts::materialize_bytes)
+            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                PublishedSummary,
+            >::uninit()))?;
+        if temporary > scratch {
+            return None;
+        }
+        let dead_arms = outcome.dead_arms.as_ref().map(LintFacts::materialize);
+        let facts = carry::FactsRef {
+            summary: outcome
+                .summary
+                .as_ref()
+                .map(|s| s.materialize(&outcome.checked, &outcome.reads)),
+            checked: &outcome.checked,
+            dead_arms: &dead_arms,
+            diagnostics: &outcome.diagnostics,
+            diagnostic_phases: &outcome.diagnostic_phases,
+            lowering: &outcome.lowering,
+            table_keys: outcome.table_keys.as_ref(),
+        };
+        // The existing bounded codec admits its collection/type/source tables
+        // before the ordinary encoder materializes the canonical record.
+        drop(self.records.prepare_record_encoding(
+            &facts,
+            |anchor| self.anchors.record_owner_ref(anchor),
+            scratch,
+            temporary,
+        )?);
+        let (facts_bytes, outer) = self
+            .records
+            .encode_record_with_decode_bytes(&facts, |anchor| {
+                self.citations.record_owner(anchor)
+            })?;
+        let decode_bytes = outer.checked_add(facts.bytes(true))?;
+        let record = RecordRef {
+            key,
+            body: outcome.reference,
+            reads: &outcome.reads,
+            decode_bytes,
+            facts: &facts_bytes,
+        };
+        let encoded = bincode::serialized_size(&record).ok()?;
+        if encoded
+            .checked_mul(8)?
+            .checked_add(decode_bytes)?
+            .checked_add(temporary)?
+            > scratch
+        {
+            return None;
+        }
+        let bytes = bincode::serialize(&record).ok()?;
+        let reference = self.store.put_content(OUTPUT, &bytes)?;
+        drop(bytes);
+        drop(facts_bytes);
+        drop(facts);
+        drop(dead_arms);
+        let mut memos = [None; 3];
+        for (memo, reads) in &outcome.memos {
+            let index = FRONT_MEMO_PHASES
+                .iter()
+                .position(|phase| *phase == memo.kind)?;
+            if reads.encoding_working_bytes()? > scratch {
+                return None;
+            }
+            let bytes = self.input_records.encode(&*self.anchors, &**reads)?;
+            if (bytes.len() as u64).checked_mul(8)? > scratch {
+                return None;
+            }
+            memos[index] = Some(self.store.put_content(
+                Domain {
+                    kind: 0x4600_0038,
+                    schema: 1,
+                },
+                &bytes,
+            )?);
+        }
+        Some(ArchivedFront {
+            facts: reference,
+            memos,
+        })
+    }
+}
 impl BodyTask {
+    pub(super) fn load_evicted(
+        &self,
+        cx: &mut dyn QueryContext,
+    ) -> Option<Result<ProductRef, Reference>> {
+        let reference = *self
+            .queries
+            .archived
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&self.input)?;
+        self.load_compact_reference(cx, reference.facts)
+    }
+    fn load_compact_reference(
+        &self,
+        cx: &mut dyn QueryContext,
+        reference: Reference,
+    ) -> Option<Result<ProductRef, Reference>> {
+        if reference.domain != OUTPUT || reference.len.checked_mul(8)? > self.weight.scratch {
+            return None;
+        }
+        let bytes = self.queries.store.get_content(reference)?;
+        let record: Record = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(reference.len)
+            .reject_trailing_bytes()
+            .deserialize(&bytes)
+            .ok()?;
+        if record.key != self.input
+            || reference
+                .len
+                .checked_mul(8)?
+                .checked_add(record.decode_bytes)?
+                > self.weight.scratch
+            || record.body.is_some_and(|body| {
+                body.domain != crate::store::product_domain(QueryKind::Modes)
+                    || body.len > self.weight.scratch
+            })
+            || record
+                .reads
+                .first_changed(|read| {
+                    self.queries
+                        .observe(self.queries.inputs[&self.input].definition.path(), read)
+                })
+                .is_some()
+        {
+            return None;
+        }
+        let reads = Arc::new(record.reads);
+        let facts = self.decode_facts(&record.facts, &reads)?;
+        self.install_cached_facts(cx, record.body, reads, facts)
+    }
     pub(super) fn store_compact(
         &self,
         body: Option<Reference>,

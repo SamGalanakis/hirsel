@@ -438,16 +438,18 @@ impl QueryEngine {
                         .ok_or_else(|| refused("front root missing"))?,
                 );
             }
-            if !queries.is_empty() {
-                let request = executor.request(&queries);
-                executor.wait(request).map_err(|reference| Failure::Front {
-                    reference,
-                    error: front
-                        .outcome(Err(reference))
-                        .and_then(|o| o.outcome.result.err()),
-                    sources: self.sources.clone(),
-                    owner: front.clone(),
-                })?;
+            for roots in queries.chunks(16) {
+                let request = executor.request(roots);
+                drop(executor.wait(request).map_err(|reference| {
+                    Failure::Front {
+                        reference,
+                        error: front
+                            .outcome(Err(reference))
+                            .and_then(|o| o.outcome.result.err()),
+                        sources: self.sources.clone(),
+                        owner: front.clone(),
+                    }
+                })?);
             }
             finish(&mut executor, &mut runtime, &mut stats)?;
             drop(executor);

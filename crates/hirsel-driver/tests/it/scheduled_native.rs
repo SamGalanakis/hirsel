@@ -308,7 +308,7 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
                     .unwrap();
                 assert!(Arc::ptr_eq(
                     &actual.source.signature,
-                    signatures.signature(DefId::intern(path)).unwrap().unwrap()
+                    &signatures.signature(DefId::intern(path)).unwrap().unwrap()
                 ));
                 fn observations(
                     codec: &NativeRecords,

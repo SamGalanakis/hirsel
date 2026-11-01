@@ -1349,8 +1349,7 @@ impl QueryEngine {
             let signature = output.value;
             let owner_signature = signatures
                 .body_view(&path.0.package, DefId::intern(&path))
-                .ok_or(QueryError::NotImplemented)?
-                .map_err(Clone::clone)?
+                .ok_or(QueryError::NotImplemented)??
                 .clone();
             views.push((owner_signature.clone(), ContentHash::default()));
             let mut content = vec![

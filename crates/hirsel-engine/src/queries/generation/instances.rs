@@ -303,7 +303,9 @@ impl QueryEngine {
             }
             let mut product = None;
             for front in fronts {
-                if let Some(output) = front.instance_discovery_summary(self, &path)? {
+                if let Some(output) =
+                    front.instance_discovery_summary(self, &path, allowance.bytes())?
+                {
                     product = Some(output);
                     break;
                 }

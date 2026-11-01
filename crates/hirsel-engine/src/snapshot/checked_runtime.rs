@@ -15,8 +15,7 @@ impl SignatureSnapshot {
         for definition in definitions {
             let signature = self
                 .signature(definition)
-                .ok_or(QueryError::NotImplemented)?
-                .map_err(Clone::clone)?;
+                .ok_or(QueryError::NotImplemented)??;
             if let hirsel_types::SignatureKind::Type(declaration) = &signature.kind {
                 if declaration.layout.flat {
                     checked.flat.insert(signature.definition.path().clone());

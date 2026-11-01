@@ -141,8 +141,7 @@ impl FrontStageQueries {
         let signature = self
             .snapshot
             .signature(DefId::intern(owner))
-            .ok_or(QueryError::NotImplemented)?
-            .map_err(Clone::clone)?;
+            .ok_or(QueryError::NotImplemented)??;
         let typed = &analyzed.typed;
         let mut registrations = Vec::new();
         for row in &typed.checked.expressions {
@@ -168,7 +167,7 @@ impl FrontStageQueries {
                     ty: row.ty,
                     inputs,
                 }
-                .prepare(self.snapshot.types(), &self.memo, signature)?,
+                .prepare(self.snapshot.types(), &self.memo, &signature)?,
             );
         }
         Ok(registrations)

@@ -359,18 +359,18 @@ impl HeaderProducts {
                 .rows
                 .iter()
                 .map(|(id, final_cell)| {
-                    let cell = OnceLock::new();
+                    let cell = HeaderSlot::default();
                     let entry = final_cell
                         .get()
                         .and_then(|product| {
                             product
                                 .entry
                                 .as_ref()
-                                .map(|entry| (entry, product.publication))
+                                .map(|entry| (entry.clone(), product.publication))
                         })
                         .or_else(|| {
                             let candidate = self.private.as_ref()?.candidates.get(id)?;
-                            Some((candidate.declared.as_ref()?, candidate.publication))
+                            Some((candidate.declared.as_ref()?.clone(), candidate.publication))
                         });
                     if let Some((entry, publication)) = entry {
                         let _ = cell.set(HeaderProduct {
@@ -380,6 +380,7 @@ impl HeaderProducts {
                             graph_work: 0,
                             publication,
                             _standalone: None,
+                            _lease: None,
                             origin: Weak::new(),
                             accounted: AtomicBool::new(true),
                         });
@@ -389,6 +390,7 @@ impl HeaderProducts {
                 .collect(),
             generation: AtomicU64::new(0),
             retention: OnceLock::new(),
+            source_backing: OnceLock::new(),
             environment: self.environment.clone(),
             adapters: self.adapters.clone(),
             sources: self.sources.clone(),

@@ -72,7 +72,7 @@ impl<'a> FrozenProvider<'a> {
             .snapshot
             .body_view(&self.owner, d)
             .and_then(Result::ok)
-            .unwrap_or(&public);
+            .unwrap_or_else(|| public.clone());
         if public.metadata.visibility == hirsel_syntax::Visibility::PublicOpaque
             && public.definition.path().0.package == self.owner
             && (self.snapshot.private.contains_key(&d)

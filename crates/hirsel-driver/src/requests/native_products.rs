@@ -156,7 +156,6 @@ impl NativeBuildReadiness {
             .signatures
             .signature(DefId::intern(&source.run.entry))
             .and_then(Result::ok)
-            .cloned()
             .ok_or_else(|| failed("selected native source signature is unavailable".into()))?;
         let directory = tempfile::tempdir().map_err(|error| failed(error.to_string()))?;
         let executable = directory.path().join("program");

@@ -94,7 +94,7 @@ impl Inference {
             }
             if let ReadKey::Signature(id) | ReadKey::ExecutedSignature(id) = key {
                 if let Some(signature) = self.snapshot.signature(id).and_then(Result::ok)
-                    && let Some(value) = memos::declared_signature_value(&self.types, signature)
+                    && let Some(value) = memos::declared_signature_value(&self.types, &signature)
                 {
                     reads.record(ReadKey::DeclaredSignature(id), value);
                 } else {
@@ -701,7 +701,6 @@ impl QueryEngine {
                         value: snapshot
                             .signature(DefId::intern(path))
                             .and_then(Result::ok)
-                            .cloned()
                             .ok_or(QueryError::NotImplemented)?,
                         dependencies: vec![],
                         diagnostics: vec![],

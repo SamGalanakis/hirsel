@@ -222,7 +222,7 @@ impl CompactCompleted {
                     .snapshot
                     .signature(DefId::intern(&done.definition))
                     .and_then(Result::ok)
-                    .map(|signature| &**signature),
+                    .as_deref(),
                 &output.value,
             )
         });

@@ -31,6 +31,18 @@ impl LintFacts {
                 .collect(),
         }
     }
+    pub(super) fn materialize_bytes(&self) -> u64 {
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.tree::<DefPath, ()>(self.errors.len());
+        weight.tree::<(DefPath, u32), ()>(self.constructed.len());
+        for id in &self.errors {
+            weight.path(id.path());
+        }
+        for (id, _) in &self.constructed {
+            weight.path(id.path());
+        }
+        weight.bytes()
+    }
     pub(super) fn capture_bytes(uses: &crate::tools::DeadArmUse) -> u64 {
         uses.errors
             .len()

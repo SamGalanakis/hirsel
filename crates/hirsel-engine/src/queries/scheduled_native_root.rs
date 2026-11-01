@@ -362,7 +362,7 @@ impl Task {
             .iter()
             .filter_map(|path| {
                 let signature = signatures.signature(DefId::intern(path))?.ok()?;
-                scheduled_native::native_declaration(signatures.types(), signature)
+                scheduled_native::native_declaration(signatures.types(), &signature)
                     .then(|| path.clone())
             })
             .collect::<Vec<_>>();
@@ -684,8 +684,7 @@ impl QueryEngine {
             let signature = definitions
                 .signatures()
                 .signature(DefId::intern(path))
-                .ok_or(QueryError::NotImplemented)?
-                .map_err(Clone::clone)?
+                .ok_or(QueryError::NotImplemented)??
                 .clone();
             if !matches!(signature.kind, SignatureKind::Const { .. }) {
                 continue;

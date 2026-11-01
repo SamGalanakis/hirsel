@@ -884,6 +884,15 @@ struct Context<'a> {
     pending: BTreeSet<u32>,
 }
 impl QueryContext for Context<'_> {
+    fn scratch_bytes(&self) -> u64 {
+        self.shared
+            .lock()
+            .nodes
+            .get(&self.query)
+            .and_then(|node| node.execution.as_ref())
+            .map_or(0, |execution| execution.weight.scratch)
+    }
+
     fn release_body(&mut self, dependency: QueryId) {
         self.shared
             .lock()
@@ -905,27 +914,59 @@ impl QueryContext for Context<'_> {
             })
             .collect::<Vec<_>>();
         state.nodes.mark_in_flight(roots.into_iter());
-        let oldest = state
+        let scratch = state
             .nodes
-            .iter()
-            .filter_map(|(&key, node)| {
-                if node.in_flight || state.requests.values().any(|roots| roots.contains(&key)) {
-                    return None;
-                }
-                let Status::Settled(result) = &node.status else {
-                    return None;
-                };
-                let product = result.as_ref().as_ref().ok()?;
-                let cache_only = product
-                    .analyzed_value()
-                    .is_some_and(|body| body.cache_only())
-                    || product.lower_value().is_some_and(|body| body.cache_only());
-                cache_only.then_some((node.settled_at, key))
-            })
-            .min()
-            .map(|(_, key)| key);
-        let Some(key) = oldest else {
-            return false;
+            .get(&self.query)
+            .and_then(|node| node.execution.as_ref())
+            .map_or(0, |execution| execution.weight.scratch);
+        let mut previous = None;
+        let key = loop {
+            let oldest = state
+                .nodes
+                .iter()
+                .filter_map(|(&key, node)| {
+                    if node.in_flight || state.requests.values().any(|roots| roots.contains(&key)) {
+                        return None;
+                    }
+                    let order = (node.settled_at, key);
+                    if previous.is_some_and(|previous| order <= previous) {
+                        return None;
+                    }
+                    let Status::Settled(result) = &node.status else {
+                        return None;
+                    };
+                    let product = result.as_ref().as_ref().ok()?;
+                    let body = product
+                        .analyzed_value()
+                        .is_some_and(|body| body.cache_only())
+                        || product.lower_value().is_some_and(|body| body.cache_only());
+                    let summary = product
+                        .summary_value()
+                        .is_some_and(|summary| summary.cache_owners(2));
+                    (body || summary).then_some((order, body))
+                })
+                .min();
+            let Some(((settled, key), body)) = oldest else {
+                return false;
+            };
+            if body {
+                break key;
+            }
+            previous = Some((settled, key));
+            let Some(Factory::Send(factory)) = state.factories.get(&key.0) else {
+                continue;
+            };
+            let Status::Settled(result) = &state.nodes[&key].status else {
+                continue;
+            };
+            if result
+                .as_ref()
+                .as_ref()
+                .ok()
+                .is_some_and(|product| factory.evict(id(key), product, scratch))
+            {
+                break key;
+            }
         };
         state.remove(key);
         state.stats.body_evictions += 1;

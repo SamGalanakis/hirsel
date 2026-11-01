@@ -40,7 +40,7 @@ mod scheduled_lower;
 mod scheduled_stage;
 pub use scheduled_check::{
     FRONT_CHECK_KIND, FrontCheckOutput, FrontCheckPlan, FrontCheckQueries, FrontCheckScope,
-    FrontCheckedInput,
+    FrontCheckedInput, FrontObservation,
 };
 pub use scheduled_stage::{FRONT_STAGE_KIND, FrontStageOutput, FrontStageQueries};
 mod scheduled_growth;

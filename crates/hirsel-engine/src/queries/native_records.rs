@@ -332,7 +332,7 @@ impl NativeRecordContext {
         }
     }
 
-    fn record_owner_ref(&self, anchor: Anchor) -> Option<(&DefPath, u32)> {
+    pub(crate) fn record_owner_ref(&self, anchor: Anchor) -> Option<(&DefPath, u32)> {
         let owners = &self.bindings.owners;
         let position = owners
             .binary_search_by_key(&anchor, |(anchor, _)| *anchor)

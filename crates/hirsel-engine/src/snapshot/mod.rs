@@ -430,11 +430,17 @@ impl SignatureSnapshot {
         &self.types
     }
     /// The public signature of `d`, or the error normalizing it reported.
-    pub fn signature(&self, d: DefId) -> Option<Result<&SignatureRef, &QueryError>> {
+    pub fn signature(&self, d: DefId) -> Option<Result<SignatureRef, QueryError>> {
         if let Some(product) = self.headers.as_ref().and_then(|headers| headers.product(d)) {
-            return Some(product.result.as_ref().map(|output| &output.value));
+            return Some(
+                product
+                    .result
+                    .as_ref()
+                    .map(|output| output.value.clone())
+                    .map_err(Clone::clone),
+            );
         }
-        self.signatures.get(&d).map(Result::as_ref)
+        self.signatures.get(&d).cloned()
     }
     /// The view of `d` a body of `package` sees: an opaque type's private view
     /// inside its own package, its public signature everywhere else.
@@ -442,7 +448,7 @@ impl SignatureSnapshot {
         &self,
         package: &PackageId,
         d: DefId,
-    ) -> Option<Result<&SignatureRef, &QueryError>> {
+    ) -> Option<Result<SignatureRef, QueryError>> {
         if &d.path().0.package == package
             && let Some(view) = self.private_view(d)
         {
@@ -450,9 +456,9 @@ impl SignatureSnapshot {
         }
         self.signature(d)
     }
-    fn private_view(&self, d: DefId) -> Option<&SignatureRef> {
+    fn private_view(&self, d: DefId) -> Option<SignatureRef> {
         if let Some(view) = self.private.get(&d) {
-            return Some(view);
+            return Some(view.clone());
         }
         let product = self.headers.as_ref()?.product(d)?;
         let public = &product.result.as_ref().ok()?.value;
@@ -460,7 +466,7 @@ impl SignatureSnapshot {
             return None;
         }
         let owner = product.entry.as_ref()?.products.representation.as_ref()?;
-        Some(&owner.body_view(&self.types, public).0)
+        Some(owner.body_view(&self.types, public).0.clone())
     }
     pub(crate) fn definitions(&self) -> Vec<DefId> {
         self.signatures
@@ -509,7 +515,7 @@ impl SignatureSnapshot {
     pub fn representation(
         &self,
         d: DefId,
-    ) -> Option<Result<(&SignatureRef, ValidationDigest), &QueryError>> {
+    ) -> Option<Result<(&SignatureRef, ValidationDigest), QueryError>> {
         if let Some(state) = self.validation.get() {
             if let Some(view) = state
                 .packages
@@ -721,11 +727,7 @@ impl QueryEngine {
         {
             return None;
         }
-        self.snapshot
-            .as_ref()?
-            .1
-            .signature(d)
-            .map(|row| row.cloned().map_err(Clone::clone))
+        self.snapshot.as_ref()?.1.signature(d)
     }
 
     pub(crate) fn unmarked_signature(&self, d: DefId) -> Option<Result<SignatureRef, QueryError>> {
@@ -953,7 +955,7 @@ extern "unused" fn unused()"#
             assert!(trace.lock().unwrap().is_empty());
             let first = snapshot.signature(DefId::intern(&used)).unwrap().unwrap();
             let second = snapshot.signature(DefId::intern(&used)).unwrap().unwrap();
-            assert!(Arc::ptr_eq(first, second));
+            assert!(Arc::ptr_eq(&first, &second));
             assert_eq!(*trace.lock().unwrap(), vec![used]);
             snapshot.validation(&context.package);
             assert!(trace.lock().unwrap().contains(&unused));

@@ -294,7 +294,7 @@ impl NativeDeclarations {
             if product.source.definition != *path
                 || product.source.signature.definition.path() != path
                 || product.source.source.syntax.item.definition != *path
-                || !Arc::ptr_eq(current, &product.source.signature)
+                || !Arc::ptr_eq(&current, &product.source.signature)
                 || roots
                     .sources
                     .anchor(product.source.source.syntax.anchor)

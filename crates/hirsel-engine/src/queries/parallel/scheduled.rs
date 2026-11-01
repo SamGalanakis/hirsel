@@ -79,9 +79,19 @@ impl FrontSummary {
     }
 }
 struct FrontOutcome {
-    reference: Option<Reference>,
     publication: Option<ProductRef>,
     body_publication: Option<WeakAnalyzedProduct>,
+    body: Weak<QueryOutput<AnalyzedBody>>,
+    facts: Arc<FrontFacts>,
+}
+impl std::ops::Deref for FrontOutcome {
+    type Target = FrontFacts;
+    fn deref(&self) -> &Self::Target {
+        &self.facts
+    }
+}
+struct FrontFacts {
+    reference: Option<Reference>,
     definition: DefId,
     status: Result<(), QueryError>,
     phase: Option<QueryKind>,
@@ -91,11 +101,11 @@ struct FrontOutcome {
     checked: CheckedProduct,
     /// The package dead-arm lint's facts of a checked body.
     dead_arms: Option<LintFacts>,
-    // Only active consumers own a decoded body. The settled query retains its
-    // canonical archive and compact source facts, including when hold_bytes=0.
-    body: Weak<QueryOutput<AnalyzedBody>>,
     diagnostics: Vec<Diagnostic>,
     lowering: Option<lowering::LoweringUse>,
+    table_keys: Option<Arc<crate::table_keys::TableKeyUse>>,
+    memos: Vec<(crate::memo::MemoKey, Arc<Reads>)>,
+    _backing: Option<Arc<LiveSourceBacking>>,
 }
 pub(crate) struct FrontCheckFacts {
     pub result: Result<Vec<Diagnostic>, QueryError>,
@@ -103,6 +113,7 @@ pub(crate) struct FrontCheckFacts {
     pub reads: Arc<Reads>,
     pub source_rules: bool,
     pub lowering: Option<lowering::LoweringUse>,
+    pub dead_arms: Option<crate::tools::DeadArmUse>,
 }
 impl FrontOutcome {
     fn capture(
@@ -111,6 +122,9 @@ impl FrontOutcome {
         outcome: ModeResult,
         checked: CheckedProduct,
         dead_arms: Option<crate::tools::DeadArmUse>,
+        table_keys: Option<Arc<crate::table_keys::TableKeyUse>>,
+        memos: Vec<(crate::memo::MemoKey, Arc<Reads>)>,
+        backing: Option<Arc<LiveSourceBacking>>,
     ) -> Self {
         let ModeResult {
             definition,
@@ -132,23 +146,34 @@ impl FrontOutcome {
             .map(|output| lowering::LoweringUse::capture(&output.value.typed));
         let summary = summary.map(|summary| FrontSummary::capture(summary, &checked, &reads));
         Self {
-            reference,
             publication,
             body_publication: None,
-            definition: DefId::intern(&definition),
-            status: result.map(|_| ()),
-            phase,
-            summary,
-            reads,
-            diagnostic_phases,
-            checked,
-            dead_arms: dead_arms.map(LintFacts::capture),
             body,
-            diagnostics,
-            lowering,
+            facts: Arc::new(FrontFacts {
+                reference,
+                definition: DefId::intern(&definition),
+                status: result.map(|_| ()),
+                phase,
+                summary,
+                reads,
+                diagnostic_phases,
+                checked,
+                dead_arms: dead_arms.map(LintFacts::capture),
+                diagnostics,
+                lowering,
+                table_keys,
+                memos,
+                _backing: backing,
+            }),
         }
     }
 }
+#[derive(Clone, Copy)]
+struct ArchivedFront {
+    facts: Reference,
+    memos: [Option<Reference>; 3],
+}
+const FRONT_MEMO_PHASES: [QueryKind; 3] = [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes];
 struct Input {
     definition: DefId,
     syntax: Reference,
@@ -198,8 +223,6 @@ pub struct FrontBodyQueries {
     anchors: Arc<crate::NativeRecordContext>,
     store: Arc<dyn ResultStore>,
     work: Mutex<BTreeMap<(DefId, QueryKind), u64>>,
-    table_keys: Mutex<BTreeMap<Key, Arc<crate::table_keys::TableKeyUse>>>,
-    memos: Mutex<BTreeMap<crate::memo::MemoKey, Arc<Reads>>>,
     store_adoptions: AtomicU64,
     /// Full-rescan refusals of stored body entries: by the first changed read
     /// of the newest variant, in `ReadKind::ALL` order, then by own text.
@@ -209,6 +232,7 @@ pub struct FrontBodyQueries {
     memo_operations: AtomicU64,
     verify_store: crate::store::VerifyStore,
     outcomes: Mutex<BTreeMap<Key, FrontOutcome>>,
+    archived: Mutex<BTreeMap<Key, ArchivedFront>>,
     carry: Mutex<Option<Arc<FrontCarry>>>,
     /// Subscription generations validated against this immutable source view.
     carry_changes: Mutex<Option<Arc<CarryChanges>>>,
@@ -227,7 +251,7 @@ pub struct FrontBodyQueries {
 #[derive(Clone)]
 pub struct FrontBodyOutput {
     pub outcome: ModeResult,
-    _snapshot: Arc<FrontBodyQueries>,
+    _facts: Arc<FrontFacts>,
     _body_owner: Option<LiveAnalyzedProduct>,
 }
 /// Checked-only source-growth input. It survives a later Modes failure and
@@ -238,7 +262,7 @@ pub struct FrontCheckedOutput {
     pub summary: Arc<CheckedSummary>,
     pub(crate) dependencies: Arc<OrderedSignatureReads>,
     pub reads: Arc<Reads>,
-    _snapshot: Arc<FrontBodyQueries>,
+    _facts: Arc<FrontFacts>,
 }
 const SOURCE_INPUT: Domain = Domain {
     kind: 0x4600_0013,
@@ -403,6 +427,7 @@ impl FrontBodyQueries {
             .checked_mul(
                 (std::mem::size_of::<Input>()
                     + std::mem::size_of::<FrontOutcome>()
+                    + std::mem::size_of::<ArchivedFront>()
                     + 8 * std::mem::size_of::<crate::memo::MemoKey>()
                     + 32 * std::mem::size_of::<usize>()
                     + std::mem::size_of::<(DefId, Key)>()
@@ -452,46 +477,35 @@ impl FrontBodyQueries {
     }
     fn pool_observed_reads(
         &self,
-        cx: &mut dyn QueryContext,
+        _cx: &mut dyn QueryContext,
         reads: &mut Arc<Reads>,
         summary: &mut Option<Arc<PublishedSummary>>,
         checked: &mut CheckedProduct,
         memos: &mut [(crate::memo::MemoKey, Arc<Reads>)],
     ) -> Option<()> {
         if let Some(summary) = summary.as_mut() {
-            Arc::make_mut(summary).share_checked_storage();
+            let summary = Arc::make_mut(summary);
+            summary.share_checked_storage();
+            if summary.reads.as_ref() == reads.as_ref() {
+                summary.reads = reads.clone();
+            }
         }
-        let Some(pool) = self.read_pool.get() else {
-            return Some(());
-        };
-        let mut pool = pool.lock().unwrap_or_else(|e| e.into_inner());
-        let mut shared = BTreeMap::<usize, Arc<Reads>>::new();
-        let mut intern = |reads: &mut Arc<Reads>| -> Option<()> {
-            let identity = Arc::as_ptr(reads) as usize;
-            let retained = if let Some(retained) = shared.get(&identity) {
-                retained.clone()
-            } else {
-                self.make_room(cx, pool.required_bytes(reads)?)?;
-                let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-                let available = self._allowance.allowance.available_bytes();
-                let mut allowance = self._allowance.allowance.take(available)?;
-                let retained = Arc::new(pool.intern(reads, &mut allowance, &mut remaining)?);
-                shared.insert(identity, retained.clone());
-                retained
-            };
-            *reads = retained;
-            Some(())
-        };
-        intern(reads)?;
-        if let Some(summary) = summary.as_mut() {
-            intern(&mut Arc::make_mut(summary).reads)?;
+        if let Some((_, checked_reads, _)) = checked
+            && checked_reads.as_ref() == reads.as_ref()
+        {
+            *checked_reads = reads.clone();
         }
-        if let Some((_, reads, _)) = checked {
-            intern(reads)?;
+        for (_, observed) in memos {
+            if observed.as_ref() == reads.as_ref() {
+                *observed = reads.clone();
+            } else if let Some((_, checked_reads, _)) = checked
+                && observed.as_ref() == checked_reads.as_ref()
+            {
+                *observed = checked_reads.clone();
+            }
         }
-        for (_, reads) in memos {
-            intern(reads)?;
-        }
+        // Only this fact owner retains the equal phase allocations. The
+        // producer-wide pool would outlive failed or evicted publications.
         Some(())
     }
     fn retain(
@@ -500,41 +514,31 @@ impl FrontBodyQueries {
         outcome: &ModeResult,
         checked: &CheckedProduct,
         table_keys: Option<&Arc<crate::table_keys::TableKeyUse>>,
-        memos: &[(crate::memo::MemoKey, Arc<Reads>)],
-    ) -> Option<()> {
-        let charge = retained::compact_metadata(outcome, checked, table_keys, memos)?;
-        self.make_room(cx, charge)?;
-        let mut retention = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-        *retention = retention.checked_sub(charge)?;
-        Some(())
+        memos: &Vec<(crate::memo::MemoKey, Arc<Reads>)>,
+        dead_arms: Option<&crate::tools::DeadArmUse>,
+    ) -> Option<Arc<LiveSourceBacking>> {
+        let mut charge = retained::compact_metadata(outcome, checked, table_keys, memos)?;
+        if let Some(summary) = &outcome.summary {
+            charge = charge.checked_add(LiveSummaryProduct::shared_value_bytes(summary)?)?;
+        }
+        charge = charge
+            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                FrontFacts,
+            >::uninit()))?
+            .checked_add(
+                (memos.capacity() * std::mem::size_of::<(crate::memo::MemoKey, Arc<Reads>)>())
+                    as u64,
+            )?
+            .checked_add(dead_arms.map_or(0, LintFacts::capture_bytes))?;
+        let (allowance, mut backing) = self.owner_grant(cx, charge)?;
+        // The complete payload and its lease are one owner. No later failure
+        // can consume a debit without retaining the corresponding reservation.
+        Arc::get_mut(&mut backing)?
+            ._allowance
+            .join(allowance)
+            .ok()?;
+        Some(backing)
     }
-    fn retain_dead_arms(
-        &self,
-        cx: &mut dyn QueryContext,
-        uses: Option<&mut crate::tools::DeadArmUse>,
-    ) -> Option<()> {
-        let Some(uses) = uses else {
-            return Some(());
-        };
-        let bytes = LintFacts::capture_bytes(uses);
-        self.make_room(cx, bytes)?;
-        let mut retention = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-        *retention = retention.checked_sub(bytes)?;
-        Some(())
-    }
-    /// The package dead-arm lint's facts of `definition`'s settled checked
-    /// body, if this view settled one.
-    pub(crate) fn dead_arm_use(&self, definition: &DefPath) -> Option<crate::tools::DeadArmUse> {
-        let query = self.query(definition)?;
-        self.outcomes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&query.address.0)?
-            .dead_arms
-            .as_ref()
-            .map(LintFacts::materialize)
-    }
-
     /// Actual phase invocations, including failed or discarded producers.
     fn completed_product(&self, query: QueryId) -> Option<Result<ProductRef, Reference>> {
         let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
@@ -546,11 +550,41 @@ impl FrontBodyQueries {
     }
     fn make_room(&self, cx: &mut dyn QueryContext, charge: u64) -> Option<()> {
         while *self.retention.lock().unwrap_or_else(|e| e.into_inner()) < charge {
-            if !cx.evict_body() {
+            if !cx.evict_body()
+                && !self.evict_idle(cx.scratch_bytes())
+                && !self
+                    .snapshot
+                    .header_products()
+                    .is_some_and(|headers| headers.evict())
+            {
                 return None;
             }
         }
         Some(())
+    }
+    fn evict_idle(&self, scratch: u64) -> bool {
+        let mut outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
+        let selected = outcomes.iter().find_map(|(key, outcome)| {
+            (outcome
+                .publication
+                .as_ref()?
+                .summary_value()?
+                .cache_owners(1)
+                && Arc::strong_count(&outcome.facts) == 2)
+                .then_some(*key)
+        });
+        let Some(key) = selected else {
+            return false;
+        };
+        let Some(reference) = self.archive_facts(key, &outcomes[&key], scratch) else {
+            return false;
+        };
+        self.archived
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, reference);
+        outcomes.remove(&key);
+        true
     }
     fn owner_grant(
         &self,
@@ -583,16 +617,72 @@ impl FrontBodyQueries {
         address: hirsel_artifact_store::Address,
         action: hirsel_artifact_store::Action,
         summary: Arc<PublishedSummary>,
+        facts: Arc<FrontFacts>,
     ) -> Option<ProductRef> {
-        let (mut allowance, backing) =
-            self.owner_grant(cx, LiveSummaryProduct::shared_value_bytes(&summary)?)?;
-        let product = LiveSummaryProduct::new(
+        let tuple_bytes = crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<(
+            Arc<FrontFacts>,
+            Arc<LiveSourceBacking>,
+        )>::uninit());
+        let (mut allowance, mut backing) = self.owner_grant(
+            cx,
+            LiveSummaryProduct::shared_owner_bytes().checked_add(tuple_bytes)?,
+        )?;
+        let tuple_grant = allowance.split(tuple_bytes)?;
+        Arc::get_mut(&mut backing)?
+            ._allowance
+            .join(tuple_grant)
+            .ok()?;
+        let backing = Arc::new((facts, backing));
+        let product = LiveSummaryProduct::new_backed(
             (address, action),
             summary,
             ProductSource::backed(self._allowance.products.clone(), backing),
             &mut allowance,
         )?;
         Some(ProductRef::summary(product))
+    }
+    fn publish_facts(
+        &self,
+        cx: &mut dyn QueryContext,
+        key: Key,
+        reference: Option<Reference>,
+        action: hirsel_artifact_store::Action,
+        outcome: ModeResult,
+        checked: CheckedProduct,
+        dead_arms: Option<crate::tools::DeadArmUse>,
+        table_keys: Option<Arc<crate::table_keys::TableKeyUse>>,
+        memos: Vec<(crate::memo::MemoKey, Arc<Reads>)>,
+    ) -> Option<FrontOutcome> {
+        let backing = self.retain(
+            cx,
+            &outcome,
+            &checked,
+            table_keys.as_ref(),
+            &memos,
+            dead_arms.as_ref(),
+        )?;
+        let summary = outcome.summary.clone();
+        let successful = outcome.result.is_ok();
+        let mut cached = FrontOutcome::capture(
+            reference,
+            None,
+            outcome,
+            checked,
+            dead_arms,
+            table_keys,
+            memos,
+            Some(backing),
+        );
+        if successful {
+            cached.publication = Some(self.admit_summary(
+                cx,
+                hirsel_artifact_store::Address(key),
+                action,
+                summary?,
+                cached.facts.clone(),
+            )?);
+        }
+        Some(cached)
     }
     fn admit_body(
         &self,
@@ -687,7 +777,7 @@ impl FrontBodyQueries {
             ),
             ReadKey::DeclaredSignature(id) => {
                 let signature = self.snapshot.signature(id).and_then(Result::ok)?;
-                memos::declared_signature_value(&self.types, signature)?
+                memos::declared_signature_value(&self.types, &signature)?
             }
             ReadKey::Signature(id) | ReadKey::ExecutedSignature(id) => memos::signature_value(
                 self.snapshot
@@ -799,13 +889,61 @@ impl FrontBodyQueries {
             .clone()
     }
     /// Actual completed phase reads. This inspection executes no query.
-    pub fn memo_snapshot(&self) -> Vec<(crate::memo::MemoKey, Arc<Reads>)> {
-        self.memos
+    pub fn memo_keys(&self) -> Vec<crate::memo::MemoKey> {
+        let mut keys = BTreeSet::new();
+        for (key, archived) in self
+            .archived
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .map(|(key, reads)| (*key, reads.clone()))
-            .collect()
+        {
+            let definition = self.inputs[key].definition;
+            for (phase, reference) in FRONT_MEMO_PHASES.iter().zip(archived.memos) {
+                if reference.is_some() {
+                    keys.insert(crate::memo::MemoKey::new(*phase, definition));
+                }
+            }
+        }
+        keys.extend(
+            self.outcomes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .flat_map(|outcome| outcome.memos.iter().map(|(key, _)| *key)),
+        );
+        keys.into_iter().collect()
+    }
+    pub fn memo_snapshot(&self) -> Option<Vec<(crate::memo::MemoKey, Arc<Reads>)>> {
+        let archived = self
+            .archived
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut rows = BTreeMap::new();
+        for (key, archived) in archived {
+            let input = self.inputs.get(&key)?;
+            for (phase, reference) in FRONT_MEMO_PHASES.iter().zip(archived.memos) {
+                if let Some(reference) = reference {
+                    if reference.len.checked_mul(8)? > input.weight.scratch {
+                        return None;
+                    }
+                    let bytes = self.store.get_content(reference)?;
+                    let reads: Reads = self.input_records.decode(&*self.anchors, &bytes)?;
+                    rows.insert(
+                        crate::memo::MemoKey::new(*phase, input.definition),
+                        Arc::new(reads),
+                    );
+                }
+            }
+        }
+        rows.extend(
+            self.outcomes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .flat_map(|outcome| outcome.memos.iter().cloned()),
+        );
+        Some(rows.into_iter().collect())
     }
     pub fn work_snapshot(&self) -> Vec<(DefPath, QueryKind, u64)> {
         let mut work = self
@@ -834,6 +972,7 @@ impl FrontBodyQueries {
         self: &Arc<Self>,
         engine: &mut QueryEngine,
         path: &DefPath,
+        scratch: u64,
     ) -> Result<Option<FrontCheckedOutput>, QueryError> {
         let Some(input) = self
             .inputs
@@ -842,6 +981,30 @@ impl FrontBodyQueries {
         else {
             return Ok(None);
         };
+        if self.checked_definition(path).is_none() {
+            let mut context = DetachedFrontContext {
+                queries: self,
+                scratch,
+            };
+            let query = self.query(path).ok_or(QueryError::NotImplemented)?;
+            let task = BodyTask {
+                queries: self.clone(),
+                query,
+                input: query.address.0,
+                materialize: false,
+                weight: MemoryWeight {
+                    scratch: scratch.min(input.weight.scratch),
+                    ..input.weight
+                },
+                terminal: None,
+            };
+            if let Some(Err(reference)) = task.load_evicted(&mut context) {
+                return Err(self
+                    .outcome(Err(reference))
+                    .and_then(|o| o.outcome.result.err())
+                    .unwrap_or(QueryError::NotImplemented));
+            }
+        }
         let Some(output) = self.checked_definition(path) else {
             return Ok(None);
         };
@@ -906,16 +1069,11 @@ impl FrontBodyQueries {
         let outcome = outcomes.get(&key)?;
         let (summary, reads, dependencies) = outcome.checked.as_ref()?;
         Some(FrontCheckedOutput {
-            table_keys: self
-                .table_keys
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&key)?
-                .clone(),
+            table_keys: outcome.table_keys.as_ref()?.clone(),
             summary: summary.clone(),
             dependencies: dependencies.clone(),
             reads: reads.clone(),
-            _snapshot: self.clone(),
+            _facts: outcome.facts.clone(),
         })
     }
 
@@ -990,6 +1148,7 @@ impl FrontBodyQueries {
             reads: selected.reads.clone(),
             source_rules,
             lowering: selected.lowering.clone(),
+            dead_arms: selected.dead_arms.as_ref().map(LintFacts::materialize),
         })
     }
     /// Failure of an already settled body, without decoding or demanding it.
@@ -1059,7 +1218,7 @@ impl FrontBodyQueries {
                 reads: outcome.reads.clone(),
                 diagnostic_phases: outcome.diagnostic_phases.clone(),
             },
-            _snapshot: self.clone(),
+            _facts: outcome.facts.clone(),
             _body_owner: body_owner,
         })
     }
@@ -1136,8 +1295,48 @@ fn index_value<'a, K: Ord, V>(rows: &'a [(K, V)], key: &K) -> Option<&'a V> {
     Some(&rows[at].1)
 }
 
+struct DetachedFrontContext<'a> {
+    queries: &'a FrontBodyQueries,
+    scratch: u64,
+}
+impl QueryContext for DetachedFrontContext<'_> {
+    fn scratch_bytes(&self) -> u64 {
+        self.scratch
+    }
+    fn evict_body(&mut self) -> bool {
+        self.queries.evict_idle(self.scratch)
+    }
+    fn read(&mut self, _: QueryId) -> std::task::Poll<Result<ProductRef, Reference>> {
+        std::task::Poll::Ready(Err(self.queries.errors.protocol))
+    }
+}
 struct Factory(Arc<FrontBodyQueries>);
 impl QueryFactory for Factory {
+    fn evict(&self, query: QueryId, product: &ProductRef, scratch: u64) -> bool {
+        let mut outcomes = self.0.outcomes.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(outcome) = outcomes.get(&query.address.0) else {
+            return false;
+        };
+        if outcome.publication.as_ref() != Some(product)
+            || !product
+                .summary_value()
+                .is_some_and(|summary| summary.cache_owners(2))
+            || Arc::strong_count(&outcome.facts) != 2
+        {
+            return false;
+        }
+        let Some(reference) = self.0.archive_facts(query.address.0, outcome, scratch) else {
+            return false;
+        };
+        self.0
+            .archived
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(query.address.0, reference);
+        outcomes.remove(&query.address.0);
+        true
+    }
+
     fn create(&self, query: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
         if query.kind != FRONT_BODY_KIND {
             return Err(self.0.errors.protocol);
@@ -1307,6 +1506,10 @@ impl BodyTask {
         if reference.domain.reference(&bytes) != Some(reference) {
             return None;
         }
+        let signature = queries
+            .snapshot
+            .signature(input.definition)
+            .and_then(Result::ok);
         let restored = persistent::restore_frozen_mode(
             &queries.records,
             &queries.types,
@@ -1315,11 +1518,7 @@ impl BodyTask {
             input.key.1,
             &bytes,
             reads,
-            queries
-                .snapshot
-                .signature(input.definition)
-                .and_then(Result::ok)
-                .map(|signature| &**signature),
+            signature.as_deref(),
         )?;
         Some(self.publish_body(cx, restored.outcome, None))
     }
@@ -1350,6 +1549,10 @@ impl BodyTask {
             return None;
         }
         let bytes = queries.store.get_content(variant.output)?;
+        let signature = queries
+            .snapshot
+            .signature(input.definition)
+            .and_then(Result::ok);
         let mut restored = persistent::restore_frozen_mode(
             &queries.records,
             &queries.types,
@@ -1358,11 +1561,7 @@ impl BodyTask {
             input.key.1,
             &bytes,
             Arc::new(variant.reads.clone()),
-            queries
-                .snapshot
-                .signature(input.definition)
-                .and_then(Result::ok)
-                .map(|signature| &**signature),
+            signature.as_deref(),
         )?;
         let definition = input.definition;
         let mut memo_rows = vec![(
@@ -1378,56 +1577,28 @@ impl BodyTask {
         if let Some(summary) = &mut restored.outcome.summary {
             Arc::make_mut(summary).share_checked_storage();
         }
-        queries.retain(
-            cx,
-            &restored.outcome,
-            &restored.checked,
-            restored.table_keys.as_ref(),
-            &memo_rows,
-        )?;
-        queries.retain_dead_arms(cx, restored.dead_arms.as_mut())?;
-        if let Some(table_keys) = restored.table_keys {
-            queries
-                .table_keys
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(self.input, table_keys);
-        }
-        let (outcome, checked) = (restored.outcome, restored.checked);
-        let failed = outcome.result.is_err();
+        let failed = restored.outcome.result.is_err();
         let action = variant.action(&input.key);
-        let publication = if failed {
-            None
-        } else {
-            Some(queries.admit_summary(
-                cx,
-                self.query.address,
-                action,
-                outcome.summary.as_ref()?.clone(),
-            )?)
-        };
-        queries
-            .memos
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend(memo_rows.iter().cloned());
+        let cached = queries.publish_facts(
+            cx,
+            self.input,
+            Some(variant.output),
+            action,
+            restored.outcome,
+            restored.checked,
+            restored.dead_arms,
+            restored.table_keys,
+            memo_rows,
+        )?;
+        let publication = cached.publication.clone();
         queries
             .memo_operations
-            .fetch_add(memo_rows.len() as u64, Relaxed);
+            .fetch_add(cached.memos.len() as u64, Relaxed);
         queries
             .outcomes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                self.input,
-                FrontOutcome::capture(
-                    Some(variant.output),
-                    publication.clone(),
-                    outcome,
-                    checked,
-                    restored.dead_arms,
-                ),
-            );
+            .insert(self.input, cached);
         queries.store_adoptions.fetch_add(1, Relaxed);
         timings::count(Count::StoreHits);
         timings::count(Count::StoreModeHits);
@@ -1468,6 +1639,9 @@ impl BodyTask {
             return body;
         }
         if !self.materialize && self.queries.verify_store == crate::store::VerifyStore::Off {
+            if let Some(hit) = self.load_evicted(cx) {
+                return hit;
+            }
             if let Some(hit) = self.load_carry(cx) {
                 return hit;
             }
@@ -1572,7 +1746,7 @@ impl BodyTask {
         );
         let mut memo_rows = completed.memo_snapshot();
         let mut checked = completed.checked_product();
-        let mut dead_arms = completed.take_dead_arms();
+        let dead_arms = completed.take_dead_arms();
         let published = completed.outcome().clone();
         let mut outcome = ModeResult {
             definition: published.definition.clone(),
@@ -1646,17 +1820,24 @@ impl BodyTask {
                     reads: outcome.reads,
                     diagnostic_phases: vec![],
                 };
-                queries
-                    .retain(cx, &output, &None, None, &[])
+                let cached = queries
+                    .publish_facts(
+                        cx,
+                        self.input,
+                        Some(record),
+                        hirsel_artifact_store::Action(ContentHash::default()),
+                        output,
+                        None,
+                        None,
+                        None,
+                        vec![],
+                    )
                     .ok_or(queries.errors.resource)?;
                 queries
                     .outcomes
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .insert(
-                        self.input,
-                        FrontOutcome::capture(Some(record), None, output, None, None),
-                    );
+                    .insert(self.input, cached);
                 return Err(record);
             }
         }
@@ -1702,53 +1883,20 @@ impl BodyTask {
         queries
             .pool_completion_reads(cx, &mut outcome, &mut checked, &mut memo_rows)
             .ok_or(queries.errors.resource)?;
-        queries
-            .retain(cx, &outcome, &checked, table_keys.as_ref(), &memo_rows)
+        let cached = queries
+            .publish_facts(
+                cx, self.input, record, action, outcome, checked, dead_arms, table_keys, memo_rows,
+            )
             .ok_or(queries.errors.resource)?;
-        queries
-            .retain_dead_arms(cx, dead_arms.as_mut())
-            .ok_or(queries.errors.resource)?;
-        queries
-            .memos
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend(memo_rows.iter().cloned());
+        let publication = cached.publication.clone();
         queries
             .memo_operations
-            .fetch_add(memo_rows.len() as u64, Relaxed);
-        if let Some(keys) = table_keys {
-            queries
-                .table_keys
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(self.input, keys);
-        }
-        let publication = if failed {
-            None
-        } else {
-            Some(
-                queries
-                    .admit_summary(
-                        cx,
-                        self.query.address,
-                        action,
-                        outcome
-                            .summary
-                            .as_ref()
-                            .ok_or(queries.errors.protocol)?
-                            .clone(),
-                    )
-                    .ok_or(queries.errors.resource)?,
-            )
-        };
+            .fetch_add(cached.memos.len() as u64, Relaxed);
         queries
             .outcomes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                self.input,
-                FrontOutcome::capture(record, publication.clone(), outcome, checked, dead_arms),
-            );
+            .insert(self.input, cached);
         if !failed {
             self.remember_carry(record);
         }
@@ -2107,6 +2255,15 @@ impl QueryEngine {
         )
         .ok_or_else(refusal)?;
         let pool = MemoryReservationPool::new(allowance).map_err(|_| refusal())?;
+        let backing = Arc::new(FrontSourceBacking {
+            products,
+            admitted,
+            allowance: pool,
+            _sources: self.sources.clone(),
+        });
+        if let Some(headers) = snapshot.header_products() {
+            headers.configure_source_backing(backing.clone());
+        }
         Ok(Arc::new(FrontBodyQueries {
             inputs,
             by_definition: by_definition.into_boxed_slice(),
@@ -2141,12 +2298,11 @@ impl QueryEngine {
             anchors,
             store,
             outcomes: Mutex::new(BTreeMap::new()),
+            archived: Mutex::new(BTreeMap::new()),
             carry: Mutex::new(None),
             carry_changes: Mutex::new(None),
             clean_memos: Mutex::new(BTreeSet::new()),
             work: Mutex::new(BTreeMap::new()),
-            table_keys: Mutex::new(BTreeMap::new()),
-            memos: Mutex::new(BTreeMap::new()),
             store_adoptions: AtomicU64::new(0),
             refusals: Default::default(),
             text_refusals: AtomicU64::new(0),
@@ -2155,12 +2311,7 @@ impl QueryEngine {
             errors,
             retention,
             read_pool: std::sync::OnceLock::new(),
-            _allowance: Arc::new(FrontSourceBacking {
-                products,
-                admitted,
-                allowance: pool,
-                _sources: self.sources.clone(),
-            }),
+            _allowance: backing,
         }))
     }
 }

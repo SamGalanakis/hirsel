@@ -54,17 +54,24 @@ impl FrontCheckQueries {
         weight.tree::<DefPath, Arc<Reads>>(front_rows + lower_rows);
         weight.tree::<DefPath, ()>(lower_rows);
         weight.tree::<DefPath, ()>(data.failed_lowered.len());
-        for (path, reference) in data
-            .front
-            .iter()
-            .map(|(p, r)| (p, Ok(r.clone())))
-            .chain(data.failed_front.iter().map(|(p, r)| (p, Err(*r))))
-        {
+        let mut transient = 0;
+        for (path, observed) in &data.front {
+            weight.path(path);
+            weight.add(crate::memo::retained_arc_bytes(&Reads::empty()) as usize);
+            weight.add(
+                observed
+                    .read_len
+                    .checked_mul(2 * size_of::<(ReadKey, ContentHash)>())
+                    .ok_or_else(missing)?,
+            );
+            transient = transient.max(observed.observed.len.checked_mul(8).ok_or_else(missing)?);
+        }
+        for (path, reference) in &data.failed_front {
             weight.path(path);
             let reads = self
                 .plan
                 .front
-                .selected_reads(reference)
+                .selected_reads(Err(*reference))
                 .ok_or_else(missing)?;
             weight.add(crate::memo::retained_arc_bytes(&*reads) as usize);
             weight.add(
@@ -100,7 +107,7 @@ impl FrontCheckQueries {
                     .ok_or_else(missing)?,
             );
         }
-        Ok(weight.bytes())
+        weight.bytes().checked_add(transient).ok_or_else(missing)
     }
     /// Scope is minted only for this root's exact completed descriptor. The
     /// caller reserves its inspection buffers separately from producer memory.
@@ -130,16 +137,25 @@ impl FrontCheckQueries {
             _owner: self.clone(),
             _allowance: allowance,
         };
-        for (path, reference) in data
-            .front
-            .iter()
-            .map(|(p, r)| (p, Ok(r.clone())))
-            .chain(data.failed_front.iter().map(|(p, r)| (p, Err(*r))))
-        {
+        for (path, observed) in &data.front {
+            let bytes = self
+                .store
+                .get_content(observed.observed)
+                .ok_or_else(missing)?;
+            let reads: Reads = self
+                .records
+                .decode(&self.anchors, &bytes)
+                .ok_or_else(missing)?;
+            if reads.len() != observed.read_len {
+                return Err(missing());
+            }
+            scope.reads.insert(path.clone(), Arc::new(reads));
+        }
+        for (path, reference) in &data.failed_front {
             let reads = self
                 .plan
                 .front
-                .selected_reads(reference)
+                .selected_reads(Err(*reference))
                 .ok_or_else(missing)?;
             scope.reads.insert(path.clone(), reads);
         }

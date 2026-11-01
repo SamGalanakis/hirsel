@@ -567,8 +567,6 @@ impl FrontLowerQueries {
         self.snapshot
             .signature(DefId::intern(path))
             .ok_or(QueryError::NotImplemented)?
-            .map(Arc::clone)
-            .map_err(Clone::clone)
     }
     /// Captured physical decode working memory for an already settled original.
     /// Reads metadata only; no provider fetch, body decoder or query runs.

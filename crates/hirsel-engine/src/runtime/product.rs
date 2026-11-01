@@ -515,6 +515,36 @@ impl LiveSummaryProduct {
             current,
         })
     }
+    pub(crate) fn shared_owner_bytes() -> u64 {
+        owner_bytes::<Arc<PublishedSummary>>()
+    }
+    /// The producer's complete fact owner admits every aliased value allocation.
+    pub(crate) fn new_backed(
+        identity: (Address, Action),
+        value: Arc<PublishedSummary>,
+        source: ProductSourceInput,
+        allowance: &mut MemoryReservation,
+    ) -> Option<Self> {
+        let mut reservation =
+            allowance.split(Self::shared_owner_bytes().checked_add(source.metadata_bytes())?)?;
+        let source = source.admit(&mut reservation)?;
+        let current = Arc::new(Owner {
+            address: identity.0,
+            action: identity.1,
+            domain: LIVE_SUMMARY,
+            value,
+            source,
+            archive: Mutex::new(None),
+            _reservation: ValueAdmission::Owned(reservation),
+        });
+        Some(Self {
+            facet: SummaryFacet(current.clone()),
+            current,
+        })
+    }
+    pub(crate) fn cache_owners(&self, owners: usize) -> bool {
+        Arc::ptr_eq(&self.current, &self.facet.0) && Arc::strong_count(&self.current) == owners * 2
+    }
     pub fn value(&self) -> &PublishedSummary {
         &self.current.value
     }

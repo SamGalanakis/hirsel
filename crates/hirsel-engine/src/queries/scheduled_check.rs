@@ -51,8 +51,16 @@ impl DeadArmLint {
         weight.tree::<DefPath, (hirsel_span::Anchor, Vec<(String, u32, u32)>)>(
             self.declarations.len(),
         );
+        weight.tree::<DefPath, ()>(self.declarations.len());
+        weight.tree::<(DefPath, u32), ()>(
+            self.declarations.values().map(|(_, arms)| arms.len()).sum(),
+        );
         for (path, (_, arms)) in &self.declarations {
             weight.path(path);
+            weight.path(path);
+            for _ in arms {
+                weight.path(path);
+            }
             weight.vec(arms, |weight, (name, _, _)| weight.add(name.capacity()));
         }
         weight.vec(&self.bodies, |weight, path| weight.path(path));
@@ -67,9 +75,23 @@ struct FileInput {
     error: Option<QueryError>,
     phase: Option<QueryKind>,
 }
+/// Complete observations of one consumed source root, without its live Summary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrontObservation {
+    pub address: hirsel_artifact_store::Address,
+    pub action: hirsel_artifact_store::Action,
+    domain: Domain,
+    observed: Reference,
+    read_len: usize,
+}
+impl FrontObservation {
+    pub fn domain(&self) -> Domain {
+        self.domain
+    }
+}
 struct Data {
     checked: CheckOutput,
-    front: Vec<(DefPath, ProductRef)>,
+    front: Vec<(DefPath, FrontObservation)>,
     lowered: Vec<(DefPath, ProductRef)>,
     failed_front: Vec<(DefPath, Reference)>,
     failed_lowered: Vec<(DefPath, Reference)>,
@@ -79,7 +101,7 @@ struct Data {
 /// execution consumer releases the completed check.
 pub struct FrontCheckOutput {
     pub checked: CheckOutput,
-    pub front: Vec<(DefPath, ProductRef)>,
+    pub front: Vec<(DefPath, FrontObservation)>,
     pub lowered: Vec<(DefPath, ProductRef)>,
     pub reads: Arc<Reads>,
     _owner: Arc<FrontCheckQueries>,
@@ -113,21 +135,6 @@ impl FrontCheckQueries {
     ) -> bool {
         Arc::ptr_eq(&self.plan.front, front) && Arc::ptr_eq(&self.plan.lower, lower)
     }
-    fn dead_arm_warnings(&self) -> Vec<Diagnostic> {
-        let Some(lint) = &self.lint else {
-            return vec![];
-        };
-        let mut errors = BTreeSet::new();
-        let mut constructed = BTreeSet::new();
-        for body in &lint.bodies {
-            let Some(uses) = self.plan.front.dead_arm_use(body) else {
-                return vec![];
-            };
-            errors.extend(uses.errors);
-            constructed.extend(uses.constructed);
-        }
-        super::dead_arms::dead_arm_diagnostics(lint.declarations.clone(), &errors, &constructed)
-    }
     /// Install the matching actual source storage producer before sharing this
     /// new root with any factory or consumer. No mutable graph switch exists.
     pub fn with_storage(
@@ -151,7 +158,8 @@ impl FrontCheckQueries {
     /// data/archive bounds. Bodies keep their own producer admission.
     pub fn input_bytes(definitions: &[DefPath], files: usize, weight: MemoryWeight) -> Option<u64> {
         let path_slot = (std::mem::size_of::<(DefPath, bool)>()
-            + 2 * std::mem::size_of::<(DefPath, ProductRef)>()
+            + std::mem::size_of::<(DefPath, ProductRef)>()
+            + std::mem::size_of::<(DefPath, FrontObservation)>()
             + 2 * std::mem::size_of::<(DefPath, Reference)>()
             + std::mem::size_of::<DefId>()
             + 2 * std::mem::size_of::<DefPath>()
@@ -238,6 +246,11 @@ impl QueryFactory for Factory {
             lowered: Vec::new(),
             failed_front: Vec::new(),
             failed_lowered: Vec::new(),
+            instance_front: 0,
+            lint_seen: 0,
+            lint_complete: true,
+            lint_errors: BTreeSet::new(),
+            lint_constructed: BTreeSet::new(),
             terminal: None,
         }))
     }
@@ -296,10 +309,15 @@ struct Task {
     instances: Vec<DefPath>,
     staged: Option<Vec<super::scheduled_lower::staged_runtime::Selection>>,
     reads: ReadsBuilder,
-    front: Vec<(DefPath, ProductRef)>,
+    front: Vec<(DefPath, FrontObservation)>,
     lowered: Vec<(DefPath, ProductRef)>,
     failed_front: Vec<(DefPath, Reference)>,
     failed_lowered: Vec<(DefPath, Reference)>,
+    instance_front: usize,
+    lint_seen: usize,
+    lint_complete: bool,
+    lint_errors: BTreeSet<DefPath>,
+    lint_constructed: BTreeSet<(DefPath, u32)>,
     terminal: Option<Result<ProductRef, Reference>>,
 }
 impl QueryTask for Task {
@@ -334,44 +352,8 @@ impl Task {
         loop {
             match self.stage {
                 Stage::Front => {
-                    // Request immutable ordinary bodies together, but publish only
-                    // in source/file order. No generator or Lower is started here.
-                    let mut pending = Vec::new();
-                    for file in &self.files {
-                        if file.input.error.is_none() && !has_errors(&file.input.diagnostics) {
-                            for (path, _) in &file.input.paths {
-                                let id = self
-                                    .queries
-                                    .plan
-                                    .front
-                                    .query(path)
-                                    .ok_or(self.queries.errors.protocol)?;
-                                if cx.read(id).is_pending() {
-                                    pending.push(id);
-                                }
-                            }
-                        }
-                    }
-                    // Accepted instance P work is pure and speculative, like
-                    // ordinary P above. Its diagnostics publish only when a
-                    // clean file selects its instance Lower obligations.
-                    for path in &self.queries.instances {
-                        let id = self
-                            .queries
-                            .plan
-                            .front
-                            .query(path)
-                            .ok_or(self.queries.errors.protocol)?;
-                        if cx.read(id).is_pending() {
-                            pending.push(id);
-                        }
-                    }
-                    // Every Pending read in this poll must be returned to
-                    // S5. Inspect and publish the completed products in source
-                    // order only after the prefetched ordinary bodies settle.
-                    if !pending.is_empty() {
-                        return Ok(Some(pending));
-                    }
+                    // Only this source-order window pins speculative P work.
+                    // Consumed roots retain observations and release their edge.
                     while self.file < self.files.len() {
                         let file = &mut self.files[self.file];
                         if file.input.error.is_some()
@@ -382,6 +364,21 @@ impl Task {
                             self.file += 1;
                             self.root = 0;
                             continue;
+                        }
+                        let mut pending = Vec::new();
+                        for (path, _) in file.input.paths.iter().skip(self.root).take(16) {
+                            let id = self
+                                .queries
+                                .plan
+                                .front
+                                .query(path)
+                                .ok_or(self.queries.errors.protocol)?;
+                            if cx.read(id).is_pending() {
+                                pending.push(id);
+                            }
+                        }
+                        if !pending.is_empty() {
+                            return Ok(Some(pending));
                         }
                         let (path, executable) = &file.input.paths[self.root];
                         let id = self
@@ -400,12 +397,57 @@ impl Task {
                             return Err(reference.err().unwrap_or(self.queries.errors.protocol));
                         };
                         self.reads.merge(&facts.reads);
+                        if self
+                            .queries
+                            .lint
+                            .as_ref()
+                            .is_some_and(|lint| lint.bodies.contains(path))
+                        {
+                            self.lint_seen += 1;
+                            if let Some(uses) = facts.dead_arms {
+                                let lint = self
+                                    .queries
+                                    .lint
+                                    .as_ref()
+                                    .ok_or(self.queries.errors.protocol)?;
+                                self.lint_errors.extend(
+                                    uses.errors
+                                        .into_iter()
+                                        .filter(|path| lint.declarations.contains_key(path)),
+                                );
+                                self.lint_constructed
+                                    .extend(uses.constructed.into_iter().filter(|(path, arm)| {
+                                        lint.declarations
+                                            .get(path)
+                                            .is_some_and(|(_, arms)| (*arm as usize) < arms.len())
+                                    }));
+                            } else {
+                                self.lint_complete = false;
+                            }
+                        }
                         file.source_rules |= facts.source_rules;
                         match facts.result {
                             Ok(diagnostics) => {
                                 file.diagnostics.extend(diagnostics);
                                 if let Ok(product) = selected {
-                                    self.front.push((path.clone(), product));
+                                    let observed = scheduled_growth::publish_observations(
+                                        &self.queries.records,
+                                        &self.queries.anchors,
+                                        &*self.queries.store,
+                                        &facts.reads,
+                                        self.queries.weight.scratch,
+                                    )
+                                    .ok_or(self.queries.errors.resource)?;
+                                    self.front.push((
+                                        path.clone(),
+                                        FrontObservation {
+                                            address: product.address,
+                                            action: product.action,
+                                            domain: product.domain(),
+                                            observed,
+                                            read_len: facts.reads.len(),
+                                        },
+                                    ));
                                 }
                                 if *executable {
                                     if facts
@@ -428,7 +470,44 @@ impl Task {
                                 file.error(error, facts.phase);
                             }
                         }
+                        cx.release_body(id);
                         self.root += 1;
+                    }
+                    // Accepted instance work is speculative; diagnostics still
+                    // publish only when a clean file selects its obligations.
+                    while self.instance_front < self.queries.instances.len() {
+                        let mut pending = Vec::new();
+                        for path in self
+                            .queries
+                            .instances
+                            .iter()
+                            .skip(self.instance_front)
+                            .take(16)
+                        {
+                            let id = self
+                                .queries
+                                .plan
+                                .front
+                                .query(path)
+                                .ok_or(self.queries.errors.protocol)?;
+                            if cx.read(id).is_pending() {
+                                pending.push(id);
+                            }
+                        }
+                        if !pending.is_empty() {
+                            return Ok(Some(pending));
+                        }
+                        let end = (self.instance_front + 16).min(self.queries.instances.len());
+                        for path in &self.queries.instances[self.instance_front..end] {
+                            cx.release_body(
+                                self.queries
+                                    .plan
+                                    .front
+                                    .query(path)
+                                    .ok_or(self.queries.errors.protocol)?,
+                            );
+                        }
+                        self.instance_front = end;
                     }
                     self.stage = Stage::Growth;
                     self.file = 0;
@@ -744,7 +823,16 @@ impl Task {
         // The root package's dead error arms (LANG-8) warn only after a clean
         // complete check; a body without settled facts leaves it unlinted.
         if completion == CheckCompletion::Complete && !has_errors(&diagnostics) {
-            diagnostics.extend(queries.dead_arm_warnings());
+            if let Some(lint) = &queries.lint
+                && self.lint_complete
+                && self.lint_seen == lint.bodies.len()
+            {
+                diagnostics.extend(super::dead_arms::dead_arm_diagnostics(
+                    lint.declarations.clone(),
+                    &self.lint_errors,
+                    &self.lint_constructed,
+                ));
+            }
         }
         let mut diagnostics = crate::select_diagnostics(diagnostics, Some(&queries.sources));
         let files: Vec<_> = (queries.plan.files.iter())

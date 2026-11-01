@@ -262,7 +262,7 @@ fn admitted_lower_saved_work_and_native_metadata_survive_dependency_suspension()
                     assert_eq!(front.recompute_count(path, kind), 1);
                 }
             }
-            let phase_rows = front.memo_snapshot();
+            let phase_rows = front.memo_snapshot().unwrap();
             for path in &definitions {
                 for kind in [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes] {
                     assert!(
@@ -894,6 +894,17 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 )
                 .unwrap();
             runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
+            let _header_pins = definitions
+                .iter()
+                .map(|definition| {
+                    front
+                        .signatures()
+                        .signature(hirsel_syntax::DefId::intern(definition))
+                        .unwrap()
+                        .unwrap()
+                        .clone()
+                })
+                .collect::<Vec<_>>();
             let bodies = definitions
                 .each_ref()
                 .map(|definition| front.body_query(definition).unwrap());
@@ -1032,6 +1043,134 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 assert_eq!(front.retained_bytes(), limit);
             }
         }
+        // The same pressure law applies to compact P owners, including a
+        // detached checked-only consumer that does not hold a ProductRef.
+        let mut compact_limit = 8 << 20;
+        for mode in 0..5 {
+            let mut program = COMPILER
+                .with_config(CompileConfig {
+                    store: Arc::new(Transport(MemStore::default())),
+                    hold_bytes: 0,
+                    ..Default::default()
+                })
+                .with_owned_engines()
+                .load_program(&path)
+                .unwrap();
+            let definitions = ["a", "b"].map(|name| {
+                let mut definition = program.entry.clone();
+                definition.0.name = name.into();
+                definition
+            });
+            let front = program
+                .engine
+                .front_body_queries(
+                    &definitions,
+                    weight,
+                    budget
+                        .reserve(compact_limit - u64::from(mode == 4))
+                        .unwrap(),
+                    errors(),
+                )
+                .unwrap();
+            // Demand both headers first; this measures exactly one compact
+            // fact owner beyond the same immutable source inventory.
+            let _header_pins = definitions
+                .iter()
+                .map(|definition| {
+                    front
+                        .signatures()
+                        .signature(hirsel_syntax::DefId::intern(definition))
+                        .unwrap()
+                        .unwrap()
+                        .clone()
+                })
+                .collect::<Vec<_>>();
+            let mut runtime = AdmittedRuntime::with_query_capacity(
+                hirsel_intern::jobs::Jobs::ONE,
+                budget
+                    .reserve(hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + 2 * weight.scratch)
+                    .unwrap(),
+                errors(),
+                6,
+            )
+            .unwrap();
+            runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
+            let summaries = definitions
+                .each_ref()
+                .map(|definition| front.query(definition).unwrap());
+            let initial = front.retained_bytes();
+            let request = runtime.request(&[summaries[0]]);
+            let result = runtime.wait(request);
+            if mode == 4 {
+                assert_eq!(result, Err(errors().resource));
+                assert_eq!(
+                    front.retained_bytes(),
+                    initial,
+                    "failed publication returns every staged debit"
+                );
+                continue;
+            }
+            let a = result.unwrap().pop().unwrap();
+            if mode == 0 {
+                compact_limit = front.retained_bytes();
+                continue;
+            }
+            let mut scratch = budget.reserve(2 << 20).unwrap();
+            let canonical = a
+                .summary_value()
+                .unwrap()
+                .archive(&mut scratch, 1 << 20)
+                .unwrap();
+            let action = a.action;
+            let summary = a.summary_value().unwrap().value().summary.clone();
+            let checked = (mode == 2).then(|| front.checked(Ok(a.clone())).unwrap());
+            let pinned_summary = (mode == 3).then(|| a.clone());
+            drop(a);
+            let request = runtime.request(&[summaries[1]]);
+            let b = runtime.wait(request);
+            if checked.is_some() || pinned_summary.is_some() {
+                assert_eq!(b, Err(errors().resource));
+                assert_eq!(runtime.stats().body_evictions, 0);
+                assert!(front.checked_definition(&definitions[0]).is_some());
+                if let Some(checked) = checked {
+                    let admitted = front.admitted_bytes();
+                    runtime.shutdown();
+                    drop(front);
+                    drop(_header_pins);
+                    drop(program);
+                    assert_eq!(checked.summary.summary, summary);
+                    let held = budget.reserved();
+                    drop(checked);
+                    assert_eq!(
+                        held - budget.reserved(),
+                        admitted,
+                        "the detached checked owner releases its complete source charge only on last drop"
+                    );
+                }
+            } else {
+                drop(b.unwrap());
+                assert_eq!(runtime.stats().body_evictions, 1);
+                assert!(front.checked_definition(&definitions[0]).is_none());
+                let request = runtime.request(&[summaries[0]]);
+                let recomputed = runtime.wait(request).unwrap().pop().unwrap();
+                assert_eq!(runtime.stats().body_evictions, 2);
+                assert_eq!(recomputed.action, action);
+                assert_eq!(recomputed.summary_value().unwrap().value().summary, summary);
+                let archived = recomputed
+                    .summary_value()
+                    .unwrap()
+                    .archive(&mut scratch, 1 << 20)
+                    .unwrap();
+                assert_eq!(canonical.reference(), archived.reference());
+                assert_eq!(canonical.bytes(), archived.bytes());
+                assert_eq!(front.live_body_count(), 0);
+                assert_eq!(
+                    front.recompute_count(&definitions[0], QueryKind::Modes),
+                    1,
+                    "complete compact facts restore without executing or opening a body"
+                );
+            }
+        }
     });
 }
 
@@ -1116,7 +1255,7 @@ fn admitted_storage_recipe_waits_for_checked_body_and_matches_scalar_adapter() {
                     program.engine.types(),
                     &hirsel_types::TypeMemo::new(),
                     &analyzed.value,
-                    signature,
+                    &signature,
                     &mut provider,
                 )
                 .unwrap();

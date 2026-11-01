@@ -154,7 +154,7 @@ impl OwnershipExecution {
             .bind(
                 launch,
                 source.signatures.types(),
-                signature,
+                &signature,
                 &self.revision,
                 source.run.code.clone(),
             )

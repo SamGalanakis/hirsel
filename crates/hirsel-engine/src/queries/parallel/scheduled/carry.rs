@@ -302,7 +302,7 @@ impl TryFrom<PackedFacts> for Facts {
     }
 }
 impl FactsRef<'_> {
-    fn bytes(&self, decoded: bool) -> u64 {
+    pub(super) fn bytes(&self, decoded: bool) -> u64 {
         self.weight(decoded, None, false)
     }
     fn weight(&self, decoded: bool, compact: Option<&Arc<Reads>>, published: bool) -> u64 {
@@ -383,6 +383,75 @@ impl FactsRef<'_> {
     }
 }
 impl FrontBodyQueries {
+    fn publish_compact_facts(
+        &self,
+        cx: &mut dyn QueryContext,
+        key: Key,
+        reference: Option<Reference>,
+        action: hirsel_artifact_store::Action,
+        reads: Arc<Reads>,
+        facts: Facts,
+        memos: Vec<(crate::memo::MemoKey, Arc<Reads>)>,
+    ) -> Option<FrontOutcome> {
+        let view = FactsRef {
+            summary: facts.summary.clone(),
+            checked: &facts.checked,
+            dead_arms: &facts.dead_arms,
+            diagnostics: &facts.diagnostics,
+            diagnostic_phases: &facts.diagnostic_phases,
+            lowering: &facts.lowering,
+            table_keys: facts.table_keys.as_ref(),
+        };
+        let summary = facts.summary.clone()?;
+        let charge = view
+            .weight(false, Some(&reads), true)
+            .checked_add(LiveSummaryProduct::shared_value_bytes(&summary)?)?
+            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                FrontFacts,
+            >::uninit()))?
+            .checked_add(
+                (memos.capacity() * std::mem::size_of::<(crate::memo::MemoKey, Arc<Reads>)>())
+                    as u64,
+            )?;
+        let (allowance, mut backing) = self.owner_grant(cx, charge)?;
+        Arc::get_mut(&mut backing)?
+            ._allowance
+            .join(allowance)
+            .ok()?;
+        let owner = Arc::new(FrontFacts {
+            reference,
+            definition: self.inputs.get(&key)?.definition,
+            status: Ok(()),
+            phase: None,
+            summary: Some(FrontSummary::capture(
+                summary.clone(),
+                &facts.checked,
+                &reads,
+            )),
+            reads,
+            diagnostic_phases: facts.diagnostic_phases,
+            checked: facts.checked,
+            dead_arms: facts.dead_arms.map(LintFacts::capture),
+            diagnostics: facts.diagnostics,
+            lowering: facts.lowering,
+            table_keys: facts.table_keys,
+            memos,
+            _backing: Some(backing),
+        });
+        let publication = self.admit_summary(
+            cx,
+            hirsel_artifact_store::Address(key),
+            action,
+            summary,
+            owner.clone(),
+        )?;
+        Some(FrontOutcome {
+            publication: Some(publication),
+            body_publication: None,
+            body: Weak::new(),
+            facts: owner,
+        })
+    }
     /// Install before submitting tasks. The caller keeps the same carry for
     /// later fresh graphs; it holds neither this producer nor its sources.
     pub fn install_carry(&self, carry: Arc<FrontCarry>) -> Result<(), Arc<FrontCarry>> {
@@ -466,7 +535,6 @@ impl BodyTask {
         if outcome.status.is_err() {
             return;
         }
-        let keys = queries.table_keys.lock().unwrap_or_else(|e| e.into_inner());
         let dead_arms = outcome.dead_arms.as_ref().map(LintFacts::materialize);
         let facts = FactsRef {
             summary: outcome
@@ -478,7 +546,7 @@ impl BodyTask {
             diagnostics: &outcome.diagnostics,
             diagnostic_phases: &outcome.diagnostic_phases,
             lowering: &outcome.lowering,
-            table_keys: keys.get(&self.input),
+            table_keys: outcome.table_keys.as_ref(),
         };
         if facts.summary.as_ref().is_some_and(|s| s.storage.is_some()) {
             return;
@@ -615,7 +683,7 @@ impl BodyTask {
         facts: Facts,
         clean: bool,
     ) -> Option<Result<ProductRef, Reference>> {
-        self.install_facts_inner(cx, reference, reads, facts, clean, false)
+        self.install_facts_inner(cx, reference, reads, facts, clean)
     }
     pub(super) fn install_cached_facts(
         &self,
@@ -640,7 +708,7 @@ impl BodyTask {
                 summary.checked = Some(checked.clone());
             }
         }
-        self.install_facts_inner(cx, reference, reads, facts, false, true)
+        self.install_facts_inner(cx, reference, reads, facts, false)
     }
     fn install_facts_inner(
         &self,
@@ -649,7 +717,6 @@ impl BodyTask {
         mut reads: Arc<Reads>,
         mut facts: Facts,
         clean: bool,
-        cached: bool,
     ) -> Option<Result<ProductRef, Reference>> {
         facts.share_summary_reads(&reads)?;
         let queries = &self.queries;
@@ -671,76 +738,17 @@ impl BodyTask {
             &mut facts.checked,
             &mut memo_rows,
         )?;
-        let view = FactsRef {
-            summary: facts.summary.clone(),
-            checked: &facts.checked,
-            dead_arms: &facts.dead_arms,
-            diagnostics: &facts.diagnostics,
-            diagnostic_phases: &facts.diagnostic_phases,
-            lowering: &facts.lowering,
-            table_keys: facts.table_keys.as_ref(),
-        };
-        let mut clean_rows = crate::NativeMetadataWeight::default();
-        if clean {
-            for _ in &memo_rows {
-                clean_rows.tree::<crate::memo::MemoKey, ()>(0);
-            }
-        }
-        let charge = if cached {
-            view.weight(false, Some(&reads), true)
-        } else {
-            let mut weight = Weight::default();
-            weight.reads(&reads);
-            view.weight(false, None, true).checked_add(weight.bytes)?
-        }
-        .checked_add(clean_rows.bytes())?;
-        queries.make_room(cx, charge)?;
-        let mut retention = queries.retention.lock().unwrap_or_else(|e| e.into_inner());
-        let remaining = retention.checked_sub(charge)?;
-        *retention = remaining;
-        drop(retention);
         let action = crate::store::query_action(&input.key, input.key.1, &reads);
-        let summary = facts
-            .summary
-            .clone()
-            .map(|s| FrontSummary::capture(s, &facts.checked, &reads));
-        if let Some(keys) = facts.table_keys {
-            queries
-                .table_keys
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(self.input, keys);
-        }
+        let outcome = queries
+            .publish_compact_facts(cx, self.input, reference, action, reads, facts, memo_rows)?;
+        let publication = outcome.publication.clone()?;
         if clean {
             queries
                 .clean_memos
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .extend(memo_rows.iter().map(|(key, _)| *key));
+                .extend(outcome.memos.iter().map(|(key, _)| *key));
         }
-        queries
-            .memos
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend(memo_rows);
-        let summary_value = facts.summary.as_ref()?.clone();
-        let publication = queries.admit_summary(cx, self.query.address, action, summary_value)?;
-        let outcome = FrontOutcome {
-            reference,
-            publication: Some(publication.clone()),
-            body_publication: None,
-            definition: input.definition,
-            status: Ok(()),
-            phase: None,
-            summary,
-            reads,
-            diagnostic_phases: facts.diagnostic_phases,
-            checked: facts.checked,
-            dead_arms: facts.dead_arms.map(LintFacts::capture),
-            body: Weak::new(),
-            diagnostics: facts.diagnostics,
-            lowering: facts.lowering,
-        };
         queries
             .outcomes
             .lock()

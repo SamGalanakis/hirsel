@@ -18,8 +18,34 @@ pub(crate) struct HeaderProduct {
     graph_work: usize,
     publication: bool,
     _standalone: Option<Arc<crate::runtime::MemoryReservation>>,
+    _lease: Option<HeaderLease>,
     origin: Weak<Entry<hirsel_types::SignatureRef>>,
     accounted: AtomicBool,
+}
+struct HeaderLease {
+    remaining: Arc<std::sync::Mutex<u64>>,
+    bytes: u64,
+    _source: Option<Arc<dyn Send + Sync>>,
+}
+impl Drop for HeaderLease {
+    fn drop(&mut self) {
+        *self.remaining.lock().unwrap_or_else(|e| e.into_inner()) += self.bytes;
+    }
+}
+#[derive(Default)]
+struct HeaderSlot(std::sync::Mutex<Option<Arc<HeaderProduct>>>);
+impl HeaderSlot {
+    fn get(&self) -> Option<Arc<HeaderProduct>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+    fn set(&self, product: HeaderProduct) -> Result<(), HeaderProduct> {
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_some() {
+            return Err(product);
+        }
+        *slot = Some(Arc::new(product));
+        Ok(())
+    }
 }
 #[derive(Clone)]
 struct HeaderPhases {
@@ -54,9 +80,10 @@ impl HeaderPhases {
     }
 }
 pub(crate) struct HeaderProducts {
-    rows: hirsel_syntax::DefMap<OnceLock<HeaderProduct>>,
+    rows: hirsel_syntax::DefMap<HeaderSlot>,
     generation: AtomicU64,
     retention: OnceLock<Arc<std::sync::Mutex<u64>>>,
+    source_backing: OnceLock<Arc<dyn Send + Sync>>,
     environment: QueryEnvironment,
     adapters: HeaderPhases,
     sources: SourceMap,
@@ -91,7 +118,7 @@ impl HeaderProducts {
             .into_iter()
             .map(|path| {
                 let id = DefId::intern(&path);
-                let cell = OnceLock::new();
+                let cell = HeaderSlot::default();
                 if engine.unmarked_signature(id).is_some()
                     && private
                         .as_ref()
@@ -105,6 +132,7 @@ impl HeaderProducts {
                         graph_work: 0,
                         publication: engine.private_signature_publications.contains(&id),
                         _standalone: None,
+                        _lease: None,
                         origin: Arc::downgrade(&entry),
                         accounted: AtomicBool::new(true),
                     });
@@ -117,6 +145,7 @@ impl HeaderProducts {
             rows,
             generation: AtomicU64::new(0),
             retention: OnceLock::new(),
+            source_backing: OnceLock::new(),
             environment: engine.environment.clone(),
             adapters: HeaderPhases::capture(&engine.adapters),
             sources: engine.sources.clone(),
@@ -269,7 +298,7 @@ impl HeaderProducts {
     pub(crate) fn contains(&self, id: DefId) -> bool {
         self.rows.contains_key(&id)
     }
-    pub(crate) fn product(self: &Arc<Self>, id: DefId) -> Option<&HeaderProduct> {
+    pub(crate) fn product(self: &Arc<Self>, id: DefId) -> Option<Arc<HeaderProduct>> {
         let cell = self.rows.get(&id)?;
         if cell.get().is_none() {
             let mut engine = self.execution();
@@ -281,6 +310,7 @@ impl HeaderProducts {
                     graph_work: 0,
                     publication: false,
                     _standalone: None,
+                    _lease: None,
                     origin: Weak::new(),
                     accounted: AtomicBool::new(false),
                 });
@@ -299,6 +329,7 @@ impl HeaderProducts {
                 graph_work: 0,
                 publication: false,
                 _standalone: None,
+                _lease: None,
                 origin: Weak::new(),
                 accounted: AtomicBool::new(true),
             });
@@ -323,7 +354,7 @@ impl HeaderProducts {
         }
         if let Some(product) = cell.get() {
             if engine.header_products.is_none() {
-                engine.adopt_header_product(id, product);
+                engine.adopt_header_product(id, &product);
             } else if let Some(entry) = &product.entry {
                 engine.graph.adopt(
                     entry.memo.key,
@@ -347,7 +378,19 @@ impl HeaderProducts {
         let bytes = entry
             .as_ref()
             .and_then(|entry| crate::memo::retained::retained_signature_entry_bytes(entry))
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .saturating_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                HeaderProduct,
+            >::uninit()));
+        while self
+            .retention
+            .get()
+            .is_some_and(|grant| *grant.lock().unwrap_or_else(|e| e.into_inner()) < bytes)
+        {
+            if !self.evict() {
+                break;
+            }
+        }
         let standalone = (self.standalone && self.retention.get().is_none())
             .then(|| self.reserve_standalone(bytes))
             .transpose()?;
@@ -363,6 +406,12 @@ impl HeaderProducts {
                 })
             })?;
         }
+        let lease = self.retention.get().map(|remaining| HeaderLease {
+            remaining: remaining.clone(),
+            bytes,
+            _source: self.source_backing.get().cloned(),
+        });
+        drop(grant);
         if cell
             .set(HeaderProduct {
                 result,
@@ -371,29 +420,59 @@ impl HeaderProducts {
                 graph_work: if local { 0 } else { recomputes },
                 publication: self.provisional,
                 _standalone: standalone,
+                _lease: lease,
                 origin,
                 accounted: AtomicBool::new(local),
             })
             .is_ok()
         {
             self.generation.fetch_add(1, Ordering::Relaxed);
-        } else if let Some(grant) = &mut grant {
-            **grant += bytes;
         }
         cell.get()
             .expect("a completed producer publishes its row")
             .result
             .clone()
     }
-    pub(crate) fn ready(&self, id: DefId) -> Option<&HeaderProduct> {
+    pub(crate) fn ready(&self, id: DefId) -> Option<Arc<HeaderProduct>> {
         self.rows.get(&id)?.get()
+    }
+    pub(crate) fn configure_source_backing(&self, backing: Arc<dyn Send + Sync>) {
+        let _ = self.source_backing.set(backing);
+    }
+    pub(crate) fn evict(&self) -> bool {
+        for cell in self.rows.values() {
+            let mut slot = cell.0.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(product) = slot.as_ref() else {
+                continue;
+            };
+            if Arc::strong_count(product) != 1 || product._lease.is_none() {
+                continue;
+            }
+            let Some(entry) = &product.entry else {
+                continue;
+            };
+            if Arc::strong_count(entry) != 1 {
+                continue;
+            }
+            let Ok(output) = &product.result else {
+                continue;
+            };
+            // The row and its Entry share the output. Scoped raw signatures,
+            // validation views and active normalizers pin the exact payload.
+            if Arc::strong_count(output) != 2 || Arc::strong_count(&output.value) != 1 {
+                continue;
+            }
+            *slot = None;
+            return true;
+        }
+        false
     }
     pub(crate) fn pending_recomputes(&self, id: DefId) -> usize {
         self.ready(id)
             .filter(|p| !p.accounted.load(Ordering::Relaxed))
             .map_or(0, |p| p.recomputes)
     }
-    pub(crate) fn completed(&self) -> impl Iterator<Item = (DefId, &HeaderProduct)> {
+    pub(crate) fn completed(&self) -> impl Iterator<Item = (DefId, Arc<HeaderProduct>)> + '_ {
         self.rows
             .iter()
             .filter_map(|(id, cell)| cell.get().map(|product| (*id, product)))
@@ -419,13 +498,13 @@ impl QueryEngine {
             self.adopt_header_products(&headers);
         } else {
             for (id, product) in headers.completed() {
-                self.account_header_work(id, product);
+                self.account_header_work(id, &product);
             }
         }
     }
     pub(crate) fn adopt_header_products(&mut self, headers: &header_products::HeaderProducts) {
         for (id, product) in headers.completed() {
-            self.adopt_header_product(id, product);
+            self.adopt_header_product(id, &product);
         }
     }
     fn account_header_work(&mut self, id: DefId, product: &HeaderProduct) {
@@ -470,14 +549,21 @@ impl QueryEngine {
 fn project(
     entry: &Arc<Entry<hirsel_types::SignatureRef>>,
 ) -> Arc<Entry<hirsel_types::SignatureRef>> {
-    if entry.products.resolution.is_none() {
+    // The same duplicate observation projection used by source_index.rs.
+    if entry.products.resolution.is_none()
+        && !crate::memo::retained::source_projection(entry).detail
+    {
         return entry.clone();
     }
     Arc::new(Entry {
         memo: entry.memo.clone(),
-        detail: entry.detail.clone(),
+        detail: DependencyReads {
+            operational_failure: entry.detail.operational_failure.clone(),
+            ..Default::default()
+        },
         products: Arc::new(PhaseProducts {
             resolution: None,
+            signature_persisted: true,
             ..(*entry.products).clone()
         }),
         covered: entry.covered.clone(),

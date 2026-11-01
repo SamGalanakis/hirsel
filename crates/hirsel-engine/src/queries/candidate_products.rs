@@ -210,8 +210,8 @@ impl QueryEngine {
             let owner_view = snapshot
                 .body_view(&path.0.package, id)
                 .and_then(Result::ok)
-                .filter(|view| ***view != *public)
-                .map(|view| (**view).clone());
+                .filter(|view| **view != *public)
+                .map(|view| (*view).clone());
             signatures.insert(
                 path.clone(),
                 SignatureSection {

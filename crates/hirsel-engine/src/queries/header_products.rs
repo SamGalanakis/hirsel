@@ -409,6 +409,10 @@ impl HeaderProducts {
         let standalone = (self.standalone && self.retention.get().is_none())
             .then(|| self.reserve_standalone(bytes))
             .transpose()?;
+        let mut grant = self
+            .retention
+            .get()
+            .map(|grant| grant.lock().unwrap_or_else(|e| e.into_inner()));
         let header_allowance = self
             .source_backing
             .get()
@@ -424,10 +428,6 @@ impl HeaderProducts {
                     })
             })
             .transpose()?;
-        let mut grant = self
-            .retention
-            .get()
-            .map(|grant| grant.lock().unwrap_or_else(|e| e.into_inner()));
         if let Some(grant) = &mut grant {
             **grant = grant.checked_sub(bytes).ok_or_else(|| {
                 QueryError::Operational(hirsel_types::OperationalFailure {

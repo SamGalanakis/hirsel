@@ -15,7 +15,7 @@ pub struct SourceIndexState {
     private_summaries: Box<[(DefId, hirsel_types::UniqueSummary)]>,
     private_unique_failures: Box<[(DefId, Vec<hirsel_types::UniqueFailure>)]>,
     private_summary_revision: Option<crate::Revision>,
-    private_summary_inputs: ContentHash,
+    private_summary_inputs: private_unique::RegistrationInputs,
     graph: crate::memo::SourceHeaderGraph,
     front_changes: frontier::FrontTracker,
     inputs: Box<[(DefId, memos::DefInputs)]>,
@@ -243,6 +243,7 @@ impl QueryEngine {
         for failures in self.private_unique_failures.values() {
             weight.vec(failures, |w, failure| w.add(failure.message.capacity()));
         }
+        weight.add(self.private_summary_inputs.len() * size_of::<[ContentHash; 3]>());
         weight.add(self.private_summary_reads.len() * size_of::<(DefId, Arc<Reads>)>());
         let mut previous: Option<&Arc<Reads>> = None;
         for reads in self.private_summary_reads.values() {
@@ -517,7 +518,7 @@ impl QueryEngine {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             private_summary_revision: self.private_summary_revision,
-            private_summary_inputs: self.private_summary_inputs,
+            private_summary_inputs: self.private_summary_inputs.clone(),
             graph,
             front_changes: std::mem::take(&mut self.front_changes),
             inputs: std::mem::take(&mut self.inputs)

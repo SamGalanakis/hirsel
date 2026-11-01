@@ -711,17 +711,9 @@ impl QueryEngine {
                         {
                             reads.merge(&signature);
                         }
-                        // Generated text is checked again by this task. The
-                        // generator's verifier receipt is not an inference input.
                         let mut inherit = |source: &Reads| {
                             for &(key, value) in source.iter() {
-                                if !matches!(
-                                    key,
-                                    ReadKey::ValidationView(_)
-                                        | ReadKey::ValidationUniverse(_)
-                                        | ReadKey::UniverseErrors
-                                        | ReadKey::FirstHeap
-                                ) {
+                                if super::inherited_registration_read(&key) {
                                     reads.record(key, value);
                                 }
                             }

@@ -2345,9 +2345,8 @@ impl QueryEngine {
                 registration.cloned(),
             ));
         }
-        let registration_inputs = private_unique::registration_inputs(registrations);
-        if self.private_summary_inputs != registration_inputs {
-            self.private_summary_inputs = registration_inputs;
+        if !private_unique::registrations_covered(&self.private_summary_inputs, registrations) {
+            self.private_summary_inputs = private_unique::registration_inputs(registrations);
             self.private_summary_revision = None;
             self.retire_snapshot();
         }

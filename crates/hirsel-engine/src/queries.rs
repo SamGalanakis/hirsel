@@ -359,7 +359,7 @@ pub struct QueryEngine {
     private_summaries: hirsel_syntax::DefMap<hirsel_types::UniqueSummary>,
     private_unique_failures: BTreeMap<DefId, Vec<hirsel_types::UniqueFailure>>,
     private_summary_revision: Option<crate::memo::Revision>,
-    private_summary_inputs: ContentHash,
+    private_summary_inputs: private_unique::RegistrationInputs,
     private_summary_active: bool,
     private_bootstrap_active: bool,
     private_inference_hosted: bool,

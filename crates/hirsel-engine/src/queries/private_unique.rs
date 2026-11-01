@@ -5,22 +5,62 @@ use super::*;
 use hirsel_types::{SignatureKind, UniqueInference};
 pub(in crate::queries) mod scheduled;
 
-pub(super) fn registration_inputs(registrations: &[Arc<AcceptedFrontRegistration>]) -> ContentHash {
+/// The accepted generated bodies one private inference read, sorted by row.
+pub(super) type RegistrationInputs = Box<[[ContentHash; 3]]>;
+
+pub(super) fn registration_inputs(
+    registrations: &[Arc<AcceptedFrontRegistration>],
+) -> RegistrationInputs {
     let mut rows = registrations
         .iter()
         .map(|registration| {
+            // The generated body's own header carries the proof this inference
+            // publishes. Reading it back would make each publication a new input.
+            let id = DefId::intern(registration.definition());
+            let mut reads = crate::memo::ReadsBuilder::new();
+            for &(key, value) in registration.reads().iter() {
+                if inherited_registration_read(&key)
+                    && !matches!(key, ReadKey::Signature(d) | ReadKey::ExecutedSignature(d) if d == id)
+                {
+                    reads.record(key, value);
+                }
+            }
             [
                 registration.definition().fingerprint(),
                 registration.syntax.text_hash,
-                registration.reads().digest(),
+                reads
+                    .finish()
+                    .map_or_else(|_| registration.reads().digest(), |reads| reads.digest()),
             ]
         })
         .collect::<Vec<_>>();
     rows.sort_unstable();
-    ContentHash::of_parts(
-        "hirsel.private-registration-inputs.v1",
-        rows.iter().flatten().map(|hash| hash.0.as_slice()),
+    rows.dedup();
+    rows.into_boxed_slice()
+}
+
+/// Generated text is checked again by inference. The generator's verifier
+/// receipt is not an inference input.
+pub(super) fn inherited_registration_read(key: &ReadKey) -> bool {
+    !matches!(
+        key,
+        ReadKey::ValidationView(_)
+            | ReadKey::ValidationUniverse(_)
+            | ReadKey::UniverseErrors
+            | ReadKey::FirstHeap
     )
+}
+
+/// A front batch selects only the registrations of its own definitions. Facts
+/// inferred from a superset still hold for it; only a new or changed accepted
+/// body invalidates them.
+pub(super) fn registrations_covered(
+    inputs: &[[ContentHash; 3]],
+    registrations: &[Arc<AcceptedFrontRegistration>],
+) -> bool {
+    registration_inputs(registrations)
+        .iter()
+        .all(|row| inputs.binary_search(row).is_ok())
 }
 
 impl QueryEngine {

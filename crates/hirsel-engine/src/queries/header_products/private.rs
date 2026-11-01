@@ -10,9 +10,8 @@ pub(super) struct ModuleProduct {
     /// live only in the admitted header rows; a miss recomputes there.
     pub(super) identities: hirsel_syntax::DefMap<ContentHash>,
     accounted: AtomicBool,
-    _standalone: Option<Arc<crate::runtime::MemoryReservation>>,
-    /// The admitted front charge. Releasing the proof returns it.
-    lease: Option<HeaderLease>,
+    /// Charged like a header row; evicting the proof returns it.
+    charge: Charge,
 }
 /// One module's proof. A settled proof is an evictable entry of the admitted
 /// front cache: it is pinned only while a consumer holds its Arc, and an
@@ -176,7 +175,7 @@ impl PrivateProducts {
                 let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
                 match &*state {
                     ProofState::Settled(product)
-                        if Arc::strong_count(product) == 1 && product.lease.is_some() =>
+                        if Arc::strong_count(product) == 1 && product.charge.evictable() =>
                     {
                         std::mem::replace(&mut *state, ProofState::Evicted)
                     }
@@ -341,7 +340,7 @@ impl HeaderProducts {
         if !self.standalone && !self.admitted() {
             return Err(private_refusal());
         }
-        let (standalone, lease) = self.admit(weight.bytes()).map_err(|error| {
+        let charge = self.admit(weight.bytes()).map_err(|error| {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "private inference admission".into(),
                 message: format!(
@@ -361,8 +360,7 @@ impl HeaderProducts {
             work,
             identities,
             accounted: AtomicBool::new(false),
-            _standalone: standalone,
-            lease,
+            charge,
         });
         *slot.state.lock().unwrap_or_else(|e| e.into_inner()) =
             ProofState::Settled(product.clone());
@@ -394,32 +392,37 @@ impl HeaderProducts {
             *state = ProofState::Evicted;
         }
     }
-    /// A proof reader that cannot carry an error. An evicted proof is demanded
-    /// again; a refusal poisons this snapshot's header products instead of
-    /// becoming a conservative verdict.
-    fn proof_for_reader(&self, id: DefId) -> Option<Arc<ModuleProduct>> {
-        match self.settled_product(id)? {
-            Ok(product) => Some(product),
-            Err(error) => {
-                self.refuse(error);
-                None
-            }
+    /// A proof reader. An evicted proof is demanded again. A failed proof is
+    /// its module's verdict and has no summary; a resource refusal is Err,
+    /// never a conservative verdict.
+    fn proof_for_reader(&self, id: DefId) -> Result<Option<Arc<ModuleProduct>>, QueryError> {
+        match self.settled_product(id) {
+            None => Ok(None),
+            Some(Ok(product)) => Ok(Some(product)),
+            Some(Err(error @ QueryError::Operational(_))) => Err(error),
+            Some(Err(_)) => Ok(None),
         }
     }
-    pub(super) fn demanded_summary(&self, id: DefId) -> Option<hirsel_types::UniqueSummary> {
-        self.proof_for_reader(id)?
-            .facts
-            .proofs
-            .iter()
-            .find(|(definition, _)| *definition == id)
-            .map(|(_, proof)| proof.summary.clone())
+    pub(super) fn demanded_summary(
+        &self,
+        id: DefId,
+    ) -> Result<Option<hirsel_types::UniqueSummary>, QueryError> {
+        Ok(self.proof_for_reader(id)?.and_then(|product| {
+            product
+                .facts
+                .proofs
+                .iter()
+                .find(|(definition, _)| *definition == id)
+                .map(|(_, proof)| proof.summary.clone())
+        }))
     }
     pub(crate) fn unique_failure(
         &self,
         id: DefId,
         claim: hirsel_types::UniqueClaim,
     ) -> Option<hirsel_types::UniqueFailure> {
-        let product = self.proof_for_reader(id)?;
+        // A citation carries no error: a refused proof cites nothing.
+        let product = self.proof_for_reader(id).ok()??;
         let proof = product
             .facts
             .proofs
@@ -523,7 +526,7 @@ impl HeaderProducts {
     pub(super) fn reserve_standalone(
         &self,
         bytes: u64,
-    ) -> Result<Arc<crate::runtime::MemoryReservation>, QueryError> {
+    ) -> Result<crate::runtime::MemoryReservation, QueryError> {
         // Legacy scalar inputs already use this shared source-inference partition.
         // The admitted front grant covers its task/output rows, not those inputs.
         let bytes = bytes
@@ -533,7 +536,6 @@ impl HeaderProducts {
             .ok_or_else(private_refusal)?;
         crate::queries::private_unique::scheduled::standalone_budget()
             .reserve(bytes)
-            .map(Arc::new)
             .map_err(|error| QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "private inference admission".into(),
                 message: format!("demanded module proof exceeds its existing front partition; standalone header owner: {error}"),
@@ -564,8 +566,7 @@ impl HeaderProducts {
                         recomputes: 0,
                         graph_work: 0,
                         publication,
-                        _standalone: None,
-                        _lease: None,
+                        charge: Charge::engine(),
                         origin: Weak::new(),
                         accounted: AtomicBool::new(true),
                     });
@@ -586,7 +587,6 @@ impl HeaderProducts {
             provisional: true,
             standalone: false,
             failure: None,
-            refusal: OnceLock::new(),
             syntax: self.syntax.clone(),
             declarations: self.declarations.clone(),
             catalog: self.catalog.clone(),

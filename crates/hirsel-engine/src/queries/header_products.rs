@@ -19,29 +19,83 @@ pub(crate) struct HeaderProduct {
     pub(crate) recomputes: usize,
     graph_work: usize,
     publication: bool,
-    _standalone: Option<Arc<crate::runtime::MemoryReservation>>,
-    _lease: Option<HeaderLease>,
+    charge: Charge,
     origin: Weak<Entry<hirsel_types::SignatureRef>>,
     accounted: AtomicBool,
 }
 pub(crate) trait HeaderAllowance: Send + Sync {
     fn take_header(&self, bytes: u64) -> Option<crate::runtime::MemoryReservation>;
 }
+/// What one settled header row or module proof holds against a budget.
+enum HeaderCharge {
+    /// Uncharged, like every engine-retained signature; admission never
+    /// evicts it.
+    Engine,
+    /// Charged to the shared standalone source-inference budget.
+    Standalone(
+        #[expect(dead_code, reason = "held for its drop")] crate::runtime::MemoryReservation,
+    ),
+    /// Lent by a live Front partition; evictable while unpinned.
+    Front(FrontCharge),
+}
+/// A charge a Front partition lent. Dropping it returns the bytes to the
+/// partition's grant and the reservation to its allowance, exactly once.
+struct FrontCharge {
+    partition: Weak<dyn HeaderAllowance>,
+    credit: Arc<std::sync::Mutex<u64>>,
+    bytes: u64,
+    #[expect(dead_code, reason = "held for its drop")]
+    allowance: crate::runtime::MemoryReservation,
+}
+impl Drop for FrontCharge {
+    fn drop(&mut self) {
+        *self.credit.lock().unwrap_or_else(|e| e.into_inner()) += self.bytes;
+    }
+}
+/// The charge cell of one row or proof. The partition that lent a `Front`
+/// charge keeps a weak handle to the cell and turns it to `Engine` when the
+/// partition ends.
+struct Charge(Arc<std::sync::Mutex<HeaderCharge>>);
+impl Charge {
+    fn engine() -> Self {
+        Self(Arc::new(std::sync::Mutex::new(HeaderCharge::Engine)))
+    }
+    /// Admission may evict only what a live partition lent.
+    fn evictable(&self) -> bool {
+        matches!(
+            &*self.0.lock().unwrap_or_else(|e| e.into_inner()),
+            HeaderCharge::Front(charge) if charge.partition.strong_count() != 0
+        )
+    }
+}
 #[derive(Clone)]
 struct HeaderAdmission {
     remaining: Arc<std::sync::Mutex<u64>>,
-    source: Weak<dyn HeaderAllowance>,
+    partition: Weak<dyn HeaderAllowance>,
+    /// Every charge cell this partition lent, rows and proofs alike.
+    lent: Arc<std::sync::Mutex<Vec<Weak<std::sync::Mutex<HeaderCharge>>>>>,
 }
-struct HeaderLease {
-    remaining: Arc<std::sync::Mutex<u64>>,
-    bytes: u64,
-    /// The Front partition that lent `allowance`.
-    source: Weak<dyn HeaderAllowance>,
-    allowance: std::sync::Mutex<Option<crate::runtime::MemoryReservation>>,
-}
-impl Drop for HeaderLease {
-    fn drop(&mut self) {
-        *self.remaining.lock().unwrap_or_else(|e| e.into_inner()) += self.bytes;
+impl HeaderAdmission {
+    fn lend(&self, charge: FrontCharge) -> Charge {
+        let cell = Arc::new(std::sync::Mutex::new(HeaderCharge::Front(charge)));
+        let mut lent = self.lent.lock().unwrap_or_else(|e| e.into_inner());
+        if lent.len() == lent.capacity() {
+            lent.retain(|cell| cell.strong_count() != 0);
+        }
+        lent.push(Arc::downgrade(&cell));
+        Charge(cell)
+    }
+    /// The partition ended: every charge it lent returns now, and the entry
+    /// stays as an uncharged engine row whose later eviction credits nothing.
+    fn release(&self) {
+        let lent = std::mem::take(&mut *self.lent.lock().unwrap_or_else(|e| e.into_inner()));
+        for cell in lent.iter().filter_map(Weak::upgrade) {
+            let charge = std::mem::replace(
+                &mut *cell.lock().unwrap_or_else(|e| e.into_inner()),
+                HeaderCharge::Engine,
+            );
+            drop(charge);
+        }
     }
 }
 #[derive(Default)]
@@ -56,15 +110,18 @@ impl HeaderSlot {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
-    fn set(&self, product: HeaderProduct) -> Result<(), HeaderProduct> {
+    /// Settle `product` unless a row is already resident. Returns the
+    /// resident row and whether it is this one.
+    fn set(&self, product: HeaderProduct) -> (Arc<HeaderProduct>, bool) {
         let mut slot = self.product.lock().unwrap_or_else(|e| e.into_inner());
-        if slot.is_some() {
-            return Err(product);
+        if let Some(resident) = slot.as_ref() {
+            return (resident.clone(), false);
         }
         self.work
             .fetch_add(product.graph_work as u64, Ordering::Relaxed);
-        *slot = Some(Arc::new(product));
-        Ok(())
+        let product = Arc::new(product);
+        *slot = Some(product.clone());
+        (product, true)
     }
 }
 #[derive(Clone)]
@@ -116,9 +173,6 @@ pub(crate) struct HeaderProducts {
     provisional: bool,
     standalone: bool,
     failure: Option<QueryError>,
-    /// A proof reader that cannot return an error records its refusal here;
-    /// every later header demand of this snapshot fails with it.
-    refusal: OnceLock<QueryError>,
     syntax: Arc<HeaderSources>,
     private: Option<private::PrivateProducts>,
     declarations: crate::DeclarationIndex,
@@ -162,8 +216,7 @@ impl HeaderProducts {
                         recomputes: 0,
                         graph_work: 0,
                         publication: engine.private_signature_publications.contains(&id),
-                        _standalone: None,
-                        _lease: None,
+                        charge: Charge::engine(),
                         origin: Arc::downgrade(&entry),
                         accounted: AtomicBool::new(true),
                     });
@@ -200,7 +253,6 @@ impl HeaderProducts {
             provisional: engine.private_summary_active,
             standalone: !engine.private_inference_hosted && !engine.private_summary_active,
             failure: engine.current_private_summary_failure().cloned(),
-            refusal: OnceLock::new(),
             syntax: engine
                 .header_products
                 .as_ref()
@@ -281,16 +333,16 @@ impl HeaderProducts {
         self.failed.load(Ordering::Acquire)
     }
     /// Publish one row; a row already present keeps its product.
-    fn publish(&self, cell: &HeaderSlot, product: HeaderProduct) -> bool {
-        let failed = product.result.is_err();
-        if cell.set(product).is_err() {
-            return false;
+    /// Returns the resident row and whether it is this one.
+    fn publish(&self, cell: &HeaderSlot, product: HeaderProduct) -> (Arc<HeaderProduct>, bool) {
+        let (product, settled) = cell.set(product);
+        if settled {
+            if product.result.is_err() {
+                self.failed.store(true, Ordering::Release);
+            }
+            self.revision.fetch_add(1, Ordering::AcqRel);
         }
-        if failed {
-            self.failed.store(true, Ordering::Release);
-        }
-        self.revision.fetch_add(1, Ordering::AcqRel);
-        true
+        (product, settled)
     }
     pub(crate) fn source_facts(&self, id: DefId) -> Option<catalog::SourceFacts> {
         self.syntax.facts(id)
@@ -339,11 +391,16 @@ impl HeaderProducts {
         self.syntax
             .archive(self.types.clone(), self.owners.clone(), store)
     }
-    pub(super) fn summary(&self, id: DefId) -> Option<hirsel_types::UniqueSummary> {
+    /// The settled summary of `id`. Err only for a resource refusal of its
+    /// module proof; a failed proof has no summary.
+    pub(super) fn summary(
+        &self,
+        id: DefId,
+    ) -> Result<Option<hirsel_types::UniqueSummary>, QueryError> {
         if self.private.is_some() {
             self.demanded_summary(id)
         } else {
-            self.summaries.get(&id).cloned()
+            Ok(self.summaries.get(&id).cloned())
         }
     }
     pub(crate) fn owners(&self) -> &Arc<crate::NativeRecordContext> {
@@ -359,36 +416,23 @@ impl HeaderProducts {
     pub(crate) fn contains(&self, id: DefId) -> bool {
         self.rows.contains_key(&id)
     }
-    pub(crate) fn product(self: &Arc<Self>, id: DefId) -> Option<Arc<HeaderProduct>> {
+    /// The settled row of `id`, produced on demand. A failed demand that
+    /// settled nothing (a resource refusal) returns its error and leaves the
+    /// row unsettled, so a later demand recomputes it.
+    pub(crate) fn product(
+        self: &Arc<Self>,
+        id: DefId,
+    ) -> Option<Result<Arc<HeaderProduct>, QueryError>> {
         let cell = self.rows.get(&id)?;
-        if cell.get().is_none() {
-            let mut engine = self.execution();
-            if let Err(error) = self.demand(&mut engine, id) {
-                self.publish(
-                    cell,
-                    HeaderProduct {
-                        result: Err(error),
-                        entry: None,
-                        recomputes: 0,
-                        graph_work: 0,
-                        publication: false,
-                        _standalone: None,
-                        _lease: None,
-                        origin: Weak::new(),
-                        accounted: AtomicBool::new(false),
-                    },
-                );
-            }
+        if let Some(product) = cell.get() {
+            return Some(Ok(product));
         }
-        cell.get()
-    }
-    fn refuse(&self, error: QueryError) {
-        let _ = self.refusal.set(error);
-    }
-    fn refused(&self) -> Result<(), QueryError> {
-        self.refusal
-            .get()
-            .map_or(Ok(()), |error| Err(error.clone()))
+        let demanded = self.demand(&mut self.execution(), id);
+        match (cell.get(), demanded) {
+            (Some(product), _) => Some(Ok(product)),
+            (None, Err(error)) => Some(Err(error)),
+            (None, Ok(_)) => None,
+        }
     }
     fn admitted(&self) -> bool {
         self.admission
@@ -396,8 +440,20 @@ impl HeaderProducts {
             .unwrap_or_else(|e| e.into_inner())
             .is_some()
     }
+    /// Demand the row of `id` for `engine`. A demand that fails without
+    /// settling the row is a resource refusal: it is recorded on `engine`, so
+    /// a producer whose read it was never publishes, and a later demand
+    /// recomputes the row.
     pub(crate) fn demand(self: &Arc<Self>, engine: &mut QueryEngine, id: DefId) -> SignatureOutput {
-        self.refused()?;
+        let result = self.produce(engine, id);
+        if let Err(refusal @ QueryError::Operational(_)) = &result
+            && self.rows.get(&id).is_some_and(|cell| cell.get().is_none())
+        {
+            engine.record_header_refusal(Some(refusal.clone()));
+        }
+        result
+    }
+    fn produce(self: &Arc<Self>, engine: &mut QueryEngine, id: DefId) -> SignatureOutput {
         if let Some(failures) = self.failures.get(&id) {
             engine
                 .private_unique_failures
@@ -431,10 +487,15 @@ impl HeaderProducts {
         if let Some(product) = cell.get() {
             return self.use_product(engine, id, &product);
         }
+        // A header or proof read refused inside this producer leaves a
+        // conservative result, so the result is never published.
+        let outer = engine.take_header_refusal();
         let result = engine.signature_query_local(id);
-        // A proof read inside the producer was refused: its result may carry a
-        // conservative summary, so it is never published.
-        self.refused()?;
+        let refusal = engine.take_header_refusal();
+        engine.record_header_refusal(outer.or_else(|| refusal.clone()));
+        if let Some(refusal) = refusal {
+            return Err(refusal);
+        }
         if let Some(stale) = proof.take().filter(|proof| {
             proof
                 .identities
@@ -482,8 +543,8 @@ impl HeaderProducts {
             .saturating_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
                 HeaderProduct,
             >::uninit()));
-        let (standalone, lease) = self.admit(bytes)?;
-        if self.publish(
+        let charge = self.admit(bytes)?;
+        let (product, settled) = self.publish(
             cell,
             HeaderProduct {
                 result,
@@ -491,18 +552,15 @@ impl HeaderProducts {
                 recomputes,
                 graph_work: if local { 0 } else { recomputes },
                 publication: self.provisional,
-                _standalone: standalone,
-                _lease: lease,
+                charge,
                 origin,
                 accounted: AtomicBool::new(local),
             },
-        ) {
+        );
+        if settled {
             self.generation.fetch_add(1, Ordering::Relaxed);
         }
-        cell.get()
-            .expect("a completed producer publishes its row")
-            .result
-            .clone()
+        product.result.clone()
     }
     fn use_product(
         &self,
@@ -523,74 +581,67 @@ impl HeaderProducts {
         }
         product.result.clone()
     }
-    /// Charge one settled row to the front's header grant, evicting unpinned
-    /// rows first. A refusal is a resource failure, never a row verdict.
-    fn admit(
-        &self,
-        bytes: u64,
-    ) -> Result<
-        (
-            Option<Arc<crate::runtime::MemoryReservation>>,
-            Option<HeaderLease>,
-        ),
-        QueryError,
-    > {
+    /// Charge one settled row or proof to the front's header grant, evicting
+    /// unpinned entries first. A refusal is a resource failure, never a verdict.
+    fn admit(&self, bytes: u64) -> Result<Charge, QueryError> {
         let admission = self
             .admission
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        while admission.as_ref().is_some_and(|admission| {
-            *admission
-                .remaining
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                < bytes
-        }) {
+        let Some(admission) = admission else {
+            return Ok(if self.standalone {
+                Charge(Arc::new(std::sync::Mutex::new(HeaderCharge::Standalone(
+                    self.reserve_standalone(bytes)?,
+                ))))
+            } else {
+                Charge::engine()
+            });
+        };
+        // The charge cell itself is part of what the partition retains.
+        let bytes =
+            bytes.saturating_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                std::sync::Mutex<HeaderCharge>,
+            >::uninit()));
+        while *admission
+            .remaining
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            < bytes
+        {
             if !self.evict() {
                 break;
             }
         }
-        let standalone = (self.standalone && admission.is_none())
-            .then(|| self.reserve_standalone(bytes))
-            .transpose()?;
-        let mut grant = admission.as_ref().map(|admission| {
-            admission
-                .remaining
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-        });
-        let header_allowance = admission
+        // Held past the grant's lock: the partition's last owner may drop it,
+        // and its drop returns charges to this same grant.
+        let partition = admission.partition.upgrade();
+        let mut grant = admission
+            .remaining
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let allowance = partition
             .as_ref()
-            .map(|admission| {
-                admission
-                    .source
-                    .upgrade()
-                    .and_then(|source| source.take_header(bytes))
-                    .ok_or_else(|| {
-                        QueryError::Operational(hirsel_types::OperationalFailure {
-                            operation: "header admission".into(),
-                            message: format!("header source allowance cannot retain {bytes} bytes"),
-                        })
-                    })
-            })
-            .transpose()?;
-        if let Some(grant) = &mut grant {
-            **grant = grant.checked_sub(bytes).ok_or_else(|| {
+            .and_then(|partition| partition.take_header(bytes))
+            .ok_or_else(|| {
                 QueryError::Operational(hirsel_types::OperationalFailure {
                     operation: "header admission".into(),
-                    message: format!("demanded header exceeds the existing front partition; required {bytes} bytes, available {} bytes", **grant),
+                    message: format!("header source allowance cannot retain {bytes} bytes"),
                 })
             })?;
-        }
-        let lease = admission.as_ref().map(|admission| HeaderLease {
-            remaining: admission.remaining.clone(),
-            bytes,
-            source: admission.source.clone(),
-            allowance: std::sync::Mutex::new(header_allowance),
-        });
+        *grant = grant.checked_sub(bytes).ok_or_else(|| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "header admission".into(),
+                message: format!("demanded header exceeds the existing front partition; required {bytes} bytes, available {} bytes", *grant),
+            })
+        })?;
         drop(grant);
-        Ok((standalone, lease))
+        Ok(admission.lend(FrontCharge {
+            partition: admission.partition.clone(),
+            credit: admission.remaining.clone(),
+            bytes,
+            allowance,
+        }))
     }
     /// Retain a payload a module proof settled, when the header grant admits it.
     fn seed(&self, id: DefId, entry: Arc<Entry<hirsel_types::SignatureRef>>) {
@@ -607,7 +658,7 @@ impl HeaderProducts {
             bytes.saturating_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
                 HeaderProduct,
             >::uninit()));
-        let Ok((standalone, lease)) = self.admit(bytes) else {
+        let Ok(charge) = self.admit(bytes) else {
             return;
         };
         self.publish(
@@ -618,8 +669,7 @@ impl HeaderProducts {
                 recomputes: 0,
                 graph_work: 0,
                 publication: false,
-                _standalone: standalone,
-                _lease: lease,
+                charge,
                 origin: Weak::new(),
                 accounted: AtomicBool::new(true),
             },
@@ -634,15 +684,19 @@ impl HeaderProducts {
         remaining: Arc<std::sync::Mutex<u64>>,
     ) -> Arc<dyn HeaderAllowance> {
         let mut admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(source) = admission
+        if let Some(partition) = admission
             .as_ref()
-            .and_then(|admission| admission.source.upgrade())
+            .and_then(|admission| admission.partition.upgrade())
         {
-            return source;
+            return partition;
+        }
+        if let Some(ended) = admission.take() {
+            ended.release();
         }
         *admission = Some(HeaderAdmission {
             remaining,
-            source: Arc::downgrade(&backing),
+            partition: Arc::downgrade(&backing),
+            lent: Arc::default(),
         });
         backing
     }
@@ -656,7 +710,7 @@ impl HeaderProducts {
             let Some(product) = slot.as_ref() else {
                 continue;
             };
-            if Arc::strong_count(product) != 1 || product._lease.is_none() {
+            if Arc::strong_count(product) != 1 || !product.charge.evictable() {
                 continue;
             }
             let Some(entry) = &product.entry else {
@@ -688,26 +742,15 @@ impl HeaderProducts {
         }
         false
     }
-    /// A Front partition ended: no charge it lent outlives it. A row the
-    /// engine keeps returns its bytes, like every engine-retained signature.
-    pub(crate) fn release_expired_leases(&self) {
-        for cell in self.rows.values() {
-            let Some(product) = cell.get() else {
-                continue;
-            };
-            if let Some(lease) = product
-                ._lease
-                .as_ref()
-                .filter(|lease| lease.source.strong_count() == 0)
-            {
-                drop(
-                    lease
-                        .allowance
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .take(),
-                );
-            }
+    /// A Front partition ended: no charge it lent, to a row or a proof,
+    /// outlives it. The entries stay as engine-retained signatures did.
+    pub(crate) fn release_ended_partition(&self) {
+        let admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ended) = admission
+            .as_ref()
+            .filter(|admission| admission.partition.strong_count() == 0)
+        {
+            ended.release();
         }
     }
     pub(crate) fn pending_recomputes(&self, id: DefId) -> usize {

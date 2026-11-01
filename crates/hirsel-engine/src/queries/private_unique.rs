@@ -85,10 +85,29 @@ impl QueryEngine {
     }
     pub(super) fn private_summary(&self, id: DefId) -> Option<hirsel_types::UniqueSummary> {
         self.private_summaries.get(&id).cloned().or_else(|| {
-            self.header_products
-                .as_ref()
-                .and_then(|headers| headers.summary(id))
+            self.header_products.as_ref().and_then(|headers| {
+                headers.summary(id).unwrap_or_else(|refusal| {
+                    self.record_header_refusal(Some(refusal));
+                    None
+                })
+            })
         })
+    }
+    /// A header or proof read refused while this engine produces a header.
+    /// The producing demand fails with it instead of publishing a conservative row.
+    pub(super) fn record_header_refusal(&self, refusal: Option<QueryError>) {
+        if let Some(refusal) = refusal {
+            self.header_refusal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_or_insert(refusal);
+        }
+    }
+    pub(super) fn take_header_refusal(&self) -> Option<QueryError> {
+        self.header_refusal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
     pub(super) fn attach_private_summary(
         &self,

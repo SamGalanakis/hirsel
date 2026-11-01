@@ -287,6 +287,8 @@ pub struct QueryEngine {
     /// Cleared whenever `signatures` changes outside header adoption.
     adopted_headers: Option<header_products::AdoptedHeaders>,
     header_products: Option<Arc<header_products::HeaderProducts>>,
+    /// A header or module proof read refused while this engine produces a row.
+    header_refusal: std::sync::Mutex<Option<QueryError>>,
     resolutions: Table<Resolution>,
     specialization_dependencies: BTreeMap<DefId, parallel::SpecializationDependencies>,
     checked: Table<TypedBody>,
@@ -687,6 +689,7 @@ impl QueryEngine {
             signatures: Default::default(),
             adopted_headers: None,
             header_products: None,
+            header_refusal: Default::default(),
             resolutions: Default::default(),
             specialization_dependencies: Default::default(),
             checked: Default::default(),

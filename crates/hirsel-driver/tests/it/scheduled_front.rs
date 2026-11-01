@@ -967,8 +967,9 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 .unwrap()
                 .unwrap()
                 .settled();
-            let proof_pin =
-                (mode == 6).then(|| front.module_proof(&definitions[0]).unwrap().unwrap());
+            // Mode 7 pins the proof so the only evictable entry is `a`'s row.
+            let proof_pin = (mode == 6 || mode == 7)
+                .then(|| front.module_proof(&definitions[0]).unwrap().unwrap());
             drop(a);
             struct DependencyFactory(Vec<QueryId>, QueryId);
             struct DependencyTask(Vec<QueryId>, QueryId);
@@ -1291,6 +1292,72 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     "a disabled cache recomputes through the ordinary producer"
                 );
             }
+        }
+        // A header demand refused under pressure is a resource failure, not a
+        // settled row: once eviction frees room the same demand succeeds with
+        // the unpressured signature. A Front that ends while its partition
+        // charges a module proof returns that charge too.
+        let mut tight = None;
+        let mut unpressured = None;
+        for _ in 0..2 {
+            let mut program = COMPILER
+                .with_config(CompileConfig {
+                    store: Arc::new(Transport(MemStore::default())),
+                    hold_bytes: 0,
+                    ..Default::default()
+                })
+                .with_owned_engines()
+                .load_program(&path)
+                .unwrap();
+            let [a, b] = ["a", "b"].map(|name| {
+                let mut definition = program.entry.clone();
+                definition.0.name = name.into();
+                definition
+            });
+            let held = budget.reserved();
+            let reservation = tight.unwrap_or(8 << 20);
+            let front = program
+                .engine
+                .front_body_queries(
+                    &[a.clone(), b.clone()],
+                    weight,
+                    budget.reserve(reservation).unwrap(),
+                    errors(),
+                )
+                .unwrap();
+            let signature = |definition: &hirsel_syntax::DefPath| {
+                front
+                    .signatures()
+                    .signature(hirsel_syntax::DefId::intern(definition))
+                    .unwrap()
+            };
+            let a_pin = signature(&a).unwrap();
+            let proof_pin = front.module_proof(&a).unwrap().unwrap();
+            let Some(expected) = &unpressured else {
+                // Room for `a`, its proof and `b`'s row, less one byte. The
+                // proof seeds what fits; pinned `a` leaves `b` unsettled.
+                unpressured = Some(signature(&b).unwrap());
+                let free = front.admitted_bytes() - front.retained_bytes();
+                tight = Some(reservation - free - 1);
+                continue;
+            };
+            assert!(!front.header_resident(&b));
+            assert!(matches!(signature(&b), Err(QueryError::Operational(_))));
+            assert!(!front.header_resident(&b));
+            // Only the pinned proof could make room; unpinning it lets the
+            // retried demand evict it and settle `b`.
+            drop(proof_pin);
+            assert_eq!(signature(&b).unwrap().fingerprint, expected.fingerprint);
+            assert!(front.header_resident(&b));
+            assert!(!front.module_proof_resident(&a));
+            // Recompute the proof under the partition, then end the Front.
+            // The engine keeps its rows and proof uncharged.
+            drop(signature(&a));
+            drop(front.module_proof(&a).unwrap().unwrap());
+            drop(a_pin);
+            drop(front);
+            assert_eq!(budget.reserved(), held, "no charge outlives its Front");
+            drop(program);
         }
     });
 }

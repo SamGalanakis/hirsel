@@ -465,7 +465,8 @@ its configured writable provider. Missing or stale records are ordinary misses;
 there is no package image codec, admission path or rebuild command. Source bytes
 and placement remain explicit inputs. The compiler parses syntax only on demand.
 
-Stored products carry data, not verification authority. V independently checks
+Stored products carry data, not verification authority; a live `ProductRef`
+value conveys none either. V independently checks
 signatures and artifacts; only verifier-owned receipts bound to the complete
 content, environment and policy can reuse success. A read-only installation or
 copied producer record cannot supply local execution authority. With environment-selected `none@1`, only V may publish accept receipts to its
@@ -974,6 +975,16 @@ cache and retains admitted phase observations. A missing cached record takes
 ordinary recomputation. Check and instance bootstrap consume roots in bounded
 groups. Header slots share the Front allowance and release unpinned signature
 payloads and metadata under pressure. Explicit archives keep their own leases.
+Settled module proofs are entries of the same cache: holding a `ModuleProof`
+pins one, and pressure evicts unpinned proofs, which recompute through the
+ordinary producer on their next demand. A header row and a module proof hold one
+kind of charge: engine-retained (uncharged, never evicted), standalone, or lent
+by a live Front partition. When the partition ends, every charge it lent returns
+exactly once and its entries stay as uncharged engine rows. A resource refusal
+of a header or proof read returns to its demander and is never settled as a row
+or a verdict; a later demand recomputes it. A module proof's semantic failure is
+that module's verdict only. A recomputed signature that disagrees twice with the
+proof that named it is an operational fault, not a diagnostic.
 `RuntimeStats::body_evictions` counts pressure evictions. Freshly encoded
 Lower, native and semantic archives transfer their concrete buffers into their
 existing producer grants, without retaining duplicate request-transport reads.

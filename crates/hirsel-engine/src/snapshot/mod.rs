@@ -438,7 +438,8 @@ impl SignatureSnapshot {
     }
     pub(crate) fn failed_signature_key(&self, d: DefId) -> Option<ContentHash> {
         if let Some(product) = self.headers.as_ref().and_then(|headers| headers.product(d)) {
-            return product.entry.as_ref().map(|entry| {
+            // A refused demand has no failed-signature key of its own.
+            return product.ok()?.entry.as_ref().map(|entry| {
                 ContentHash::of_parts(
                     "hirsel.failed-signature.v1",
                     [
@@ -460,13 +461,13 @@ impl SignatureSnapshot {
     /// The public signature of `d`, or the error normalizing it reported.
     pub fn signature(&self, d: DefId) -> Option<Result<SignatureRef, QueryError>> {
         if let Some(product) = self.headers.as_ref().and_then(|headers| headers.product(d)) {
-            return Some(
+            return Some(product.and_then(|product| {
                 product
                     .result
                     .as_ref()
                     .map(|output| output.value.clone())
-                    .map_err(Clone::clone),
-            );
+                    .map_err(Clone::clone)
+            }));
         }
         self.signatures.get(&d).cloned()
     }
@@ -488,7 +489,7 @@ impl SignatureSnapshot {
         if let Some(view) = self.private.get(&d) {
             return Some(view.clone());
         }
-        let product = self.headers.as_ref()?.product(d)?;
+        let product = self.headers.as_ref()?.product(d)?.ok()?;
         let public = &product.result.as_ref().ok()?.value;
         if public.metadata.visibility != hirsel_syntax::Visibility::PublicOpaque {
             return None;

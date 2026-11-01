@@ -294,6 +294,11 @@ for check, build, run and serve. Path entry points take the same `Policy`, and
 the thread's session registry keeps sessions by working directory, entry and
 policy, so no session is reused under another store choice. A configured
 Compiler is Clone: clones share the selected provider and create separate engines.
+Every thread keeps at least one session: a one-shot path entry point leaves its
+compiled session on the thread after it returns, and a repeated request for the
+same program reuses it. `keep_sessions(limit)` raises the per-thread limit
+(`hirsel serve` keeps several for its clients) and drops the oldest sessions over
+it. `opened()` counts the sessions the path entry points opened on this thread.
 
 `native::receipt_source::factory::NamedGraph::declarations` publishes receipt
 source declarations only after reconstructing the graph against the caller's

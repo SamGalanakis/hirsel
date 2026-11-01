@@ -207,9 +207,9 @@ struct FrontSourceBacking {
 }
 impl Drop for FrontSourceBacking {
     fn drop(&mut self) {
-        // No header lease this partition lent outlives it.
+        // No header charge this partition lent outlives it.
         if let Some(headers) = self.headers.as_ref().and_then(std::sync::Weak::upgrade) {
-            headers.release_expired_leases();
+            headers.release_ended_partition();
         }
     }
 }
@@ -430,7 +430,7 @@ impl FrontBodyQueries {
             .header_products()
             .and_then(|headers| headers.product(input.definition))
         {
-            return product.result.clone();
+            return product?.result.clone();
         }
         match self.snapshot.signature(input.definition) {
             Some(Ok(signature)) => Ok(Arc::new(output(signature.clone()))),
@@ -444,6 +444,7 @@ impl FrontBodyQueries {
             .snapshot
             .header_products()
             .and_then(|headers| headers.product(input.definition))
+            .transpose()?
             && let Some(entry) = &product.entry
         {
             reads.merge(entry.reads());

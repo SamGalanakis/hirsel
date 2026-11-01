@@ -81,8 +81,7 @@ pub struct FrontObservation {
     pub address: hirsel_artifact_store::Address,
     pub action: hirsel_artifact_store::Action,
     domain: Domain,
-    observed: Reference,
-    read_len: usize,
+    reads: Arc<Reads>,
 }
 impl FrontObservation {
     pub fn domain(&self) -> Domain {
@@ -232,6 +231,7 @@ impl QueryFactory for Factory {
         if id != self.0.query {
             return Err(self.0.errors.protocol);
         }
+        self.0.plan.front.compact_retained_reads();
         Ok(Box::new(Task {
             queries: self.0.clone(),
             files: self.0.files.iter().cloned().map(File::new).collect(),
@@ -430,22 +430,19 @@ impl Task {
                             Ok(diagnostics) => {
                                 file.diagnostics.extend(diagnostics);
                                 if let Ok(product) = selected {
-                                    let observed = scheduled_growth::publish_observations(
-                                        &self.queries.records,
-                                        &self.queries.anchors,
-                                        &*self.queries.store,
-                                        &facts.reads,
-                                        self.queries.weight.scratch,
-                                    )
-                                    .ok_or(self.queries.errors.resource)?;
+                                    let observed = self
+                                        .queries
+                                        .plan
+                                        .front
+                                        .retained_reads(cx, &facts.reads)
+                                        .ok_or(self.queries.errors.resource)?;
                                     self.front.push((
                                         path.clone(),
                                         FrontObservation {
                                             address: product.address,
                                             action: product.action,
                                             domain: product.domain(),
-                                            observed,
-                                            read_len: facts.reads.len(),
+                                            reads: observed,
                                         },
                                     ));
                                 }

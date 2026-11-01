@@ -33,16 +33,24 @@ impl Drop for HeaderLease {
     }
 }
 #[derive(Default)]
-struct HeaderSlot(std::sync::Mutex<Option<Arc<HeaderProduct>>>);
+struct HeaderSlot {
+    product: std::sync::Mutex<Option<Arc<HeaderProduct>>>,
+    work: AtomicU64,
+}
 impl HeaderSlot {
     fn get(&self) -> Option<Arc<HeaderProduct>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.product
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
     fn set(&self, product: HeaderProduct) -> Result<(), HeaderProduct> {
-        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = self.product.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_some() {
             return Err(product);
         }
+        self.work
+            .fetch_add(product.graph_work as u64, Ordering::Relaxed);
         *slot = Some(Arc::new(product));
         Ok(())
     }
@@ -83,7 +91,7 @@ pub(crate) struct HeaderProducts {
     rows: hirsel_syntax::DefMap<HeaderSlot>,
     generation: AtomicU64,
     retention: OnceLock<Arc<std::sync::Mutex<u64>>>,
-    source_backing: OnceLock<Arc<dyn Send + Sync>>,
+    source_backing: OnceLock<Weak<dyn Send + Sync>>,
     environment: QueryEnvironment,
     adapters: HeaderPhases,
     sources: SourceMap,
@@ -255,13 +263,17 @@ impl HeaderProducts {
         &self.types
     }
     pub(crate) fn work_snapshot(&self) -> Vec<(DefPath, QueryKind, u64)> {
-        self.completed()
-            .map(|(id, product)| {
-                (
-                    id.path().clone(),
-                    QueryKind::Signature,
-                    product.graph_work as u64,
-                )
+        self.rows
+            .iter()
+            .filter_map(|(id, slot)| {
+                let work = slot.work.load(Ordering::Relaxed);
+                (work != 0
+                    || slot
+                        .product
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .is_some())
+                .then(|| (id.path().clone(), QueryKind::Signature, work))
             })
             .collect()
     }
@@ -409,7 +421,7 @@ impl HeaderProducts {
         let lease = self.retention.get().map(|remaining| HeaderLease {
             remaining: remaining.clone(),
             bytes,
-            _source: self.source_backing.get().cloned(),
+            _source: self.source_backing.get().and_then(Weak::upgrade),
         });
         drop(grant);
         if cell
@@ -437,11 +449,11 @@ impl HeaderProducts {
         self.rows.get(&id)?.get()
     }
     pub(crate) fn configure_source_backing(&self, backing: Arc<dyn Send + Sync>) {
-        let _ = self.source_backing.set(backing);
+        let _ = self.source_backing.set(Arc::downgrade(&backing));
     }
     pub(crate) fn evict(&self) -> bool {
         for cell in self.rows.values() {
-            let mut slot = cell.0.lock().unwrap_or_else(|e| e.into_inner());
+            let mut slot = cell.product.lock().unwrap_or_else(|e| e.into_inner());
             let Some(product) = slot.as_ref() else {
                 continue;
             };
@@ -462,6 +474,16 @@ impl HeaderProducts {
             if Arc::strong_count(output) != 2 || Arc::strong_count(&output.value) != 1 {
                 continue;
             }
+            if entry
+                .products
+                .representation
+                .as_ref()
+                .and_then(|owner| owner.view.get())
+                .is_some_and(|(view, _)| Arc::strong_count(view) != 1)
+            {
+                continue;
+            }
+
             *slot = None;
             return true;
         }

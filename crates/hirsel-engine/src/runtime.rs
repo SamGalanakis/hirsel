@@ -81,7 +81,7 @@ pub trait QueryContext {
     /// and released its raw body. Keep the semantic edge and subscriptions;
     /// only its in-flight body pin ends, until the next read.
     fn release_body(&mut self, _query: QueryId) {}
-    /// Evict the oldest settled, unpinned analyzed or Lower body outside unfinished
+    /// Evict the oldest settled, unpinned Front facts, analyzed or Lower body outside unfinished
     /// roots and active continuations. Producers call this before retrying a
     /// refused admission.
     fn evict_body(&mut self) -> bool {

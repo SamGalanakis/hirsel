@@ -87,16 +87,47 @@ impl ReadPool {
         )?;
         Some((loaned, charge, row_bytes, shared_bytes))
     }
+    pub(crate) fn required_tracked_bytes(&self, reads: &Reads) -> Option<u64> {
+        self.admission(reads)?
+            .1
+            .checked_add(crate::memo::retained_arc_bytes(reads))
+    }
+    pub(crate) fn intern_tracked(
+        &mut self,
+        reads: &Reads,
+        allowance: &mut MemoryReservation,
+        remaining: &mut u64,
+        credit: Arc<std::sync::Mutex<u64>>,
+    ) -> Option<Reads> {
+        self.intern_inner(reads, allowance, remaining, Some(credit))
+    }
     pub(crate) fn intern(
         &mut self,
         reads: &Reads,
         allowance: &mut MemoryReservation,
         remaining: &mut u64,
     ) -> Option<Reads> {
-        if reads.is_empty() {
+        self.intern_inner(reads, allowance, remaining, None)
+    }
+    fn intern_inner(
+        &mut self,
+        reads: &Reads,
+        allowance: &mut MemoryReservation,
+        remaining: &mut u64,
+        credit: Option<Arc<std::sync::Mutex<u64>>>,
+    ) -> Option<Reads> {
+        if reads.is_empty() && credit.is_none() {
             return Some(Reads::empty());
         }
         let (loaned, charge, row_bytes, shared_bytes) = self.admission(reads)?;
+        let wrapper = if credit.is_some() {
+            crate::memo::retained_arc_bytes(reads)
+        } else {
+            0
+        };
+        let loaned = loaned.checked_add(wrapper)?;
+        let charge = charge.checked_add(wrapper)?;
+        let shared_bytes = shared_bytes.checked_add(wrapper)?;
         let after = remaining.checked_sub(charge)?;
         if allowance.bytes() < loaned {
             return None;
@@ -117,6 +148,10 @@ impl ReadPool {
         }
         let shared = Arc::new(SharedRows {
             values: rows.into_boxed_slice(),
+            _credit: credit.map(|remaining| ReadCredit {
+                remaining,
+                bytes: shared_bytes,
+            }),
             _allowance: allowance
                 .split(shared_bytes)
                 .expect("pre-admitted read array"),
@@ -130,9 +165,19 @@ impl ReadPool {
     }
 }
 
+struct ReadCredit {
+    remaining: Arc<std::sync::Mutex<u64>>,
+    bytes: u64,
+}
+impl Drop for ReadCredit {
+    fn drop(&mut self) {
+        *self.remaining.lock().unwrap_or_else(|e| e.into_inner()) += self.bytes;
+    }
+}
 pub(super) struct SharedRows {
     values: Box<[Arc<ChargedRow>]>,
     _allowance: MemoryReservation,
+    _credit: Option<ReadCredit>,
 }
 
 impl std::fmt::Debug for SharedRows {

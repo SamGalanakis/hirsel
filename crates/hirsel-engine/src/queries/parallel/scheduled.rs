@@ -456,14 +456,15 @@ impl FrontBodyQueries {
             return Some(reads.clone());
         };
         let mut pool = pool.lock().unwrap_or_else(|e| e.into_inner());
-        self.make_room(cx, pool.required_bytes(reads)?)?;
+        self.make_room(cx, pool.required_tracked_bytes(reads)?)?;
         let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
         let available = self._allowance.allowance.available_bytes();
         let mut allowance = self._allowance.allowance.take(available)?;
-        Some(Arc::new(pool.intern(
+        Some(Arc::new(pool.intern_tracked(
             reads,
             &mut allowance,
             &mut remaining,
+            self.retention.clone(),
         )?))
     }
     fn pool_completion_reads(

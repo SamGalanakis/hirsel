@@ -54,17 +54,16 @@ impl FrontCheckQueries {
         weight.tree::<DefPath, Arc<Reads>>(front_rows + lower_rows);
         weight.tree::<DefPath, ()>(lower_rows);
         weight.tree::<DefPath, ()>(data.failed_lowered.len());
-        let mut transient = 0;
         for (path, observed) in &data.front {
             weight.path(path);
-            weight.add(crate::memo::retained_arc_bytes(&Reads::empty()) as usize);
+            weight.add(crate::memo::retained_arc_bytes(&*observed.reads) as usize);
             weight.add(
                 observed
-                    .read_len
+                    .reads
+                    .len()
                     .checked_mul(2 * size_of::<(ReadKey, ContentHash)>())
                     .ok_or_else(missing)?,
             );
-            transient = transient.max(observed.observed.len.checked_mul(8).ok_or_else(missing)?);
         }
         for (path, reference) in &data.failed_front {
             weight.path(path);
@@ -107,7 +106,7 @@ impl FrontCheckQueries {
                     .ok_or_else(missing)?,
             );
         }
-        weight.bytes().checked_add(transient).ok_or_else(missing)
+        Ok(weight.bytes())
     }
     /// Scope is minted only for this root's exact completed descriptor. The
     /// caller reserves its inspection buffers separately from producer memory.
@@ -138,18 +137,7 @@ impl FrontCheckQueries {
             _allowance: allowance,
         };
         for (path, observed) in &data.front {
-            let bytes = self
-                .store
-                .get_content(observed.observed)
-                .ok_or_else(missing)?;
-            let reads: Reads = self
-                .records
-                .decode(&self.anchors, &bytes)
-                .ok_or_else(missing)?;
-            if reads.len() != observed.read_len {
-                return Err(missing());
-            }
-            scope.reads.insert(path.clone(), Arc::new(reads));
+            scope.reads.insert(path.clone(), observed.reads.clone());
         }
         for (path, reference) in &data.failed_front {
             let reads = self

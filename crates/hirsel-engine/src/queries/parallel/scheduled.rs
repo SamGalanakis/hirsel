@@ -782,12 +782,13 @@ impl FrontBodyQueries {
         key: Key,
         reference: Option<Reference>,
         action: hirsel_artifact_store::Action,
-        outcome: ModeResult,
-        checked: CheckedProduct,
+        mut outcome: ModeResult,
+        mut checked: CheckedProduct,
         dead_arms: Option<crate::tools::DeadArmUse>,
         table_keys: Option<Arc<crate::table_keys::TableKeyUse>>,
-        memos: Vec<(crate::memo::MemoKey, Arc<Reads>)>,
+        mut memos: Vec<(crate::memo::MemoKey, Arc<Reads>)>,
     ) -> Option<FrontOutcome> {
+        self.pool_completion_reads(cx, &mut outcome, &mut checked, &mut memos)?;
         let backing = self.retain(
             cx,
             &outcome,
@@ -2029,9 +2030,6 @@ impl BodyTask {
                 crate::store::query_action(&input.key, input.key.1, &outcome.reads),
             )
         };
-        queries
-            .pool_completion_reads(cx, &mut outcome, &mut checked, &mut memo_rows)
-            .ok_or(queries.errors.resource)?;
         let cached = queries
             .publish_facts(
                 cx, self.input, record, action, outcome, checked, dead_arms, table_keys, memo_rows,

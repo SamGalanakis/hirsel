@@ -4052,7 +4052,9 @@ References: [`core@1/List`](#def-core_401_2fList), [`core@1/Result`](#def-core_4
 - `pub type cpu.PoolError = CpuPoolError`
 
 Errors returned by core cpu.map_scoped. The operation runs preparation once
-and maps at most 2 * width owned jobs on exactly 1, 4, 8 or 16 fresh workers.
+and maps at most 2 * width owned jobs on exactly width fresh workers,
+for any width from 1 through the granted max_workers. Width 0 returns
+InvalidWidth; a width above the grant returns WidthUnavailable.
 Call the operation directly with locally visible callbacks. Both callbacks
 are closed, sendable and authority-free. Workers join before
 return; results preserve input order. Native replay starts no workers.

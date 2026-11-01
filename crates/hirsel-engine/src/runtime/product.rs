@@ -600,6 +600,82 @@ impl LiveSummaryProduct {
     }
 }
 
+/// The source-growth verdict retains its admitted facets, complete reads and
+/// source owner. Settlement never creates a portable record.
+#[derive(Clone)]
+pub struct LiveGrowthProduct(Arc<Owner<Arc<crate::source_components::SourceGrowthData>>>);
+pub const LIVE_GROWTH: Domain = Domain {
+    kind: 0x4600_0009,
+    schema: 4,
+};
+impl LiveGrowthProduct {
+    pub(crate) fn value_bytes(value: &crate::source_components::SourceGrowthData) -> Option<u64> {
+        let mut weight = Weight::default();
+        weight.add(retained_arc_bytes(value) as usize);
+        // Facets have their own exact charge in the same growth output pool.
+        weight.arc(&value.diagnostics, |w, diagnostics| {
+            w.vec(diagnostics, |w, diagnostic| w.diagnostic(diagnostic));
+        });
+        weight.reads(&value.reads);
+        weight
+            .bytes
+            .checked_add(owner_bytes::<Arc<crate::source_components::SourceGrowthData>>())
+            .and_then(|n| n.checked_add(ProductSource::metadata_bytes()))
+    }
+    pub(crate) fn new(
+        identity: (Address, Action),
+        value: Arc<crate::source_components::SourceGrowthData>,
+        source: ProductSourceInput,
+        allowance: &mut MemoryReservation,
+    ) -> Option<Self> {
+        let mut reservation = allowance.split(Self::value_bytes(&value)?)?;
+        let source = source.admit(&mut reservation)?;
+        Some(Self(Arc::new(Owner {
+            address: identity.0,
+            action: identity.1,
+            domain: LIVE_GROWTH,
+            value,
+            source,
+            archive: Mutex::new(None),
+            _reservation: ValueAdmission::Owned(reservation),
+        })))
+    }
+    pub(crate) fn value(&self) -> &Arc<crate::source_components::SourceGrowthData> {
+        &self.0.value
+    }
+    pub fn address(&self) -> Address {
+        self.0.address
+    }
+    pub fn action(&self) -> Action {
+        self.0.action
+    }
+    pub fn domain(&self) -> Domain {
+        self.0.domain
+    }
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+    pub(super) fn archive_with(
+        &self,
+        admission: ArchiveAdmission<'_>,
+    ) -> io::Result<ProductArchive> {
+        self.0.archive_with(admission, |value, source, grant| {
+            value
+                .reads
+                .encoding_working_bytes()
+                .and_then(|working| {
+                    source.records().encode_with_admission(
+                        source.context(),
+                        &**value,
+                        grant,
+                        working,
+                    )
+                })
+                .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))
+        })
+    }
+}
+
 /// The ordinary Lower value and complete source observations. Acceptance
 /// remains in its existing verifier-owned product, outside facet equality.
 #[derive(Clone)]
@@ -1000,6 +1076,33 @@ mod tests {
         );
         ProductSource::prepare(context, records, backing).unwrap()
     }
+    fn growth_fixture() -> (
+        Arc<crate::source_components::SourceGrowthData>,
+        NativeRecordContext,
+    ) {
+        let (_, source) = fixture();
+        let budget = ProcessBudget::new(1 << 20);
+        let pool =
+            crate::runtime::MemoryReservationPool::new(budget.reserve(budget.limit()).unwrap())
+                .ok()
+                .unwrap();
+        let facets = crate::SourceGrowthProducer {
+            source: &source,
+            output_pool: &pool,
+            namespace: descriptor().0,
+            scratch: 1 << 20,
+        }
+        .settle(Vec::new())
+        .unwrap();
+        (
+            Arc::new(crate::source_components::SourceGrowthData {
+                facets: Arc::new(facets),
+                diagnostics: Arc::new(Vec::new()),
+                reads: Arc::new(Reads::empty()),
+            }),
+            source,
+        )
+    }
     #[test]
     fn live_summary_exact_admission_keeps_the_producer_until_eviction_and_last_view_drop() {
         let (value, source) = fixture();
@@ -1038,6 +1141,42 @@ mod tests {
         assert!(producer.upgrade().is_some());
         assert_eq!(budget.reserved(), bytes + 17);
         assert_eq!(view.value().definition, key.def);
+        drop(view);
+        assert!(producer.upgrade().is_none());
+        assert_eq!(budget.reserved(), 0);
+
+        let (value, source) = growth_fixture();
+        let bytes = LiveGrowthProduct::value_bytes(&value).unwrap();
+        let budget = ProcessBudget::new(bytes * 2 + 17);
+        let backing = Arc::new(budget.reserve(17).unwrap());
+        let producer = Arc::downgrade(&backing);
+        let mut short = budget.reserve(bytes - 1).unwrap();
+        assert!(
+            LiveGrowthProduct::new(
+                descriptor(),
+                value.clone(),
+                product_source(source.clone(), backing.clone()),
+                &mut short
+            )
+            .is_none()
+        );
+        assert_eq!(short.bytes(), bytes - 1);
+        drop(short);
+        let mut exact = budget.reserve(bytes).unwrap();
+        let product = LiveGrowthProduct::new(
+            descriptor(),
+            value,
+            product_source(source, backing.clone()),
+            &mut exact,
+        )
+        .unwrap();
+        assert_eq!(exact.bytes(), 0);
+        let view = product.clone();
+        drop(backing);
+        drop(product);
+        assert!(producer.upgrade().is_some());
+        assert_eq!(budget.reserved(), bytes + 17);
+        assert!(view.value().facets.components.is_empty());
         drop(view);
         assert!(producer.upgrade().is_none());
         assert_eq!(budget.reserved(), 0);
@@ -1135,6 +1274,76 @@ mod tests {
         drop(product);
         assert_eq!(budget.reserved(), archive.retained_bytes());
         assert_eq!(archive.bytes(), b"complete");
+        drop(archive);
+        assert_eq!(budget.reserved(), 0);
+
+        let (value, source) = growth_fixture();
+        let budget = ProcessBudget::new(1 << 20);
+        let backing = Arc::new(budget.reserve(1).unwrap());
+        let mut allowance = budget
+            .reserve(LiveGrowthProduct::value_bytes(&value).unwrap())
+            .unwrap();
+        let product = LiveGrowthProduct::new(
+            descriptor(),
+            value,
+            product_source(source.clone(), backing),
+            &mut allowance,
+        )
+        .unwrap();
+        assert!(product.archive_with(ArchiveAdmission::Retained).is_err());
+        let required = archive_bytes(8).unwrap();
+        let mut short = budget.reserve(required - 1).unwrap();
+        assert!(
+            product
+                .0
+                .archive(&mut short, required, |_, _, _| panic!(
+                    "short growth grant encoded"
+                ))
+                .is_err()
+        );
+        assert_eq!(short.bytes(), required - 1);
+        drop(short);
+        let mut scratch = budget.reserve(required).unwrap();
+        assert!(
+            product
+                .0
+                .archive(&mut scratch, required, |_, _, _| Err(io::Error::other(
+                    "growth codec refused"
+                )))
+                .is_err()
+        );
+        assert_eq!(scratch.bytes(), required);
+        assert!(product.archive_with(ArchiveAdmission::Retained).is_err());
+        let mut working = budget.reserve(64 << 10).unwrap();
+        let archive = product
+            .archive_with(ArchiveAdmission::Materialize {
+                scratch: &mut working,
+                working_bytes: 64 << 10,
+            })
+            .unwrap();
+        let records = NativeRecords::new(
+            source.record_types().clone(),
+            Arc::new(crate::store::MemStore::default()),
+        );
+        let decoded: (
+            Vec<(Vec<hirsel_syntax::DefId>, Vec<Span>)>,
+            Vec<hirsel_diag::Diagnostic>,
+            Reads,
+        ) = records.decode(&source, archive.bytes()).unwrap();
+        assert!(decoded.0.is_empty());
+        assert!(decoded.1.is_empty());
+        assert!(decoded.2.is_empty());
+        drop(working);
+        drop(scratch);
+        assert_eq!(
+            product
+                .archive_with(ArchiveAdmission::Retained)
+                .unwrap()
+                .reference(),
+            archive.reference()
+        );
+        drop(product);
+        assert_eq!(budget.reserved(), archive.retained_bytes());
         drop(archive);
         assert_eq!(budget.reserved(), 0);
     }

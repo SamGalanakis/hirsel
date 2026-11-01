@@ -1,10 +1,11 @@
 //! Source-only call SCCs and independently addressed settled GEN-5 facets.
 //! Membership uses hirsel-graph's iterative Tarjan walk, also used by the
 //! scalar source oracle. Native instance/layout graphs never select roots.
-use crate::store::{Action, Address, Domain, Reference, ResultStore};
+use crate::store::{Action, Address, Reference};
 use crate::{
-    CheckedSummary, NativeRecordContext, NativeRecordSource, NativeRecords, memo::Reads,
-    runtime::ProductRef,
+    CheckedSummary, NativeRecordContext, NativeRecordSource,
+    memo::Reads,
+    runtime::{MemoryReservation, ProductRef},
 };
 use hirsel_span::Span;
 use hirsel_syntax::{ContentHash, DefId};
@@ -13,32 +14,41 @@ use std::{
     sync::Arc,
 };
 
-const MEMBERSHIP: Domain = Domain {
-    kind: 0x4600_0021,
-    schema: 1,
-};
-const SETTLED: Domain = Domain {
-    kind: 0x4600_0022,
-    schema: 1,
-};
+/// Content-derived identity of a live source facet. Its output observes only
+/// the settled value; changed actions with equal outputs stop propagation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceGrowthIdentity {
+    pub address: Address,
+    pub action: Action,
+    pub output: ContentHash,
+}
 
-/// Only the settled output is an observation for downstream consumers. The
-/// action can change while this record remains equal.
-#[derive(Clone, Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct SourceGrowthComponent {
-    pub product: ProductRef,
+    #[serde(skip)]
+    pub product: SourceGrowthIdentity,
     pub members: Box<[DefId]>,
     pub growing: Box<[Span]>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize)]
 pub struct SourceGrowthFacets {
-    pub membership: ProductRef,
+    #[serde(skip)]
+    pub membership: SourceGrowthIdentity,
     pub components: Vec<SourceGrowthComponent>,
+    #[serde(skip)]
+    _reservation: MemoryReservation,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct SourceGrowthData {
+    pub facets: Arc<SourceGrowthFacets>,
+    pub diagnostics: Arc<Vec<hirsel_diag::Diagnostic>>,
+    pub reads: Arc<Reads>,
 }
 
 /// Accepted typed call/growth facts retained by the admitted source task.
-/// Durable component publication encodes their complete observations together.
+/// Component actions bind their complete observations without an archive.
 pub struct SourceGrowthFact {
     owner: DefId,
     calls: Box<[DefId]>,
@@ -74,10 +84,8 @@ impl SourceGrowthFact {
 /// context and an environment/root namespace. Every required root must contribute
 /// a settled checked summary before `settle` is used as a program verdict.
 pub struct SourceGrowthProducer<'a> {
-    pub records: &'a NativeRecords,
     pub source: &'a NativeRecordContext,
-    pub store: &'a dyn ResultStore,
-    pub archive_pool: &'a crate::runtime::MemoryReservationPool,
+    pub output_pool: &'a crate::runtime::MemoryReservationPool,
     pub namespace: Address,
     pub scratch: u64,
 }
@@ -151,9 +159,17 @@ impl SourceGrowthProducer<'_> {
         })
     }
 
-    /// Settle every source call SCC and publish only its coarse durable facet.
-    pub fn settle(&self, facts: &[SourceGrowthFact]) -> Option<SourceGrowthFacets> {
-        let mut facts: Vec<_> = facts.iter().collect();
+    /// Consume the accepted facts and settle source call SCCs into one admitted
+    /// live facet owner. No store or archive participates in local acceptance.
+    pub fn settle(&self, mut facts: Vec<SourceGrowthFact>) -> Option<SourceGrowthFacets> {
+        let spare = facts
+            .capacity()
+            .checked_sub(facts.len())?
+            .checked_mul(std::mem::size_of::<SourceGrowthFact>())?;
+        let fact_bytes = facts
+            .iter()
+            .try_fold(spare as u64, |n, f| n.checked_add(f.input_bytes()))?;
+        let mut fact_reservation = self.output_pool.take(fact_bytes)?;
         facts.sort_by_key(|fact| (fact.owner, fact.definition.0.0));
         let mut nodes = BTreeSet::new();
         for node in facts
@@ -164,11 +180,6 @@ impl SourceGrowthProducer<'_> {
             if !nodes.contains(&node) {
                 let mut weight = crate::NativeMetadataWeight::default();
                 weight.tree::<DefId, ()>(nodes.len().checked_add(1)?);
-                weight.add(
-                    facts
-                        .len()
-                        .checked_mul(std::mem::size_of::<&SourceGrowthFact>())?,
-                );
                 if weight.bytes() > self.scratch {
                     return None;
                 }
@@ -187,8 +198,7 @@ impl SourceGrowthProducer<'_> {
         for fact in &facts {
             graph[numbers[&fact.owner]].extend(fact.calls.iter().map(|id| numbers[id]));
         }
-        // Tarjan emits dependency order. Persist path-sorted membership so
-        // traversal and completion order cannot change addresses or outputs.
+        // hirsel-graph lib.rs:170, the existing iterative Tarjan implementation.
         let mut membership: Vec<Vec<DefId>> = hirsel_graph::components(&graph)
             .into_iter()
             .map(|members| members.into_iter().map(|i| nodes[i]).collect())
@@ -197,38 +207,58 @@ impl SourceGrowthProducer<'_> {
         drop(graph);
         drop(numbers);
         drop(nodes);
-        let topology = self.encode(
-            &facts
-                .iter()
-                .map(|fact| (fact.owner, &fact.calls))
-                .collect::<Vec<_>>(),
-        )?;
-        let address = Address(ContentHash::of_parts(
-            "hirsel.source-growth.membership.address.v1",
-            [self.namespace.0.0.as_slice()],
-        ));
-        let action = Action(ContentHash::of_parts(
-            "hirsel.source-growth.membership.action.v1",
-            [topology.as_slice()],
-        ));
-        let membership_product =
-            self.publish(address, action, MEMBERSHIP, self.encode(&membership)?)?;
+        let topology: Vec<_> = facts.iter().map(|fact| (fact.owner, &fact.calls)).collect();
+        let membership_product = SourceGrowthIdentity {
+            address: Address(ContentHash::of_parts(
+                "hirsel.source-growth.membership.address.v1",
+                [self.namespace.0.0.as_slice()],
+            )),
+            action: Action(hash_value(
+                "hirsel.source-growth.membership.action.v1",
+                &topology,
+            )?),
+            output: hash_value("hirsel.source-growth.membership.value.v1", &membership)?,
+        };
         drop(topology);
-        let mut by_owner: BTreeMap<DefId, Vec<&SourceGrowthFact>> = BTreeMap::new();
-        for fact in facts {
-            by_owner.entry(fact.owner).or_default().push(fact);
+        // Move off the all-facts vector before solving any components, so its
+        // allocation is actually freed. Only compact SCC membership remains.
+        let mut counts = BTreeMap::<DefId, usize>::new();
+        for fact in &facts {
+            *counts.entry(fact.owner).or_default() += 1;
         }
-        let mut components = Vec::with_capacity(membership.len());
+        let mut by_owner: BTreeMap<DefId, Vec<SourceGrowthFact>> = counts
+            .into_iter()
+            .map(|(owner, count)| (owner, Vec::with_capacity(count)))
+            .collect();
+        for fact in facts {
+            by_owner.get_mut(&fact.owner)?.push(fact);
+        }
+        let mut by_owner: BTreeMap<_, _> = by_owner
+            .into_iter()
+            .map(|(id, facts)| {
+                let facts = facts.into_boxed_slice();
+                let bytes = facts.iter().map(SourceGrowthFact::input_bytes).sum();
+                Some((id, (facts, fact_reservation.split(bytes)?)))
+            })
+            .collect::<Option<_>>()?;
+        drop(fact_reservation);
+        let component_count = membership.len();
+        let base = std::mem::size_of::<SourceGrowthFacets>() + 2 * std::mem::size_of::<usize>();
+        let mut reservation = self.output_pool.take(base as u64)?;
+        let mut components: Vec<SourceGrowthComponent> = Vec::new();
         for members in membership {
-            let member_bytes = self.encode(&members)?;
+            let member_hash = hash_value("hirsel.source-growth.members.v1", &members)?;
             let address = Address(ContentHash::of_parts(
                 "hirsel.source-growth.component.address.v1",
-                [self.namespace.0.0.as_slice(), member_bytes.as_slice()],
+                [self.namespace.0.0.as_slice(), member_hash.0.as_slice()],
             ));
-            let observations: Vec<_> = members
+            let selected_facts: Vec<_> = members
                 .iter()
-                .filter_map(|id| by_owner.get(id))
-                .flatten()
+                .filter_map(|id| by_owner.remove(id))
+                .collect();
+            let observations: Vec<_> = selected_facts
+                .iter()
+                .flat_map(|(facts, _)| facts.iter())
                 .map(|fact| {
                     (
                         fact.definition.0,
@@ -240,66 +270,108 @@ impl SourceGrowthProducer<'_> {
                     )
                 })
                 .collect();
+            let observed = hash_source_value(
+                self.source,
+                "hirsel.source-growth.observations.v1",
+                &observations,
+            )?;
             let action = Action(ContentHash::of_parts(
                 "hirsel.source-growth.component.action.v4",
-                [
-                    member_bytes.as_slice(),
-                    self.encode(&observations)?.as_slice(),
-                ],
+                [member_hash.0.as_slice(), observed.0.as_slice()],
             ));
+            drop(observations);
             let selected: BTreeSet<_> = members.iter().copied().collect();
-            let edges: Vec<_> = members
+            let edges: Vec<_> = selected_facts
                 .iter()
-                .filter_map(|id| by_owner.get(id))
-                .flatten()
+                .flat_map(|(facts, _)| facts.iter())
                 .flat_map(|fact| fact.summary.growth.edges.iter())
                 .filter(|edge| selected.contains(&edge.1.0))
                 .copied()
                 .collect();
-            // An ordinary store association supplies integrity, not source
-            // validation authority. Settle current accepted equations before
-            // publishing or backdating a verdict, including on a store hit.
             let mut growing = crate::growing_sites(&edges);
             growing.sort_by_cached_key(|site| {
                 (self.source.record_owner(site.anchor), site.start, site.end)
             });
+            drop(edges);
+            // Drop the physical facts and their matching charge before admitting
+            // this component's owned members and growing sites.
+            drop(selected_facts);
+            let members = members.into_boxed_slice();
             let growing = growing.into_boxed_slice();
-            let bytes = self.encode(&(&members, &growing))?;
-            let product = self.publish(address, action, SETTLED, bytes)?;
+            let output = hash_source_value(
+                self.source,
+                "hirsel.source-growth.component.value.v1",
+                &(&members, &growing),
+            )?;
+            let next_capacity = if components.len() == components.capacity() {
+                components
+                    .capacity()
+                    .max(2)
+                    .checked_mul(2)?
+                    .min(component_count)
+            } else {
+                components.capacity()
+            };
+            let slots = next_capacity.checked_sub(components.capacity())?;
+            let bytes = std::mem::size_of_val(&*members)
+                .checked_add(std::mem::size_of_val(&*growing))?
+                .checked_add(slots.checked_mul(std::mem::size_of::<SourceGrowthComponent>())?)?;
+            reservation
+                .join(self.output_pool.take(bytes as u64)?)
+                .ok()?;
+            // Admit new vector backing only as consumed facts make room. Bound
+            // its final capacity by the known SCC count rather than doubling
+            // the retained allocation for a non-power-of-two root set.
+            components.try_reserve_exact(slots).ok()?;
             components.push(SourceGrowthComponent {
-                product,
-                members: members.into(),
+                product: SourceGrowthIdentity {
+                    address,
+                    action,
+                    output,
+                },
+                members,
                 growing,
             });
         }
         Some(SourceGrowthFacets {
             membership: membership_product,
             components,
+            _reservation: reservation,
         })
     }
+}
 
-    fn encode(&self, value: &impl serde::Serialize) -> Option<Vec<u8>> {
-        let bytes = self.records.encode(self.source, value)?;
-        (bytes.len() as u64 <= self.scratch).then_some(bytes)
-    }
-
-    fn publish(
-        &self,
-        address: Address,
-        action: Action,
-        domain: Domain,
-        bytes: Vec<u8>,
-    ) -> Option<ProductRef> {
-        let record = self.store.put_content(domain, &bytes)?;
-        let product = ProductRef::import_archive(
-            address,
-            action,
-            crate::runtime::ProductArchive::from_encoded_in(record, bytes, self.archive_pool)
-                .ok()?,
-        );
-        self.store.associate_product(address, action, record);
-        Some(product)
-    }
+/// Bincode's ordinary fixed-width serialization streams straight into SHA-256.
+/// Source spans below name lexical owners, never process-local anchor numbers.
+pub(crate) fn hash_value(domain: &str, value: &impl serde::Serialize) -> Option<ContentHash> {
+    let size = bincode::serialized_size(value).ok()?;
+    ContentHash::of_stream(domain, size, |writer| {
+        bincode::serialize_into(writer, value).map_err(std::io::Error::other)
+    })
+    .ok()
+}
+pub(crate) fn hash_source_value(
+    source: &NativeRecordContext,
+    domain: &str,
+    value: &impl serde::Serialize,
+) -> Option<ContentHash> {
+    let mut codec = hirsel_span::AnchorCodec::Collect(Vec::new());
+    hirsel_span::with_anchor_codec(&mut codec, || bincode::serialized_size(value)).ok()?;
+    let hirsel_span::AnchorCodec::Collect(anchors) = codec else {
+        unreachable!()
+    };
+    let owners = anchors
+        .iter()
+        .map(|anchor| source.record_owner(*anchor))
+        .collect::<Option<Vec<_>>>()?;
+    let mut codec = hirsel_span::AnchorCodec::Encode(
+        anchors
+            .into_iter()
+            .enumerate()
+            .map(|(i, anchor)| (anchor, i as u32 + 1))
+            .collect(),
+    );
+    hirsel_span::with_anchor_codec(&mut codec, || hash_value(domain, &(&owners, value)))
 }
 
 // Bounds the live containers of hirsel-graph's iterative Tarjan walk at
@@ -316,6 +388,8 @@ fn graph_bytes(nodes: usize, edges: usize, facts: usize) -> Option<u64> {
     weight.tree::<DefId, usize>(nodes);
     weight.tree::<usize, (usize, usize)>(nodes);
     weight.tree::<usize, ()>(nodes);
+    weight.tree::<DefId, Vec<SourceGrowthFact>>(facts);
+    weight.add(facts.checked_mul(std::mem::size_of::<SourceGrowthFact>())?);
     for (count, size) in [
         (nodes, std::mem::size_of::<DefId>()),
         (nodes, std::mem::size_of::<Vec<usize>>()),

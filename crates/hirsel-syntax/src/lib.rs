@@ -38,6 +38,46 @@ impl ContentHash {
     pub fn of_bytes(bytes: &[u8]) -> Self {
         Self::of_parts("hirsel.text.v1", [bytes])
     }
+    /// Hash one length-framed canonical stream without retaining encoded bytes.
+    /// The caller supplies its exact length; a short or long stream is refused.
+    pub fn of_stream(
+        domain: &str,
+        length: u64,
+        emit: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
+    ) -> std::io::Result<Self> {
+        struct Stream {
+            hash: Sha256,
+            remaining: u64,
+        }
+        impl std::io::Write for Stream {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.remaining = self
+                    .remaining
+                    .checked_sub(bytes.len() as u64)
+                    .ok_or_else(|| std::io::Error::other("hash stream exceeds its length"))?;
+                self.hash.update(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut hash = Sha256::new();
+        hash.update((domain.len() as u64).to_le_bytes());
+        hash.update(domain.as_bytes());
+        hash.update(length.to_le_bytes());
+        let mut stream = Stream {
+            hash,
+            remaining: length,
+        };
+        emit(&mut stream)?;
+        if stream.remaining != 0 {
+            return Err(std::io::Error::other(
+                "hash stream is shorter than its length",
+            ));
+        }
+        Ok(Self(stream.hash.finalize().into()))
+    }
     pub fn of_parts<'a>(domain: &'a str, parts: impl IntoIterator<Item = &'a [u8]>) -> Self {
         let mut hash = Sha256::new();
         for part in std::iter::once(domain.as_bytes()).chain(parts) {
@@ -1739,6 +1779,12 @@ mod tests {
         ));
         assert_eq!(tree.expressions.len(), 2);
         assert_ne!(path("a").fingerprint(), path("b").fingerprint());
+        assert_eq!(
+            ContentHash::of_stream("test", 3, |writer| writer.write_all(b"abc")).unwrap(),
+            ContentHash::of_parts("test", [b"abc".as_slice()])
+        );
+        assert!(ContentHash::of_stream("test", 2, |writer| writer.write_all(b"abc")).is_err());
+        assert!(ContentHash::of_stream("test", 4, |writer| writer.write_all(b"abc")).is_err());
         assert_ne!(
             ContentHash::of_parts("test", [b"ab".as_slice(), b"c"]),
             ContentHash::of_parts("test", [b"a".as_slice(), b"bc"])

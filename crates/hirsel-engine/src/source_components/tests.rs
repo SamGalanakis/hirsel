@@ -1,4 +1,5 @@
 use super::*;
+use crate::store::Domain;
 use crate::{DefinitionSummary, GenericParameterRef, ParameterGrowth, QueryEngine, ReadsBuilder};
 use hirsel_syntax::LexicalOwner;
 use hirsel_types::{NameSite, TypeParamId, TypeParameterRef};
@@ -8,14 +9,11 @@ const SELECTED: Domain = Domain {
     schema: 1,
 };
 
-fn archive_reference(product: &ProductRef) -> Reference {
-    product
-        .archive(crate::runtime::ArchiveAdmission::Retained)
-        .unwrap()
-        .reference()
+fn output(product: &SourceGrowthIdentity) -> ContentHash {
+    product.output
 }
 
-fn archive_pool() -> crate::runtime::MemoryReservationPool {
+fn output_pool() -> crate::runtime::MemoryReservationPool {
     let budget = crate::runtime::ProcessBudget::new(64 << 20);
     crate::runtime::MemoryReservationPool::new(budget.reserve(64 << 20).unwrap())
         .ok()
@@ -76,18 +74,11 @@ fn summary(owner: DefId, edges: Vec<crate::GrowthEdge>) -> Arc<CheckedSummary> {
 
 #[test]
 fn equal_settled_component_stops_changed_member_and_preserves_unrelated_outputs() {
-    let (engine, source, ids, sites) = context();
-    let store = crate::store::MemStore::default();
-    let pool = archive_pool();
-    let records = NativeRecords::new(
-        engine.types().clone(),
-        Arc::new(crate::store::MemStore::default()),
-    );
+    let (_engine, source, ids, sites) = context();
+    let pool = output_pool();
     let producer = SourceGrowthProducer {
-        records: &records,
         source: &source,
-        store: &store,
-        archive_pool: &pool,
+        output_pool: &pool,
         namespace: Address(ContentHash::of_bytes(b"source components")),
         scratch: 8 << 20,
     };
@@ -131,19 +122,16 @@ fn equal_settled_component_stops_changed_member_and_preserves_unrelated_outputs(
                 .unwrap(),
         ]
     };
-    let first = producer.settle(&make(false, false)).unwrap();
-    let changed = producer.settle(&make(true, false)).unwrap();
-    assert_eq!(
-        archive_reference(&first.membership),
-        archive_reference(&changed.membership)
-    );
+    let first = producer.settle(make(false, false)).unwrap();
+    let changed = producer.settle(make(true, false)).unwrap();
+    assert_eq!(output(&first.membership), output(&changed.membership));
     assert_ne!(
         first.components[0].product.action,
         changed.components[0].product.action
     );
     assert_eq!(
-        archive_reference(&first.components[0].product),
-        archive_reference(&changed.components[0].product),
+        output(&first.components[0].product),
+        output(&changed.components[0].product),
         "the settled verdict is the exact consumer cutoff even when its action changed"
     );
     assert_eq!(first.components[1].product, changed.components[1].product);
@@ -155,9 +143,9 @@ fn equal_settled_component_stops_changed_member_and_preserves_unrelated_outputs(
         Ok(Arc::new(())),
         Arc::new(reads.clone()),
         crate::memo::Durability::Low,
-        Some(crate::summary::SettledSummary::Test(
-            archive_reference(&first.components[0].product).output.0,
-        )),
+        Some(crate::summary::SettledSummary::Test(output(
+            &first.components[0].product,
+        ))),
     );
     let mut edits = crate::memo::ChangeSet::default();
     edits.text(ids[0], crate::memo::Durability::Low);
@@ -168,23 +156,23 @@ fn equal_settled_component_stops_changed_member_and_preserves_unrelated_outputs(
         Ok(Arc::new(())),
         Arc::new(reads.clone()),
         crate::memo::Durability::Low,
-        Some(crate::summary::SettledSummary::Test(
-            archive_reference(&changed.components[0].product).output.0,
-        )),
+        Some(crate::summary::SettledSummary::Test(output(
+            &changed.components[0].product,
+        ))),
     );
     assert_eq!(
         original.changed_at, equal.changed_at,
         "an actual settled facet backdates across the changed member"
     );
-    let rejected = producer.settle(&make(true, true)).unwrap();
+    let rejected = producer.settle(make(true, true)).unwrap();
     assert_ne!(
-        archive_reference(&changed.components[0].product),
-        archive_reference(&rejected.components[0].product)
+        output(&changed.components[0].product),
+        output(&rejected.components[0].product)
     );
     assert_eq!(&*rejected.components[0].growing, &[sites[0]]);
     let mut reordered = make(true, true);
     reordered.reverse();
-    let reordered = producer.settle(&reordered).unwrap();
+    let reordered = producer.settle(reordered).unwrap();
     assert_eq!(reordered.membership, rejected.membership);
     for (a, b) in reordered.components.iter().zip(&rejected.components) {
         assert_eq!(a.product, b.product);
@@ -192,19 +180,12 @@ fn equal_settled_component_stops_changed_member_and_preserves_unrelated_outputs(
 }
 
 #[test]
-fn changed_observations_are_republished_before_equal_fact_cutoff() {
-    let (engine, source, ids, _) = context();
-    let store = crate::store::MemStore::default();
-    let pool = archive_pool();
-    let records = NativeRecords::new(
-        engine.types().clone(),
-        Arc::new(crate::store::MemStore::default()),
-    );
+fn changed_observations_bind_live_actions_before_equal_fact_cutoff() {
+    let (_engine, source, ids, _) = context();
+    let pool = output_pool();
     let producer = SourceGrowthProducer {
-        records: &records,
         source: &source,
-        store: &store,
-        archive_pool: &pool,
+        output_pool: &pool,
         namespace: Address(ContentHash::of_bytes(b"observations")),
         scratch: 8 << 20,
     };
@@ -236,37 +217,27 @@ fn changed_observations_are_republished_before_equal_fact_cutoff() {
                 )
                 .unwrap()
         };
-        let before = store.len();
         let a = make(b"before");
         let b = make(b"after");
-        assert_eq!(store.len(), before, "typed facts do not publish records");
         assert_ne!(a.observed, b.observed);
         assert_eq!(a.calls, b.calls);
         assert_eq!(a.summary.growth, b.summary.growth);
-        let a = producer.settle(&[a]).unwrap();
-        let b = producer.settle(&[b]).unwrap();
+        let a = producer.settle(vec![a]).unwrap();
+        let b = producer.settle(vec![b]).unwrap();
         let a = &a.components[0].product;
         let b = &b.components[0].product;
         assert_ne!(a.action, b.action);
-        assert_eq!(archive_reference(a), archive_reference(b));
-        assert_eq!(store.lookup_product(b.address).unwrap().action, b.action);
+        assert_eq!(output(a), output(b));
     }
 }
 
 #[test]
 fn independently_selected_roots_sharing_a_lexical_owner_all_contribute() {
-    let (engine, source, ids, sites) = context();
-    let store = crate::store::MemStore::default();
-    let pool = archive_pool();
-    let records = NativeRecords::new(
-        engine.types().clone(),
-        Arc::new(crate::store::MemStore::default()),
-    );
+    let (_engine, source, ids, sites) = context();
+    let pool = output_pool();
     let producer = SourceGrowthProducer {
-        records: &records,
         source: &source,
-        store: &store,
-        archive_pool: &pool,
+        output_pool: &pool,
         namespace: Address(ContentHash::of_bytes(b"shared lexical owner")),
         scratch: 8 << 20,
     };
@@ -291,33 +262,41 @@ fn independently_selected_roots_sharing_a_lexical_owner_all_contribute() {
             selected,
         )
         .unwrap();
+    // The former store-poisoning vector now has no archive lookup path. Keep
+    // its single-root source verdict in the live producer law.
+    let single = producer
+        .fact(
+            Address(ids[0].path().fingerprint()),
+            summary(
+                ids[0],
+                vec![(parameter(ids[0]), parameter(ids[0]), true, sites[0])],
+            ),
+            &reads,
+            selected,
+        )
+        .unwrap();
+    let single = producer.settle(vec![single]).unwrap();
+    assert_eq!(&*single.components[0].growing, &[sites[0]]);
     assert_ne!(a.definition, b.definition);
-    let facets = producer.settle(&[a, b]).unwrap();
+    let facets = producer.settle(vec![a, b]).unwrap();
     assert_eq!(facets.components.len(), 1);
     assert_eq!(&*facets.components[0].growing, &[sites[0]]);
     let bounded = SourceGrowthProducer {
         scratch: 1,
         ..producer
     };
-    assert!(bounded.settle(&[]).is_none());
+    assert!(bounded.settle(vec![]).is_none());
 }
 
 #[test]
-fn reordered_sources_preserve_canonical_settled_component_bytes() {
+fn reordered_sources_preserve_canonical_settled_component_values() {
     let mut previous = None;
     for text in ["fn a(){}\nfn b(){}\n", "fn b(){}\nfn a(){}\n"] {
-        let (engine, source, ids, sites) = context_with(text);
-        let store = crate::store::MemStore::default();
-        let pool = archive_pool();
-        let records = NativeRecords::new(
-            engine.types().clone(),
-            Arc::new(crate::store::MemStore::default()),
-        );
+        let (_engine, source, ids, sites) = context_with(text);
+        let pool = output_pool();
         let producer = SourceGrowthProducer {
-            records: &records,
             source: &source,
-            store: &store,
-            archive_pool: &pool,
+            output_pool: &pool,
             namespace: Address(ContentHash::of_bytes(b"canonical source order")),
             scratch: 8 << 20,
         };
@@ -338,7 +317,7 @@ fn reordered_sources_preserve_canonical_settled_component_bytes() {
                     .unwrap()
             })
             .collect();
-        let facets = producer.settle(&facts).unwrap();
+        let facets = producer.settle(facts).unwrap();
         assert_eq!(facets.components.len(), 1);
         let component = &facets.components[0];
         let owners: Vec<_> = component
@@ -348,56 +327,8 @@ fn reordered_sources_preserve_canonical_settled_component_bytes() {
             .collect();
         assert_eq!(owners, ["a", "b"]);
         if let Some(previous) = previous {
-            assert_eq!(archive_reference(&component.product), previous);
+            assert_eq!(output(&component.product), previous);
         }
-        previous = Some(archive_reference(&component.product));
+        previous = Some(output(&component.product));
     }
-}
-
-#[test]
-fn stored_component_bytes_cannot_silence_an_unexecuted_growing_cycle() {
-    let (engine, source, ids, sites) = context();
-    let store = crate::store::MemStore::default();
-    let pool = archive_pool();
-    let records = NativeRecords::new(
-        engine.types().clone(),
-        Arc::new(crate::store::MemStore::default()),
-    );
-    let producer = SourceGrowthProducer {
-        records: &records,
-        source: &source,
-        store: &store,
-        archive_pool: &pool,
-        namespace: Address(ContentHash::of_bytes(b"untrusted growth bytes")),
-        scratch: 8 << 20,
-    };
-    let reads = ReadsBuilder::new().finish().unwrap();
-    let fact = producer
-        .fact(
-            Address(ids[0].path().fingerprint()),
-            summary(
-                ids[0],
-                vec![(parameter(ids[0]), parameter(ids[0]), true, sites[0])],
-            ),
-            &reads,
-            SELECTED.reference(b"accepted checked output").unwrap(),
-        )
-        .unwrap();
-    let facets = producer.settle(std::slice::from_ref(&fact)).unwrap();
-    let component = &facets.components[0];
-    let forged = records
-        .encode(&source, &(&component.members, Vec::<Span>::new()))
-        .unwrap();
-    let reference = store.put_content(SETTLED, &forged).unwrap();
-    store.associate_product(
-        component.product.address,
-        component.product.action,
-        reference,
-    );
-    let actual = producer.settle(&[fact]).unwrap();
-    assert_eq!(&*actual.components[0].growing, &[sites[0]]);
-    assert_eq!(
-        archive_reference(&actual.components[0].product),
-        archive_reference(&component.product)
-    );
 }

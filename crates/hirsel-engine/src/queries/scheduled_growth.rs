@@ -6,10 +6,6 @@ use crate::runtime::*;
 use crate::store::{Domain, Reference, ResultStore};
 use std::{sync::Mutex, task::Poll};
 pub const FRONT_GROWTH_KIND: u32 = 0x4600_0008;
-const OUTPUT: Domain = Domain {
-    kind: 0x4600_0009,
-    schema: 3,
-};
 const OBSERVATIONS: Domain = Domain {
     kind: 0x4600_0023,
     schema: 1,
@@ -18,12 +14,6 @@ const FAILURE: Domain = Domain {
     kind: 0x4600_000c,
     schema: 1,
 };
-struct Data {
-    facets: Arc<SourceGrowthFacets>,
-    diagnostics: Arc<Vec<Diagnostic>>,
-    reads: Arc<Reads>,
-    _reservation: Option<MemoryReservation>,
-}
 pub struct FrontGrowthQueries {
     query: QueryId,
     roots: Vec<QueryId>,
@@ -34,12 +24,12 @@ pub struct FrontGrowthQueries {
     snapshot: Arc<SignatureSnapshot>,
     package: hirsel_syntax::PackageId,
     store: Arc<dyn ResultStore>,
-    completed: Mutex<Option<(ProductRef, Arc<Data>)>>,
+    completed: Mutex<Option<ProductRef>>,
     failure: Mutex<Option<(Reference, QueryError)>>,
     weight: MemoryWeight,
     errors: RuntimeErrors,
     output_budget: u64,
-    archive_pool: MemoryReservationPool,
+    output_pool: MemoryReservationPool,
     _allowance: MemoryReservation,
 }
 #[derive(Clone)]
@@ -47,7 +37,7 @@ pub struct FrontGrowthOutput {
     pub facets: Arc<SourceGrowthFacets>,
     pub diagnostics: Arc<Vec<Diagnostic>>,
     pub reads: Arc<Reads>,
-    _owner: Arc<FrontGrowthQueries>,
+    _product: ProductRef,
 }
 impl FrontGrowthQueries {
     /// Root handles and the owner itself. The exact front keeps source paths,
@@ -68,10 +58,8 @@ impl FrontGrowthQueries {
     }
     fn producer(&self) -> SourceGrowthProducer<'_> {
         SourceGrowthProducer {
-            records: &self.records,
             source: &self.items,
-            store: &*self.store,
-            archive_pool: &self.archive_pool,
+            output_pool: &self.output_pool,
             namespace: self.query.address,
             scratch: self.weight.scratch,
         }
@@ -91,12 +79,13 @@ impl FrontGrowthQueries {
     }
     pub fn outcome(self: &Arc<Self>, product: ProductRef) -> Option<FrontGrowthOutput> {
         let completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
-        let (selected, data) = completed.as_ref()?;
+        let selected = completed.as_ref()?;
+        let data = product.growth_value()?.value();
         (*selected == product).then(|| FrontGrowthOutput {
             facets: data.facets.clone(),
             diagnostics: data.diagnostics.clone(),
             reads: data.reads.clone(),
-            _owner: self.clone(),
+            _product: product.clone(),
         })
     }
 }
@@ -257,16 +246,10 @@ impl Task {
             }
         };
         let facts = std::mem::take(&mut self.facts);
-        let fact_reservation = queries
-            .archive_pool
-            .take(self.fact_bytes)
-            .ok_or(queries.errors.resource)?;
         let facets = queries
             .producer()
-            .settle(&facts)
+            .settle(facts)
             .ok_or(queries.errors.resource)?;
-        drop(facts);
-        drop(fact_reservation);
         let diagnostics = crate::select_diagnostics(
             table_diagnostics
                 .into_iter()
@@ -286,109 +269,56 @@ impl Task {
                 .collect(),
             Some(&queries.sources),
         );
+        // Equal settled components still stop propagation even when their
+        // checked inputs/actions changed. Complete current reads remain bound.
         let outputs: Vec<_> = facets
             .components
             .iter()
-            .map(|component| {
-                component
-                    .product
-                    .archive(ArchiveAdmission::Retained)
-                    .map(|archive| archive.reference())
-            })
-            .collect::<Result<_, _>>()
-            .map_err(|_| queries.errors.resource)?;
-        let membership = facets
-            .membership
-            .archive(ArchiveAdmission::Retained)
-            .map_err(|_| queries.errors.resource)?
-            .reference();
-        // Like Lower's descriptor/body records, retain one small descriptor
-        // and publish its complete observation rows as referenced content.
-        // The live read view independently retains its source admission.
-        let observed = publish_observations(
-            &queries.records,
+            .map(|component| component.product.output)
+            .collect();
+        let observed = crate::source_components::hash_source_value(
             &queries.items,
-            &*queries.store,
-            &reads,
-            queries.weight.scratch,
+            "hirsel.front.source-growth.value.v1",
+            &(
+                facets.membership.output,
+                &outputs,
+                &diagnostics,
+                crate::store::payload_reads_hash(&reads),
+            ),
         )
         .ok_or(queries.errors.resource)?;
-        let bytes = queries
-            .records
-            .encode(
-                &*queries.items,
-                &(membership, &outputs, &diagnostics, observed),
-            )
-            .ok_or(queries.errors.resource)?;
-        if bytes.len() as u64 > queries.weight.scratch {
-            return Err(queries.errors.resource);
-        }
-        let mut data = Arc::new(Data {
+        let action = hirsel_artifact_store::Action(ContentHash::of_parts(
+            "hirsel.front.source-growth.action.v3",
+            [queries.query.address.0.0.as_slice(), observed.0.as_slice()],
+        ));
+        let data = Arc::new(crate::source_components::SourceGrowthData {
             facets: Arc::new(facets),
             diagnostics: Arc::new(diagnostics),
             reads: queries
                 .front
                 .retained_reads(cx, &Arc::new(reads))
                 .ok_or(queries.errors.resource)?,
-            _reservation: None,
         });
-        // Encoded bytes are temporary scratch and belong to the result store
-        // after publication. Bound only the actual retained allocation graph.
-        let mut retained = crate::memo::retained::Weight::default();
-        retained.arc(
-            &data,
-            |w,
-             Data {
-                 facets,
-                 diagnostics,
-                 reads,
-                 _reservation: _,
-             }| {
-                w.arc(facets, |w, facets| {
-                    w.vec(&facets.components, |w, component| {
-                        w.add(std::mem::size_of_val(&*component.members));
-                        w.add(std::mem::size_of_val(&*component.growing));
-                    });
-                });
-                w.arc(diagnostics, |w, diagnostics| {
-                    w.vec(diagnostics, |w, diagnostic| w.diagnostic(diagnostic))
-                });
-                w.reads(reads);
-            },
-        );
-        if retained.bytes > queries.output_budget {
-            return Err(queries.errors.resource);
-        }
-        Arc::get_mut(&mut data)
-            .ok_or(queries.errors.protocol)?
-            ._reservation = Some(
-            queries
-                .archive_pool
-                .take(retained.bytes)
-                .ok_or(queries.errors.resource)?,
-        );
-        let record = queries
-            .store
-            .put_content(OUTPUT, &bytes)
+        let required = LiveGrowthProduct::value_bytes(&data).ok_or(queries.errors.resource)?;
+        let mut allowance = queries
+            .output_pool
+            .take(required)
             .ok_or(queries.errors.resource)?;
-        // Downstream growth observes settled facets, not every checked body.
-        // Current source observations remain mandatory transaction evidence.
-        let action = hirsel_artifact_store::Action(ContentHash::of_parts(
-            "hirsel.front.source-growth.action.v2",
-            [queries.query.address.0.0.as_slice(), bytes.as_slice()],
-        ));
-        let product = ProductRef::import_archive(
-            queries.query.address,
-            action,
-            ProductArchive::from_encoded_in(record, bytes, &queries.archive_pool)
-                .ok()
-                .ok_or(queries.errors.resource)?,
-        );
-        *queries.completed.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((product.clone(), data));
-        queries
-            .store
-            .associate_product(product.address, product.action, record);
+        let source = ProductSource::prepare(
+            (*queries.items).clone(),
+            queries.records.clone(),
+            queries.front.clone(),
+        )
+        .ok_or(queries.errors.protocol)?;
+        let value = LiveGrowthProduct::new(
+            (queries.query.address, action),
+            data,
+            source,
+            &mut allowance,
+        )
+        .ok_or(queries.errors.resource)?;
+        let product = ProductRef::growth(value);
+        *queries.completed.lock().unwrap_or_else(|e| e.into_inner()) = Some(product.clone());
         Ok(product)
     }
 }
@@ -457,7 +387,7 @@ impl QueryEngine {
             .checked_sub(retained.bytes())
             .ok_or_else(refusal)?;
         let output = allowance.split(output_budget).ok_or_else(refusal)?;
-        let archive_pool = MemoryReservationPool::new(output).map_err(|_| refusal())?;
+        let output_pool = MemoryReservationPool::new(output).map_err(|_| refusal())?;
         let query = QueryId {
             kind: FRONT_GROWTH_KIND,
             address: hirsel_artifact_store::Address(ContentHash::of_parts(
@@ -490,7 +420,7 @@ impl QueryEngine {
             weight,
             errors,
             output_budget,
-            archive_pool,
+            output_pool,
             _allowance: allowance,
         }))
     }

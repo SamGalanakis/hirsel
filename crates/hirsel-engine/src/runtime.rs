@@ -11,8 +11,8 @@ mod scheduler;
 pub use budget::{MemoryReservation, MemoryReservationPool, ProcessBudget};
 pub use future_task::{LocalFutureTask, QueryReads};
 pub use product::{
-    ArchiveAdmission, LIVE_ANALYZED, LIVE_LOWER, LIVE_SUMMARY, LiveAnalyzedProduct,
-    LiveLowerProduct, LiveSummaryProduct, ProductArchive, SummaryFacet,
+    ArchiveAdmission, LIVE_ANALYZED, LIVE_GROWTH, LIVE_LOWER, LIVE_SUMMARY, LiveAnalyzedProduct,
+    LiveGrowthProduct, LiveLowerProduct, LiveSummaryProduct, ProductArchive, SummaryFacet,
 };
 pub(crate) use product::{
     ProductSource, SharedProductSource, WeakAnalyzedProduct, WeakLowerProduct,

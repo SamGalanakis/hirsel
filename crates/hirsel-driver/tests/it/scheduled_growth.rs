@@ -125,10 +125,27 @@ fn growth_output_admission_does_not_spend_its_grant_on_the_runtime_frame() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("main.hir");
         let manifest = directory.path().join("hirsel.json");
-        std::fs::write(&source,"fn leaf[T:copyable](x:T)->T{x}\nfn relay[T:copyable](x:T)->T{leaf(x)}\npub fn main(){}\n").unwrap();
+        let small = "fn leaf[T:copyable](x:T)->T{x}\nfn relay[T:copyable](x:T)->T{leaf(x)}\npub fn main(){}\n";
+        let mut many = String::new();
+        for index in 0..256 {
+            many.push_str(&format!("fn f{index}()->u8{{1u8}}\n"));
+        }
+        many.push_str("pub fn main()->u8{1u8}\n");
         std::fs::write(&manifest,r#"{"schema":1,"package":{"name":"growth","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
         for jobs in [1, 2] {
-            for output_bytes in [1, 16 << 10] {
+            for (text, output_bytes, member) in [
+                (small, 1, "relay"),
+                (small, 16 << 10, "relay"),
+                // The selected-footprint control's original complete growth
+                // output grant, including the pool's own metadata. Front has
+                // its independent admission here, so this law reaches growth.
+                (
+                    many.as_str(),
+                    106_172 - MemoryReservationPool::metadata_bytes(),
+                    "f255",
+                ),
+            ] {
+                std::fs::write(&source, text).unwrap();
                 let mut program = COMPILER
                     .with_config(CompileConfig {
                         store: Arc::new(MemStore::default()),
@@ -189,7 +206,7 @@ fn growth_output_admission_does_not_spend_its_grant_on_the_runtime_frame() {
                         output.facets.components.iter().any(|component| component
                             .members
                             .iter()
-                            .any(|id| id.path().0.name == "relay")),
+                            .any(|id| id.path().0.name == member)),
                         "actual generic definitions must reach the component root"
                     );
                     assert_eq!(runtime.stats().claims, definitions.len() as u64 + 1);
@@ -296,7 +313,6 @@ fn changed_source_member_stops_at_equal_settled_component() {
                 .find(|component| component.members.iter().any(|id| id.path().0.name == name))
                 .unwrap()
                 .product
-                .clone()
         };
         let before = component(&first, "left");
         let after = component(&changed, "left");
@@ -306,14 +322,7 @@ fn changed_source_member_stops_at_equal_settled_component() {
             "the changed member reaches the SCC"
         );
         assert_eq!(
-            before
-                .archive(ArchiveAdmission::Retained)
-                .unwrap()
-                .reference(),
-            after
-                .archive(ArchiveAdmission::Retained)
-                .unwrap()
-                .reference(),
+            before.output, after.output,
             "equal settled facet stops propagation"
         );
         assert_eq!(
@@ -325,14 +334,8 @@ fn changed_source_member_stops_at_equal_settled_component() {
         assert_eq!(rejected.diagnostics.len(), 1);
         assert_eq!(rejected.diagnostics[0].rule.as_str(), "GEN-5");
         assert_ne!(
-            component(&rejected, "left")
-                .archive(ArchiveAdmission::Retained)
-                .unwrap()
-                .reference(),
-            before
-                .archive(ArchiveAdmission::Retained)
-                .unwrap()
-                .reference(),
+            component(&rejected, "left").output,
+            before.output,
             "unexecuted growing roots still invalidate the verdict"
         );
         let split = settle(&source.replace("{left(x)}", "{let _=x}"), 2);
@@ -344,14 +347,8 @@ fn changed_source_member_stops_at_equal_settled_component() {
         );
         let merged = settle(&source.replace("{right(x)}", "{right((copy x,copy x))}"), 2);
         assert_eq!(
-            component(&merged, "left")
-                .archive(ArchiveAdmission::Retained)
-                .unwrap()
-                .reference(),
-            component(&rejected, "left")
-                .archive(ArchiveAdmission::Retained)
-                .unwrap()
-                .reference()
+            component(&merged, "left").output,
+            component(&rejected, "left").output
         );
         assert_eq!(merged.diagnostics.len(), 1);
         let removed = settle("fn separate[T](x:T){separate(x)}\npub fn main(){}\n", 1);

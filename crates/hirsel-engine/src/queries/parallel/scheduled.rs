@@ -79,6 +79,7 @@ impl FrontSummary {
     }
 }
 struct FrontOutcome {
+    reference: Option<Reference>,
     publication: Option<ProductRef>,
     body_publication: Option<WeakAnalyzedProduct>,
     body: Weak<QueryOutput<AnalyzedBody>>,
@@ -91,9 +92,8 @@ impl std::ops::Deref for FrontOutcome {
     }
 }
 struct FrontFacts {
-    reference: Option<Reference>,
     definition: DefId,
-    status: Result<(), QueryError>,
+    status: Result<(), Box<QueryError>>,
     phase: Option<QueryKind>,
     summary: Option<FrontSummary>,
     reads: Arc<Reads>,
@@ -104,7 +104,7 @@ struct FrontFacts {
     diagnostics: Vec<Diagnostic>,
     lowering: Option<lowering::LoweringUse>,
     table_keys: Option<Arc<crate::table_keys::TableKeyUse>>,
-    memos: Vec<(crate::memo::MemoKey, Arc<Reads>)>,
+    memos: Box<[(crate::memo::MemoKey, Arc<Reads>)]>,
     _backing: Option<Arc<LiveSourceBacking>>,
 }
 pub(crate) struct FrontCheckFacts {
@@ -146,13 +146,13 @@ impl FrontOutcome {
             .map(|output| lowering::LoweringUse::capture(&output.value.typed));
         let summary = summary.map(|summary| FrontSummary::capture(summary, &checked, &reads));
         Self {
+            reference,
             publication,
             body_publication: None,
             body,
             facts: Arc::new(FrontFacts {
-                reference,
                 definition: DefId::intern(&definition),
-                status: result.map(|_| ()),
+                status: result.map(|_| ()).map_err(Box::new),
                 phase,
                 summary,
                 reads,
@@ -162,7 +162,7 @@ impl FrontOutcome {
                 diagnostics,
                 lowering,
                 table_keys,
-                memos,
+                memos: memos.into_boxed_slice(),
                 _backing: backing,
             }),
         }
@@ -182,6 +182,9 @@ pub struct FrontMemoryRefusal {
     pub owner: &'static str,
     pub required: u64,
     pub available: u64,
+    pub settled: usize,
+    pub archived: usize,
+    pub pinned: usize,
 }
 struct Input {
     definition: DefId,
@@ -526,7 +529,7 @@ impl FrontBodyQueries {
     }
     fn pool_observed_reads(
         &self,
-        _cx: &mut dyn QueryContext,
+        cx: &mut dyn QueryContext,
         reads: &mut Arc<Reads>,
         summary: &mut Option<Arc<PublishedSummary>>,
         checked: &mut CheckedProduct,
@@ -544,7 +547,7 @@ impl FrontBodyQueries {
         {
             *checked_reads = reads.clone();
         }
-        for (_, observed) in memos {
+        for (_, observed) in memos.iter_mut() {
             if observed.as_ref() == reads.as_ref() {
                 *observed = reads.clone();
             } else if let Some((_, checked_reads, _)) = checked
@@ -553,8 +556,34 @@ impl FrontBodyQueries {
                 *observed = checked_reads.clone();
             }
         }
-        // Only this fact owner retains the equal phase allocations. The
-        // producer-wide pool would outlive failed or evicted publications.
+        if self.read_pool.get().is_none() {
+            return Some(());
+        }
+        // Arrays carry refundable leases; the source-local dictionary owns
+        // each distinct observed row once across settled and archived facts.
+        let mut shared = BTreeMap::<usize, Arc<Reads>>::new();
+        let mut intern = |reads: &mut Arc<Reads>| -> Option<()> {
+            let identity = Arc::as_ptr(reads) as usize;
+            let retained = if let Some(retained) = shared.get(&identity) {
+                retained.clone()
+            } else {
+                let retained = self.retained_reads(cx, reads)?;
+                shared.insert(identity, retained.clone());
+                retained
+            };
+            *reads = retained;
+            Some(())
+        };
+        intern(reads)?;
+        if let Some(summary) = summary {
+            intern(&mut Arc::make_mut(summary).reads)?;
+        }
+        if let Some((_, reads, _)) = checked {
+            intern(reads)?;
+        }
+        for (_, reads) in memos {
+            intern(reads)?;
+        }
         Some(())
     }
     fn retain(
@@ -568,16 +597,20 @@ impl FrontBodyQueries {
     ) -> Option<Arc<LiveSourceBacking>> {
         let mut charge = retained::compact_metadata(outcome, checked, table_keys, memos)?;
         if let Some(summary) = &outcome.summary {
-            charge = charge.checked_add(LiveSummaryProduct::shared_value_bytes(summary)?)?;
+            charge = charge.checked_add(LiveSummaryProduct::shared_payload_bytes(summary)?)?;
         }
         charge = charge
             .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
                 FrontFacts,
             >::uninit()))?
             .checked_add(
-                (memos.capacity() * std::mem::size_of::<(crate::memo::MemoKey, Arc<Reads>)>())
-                    as u64,
+                (memos.len() * std::mem::size_of::<(crate::memo::MemoKey, Arc<Reads>)>()) as u64,
             )?
+            .checked_add(if outcome.result.is_err() {
+                std::mem::size_of::<QueryError>() as u64
+            } else {
+                0
+            })?
             .checked_add(dead_arms.map_or(0, LintFacts::capture_bytes))?;
         let (allowance, backing) = self.owner_grant(cx, charge, "compact facts")?;
         // The complete payload and its lease are one owner. No later failure
@@ -646,6 +679,24 @@ impl FrontBodyQueries {
         let charge = value_bytes.checked_add(backing_bytes)?;
         if self.make_room(cx, charge).is_none() {
             let available = *self.retention.lock().unwrap_or_else(|e| e.into_inner());
+            let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
+            let settled = outcomes.len();
+            let pinned = outcomes
+                .values()
+                .filter(|outcome| {
+                    Arc::strong_count(&outcome.facts) != 2
+                        || outcome
+                            .publication
+                            .as_ref()
+                            .and_then(ProductRef::summary_value)
+                            .is_none_or(|summary| !summary.cache_owners(1))
+                })
+                .count();
+            let archived = self
+                .archived
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len();
             self.refusal
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -653,6 +704,9 @@ impl FrontBodyQueries {
                     owner,
                     required: charge,
                     available,
+                    settled,
+                    archived,
+                    pinned,
                 });
             return None;
         }
@@ -1213,7 +1267,8 @@ impl FrontBodyQueries {
             result: selected
                 .status
                 .clone()
-                .map(|()| selected.diagnostics.clone()),
+                .map(|()| selected.diagnostics.clone())
+                .map_err(|error| *error),
             phase: selected.phase,
             reads: selected.reads.clone(),
             source_rules,
@@ -1229,10 +1284,15 @@ impl FrontBodyQueries {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let outcome = outcomes.get(&query.address.0)?;
-        outcome.status.clone().err().or_else(|| {
-            has_errors(&outcome.diagnostics)
-                .then(|| QueryError::Diagnostics(outcome.diagnostics.clone()))
-        })
+        outcome
+            .status
+            .as_ref()
+            .err()
+            .map(|error| (**error).clone())
+            .or_else(|| {
+                has_errors(&outcome.diagnostics)
+                    .then(|| QueryError::Diagnostics(outcome.diagnostics.clone()))
+            })
     }
     pub(crate) fn with_settled_summary<T>(
         &self,
@@ -1258,7 +1318,7 @@ impl FrontBodyQueries {
         let key = self.selection_key(&selected, &outcomes)?;
         let outcome = outcomes.get(&key)?;
         let (result, body_owner) = match &outcome.status {
-            Err(error) => (Err(error.clone()), None),
+            Err(error) => (Err((**error).clone()), None),
             Ok(()) => {
                 let owner = selected
                     .as_ref()

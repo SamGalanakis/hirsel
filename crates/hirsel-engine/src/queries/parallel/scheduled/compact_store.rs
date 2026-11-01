@@ -135,7 +135,7 @@ impl FrontBodyQueries {
                 )))?;
             let backing = outcome._backing.as_ref()?.split(charge)?;
             Arc::new(FrontObservations {
-                memos: outcome.memos.clone().into_boxed_slice(),
+                memos: outcome.memos.clone(),
                 _backing: backing,
             })
         };

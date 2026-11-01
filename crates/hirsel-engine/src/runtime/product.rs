@@ -477,6 +477,9 @@ impl LiveSummaryProduct {
         Self::shared_value_bytes(value)?.checked_add(ProductSource::metadata_bytes())
     }
     pub(crate) fn shared_value_bytes(value: &PublishedSummary) -> Option<u64> {
+        Self::shared_payload_bytes(value)?.checked_add(Self::shared_owner_bytes())
+    }
+    pub(crate) fn shared_payload_bytes(value: &PublishedSummary) -> Option<u64> {
         // Storage equations have a separate admitted owner. Ordinary Summary
         // publication does not silently accept an unknown backing layout.
         if value.storage.is_some() {
@@ -490,7 +493,7 @@ impl LiveSummaryProduct {
             weight.arc(checked, Weight::checked_summary);
         }
         weight.reads(&value.reads);
-        Some(weight.bytes + owner_bytes::<Arc<PublishedSummary>>())
+        Some(weight.bytes)
     }
     pub(crate) fn new(
         identity: (Address, Action),

@@ -405,18 +405,16 @@ impl FrontBodyQueries {
         let summary = facts.summary.clone()?;
         let charge = view
             .weight(false, Some(&reads), true)
-            .checked_add(LiveSummaryProduct::shared_value_bytes(&summary)?)?
+            .checked_add(LiveSummaryProduct::shared_payload_bytes(&summary)?)?
             .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
                 FrontFacts,
             >::uninit()))?
             .checked_add(
-                (memos.capacity() * std::mem::size_of::<(crate::memo::MemoKey, Arc<Reads>)>())
-                    as u64,
+                (memos.len() * std::mem::size_of::<(crate::memo::MemoKey, Arc<Reads>)>()) as u64,
             )?;
         let (allowance, backing) = self.owner_grant(cx, charge, "cached compact facts")?;
         backing.add(allowance)?;
         let owner = Arc::new(FrontFacts {
-            reference,
             definition: self.inputs.get(&key)?.definition,
             status: Ok(()),
             phase: None,
@@ -432,7 +430,7 @@ impl FrontBodyQueries {
             diagnostics: facts.diagnostics,
             lowering: facts.lowering,
             table_keys: facts.table_keys,
-            memos,
+            memos: memos.into_boxed_slice(),
             _backing: Some(backing),
         });
         let publication = self.admit_summary(
@@ -443,6 +441,7 @@ impl FrontBodyQueries {
             owner.clone(),
         )?;
         Some(FrontOutcome {
+            reference,
             publication: Some(publication),
             body_publication: None,
             body: Weak::new(),

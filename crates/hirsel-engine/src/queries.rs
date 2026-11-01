@@ -8,6 +8,7 @@ pub use candidate_products::{CheckedProductEncoder, CheckedProducts};
 mod arm_fixes;
 mod frontier;
 pub(crate) mod header_products;
+pub use header_products::ModuleProof;
 mod source_index;
 pub use source_index::SourceIndexState;
 pub(crate) mod recipes;

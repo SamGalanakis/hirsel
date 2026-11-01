@@ -8,6 +8,7 @@ use std::sync::{
 };
 mod private;
 mod sources;
+pub use private::ModuleProof;
 pub(crate) use sources::CapturedText;
 use sources::HeaderSources;
 
@@ -107,6 +108,9 @@ pub(crate) struct HeaderProducts {
     provisional: bool,
     standalone: bool,
     failure: Option<QueryError>,
+    /// A proof reader that cannot return an error records its refusal here;
+    /// every later header demand of this snapshot fails with it.
+    refusal: OnceLock<QueryError>,
     syntax: Arc<HeaderSources>,
     private: Option<private::PrivateProducts>,
     declarations: crate::DeclarationIndex,
@@ -186,6 +190,7 @@ impl HeaderProducts {
             provisional: engine.private_summary_active,
             standalone: !engine.private_inference_hosted && !engine.private_summary_active,
             failure: engine.current_private_summary_failure().cloned(),
+            refusal: OnceLock::new(),
             syntax: engine
                 .header_products
                 .as_ref()
@@ -346,16 +351,42 @@ impl HeaderProducts {
         }
         cell.get()
     }
+    fn refuse(&self, error: QueryError) {
+        let _ = self.refusal.set(error);
+    }
+    fn refused(&self) -> Result<(), QueryError> {
+        self.refusal
+            .get()
+            .map_or(Ok(()), |error| Err(error.clone()))
+    }
+    fn admitted(&self) -> bool {
+        self.admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
     pub(crate) fn demand(self: &Arc<Self>, engine: &mut QueryEngine, id: DefId) -> SignatureOutput {
-        let mut proof = self.private_product(id)?;
-        if engine.header_products.is_none() {
-            self.adopt_private_products(engine)?;
-        }
+        self.refused()?;
         if let Some(failures) = self.failures.get(&id) {
             engine
                 .private_unique_failures
                 .entry(id)
                 .or_insert_with(|| failures.clone());
+        }
+        // Only producing a row needs its module proof. A settled row is used
+        // as is, so an evicted proof is not re-inferred for it.
+        if engine.header_products.is_some()
+            && let Some(product) = self.rows.get(&id).and_then(HeaderSlot::get)
+            && !engine
+                .active
+                .contains(&(id.path().clone(), QueryKind::Signature))
+        {
+            return self.use_product(engine, id, &product);
+        }
+        // The held proof pins this module while its header is produced.
+        let mut proof = self.private_product(id)?;
+        if engine.header_products.is_none() {
+            self.adopt_private_products(engine)?;
         }
         let Some(cell) = self.rows.get(&id) else {
             return engine.signature_query_local(id);
@@ -370,6 +401,9 @@ impl HeaderProducts {
             return self.use_product(engine, id, &product);
         }
         let result = engine.signature_query_local(id);
+        // A proof read inside the producer was refused: its result may carry a
+        // conservative summary, so it is never published.
+        self.refused()?;
         if let Some(stale) = proof.take().filter(|proof| {
             proof
                 .identities
@@ -576,7 +610,11 @@ impl HeaderProducts {
         });
         backing
     }
+    /// Evict one unpinned settled entry: a header row, else a module proof.
     pub(crate) fn evict(&self) -> bool {
+        self.evict_row() || self.evict_proof()
+    }
+    fn evict_row(&self) -> bool {
         for cell in self.rows.values() {
             let mut slot = cell.product.lock().unwrap_or_else(|e| e.into_inner());
             let Some(product) = slot.as_ref() else {

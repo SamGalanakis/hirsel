@@ -849,6 +849,24 @@ impl FrontBodyQueries {
         self._allowance.admitted - *remaining
     }
 
+    /// The settled proof of the private module declaring `definition`,
+    /// demanded again through the ordinary producer if it was evicted.
+    pub fn module_proof(
+        &self,
+        definition: &DefPath,
+    ) -> Option<Result<header_products::ModuleProof, QueryError>> {
+        self.snapshot
+            .header_products()?
+            .module_proof(DefId::intern(definition))
+            .transpose()
+    }
+    /// Whether that proof is currently retained in the admitted cache.
+    pub fn module_proof_resident(&self, definition: &DefPath) -> bool {
+        self.snapshot
+            .header_products()
+            .is_some_and(|headers| headers.module_proof_resident(DefId::intern(definition)))
+    }
+
     /// Immutable producer grant, including input rows and retained outcomes.
     pub fn admitted_bytes(&self) -> u64 {
         self._allowance.admitted
@@ -2353,7 +2371,7 @@ impl QueryEngine {
         let snapshot = self.signature_inputs();
         let retention = Arc::new(Mutex::new(allowance.bytes() - required));
         if let Some(headers) = snapshot.header_products() {
-            headers.configure_private(weight.scratch, registrations, retention.clone());
+            headers.configure_private(weight.scratch, registrations);
             headers.archive_sources(store.clone())?;
         }
         let mut inputs = BTreeMap::new();

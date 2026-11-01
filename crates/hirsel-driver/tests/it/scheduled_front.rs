@@ -860,7 +860,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         };
         let mut limit = 8 << 20;
         // First measure the complete metadata and one body through the same harness.
-        for mode in 0..6 {
+        for mode in 0..7 {
             let mut program = COMPILER
                 .with_config(CompileConfig {
                     store: Arc::new(Transport(MemStore::default())),
@@ -956,7 +956,16 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 limit,
                 "partition fits exactly one body"
             );
-            let pin = (mode == 2).then(|| front.outcome(Ok(a.clone())).unwrap());
+            let pin = (mode == 2 || mode == 6).then(|| front.outcome(Ok(a.clone())).unwrap());
+            // The settled module proof is an entry of the same admitted cache.
+            assert!(front.module_proof_resident(&definitions[0]));
+            let proof = front
+                .module_proof(&definitions[0])
+                .unwrap()
+                .unwrap()
+                .settled();
+            let proof_pin =
+                (mode == 6).then(|| front.module_proof(&definitions[0]).unwrap().unwrap());
             drop(a);
             struct DependencyFactory(Vec<QueryId>, QueryId);
             struct DependencyTask(Vec<QueryId>, QueryId);
@@ -1017,6 +1026,25 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 assert_eq!(runtime.stats().body_evictions, 0);
                 assert!(pin.outcome.result.is_ok());
                 assert_eq!(front.live_body_count(), 1);
+                // Pressure evicts an unpinned settled proof and never a pinned
+                // one; an evicted proof recomputes equal on its next demand.
+                if let Some(held) = &proof_pin {
+                    assert!(front.module_proof_resident(&definitions[0]));
+                    assert_eq!(held.settled(), proof);
+                } else {
+                    assert!(!front.module_proof_resident(&definitions[0]));
+                    // Equal facts. Rows the first proof settled stay settled, so
+                    // the recomputed proof names only identities it re-derives,
+                    // and each agrees with what the first proof recorded.
+                    let (facts, identities) = front
+                        .module_proof(&definitions[0])
+                        .unwrap()
+                        .unwrap()
+                        .settled();
+                    assert_eq!(facts, proof.0);
+                    assert!(identities.iter().all(|row| proof.1.contains(row)));
+                    assert!(front.module_proof_resident(&definitions[0]));
+                }
             } else {
                 drop(b.unwrap());
                 assert_eq!(runtime.stats().body_evictions, 1);
@@ -1119,6 +1147,9 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                         .clone()
                 })
                 .collect::<Vec<_>>();
+            // Their settled module proof is pinned too, so pressure here
+            // can only evict compact owners.
+            let proof_pin = front.module_proof(&definitions[0]).unwrap().unwrap();
             let mut runtime = AdmittedRuntime::with_query_capacity(
                 hirsel_intern::jobs::Jobs::ONE,
                 budget
@@ -1196,6 +1227,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     runtime.shutdown();
                     drop(front);
                     drop(_header_pins);
+                    drop(proof_pin);
                     drop(program);
                     assert_eq!(checked.summary.summary, summary);
                     let held = budget.reserved();

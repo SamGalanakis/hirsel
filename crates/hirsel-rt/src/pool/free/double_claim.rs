@@ -1,8 +1,13 @@
-//! Native TSan mutation of Queued<Image>'s exclusive claim. The second scoped
-//! worker resumes the first job's actual saved mapper stack, never a synthetic
-//! shared cell. No duplicate reaches cleanup: the campaign requires TSan exit 66.
+//! Native TSan mutation of Queued<Image>'s exclusive claim. A second scoped
+//! worker also claims the first job's saved mapper image and runs it as an
+//! ordinary owner: on its own stack, saved to its own idle, through the
+//! annotated switch. The owners share only the job's context and data, never a
+//! stack or a return path. No duplicate reaches cleanup: the campaign requires
+//! TSan exit 66.
 use super::{Image, Queued};
 use crate::TaskCtx;
+use crate::tasks::ordered::ahead::native::Physical;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Barrier, Mutex, OnceLock};
 
 #[derive(Default)]
@@ -18,7 +23,13 @@ static STATE: Mutex<State> = Mutex::new(State {
     sp: 0,
     ordinary: false,
 });
+/// Both owners hold the image: the duplicate has copied it, the victim not yet resumed it.
 static ENTER: Barrier = Barrier::new(2);
+/// The victim is resuming. The duplicate starts on this event, inside the
+/// victim's first mapper quantum rather than a futex wake later.
+static GO: AtomicBool = AtomicBool::new(false);
+/// The points of one mapper quantum, as the victim's quota-only return grants.
+const QUANTUM: i64 = 1024;
 
 fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -57,16 +68,81 @@ pub(crate) unsafe fn idle() {
         return;
     }
     state.stolen = true;
+    let ctx = state.ctx as *mut TaskCtx;
     let sp = state.sp as *mut u8;
     drop(state);
+    // An Ordered image returns through its Physical. The duplicate gets its
+    // own, so its quanta end on this idle stack rather than the victim's.
+    let shared = unsafe { (*ctx).ahead_physical };
+    let own = (!shared.is_null()).then(|| {
+        Box::into_raw(Box::new(Physical {
+            points_left: QUANTUM,
+            saved_sp: std::ptr::null_mut(),
+            idle_sp: std::ptr::null_mut(),
+            reason: 0,
+            reserved_zero: 0,
+        }))
+    });
+    // SAFETY: deliberately violated by this mutant. A real scoped worker takes
+    // the victim's saved image without the Queued CAS or Option::take; the
+    // victim waits at ENTER, so the image is intact until it is copied.
+    let mut sp = unsafe { duplicate(ctx.cast(), sp, shared, own.unwrap_or(shared)) };
     ENTER.wait();
-    let mut idle = std::ptr::null_mut();
-    // SAFETY: deliberately violated by this mutant. A real scoped worker
-    // takes the *same* mapper stack without the Queued CAS or Option::take.
-    // Retain this worker's distinct TSan identity: transferring the exclusive
-    // fiber identity a second time would falsely serialize the two owners.
-    unsafe { crate::fiber::fiber_switch_raw(&raw mut idle, sp) };
-    crate::fault("double-claimed mapper returned without a TSan report");
+    while !GO.load(Ordering::Acquire) {
+        std::hint::spin_loop();
+    }
+    let Some(own) = own else {
+        let mut idle = std::ptr::null_mut();
+        // SAFETY: the copy is a suspended fiber on a stack no other switch resumes.
+        unsafe { crate::fiber::switch(&raw mut idle, sp) };
+        crate::fault("double-claimed mapper returned without a TSan report");
+    };
+    // Each ended quantum is refilled, as the victim's quota-only return is,
+    // until TSan reports the owners' overlapping writes.
+    loop {
+        // SAFETY: as above; the copy's handoffs save to and resume `own`.
+        unsafe { crate::fiber::switch(&raw mut (*own).idle_sp, sp) };
+        unsafe {
+            sp = (*own).saved_sp;
+            (*own).points_left = QUANTUM;
+        }
+    }
+}
+
+/// The saved image `[sp, ctx)` of the victim's stack, copied to the same
+/// offset below a fresh stack's context slot. Words that address the copied
+/// range move with it, so frame chains and local addresses stay on the copy,
+/// and words naming the victim's `shared` return state name `own` instead.
+/// The context and everything else it reaches stay shared.
+/// # Safety
+/// `sp` is a suspended fiber of the task stack whose context slot is `ctx`.
+unsafe fn duplicate(
+    ctx: *mut u8,
+    sp: *mut u8,
+    shared: *mut Physical,
+    own: *mut Physical,
+) -> *mut u8 {
+    let length = (ctx as usize).wrapping_sub(sp as usize);
+    if sp >= ctx || length > crate::fiber::STACK_BYTES {
+        crate::fault("a double-claimed image is not below its task context");
+    }
+    // Never dropped: no duplicate returns, and its fiber stays registered.
+    let stack = std::mem::ManuallyDrop::new(crate::fiber::Stack::new());
+    let copy = stack.context().cast::<u8>().wrapping_sub(length);
+    let delta = (copy as usize).wrapping_sub(sp as usize);
+    // SAFETY: both ranges are `length` mapped bytes of distinct stacks.
+    unsafe { copy.copy_from_nonoverlapping(sp, length) };
+    let words = copy.cast::<usize>();
+    for i in 0..length / 8 {
+        // SAFETY: within the copy, which `sp` aligned to 8 bytes.
+        let word = unsafe { &mut *words.add(i) };
+        if (sp as usize..ctx as usize).contains(word) {
+            *word = word.wrapping_add(delta);
+        } else if *word == shared as usize {
+            *word = own as usize;
+        }
+    }
+    copy
 }
 
 /// Publish the victim's first saved scalar mapper quantum. Deferring the
@@ -86,6 +162,7 @@ pub(crate) unsafe fn mapper(ctx: *mut TaskCtx, sp: *mut u8) {
     drop(state);
     super::super::cpu_scoped::tsan_wake(super::super::execs(ctx));
     ENTER.wait();
+    GO.store(true, Ordering::Release);
 }
 
 #[repr(C)]

@@ -68,6 +68,7 @@ pub trait ResultStore: Send + Sync {
     /// completion and materialization. Drop aborts the unpublished tail.
     fn operation_scope(&self) -> StoreOperation {
         StoreOperation {
+            persistence: self.persistence(),
             requests: [
                 self.local_product_store().map(|store| store.request()),
                 self.verifier()
@@ -114,15 +115,18 @@ pub trait ResultStore: Send + Sync {
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         None
     }
-    /// Whether this provider can serve ordinary products. A disabled provider
-    /// skips record capture and encoding as well as I/O; names are only labels.
-    fn enabled(&self) -> bool {
-        true
+    /// What survives a request that publishes through this provider. Query
+    /// variants, `cache_product` and product associations publish only when
+    /// it retains; names are only labels.
+    fn persistence(&self) -> Persistence {
+        Persistence::Cache
     }
-    /// Whether ordinary query variants can survive this request. Transient
-    /// transport can be enabled while its selected query cache is disabled.
-    fn query_cache_enabled(&self) -> bool {
-        self.enabled()
+    /// Whether this provider carries a request's live bytes. A request
+    /// transport does so whatever its backend persists; any other provider
+    /// carries bytes only when it retains them. A provider that carries none
+    /// skips record capture, encoding and I/O, and engines treat it as absent.
+    fn transports(&self) -> bool {
+        self.persistence().retains()
     }
     fn get(&self, key: &EntryKey) -> Option<Bytes>;
     fn put(&self, key: &EntryKey, value: &[u8]);
@@ -134,7 +138,7 @@ pub trait ResultStore: Send + Sync {
     /// Request transports forward this directly to the selected cache, without
     /// pinning optional bytes or associations in their required-output budget.
     fn cache_product(&self, address: Address, action: Action, domain: Domain, bytes: &[u8]) {
-        if self.query_cache_enabled()
+        if self.persistence().retains()
             && let Some(reference) = self.put_content(domain, bytes)
         {
             self.associate_product(address, action, reference);
@@ -144,7 +148,7 @@ pub trait ResultStore: Send + Sync {
     /// Their registered domains are independent of front QueryKind tags. An
     /// association supplies integrity only, never verifier/native authority.
     fn lookup_product(&self, address: Address) -> Option<Association> {
-        if !self.enabled() {
+        if !self.transports() {
             return None;
         }
         let bytes = self.get(&product_association_key(address))?;
@@ -163,7 +167,7 @@ pub trait ResultStore: Send + Sync {
     /// Publish only after immutable output publication. Eviction or a failed
     /// write leaves a miss; read-only roots never receive an association.
     fn associate_product(&self, address: Address, action: Action, reference: Reference) {
-        if !self.enabled() || self.get_content(reference).is_none() {
+        if !self.transports() || self.get_content(reference).is_none() {
             return;
         }
         let bytes = serde_json::to_vec(&(address.0, action.0, reference))
@@ -205,7 +209,7 @@ pub trait ResultStore: Send + Sync {
         (reference.domain.reference(&bytes)? == reference).then_some(bytes)
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
-        if !self.enabled() {
+        if !self.transports() {
             return None;
         }
         let reference = domain.reference(bytes)?;
@@ -223,9 +227,32 @@ pub trait ResultStore: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
+/// What a request leaves behind in its selected provider. Each provider
+/// reports one; a `StoreOperation` captures it once for the request it scopes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Persistence {
+    /// Nothing survives the request: no query variant, cached product or
+    /// association is encoded or restored. A request transport still carries
+    /// the request's live bytes.
+    Disabled,
+    /// Ordinary products and query variants publish best-effort; eviction or
+    /// a failed write is a later miss.
+    Cache,
+    /// Publication materializes the complete demanded component closure before
+    /// any association becomes visible (Precompute, export and restart).
+    Complete,
+}
+impl Persistence {
+    /// Whether anything this request publishes can outlive it.
+    pub fn retains(self) -> bool {
+        self != Self::Disabled
+    }
+}
+
 /// The caller joins producers and materializes the result before finishing.
 /// Completed pressure prefixes remain durable on abort, as in Request.
 pub struct StoreOperation {
+    persistence: Persistence,
     requests: Vec<hirsel_artifact_store::Request>,
     reads: Vec<Box<dyn Send + Sync>>,
 }
@@ -236,6 +263,11 @@ impl StoreOperation {
     pub fn has_publication(&self) -> bool {
         !self.requests.is_empty()
     }
+    /// The policy captured when this operation's scope opened.
+    pub fn persistence(&self) -> Persistence {
+        self.persistence
+    }
+    /// Joining keeps this operation's captured policy.
     pub fn join(&mut self, mut other: Self) {
         self.requests.append(&mut other.requests);
         self.reads.append(&mut other.reads);
@@ -550,8 +582,8 @@ impl Entry {
 #[derive(Debug, Default)]
 pub struct NoneStore;
 impl ResultStore for NoneStore {
-    fn enabled(&self) -> bool {
-        false
+    fn persistence(&self) -> Persistence {
+        Persistence::Disabled
     }
     fn get(&self, _: &EntryKey) -> Option<Bytes> {
         None

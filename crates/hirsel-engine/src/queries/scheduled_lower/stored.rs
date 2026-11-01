@@ -28,7 +28,7 @@ impl FrontLowerQueries {
         descriptor: Reference,
         outcome: &Outcome,
     ) {
-        if !self.store.query_cache_enabled() {
+        if !self.store.persistence().retains() {
             return;
         }
         let (lower, constant_decode_bytes) = match &outcome.result {
@@ -75,7 +75,7 @@ impl FrontLowerQueries {
         key: &EntryKey,
         query_reads: &QueryReads,
     ) -> Option<Result<ProductRef, Reference>> {
-        if !self.store.query_cache_enabled() {
+        if !self.store.persistence().retains() {
             return None;
         }
         let storage = stored_key(key);

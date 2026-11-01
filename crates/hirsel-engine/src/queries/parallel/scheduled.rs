@@ -1670,7 +1670,7 @@ impl BodyTask {
 
     fn restore_body(&self, cx: &mut dyn QueryContext) -> Option<Result<ProductRef, Reference>> {
         let queries = &self.queries;
-        if !queries.store.query_cache_enabled()
+        if !queries.store.persistence().retains()
             || queries.verify_store != crate::store::VerifyStore::Off
         {
             return None;
@@ -1925,7 +1925,8 @@ impl BodyTask {
             &mut source,
             queries
                 .store
-                .query_cache_enabled()
+                .persistence()
+                .retains()
                 .then_some(&*queries.records),
         );
         let mut memo_rows = completed.memo_snapshot();
@@ -2222,16 +2223,12 @@ impl QueryEngine {
         if required > allowance.bytes() {
             return Err(refused_inputs(required));
         }
-        let store = self
-            .result_store
-            .clone()
-            .filter(|s| s.enabled())
-            .ok_or_else(|| {
-                QueryError::Operational(hirsel_types::OperationalFailure {
-                    operation: "front source transport".into(),
-                    message: "source archives require an enabled result provider".into(),
-                })
-            })?;
+        let store = self.result_store.clone().ok_or_else(|| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "front source transport".into(),
+                message: "source archives require an enabled result provider".into(),
+            })
+        })?;
         // Materialize only the selected ordinary Parse files before capturing
         // their stable source/anchor archive inputs.
         for definition in definitions {

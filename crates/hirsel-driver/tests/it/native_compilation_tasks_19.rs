@@ -36,8 +36,8 @@ impl ResultStore for DiagnosedStore {
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         self.0.verifier()
     }
-    fn enabled(&self) -> bool {
-        self.0.enabled()
+    fn persistence(&self) -> store::Persistence {
+        self.0.persistence()
     }
     fn name(&self) -> &'static str {
         self.0.name()

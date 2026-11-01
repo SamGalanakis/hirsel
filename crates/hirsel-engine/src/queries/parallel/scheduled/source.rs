@@ -121,11 +121,7 @@ impl QueryEngine {
                 message: "source input size overflow or missing syntax archive".into(),
             })
         };
-        if self
-            .result_store
-            .as_ref()
-            .is_none_or(|store| !store.enabled())
-        {
+        if self.result_store.is_none() {
             return Err(refused());
         }
         let (files, siblings) = self.declarations.sibling_inventory();

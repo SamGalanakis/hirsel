@@ -274,7 +274,7 @@ impl FrontRegistrationQueries {
     }
     fn restore(&self, input: &Input) -> Option<Data> {
         use crate::store::Entry;
-        if self.lower.verify != Verify::On || !self.lower.store.query_cache_enabled() {
+        if self.lower.verify != Verify::On || !self.lower.store.persistence().retains() {
             return None;
         }
         let key = Self::storage_key(input);
@@ -336,7 +336,7 @@ impl FrontRegistrationQueries {
     }
     fn remember(&self, input: &Input, output: Reference, data: &Data, decode_bytes: u64) {
         use crate::store::{Entry, VariantRef};
-        if !self.lower.store.query_cache_enabled() || data.acceptance.is_none() {
+        if !self.lower.store.persistence().retains() || data.acceptance.is_none() {
             return;
         }
         let Some(reads) =

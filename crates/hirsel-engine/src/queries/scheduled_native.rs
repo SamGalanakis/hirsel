@@ -681,11 +681,7 @@ impl QueryEngine {
         self.prepare_private_summaries();
         let snapshot = self.signature_inputs();
         let original_context = self.native_original_context(definitions)?;
-        let store = self
-            .result_store
-            .clone()
-            .filter(|s| s.enabled())
-            .ok_or_else(refuse)?;
+        let store = self.result_store.clone().ok_or_else(refuse)?;
         let records = crate::NativeRecords::new(self.types.clone(), store.clone());
         let anchors = crate::NativeRecordContext::capture(self);
         let mut inputs = BTreeMap::new();

@@ -116,8 +116,8 @@ mod tests {
         fn name(&self) -> &'static str {
             "live-only-test"
         }
-        fn query_cache_enabled(&self) -> bool {
-            false
+        fn persistence(&self) -> crate::store::Persistence {
+            crate::store::Persistence::Disabled
         }
     }
     fn value(store: &dyn ResultStore, reads: Vec<ProductRef>) -> LiveDependencyProduct {

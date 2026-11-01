@@ -598,7 +598,6 @@ impl QueryEngine {
         let store = self
             .result_store
             .clone()
-            .filter(|s| s.enabled())
             .ok_or(QueryError::NotImplemented)?;
         let query = QueryId {
             kind: FRONT_STORAGE_GRAPH_KIND,

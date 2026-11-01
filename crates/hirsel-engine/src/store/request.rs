@@ -50,6 +50,8 @@ impl Admission {
 }
 pub struct RequestStore {
     backend: Arc<dyn ResultStore>,
+    /// The backend's policy, chosen once for this request.
+    persistence: Persistence,
     verifier: Option<Arc<hirsel_validate::VerifierCache>>,
     memory: Arc<Admission>,
     state: Mutex<State>,
@@ -125,6 +127,7 @@ impl RequestStore {
     fn admitted(backend: Arc<dyn ResultStore>, memory: Arc<Admission>) -> Self {
         let verifier = backend.verifier();
         Self {
+            persistence: backend.persistence(),
             backend,
             verifier,
             memory,
@@ -225,8 +228,12 @@ impl ResultStore for RequestStore {
     fn cache_product(&self, address: Address, action: Action, domain: Domain, bytes: &[u8]) {
         self.backend.cache_product(address, action, domain, bytes);
     }
-    fn query_cache_enabled(&self) -> bool {
-        self.backend.query_cache_enabled()
+    fn persistence(&self) -> Persistence {
+        self.persistence
+    }
+    // Live transport is carried even when the selected backend persists nothing.
+    fn transports(&self) -> bool {
+        true
     }
     fn read_scope(&self) -> Option<Box<dyn Send + Sync>> {
         self.backend.read_scope()
@@ -240,7 +247,6 @@ impl ResultStore for RequestStore {
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         self.verifier.clone()
     }
-    // Transient transport is enabled even if the selected durable policy is off.
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
         self.backend.get(key)
     }

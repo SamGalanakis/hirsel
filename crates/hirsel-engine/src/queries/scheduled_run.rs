@@ -1332,7 +1332,6 @@ impl QueryEngine {
         let store = self
             .result_store
             .clone()
-            .filter(|store| store.enabled())
             .ok_or(QueryError::NotImplemented)?;
         let declarations = self.frozen_declarations();
         let source_paths = self.source_paths();

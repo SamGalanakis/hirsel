@@ -829,8 +829,11 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
     with_compiler_stack(|| {
         struct Transport(MemStore);
         impl ResultStore for Transport {
-            fn query_cache_enabled(&self) -> bool {
-                false
+            fn persistence(&self) -> hirsel_engine::store::Persistence {
+                hirsel_engine::store::Persistence::Disabled
+            }
+            fn transports(&self) -> bool {
+                true
             }
             fn get(
                 &self,

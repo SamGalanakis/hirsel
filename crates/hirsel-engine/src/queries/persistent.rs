@@ -1295,7 +1295,7 @@ impl QueryEngine {
     /// Select a persistent result store. Library engines default to no store;
     /// CLI engines use dir@1. Injected stores keep integration tests isolated.
     pub fn with_result_store(mut self, store: Arc<dyn crate::store::ResultStore>) -> Self {
-        self.result_store = store.enabled().then_some(store);
+        self.result_store = store.transports().then_some(store);
         self
     }
     /// Recompute store hits and compare their canonical bytes (cache oracle).

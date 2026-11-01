@@ -2333,11 +2333,7 @@ impl QueryEngine {
             return Err(refusal());
         }
         let retention = Arc::new(Mutex::new(allowance.bytes() - input_bytes));
-        let store = self
-            .result_store
-            .clone()
-            .filter(|s| s.enabled())
-            .ok_or_else(refusal)?;
+        let store = self.result_store.clone().ok_or_else(refusal)?;
         let lowering = self.adapters.lowering.clone();
         let mut inputs = Vec::with_capacity(definitions.len());
         for path in definitions {

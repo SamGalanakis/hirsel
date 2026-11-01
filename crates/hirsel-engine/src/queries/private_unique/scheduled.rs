@@ -965,7 +965,7 @@ impl QueryEngine {
             panicked: reference,
         };
         let previous = self.result_store.clone();
-        if previous.as_ref().is_none_or(|store| !store.enabled()) {
+        if previous.is_none() {
             self.result_store = Some(Arc::new(crate::store::MemStore::default()));
         }
         let result = self.bootstrap_front_instances(

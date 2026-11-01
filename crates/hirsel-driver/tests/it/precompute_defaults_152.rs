@@ -16,7 +16,7 @@ fn library_defaults_read_installed_products_and_preserve_explicit_none() {
                 modules: vec![],
                 name: "first".into(),
             });
-            assert!(COMPILER.configuration().store.enabled());
+            assert!(COMPILER.configuration().store.persistence().retains());
             let mut installed = COMPILER.load_check_package(manifest).unwrap();
             installed.engine.check_definition(&definition).unwrap();
             assert_eq!(
@@ -32,7 +32,7 @@ fn library_defaults_read_installed_products_and_preserve_explicit_none() {
                 0
             );
             let explicit = COMPILER.with_config(CompileConfig::default());
-            assert!(!explicit.configuration().store.enabled());
+            assert!(!explicit.configuration().store.persistence().retains());
             let mut fresh = explicit.load_check_package(manifest).unwrap();
             fresh.engine.check_definition(&definition).unwrap();
             assert_eq!(

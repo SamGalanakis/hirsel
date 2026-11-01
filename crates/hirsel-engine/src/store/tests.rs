@@ -688,7 +688,7 @@ fn product_associations_share_content_without_conveying_authority() {
             store.lookup_product(address).is_none(),
             "absent content cannot publish"
         );
-        if store.enabled() {
+        if store.transports() {
             assert_eq!(store.put_content(domain, b"product"), Some(reference));
             store.associate_product(address, action, reference);
             let hit = store.lookup_product(address).unwrap();
@@ -794,7 +794,7 @@ fn disabled_writable_cache_keeps_installed_products_and_never_publishes() {
     if std::env::var_os(CHILD).is_some() {
         let store = store_by_name("none@1", None).unwrap();
         assert_eq!(store.name(), "none@1");
-        assert!(store.enabled());
+        assert_eq!(store.persistence(), Persistence::Cache);
         assert!(store.local_product_store().is_none());
         assert_eq!(&*store.get(&query).unwrap(), b"installed index");
         assert_eq!(&*store.get_content(reference).unwrap(), b"installed bytes");

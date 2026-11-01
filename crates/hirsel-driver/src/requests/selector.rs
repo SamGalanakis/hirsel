@@ -180,7 +180,7 @@ impl CompilerRequests {
         // facts therefore have the same bounded carry regardless of provider.
         // An off provider also gets a transient byte store within this bound.
         let quarter = limits.transport_bytes / 4;
-        if !config.store.enabled() {
+        if !config.store.transports() {
             config.store = Arc::new(super::resident_store::ResidentStore::new(
                 budget.clone(),
                 limits.transport_bytes - 2 * quarter,

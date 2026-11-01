@@ -1103,11 +1103,7 @@ impl QueryEngine {
                 ],
             )),
         };
-        let store = self
-            .result_store
-            .clone()
-            .filter(|store| store.enabled())
-            .ok_or_else(refusal)?;
+        let store = self.result_store.clone().ok_or_else(refusal)?;
         Ok(Arc::new(FrontCheckQueries {
             query,
             files,

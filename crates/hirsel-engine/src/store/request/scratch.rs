@@ -120,8 +120,11 @@ impl ResultStore for ScratchStore {
     fn cache_product(&self, address: Address, action: Action, domain: Domain, bytes: &[u8]) {
         self.selected.cache_product(address, action, domain, bytes);
     }
-    fn query_cache_enabled(&self) -> bool {
-        self.selected.query_cache_enabled()
+    fn persistence(&self) -> Persistence {
+        self.selected.persistence()
+    }
+    fn transports(&self) -> bool {
+        true
     }
     fn read_scope(&self) -> Option<Box<dyn Send + Sync>> {
         self.selected.read_scope()

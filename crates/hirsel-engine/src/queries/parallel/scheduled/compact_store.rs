@@ -46,7 +46,7 @@ pub(in crate::queries) fn load_publication(
     let store = engine
         .result_store
         .clone()
-        .filter(|s| s.query_cache_enabled())?;
+        .filter(|s| s.persistence().retains())?;
     let key = engine.store_key(path, QueryKind::Modes)?;
     let selected = store.lookup_product(address(key.0))?;
     if selected.reference.domain != OUTPUT
@@ -153,7 +153,7 @@ impl FrontBodyQueries {
         outcome: &FrontOutcome,
         scratch: u64,
     ) -> Option<Reference> {
-        if !self.store.query_cache_enabled() {
+        if !self.store.persistence().retains() {
             return None;
         }
         let temporary = outcome
@@ -277,7 +277,7 @@ impl BodyTask {
         decode_bytes: u64,
     ) {
         let queries = &self.queries;
-        if !queries.store.query_cache_enabled() {
+        if !queries.store.persistence().retains() {
             return;
         }
         let record = RecordRef {
@@ -312,7 +312,7 @@ impl BodyTask {
         cx: &mut dyn QueryContext,
     ) -> Option<Result<ProductRef, Reference>> {
         let queries = &self.queries;
-        if !queries.store.query_cache_enabled() {
+        if !queries.store.persistence().retains() {
             return None;
         }
         let selected = queries.store.lookup_product(address(self.input))?;

@@ -398,11 +398,7 @@ impl QueryEngine {
                 ],
             )),
         };
-        let store = self
-            .result_store
-            .clone()
-            .filter(|s| s.enabled())
-            .ok_or_else(refusal)?;
+        let store = self.result_store.clone().ok_or_else(refusal)?;
         Ok(Arc::new(FrontGrowthQueries {
             query,
             roots,

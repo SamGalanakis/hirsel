@@ -46,8 +46,11 @@ impl ResultStore for LiveStore {
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         self.bytes.verifier()
     }
-    fn query_cache_enabled(&self) -> bool {
-        false
+    fn persistence(&self) -> store::Persistence {
+        store::Persistence::Disabled
+    }
+    fn transports(&self) -> bool {
+        true
     }
     fn name(&self) -> &'static str {
         "live-without-persistence"

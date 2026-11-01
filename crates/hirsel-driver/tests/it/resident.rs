@@ -626,8 +626,8 @@ fn restored_mode_phases_retire_with_the_edited_or_removed_memo() {
 fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
     struct Off;
     impl store::ResultStore for Off {
-        fn enabled(&self) -> bool {
-            false
+        fn persistence(&self) -> store::Persistence {
+            store::Persistence::Disabled
         }
         fn get(&self, _: &store::EntryKey) -> Option<hirsel_engine::store::Bytes> {
             panic!("off provider read")
@@ -665,8 +665,6 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
             assert!(results.iter().all(|r| r.result.is_ok()));
             assert_eq!(compact.export_tir(&path("main")).unwrap(), scalar_tir);
         }
-        assert!(!store::ResultStore::enabled(&store::NoneStore));
-        assert!(store::ResultStore::enabled(&store::MemStore::default()));
     });
 }
 

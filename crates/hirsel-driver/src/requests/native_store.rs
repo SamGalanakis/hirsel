@@ -64,11 +64,11 @@ impl ResultStore for NativeStore {
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         self.cache.verifier()
     }
-    fn enabled(&self) -> bool {
-        self.cache.enabled()
+    fn persistence(&self) -> hirsel_engine::store::Persistence {
+        self.cache.persistence()
     }
-    fn query_cache_enabled(&self) -> bool {
-        self.cache.query_cache_enabled()
+    fn transports(&self) -> bool {
+        self.cache.transports()
     }
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
         self.cache.get(key)

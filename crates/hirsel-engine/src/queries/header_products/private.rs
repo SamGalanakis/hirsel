@@ -304,7 +304,7 @@ impl HeaderProducts {
             .iter()
             .filter(|(definition, entry)| {
                 complete
-                    && self.store.as_ref().is_some_and(|store| store.enabled())
+                    && self.store.is_some()
                     && private
                         .candidates
                         .get(definition)

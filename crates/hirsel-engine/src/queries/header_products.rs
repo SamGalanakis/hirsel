@@ -22,10 +22,13 @@ pub(crate) struct HeaderProduct {
     origin: Weak<Entry<hirsel_types::SignatureRef>>,
     accounted: AtomicBool,
 }
+pub(crate) trait HeaderAllowance: Send + Sync {
+    fn take_header(&self, bytes: u64) -> Option<crate::runtime::MemoryReservation>;
+}
 struct HeaderLease {
     remaining: Arc<std::sync::Mutex<u64>>,
     bytes: u64,
-    _source: Option<Arc<dyn Send + Sync>>,
+    _allowance: Option<crate::runtime::MemoryReservation>,
 }
 impl Drop for HeaderLease {
     fn drop(&mut self) {
@@ -91,7 +94,7 @@ pub(crate) struct HeaderProducts {
     rows: hirsel_syntax::DefMap<HeaderSlot>,
     generation: AtomicU64,
     retention: OnceLock<Arc<std::sync::Mutex<u64>>>,
-    source_backing: OnceLock<Weak<dyn Send + Sync>>,
+    source_backing: OnceLock<Weak<dyn HeaderAllowance>>,
     environment: QueryEnvironment,
     adapters: HeaderPhases,
     sources: SourceMap,
@@ -406,6 +409,21 @@ impl HeaderProducts {
         let standalone = (self.standalone && self.retention.get().is_none())
             .then(|| self.reserve_standalone(bytes))
             .transpose()?;
+        let header_allowance = self
+            .source_backing
+            .get()
+            .map(|source| {
+                source
+                    .upgrade()
+                    .and_then(|source| source.take_header(bytes))
+                    .ok_or_else(|| {
+                        QueryError::Operational(hirsel_types::OperationalFailure {
+                            operation: "header admission".into(),
+                            message: format!("header source allowance cannot retain {bytes} bytes"),
+                        })
+                    })
+            })
+            .transpose()?;
         let mut grant = self
             .retention
             .get()
@@ -421,7 +439,7 @@ impl HeaderProducts {
         let lease = self.retention.get().map(|remaining| HeaderLease {
             remaining: remaining.clone(),
             bytes,
-            _source: self.source_backing.get().and_then(Weak::upgrade),
+            _allowance: header_allowance,
         });
         drop(grant);
         if cell
@@ -448,8 +466,13 @@ impl HeaderProducts {
     pub(crate) fn ready(&self, id: DefId) -> Option<Arc<HeaderProduct>> {
         self.rows.get(&id)?.get()
     }
-    pub(crate) fn configure_source_backing(&self, backing: Arc<dyn Send + Sync>) {
+    pub(crate) fn configure_source_backing(&self, backing: Arc<dyn HeaderAllowance>) {
         let _ = self.source_backing.set(Arc::downgrade(&backing));
+    }
+    pub(crate) fn admission_expired(&self) -> bool {
+        self.source_backing
+            .get()
+            .is_some_and(|source| source.upgrade().is_none())
     }
     pub(crate) fn evict(&self) -> bool {
         for cell in self.rows.values() {

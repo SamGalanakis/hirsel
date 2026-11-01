@@ -1132,6 +1132,22 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
             let summaries = definitions
                 .each_ref()
                 .map(|definition| front.query(definition).unwrap());
+            let evict = QueryId {
+                kind: 0x281,
+                address: summaries[0].address,
+            };
+            runtime
+                .register(
+                    evict.kind,
+                    Arc::new(EvictCompact(
+                        evict,
+                        MemoryWeight {
+                            scratch: weight.scratch,
+                            ..Default::default()
+                        },
+                    )),
+                )
+                .unwrap();
             let initial = front.retained_bytes();
             let request = runtime.request(&[summaries[0]]);
             let result = runtime.wait(request);
@@ -1148,22 +1164,6 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
             if mode == 0 {
                 single_compact_limit = front.retained_bytes();
                 drop(a);
-                let evict = QueryId {
-                    kind: 0x281,
-                    address: summaries[0].address,
-                };
-                runtime
-                    .register(
-                        evict.kind,
-                        Arc::new(EvictCompact(
-                            evict,
-                            MemoryWeight {
-                                scratch: weight.scratch,
-                                ..Default::default()
-                            },
-                        )),
-                    )
-                    .unwrap();
                 let request = runtime.request(&[evict]);
                 drop(runtime.wait(request).unwrap());
                 let observations = front.retained_bytes() - initial;

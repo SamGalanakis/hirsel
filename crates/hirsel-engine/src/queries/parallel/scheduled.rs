@@ -204,6 +204,11 @@ struct FrontSourceBacking {
     allowance: MemoryReservationPool,
     _sources: SourceMap,
 }
+impl header_products::HeaderAllowance for FrontSourceBacking {
+    fn take_header(&self, bytes: u64) -> Option<MemoryReservation> {
+        self.allowance.take(bytes)
+    }
+}
 struct LiveSourceBacking {
     _source: Arc<FrontSourceBacking>,
     retention: Arc<Mutex<u64>>,
@@ -2158,9 +2163,18 @@ impl QueryEngine {
                         .into(),
             })
         };
+        let refused_inputs = |required: u64| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "front query admission".into(),
+                message: format!(
+                    "immutable front inputs require {required} bytes; available {} bytes",
+                    allowance.bytes()
+                ),
+            })
+        };
         let mut required = FrontBodyQueries::input_bytes(definitions).ok_or_else(refusal)?;
         if required > allowance.bytes() {
-            return Err(refusal());
+            return Err(refused_inputs(required));
         }
         let store = self
             .result_store
@@ -2178,7 +2192,7 @@ impl QueryEngine {
             .checked_add(anchors.input_bytes().ok_or_else(refusal)?)
             .ok_or_else(refusal)?;
         if required > allowance.bytes() {
-            return Err(refusal());
+            return Err(refused_inputs(required));
         }
         let input_records = crate::NativeRecords::new(self.types.clone(), store.clone());
         let declarations = self.frozen_declarations();
@@ -2200,7 +2214,7 @@ impl QueryEngine {
                     )
                     .ok_or_else(refusal)?;
                 if required > allowance.bytes() {
-                    return Err(refusal());
+                    return Err(refused_inputs(required));
                 }
                 let mut refs = Vec::with_capacity(written.len());
                 for sibling in written.iter() {
@@ -2300,7 +2314,7 @@ impl QueryEngine {
                     })
                 })?;
             if required > allowance.bytes() {
-                return Err(refusal());
+                return Err(refused_inputs(required));
             }
             let syntax = store
                 .put_content(SOURCE_INPUT, &bytes)
@@ -2318,6 +2332,15 @@ impl QueryEngine {
         if self.private_summary_inputs != registration_inputs {
             self.private_summary_inputs = registration_inputs;
             self.private_summary_revision = None;
+            self.retire_snapshot();
+        }
+        if self
+            .snapshot
+            .as_ref()
+            .and_then(|(_, snapshot)| snapshot.header_products())
+            .is_some_and(|headers| headers.admission_expired())
+        {
+            self.adopt_completed_headers();
             self.retire_snapshot();
         }
         let snapshot = self.signature_inputs();

@@ -13,9 +13,18 @@ enum Transport {
     },
     Written(BTreeMap<FileId, Vec<Arc<ItemSyntax>>>),
 }
+#[derive(Clone, Copy)]
+pub(crate) struct CapturedText {
+    pub(crate) cited: ContentHash,
+    pub(crate) implementation: Option<ContentHash>,
+}
 pub(super) struct HeaderSources {
     by_definition: hirsel_syntax::DefMap<Vec<FileId>>,
     facts: hirsel_syntax::DefMap<Arc<catalog::SourceFacts>>,
+    /// Each captured definition's cited text and implementation text, so an
+    /// execution engine that has not materialized it observes the values the
+    /// capturing engine observes.
+    texts: hirsel_syntax::DefMap<CapturedText>,
     transport: std::sync::RwLock<Transport>,
 }
 impl HeaderSources {
@@ -41,18 +50,36 @@ impl HeaderSources {
                 ))
             })
             .collect();
+        let texts = engine
+            .items
+            .keys()
+            .map(|path| {
+                (
+                    DefId::intern(path),
+                    CapturedText {
+                        cited: engine.cited_value(path),
+                        implementation: engine.implementation_hash(path),
+                    },
+                )
+            })
+            .collect();
         Self {
             by_definition,
             facts,
+            texts,
             transport: std::sync::RwLock::new(Transport::Written(files)),
         }
     }
     pub(super) fn facts(&self, id: DefId) -> Option<catalog::SourceFacts> {
         self.facts.get(&id).map(|facts| (**facts).clone())
     }
+    pub(super) fn text(&self, id: DefId) -> Option<CapturedText> {
+        self.texts.get(&id).copied()
+    }
     pub(super) fn facts_index_bytes(definitions: usize) -> u64 {
         let mut weight = crate::NativeMetadataWeight::default();
         weight.tree::<DefId, Arc<catalog::SourceFacts>>(definitions);
+        weight.tree::<DefId, CapturedText>(definitions);
         weight.bytes()
     }
     pub(super) fn archive(

@@ -172,17 +172,22 @@ impl HeaderProducts {
                 // another settled module while its own publication is in progress.
                 let declared = self.declared();
                 let mut engine = declared.execution();
-                engine.private_summaries = self
-                    .summaries
-                    .iter()
-                    .filter(|(id, _)| {
-                        private
-                            .candidates
-                            .get(id)
-                            .is_some_and(|candidate| candidate.module == module)
-                    })
-                    .map(|(id, summary)| (*id, summary.clone()))
-                    .collect();
+                // The module's previous proof, with its reads and failures, is
+                // revalidated by the ordinary previous-facts check.
+                for (id, summary) in self.summaries.iter().filter(|(id, _)| {
+                    private
+                        .candidates
+                        .get(id)
+                        .is_some_and(|candidate| candidate.module == module)
+                }) {
+                    engine.private_summaries.insert(*id, summary.clone());
+                    if let Some(reads) = self.summary_reads.get(id) {
+                        engine.private_summary_reads.insert(*id, reads.clone());
+                    }
+                    if let Some(failures) = self.failures.get(id) {
+                        engine.private_unique_failures.insert(*id, failures.clone());
+                    }
+                }
                 let (facts, complete) = engine.infer_private_module(
                     working,
                     private.registrations.get().map_or(&[], Vec::as_slice),
@@ -480,6 +485,7 @@ impl HeaderProducts {
             limits: self.limits,
             staged: self.staged.clone(),
             summaries: self.summaries.clone(),
+            summary_reads: self.summary_reads.clone(),
             failures: Default::default(),
             private: None,
         })

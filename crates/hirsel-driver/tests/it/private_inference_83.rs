@@ -310,6 +310,89 @@ fn generated()->Bytes uses {} = comptime make()
 }
 
 #[test]
+fn a_changed_registration_reinfers_only_the_modules_that_read_it() {
+    use hirsel_driver::{requests::*, resident::ObservedSession};
+    with_compiler_stack(|| {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = directory.path().join("hirsel.json");
+        std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"registration_reset","version":"1"},"sources":[{"path":"main.hir","module":[]},{"path":"a.hir","module":["a"]},{"path":"b.hir","module":["b"]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
+        let main = |text: &str| {
+            format!(
+                "fn make()->Result[Body[fn()->Bytes uses {{}}],String] uses {{}} {{\n  Ok(codegen.body(\"fn()->Bytes uses {{}} {{unique b\\\"{text}\\\"}}\"))\n}}\nfn generated()->Bytes uses {{}} = comptime make()\npub fn main()->u8 uses {{}} {{let _ = generated(); a.run() + b.run()}}\n"
+            )
+        };
+        for module in ["a", "b"] {
+            std::fs::write(
+                directory.path().join(format!("{module}.hir")),
+                "fn keep(take data: unique Bytes)->Bytes { let _ = data[0]; data }\npub fn run()->u8 { keep(unique b\"x\")[0] }\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(directory.path().join("main.hir"), main("x")).unwrap();
+        let config = CompileConfig {
+            store: Arc::new(MemStore::default()),
+            jobs: hirsel_intern::jobs::Jobs::new(1),
+            hold_bytes: 0,
+            ..Default::default()
+        };
+        let compiler = COMPILER.with_config(config.clone()).with_owned_engines();
+        let selector = CompilerRequests::new(
+            compiler.clone(),
+            config.clone(),
+            ProcessBudget::new(1 << 30),
+            RequestLimits {
+                runtime_bytes: 512 << 20,
+                snapshot_bytes: 128 << 20,
+                transport_bytes: 32 << 20,
+            },
+        );
+        let limits = selector.input_limits();
+        let mut session = ObservedSession::new(manifest, compiler, config, selector, limits, 3);
+        let path = |module: &str, name: &str| {
+            hirsel_syntax::DefPath(hirsel_syntax::ItemPath {
+                package: hirsel_syntax::PackageId {
+                    name: "registration_reset".into(),
+                    version: "1".into(),
+                },
+                modules: if module.is_empty() { vec![] } else { vec![module.into()] },
+                name: name.into(),
+            })
+        };
+        let queries = vec![
+            (path("", "generated"), QueryKind::PrivateInference),
+            (path("a", "keep"), QueryKind::PrivateInference),
+            (path("b", "keep"), QueryKind::PrivateInference),
+        ];
+        let mut check = |session: &mut ObservedSession<_>| {
+            let output = session
+                .request(CompileOperation::Check {
+                    lowering: LoweringPolicy::Reachable,
+                })
+                .unwrap();
+            let CompileResult::Check(checked) = &output.result else {
+                panic!("check result")
+            };
+            assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+            session
+                .recompute_counts(queries.clone())
+                .unwrap()
+                .into_iter()
+                .map(|(_, _, count)| count)
+                .collect::<Vec<_>>()
+        };
+        let first = check(&mut session);
+        // Each module's proof is inferred once, however many registration
+        // resets the generated body causes.
+        assert_eq!(first[1..], [1, 1], "{first:?}");
+        std::fs::write(directory.path().join("main.hir"), main("y")).unwrap();
+        let second = check(&mut session);
+        // Only the root module reads the changed registration.
+        assert!(second[0] > first[0], "{first:?} {second:?}");
+        assert_eq!(second[1..], first[1..], "{first:?} {second:?}");
+    });
+}
+
+#[test]
 fn changed_private_result_proofs_invalidate_unchanged_callers() {
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());

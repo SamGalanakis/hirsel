@@ -54,8 +54,25 @@ impl QueryEngine {
     pub(crate) fn implementation_hash(&self, path: &DefPath) -> Option<ContentHash> {
         match self.items.get(path) {
             Some(items) => Some(items.first()?.text_hash),
-            None => self.catalog.body(path),
+            None => self.catalog.body(path).or_else(|| {
+                self.captured_text(path)
+                    .and_then(|text| text.implementation)
+            }),
         }
+    }
+    /// The texts an execution engine's header capture observed for a
+    /// definition that is neither materialized nor cataloged here: the
+    /// capturing engine had materialized it, so both engines read one value.
+    pub(crate) fn captured_text(
+        &self,
+        path: &DefPath,
+    ) -> Option<header_products::CapturedText> {
+        if self.items.contains_key(path) || self.catalog.body(path).is_some() {
+            return None;
+        }
+        self.header_products
+            .as_ref()?
+            .captured_text(DefId::intern(path))
     }
     /// Every open evaluation frame read these views by reflecting or
     /// serializing them, each with the digest it saw.

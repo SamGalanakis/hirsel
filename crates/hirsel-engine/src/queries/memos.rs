@@ -433,7 +433,10 @@ impl QueryEngine {
     /// depends on the citing owner's file, but the observed value may not,
     /// so readers in different files merge.
     pub(crate) fn cited_value(&self, path: &DefPath) -> ContentHash {
-        self.citation_source().cited_text(DefId::intern(path))
+        match self.captured_text(path) {
+            Some(text) => text.cited,
+            None => self.citation_source().cited_text(DefId::intern(path)),
+        }
     }
     pub(crate) fn failed_key_value(&self, path: &DefPath) -> ContentHash {
         optional(self.failed_signature_key(path))

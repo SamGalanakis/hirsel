@@ -2377,10 +2377,7 @@ impl QueryEngine {
         let cited = self
             .source_paths()
             .into_iter()
-            .map(|path| {
-                let id = DefId::intern(&path);
-                (id, self.citation_source().cited_text(id))
-            })
+            .map(|path| (DefId::intern(&path), self.cited_value(&path)))
             .collect();
         let candidates = inputs
             .values()

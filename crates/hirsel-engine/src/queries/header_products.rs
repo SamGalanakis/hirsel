@@ -8,6 +8,7 @@ use std::sync::{
 };
 mod private;
 mod sources;
+pub(crate) use sources::CapturedText;
 use sources::HeaderSources;
 
 type SignatureOutput = Result<Arc<QueryOutput<hirsel_types::SignatureRef>>, QueryError>;
@@ -122,6 +123,9 @@ pub(crate) struct HeaderProducts {
     limits: crate::ComptimeLimits,
     staged: BTreeMap<DefPath, crate::comptime::StagedConstant>,
     summaries: Arc<hirsel_syntax::DefMap<hirsel_types::UniqueSummary>>,
+    /// The reads each carried summary's module proof recorded: a module
+    /// producer validates them like any previous proof.
+    summary_reads: Arc<hirsel_syntax::DefMap<Arc<crate::memo::Reads>>>,
     failures: BTreeMap<DefId, Vec<hirsel_types::UniqueFailure>>,
 }
 impl HeaderProducts {
@@ -156,6 +160,21 @@ impl HeaderProducts {
             })
             .collect();
         let owners = Arc::new(crate::NativeRecordContext::capture(engine));
+        let summaries: hirsel_syntax::DefMap<_> = engine
+            .private_summaries
+            .iter()
+            .filter(|(id, _)| {
+                declarations
+                    .metadata()
+                    .definitions
+                    .get(id.path())
+                    .is_some_and(|metadata| !metadata.public)
+                    && engine.source_facts(id.path()).is_some_and(|facts| {
+                        (facts.body || facts.generator) && !facts.constant && !facts.instance_bodied
+                    })
+            })
+            .map(|(id, summary)| (*id, summary.clone()))
+            .collect();
         Arc::new(Self {
             rows,
             generation: AtomicU64::new(0),
@@ -186,25 +205,13 @@ impl HeaderProducts {
             verify_store: engine.verify_store,
             limits: engine.comptime_limits,
             staged: engine.staged_constants.clone(),
-            summaries: Arc::new(
-                engine
-                    .private_summaries
-                    .iter()
-                    .filter(|(id, _)| {
-                        declarations
-                            .metadata()
-                            .definitions
-                            .get(id.path())
-                            .is_some_and(|metadata| !metadata.public)
-                            && engine.source_facts(id.path()).is_some_and(|facts| {
-                                (facts.body || facts.generator)
-                                    && !facts.constant
-                                    && !facts.instance_bodied
-                            })
-                    })
-                    .map(|(id, summary)| (*id, summary.clone()))
+            summary_reads: Arc::new(
+                summaries
+                    .keys()
+                    .filter_map(|id| Some((*id, engine.private_summary_reads.get(id)?.clone())))
                     .collect(),
             ),
+            summaries: Arc::new(summaries),
             failures: engine.private_unique_failures.clone(),
         })
     }
@@ -254,6 +261,9 @@ impl HeaderProducts {
     }
     pub(crate) fn source_facts(&self, id: DefId) -> Option<catalog::SourceFacts> {
         self.syntax.facts(id)
+    }
+    pub(crate) fn captured_text(&self, id: DefId) -> Option<sources::CapturedText> {
+        self.syntax.text(id)
     }
     pub(crate) fn source_fact_index_bytes(engine: &QueryEngine, private: bool) -> u64 {
         HeaderSources::facts_index_bytes(engine.source_paths().len()).saturating_add(if private {

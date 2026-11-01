@@ -356,7 +356,7 @@ pub fn serve(args: &[OsString]) -> u8 {
         socket.display()
     );
     let startup = environment().unwrap_or_default();
-    hirsel_driver::session::enable_resident(8);
+    hirsel_driver::session::keep_sessions(8);
     hirsel_engine::free_sessions(true);
     let code = run_server(&listener, Duration::from_secs(idle), &startup, &workspace);
     let _ = std::fs::remove_file(&socket);
@@ -734,7 +734,6 @@ fn unreachable_cwd<R>(cwd: &Path) -> R {
 /// the kernel delivers an input event. Register before comparing bytes so an
 /// edit racing the previous check or watch installation cannot be missed.
 pub fn watch(args: Vec<OsString>) -> u8 {
-    hirsel_driver::session::enable_resident(1);
     hirsel_engine::free_sessions(true);
     loop {
         let started = Instant::now();

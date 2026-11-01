@@ -87,6 +87,31 @@ fn session_rechecks_edits_and_recovers_from_invalid_sources() {
     });
 }
 
+#[test]
+fn path_requests_reuse_one_session_per_thread_and_observe_edits() {
+    with_compiler_stack(|| {
+        let f = crate::image_fixture::Fixture::new();
+        let source = f.0.join("main.hir");
+        std::fs::write(&source, "fn main() {}\n").unwrap();
+        let before = session::opened();
+        request_tir(&source, Verify::On, None).unwrap();
+        request_tir(&source, Verify::On, None).unwrap();
+        assert_eq!(session::opened() - before, 1);
+        std::fs::write(&source, "fn main() { missing }\n").unwrap();
+        let Err(ToolError::Query {
+            error: QueryError::Diagnostics(diagnostics),
+            sources,
+            ..
+        }) = request_tir(&source, Verify::On, None)
+        else {
+            panic!("the edited source was not observed");
+        };
+        let rendered: Vec<_> = diagnostics.iter().map(|d| d.render_human(&sources)).collect();
+        assert!(rendered.iter().any(|d| d.contains("missing")), "{rendered:?}");
+        assert_eq!(session::opened() - before, 1);
+    });
+}
+
 fn session_representation_edit_matches_cold(opaque: bool, reads_field: bool) {
     with_compiler_stack(|| {
         let fixture = crate::image_fixture::Fixture::new();

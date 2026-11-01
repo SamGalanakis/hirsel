@@ -275,8 +275,6 @@ fn native(backend: &str) {
     }
     eprintln!("{}", String::from_utf8_lossy(&result.stdout));
     hirsel_engine::with_compiler_stack(|| {
-        // Compile once; replay still constructs a new runtime for each bound tape.
-        hirsel_driver::session::enable_resident(1);
         for path in fs::read_dir(root)
             .unwrap()
             .map(|p| p.unwrap().path())

@@ -406,8 +406,6 @@ fn route_planner_33_reference_checked_workflows() {
 #[test]
 fn route_planner_33_native_four_engine_replay() {
     hirsel_engine::with_compiler_stack(|| {
-        // Reuse compilation for this immutable package; each tape gets a fresh runtime.
-        hirsel_driver::session::enable_resident(1);
         let raw_only = std::env::var("ROUTE_PLANNER_33_LIVE_STDERR_ONLY").as_deref() == Ok("1");
         if raw_only {
             assert!(

@@ -386,7 +386,6 @@ fn chunk_backup_31_scripted_native_record_replay() {
     }
 
     with_compiler_stack(|| {
-        hirsel_driver::session::enable_resident(1);
         let root = scratch("native-");
         let path = package(&root);
         seal_tools(&root);

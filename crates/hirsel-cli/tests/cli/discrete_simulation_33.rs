@@ -240,8 +240,6 @@ fn discrete_simulation_33_reference_checked_workflows() {
 #[test]
 fn discrete_simulation_33_native_full_entry_replay() {
     hirsel_engine::with_compiler_stack(|| {
-        // Reuse compilation for this immutable package; each tape gets a fresh runtime.
-        hirsel_driver::session::enable_resident(1);
         let root = std::env::var_os("QUEUESIM_NATIVE_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|| root("native-"));

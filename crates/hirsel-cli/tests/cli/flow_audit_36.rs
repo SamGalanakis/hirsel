@@ -486,8 +486,6 @@ fn flow_audit_36_reference_checked_workflows() {
 #[test]
 fn flow_audit_36_native_four_engine_replay() {
     hirsel_engine::with_compiler_stack(|| {
-        // Reuse compilation for this immutable package; each tape gets a fresh runtime.
-        hirsel_driver::session::enable_resident(1);
         let root = scratch("native-");
         let _evidence = Evidence(root.clone());
         let path = package(&root);

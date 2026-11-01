@@ -404,8 +404,7 @@ fn loopback_boundaries_decoding_legacy_and_offline_replay() {
     with_compiler_stack(|| {
         let path = fixture("main");
         // Each live row arms a 30 s accept window. Check the program before any
-        // is armed and keep it resident, so every run of this path reuses it.
-        hirsel_driver::session::enable_resident(1);
+        // is armed, so every run of this path reuses its session.
         check_safe_path(&path).unwrap();
         let mut loaded = checked(&path);
         let program = ready(&mut loaded);

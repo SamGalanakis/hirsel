@@ -427,7 +427,6 @@ fn replay_batch(path: &std::path::Path) {
         }
     }
     hirsel_engine::with_compiler_stack(|| {
-        hirsel_driver::session::enable_resident(1);
         let requests: Vec<Value> = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert!(!requests.is_empty() && requests.len() <= 8);
         for request in requests {

@@ -72,58 +72,60 @@ impl Session {
     }
 }
 
-/// The sessions a resident host keeps, by (working directory, entry as
-/// given, verification), most recently used last. The entry keeps its
-/// spelling: a standalone source's diagnostics print the path as given.
+/// The sessions this thread keeps, by (working directory, entry as given,
+/// verification), most recently used last. The entry keeps its spelling: a
+/// standalone source's diagnostics print the path as given.
 struct Registry {
     sessions: Vec<(Key, Session)>,
     limit: usize,
+    opened: u64,
 }
 thread_local! {
-    static RESIDENT: RefCell<Option<Registry>> = const { RefCell::new(None) };
+    static RESIDENT: RefCell<Registry> = const {
+        RefCell::new(Registry {
+            sessions: Vec::new(),
+            limit: 1,
+            opened: 0,
+        })
+    };
 }
 
-/// Keep up to `limit` sessions on this thread from now on: the path entry
-/// points lease theirs from here instead of loading afresh. `hirsel serve`
-/// turns it on; one-shot processes never do.
-pub fn enable_resident(limit: usize) {
+/// Keep up to `limit` sessions on this thread from now on. Every thread
+/// keeps one, so repeated requests for one program reuse its session;
+/// `hirsel serve` keeps more for its several clients.
+pub fn keep_sessions(limit: usize) {
     RESIDENT.with(|r| {
-        *r.borrow_mut() = Some(Registry {
-            sessions: vec![],
-            limit: limit.max(1),
-        })
+        let mut registry = r.borrow_mut();
+        registry.limit = limit.max(1);
+        let over = registry.sessions.len().saturating_sub(registry.limit);
+        registry.sessions.drain(..over);
     });
+}
+/// Sessions the path entry points opened on this thread so far.
+pub fn opened() -> u64 {
+    RESIDENT.with(|r| r.borrow().opened)
 }
 /// Current logical input paths, including absent manifests and sidecars.
 /// Event hosts register these before comparing bytes; event metadata alone
 /// never establishes source identity.
 pub fn resident_watched() -> Vec<PathBuf> {
     RESIDENT.with(|r| {
-        r.borrow().as_ref().map_or_else(Vec::new, |registry| {
-            registry
-                .sessions
-                .iter()
-                .flat_map(|(_, session)| session.watched().map(Path::to_path_buf))
-                .collect()
-        })
+        r.borrow()
+            .sessions
+            .iter()
+            .flat_map(|(_, session)| session.watched().map(Path::to_path_buf))
+            .collect()
     })
 }
 /// Whether a file of any kept session changed since it was last used.
 pub fn resident_changed() -> bool {
-    RESIDENT.with(|r| {
-        r.borrow()
-            .as_ref()
-            .is_some_and(|r| r.sessions.iter().any(|(_, s)| !s.poll().is_empty()))
-    })
-}
-pub fn resident() -> bool {
-    RESIDENT.with(|r| r.borrow().is_some())
+    RESIDENT.with(|r| r.borrow().sessions.iter().any(|(_, s)| !s.poll().is_empty()))
 }
 
 /// Fresh and resident callers use the same immutable request selector. The
 /// registry changes only the lifetime of the input cursor and shared host.
 pub(crate) fn with_session<R>(path: &Path, verify: Verify, f: impl FnOnce(&mut Session) -> R) -> R {
-    let mut session = take(path, verify).unwrap_or_else(|| Session::open(path, verify));
+    let mut session = take(path, verify);
     let result = f(&mut session);
     put(path, verify, session);
     result
@@ -137,30 +139,30 @@ pub(crate) fn request(
     with_session(path, verify, |session| session.request(operation))
 }
 
-/// `path`'s session out of the registry (a new one if it has none), or None
-/// when this thread keeps no sessions. A session is taken while in use so a
-/// nested lease of the same program loads its own.
-fn take(path: &Path, verify: Verify) -> Option<Session> {
+/// `path`'s session out of the registry, or a new one. A session is taken
+/// while in use so a nested lease of the same program loads its own.
+fn take(path: &Path, verify: Verify) -> Session {
     let key = key(path, verify);
-    RESIDENT.with(|r| {
-        let mut r = r.borrow_mut();
-        let registry = r.as_mut()?;
-        Some(
-            match registry.sessions.iter().position(|(k, _)| *k == key) {
-                Some(i) => registry.sessions.remove(i).1,
-                None => Session::open(path, verify),
-            },
-        )
-    })
+    let kept = RESIDENT.with(|r| {
+        let mut registry = r.borrow_mut();
+        let index = registry.sessions.iter().position(|(k, _)| *k == key);
+        match index {
+            Some(i) => Some(registry.sessions.remove(i).1),
+            None => {
+                registry.opened += 1;
+                None
+            }
+        }
+    });
+    kept.unwrap_or_else(|| Session::open(path, verify))
 }
 fn put(path: &Path, verify: Verify, session: Session) {
     let key = key(path, verify);
     RESIDENT.with(|r| {
-        if let Some(registry) = r.borrow_mut().as_mut() {
-            registry.sessions.push((key, session));
-            let over = registry.sessions.len().saturating_sub(registry.limit);
-            registry.sessions.drain(..over);
-        }
+        let mut registry = r.borrow_mut();
+        registry.sessions.push((key, session));
+        let over = registry.sessions.len().saturating_sub(registry.limit);
+        registry.sessions.drain(..over);
     });
 }
 type Key = (PathBuf, PathBuf, bool);

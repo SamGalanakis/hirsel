@@ -272,7 +272,7 @@ mod tsan {
     use std::cell::Cell;
     use std::collections::BTreeMap;
     use std::ffi::c_void;
-    use std::sync::RwLock;
+    use std::sync::{Mutex, RwLock};
 
     unsafe extern "C" {
         fn __tsan_get_current_fiber() -> *mut c_void;
@@ -283,24 +283,37 @@ mod tsan {
 
     /// Each range's low address: its high address and its fiber, for the stack mappings and for
     /// the threads' own stacks. A thread's reported stack may span mappings (the main thread's
-    /// reaches its stack limit), so a mapping is looked up first.
+    /// reaches its stack limit), so a mapping is looked up first. A thread's own range also
+    /// names its thread: only that thread may resume it.
     static MAPPINGS: RwLock<BTreeMap<usize, (usize, usize)>> = RwLock::new(BTreeMap::new());
-    static THREADS: RwLock<BTreeMap<usize, (usize, usize)>> = RwLock::new(BTreeMap::new());
+    static THREADS: RwLock<BTreeMap<usize, (usize, usize, i32)>> = RwLock::new(BTreeMap::new());
+    /// Each fiber that is running: the thread it runs on. Marked by the switch to it and
+    /// cleared by the switch away, so a second thread entering it faults at that switch
+    /// instead of inside ThreadSanitizer's processor wiring.
+    static RUNNING: Mutex<BTreeMap<usize, i32>> = Mutex::new(BTreeMap::new());
     thread_local! {
         // OS-thread lifetime, so a recycled pthread stack registers its new
         // native fiber instead of inheriting the previous thread's identity.
         static REGISTERED: Cell<bool> = const { Cell::new(false) };
     }
 
-    fn find(ranges: &RwLock<BTreeMap<usize, (usize, usize)>>, at: usize) -> Option<usize> {
-        let ranges = ranges.read().unwrap();
-        let (_, &(high, fiber)) = ranges.range(..=at).next_back()?;
-        (at < high).then_some(fiber)
+    fn find(at: usize) -> Option<(usize, usize)> {
+        let ranges = MAPPINGS.read().unwrap();
+        let (&low, &(high, fiber)) = ranges.range(..=at).next_back()?;
+        (at < high).then_some((low, fiber))
+    }
+
+    fn find_thread(at: usize) -> Option<(usize, usize, i32)> {
+        let ranges = THREADS.read().unwrap();
+        let (&low, &(high, fiber, thread)) = ranges.range(..=at).next_back()?;
+        (at < high).then_some((low, fiber, thread))
     }
 
     pub(super) fn create(low: *mut u8, high: *mut u8) -> *mut c_void {
         // SAFETY: creating a fiber has no preconditions.
         let fiber = unsafe { __tsan_create_fiber(0) };
+        // A fresh fiber runs nowhere, even if its address was a dead thread's.
+        RUNNING.lock().unwrap().remove(&(fiber as usize));
         MAPPINGS
             .write()
             .unwrap()
@@ -312,6 +325,7 @@ mod tsan {
         let fiber = create(low, high);
         // SAFETY: the old fiber is no longer resumed; the running one is left to leak.
         if unsafe { __tsan_get_current_fiber() } != old {
+            RUNNING.lock().unwrap().remove(&(old as usize));
             unsafe { __tsan_destroy_fiber(old) };
         }
         fiber
@@ -319,14 +333,18 @@ mod tsan {
 
     pub(super) fn destroy(low: *mut u8, fiber: *mut c_void) {
         MAPPINGS.write().unwrap().remove(&(low as usize));
+        RUNNING.lock().unwrap().remove(&(fiber as usize));
         // SAFETY: the stack's fiber runs nowhere any more.
         unsafe { __tsan_destroy_fiber(fiber) };
     }
 
     /// The fiber suspended at `to`, after registering the calling thread's own stack when it
-    /// runs there.
+    /// runs there. The caller switches ThreadSanitizer to it next, on this thread: the
+    /// current fiber stops running here and the target starts.
     pub(super) fn target(to: *mut u8, here: usize) -> *mut c_void {
-        if !REGISTERED.get() && find(&MAPPINGS, here).is_none() {
+        // SAFETY: gettid has no preconditions. The native link resolves no gettid wrapper.
+        let me = unsafe { libc::syscall(libc::SYS_gettid) } as i32;
+        if !REGISTERED.get() && find(here).is_none() {
             // SAFETY: the calling thread's attributes describe its own live stack.
             unsafe {
                 let mut attr: libc::pthread_attr_t = std::mem::zeroed();
@@ -336,15 +354,47 @@ mod tsan {
                     libc::pthread_attr_destroy(&mut attr);
                     let low = low as usize;
                     let fiber = __tsan_get_current_fiber() as usize;
-                    THREADS.write().unwrap().insert(low, (low + size, fiber));
+                    THREADS
+                        .write()
+                        .unwrap()
+                        .insert(low, (low + size, fiber, me));
+                    RUNNING.lock().unwrap().insert(fiber, me);
                     REGISTERED.set(true);
                 }
             }
         }
-        find(&MAPPINGS, to as usize)
-            .or_else(|| find(&THREADS, to as usize))
-            .unwrap_or_else(|| crate::fault("a fiber switch to a stack of no fiber"))
-            as *mut c_void
+        let to = to as usize;
+        let (low, fiber) = match find(to) {
+            Some(found) => found,
+            None => {
+                let Some((low, fiber, owner)) = find_thread(to) else {
+                    crate::fault("a fiber switch to a stack of no fiber")
+                };
+                if owner != me {
+                    crate::fault(&format!(
+                        "thread {me} switched to the own stack of thread {owner} \
+                         (range at {low:#x}, saved SP {to:#x})"
+                    ));
+                }
+                (low, fiber)
+            }
+        };
+        // SAFETY: querying the current fiber has no preconditions.
+        let current = unsafe { __tsan_get_current_fiber() } as usize;
+        let mut running = RUNNING.lock().unwrap();
+        if running.get(&current) == Some(&me) {
+            running.remove(&current);
+        }
+        if let Some(&other) = running.get(&fiber)
+            && other != me
+        {
+            crate::fault(&format!(
+                "thread {me} switched to the fiber of the stack at {low:#x} (saved SP {to:#x}), \
+                 which is running on thread {other}"
+            ));
+        }
+        running.insert(fiber, me);
+        fiber as *mut c_void
     }
 }
 

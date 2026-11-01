@@ -1322,20 +1322,39 @@ impl QueryEngine {
                 return None;
             }
         } else {
-            let item = self.items.get(path)?.first()?;
+            let (generator, instance_bodied, file) = match self.items.get(path) {
+                Some(items) => {
+                    let item = items.first()?;
+                    (
+                        generation::generator(item).is_some(),
+                        generation::instance_bodied(item),
+                        self.item_file(item),
+                    )
+                }
+                // A signature keys on its header capture's facts, so a store
+                // hit decodes none of the definition's syntax.
+                None if kind == QueryKind::Signature => {
+                    let headers = self.header_products.as_ref()?;
+                    let id = DefId::intern(path);
+                    let facts = headers.source_facts(id)?;
+                    let file = headers.captured_text(id)?.file;
+                    (facts.generator, facts.instance_bodied, file)
+                }
+                None => return None,
+            };
             if kind == QueryKind::Generate {
-                if generation::generator(item).is_none() || generation::instance_bodied(item) {
+                if !generator || instance_bodied {
                     return None;
                 }
             } else if kind != QueryKind::GeneratedRegistration
                 && !(kind == QueryKind::Lower && self.source_owned_generator(path))
-                && (generation::generator(item).is_some() || self.generated.contains_key(path))
+                && (generator || self.generated.contains_key(path))
             {
                 return None;
             }
             if self
                 .sources
-                .file(self.item_file(item))?
+                .file(file)?
                 .path
                 .to_string_lossy()
                 .starts_with('<')

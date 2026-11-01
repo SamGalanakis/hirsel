@@ -411,6 +411,100 @@ fn a_changed_registration_reinfers_only_the_modules_that_read_it() {
     });
 }
 
+/// A warm check keys every stored signature on its header capture, so a
+/// dependency's signatures are adopted without decoding its syntax; an edit
+/// decodes only the edited file. The exports equal a cold compile's.
+#[test]
+fn a_warm_check_materializes_only_the_edited_definitions_source() {
+    use hirsel_driver::{requests::*, resident::ObservedSession};
+    use hirsel_intern::timings::{self, Count};
+    with_compiler_stack(|| {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = directory.path().join("hirsel.json");
+        std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"warm_headers","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[{"manifest":"library.json","package":{"name":"library","version":"1"},"expose":[{"head":"a","module":["a"]},{"head":"b","module":["b"]}]}],"entry":{"module":[],"name":"main"}}"#).unwrap();
+        std::fs::write(directory.path().join("library.json"), r#"{"schema":1,"package":{"name":"library","version":"1"},"sources":[{"path":"a.hir","module":["a"]},{"path":"b.hir","module":["b"]}],"dependencies":[]}"#).unwrap();
+        std::fs::write(
+            directory.path().join("main.hir"),
+            "pub fn main()->u8 { a.run() + b.run() }\n",
+        )
+        .unwrap();
+        let module = "fn helper()->u8 { 2u8 }\npub fn run()->u8 { helper() + 1u8 }\n";
+        for name in ["a", "b"] {
+            std::fs::write(directory.path().join(format!("{name}.hir")), module).unwrap();
+        }
+        timings::enable();
+        let read = |wanted: Count| {
+            timings::report()
+                .counts
+                .into_iter()
+                .find(|(count, _)| *count == wanted)
+                .unwrap()
+                .1
+        };
+        let counts = || {
+            (
+                read(Count::HeaderSourceFiles),
+                read(Count::StoreSignatureMisses),
+            )
+        };
+        // Each check is a fresh process's session over one result store.
+        let check = |store: &Arc<MemStore>| {
+            let config = CompileConfig {
+                store: store.clone(),
+                jobs: hirsel_intern::jobs::Jobs::new(2),
+                hold_bytes: 0,
+                ..Default::default()
+            };
+            let compiler = COMPILER.with_config(config.clone()).with_owned_engines();
+            let selector = CompilerRequests::new(
+                compiler.clone(),
+                config.clone(),
+                ProcessBudget::new(1 << 30),
+                RequestLimits {
+                    runtime_bytes: 512 << 20,
+                    snapshot_bytes: 128 << 20,
+                    transport_bytes: 32 << 20,
+                },
+            );
+            let limits = selector.input_limits();
+            let mut session =
+                ObservedSession::new(manifest.clone(), compiler, config, selector, limits, 3);
+            let before = counts();
+            let output = session
+                .request(CompileOperation::Check {
+                    lowering: LoweringPolicy::Reachable,
+                })
+                .unwrap();
+            let CompileResult::Check(checked) = &output.result else {
+                panic!("check result")
+            };
+            assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+            let after = counts();
+            (
+                (after.0 - before.0, after.1 - before.1),
+                session.checked_products(true).unwrap().canonical.clone(),
+            )
+        };
+        let store = Arc::new(MemStore::default());
+        let (_, cold) = check(&store);
+        // The first warm check stores the signatures the cold one settled late.
+        check(&store);
+        let ((files, misses), warm) = check(&store);
+        assert_eq!(misses, 0, "every signature is adopted from the store");
+        assert_eq!(files, 0, "a store-hit-only check decodes no source");
+        assert_eq!(warm, cold);
+        std::fs::write(
+            directory.path().join("a.hir"),
+            module.replace("{ 2u8 }", "{ 3u8 }"),
+        )
+        .unwrap();
+        let ((files, _), edited) = check(&store);
+        assert_eq!(files, 1, "only the edited a.hir is decoded");
+        let (_, edited_cold) = check(&Arc::new(MemStore::default()));
+        assert_eq!(edited, edited_cold);
+    });
+}
+
 #[test]
 fn changed_private_result_proofs_invalidate_unchanged_callers() {
     with_compiler_stack(|| {

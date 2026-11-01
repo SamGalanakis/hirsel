@@ -911,17 +911,11 @@ impl QueryEngine {
             } else {
                 body
             }
+        } else if kind == QueryKind::Signature {
+            self.signature_header(definition)?
         } else {
             self.materialize(definition)?;
-            let snapshot = self.snapshot(definition)?;
-            if kind == QueryKind::Signature {
-                match self.inputs.get(&DefId::intern(definition)) {
-                    Some(inputs) => inputs.header(),
-                    None => self.headers_hash(definition),
-                }
-            } else {
-                snapshot.text_hash
-            }
+            self.snapshot(definition)?.text_hash
         };
         let manifest = self
             .package_manifests
@@ -932,6 +926,32 @@ impl QueryEngine {
             "hirsel.query.text.v1",
             [text.0.as_slice(), manifest.0.as_slice()],
         ))
+    }
+    /// The header digest a signature keys on: as indexed here, or as the
+    /// header capture recorded it, so a captured definition's syntax is never
+    /// decoded for its key. Only a definition no index or capture has seen
+    /// (an uncaptured catalog declaration, a GEN-6 specialization) is
+    /// materialized first.
+    fn signature_header(&mut self, definition: &DefPath) -> Result<ContentHash, QueryError> {
+        let id = DefId::intern(definition);
+        if !self.inputs.contains_key(&id) {
+            if let Some(text) = self
+                .header_products
+                .as_ref()
+                .and_then(|headers| headers.captured_text(id))
+            {
+                return Ok(text.header);
+            }
+            self.materialize(definition)?;
+            self.snapshot(definition)?;
+        }
+        Ok(self.header_digest(definition))
+    }
+    /// The header digest a capture records for a materialized definition.
+    pub(crate) fn header_digest(&self, definition: &DefPath) -> ContentHash {
+        self.inputs
+            .get(&DefId::intern(definition))
+            .map_or_else(|| self.headers_hash(definition), memos::DefInputs::header)
     }
     /// Every candidate's header hash, combined.
     pub(crate) fn headers_hash(&self, definition: &DefPath) -> ContentHash {

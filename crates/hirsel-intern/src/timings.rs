@@ -277,11 +277,13 @@ pub enum Count {
     StoreSummaryMisses,
     StoreModeHits,
     StoreModeMisses,
+    /// Source files whose item syntax a header product materialized.
+    HeaderSourceFiles,
 }
 
 impl Count {
     /// Every count, in declaration order.
-    pub const ALL: [Count; 69] = [
+    pub const ALL: [Count; 70] = [
         Count::Definitions,
         Count::Units,
         Count::VRuns,
@@ -351,6 +353,7 @@ impl Count {
         Count::StoreSummaryMisses,
         Count::StoreModeHits,
         Count::StoreModeMisses,
+        Count::HeaderSourceFiles,
     ];
     /// The stable name `--timings` prints.
     pub fn name(self) -> &'static str {
@@ -380,6 +383,7 @@ impl Count {
             Count::StoreSummaryMisses => "store summary misses",
             Count::StoreModeHits => "store mode hits",
             Count::StoreModeMisses => "store mode misses",
+            Count::HeaderSourceFiles => "header source files materialized",
             Count::ObjectHits => "object hits",
             Count::ObjectMisses => "object misses",
             Count::NativeImports => "native imports",

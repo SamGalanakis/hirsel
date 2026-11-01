@@ -17,13 +17,17 @@ enum Transport {
 pub(crate) struct CapturedText {
     pub(crate) cited: ContentHash,
     pub(crate) implementation: Option<ContentHash>,
+    /// The digest a signature keys on: every candidate's header.
+    pub(crate) header: ContentHash,
+    /// The first candidate's file, which a signature's store key admits.
+    pub(crate) file: FileId,
 }
 pub(super) struct HeaderSources {
     by_definition: hirsel_syntax::DefMap<Vec<FileId>>,
     facts: hirsel_syntax::DefMap<Arc<catalog::SourceFacts>>,
-    /// Each captured definition's cited text and implementation text, so an
-    /// execution engine that has not materialized it observes the values the
-    /// capturing engine observes.
+    /// Each captured definition's cited text, implementation text and header
+    /// digest, so an execution engine that has not materialized it observes
+    /// the values the capturing engine observes.
     texts: hirsel_syntax::DefMap<CapturedText>,
     transport: std::sync::RwLock<Transport>,
 }
@@ -52,15 +56,17 @@ impl HeaderSources {
             .collect();
         let texts = engine
             .items
-            .keys()
-            .map(|path| {
-                (
+            .iter()
+            .filter_map(|(path, candidates)| {
+                Some((
                     DefId::intern(path),
                     CapturedText {
                         cited: engine.cited_value(path),
                         implementation: engine.implementation_hash(path),
+                        header: engine.header_digest(path),
+                        file: engine.item_file(candidates.first()?),
                     },
-                )
+                ))
             })
             .collect();
         Self {
@@ -140,6 +146,7 @@ impl HeaderSources {
             })
         };
         for file in files {
+            hirsel_intern::timings::count(hirsel_intern::timings::Count::HeaderSourceFiles);
             let transport = self.transport.read().unwrap_or_else(|e| e.into_inner());
             let syntaxes = match &*transport {
                 Transport::Written(files) => files.get(file).ok_or_else(refused)?.clone(),

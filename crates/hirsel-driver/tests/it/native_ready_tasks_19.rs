@@ -284,7 +284,9 @@ fn ready_case_inner_mutation(
             let originals = OriginalBodies(originals);
             let inputs = NativeInstanceInputs::from_products(declarations, reader).unwrap();
             drop(engine);
-            assert!(originals.0.iter().all(|body| body.upgrade().is_some()));
+            // Catalogue rows are weak and the fixture host holds nothing, so
+            // every later stage reopens its original body under admission.
+            assert!(originals.0.iter().all(|body| body.upgrade().is_none()));
             let runtime_bytes = hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + (64 << 20);
             let budget = ProcessBudget::new(runtime_bytes + (32 << 20));
             let trace = hirsel_lir::construction::ValueTrace::default();

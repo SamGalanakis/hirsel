@@ -96,8 +96,8 @@ fn immutable_native_inputs_bind_only_the_selected_front_output_without_eager_bod
             &shared.declarations.sources[&main]
         ));
         assert!(
-            original.upgrade().is_some(),
-            "immutable worker inputs retain the exact shared original Definition"
+            original.upgrade().is_none(),
+            "immutable worker inputs retain no decoded original Definition"
         );
         assert_eq!(
             pinned.original_source(&main).unwrap().0.signature_hash,

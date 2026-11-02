@@ -387,8 +387,30 @@ impl QueryEngine {
                 return Err(refused("duplicate accepted registration"));
             }
         }
+        // Portable generation dependencies name only their generating
+        // declarations. The capture identity retains the complete
+        // written base; unrelated headers must not change ordinary records.
+        let generation_headers = registrations
+            .iter()
+            .map(|registration| {
+                let id = DefId::intern(registration.definition());
+                (id, self.candidates_value(id.path()))
+            })
+            .chain(
+                instances
+                    .declarations
+                    .iter()
+                    .map(|id| (*id, self.candidates_value(id.path()))),
+            )
+            .collect::<BTreeMap<_, _>>();
+        let generation_base = records
+            .encode(&*anchors, &(self.environment_value(), generation_headers))
+            .ok_or_else(|| refused("generation header encoding"))?;
+        if generation_base.len() as u64 > limit {
+            return Err(refused("generation headers exceed admission"));
+        }
         let manifest = Manifest {
-            base,
+            base: ContentHash::of_parts("hirsel.generation.base.v1", [generation_base.as_slice()]),
             dependencies: dependencies.into_iter().collect(),
             trace: registrations
                 .iter()

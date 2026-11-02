@@ -246,7 +246,11 @@ impl FrontLowerQueries {
                 execution_subject,
                 self.namespace.snapshot.types().clone(),
                 |path, occurrence| {
-                    crate::NativeRecordSource::record_source_anchor(&*self.namespace.anchors, path, occurrence)
+                    crate::NativeRecordSource::record_source_anchor(
+                        &*self.namespace.anchors,
+                        path,
+                        occurrence,
+                    )
                 },
                 &*self.namespace.snapshot,
             )?)

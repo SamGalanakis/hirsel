@@ -11,7 +11,7 @@ use crate::{
     SignatureLookup, UniverseErrors, VRead, ValidatedSignatures, ValidationDigest, ViewVerdict,
     Violation,
 };
-use hirsel_syntax::{ContentHash, DefId, DefMap};
+use hirsel_syntax::{ContentHash, DefId, DefMap, PackageId};
 use hirsel_types::{HeapRole, SignatureRef, TypeInterner};
 use std::collections::BTreeSet;
 use std::sync::{Arc, OnceLock};
@@ -92,6 +92,97 @@ fn first_heap<'a>(views: impl Iterator<Item = &'a View>) -> Option<(DefId, HeapR
         .into_iter()
         .find_map(|v| v.input.heap().cloned().map(|role| (v.d, role)))
 }
+/// The earlier, in DefPath order, of two first heap roles.
+fn earlier(
+    a: Option<(DefId, HeapRole)>,
+    b: Option<&(DefId, HeapRole)>,
+) -> Option<(DefId, HeapRole)> {
+    match (a, b) {
+        (Some(a), Some(b)) if b.0 < a.0 => Some(b.clone()),
+        (None, b) => b.cloned(),
+        (a, _) => a,
+    }
+}
+
+/// Reads the view of one installed definition when V first asks for it.
+pub trait ViewSource: Send + Sync {
+    fn view(&self, d: DefId) -> Option<View>;
+}
+/// The views of read-only installed packages, by definition. Each is
+/// identified on its first read, so a universe that holds them reads only
+/// the rows V's verdicts and lookups name.
+pub struct InstalledViews {
+    cells: DefMap<OnceLock<Option<View>>>,
+    source: Box<dyn ViewSource>,
+}
+impl InstalledViews {
+    pub fn new(members: impl IntoIterator<Item = DefId>, source: Box<dyn ViewSource>) -> Self {
+        Self {
+            cells: members.into_iter().map(|d| (d, OnceLock::new())).collect(),
+            source,
+        }
+    }
+    pub fn contains(&self, d: DefId) -> bool {
+        self.cells.contains_key(&d)
+    }
+    /// `d`'s view, identified on its first read.
+    pub fn get(&self, d: DefId) -> Option<&View> {
+        self.cells
+            .get(&d)?
+            .get_or_init(|| self.source.view(d))
+            .as_ref()
+    }
+}
+/// The installed part of a universe: views read on demand, and the
+/// published summaries that stand for their verdicts. Only error-free
+/// summaries are published, so an installed part adds no universe errors.
+#[derive(Clone)]
+pub struct Installed {
+    views: Arc<InstalledViews>,
+    parts: Arc<[PackageUniverse]>,
+}
+impl Installed {
+    /// `None` when a summary carries errors: such a package is not installed.
+    pub fn new(
+        views: Arc<InstalledViews>,
+        parts: impl IntoIterator<Item = PackageUniverse>,
+    ) -> Option<Self> {
+        let mut parts: Vec<_> = parts.into_iter().collect();
+        if parts.iter().any(|part| !part.errors.1.is_empty()) {
+            return None;
+        }
+        parts.sort_by_key(|part| part.input);
+        Some(Self {
+            views,
+            parts: parts.into(),
+        })
+    }
+    fn first_heap(&self) -> Option<&(DefId, HeapRole)> {
+        self.parts
+            .iter()
+            .filter_map(|part| part.first_heap.as_ref())
+            .min_by_key(|(d, _)| *d)
+    }
+    /// The identity of a universe of `views` beside these installed parts.
+    /// A universe that is exactly one published universe has its identity.
+    fn input(&self, views: Option<ContentHash>) -> ContentHash {
+        match (views, &*self.parts) {
+            (None, [part]) => part.input,
+            _ => {
+                let mut bytes = Vec::with_capacity(33 + self.parts.len() * 32);
+                bytes.push(u8::from(views.is_some()));
+                bytes.extend(views.unwrap_or_default().0);
+                for part in self.parts.iter() {
+                    bytes.extend(part.input.0);
+                }
+                ContentHash::of_parts(
+                    "hirsel.validate.universe-input.installed.v1",
+                    [bytes.as_slice()],
+                )
+            }
+        }
+    }
+}
 
 /// The public universe of one snapshot, with V's verdict on every view.
 pub struct ViewTable {
@@ -106,6 +197,7 @@ pub struct ViewTable {
     errors: UniverseErrors,
     input_digest: OnceLock<ContentHash>,
     stamp: EnvironmentStamp,
+    installed: Option<Installed>,
 }
 impl ViewTable {
     /// The table of `signatures` (one per path), reusing the digests of
@@ -136,6 +228,18 @@ impl ViewTable {
         store: &mut ValidatedSignatures,
         old: Option<&ValidatedSignatures>,
     ) -> Self {
+        Self::with_installed(t, views, None, store, old)
+    }
+    /// A universe of `views`, which V checks, beside `installed` packages,
+    /// which V reads on demand and whose published summaries stand for their
+    /// verdicts. An installed package never reads its importers' views.
+    pub fn with_installed(
+        t: &Arc<TypeInterner>,
+        views: impl IntoIterator<Item = View>,
+        installed: Option<Installed>,
+        store: &mut ValidatedSignatures,
+        old: Option<&ValidatedSignatures>,
+    ) -> Self {
         let _batch = store.publication_batch();
         let mut views: Vec<View> = views.into_iter().collect();
         views.sort_by_key(|view| view.d);
@@ -144,8 +248,18 @@ impl ViewTable {
             .enumerate()
             .map(|(i, v)| (v.d, i as u32))
             .collect();
+        assert!(
+            views
+                .iter()
+                .all(|v| installed.as_ref().is_none_or(|i| !i.views.contains(v.d))),
+            "a checked view is not also an installed one"
+        );
         let mut table = Self {
-            first_heap: first_heap(views.iter()),
+            first_heap: earlier(
+                first_heap(views.iter()),
+                installed.as_ref().and_then(Installed::first_heap),
+            ),
+            installed,
             views,
             index,
             verdicts: vec![],
@@ -174,22 +288,47 @@ impl ViewTable {
         table
     }
     pub fn get(&self, d: DefId) -> Option<&View> {
-        self.index.get(&d).map(|&i| &self.views[i as usize])
+        match self.index.get(&d) {
+            Some(&i) => Some(&self.views[i as usize]),
+            None => self.installed.as_ref()?.views.get(d),
+        }
     }
     /// Identity of all inputs a private evaluation overlay can observe. This
     /// includes valid rows: an overlay can invalidate a dependent declaration
     /// even when both base universes have no errors. Compute once per universe.
     pub fn input_digest(&self) -> ContentHash {
         *self.input_digest.get_or_init(|| {
-            input_digest(
+            universe_input(
                 self.views.iter(),
                 self.first_heap.as_ref(),
                 self.errors.digest,
+                self.installed.as_ref(),
             )
         })
     }
+    /// The views V checks in this universe; installed views are not listed.
     pub fn views(&self) -> &[View] {
         &self.views
+    }
+    /// What importers read of `package`'s own public views in this universe:
+    /// the identity of those views, their verdicts' errors and their first
+    /// heap role. An importer's universe holds them beside its own views.
+    pub fn exported(&self, package: &PackageId) -> PackageUniverse {
+        let own: Vec<usize> = (0..self.views.len())
+            .filter(|&i| &self.views[i].d.path().0.package == package)
+            .collect();
+        let heap = first_heap(own.iter().map(|&i| &self.views[i]));
+        let errors = UniverseErrors::new(
+            own.iter()
+                .filter_map(|&i| self.verdicts[i].error.clone())
+                .collect(),
+        );
+        let input = input_digest(
+            own.iter().map(|&i| &self.views[i]),
+            heap.as_ref(),
+            errors.digest,
+        );
+        PackageUniverse::of(input, &errors, heap.as_ref())
     }
     /// This universe's summary for importers that do not read its views.
     pub fn universe(&self) -> PackageUniverse {
@@ -334,7 +473,12 @@ impl PackageViews {
                         .values()
                         .filter(|view| self.base.get(view.d).is_none()),
                 );
-            input_digest(views, self.first_heap.as_ref(), self.errors.digest)
+            universe_input(
+                views,
+                self.first_heap.as_ref(),
+                self.errors.digest,
+                self.base.installed.as_ref(),
+            )
         })
     }
     fn over(
@@ -346,6 +490,14 @@ impl PackageViews {
         old: Option<&ValidatedSignatures>,
     ) -> Self {
         // The universe in DefPath order: the base's views and new ones.
+        // An installed view's readers are not known, so none is replaced.
+        assert!(
+            replaced.keys().all(|d| base
+                .installed
+                .as_ref()
+                .is_none_or(|i| !i.views.contains(*d))),
+            "an installed view is replaced only in its full table"
+        );
         let _batch = store.publication_batch();
         let mut order: Vec<&View> = base
             .views
@@ -354,7 +506,10 @@ impl PackageViews {
             .collect();
         order.extend(replaced.values().filter(|v| base.get(v.d).is_none()));
         order.sort_by(|a, b| a.d.path().cmp(b.d.path()));
-        let heap = first_heap(order.iter().copied());
+        let heap = earlier(
+            first_heap(order.iter().copied()),
+            base.installed.as_ref().and_then(Installed::first_heap),
+        );
         // Verdicts to check again: the replaced views and every view whose
         // verdict, public or already checked here, read one of them.
         let mut again: BTreeSet<DefId> = replaced.keys().copied().collect();
@@ -409,6 +564,27 @@ impl SignatureLookup for PackageViews {
     }
     fn universe_errors(&self) -> (ContentHash, &[Violation]) {
         (self.errors.digest, &self.errors.errors)
+    }
+}
+
+/// A universe's identity: its checked views' and, beside them, its installed
+/// parts' published identities.
+fn universe_input<'a>(
+    views: impl Iterator<Item = &'a View>,
+    heap: Option<&(DefId, HeapRole)>,
+    errors: ContentHash,
+    installed: Option<&Installed>,
+) -> ContentHash {
+    let mut views = views.peekable();
+    match installed {
+        None => input_digest(views, heap, errors),
+        Some(installed) => {
+            let checked = views
+                .peek()
+                .is_some()
+                .then(|| input_digest(views, heap, errors));
+            installed.input(checked)
+        }
     }
 }
 

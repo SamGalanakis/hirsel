@@ -182,6 +182,7 @@ pub(crate) struct HeaderProducts {
     builtins: BTreeMap<DefPath, hirsel_types::SignatureRef>,
     registry: crate::registry::BuiltinRegistry,
     package_manifests: BTreeMap<hirsel_syntax::PackageId, ContentHash>,
+    package_sources: BTreeMap<hirsel_syntax::PackageId, ContentHash>,
     published_manifest: Option<ContentHash>,
     store: Option<Arc<dyn crate::store::ResultStore>>,
     identity: ContentHash,
@@ -266,6 +267,7 @@ impl HeaderProducts {
             builtins: engine.builtins.clone(),
             registry: engine.registry.clone(),
             package_manifests: engine.package_manifests.clone(),
+            package_sources: engine.package_sources.clone(),
             published_manifest: engine.published_manifest,
             store: engine.result_store.clone(),
             identity: engine.store_identity,
@@ -314,6 +316,7 @@ impl HeaderProducts {
         engine.builtins = self.builtins.clone();
         engine.registry = self.registry.clone();
         engine.package_manifests = self.package_manifests.clone();
+        engine.package_sources = self.package_sources.clone();
         engine.published_manifest = self.published_manifest;
         engine.result_store = self.store.clone();
         engine.store_identity = self.identity;

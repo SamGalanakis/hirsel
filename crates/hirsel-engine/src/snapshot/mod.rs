@@ -84,7 +84,89 @@ struct ValidationState {
     views: Arc<ViewTable>,
     bases: BTreeMap<PackageId, Arc<ViewTable>>,
     packages: BTreeMap<PackageId, PackageViews>,
+    /// Each installed package's own universe: its published summary, with
+    /// its views (its opaque types' private ones) read on demand.
+    installed: BTreeMap<PackageId, Arc<ViewTable>>,
     validated: ValidatedSignatures,
+}
+/// A read-only installed dependency's published universe summaries: its own
+/// universe, which its bodies are validated against, and what importers'
+/// universes hold of its public views.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InstalledUniverse {
+    pub own: hirsel_validate::PackageUniverse,
+    pub exported: hirsel_validate::PackageUniverse,
+}
+impl InstalledUniverse {
+    /// The archived pair, or `None` when either summary carries errors.
+    pub(crate) fn encode(&self) -> Option<Vec<u8>> {
+        let own = self.own.encode()?;
+        let exported = self.exported.encode()?;
+        bincode::serialize(&(own, exported)).ok()
+    }
+    pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
+        let (own, exported): (Vec<u8>, Vec<u8>) = bincode::deserialize(bytes).ok()?;
+        Some(Self {
+            own: hirsel_validate::PackageUniverse::decode(&own)?,
+            exported: hirsel_validate::PackageUniverse::decode(&exported)?,
+        })
+    }
+}
+/// Installed views, read from the snapshot's rows when V first names one.
+struct InstalledRows {
+    types: Arc<TypeInterner>,
+    headers: Option<Arc<crate::queries::header_products::HeaderProducts>>,
+    signatures: DefMap<SignatureRef>,
+    private: DefMap<SignatureRef>,
+    /// The package whose opaque types are seen through their private views.
+    owner: Option<PackageId>,
+}
+impl hirsel_validate::ViewSource for InstalledRows {
+    fn view(&self, d: DefId) -> Option<View> {
+        if self.owner.as_ref() == Some(&d.path().0.package)
+            && let Some(private) =
+                private_view(&self.types, &self.private, self.headers.as_ref(), d)
+        {
+            return Some(View::new(&self.types, private, None));
+        }
+        if let Some(signature) = self.signatures.get(&d) {
+            return Some(View::new(&self.types, signature.clone(), None));
+        }
+        let headers = self.headers.as_ref()?;
+        let signature = headers
+            .product(d)?
+            .ok()?
+            .result
+            .as_ref()
+            .ok()?
+            .value
+            .clone();
+        Some(View::sourced(
+            &self.types,
+            &signature,
+            &(Arc::new(crate::queries::header_products::RowSource(headers.clone()))
+                as Arc<dyn hirsel_validate::SignatureSource>),
+            None,
+        ))
+    }
+}
+/// `d`'s private view: an opaque type's own representation.
+fn private_view(
+    types: &TypeInterner,
+    private: &DefMap<SignatureRef>,
+    headers: Option<&Arc<crate::queries::header_products::HeaderProducts>>,
+    d: DefId,
+) -> Option<SignatureRef> {
+    if let Some(view) = private.get(&d) {
+        return Some(view.clone());
+    }
+    let product = headers?.product(d)?.ok()?;
+    let public = &product.result.as_ref().ok()?.value;
+    if public.metadata.visibility != hirsel_syntax::Visibility::PublicOpaque {
+        return None;
+    }
+    let owner = product.entry.as_ref()?.products.representation.as_ref()?;
+    Some(owner.body_view(types, public).0.clone())
 }
 /// A snapshot's lookup input: the provider manifest hash every lookup
 /// observes, the registry a bare name falls back to, the source builtins and
@@ -97,11 +179,25 @@ pub(crate) struct LookupInput {
     pub candidates: DefMap<ContentHash>,
     pub failed: DefMap<Option<ContentHash>>,
     pub package_dependencies: BTreeMap<PackageId, Vec<PackageId>>,
+    /// The dependencies whose published universe summaries are bound to
+    /// exactly this snapshot's sources: V reads their rows on demand.
+    pub installed: BTreeMap<PackageId, InstalledUniverse>,
+    /// Each package's source binding: what its published summary is keyed by.
+    pub sources: BTreeMap<PackageId, ContentHash>,
 }
 const _: () = {
     const fn shared<T: Send + Sync>() {}
     shared::<SignatureSnapshot>();
 };
+impl ValidationState {
+    /// The table `package`'s bodies are validated against, without private views.
+    fn base(&self, package: &PackageId) -> &Arc<ViewTable> {
+        self.installed
+            .get(package)
+            .or_else(|| self.bases.get(package))
+            .unwrap_or(&self.views)
+    }
+}
 impl SignatureSnapshot {
     /// The snapshot of `signatures` (every public signature, by path, or the
     /// error that normalizing it reported) and `private` (each opaque owner's
@@ -205,6 +301,49 @@ impl SignatureSnapshot {
             }
         })
     }
+    /// Every package `package` sees: itself, its dependency closure and the
+    /// builtin packages. `None` when the loader graph is incomplete.
+    fn visible(&self, package: &PackageId) -> Option<std::collections::BTreeSet<PackageId>> {
+        let mut visible: std::collections::BTreeSet<_> = self
+            .lookup
+            .registry
+            .signatures()
+            .map(|s| s.definition.path().0.package.clone())
+            .collect();
+        let mut pending = vec![package.clone()];
+        while let Some(next) = pending.pop() {
+            if !visible.insert(next.clone()) {
+                continue;
+            }
+            pending.extend(self.lookup.package_dependencies.get(&next)?.iter().cloned());
+        }
+        Some(visible)
+    }
+    /// The rows of `members`, read as V names them. `owner`'s opaque types
+    /// are seen through their private views.
+    fn installed_rows(
+        &self,
+        members: &[DefId],
+        owner: Option<&PackageId>,
+    ) -> Arc<hirsel_validate::InstalledViews> {
+        let rows = InstalledRows {
+            types: self.types.clone(),
+            headers: self.headers.clone(),
+            signatures: members
+                .iter()
+                .filter_map(|d| Some((*d, self.signatures.get(d)?.as_ref().ok()?.clone())))
+                .collect(),
+            private: members
+                .iter()
+                .filter_map(|d| Some((*d, self.private.get(d)?.clone())))
+                .collect(),
+            owner: owner.cloned(),
+        };
+        Arc::new(hirsel_validate::InstalledViews::new(
+            members.iter().copied(),
+            Box::new(rows),
+        ))
+    }
     fn validation_state(&self) -> &ValidationState {
         self.validation.get_or_init(|| {
             let _timing = hirsel_intern::timings::phase(hirsel_intern::timings::Phase::Verify);
@@ -219,11 +358,19 @@ impl SignatureSnapshot {
             let old = previous.map(|p| &p.validated);
             let mut validated =
                 ValidatedSignatures::with_cache(self.verifier.clone(), self.verifier_policy);
-            // The universe holds identities; each read of a payload is a
-            // scoped view, so the header cache can evict a row it only names.
-            let views = Arc::new(ViewTable::from_views(
-                t,
-                self.definitions().into_iter().filter_map(|d| {
+            // An installed dependency's rows are read only when V names one:
+            // its published summary stands for its verdicts. Every other
+            // view is identified and checked. The universe holds identities;
+            // each read of a payload is a scoped view, so the header cache
+            // can evict a row it only names.
+            let installed = &self.lookup.installed;
+            let (members, checked): (Vec<DefId>, Vec<DefId>) = self
+                .definitions()
+                .into_iter()
+                .partition(|d| installed.contains_key(&d.path().0.package));
+            let checked: Vec<View> = checked
+                .into_iter()
+                .filter_map(|d| {
                     self.signature(d).and_then(Result::ok).map(|s| {
                         self.public_views[&d]
                             .get_or_init(|| {
@@ -231,65 +378,128 @@ impl SignatureSnapshot {
                             })
                             .clone()
                     })
-                }),
-                &mut validated,
-                old,
-            ));
+                })
+                .collect();
+            let public = self.installed_rows(&members, None);
+            // One universe over the packages `visible` admits (all: `None`).
+            // An installed package's verdicts read the first heap role of its
+            // own closure; a universe whose first heap differs checks them.
+            let universe = |visible: Option<&std::collections::BTreeSet<PackageId>>,
+                            validated: &mut ValidatedSignatures| {
+                let admits = |package: &PackageId| visible.is_none_or(|v| v.contains(package));
+                let views = checked
+                    .iter()
+                    .filter(|v| admits(&v.d.path().0.package))
+                    .cloned();
+                let parts: Vec<_> = installed
+                    .iter()
+                    .filter(|(package, _)| admits(package))
+                    .collect();
+                if parts.is_empty() {
+                    return ViewTable::from_views(t, views, validated, old);
+                }
+                let table = ViewTable::with_installed(
+                    t,
+                    views.clone(),
+                    hirsel_validate::Installed::new(
+                        public.clone(),
+                        parts.iter().map(|(_, u)| u.exported.clone()),
+                    ),
+                    validated,
+                    old,
+                );
+                let heap = |package: &PackageId| {
+                    let closure = self.visible(package)?;
+                    let views = checked
+                        .iter()
+                        .filter(|v| closure.contains(&v.d.path().0.package));
+                    let own = installed
+                        .iter()
+                        .filter(|(p, _)| closure.contains(*p))
+                        .filter_map(|(_, u)| u.exported.first_heap.clone());
+                    Some(
+                        views
+                            .filter_map(|v| v.identified().heap().map(|_| v.d))
+                            .chain(own.map(|(d, _)| d))
+                            .min(),
+                    )
+                };
+                let first = table.first_heap().map(|(d, _)| d);
+                if parts
+                    .iter()
+                    .all(|(package, _)| heap(package) == Some(first))
+                {
+                    return table;
+                }
+                ViewTable::from_views(
+                    t,
+                    views.chain(members.iter().filter_map(|d| {
+                        admits(&d.path().0.package)
+                            .then(|| public.get(*d).cloned())
+                            .flatten()
+                    })),
+                    validated,
+                    old,
+                )
+            };
+            let views = Arc::new(universe(None, &mut validated));
             // Dependency packages cannot observe their importers. Keep every
             // selected dependency and registry row in each actual V universe,
             // including valid rows, private replacements and heap/error inputs.
             // Explicit snapshots without a complete loader graph retain the
             // full-world contract rather than guessing package visibility.
             let mut bases = BTreeMap::new();
-            let builtins: std::collections::BTreeSet<_> = self
-                .lookup
-                .registry
-                .signatures()
-                .map(|s| s.definition.path().0.package.clone())
-                .collect();
             for package in self.lookup.package_dependencies.keys() {
-                let mut visible = builtins.clone();
-                let mut pending = vec![package.clone()];
-                let mut complete = true;
-                while let Some(next) = pending.pop() {
-                    if !visible.insert(next.clone()) {
-                        continue;
-                    }
-                    let Some(dependencies) = self.lookup.package_dependencies.get(&next) else {
-                        complete = false;
-                        break;
-                    };
-                    pending.extend(dependencies.iter().cloned());
-                }
-                if !complete {
+                if installed.contains_key(package) {
                     continue;
                 }
-                let base = if views
-                    .views()
+                let Some(visible) = self.visible(package) else {
+                    continue;
+                };
+                let base = if checked
                     .iter()
-                    .all(|v| visible.contains(&v.d.path().0.package))
+                    .map(|v| &v.d.path().0.package)
+                    .chain(installed.keys())
+                    .all(|p| visible.contains(p))
                 {
                     views.clone()
                 } else {
-                    Arc::new(ViewTable::from_views(
-                        t,
-                        views
-                            .views()
-                            .iter()
-                            .filter(|v| visible.contains(&v.d.path().0.package))
-                            .cloned(),
-                        &mut validated,
-                        old,
-                    ))
+                    Arc::new(universe(Some(&visible), &mut validated))
                 };
                 bases.insert(package.clone(), base);
             }
+            // An installed package's own universe is its published summary.
+            let installed_universes = installed
+                .iter()
+                .filter_map(|(package, universe)| {
+                    let visible = self.visible(package)?;
+                    let members: Vec<DefId> = self
+                        .definitions()
+                        .into_iter()
+                        .filter(|d| visible.contains(&d.path().0.package))
+                        .collect();
+                    let rows = self.installed_rows(&members, Some(package));
+                    Some((
+                        package.clone(),
+                        Arc::new(ViewTable::with_installed(
+                            t,
+                            [],
+                            hirsel_validate::Installed::new(rows, [universe.own.clone()]),
+                            &mut validated,
+                            old,
+                        )),
+                    ))
+                })
+                .collect();
             let mut owned: BTreeMap<PackageId, Vec<View>> = BTreeMap::new();
             for d in self.definitions() {
+                let package = &d.path().0.package;
+                if installed.contains_key(package) {
+                    continue;
+                }
                 let Some(view) = self.private_view(d) else {
                     continue;
                 };
-                let package = &d.path().0.package;
                 let earlier = previous
                     .and_then(|p| p.packages.get(package))
                     .and_then(|p| p.replacement(d));
@@ -313,6 +523,7 @@ impl SignatureSnapshot {
                 views,
                 bases,
                 packages,
+                installed: installed_universes,
                 validated,
             })
         })
@@ -458,6 +669,13 @@ impl SignatureSnapshot {
     pub fn types(&self) -> &Arc<TypeInterner> {
         &self.types
     }
+    /// Whether `d`'s header row has been produced in this snapshot and is
+    /// still held: what a demand trace observes.
+    pub fn header_ready(&self, d: DefId) -> bool {
+        self.headers
+            .as_ref()
+            .is_some_and(|headers| headers.ready(d).is_some())
+    }
     /// The public signature of `d`, or the error normalizing it reported.
     pub fn signature(&self, d: DefId) -> Option<Result<SignatureRef, QueryError>> {
         if let Some(product) = self.headers.as_ref().and_then(|headers| headers.product(d)) {
@@ -486,16 +704,7 @@ impl SignatureSnapshot {
         self.signature(d)
     }
     fn private_view(&self, d: DefId) -> Option<SignatureRef> {
-        if let Some(view) = self.private.get(&d) {
-            return Some(view.clone());
-        }
-        let product = self.headers.as_ref()?.product(d)?.ok()?;
-        let public = &product.result.as_ref().ok()?.value;
-        if public.metadata.visibility != hirsel_syntax::Visibility::PublicOpaque {
-            return None;
-        }
-        let owner = product.entry.as_ref()?.products.representation.as_ref()?;
-        Some(owner.body_view(&self.types, public).0.clone())
+        private_view(&self.types, &self.private, self.headers.as_ref(), d)
     }
     /// Every definition in this snapshot's signature table, in path order.
     pub fn definitions(&self) -> Vec<DefId> {
@@ -560,6 +769,12 @@ impl SignatureSnapshot {
         d: DefId,
     ) -> Option<Result<Arc<hirsel_validate::IdentifiedSignature>, QueryError>> {
         if let Some(state) = self.validation.get() {
+            if let Some(own) = state.installed.get(&d.path().0.package) {
+                return match self.signature(d)? {
+                    Ok(_) => own.get(d).map(|v| Ok(v.identified().clone())),
+                    Err(error) => Some(Err(error)),
+                };
+            }
             if let Some(view) = state
                 .packages
                 .get(&d.path().0.package)
@@ -601,7 +816,7 @@ impl SignatureSnapshot {
         let state = self.validation_state();
         match state.packages.get(package) {
             Some(views) => views,
-            None => &**state.bases.get(package).unwrap_or(&state.views),
+            None => &**state.base(package),
         }
     }
     /// The complete input of a package's base V universe. Artifact overlays
@@ -610,11 +825,7 @@ impl SignatureSnapshot {
         let state = self.validation_state();
         match state.packages.get(package) {
             Some(views) => views.input_digest(),
-            None => state
-                .bases
-                .get(package)
-                .unwrap_or(&state.views)
-                .input_digest(),
+            None => state.base(package).input_digest(),
         }
     }
     /// The summary of `package`'s V universe: its input identity, errors and
@@ -623,8 +834,36 @@ impl SignatureSnapshot {
         let state = self.validation_state();
         match state.packages.get(package) {
             Some(views) => views.universe(),
-            None => state.bases.get(package).unwrap_or(&state.views).universe(),
+            None => state.base(package).universe(),
         }
+    }
+    /// What importers' universes hold of `package`'s public views.
+    pub(crate) fn exported_universe(
+        &self,
+        package: &PackageId,
+    ) -> hirsel_validate::PackageUniverse {
+        let state = self.validation_state();
+        state
+            .bases
+            .get(package)
+            .unwrap_or(&state.views)
+            .exported(package)
+    }
+    /// `package`'s published summaries when it is installed here, else its
+    /// summaries as this snapshot's full tables compute them.
+    pub(crate) fn installed_universe(&self, package: &PackageId) -> InstalledUniverse {
+        self.lookup
+            .installed
+            .get(package)
+            .cloned()
+            .unwrap_or_else(|| InstalledUniverse {
+                own: self.package_universe(package),
+                exported: self.exported_universe(package),
+            })
+    }
+    /// The exact source identity `package`'s summary is published under.
+    pub(crate) fn package_sources(&self, package: &PackageId) -> Option<ContentHash> {
+        self.lookup.sources.get(package).copied()
     }
     /// `package`'s universe with `signature` in place of its declared view:
     /// compile-time evaluation validates a materialized owner against it.
@@ -633,6 +872,32 @@ impl SignatureSnapshot {
         let state = self.validation_state();
         let mut store =
             ValidatedSignatures::with_cache(self.verifier.clone(), self.verifier_policy);
+        if state.installed.contains_key(package) {
+            // An installed universe does not know which verdicts read the
+            // replaced owner: check the replacement against its full table.
+            let visible = self
+                .visible(package)
+                .expect("installed closures are complete");
+            let full = ViewTable::from_views(
+                t,
+                self.definitions()
+                    .into_iter()
+                    .filter(|d| visible.contains(&d.path().0.package))
+                    .filter_map(|d| {
+                        let view = self.body_view(package, d)?.ok()?;
+                        Some(View::new(t, view, None))
+                    }),
+                &mut store,
+                Some(&state.validated),
+            );
+            return PackageViews::new(
+                t,
+                Arc::new(full),
+                [View::new(t, signature, None)],
+                &mut store,
+                Some(&state.validated),
+            );
+        }
         match state.packages.get(package) {
             Some(views) => views.replace(t, signature, &mut store, Some(&state.validated)),
             None => PackageViews::new(
@@ -713,7 +978,11 @@ impl QueryEngine {
         }
         self.snapshot_epoch = self.snapshot_epoch.next();
         let previous = self.snapshot.as_ref().map(|(_, s)| s.clone());
+        let sources = self.package_source_bindings();
+        let installed = self.installed_universes(&sources);
         let lookup = LookupInput {
+            installed,
+            sources,
             package_dependencies: self.declarations.inputs().package_dependencies.clone(),
             manifest: ContentHash::of_parts(
                 "hirsel.provider.registry.v1",
@@ -759,6 +1028,66 @@ impl QueryEngine {
         self.snapshot = Some((stamp, snapshot.clone()));
         self.snapshot_sources = row_sources;
         snapshot
+    }
+    /// Each package's source binding: the environment, its closure manifest
+    /// and the complete sources of every package in its dependency closure.
+    /// A package with an incomplete closure or unloaded sources has none.
+    fn package_source_bindings(&self) -> BTreeMap<PackageId, ContentHash> {
+        let dependencies = &self.declarations.inputs().package_dependencies;
+        let environment = self.environment_value();
+        let mut bindings = BTreeMap::new();
+        'packages: for package in dependencies.keys() {
+            let mut closure = std::collections::BTreeSet::new();
+            let mut pending = vec![package];
+            while let Some(next) = pending.pop() {
+                if !closure.insert(next) {
+                    continue;
+                }
+                let Some(more) = dependencies.get(next) else {
+                    continue 'packages;
+                };
+                pending.extend(more);
+            }
+            let mut bytes = Vec::new();
+            bytes.extend(environment.0);
+            bytes.extend(self.package_environment(package).package_manifest_hash.0);
+            for member in &closure {
+                let Some(sources) = self.package_sources.get(*member) else {
+                    continue 'packages;
+                };
+                for text in [member.name.as_str(), member.version.as_str()] {
+                    bytes.extend((text.len() as u64).to_le_bytes());
+                    bytes.extend(text.as_bytes());
+                }
+                bytes.extend(sources.0);
+            }
+            bindings.insert(
+                package.clone(),
+                ContentHash::of_parts("hirsel.front.universe.sources.v1", [bytes.as_slice()]),
+            );
+        }
+        bindings
+    }
+    /// The dependencies whose summaries are published for exactly their
+    /// current sources. Any other package is checked from its full table.
+    fn installed_universes(
+        &self,
+        sources: &BTreeMap<PackageId, ContentHash>,
+    ) -> BTreeMap<PackageId, InstalledUniverse> {
+        let Some(store) = self.result_store.as_ref() else {
+            return BTreeMap::new();
+        };
+        let environment = self.environment_value();
+        self.package_manifests
+            .keys()
+            .filter_map(|package| {
+                let query =
+                    crate::queries::universe_query(environment, package, *sources.get(package)?);
+                let association = store.lookup_product(query.address)?;
+                let bytes = store.get_content(association.reference)?;
+                Some((package.clone(), InstalledUniverse::decode(&bytes)?))
+            })
+            .collect()
     }
     /// Observe a published signature without another phase memo query. The
     /// snapshot must describe the current universe and the immutable producer

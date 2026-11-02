@@ -434,6 +434,7 @@ fn checks(
     trial.declarations = engine.declarations.clone();
     trial.builtins = engine.builtins.clone();
     trial.package_manifests = engine.package_manifests.clone();
+    trial.package_sources = engine.package_sources.clone();
     trial.comptime_limits = engine.comptime_limits;
     trial.configured_jobs = engine.configured_jobs;
     let Some(edited) = trial.sources.add_snapshot(file, text) else {

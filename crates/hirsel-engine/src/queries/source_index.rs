@@ -24,6 +24,7 @@ pub struct SourceIndexState {
     vanished: BTreeSet<DefId>,
     declarations: crate::DeclarationIndex,
     package_manifests: BTreeMap<hirsel_syntax::PackageId, ContentHash>,
+    package_sources: BTreeMap<hirsel_syntax::PackageId, ContentHash>,
     types: Arc<hirsel_types::TypeInterner>,
     catalog: catalog::SourceCatalog,
     compiler: ContentHash,
@@ -287,6 +288,10 @@ impl QueryEngine {
             w.add(package.name.capacity());
             w.add(package.version.capacity());
         });
+        weight.map(&self.package_sources, |w, package, _| {
+            w.add(package.name.capacity());
+            w.add(package.version.capacity());
+        });
         weight.map(&self.builtins, |w, path, _| w.path(path));
         if let Some((environment, _, _)) = &self.environment_seen {
             weight.add(environment.compiler_version.capacity());
@@ -530,6 +535,7 @@ impl QueryEngine {
             vanished: std::mem::take(&mut self.vanished),
             declarations: std::mem::take(&mut self.declarations).into_source_carry(),
             package_manifests: std::mem::take(&mut self.package_manifests),
+            package_sources: std::mem::take(&mut self.package_sources),
             types: types.into_interner(),
             catalog,
             compiler: self.store_identity,
@@ -629,6 +635,7 @@ impl SourceIndexState {
             vanished,
             declarations,
             package_manifests,
+            package_sources,
             types,
             catalog,
             compiler: _,
@@ -665,6 +672,7 @@ impl SourceIndexState {
         engine.vanished = vanished;
         engine.declarations = declarations;
         engine.package_manifests = package_manifests;
+        engine.package_sources = package_sources;
         engine.types = types;
         // Pure structural memoization is disposable; no previous body phase
         // or interpreter is installed into the fresh source engine.

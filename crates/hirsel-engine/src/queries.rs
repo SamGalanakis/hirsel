@@ -27,6 +27,7 @@ pub use scheduled_native_root::{
     FRONT_NATIVE_ROOT_KIND, FrontNativeOutput, FrontNativePlan, FrontNativeProducts,
     FrontNativeQueries,
 };
+pub(crate) use scheduled_run::universe_query;
 pub use scheduled_run::{
     FRONT_RUN_BATCH_KIND, FRONT_RUN_KIND, FrontBuiltProof, FrontPrecomputeOutput,
     FrontPreparedProof, FrontProofExport, FrontProofInput, FrontProofText, FrontRunBatchOutput,
@@ -322,6 +323,9 @@ pub struct QueryEngine {
     /// Dependency packages key on their own closure's manifests, not the whole
     /// graph's, so their queries are shared across programs (package images).
     pub(crate) package_manifests: BTreeMap<hirsel_syntax::PackageId, ContentHash>,
+    /// Each loaded package's complete sources (logical path and text of every
+    /// file): what its published universe summary is bound to.
+    pub(crate) package_sources: BTreeMap<hirsel_syntax::PackageId, ContentHash>,
     /// The selected `unsafe ffi` packages' link inputs, in package order (PROG-4).
     pub foreign_links: Vec<crate::LinkInput>,
     /// The checked entry reaches an extern outside a deterministic wrapper, so its
@@ -709,6 +713,7 @@ impl QueryEngine {
             published_manifest: None,
             declarations: Default::default(),
             package_manifests: BTreeMap::new(),
+            package_sources: BTreeMap::new(),
             foreign_links: vec![],
             foreign_unreplayable: false,
             foreign_threads: BTreeMap::new(),

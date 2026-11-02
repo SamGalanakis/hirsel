@@ -717,3 +717,93 @@ fn installed_std_publishes_the_universe_summary_its_full_table_computes() {
         assert!(published.first_heap.is_some(), "std declares the heap");
     });
 }
+
+#[test]
+fn hello_on_installed_std_answers_v_universe_questions_without_reading_std_rows() {
+    with_compiler_stack(|| {
+        use hirsel_driver::requests::{CompileOperation, CompilerRequests};
+        use hirsel_validate::{SignatureLookup, ValidatedSignatures};
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stdlib/std@1/hirsel.json")
+            .canonicalize()
+            .unwrap();
+        let products = dir.path().join("products");
+        let config = CompileConfig {
+            store: Arc::new(store::DirStore::new(products.clone())),
+            jobs: hirsel_intern::jobs::Jobs::ONE,
+            hold_bytes: 0,
+            ..Default::default()
+        };
+        CompilerRequests::for_host(COMPILER.with_config(config.clone()), config)
+            .execute(&manifest, CompileOperation::Precompute)
+            .unwrap();
+        let path = dir.path().join("main.hir");
+        std::fs::write(&path, "pub fn main()->u64{7u64}\n").unwrap();
+        let mut program = COMPILER
+            .with_config(CompileConfig {
+                store: Arc::new(
+                    store::DirStore::new(dir.path().join("reader")).with_read_only_root(products),
+                ),
+                jobs: hirsel_intern::jobs::Jobs::ONE,
+                hold_bytes: 0,
+                ..Default::default()
+            })
+            .load_program(&path)
+            .unwrap();
+        let hello = program.entry.0.package.clone();
+        let std = hirsel_syntax::PackageId {
+            name: "std".into(),
+            version: "1".into(),
+        };
+        let snapshot = program.engine.signature_snapshot();
+        let std_row = |name: &str| {
+            let mut path = hirsel_syntax::DefPath::core(name);
+            path.0.package = std.clone();
+            path.0.modules = vec!["aes_gcm".into()];
+            hirsel_syntax::DefId::intern(&path)
+        };
+        // Hello names nothing of std's AES-GCM: V's universe questions about
+        // hello and about installed std read neither of these rows.
+        let (unused, named) = (std_row("seal"), std_row("open"));
+        assert!(snapshot.definitions().contains(&unused));
+        let hello_heap = snapshot.validation(&hello).first_heap();
+        let hello_errors = snapshot.validation(&hello).universe_errors().0;
+        let std_heap = snapshot.validation(&std).first_heap();
+        let std_errors = snapshot.validation(&std).universe_errors().0;
+        let std_input = snapshot.validation_input_digest(&std);
+        assert!(!snapshot.header_ready(unused), "V read an unused std row");
+        assert!(!snapshot.header_ready(named), "V read an unused std row");
+        // A view read demands that row, and not its unused sibling.
+        assert!(snapshot.validation(&hello).view(named).is_some());
+        assert!(snapshot.header_ready(named));
+        assert!(!snapshot.header_ready(unused));
+        // Oracle: V over each full table, every view identified afresh.
+        let types = snapshot.types();
+        let full = |package: &hirsel_syntax::PackageId,
+                    admits: &dyn Fn(&hirsel_syntax::PackageId) -> bool| {
+            ViewTable::from_views(
+                types,
+                snapshot
+                    .definitions()
+                    .into_iter()
+                    .filter(|d| admits(&d.path().0.package))
+                    .filter_map(|d| {
+                        let signature = snapshot.body_view(package, d)?.ok()?;
+                        Some(View::new(types, signature, None))
+                    }),
+                &mut ValidatedSignatures::default(),
+                None,
+            )
+        };
+        let everything = full(&hello, &|_| true);
+        assert_eq!(hello_heap, everything.first_heap());
+        assert_eq!(hello_errors, everything.universe_errors().0);
+        let std_table = full(&std, &|package| *package != hello);
+        assert_eq!(std_heap, std_table.first_heap());
+        assert!(std_heap.is_some(), "std declares the heap");
+        assert_eq!(std_errors, std_table.universe_errors().0);
+        assert_eq!(std_input, std_table.input_digest());
+    });
+}

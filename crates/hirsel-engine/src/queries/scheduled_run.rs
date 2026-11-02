@@ -9,6 +9,7 @@ mod source_products;
 pub use graph_reader::FrontSemanticGraph;
 use hirsel_run_schema::{CallForm, CalleeFacts, CodeReach, ProgramRevision};
 pub use precompute::FrontPrecomputeOutput;
+pub(crate) use precompute::universe_query;
 pub use proof_export::{
     FrontBuiltProof, FrontPreparedProof, FrontProofExport, FrontProofInput, FrontProofText,
 };

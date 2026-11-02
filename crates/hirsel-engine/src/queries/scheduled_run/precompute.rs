@@ -8,8 +8,9 @@ const OUTPUT: Domain = Domain {
     kind: 0x4600_0036,
     schema: 2,
 };
+// 0x4600_0037 is the compact Check store's domain.
 const UNIVERSE: Domain = Domain {
-    kind: 0x4600_0037,
+    kind: 0x4600_0038,
     schema: 1,
 };
 #[derive(Clone, Copy)]
@@ -68,9 +69,10 @@ impl FrontRunQueries {
             .map(|(path, _)| path.0.package.clone())
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .map(|package| {
-                let query = universe_query(this.environment, &package);
-                (query.address.0, (query, package))
+            .filter_map(|package| {
+                let sources = this.front.signatures().package_sources(&package)?;
+                let query = universe_query(this.environment, &package, sources);
+                Some((query.address.0, (query, package)))
             })
             .collect();
         this.check = Some(check);
@@ -87,7 +89,8 @@ impl FrontRunQueries {
     /// `package`'s published universe summary, decoded from its archived
     /// bytes, once this precomputation has completed it.
     pub fn published_universe(&self, package: &PackageId) -> Option<PackageUniverse> {
-        let query = universe_query(self.environment, package);
+        let sources = self.front.signatures().package_sources(package)?;
+        let query = universe_query(self.environment, package, sources);
         let product = self
             .precompute
             .as_ref()?
@@ -97,7 +100,7 @@ impl FrontRunQueries {
             .get(&query.address.0)?
             .clone();
         let archive = product.archive(ArchiveAdmission::Retained).ok()?;
-        PackageUniverse::decode(archive.bytes())
+        Some(crate::snapshot::InstalledUniverse::decode(archive.bytes())?.own)
     }
     pub fn precompute_query(&self) -> Option<QueryId> {
         self.precompute.as_ref().map(|selection| selection.query)
@@ -110,19 +113,25 @@ impl FrontRunQueries {
             .and_then(|(selected, output)| (*selected == product).then_some(*output))
     }
 }
-/// The address of `package`'s universe summary under one engine environment.
-/// An installed package's products share the environment their importer
-/// reads semantic products under, so an importer names it without its rows.
-pub fn universe_query(environment: ContentHash, package: &PackageId) -> QueryId {
+/// The address of `package`'s universe summaries under one engine
+/// environment and the exact sources of its dependency closure. An importer
+/// computes it from the sources it loaded, without reading any row, and so
+/// never reads a summary published for other sources.
+pub fn universe_query(
+    environment: ContentHash,
+    package: &PackageId,
+    sources: ContentHash,
+) -> QueryId {
     QueryId {
         kind: FRONT_RUN_KIND,
         address: hirsel_artifact_store::Address(ContentHash::of_parts(
-            "hirsel.front.universe.address.v1",
+            "hirsel.front.universe.address.v2",
             [
                 environment.0.as_slice(),
                 package.name.as_bytes(),
                 &[0],
                 package.version.as_bytes(),
+                sources.0.as_slice(),
             ],
         )),
     }
@@ -191,7 +200,7 @@ impl UniverseTask {
             .precompute
             .as_ref()
             .ok_or_else(|| operational("universe summary requires precomputation"))?;
-        let universe = queries.front.signatures().package_universe(&self.package);
+        let universe = queries.front.signatures().installed_universe(&self.package);
         let bytes = universe.encode().ok_or_else(|| {
             operational("a package universe with signature errors is not published")
         })?;

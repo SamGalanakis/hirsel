@@ -595,6 +595,7 @@ impl HeaderProducts {
             builtins: self.builtins.clone(),
             registry: self.registry.clone(),
             package_manifests: self.package_manifests.clone(),
+            package_sources: self.package_sources.clone(),
             published_manifest: self.published_manifest,
             store: self.store.clone(),
             identity: self.identity,

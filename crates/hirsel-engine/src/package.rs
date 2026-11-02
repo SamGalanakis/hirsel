@@ -606,6 +606,35 @@ pub(crate) fn load_program_inputs_with_source_index(
             texts.push(text);
         }
     }
+    // Each package's complete sources, in logical path order.
+    let package_sources: BTreeMap<PackageId, ContentHash> = {
+        let mut by_package: BTreeMap<&PackageId, Vec<(&Path, &str)>> =
+            graph.packages.keys().map(|id| (id, Vec::new())).collect();
+        for ((source, context), text) in files.iter().zip(&texts) {
+            let logical = &graph.packages[&context.package].logical_sources[source];
+            if let Some(rows) = by_package.get_mut(&context.package) {
+                rows.push((logical.as_path(), text.as_str()));
+            }
+        }
+        by_package
+            .into_iter()
+            .map(|(id, mut rows)| {
+                rows.sort();
+                let mut bytes = Vec::new();
+                for (path, text) in rows {
+                    let path = path.to_string_lossy();
+                    for part in [path.as_ref(), text] {
+                        bytes.extend((part.len() as u64).to_le_bytes());
+                        bytes.extend(part.as_bytes());
+                    }
+                }
+                (
+                    id.clone(),
+                    ContentHash::of_parts("hirsel.package.sources.v1", [bytes.as_slice()]),
+                )
+            })
+            .collect()
+    };
     // Dependencies key on their own closure; the program package on the graph.
     let dependencies: Vec<_> = graph.packages.keys().filter(|id| **id != package).collect();
     let manifests: BTreeMap<_, _> = dependencies
@@ -660,6 +689,7 @@ pub(crate) fn load_program_inputs_with_source_index(
     engine.begin_memo_touch_tracking();
     engine.comptime_limits = limits;
     engine.package_manifests = manifests;
+    engine.package_sources = package_sources;
     let package_exposures: BTreeMap<_, _> = graph
         .packages
         .iter()

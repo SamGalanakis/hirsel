@@ -1383,7 +1383,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         for mode in 0..5 {
             let mut program = COMPILER
                 .with_config(CompileConfig {
-                    store: Arc::new(Transport(MemStore::default())),
+                    store: Arc::new(Transport(Arc::default())),
                     hold_bytes: 0,
                     ..Default::default()
                 })
@@ -1547,7 +1547,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         for _ in 0..2 {
             let mut program = COMPILER
                 .with_config(CompileConfig {
-                    store: Arc::new(Transport(MemStore::default())),
+                    store: Arc::new(Transport(Arc::default())),
                     hold_bytes: 0,
                     ..Default::default()
                 })

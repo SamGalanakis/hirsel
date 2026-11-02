@@ -127,9 +127,9 @@ class Land(unittest.TestCase):
         self.ledger_batch('red\told\tfirst\t2026-10-30\n', 'red\tnew\tsecond\t2026-11-01\n',
                           'red\tnew\tsecond\t2026-11-01\n')
 
-    def test_an_older_incoming_failure_replaces_the_newer_date(self):
+    def test_an_older_incoming_failure_keeps_the_newer_date(self):
         self.ledger_batch('red\tnew\tfirst\t2026-11-01\n', 'red\told\tsecond\t2026-10-30\n',
-                          'red\told\tsecond\t2026-10-30\n')
+                          'red\tnew\tfirst\t2026-11-01\n')
 
     def test_equal_date_failure_rows_choose_the_incoming_ticket(self):
         self.ledger_batch('red\tfirst\tfirst\t2026-11-01\n', 'red\tsecond\tsecond\t2026-11-01\n',
@@ -203,11 +203,11 @@ class Land(unittest.TestCase):
                               'red\tr\tx\t2026-10-30\nz\tr\tx\t2026-10-30\nnew\tr\tt\t2026-11-01\n',
                               'new\tr\tt\t2026-11-01\nz\tr\tx\t2026-10-30\n')
 
-    def test_both_sides_editing_a_row_choose_the_ticket_even_when_older(self):
+    def test_both_sides_editing_a_row_keep_main_when_it_is_later(self):
         self.ledger_three_way('red\tr\tx\t2026-10-30\nz\tr\tx\t2026-10-30\n',
                               'red\tr\tmain\t2026-11-01\nz\tr\tx\t2026-10-30\n',
                               'red\tr\tticket\t2026-10-31\nz\tr\tx\t2026-10-30\n',
-                              'red\tr\tticket\t2026-10-31\nz\tr\tx\t2026-10-30\n')
+                              'red\tr\tmain\t2026-11-01\nz\tr\tx\t2026-10-30\n')
 
     def test_both_sides_editing_a_row_keep_the_ticket_when_it_is_later(self):
         self.ledger_three_way('red\tr\tx\t2026-10-30\nz\tr\tx\t2026-10-30\n',

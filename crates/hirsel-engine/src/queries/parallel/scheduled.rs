@@ -334,6 +334,9 @@ const SOURCE_INPUT: Domain = Domain {
     schema: 1,
 };
 impl FrontBodyQueries {
+    pub(crate) fn snapshot(&self) -> &Arc<SignatureSnapshot> {
+        &self.snapshot
+    }
     /// Retain a typed settled Summary under its own grant. Its producer keeps
     /// the existing complete source/type reservation alive through the view.
     pub fn live_summary(

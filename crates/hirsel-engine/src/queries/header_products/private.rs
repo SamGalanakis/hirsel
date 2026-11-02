@@ -211,6 +211,16 @@ impl HeaderProducts {
             let _ = private.registrations.set(registrations.to_vec());
         }
     }
+    /// A later snapshot of the same request proves private modules in the
+    /// working space and registration view its Front producer configured.
+    pub(super) fn inherit_private(&self, front: &Self) {
+        if let Some(private) = &front.private {
+            self.configure_private(
+                private.working.load(Ordering::Relaxed),
+                private.registrations.get().map_or(&[], Vec::as_slice),
+            );
+        }
+    }
     /// The proof of the module declaring `id`, demanded again if evicted.
     pub(crate) fn module_proof(&self, id: DefId) -> Result<Option<ModuleProof>, QueryError> {
         Ok(self.private_product(id)?.map(ModuleProof))

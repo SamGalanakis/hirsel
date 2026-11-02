@@ -703,6 +703,22 @@ impl HeaderProducts {
         });
         backing
     }
+    /// Headers a later snapshot of the same request captured are charged to
+    /// the Front partition, and prove private modules in its working space,
+    /// exactly as the Front producer's own headers are.
+    pub(crate) fn inherit_front(&self, front: &Self) {
+        let shared = front
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
+        if admission.is_none() {
+            *admission = shared;
+        }
+        drop(admission);
+        self.inherit_private(front);
+    }
     /// Evict one unpinned settled entry: a header row, else a module proof.
     pub(crate) fn evict(&self) -> bool {
         self.evict_row() || self.evict_proof()

@@ -2380,6 +2380,15 @@ impl QueryEngine {
             return Err(refusal());
         }
         let snapshot = self.signature_inputs();
+        // Front's own publication can move the snapshot stamp, so Lower may
+        // read a header, or a private proof, that Front never demanded.
+        if let (Some(headers), Some(previous)) = (
+            snapshot.header_products(),
+            front.snapshot().header_products(),
+        ) && !Arc::ptr_eq(headers, previous)
+        {
+            headers.inherit_front(previous);
+        }
         let packages: std::collections::BTreeSet<_> =
             definitions.iter().map(|path| &path.0.package).collect();
         let opaque = self

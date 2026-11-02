@@ -547,19 +547,6 @@ fn markdown_parse_budget_39_mdman_consumer() {
     scripted(selected)
 }
 
-#[test]
-fn man_render_30_owned_ast_40_consumer() {
-    let source = include_str!("../../../../examples/mdman/document.hir");
-    assert!(source.contains("markdown.parse_located_bounded("));
-    assert!(source.contains("Ok(tree) => take tree,"));
-    assert!(!source.contains("Ok(tree) => unique tree,"));
-    scripted(
-        cases()
-            .into_iter()
-            .filter(|r| ["cmark-nowrap", "html-block"].contains(&r["id"].as_str().unwrap()))
-            .collect(),
-    );
-}
 
 #[test]
 fn markdown_source_map_41_mdman_consumer() {

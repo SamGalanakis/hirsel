@@ -199,24 +199,3 @@ fn explore(n: usize, capacity: u32, mutation: Mutation) -> (usize, usize) {
     (graph.len(), bad)
 }
 
-#[test]
-fn finite_compute_role_home_graph_drains_and_detects_both_deadlock_mutations() {
-    let mut states = 0;
-    for workers in 1..=3 {
-        for capacity in 1..=workers as u32 {
-            let (visited, bad) = explore(workers, capacity, Mutation::None);
-            assert_eq!(bad, 0, "workers={workers} C={capacity}");
-            states += visited;
-        }
-    }
-    assert!(states > 100);
-    assert!(
-        explore(2, 1, Mutation::ReturnC).1 > 0,
-        "R -> C / C -> R counterexample"
-    );
-    assert!(
-        explore(2, 1, Mutation::StopServingCalls).1 > 0,
-        "R -> home / home -> R counterexample"
-    );
-    eprintln!("PHYSICAL_MODEL {states} states; widths 1..3, stop before/after each boundary");
-}

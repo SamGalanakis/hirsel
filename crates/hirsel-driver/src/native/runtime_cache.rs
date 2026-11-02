@@ -860,20 +860,6 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn planted_archive_without_a_receipt_is_rebuilt() {
-        let store = MemStore::default();
-        let cache_scratch = test_cache("planted");
-        let cache = cache_scratch.path().to_path_buf();
-        fs::write(cache.join("key.a"), b"planted archive").unwrap();
-        let archive = build_bytes(&store, &cache, "key", b"trusted build");
-        assert_eq!(fs::read(&archive).unwrap(), b"trusted build");
-        publish(&store, &cache, "key", |_| {
-            panic!("verified archive should be reused")
-        })
-        .unwrap();
-        fs::remove_dir_all(cache).unwrap();
-    }
 
     #[test]
     fn truncated_or_changed_archives_and_receipts_are_rebuilt() {

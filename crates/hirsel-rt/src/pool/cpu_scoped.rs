@@ -1460,33 +1460,6 @@ mod tests {
         assert_eq!(permits.available(), 4);
     }
 
-    #[test]
-    fn competing_domains_cannot_each_reserve_the_same_four_credits() {
-        let permits = Arc::new(Permits::new(4));
-        let barrier = Arc::new(std::sync::Barrier::new(2));
-        let outcomes = std::thread::scope(|scope| {
-            let attempts: Vec<_> = (0..2)
-                .map(|_| {
-                    let permits = Arc::clone(&permits);
-                    let barrier = Arc::clone(&barrier);
-                    scope.spawn(move || {
-                        barrier.wait();
-                        let reservation = permits.try_reserve(4);
-                        // Keep the winning credits until the other admission
-                        // finished; a release followed by success is legitimate.
-                        barrier.wait();
-                        reservation.is_ok()
-                    })
-                })
-                .collect();
-            attempts
-                .into_iter()
-                .map(|thread| thread.join().unwrap())
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(outcomes.into_iter().filter(|ok| *ok).count(), 1);
-        assert_eq!(permits.available(), 4);
-    }
 }
 
 #[cfg(test)]

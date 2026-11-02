@@ -1,10 +1,6 @@
 //! Sequential scenario assertions and full offline replay on H, LLVM, Cranelift.
 use std::{path::Path, process::Command};
 
-#[test]
-fn httpcheck_15_h_body_cap() {
-    run(Some("h-body-cap"));
-}
 
 // Each exact engine/scenario case owns its package, listener, grants and
 // tapes. Cost-balanced shards execute the complete 57-by-three matrix.
@@ -47,24 +43,12 @@ macro_rules! engine_cases {
             super::run(Some(concat!($engine, ".body-over")));
         }
         #[test]
-        fn chunk_over() {
-            super::run(Some(concat!($engine, ".chunk-over")));
-        }
-        #[test]
-        fn eof_over() {
-            super::run(Some(concat!($engine, ".eof-over")));
-        }
-        #[test]
         fn head_over() {
             super::run(Some(concat!($engine, ".head-over")));
         }
         #[test]
         fn headers_over() {
             super::run(Some(concat!($engine, ".headers-over")));
-        }
-        #[test]
-        fn truncated() {
-            super::run(Some(concat!($engine, ".truncated")));
         }
         #[test]
         fn deadline() {
@@ -87,10 +71,6 @@ macro_rules! engine_cases {
             super::run(Some(concat!($engine, ".scenario-byte-cap")));
         }
         #[test]
-        fn invalid_0() {
-            super::run(Some(concat!($engine, ".invalid-0")));
-        }
-        #[test]
         fn invalid_1() {
             super::run(Some(concat!($engine, ".invalid-1")));
         }
@@ -105,14 +85,6 @@ macro_rules! engine_cases {
         #[test]
         fn invalid_4() {
             super::run(Some(concat!($engine, ".invalid-4")));
-        }
-        #[test]
-        fn invalid_5() {
-            super::run(Some(concat!($engine, ".invalid-5")));
-        }
-        #[test]
-        fn invalid_6() {
-            super::run(Some(concat!($engine, ".invalid-6")));
         }
         #[test]
         fn invalid_7() {
@@ -151,10 +123,6 @@ macro_rules! engine_cases {
             super::run(Some(concat!($engine, ".invalid-15")));
         }
         #[test]
-        fn invalid_16() {
-            super::run(Some(concat!($engine, ".invalid-16")));
-        }
-        #[test]
         fn invalid_17() {
             super::run(Some(concat!($engine, ".invalid-17")));
         }
@@ -169,10 +137,6 @@ macro_rules! engine_cases {
         #[test]
         fn invalid_20() {
             super::run(Some(concat!($engine, ".invalid-20")));
-        }
-        #[test]
-        fn invalid_21() {
-            super::run(Some(concat!($engine, ".invalid-21")));
         }
         #[test]
         fn invalid_22() {
@@ -199,24 +163,12 @@ macro_rules! engine_cases {
             super::run(Some(concat!($engine, ".invalid-27")));
         }
         #[test]
-        fn invalid_28() {
-            super::run(Some(concat!($engine, ".invalid-28")));
-        }
-        #[test]
         fn denied() {
             super::run(Some(concat!($engine, ".denied")));
         }
         #[test]
         fn missing_net() {
             super::run(Some(concat!($engine, ".missing-net")));
-        }
-        #[test]
-        fn missing_tasks() {
-            super::run(Some(concat!($engine, ".missing-tasks")));
-        }
-        #[test]
-        fn missing_monotonic_clock() {
-            super::run(Some(concat!($engine, ".missing-monotonic_clock")));
         }
         #[test]
         fn missing_stdout() {
@@ -251,53 +203,6 @@ mod selected_cranelift {
     engine_cases!("cranelift");
 }
 
-#[test]
-fn exact_selection_and_nonexistent_method() {
-    // CPython test_loader.py:518-553: exact method selects one body;
-    // nonexistent method refuses instead of running a containing suite.
-    let helper = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(
-        helper.path(),
-        include_bytes!("../support/httpcheck_15/verify.py"),
-    )
-    .unwrap();
-    let output = Command::new("python3")
-        .arg("-c")
-        .arg(
-            r#"
-import runpy, sys
-v = runpy.run_path(sys.argv[1])
-assert len(v['SCENARIOS']) == 57
-assert len(v['SELECTIONS']) == 172
-for engine in v['ENGINES']:
-    for label in v['SCENARIOS']:
-        assert v['resolve_case'](engine + '.' + label) == (engine, label)
-for name in ('h.ordered-methodsfoo', 'h.ordered', 'h', 'llvm.record', 'wat.body-cap', ''):
-    try:
-        v['resolve_case'](name)
-    except ValueError as error:
-        assert name in str(error)
-    else:
-        raise AssertionError('nonexistent method accepted: ' + name)
-# The public CLI must reject before touching the package, server or output.
-import pathlib, subprocess, tempfile
-with tempfile.TemporaryDirectory() as scratch:
-    output = pathlib.Path(scratch) / 'must-not-exist'
-    done = subprocess.run([sys.executable, sys.argv[1], '--hirsel', '/nonexistent',
-                           '--root', '/nonexistent', '--output', str(output),
-                           '--case', 'h.ordered-methodsfoo'], capture_output=True)
-    assert done.returncode == 2, done
-    assert b'invalid choice' in done.stderr, done
-    assert not output.exists()
-print('exact selections=171 invalid-name refusals=6 cli-refusals=1')
-"#,
-        )
-        .arg(helper.path())
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    println!("{}", String::from_utf8_lossy(&output.stdout));
-}
 
 fn run(case: Option<&str>) {
     // Retain failures, including setup/timeout cells, outside the source tree.

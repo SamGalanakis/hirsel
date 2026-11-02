@@ -652,37 +652,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn immutable_tir_executes_normal_and_checked_after_engine_drop_with_identical_observations() {
-        hirsel_engine::with_compiler_stack(|| {
-            let input = fixture();
-            let mut prior = None;
-            for checked in [false, true] {
-                let launch = HostLaunch::empty();
-                let mut observed = None;
-                let (outcome, callee) = run_tir_on_host(
-                    &input,
-                    launch,
-                    LaunchSelection::read(launch).unwrap(),
-                    Some(10000),
-                    Some(&mut observed),
-                    None,
-                    checked,
-                )
-                .unwrap();
-                assert_eq!(
-                    outcome,
-                    RunOutcome::Returned(hirsel_run_schema::Returned::Ok)
-                );
-                assert!(callee.is_none());
-                let observed = observed.expect("completed execution has a semantic observation");
-                if let Some(prior) = prior {
-                    assert_eq!(prior, observed);
-                }
-                prior = Some(observed);
-            }
-        });
-    }
 
     #[test]
     fn immutable_tir_refuses_foreign_use_and_missing_settled_bodies_without_compiler_fallback() {

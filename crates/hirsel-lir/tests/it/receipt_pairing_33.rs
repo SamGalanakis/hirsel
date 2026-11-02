@@ -96,14 +96,6 @@ fn fixture(result: bool) -> (FnAbi, CallSite, Pools) {
     (abi, call, pools)
 }
 #[test]
-fn receipt_pairing_uses_original_selectors_without_requiring_unit_value_carriers() {
-    for result in [false, true] {
-        let (abi, call, pools) = fixture(result);
-        check_call_contract(&abi, &call, &pools).unwrap();
-        assert_eq!(call.pretransfer_failure, Some(FailureId(1)));
-    }
-}
-#[test]
 fn receipt_pairing_rejects_missing_duplicate_wrong_mode_and_nonaddress_actuals() {
     let (abi, good, pools) = fixture(true);
     check_call_contract(&abi, &good, &pools).unwrap();

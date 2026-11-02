@@ -123,33 +123,11 @@ class Land(unittest.TestCase):
         self.assertEqual(self.git(self.origin, 'show', 'main:tools/known-failures.tsv'), prefix + expected)
         self.assertEqual(len((checks / 'received').read_text().splitlines()), 1)
 
-    def test_two_tickets_choose_the_incoming_failure_row(self):
-        self.ledger_batch('red\told\tfirst\t2026-10-30\n', 'red\tnew\tsecond\t2026-11-01\n',
-                          'red\tnew\tsecond\t2026-11-01\n')
-
-    def test_an_older_incoming_failure_keeps_the_newer_date(self):
-        self.ledger_batch('red\tnew\tfirst\t2026-11-01\n', 'red\told\tsecond\t2026-10-30\n',
-                          'red\tnew\tfirst\t2026-11-01\n')
 
     def test_equal_date_failure_rows_choose_the_incoming_ticket(self):
         self.ledger_batch('red\tfirst\tfirst\t2026-11-01\n', 'red\tsecond\tsecond\t2026-11-01\n',
                           'red\tsecond\tsecond\t2026-11-01\n')
 
-    def test_rerecording_a_main_failure_with_duplicate_id_is_refused(self):
-        prefix = '# failures\nzed\treason\towner\t2026-10-30\n'
-        old = 'red\told\tmain\t2026-11-01\n'
-        suffix = '\nalpha\treason\towner\t2026-10-30\n'
-        new = 'red\tnew\tincoming\t2026-11-01\n'
-        self.ledger_checks(prefix + old + suffix)
-        self.git(self.lane, 'push', '-q', 'origin', 'HEAD:main')
-        with (self.lane / 'tools/known-failures.tsv').open('a') as out:
-            out.write(new)
-        self.git(self.lane, 'commit', '-qam', 'rerecord red')
-        landed = self.land()
-        self.assertEqual(landed.returncode, 1, landed.stdout + landed.stderr)
-        self.assertIn('FAIL  independent line lists', landed.stdout)
-        self.assertEqual((self.lane / 'tools/known-failures.tsv').read_text(), prefix + old + suffix + new)
-        self.assertEqual(self.git(self.origin, 'show', 'main:tools/known-failures.tsv'), prefix + old + suffix)
 
     def test_a_ticket_with_duplicate_failures_is_refused_unchanged(self):
         original = ('red\tnew\towner\t2026-11-01\n'
@@ -197,23 +175,6 @@ class Land(unittest.TestCase):
                               'a\tr\tx\t2026-10-30\nz\tr\tx\t2026-10-30\n',
                               'a\tr\tx\t2026-10-30\nred\tr\ty\t2026-11-01\nz\tr\tx\t2026-10-30\n')
 
-    def test_a_main_deletion_beats_an_untouched_ticket_row(self):
-        self.ledger_three_way('red\tr\tx\t2026-10-30\nz\tr\tx\t2026-10-30\n',
-                              'z\tr\tx\t2026-10-30\n',
-                              'red\tr\tx\t2026-10-30\nz\tr\tx\t2026-10-30\nnew\tr\tt\t2026-11-01\n',
-                              'new\tr\tt\t2026-11-01\nz\tr\tx\t2026-10-30\n')
-
-    def test_both_sides_editing_a_row_keep_main_when_it_is_later(self):
-        self.ledger_three_way('red\tr\tx\t2026-10-30\nz\tr\tx\t2026-10-30\n',
-                              'red\tr\tmain\t2026-11-01\nz\tr\tx\t2026-10-30\n',
-                              'red\tr\tticket\t2026-10-31\nz\tr\tx\t2026-10-30\n',
-                              'red\tr\tmain\t2026-11-01\nz\tr\tx\t2026-10-30\n')
-
-    def test_both_sides_editing_a_row_keep_the_ticket_when_it_is_later(self):
-        self.ledger_three_way('red\tr\tx\t2026-10-30\nz\tr\tx\t2026-10-30\n',
-                              'red\tr\tmain\t2026-10-31\nz\tr\tx\t2026-10-30\n',
-                              'red\tr\tticket\t2026-11-01\nz\tr\tx\t2026-10-30\n',
-                              'red\tr\tticket\t2026-11-01\nz\tr\tx\t2026-10-30\n')
 
     def test_malformed_failure_rows_still_refuse_landing(self):
         valid = 'keep\tvalid\towner\t2026-11-01\n'

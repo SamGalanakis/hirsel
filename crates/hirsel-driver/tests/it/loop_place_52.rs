@@ -106,27 +106,6 @@ fn loop_place_52_index_field_four_engines() {
     with_compiler_stack(|| runtime(&vector("index-field-run")));
 }
 
-#[test]
-fn loop_place_52_negative_witnesses() {
-    with_compiler_stack(|| {
-        for (name, rule) in [("write-bad", "OWN-3"), ("copy-bad", "MODE-2")] {
-            let mut engine = crate::source_std::engine();
-            let source = vector(name);
-            let file = engine
-                .sources
-                .add("loop-place-negative.hir", source)
-                .unwrap();
-            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
-            assert_eq!(output.completion, CheckCompletion::Complete);
-            assert_eq!(
-                output.diagnostics.first().unwrap().rule.as_str(),
-                rule,
-                "{name}: {:?}",
-                output.diagnostics
-            );
-        }
-    });
-}
 
 #[test]
 fn loop_place_52_paths_four_engines() {

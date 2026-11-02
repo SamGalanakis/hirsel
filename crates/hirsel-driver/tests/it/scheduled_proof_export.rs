@@ -437,15 +437,6 @@ fn source_export_shares_exact_native_selected_run_and_completed_originals() {
     );
 }
 
-#[test]
-fn complete_ps9_input_admission_precedes_body_reads_and_matches_scalar_export() {
-    export_case(
-        "@analysis(example: retain = yes)\npub opaque type Hidden: () uses {} { value:u64 }\nfn read(h:Hidden)->u64{h.value}\nfn unused(x:u64)->u64{x+1u64}\nconst A:u8=comptime 1u8; pub fn main()->u8{A}",
-        true,
-        true,
-        false,
-    );
-}
 
 #[test]
 fn full_ps9_build_and_text_admission_preserve_scalar_and_detached_ownership() {

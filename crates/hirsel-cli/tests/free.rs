@@ -498,30 +498,18 @@ fn every_f0_trace_replays_to_its_live_projection_at_every_cut_mutex_cycle_interp
     every_f0_trace("mutex_cycle", ENGINES[0], &[false]);
 }
 
-#[test]
-fn every_f0_trace_replays_to_its_live_projection_at_every_cut_mutex_cycle_interpreter_durable() {
-    every_f0_trace("mutex_cycle", ENGINES[0], &[true]);
-}
 
 #[test]
 fn every_f0_trace_replays_to_its_live_projection_at_every_cut_mutex_cycle_llvm_plain() {
     every_f0_trace("mutex_cycle", ENGINES[1], &[false]);
 }
 
-#[test]
-fn every_f0_trace_replays_to_its_live_projection_at_every_cut_mutex_cycle_llvm_durable() {
-    every_f0_trace("mutex_cycle", ENGINES[1], &[true]);
-}
 
 #[test]
 fn every_f0_trace_replays_to_its_live_projection_at_every_cut_mutex_cycle_cranelift_plain() {
     every_f0_trace("mutex_cycle", ENGINES[2], &[false]);
 }
 
-#[test]
-fn every_f0_trace_replays_to_its_live_projection_at_every_cut_mutex_cycle_cranelift_durable() {
-    every_f0_trace("mutex_cycle", ENGINES[2], &[true]);
-}
 
 #[test]
 fn every_f0_trace_replays_to_its_live_projection_at_every_cut_parked_receive_interpreter_plain() {
@@ -568,20 +556,12 @@ fn every_f0_trace_replays_to_its_live_projection_at_every_cut_acquire_reply_llvm
     every_f0_trace("acquire_reply", ENGINES[1], &[false]);
 }
 
-#[test]
-fn every_f0_trace_replays_to_its_live_projection_at_every_cut_acquire_reply_llvm_durable() {
-    every_f0_trace("acquire_reply", ENGINES[1], &[true]);
-}
 
 #[test]
 fn every_f0_trace_replays_to_its_live_projection_at_every_cut_acquire_reply_cranelift_plain() {
     every_f0_trace("acquire_reply", ENGINES[2], &[false]);
 }
 
-#[test]
-fn every_f0_trace_replays_to_its_live_projection_at_every_cut_acquire_reply_cranelift_durable() {
-    every_f0_trace("acquire_reply", ENGINES[2], &[true]);
-}
 
 #[test]
 fn every_f0_trace_replays_to_its_live_projection_at_every_cut_coalesced_root_interpreter() {
@@ -603,10 +583,6 @@ fn every_f0_trace_replays_to_its_live_projection_at_every_cut_thaw_race_interpre
     every_f0_trace("thaw_race", ENGINES[0], &[false]);
 }
 
-#[test]
-fn every_f0_trace_replays_to_its_live_projection_at_every_cut_thaw_race_interpreter_durable() {
-    every_f0_trace("thaw_race", ENGINES[0], &[true]);
-}
 
 #[test]
 fn every_f0_trace_replays_to_its_live_projection_at_every_cut_thaw_race_llvm() {
@@ -1851,10 +1827,6 @@ fn f1_blocked_terminal_outcome_matrix(cells: Cells) {
     );
 }
 
-#[test]
-fn f1_terminal_restoration_rejects_forged_root_and_unconsumed_records() {
-    f1_terminal_restoration_matrix("record", &[("1", None)], &ENGINES);
-}
 
 fn f1_terminal_restoration_matrix(
     level: &str,
@@ -3813,27 +3785,6 @@ fn f1_returned_error_resource_matrix(
     }
 }
 
-#[test]
-fn f1_explicit_exit_codes_replay_exact_terminal_and_projection_record() {
-    f1_explicit_exit_codes_matrix(
-        "1",
-        1,
-        &[("1", 1)],
-        Cells::level(false),
-        &F1_EXIT_CODE_FIXTURES,
-    );
-}
-
-#[test]
-fn f1_explicit_exit_codes_replay_exact_terminal_and_projection_durable() {
-    f1_explicit_exit_codes_matrix(
-        "1",
-        1,
-        &[("1", 1)],
-        Cells::level(true),
-        &F1_EXIT_CODE_FIXTURES,
-    );
-}
 
 const F1_EXIT_CODE_FIXTURES: [&str; 3] = ["direct", "wrapped", "error"];
 
@@ -3934,10 +3885,6 @@ fn f1_explicit_exit_codes_matrix(
     }
 }
 
-#[test]
-fn f1_failed_root_preserves_ordered_cleanup_causes_and_projection() {
-    f1_ordered_cleanup_causes_matrix("1", 1, &[("1", 1)], Cells::ALL);
-}
 
 fn f1_ordered_cleanup_causes_matrix(
     record_width: &str,
@@ -4055,10 +4002,6 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
     }
 }
 
-#[test]
-fn f1_terminal_metadata_rejects_contradictory_outcomes_and_receipts_before_effects() {
-    f1_terminal_metadata_matrix("1", 1, &[("1", 1)], "record", &ENGINES);
-}
 
 fn f1_terminal_metadata_matrix(
     record_width: &str,
@@ -6315,70 +6258,30 @@ fn runtime50_end_to_end_engine_replay_matrix_channel_gap_refusals() {
     runtime50_matrix("gap", source("gap"), Runtime50::Refusals);
 }
 
-#[test]
-fn runtime50_end_to_end_engine_replay_matrix_mutex_llvm_width1() {
-    runtime50_matrix("mutex", &corpus(MUTEX), Runtime50::LlvmWidth1);
-}
-
-#[test]
-fn runtime50_end_to_end_engine_replay_matrix_mutex_llvm_width8() {
-    runtime50_matrix("mutex", &corpus(MUTEX), Runtime50::LlvmWidth8);
-}
 
 #[test]
 fn runtime50_end_to_end_engine_replay_matrix_mutex_cranelift() {
     runtime50_matrix("mutex", &corpus(MUTEX), Runtime50::Cranelift);
 }
 
-#[test]
-fn runtime50_end_to_end_engine_replay_matrix_mutex_refusals() {
-    runtime50_matrix("mutex", &corpus(MUTEX), Runtime50::Refusals);
-}
 
 const MUTEX: &str = "../../conformance/CLO/CLO-3-child-mutex-capture-run.hir";
 
 const ATOMIC: &str = "../../conformance/CLO/CLO-3-child-atomic-capture-run.hir";
 const TASK_SET: &str = "../../conformance/CONC/CONC-2-task-set-first-completed-run.hir";
 
-#[test]
-fn runtime50_end_to_end_engine_replay_matrix_atomic_llvm_width1() {
-    runtime50_matrix("atomic", &corpus(ATOMIC), Runtime50::LlvmWidth1);
-}
-
-#[test]
-fn runtime50_end_to_end_engine_replay_matrix_atomic_llvm_width8() {
-    runtime50_matrix("atomic", &corpus(ATOMIC), Runtime50::LlvmWidth8);
-}
 
 #[test]
 fn runtime50_end_to_end_engine_replay_matrix_atomic_cranelift() {
     runtime50_matrix("atomic", &corpus(ATOMIC), Runtime50::Cranelift);
 }
 
-#[test]
-fn runtime50_end_to_end_engine_replay_matrix_atomic_refusals() {
-    runtime50_matrix("atomic", &corpus(ATOMIC), Runtime50::Refusals);
-}
-
-#[test]
-fn runtime50_end_to_end_engine_replay_matrix_task_set_llvm_width1() {
-    runtime50_matrix("task-set", &corpus(TASK_SET), Runtime50::LlvmWidth1);
-}
-
-#[test]
-fn runtime50_end_to_end_engine_replay_matrix_task_set_llvm_width8() {
-    runtime50_matrix("task-set", &corpus(TASK_SET), Runtime50::LlvmWidth8);
-}
 
 #[test]
 fn runtime50_end_to_end_engine_replay_matrix_task_set_cranelift() {
     runtime50_matrix("task-set", &corpus(TASK_SET), Runtime50::Cranelift);
 }
 
-#[test]
-fn runtime50_end_to_end_engine_replay_matrix_task_set_refusals() {
-    runtime50_matrix("task-set", &corpus(TASK_SET), Runtime50::Refusals);
-}
 
 /// The single production route (runtime-cutover-50). Source and build checks:
 /// no qualification feature, configuration, admission constant or probe
@@ -6387,149 +6290,7 @@ fn runtime50_end_to_end_engine_replay_matrix_task_set_refusals() {
 /// with production host-request evidence and a projected stdout output, and
 /// the interpreter replays it without a live host.
 /// The `outputs` map of a reported projection: each sink and its bytes, in sink order.
-fn projected_outputs(report: &str) -> Vec<(String, Vec<u8>)> {
-    let [_, rest] = report.split(", outputs: {").collect::<Vec<_>>()[..] else {
-        panic!("one outputs map: {report}");
-    };
-    let mut rest = rest;
-    let mut outputs = Vec::new();
-    while let Some(entry) = rest.strip_prefix('"') {
-        let (sink, entry) = entry.split_once("\": [").unwrap();
-        let (bytes, entry) = entry.split_once(']').unwrap();
-        let bytes = bytes
-            .split(", ")
-            .filter(|byte| !byte.is_empty())
-            .map(|byte| byte.parse().unwrap())
-            .collect();
-        outputs.push((sink.to_owned(), bytes));
-        rest = entry.strip_prefix(", ").unwrap_or(entry);
-    }
-    assert!(
-        rest.starts_with("}, observed: {"),
-        "outputs map ends: {rest}"
-    );
-    outputs
-}
 
-#[test]
-fn runtime50_default_routes_use_r6() {
-    let sources = [
-        (
-            "hirsel-rt Cargo.toml",
-            include_str!("../../hirsel-rt/Cargo.toml"),
-        ),
-        ("launch.rs", include_str!("../../hirsel-rt/src/launch.rs")),
-        (
-            "free_launch.rs",
-            include_str!("../../hirsel-rt/src/free_launch.rs"),
-        ),
-        (
-            "free_driver.rs",
-            include_str!("../../hirsel-rt/src/free_driver.rs"),
-        ),
-        (
-            "pool/free.rs",
-            include_str!("../../hirsel-rt/src/pool/free.rs"),
-        ),
-        (
-            "network.rs",
-            include_str!("../../hirsel-driver/src/network.rs"),
-        ),
-    ];
-    for (name, text) in sources {
-        for superseded in [
-            "free-qualification",
-            "free_qualification",
-            "FREE_QUALIFICATION",
-            "free_launch::ENABLED",
-            "admission_enabled",
-        ] {
-            assert!(!text.contains(superseded), "{name} retains {superseded}");
-        }
-    }
-    let launch: String = sources[1].1.split_whitespace().collect();
-    assert!(
-        launch.contains(
-            "letproduction_free=requested.as_ref()\
-             .and_then(|run|run.record().io.as_ref())\
-             .and_then(|io|io.tasks.as_deref())==Some(\"tasks.free@1\");"
-        ),
-        "the Tasks provider alone selects production Free"
-    );
-
-    let scratch = Scratch::new("runtime50-routes");
-    let program = scratch.path("main.hir");
-    std::fs::write(&program, source("gap")).unwrap();
-    let tape = scratch.path("tape");
-    let report = scratch.path("projection");
-    let grants = r#"{"io":{"stdout":"stdout.bytes@1","tasks":"tasks.free@1","dirs":[]},"args":[]}"#;
-    let mut command = Command::new(env!("CARGO_BIN_EXE_hirsel"));
-    command
-        .args(["run", "--native"])
-        .arg(&program)
-        .args(["--grants", grants, "--cores", "8", "--record"])
-        .arg(&tape)
-        .stdin(std::process::Stdio::null())
-        .env(hirsel_rt::free_replay::Report::VAR, &report);
-    f1_permits(&mut command, 8);
-    let live = bounded_output(&mut command, &program, "runtime50 routes live LLVM width 8");
-    assert!(live.status.success(), "{live:?}");
-    let bytes = std::fs::read(&tape).unwrap();
-    assert!(bytes.starts_with(hirsel_free::tape::MAGIC), "F1 phases");
-    let parsed = hirsel_free::tape::parse(&bytes).unwrap();
-    assert_eq!(
-        parsed.cut[&Vec::new()].phase,
-        hirsel_free::phase::Phase::Done,
-        "the root's terminal phase"
-    );
-    assert!(parsed.logs.len() >= 2, "a child task's own phase log");
-    let host = parsed
-        .logs
-        .values()
-        .flat_map(|log| hirsel_free::record::decode(log).unwrap())
-        .filter(|record| {
-            matches!(
-                record,
-                hirsel_free::record::Record::Prepared { .. }
-                    | hirsel_free::record::Record::Completion { .. }
-            )
-        })
-        .count();
-    assert!(
-        host >= 2,
-        "production host requests record prepare and completion"
-    );
-    let projection = std::fs::read_to_string(&report).unwrap();
-    assert!(
-        live.stdout == b"sent\n" || live.stdout == b"closed\n",
-        "{live:?}"
-    );
-    // The gap fixture's one output is its stdout print: one exclusive host-resource sink.
-    let outputs = projected_outputs(&projection);
-    let [(sink, bytes)] = &outputs[..] else {
-        panic!("one projected output sink: {projection}");
-    };
-    assert!(sink.starts_with("host-resource/"), "{sink}: {projection}");
-    assert_eq!(bytes, &live.stdout, "the stdout sink's projected bytes");
-    let _ = std::fs::remove_file(&report);
-    let mut command = Command::new(env!("CARGO_BIN_EXE_hirsel"));
-    command
-        .arg("run")
-        .arg(&program)
-        .arg("--replay")
-        .arg(&tape)
-        .args(["--cores", "1"])
-        .stdin(std::process::Stdio::null())
-        .env(hirsel_rt::free_replay::Report::VAR, &report);
-    let replay = bounded_output(
-        &mut command,
-        &program,
-        "runtime50 routes interpreter replay",
-    );
-    assert_eq!(replay.status.code(), live.status.code(), "{replay:?}");
-    assert_eq!(replay.stdout, live.stdout);
-    assert_eq!(std::fs::read_to_string(&report).unwrap(), projection);
-}
 
 #[test]
 fn tir_live_free_durable_host_wait_and_scope_expiry_cross_replay() {

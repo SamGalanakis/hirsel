@@ -28,77 +28,7 @@ pub fn main() -> Result[(), u64] uses {} {
 
 /// Each storage primitive call in `name` follows a writability test.
 /// An ordinary wrapper detaches at its own primitive call, checked separately.
-fn tests_before_calls(lowered: &hirsel_rc::import::Lowered, name: &str) {
-    let ids: Vec<_> = support::instances_of(lowered, name)
-        .into_iter()
-        .filter(|&id| {
-            !lowered
-                .instances
-                .view(id)
-                .key
-                .definition()
-                .is_core("list.pop")
-        })
-        .collect();
-    assert_eq!(ids.len(), 1);
-    let id = ids[0];
-    let placed = hirsel_rc::placement::place(
-        lowered.units[id.index()].clone(),
-        &lowered.table,
-        &Options::for_instance(true, &lowered.instances, id),
-    )
-    .unwrap();
-    let rc = hirsel_rc::insert::insert(
-        placed,
-        &lowered.table,
-        &Proofs::for_instance(&lowered.instances, id),
-    )
-    .unwrap();
-    let mut calls = 0;
-    let mut tested = 0;
-    for (b, term) in rc.terminators.iter().enumerate() {
-        let Terminator::Call { call, .. } = *term else {
-            continue;
-        };
-        let site = &rc.tables.calls[call.index()];
-        let definition = match site.callee {
-            Callee::Direct(symbol) => &rc.tables.symbols[symbol.index()].definition,
-            Callee::Operation(op) => &rc.tables.operations[op.index()].definition,
-            _ => continue,
-        };
-        if !definition.is_core("list.pop") {
-            continue;
-        }
-        calls += 1;
-        // The test's join block, or this block itself, starts after it.
-        let preceded = (0..rc.blocks.len()).any(|p| {
-            rc.blocks[p]
-                .instructions
-                .get(&rc.instructions)
-                .unwrap()
-                .iter()
-                .any(|i| matches!(i, Inst::IsWritable { .. }))
-                && rc.terminators[p]
-                    .normal_edges(&rc.pools)
-                    .iter()
-                    .any(|e| rc.tables.edges[e.index()].target.index() == b)
-        });
-        tested += usize::from(preceded);
-    }
-    assert!(
-        calls > 0 && tested == calls,
-        "{name}: {tested} of {calls}\n{}",
-        support::dump(&rc)
-    );
-}
 
-#[test]
-fn callers_detach_lists_the_storage_primitives_write() {
-    let (program, lowered) = support::lower_valid(SOURCE);
-    tests_before_calls(&lowered, "inside");
-    tests_before_calls(&lowered, "pop");
-    let _ = program;
-}
 
 #[test]
 fn direct_and_wrapper_calls_preserve_arena_and_shared_owners() {

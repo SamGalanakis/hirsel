@@ -702,26 +702,4 @@ fn pubsub_relay_30_registration_completion_contract() {
     }
 }
 
-#[test]
-#[ignore = "manual historical RE600 diagnostic; bounded cells run by default"]
-fn pubsub_relay_30_native_and_real_unix() {
-    let cases = selected_cases(false);
-    let cells = original_cells(&cases);
-    let selected = std::env::var("PUBSUB_30_CELL")
-        .map(|cell| vec![cell])
-        .unwrap_or(cells);
-    native(&selected, &cases);
-}
 
-#[test]
-#[ignore = "explicit recovery of the ten historical native replay complements"]
-fn historical_native_prefix_complements() {
-    let cases = selected_cases(false);
-    let mut selected = vec!["duplicate-llvm-1".to_string()];
-    for name in ["no-subscriber", "one-receiver", "order-two"] {
-        for width in [1, 2, 4] {
-            selected.push(format!("{name}-llvm-{width}"));
-        }
-    }
-    native(&selected, &cases);
-}

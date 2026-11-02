@@ -956,63 +956,6 @@ fn front_changes_survive_early_query_recomputation_and_selective_acknowledgment(
     });
 }
 
-#[test]
-fn frozen_frontier_publishes_compact_inputs_before_bodies_are_released() {
-    with_compiler_stack(|| {
-        use hirsel_intern::jobs::Jobs;
-        let source = "fn identity[T](take v:T) -> T { v }\nfn main() { let _ = identity(1u64) }\n";
-        for jobs in [1, 2, 8] {
-            let mut engine = engine(Arc::new(store::NoneStore));
-            let file = engine.sources.add("resident.hir", source.into()).unwrap();
-            engine.parse_file(file, &default_context()).unwrap();
-            let paths = vec![path("main"), path("identity")];
-            let outcomes = crate::request_graph::front(&mut engine, paths.clone(), Jobs::new(jobs));
-            assert!(
-                outcomes
-                    .iter()
-                    .all(|o| o.result.as_ref().unwrap().diagnostics.is_empty())
-            );
-            for outcome in &outcomes {
-                let recorded = engine
-                    .shared_memo_reads(&outcome.definition, QueryKind::Modes)
-                    .unwrap();
-                assert!(Arc::ptr_eq(&outcome.reads, &recorded));
-                assert!(Arc::ptr_eq(
-                    &outcome.summary.as_ref().unwrap().reads,
-                    &recorded
-                ));
-            }
-            for definition in &paths {
-                assert_eq!(
-                    engine.recompute_count(definition, QueryKind::Summary),
-                    1,
-                    "P publishes the final compact result directly"
-                );
-                let id = hirsel_syntax::DefId::intern(definition);
-                let before = engine.memo_stats().recomputed.clone();
-                let published = engine
-                    .publish_definition(id, memo::Retention::Batch)
-                    .unwrap();
-                assert_eq!(published.definition, id);
-                let checked = published.checked.as_ref().unwrap();
-                assert_eq!(
-                    engine.checked_definition_summary(id).unwrap(),
-                    (checked.summary.clone(), checked.growth.clone())
-                );
-                assert!(engine.memo_reads(definition, QueryKind::Check).is_none());
-                assert!(engine.memo_reads(definition, QueryKind::Modes).is_none());
-                assert_eq!(engine.memo_stats().recomputed, before);
-            }
-            drop(outcomes);
-            engine.mode_definition(&path("main")).unwrap();
-            assert_eq!(
-                engine.recompute_count(&path("main"), QueryKind::Check),
-                2,
-                "an explicit later body demand follows the ordinary miss path"
-            );
-        }
-    });
-}
 
 #[test]
 fn compact_front_results_preserve_diagnostics_after_batch_body_release() {

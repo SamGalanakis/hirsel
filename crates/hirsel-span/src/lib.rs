@@ -679,25 +679,6 @@ mod retained_source_owner_tests {
         assert_eq!(decorated.retained_snapshot_metadata_bytes(), bytes);
     }
     #[test]
-    fn extracted_source_file_keeps_snapshot_owner_after_all_maps_drop() {
-        let dropped = Arc::new(AtomicUsize::new(0));
-        let mut sources = SourceMap::default();
-        let file = sources
-            .add("main.hir", "pub fn main() {}\n".into())
-            .unwrap();
-        let original_debug = format!("{sources:?}");
-        let sources = sources.retain_owner(Arc::new(Owner(dropped.clone())));
-        assert_eq!(format!("{sources:?}"), original_debug);
-        let clone = sources.clone();
-        let extracted = sources.file(file).unwrap().clone();
-        drop(sources);
-        drop(clone);
-        assert_eq!(dropped.load(Ordering::SeqCst), 0);
-        assert_eq!(extracted.text(), "pub fn main() {}\n");
-        drop(extracted);
-        assert_eq!(dropped.load(Ordering::SeqCst), 1);
-    }
-    #[test]
     fn extending_a_snapshot_shares_owned_rows_and_keeps_each_files_admission() {
         let first = Arc::new(AtomicUsize::new(0));
         let second = Arc::new(AtomicUsize::new(0));

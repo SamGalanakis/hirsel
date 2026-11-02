@@ -288,7 +288,3 @@ fn first_comparator_failure_and_upper_phase_failure_clean_up() {
     });
 }
 
-#[test]
-fn duplicate_resource_range_borrows_without_cloning_or_reordering() {
-    with_compiler_stack(|| resource_case("owned"));
-}

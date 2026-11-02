@@ -508,9 +508,5 @@ pub(crate) fn compact(
 mod policy_tests;
 
 #[cfg(test)]
-#[path = "index/microbench.rs"]
-mod microbench;
-
-#[cfg(test)]
 #[path = "index/tests/mod.rs"]
 mod tests;

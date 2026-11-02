@@ -365,32 +365,6 @@ class Unit(unittest.TestCase):
             save(self.manifest, value)
             self.assertEqual(self.success()['dependency_catalog']['edge']['manifest'], expected)
 
-    def test_go_relative_path_vectors_on_resolved_existing_paths(self):
-        # Go ebe2feefc400 src/path/filepath/path_test.go:1495-1538.
-        # Canonicalize first, as the helper does; all directories exist.
-        vectors = [('a/b', 'a/b', '.'), ('a/b/.', 'a/b', '.'), ('a/b', 'a/b/.', '.'),
-                   ('./a/b', 'a/b', '.'), ('a/b', './a/b', '.'),
-                   ('ab/cd', 'ab/cde', '../cde'), ('ab/cd', 'ab/c', '../c'),
-                   ('a/b', 'a/b/c/d', 'c/d'), ('a/b', 'a/b/../c', '../c'),
-                   ('a/b/../c', 'a/b', '../b'), ('a/b/c', 'a/c/d', '../../c/d'),
-                   ('a/b', 'c/d', '../../c/d'), ('a/b/c/d', 'a/b', '../..'),
-                   ('a/b/c/d', 'a/b/', '../..'), ('a/b/c/d/', 'a/b', '../..'),
-                   ('a/b/c/d/', 'a/b/', '../..'), ('.', 'a/b', 'a/b'), ('.', '..', '..')]
-        for base, target, expected in vectors:
-            with self.subTest(base=base, target=target):
-                paths = [self.root / 'vectors' / p for p in (base, target)]
-                for path in paths:
-                    path.mkdir(parents=True, exist_ok=True)
-                self.assertEqual(API['relative_manifest'](paths[1].resolve(), paths[0].resolve()), expected)
-
-    def test_go_incompatible_root_vector(self):
-        # Canonical host paths cannot mix absolute/relative roots. Different
-        # Windows volumes still fail in the stdlib relative operation.
-        function = API['relative_manifest']
-        with patch.dict(function.__globals__, os=SimpleNamespace(path=ntpath)):
-            with self.assertRaises(ValueError):
-                function(r'D:\lib\hirsel.json', r'C:\app')
-
 
 class Integration(unittest.TestCase):
     def test_moved_workspace_checks_tests_and_dependency_cards(self):

@@ -721,7 +721,6 @@ semver_upstream_25::order_24	48.095
 sha_primitive_38::sha_primitive_38_cavp_four_engines	43.882
 shortest_direct_candidate_28::upstream_binary64_and_boundary_neighbors	32.951
 sorted_bounds_7::comparator_counts_are_logarithmic_including_empty	25.842
-sorted_bounds_7::duplicate_resource_range_borrows_without_cloning_or_reordering	12.528
 sorted_bounds_7::first_comparator_failure_and_upper_phase_failure_clean_up	47.708
 sorted_bounds_7::generated_small_lists_match_independent_linear_oracle	13.279
 sorted_bounds_7::midpoint_and_go_large_domains_without_large_allocations	163.259
@@ -1006,7 +1005,6 @@ stream_item_bound_38::cranelift_controls	10.158
 stream_item_bound_38::cranelift_failures	11.945
 stream_item_bound_38::llvm_controls	10.965
 stream_item_bound_38::llvm_failures	14.639
-stream_item_bound_38::native_importer_with_symbolic_capture_dependency	10.187
 stream_item_bound_38::reference_controls	35.482
 stream_item_bound_38::reference_failures	18.865
 stream_item_bound_38::unique_payload_aliased_source_refused	131.414

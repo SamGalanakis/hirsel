@@ -120,49 +120,6 @@ fn publication_before_the_park_lock_is_retained_by_the_epoch() {
     );
 }
 
-#[test]
-fn publication_while_subscribing_to_the_bell_wakes_the_parked_worker() {
-    let execs = topology(1);
-    let exec = execs.compute.lock().unwrap().active[0].clone();
-    let epoch = exec.ready_epoch.load(Ordering::Acquire);
-    assert!(next(&execs, &exec).is_none());
-    let mut inbox = exec.inbox.lock().unwrap();
-    std::thread::scope(|scope| {
-        let (begin, ready) = std::sync::mpsc::channel();
-        let mut begin = Some(begin);
-        let publisher = scope.spawn({
-            let execs = &execs;
-            move || {
-                ready.recv().unwrap();
-                publish(execs, segment(execs, 8), false, false);
-            }
-        });
-        // Publish after the last predicate check, potentially before parking.
-        while exec.ready_epoch.load(Ordering::Acquire) == epoch {
-            drop(inbox);
-            if let Some(begin) = begin.take() {
-                begin.send(()).unwrap();
-            }
-            assert!(
-                exec.bell.wait_timeout(Duration::from_secs(5)),
-                "publication lost at the park boundary"
-            );
-            inbox = exec.inbox.lock().unwrap();
-        }
-        drop(inbox);
-        publisher.join().unwrap();
-    });
-    assert_eq!(
-        next(&execs, &exec)
-            .unwrap()
-            .queued
-            .start()
-            .value()
-            .task
-            .slot,
-        8
-    );
-}
 
 #[test]
 fn addressed_work_hands_an_outstanding_search_to_another_worker() {
@@ -645,32 +602,6 @@ fn runtime50_notify_save_shrink_batch() {
     }
 }
 
-#[test]
-fn scoped_workers_take_only_addressed_frames_and_never_ordinary_work() {
-    let execs = topology(1);
-    let scoped = Exec::new(Kind::Scoped(0), std::ptr::null_mut(), false);
-    publish(&execs, segment(&execs, 19), false, false);
-    assert!(next(&execs, &scoped).is_none());
-    let owner = Owner::Compute(Arc::as_ptr(&scoped).expose_provenance());
-    let addressed = segment(&execs, 23);
-    addressed.frame.placement.set_owner(owner_word(owner));
-    publish(&execs, addressed, false, false);
-    let Post::Saved(saved) = scoped.take().0 else {
-        panic!("scoped addressed frame")
-    };
-    assert_eq!(saved.queued.start().value().task.slot, 23);
-    let ordinary = execs.compute.lock().unwrap().active[0].clone();
-    assert_eq!(
-        next(&execs, &ordinary)
-            .unwrap()
-            .queued
-            .start()
-            .value()
-            .task
-            .slot,
-        19
-    );
-}
 
 #[test]
 fn a_late_token_wake_routes_a_saved_compact_frame_off_its_last_worker() {

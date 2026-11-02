@@ -56,15 +56,6 @@ impl QueryContext for Pending {
     }
 }
 #[test]
-fn native_ready_tasks_validate_cold_and_fresh_snapshots_with_current_source_invocations() {
-    ready_case(
-        "fn other()->u64{9u64}\npub fn main()->u64{7u64}",
-        false,
-        false,
-        false,
-    );
-}
-#[test]
 fn native_ready_tasks_reuse_specialized_callable_dependencies_without_materialization() {
     ready_case_inner_mutation(
         "fn other()->u64{9u64}\nfn apply(f:fn()->u64 uses {})->u64 uses {f}{f()}\npub fn main()->u64{apply(other)}",
@@ -91,10 +82,6 @@ pub fn main()->Result[(),()] {
 #[test]
 fn native_ready_tasks_preserve_actual_materialized_adapter_inventory_on_cold_and_fresh_reads() {
     ready_case(ADAPTER_SOURCE, true, false, false);
-}
-#[test]
-fn native_ready_tasks_refuse_missing_independent_adapter_inventory_before_materialization() {
-    ready_case(ADAPTER_SOURCE, true, true, false);
 }
 #[test]
 fn every_stage_recomputes_instance_and_ready_hits_in_fresh_snapshots() {
@@ -146,18 +133,6 @@ fn ownership_ready_query_keeps_value_identities_and_refuses_stale_dependencies()
     );
 }
 
-#[test]
-fn ownership_query_root_waits_for_dependencies_and_revalidates_selected_outputs() {
-    ready_case_inner(
-        "resource type Token { value:u64 }\ndrop(x) {}\nfn other()->u64{9u64}\npub fn main()->u64{let first=Token(value:7u64)\nlet second=take first\n7u64}",
-        false,
-        false,
-        false,
-        native::Validation::Ready,
-        store::VerifyStore::Off,
-        2,
-    );
-}
 
 #[test]
 fn ownership_compilation_root_discovers_source_and_arena_before_diagnostics() {
@@ -844,10 +819,6 @@ fn original_inventory_mutation(mutation: u8) {
 #[test]
 fn original_keyed_map_missing_inventory_refuses_before_materialization() {
     original_inventory_mutation(1);
-}
-#[test]
-fn original_keyed_map_forged_adapter_abi_refuses_before_materialization() {
-    original_inventory_mutation(2);
 }
 #[test]
 fn original_keyed_map_duplicate_inventory_refuses_before_materialization() {

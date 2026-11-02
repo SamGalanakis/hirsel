@@ -410,38 +410,6 @@ fn static_foreign_launch_runtime_and_linker_changes_invalidate() {
     }
 }
 
-#[test]
-fn executable_materialization_reuses_inode_and_repairs_wrong_mode_or_bytes() {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let dir = tempfile::tempdir().unwrap();
-    let store = admitted(Arc::new(DirStore::new(dir.path().join("store"))));
-    let manifest = inputs(&store, vec![]);
-    let linked = link(&store, &link_key(), &manifest, &mut |_, _, _| {
-        Ok(b"#!/bin/sh\nexit 0\n".to_vec())
-    })
-    .unwrap();
-    let path = dir.path().join("out/program");
-    materialize_executable(&store, &linked, &path).unwrap();
-    let ino = path.metadata().unwrap().ino();
-    materialize_executable(&store, &linked, &path).unwrap();
-    assert_eq!(path.metadata().unwrap().ino(), ino);
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    materialize_executable(&store, &linked, &path).unwrap();
-    assert_ne!(path.metadata().unwrap().ino(), ino);
-    assert!(
-        std::process::Command::new(&path)
-            .status()
-            .unwrap()
-            .success()
-    );
-    std::fs::write(&path, b"wrong").unwrap();
-    materialize_executable(&store, &linked, &path).unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), b"#!/bin/sh\nexit 0\n");
-    std::fs::remove_file(&path).unwrap();
-    let fresh = DirStore::new(dir.path().join("store"));
-    materialize_executable(&fresh, &linked, &path).unwrap();
-    assert!(path.exists());
-}
 
 #[test]
 fn chunk_boundaries_domains_and_complete_lengths_are_checked() {

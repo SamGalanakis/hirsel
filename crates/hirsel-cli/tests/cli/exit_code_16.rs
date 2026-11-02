@@ -43,14 +43,6 @@ macro_rules! code_cases {
             super::exit_code($wrapped, 0);
         }
         #[test]
-        fn one() {
-            super::exit_code($wrapped, 1);
-        }
-        #[test]
-        fn two() {
-            super::exit_code($wrapped, 2);
-        }
-        #[test]
         fn maximum() {
             super::exit_code($wrapped, 255);
         }

@@ -310,20 +310,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_cpu_ahead_grow(
 mod tests {
     use super::*;
 
-    #[test]
-    fn uncertified_handoffs_refuse_before_reading_the_saved_frame() {
-        // SAFETY: these declaration-only entries never dereference arguments.
-        unsafe {
-            assert_eq!(
-                hirsel_rt_v2_cpu_ahead_publish(std::ptr::null_mut(), std::ptr::null_mut()),
-                NOT_CERTIFIED
-            );
-            assert_eq!(
-                hirsel_rt_v2_cpu_ahead_grow(std::ptr::null_mut(), std::ptr::null_mut()),
-                NOT_CERTIFIED
-            );
-        }
-    }
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]

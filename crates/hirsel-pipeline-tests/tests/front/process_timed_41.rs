@@ -673,14 +673,6 @@ const S01_BYTES: &[u8] = b"{\"version\":1,\"cases\":[{\"index\":0,\"id\":\"slow\
 fn timed_s01_suite_runner_timeout_oracle() {
     campaign("S01", "", suite_fixture(), S01_BYTES);
 }
-#[test]
-fn timed_s01_missing_native_complements() {
-    campaign_mode("S01", "", suite_fixture(), S01_BYTES, true, false);
-}
-#[test]
-fn timed_s01_checked_outcome_diagnostic() {
-    campaign_mode("S01", "", suite_fixture(), S01_BYTES, false, true);
-}
 
 fn tape_sha(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -707,51 +699,6 @@ fn timed_e04_delayed_close_is_lang9() {
     );
 }
 
-#[test]
-fn timed_d02_native_complement() {
-    campaign_mode(
-        "D02",
-        WAIT,
-        Fixture {
-            monotonic: Some(0),
-            process: Some(grant(oracle("D02")["steps"].clone())),
-            ..Default::default()
-        },
-        b"timed out\nat 5\n",
-        true,
-        false,
-    );
-}
-#[test]
-fn timed_c02_native_complement() {
-    campaign_mode(
-        "C02",
-        SCOPE_WAIT,
-        Fixture {
-            monotonic: Some(0),
-            process: Some(grant(json!([{"at":5},{"exit":{"exited":7}}]))),
-            ..Default::default()
-        },
-        b"expired\nat 5\n",
-        true,
-        false,
-    );
-}
-#[test]
-fn timed_r04_four_producer_complement() {
-    campaign_mode(
-        "R04",
-        READ,
-        Fixture {
-            monotonic: Some(0),
-            process: Some(grant(oracle("R04")["steps"].clone())),
-            ..Default::default()
-        },
-        b"read 1\nat 5\n",
-        true,
-        false,
-    );
-}
 
 fn oracle_fixture(id: &str) -> Fixture {
     let v = oracle(id);

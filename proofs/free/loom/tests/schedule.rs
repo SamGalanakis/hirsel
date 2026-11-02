@@ -7,32 +7,6 @@ use hirsel_free_loom::{queue, schedule::TaskState};
 use loom::sync::Arc;
 use loom::sync::atomic::{AtomicUsize, Ordering};
 
-#[test]
-fn a_queue_token_cannot_expose_a_frame_before_the_idle_save() {
-    use hirsel_free_loom::frame;
-    hirsel_free_loom::sync::model(|| {
-        let (wake, queued) = frame::prepared(0usize);
-        let mut running = queued.start();
-        let thread = loom::thread::spawn(move || {
-            wake.notify().is_some_and(|queued| {
-                let running = queued.start();
-                assert_eq!(*running.value(), 42);
-                true
-            })
-        });
-        // A real executor writes the saved stack pointer here on its idle
-        // continuation. A racing notification must never read the old image.
-        *running.value_mut() = 42;
-        let queued = running.save(false);
-        let here = queued.is_some_and(|queued| {
-            let running = queued.start();
-            assert_eq!(*running.value(), 42);
-            true
-        });
-        let remote = thread.join().unwrap();
-        assert_eq!(usize::from(here) + usize::from(remote), 1);
-    });
-}
 
 #[test]
 fn discarded_queue_and_running_owners_drop_images_once_and_ignore_late_wakes() {

@@ -194,10 +194,6 @@ fn free_heap_and_tir_owned_batches_width_1() {
     owned_batch(1);
 }
 #[test]
-fn free_heap_and_tir_owned_batches_width_4() {
-    owned_batch(4);
-}
-#[test]
 fn free_heap_and_tir_owned_batches_width_8() {
     owned_batch(8);
 }

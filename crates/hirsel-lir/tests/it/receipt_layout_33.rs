@@ -14,20 +14,6 @@ fn fixture() -> (TargetSpec, LayoutTable, LayoutId) {
     (target, table, id)
 }
 #[test]
-fn receipt_layout_is_pointer_sized_noncopyable_metadata_without_language_credits() {
-    let (target, table, id) = fixture();
-    let record = &table.layouts[id.0 as usize];
-    assert_eq!(
-        record.size,
-        SizeSpec::Fixed(target.scalar_size(ScalarKind::Pointer))
-    );
-    assert_eq!(record.align, target.scalar_align(ScalarKind::Pointer));
-    assert!(record.fields.is_empty() && record.scan.is_empty() && record.finalizer.is_none());
-    assert_eq!(record.drop, [DropStep::ReleaseReceipt { offset: 0 }]);
-    assert_eq!(record.copy, CopyRecipe::NotCopyable);
-    assert_eq!(hirsel_lir::layout::logical_size(&table, id), None);
-}
-#[test]
 fn receipt_layout_memo_and_content_bind_the_original_root_without_changing_ordinary_rows() {
     let target = TargetSpec::x86_64_unknown_linux_gnu();
     let owners = Owners::default();

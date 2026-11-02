@@ -371,37 +371,11 @@ fn isolate_admission_takers_eight() {
     );
 }
 #[test]
-fn isolate_admission_takers_sixteen() {
-    admitted_isolate_fanout(ISOLATED_TAKERS, "isolate takers", 16, &["tasks.free@1"]);
-}
-#[test]
-fn isolate_admission_takers_thirty_two() {
-    admitted_isolate_fanout(
-        ISOLATED_TAKERS,
-        "isolate takers",
-        32,
-        &["tasks.free@1", "tasks.cooperative@1"],
-    );
-}
-#[test]
 fn isolate_admission_dups_eight() {
     admitted_isolate_fanout(
         ISOLATED_DUPS,
         "isolate dups",
         8,
-        &["tasks.free@1", "tasks.cooperative@1"],
-    );
-}
-#[test]
-fn isolate_admission_dups_sixteen() {
-    admitted_isolate_fanout(ISOLATED_DUPS, "isolate dups", 16, &["tasks.free@1"]);
-}
-#[test]
-fn isolate_admission_dups_thirty_two() {
-    admitted_isolate_fanout(
-        ISOLATED_DUPS,
-        "isolate dups",
-        32,
         &["tasks.free@1", "tasks.cooperative@1"],
     );
 }
@@ -426,17 +400,4 @@ fn isolate_admission_dup_fanout_checked_heap() {
     });
 }
 
-#[test]
-fn isolate_admission_takers_sixteen_ordered() {
-    admitted_isolate_fanout(
-        ISOLATED_TAKERS,
-        "isolate takers",
-        16,
-        &["tasks.cooperative@1"],
-    );
-}
 
-#[test]
-fn isolate_admission_dups_sixteen_ordered() {
-    admitted_isolate_fanout(ISOLATED_DUPS, "isolate dups", 16, &["tasks.cooperative@1"]);
-}

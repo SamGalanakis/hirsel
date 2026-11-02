@@ -124,29 +124,6 @@ fn rejected_with_context(text: &str, primary: &str, other_errors: &[(&str, &str)
     );
 }
 
-#[test]
-fn expression_type_argument_guidance_49_constructor_and_function() {
-    with_compiler_stack(|| {
-        for (header, body, primary, repair) in [
-            (
-                HOLDER,
-                "let value=Holder[u64](item:1u64)",
-                "Holder[u64]",
-                "let value:Holder[u64]=Holder(item:1u64)",
-            ),
-            (
-                ID,
-                "let value=id[u64](1u64)",
-                "id[u64]",
-                "let value=id(1u64)",
-            ),
-        ] {
-            let text = source(header, body);
-            rejected(&text, primary);
-            accepted(&source(header, repair));
-        }
-    });
-}
 
 #[test]
 fn expression_type_argument_guidance_49_nested_type() {

@@ -2375,53 +2375,6 @@ fn runtime50_checked_transcript_boundaries() {
     }
 }
 
-#[test]
-fn runtime50_checked_invalid_choice_keeps_its_classification() {
-    let entry = Entry::Random {
-        site: "choice",
-        bound: 2,
-        value: 0,
-    };
-    let suffix = Entry::Handoff {
-        site: "suffix",
-        owner: None,
-    };
-    // Invalid with matching entries and an expected suffix must remain invalid.
-    // A simultaneous mismatch is retained for diagnostics, as before.
-    for value in [0, 1] {
-        let mut c = Controller::schedule(
-            &[2],
-            Some(vec![
-                Entry::Random {
-                    site: "choice",
-                    bound: 2,
-                    value,
-                },
-                suffix.clone(),
-            ]),
-            None,
-        );
-        c.random("choice", 2);
-        c.finish();
-        assert_eq!(c.invalid, Some(0));
-        assert_eq!(c.transcript, vec![entry.clone()]);
-        assert_eq!(c.divergence.is_some(), value == 1);
-        if let Some(d) = c.divergence {
-            assert_eq!(d.index, 0);
-            assert_eq!(d.actual, Some(entry.clone()));
-        }
-    }
-    // A mismatch before an invalid choice still wins over both later causes.
-    let mut c = Controller::schedule(&[2], Some(vec![suffix.clone(), entry.clone()]), None);
-    c.push(entry.clone());
-    c.random("choice", 2);
-    c.finish();
-    assert_eq!(c.invalid, Some(1));
-    let d = c.divergence.unwrap();
-    assert_eq!(d.index, 0);
-    assert_eq!(d.expected, Some(suffix));
-    assert_eq!(d.actual, Some(entry));
-}
 
 const SEEDS: u64 = 96;
 

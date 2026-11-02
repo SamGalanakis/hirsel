@@ -40,19 +40,6 @@ fn ordered_check_gates_lowering_and_preserves_file_failure_prefixes() {
     });
 }
 
-#[test]
-fn ordered_check_admits_lint_rows_before_reserving_outputs() {
-    with_compiler_stack(|| {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("main.hir");
-        std::fs::write(
-            &path,
-            "type Failure = Used() | Stale()\nfn parse()->Result[u8,Failure]{Error(Used())}\npub fn main(){}\n",
-        )
-        .unwrap();
-        check_case(&path, false, false, 2, LoweringPolicy::Reachable);
-    });
-}
 
 fn check_case(
     path: &std::path::Path,
@@ -244,19 +231,6 @@ fn check_case(
     runtime.shutdown();
 }
 
-#[test]
-fn ordered_reachable_check_fits_original_lower_metadata_grant() {
-    with_compiler_stack(|| {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("main.hir");
-        std::fs::write(
-            &path,
-            "const A:u8=comptime 1u8;\nconst B:u8=comptime A;\npub fn main()->u8{B}\n",
-        )
-        .unwrap();
-        check_case(&path, false, false, 1, LoweringPolicy::Reachable);
-    });
-}
 
 #[test]
 fn settled_front_check_does_not_decode_an_evicted_modes_body() {

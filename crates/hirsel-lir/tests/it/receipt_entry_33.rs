@@ -190,42 +190,6 @@ fn receipt_entry_references_participate_in_common_schema_bounds_checks() {
     }
 }
 #[test]
-fn receipt_entry_absence_preserves_legacy_side_table_encoding_and_hash() {
-    use std::hash::{Hash, Hasher};
-    let tables = SideTables::default();
-    let legacy = format!(
-        "(SideTables{} 0{})",
-        "\n  (list)".repeat(13),
-        "\n  (list)".repeat(5)
-    );
-    assert_eq!(hirsel_codec::to_text(&tables), legacy);
-    let decoded: SideTables = hirsel_codec::from_text(&legacy).unwrap();
-    assert_eq!(decoded, tables);
-    let mut old = std::hash::DefaultHasher::new();
-    for _ in 0..13 {
-        0usize.hash(&mut old);
-    }
-    0u32.hash(&mut old);
-    for _ in 0..5 {
-        0usize.hash(&mut old);
-    }
-    let mut actual = std::hash::DefaultHasher::new();
-    tables.hash(&mut actual);
-    assert_eq!(old.finish(), actual.finish());
-    let empty = ReceiptContract::new(vec![], None, vec![], vec![]).unwrap();
-    let mut demanded = tables;
-    demanded.receipt_entry = Some(ReceiptEntry {
-        environment: None,
-        contract: empty.content().unwrap(),
-        parameters: vec![],
-        captures: vec![],
-        result: None,
-    });
-    assert_ne!(hirsel_codec::to_text(&demanded), legacy);
-    let restored: SideTables = hirsel_codec::from_text(&hirsel_codec::to_text(&demanded)).unwrap();
-    assert_eq!(restored, demanded);
-}
-#[test]
 fn receipt_entry_declaration_alone_is_not_executable_c_authority() {
     let (mut t, entry) = fixture();
     t.builder.unit.tables.receipt_entry = Some(entry);

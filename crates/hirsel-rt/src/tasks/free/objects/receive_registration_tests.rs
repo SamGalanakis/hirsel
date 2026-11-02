@@ -22,26 +22,6 @@ fn isolated(name: &str, variable: &str) -> bool {
 }
 
 /// As `isolated`, passing on the child's count lines.
-fn isolated_counting(name: &str, variable: &str) -> bool {
-    if std::env::var_os(variable).is_some() {
-        crate::pool::set_compute_grant(4);
-        return true;
-    }
-    let test = format!("tasks::free::objects::receive_registration_tests::{name}");
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", &test, "--nocapture"])
-        .env(variable, "1")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
-    for line in String::from_utf8_lossy(&output.stderr).lines() {
-        if line.starts_with("free53 cycles") {
-            eprintln!("{line}");
-        }
-    }
-    false
-}
 
 fn runs(
     name: &'static [u8],
@@ -477,40 +457,3 @@ unsafe extern "C" fn ping(ctx: *mut TaskCtx, env: *mut Header, _: u64, _: u64) -
 
 /// Each parked receive's scheduler-role acquisitions and task switches,
 /// whole-run, for the REPORT's before/after comparison.
-#[test]
-fn free53_parked_receive_cycles_count_roles_and_switches() {
-    if !isolated_counting(
-        "free53_parked_receive_cycles_count_roles_and_switches",
-        "HIRSEL_FREE53_CYCLES",
-    ) {
-        return;
-    }
-    runs(b"free53 receive cycles", |ctx, metrics| unsafe {
-        let [sender, receiver] = open(ctx);
-        let shared = PingPong {
-            sender,
-            receiver,
-            ready: AtomicBool::new(false),
-            received: Mutex::default(),
-        };
-        let mut scope = 0;
-        hirsel_rt_v2_task_scope_enter(ctx, std::ptr::null_mut(), &mut scope, &0);
-        let env = (&shared as *const PingPong).cast();
-        let run = &*(*ctx).run_ptr();
-        let (roles, switches) = (run.role.acquisitions(), metrics.unwrap().switches());
-        spawn(ctx, &scope, pong, env);
-        spawn(ctx, &scope, ping, env);
-        hirsel_rt_v2_task_scope_exit(ctx, 0, 0, &scope, 0);
-        let roles = run.role.acquisitions() - roles;
-        let switches = metrics.unwrap().switches() - switches;
-        assert_eq!(
-            *shared.received.lock().unwrap(),
-            (0..CYCLES).collect::<Vec<_>>()
-        );
-        eprintln!(
-            "free53 cycles: {CYCLES} parked receives, {roles} role acquisitions, {switches} switches"
-        );
-        close(ctx, sender);
-        close(ctx, receiver);
-    });
-}

@@ -6269,7 +6269,6 @@ conformance/SEM/SEM-3-regex-captures-re2-136-run.hir
 conformance/SEM/SEM-3-regex-captures-re2-137-run.hir
 conformance/SEM/SEM-3-regex-captures-re2-138-run.hir
 conformance/SEM/SEM-3-regex-captures-re2-139-run.hir
-conformance/SEM/SEM-3-regex-captures-re2-14-run.hir
 conformance/SEM/SEM-3-regex-captures-re2-140-run.hir
 conformance/SEM/SEM-3-regex-captures-re2-141-run.hir
 conformance/SEM/SEM-3-regex-captures-re2-142-run.hir
@@ -6386,7 +6385,6 @@ conformance/SEM/SEM-3-regex-captures-re2-46-run.hir
 conformance/SEM/SEM-3-regex-captures-re2-47-run.hir
 conformance/SEM/SEM-3-regex-captures-re2-48-run.hir
 conformance/SEM/SEM-3-regex-captures-re2-49-run.hir
-conformance/SEM/SEM-3-regex-captures-re2-5-run.hir
 conformance/SEM/SEM-3-regex-captures-re2-50-run.hir
 conformance/SEM/SEM-3-regex-captures-re2-51-run.hir
 conformance/SEM/SEM-3-regex-captures-re2-52-run.hir

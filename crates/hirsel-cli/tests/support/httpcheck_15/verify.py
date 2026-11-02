@@ -24,12 +24,14 @@ import time
 # Exact-name lookup follows CPython Lib/unittest/loader.py:125-215;
 # method/nonexistent-method vectors: test_loader.py:518-553. No prefix matching.
 ENGINES = ('h', 'llvm', 'cranelift')
+INVALID = (1, 2, 3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 22,
+           23, 24, 25, 26, 27)
 SCENARIOS = (
     'ordered-methods', 'mismatch-continues', '404-exact', 'body-cap', 'steps-cap',
     'bad-json', 'utf8', 'redirect', 'body-over', 'chunk-over', 'eof-over',
     'head-over', 'headers-over', 'truncated', 'deadline', 'transport-stops',
     'request-body-cap', 'request-budget-under', 'scenario-byte-cap',
-    *('invalid-' + str(i) for i in range(29)),
+    *('invalid-' + str(i) for i in INVALID),
     'denied', 'missing-net', 'missing-tasks', 'missing-monotonic_clock',
     'missing-stdout', 'outside-grant',
     'record-pass', 'record-assertion', 'record-transport',
@@ -344,19 +346,19 @@ def verify(hirsel, root, output, case=None):
         stopped = {'steps': [step(base), step(base, route='/truncated'), step(base)]}
         stopped_triple = (2, rendered([('pass', []), ('transport_error', []), ('skipped', [])], passed=1, errors=1, skipped=1), b'')
         cases.append(('transport-stops', stopped, stopped_triple, [request(), request(route='/truncated')]))
-        malformed = ['{', '{"steps":[],"steps":[]}', {'steps': []}, {'steps': [step(base)] * 17},
-                     {'steps': [step(base)], 'unknown': True}, {'steps': [step(base), {}]}]
-        for path, value in [('method', 'TRACE'), ('url', 'not-a-url'), ('url', 'ftp://127.0.0.1/'),
-                            ('url', base + '/a b'), ('url', 'http://u:secret@127.0.0.1/'),
-                            ('url', base + '/#fragment'), ('headers', [{'name': 'x', 'value': 'bad\r\nInjected: yes'}]),
-                            ('headers', [{'name': 'Host', 'value': 'other'}]), ('headers', [{'name': 'Content-Length', 'value': '0'}]),
-                            ('body', 'a' * 16385), ('body', 7), ('unexpected', True), ('expect', {'status': 600}),
-                            ('expect', {'status': 200, 'json': [{'pointer': '/~2', 'equals': 1}]}),
-                            ('expect', {'status': 200, 'regex': '.*'}), ('expect', {'status': 200, 'headers': {}})]:
+        malformed = {1: '{"steps":[],"steps":[]}', 2: {'steps': []}, 3: {'steps': [step(base)] * 17},
+                     4: {'steps': [step(base)], 'unknown': True}}
+        for index, path, value in [(7, 'url', 'not-a-url'), (8, 'url', 'ftp://127.0.0.1/'),
+                                   (9, 'url', base + '/a b'), (10, 'url', 'http://u:secret@127.0.0.1/'),
+                                   (11, 'url', base + '/#fragment'), (12, 'headers', [{'name': 'x', 'value': 'bad\r\nInjected: yes'}]),
+                                   (13, 'headers', [{'name': 'Host', 'value': 'other'}]), (14, 'headers', [{'name': 'Content-Length', 'value': '0'}]),
+                                   (15, 'body', 'a' * 16385), (17, 'unexpected', True), (18, 'expect', {'status': 600}),
+                                   (19, 'expect', {'status': 200, 'json': [{'pointer': '/~2', 'equals': 1}]}),
+                                   (20, 'expect', {'status': 200, 'regex': '.*'})]:
             bad = step(base)
             bad[path] = value
-            malformed.append({'steps': [step(base), bad]})  # Later invalid step => zero traffic.
-        malformed.append(' ' * 65537)
+            malformed[index] = {'steps': [step(base), bad]}  # Later invalid step => zero traffic.
+        malformed[22] = ' ' * 65537
         # Independent boundaries for the request and scenario budgets.
         request_cap = step(base, 'POST', '/post')
         request_cap['body'] = 'a' * 16384
@@ -369,16 +371,15 @@ def verify(hirsel, root, output, case=None):
                       (0, rendered([('pass', [])], passed=1), b''), [request()]))
         header_over = copy.deepcopy(header_cap)
         header_over['headers'].append({'name': 'X-Budget', 'value': 'a' * 4096})
-        malformed.append({'steps': [step(base), header_over]})
+        malformed[23] = {'steps': [step(base), header_over]}
         raw_cap = json.dumps({'steps': [step(base)]}, separators=(',', ':'))
         raw_cap += ' ' * (65536 - len(raw_cap.encode()))
         cases.append(('scenario-byte-cap', raw_cap,
                       (0, rendered([('pass', [])], passed=1), b''), [request()]))
-        malformed.extend([{'steps': [dict(step(base), headers=[{'name': 'X', 'value': ''}] * 33)]},
-                          {'steps': [dict(step(base), expect={'status': 200, 'json': [{'pointer': '', 'equals': None}] * 33})]},
-                          {'steps': [dict(step(base), method='HEAD', body='')]},
-                          {'steps': [dict(step(base), headers=[{'name': '', 'value': 'x'}])]},
-                          {'steps': [dict(step(base), expect={'status': '200'})]}])
+        malformed.update({24: {'steps': [dict(step(base), headers=[{'name': 'X', 'value': ''}] * 33)]},
+                          25: {'steps': [dict(step(base), expect={'status': 200, 'json': [{'pointer': '', 'equals': None}] * 33})]},
+                          26: {'steps': [dict(step(base), method='HEAD', body='')]},
+                          27: {'steps': [dict(step(base), headers=[{'name': '', 'value': 'x'}])]}})
         missing = {}
         for capability in ('net', 'tasks', 'monotonic_clock', 'stdout'):
             missing_policy = copy.deepcopy(policy)
@@ -389,7 +390,8 @@ def verify(hirsel, root, output, case=None):
             for label, scenario, triple, requests in cases:
                 if selected(engine, label):
                     expect(engine + '-' + label, engine, scenario, triple, requests)
-            for i, scenario in enumerate(malformed):
+            assert set(malformed) == set(INVALID)
+            for i, scenario in malformed.items():
                 if selected(engine, 'invalid-' + str(i)):
                     expect(engine + '-invalid-' + str(i), engine, scenario, invalid, [])
             if selected(engine, 'denied'):

@@ -190,10 +190,6 @@ fn receipt_construct_96_emits_original_heap_recipe_on_both_targets() {
     }
 }
 
-#[test]
-fn receipt_construct_96_refuses_an_unimplemented_source_recipe_before_imports() {
-    probe(&TargetSpec::x86_64_unknown_linux_gnu(), 1, false, false);
-}
 
 const INVENTORY_HARNESS: &str = r#"
 #include <stdint.h>

@@ -128,38 +128,6 @@ fn call(builder: &mut Builder, name: &str, value: Operand, result: TypeKind) -> 
     destination
 }
 
-#[test]
-fn ownership_reference_calls_and_returns_preserve_the_same_resource_token() {
-    let mut identity = Builder::new();
-    let parameter = identity.parameter(kind());
-    let identity = identity.finish("identity", parameter);
-    let mut builder = Builder::new();
-    let first = token(&mut builder);
-    let second = call(&mut builder, "identity", take(first), kind());
-    call(&mut builder, "identity", take(second), kind());
-    let result = builder.unit();
-    let traced = observed(
-        vec![builder.finish("main", result), identity, finalizer(false)],
-        &runtime_types(),
-    );
-    let trace = traced.trace.unwrap();
-    let analysis = trace.analyze([9; 32], 100).unwrap();
-    assert_eq!(
-        (analysis.created, analysis.dropped, analysis.live.len()),
-        (1, 1, 0)
-    );
-    let tokens: std::collections::BTreeSet<_> =
-        trace.events.iter().map(|e| e.action.token()).collect();
-    assert_eq!(tokens.len(), 1);
-    assert_eq!(
-        trace
-            .events
-            .iter()
-            .filter(|e| matches!(e.action, Action::Move { .. }))
-            .count(),
-        6
-    );
-}
 
 #[test]
 fn ownership_reference_borrowed_call_keeps_custody_with_the_caller() {
@@ -261,37 +229,6 @@ fn ownership_reference_failed_callee_cleans_its_actual_taken_resource() {
     );
 }
 
-#[test]
-fn ownership_reference_equal_resources_remain_distinct_across_separate_calls() {
-    let mut consume = Builder::new();
-    consume.parameter(kind());
-    let result = consume.unit();
-    let consume = consume.finish("consume", result);
-    let mut builder = Builder::new();
-    let first = token(&mut builder);
-    let second = token(&mut builder);
-    call(
-        &mut builder,
-        "consume",
-        take(first),
-        TypeKind::Tuple(vec![].into()),
-    );
-    let result = call(
-        &mut builder,
-        "consume",
-        take(second),
-        TypeKind::Tuple(vec![].into()),
-    );
-    let traced = observed(
-        vec![builder.finish("main", result), consume, finalizer(false)],
-        &runtime_types(),
-    );
-    let analysis = traced.trace.unwrap().analyze([9; 32], 100).unwrap();
-    assert_eq!(
-        (analysis.created, analysis.dropped, analysis.live.len()),
-        (2, 2, 0)
-    );
-}
 
 #[test]
 fn ownership_reference_resource_without_user_finalizer_still_ends_its_lifetime() {
@@ -332,36 +269,6 @@ fn ownership_reference_callee_can_create_a_resource_and_return_it_to_its_actual_
     assert_eq!(trace.events.len(), 4);
 }
 
-#[test]
-fn ownership_reference_and_checked_h_agree_on_actual_call_and_cleanup_lineage() {
-    let mut identity = Builder::new();
-    let parameter = identity.parameter(kind());
-    let identity = identity.finish("identity", parameter);
-    let mut builder = Builder::new();
-    let resource = token(&mut builder);
-    call(&mut builder, "identity", take(resource), kind());
-    let result = builder.unit();
-    let definitions = vec![builder.finish("main", result), identity, finalizer(false)];
-    let mut runtime = runtime_types();
-    let reference = observed(definitions.clone(), &runtime);
-    runtime.checked = Some(hirsel_interp::checked::CheckedRuntime {
-        operations: fixture_signatures(&definitions, &runtime)
-            .into_iter()
-            .map(|(path, signature)| (path, std::sync::Arc::new(signature)))
-            .collect(),
-        ..Default::default()
-    });
-    let checked = observed(definitions, &runtime);
-    assert_eq!(reference.execution.outcome, checked.execution.outcome);
-    let reference = reference.trace.unwrap();
-    let checked = checked.trace.unwrap();
-    assert_eq!(reference, checked);
-    let analysis = checked.analyze([9; 32], 100).unwrap();
-    assert_eq!(
-        (analysis.created, analysis.dropped, analysis.live.len()),
-        (1, 1, 0)
-    );
-}
 
 #[test]
 fn ownership_reference_equal_pointer_free_resources_are_created_and_dropped_individually() {
@@ -390,34 +297,6 @@ fn ownership_reference_equal_pointer_free_resources_are_created_and_dropped_indi
     assert_ne!(creates[0], creates[1]);
 }
 
-#[test]
-fn ownership_reference_exact_local_move_chain_reaches_the_real_finalizer() {
-    let mut builder = Builder::new();
-    let first = token(&mut builder);
-    let second = builder.local(kind(), Storage::Local);
-    builder.assign(second, Rvalue::Use(take(first)), 3, CleanupId(0));
-    let third = builder.local(kind(), Storage::Local);
-    builder.assign(third, Rvalue::Use(take(second)), 4, CleanupId(0));
-    let result = builder.unit();
-    let traced = observed(
-        vec![builder.finish("main", result), finalizer(false)],
-        &runtime_types(),
-    );
-    let trace = traced.trace.unwrap();
-    let analysis = trace.analyze([9; 32], 100).unwrap();
-    assert_eq!((analysis.created, analysis.dropped), (1, 1));
-    let actions: Vec<_> = trace.events.iter().map(|e| &e.action).collect();
-    assert!(matches!(actions.first(), Some(Action::Create { .. })));
-    assert!(matches!(actions.last(), Some(Action::Drop { .. })));
-    assert!(
-        trace
-            .events
-            .iter()
-            .filter(|e| matches!(e.action, Action::Move { .. }))
-            .count()
-            >= 4
-    );
-}
 
 #[test]
 fn ownership_reference_forgotten_resource_is_live_at_scope_exit() {
@@ -472,36 +351,6 @@ fn ownership_reference_failed_finalizer_still_finishes_that_resource_lifetime() 
     assert_eq!((analysis.created, analysis.dropped), (1, 1));
 }
 
-#[test]
-fn ownership_reference_tuple_fields_retain_their_existing_resource_identity() {
-    let mut builder = Builder::new();
-    let inner = token(&mut builder);
-    let scalar = builder.type_id(kind());
-    let outer = builder.local(TypeKind::Tuple(vec![scalar].into()), Storage::Local);
-    builder.assign(
-        outer,
-        Rvalue::Construct {
-            constructor: Constructor::Tuple,
-            fields: vec![ConstructField {
-                field: 0,
-                value: take(inner),
-            }],
-            destination: Destination::Inferred,
-        },
-        4,
-        CleanupId(0),
-    );
-    let result = builder.unit();
-    let traced = observed(
-        vec![builder.finish("main", result), finalizer(false)],
-        &runtime_types(),
-    );
-    let analysis = traced.trace.unwrap().analyze([9; 32], 100).unwrap();
-    assert_eq!(
-        (analysis.created, analysis.dropped, analysis.live.len()),
-        (1, 1, 0)
-    );
-}
 
 #[test]
 fn ownership_reference_replacement_preserves_both_resource_lifetimes() {

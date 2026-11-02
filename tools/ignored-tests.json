@@ -14,10 +14,6 @@
     "source": "crates/hirsel-cli/tests/cli/discrete_simulation_33.rs",
     "inputs": []
   },
-  "durable_queue_31::durable_queue_31_fixture_native_record_replay": {
-    "source": "crates/hirsel-cli/tests/cli/durable_queue_31.rs",
-    "inputs": []
-  },
   "durable_queue_31::durable_queue_31_existing_tapes_and_refusal_controls": {
     "source": "crates/hirsel-cli/tests/cli/durable_queue_31.rs",
     "inputs": [
@@ -86,12 +82,6 @@
     ]
   },
   "toy_analyzer_31::toy_analyzer_31_exact_refusal_controls": {
-    "source": "crates/hirsel-cli/tests/cli/toy_analyzer_31.rs",
-    "inputs": [
-      "TOY_ANALYZER_31_REFUSAL_ARCHIVE"
-    ]
-  },
-  "toy_analyzer_31::toy_analyzer_31_recording_difference": {
     "source": "crates/hirsel-cli/tests/cli/toy_analyzer_31.rs",
     "inputs": [
       "TOY_ANALYZER_31_REFUSAL_ARCHIVE"
@@ -229,16 +219,6 @@
     "source": "crates/hirsel-cli/tests/cli/merge_audit_37.rs",
     "inputs": []
   },
-  "index::microbench::measured": {
-    "source": "crates/hirsel-artifact-store/src/index/microbench.rs",
-    "module_registry": "crates/hirsel-artifact-store/src/index.rs",
-    "target": "//:hirsel-artifact-store-unittest",
-    "inputs": [
-      "INDEX36_OP",
-      "INDEX36_ROOT",
-      "INDEX36_FIXTURE"
-    ]
-  },
   "heap_file_faults_38::treelearn_original_commit_denied": {
     "source": "crates/hirsel-pipeline-tests/tests/front/heap_file_faults_38.rs",
     "target": "//:hirsel-pipeline-tests-test-front-shard-1",
@@ -284,10 +264,6 @@
     "target": "//:hirsel-driver-test-it-stdlib-shard-1",
     "inputs": []
   },
-  "pubsub_relay_30::pubsub_relay_30_native_and_real_unix": {
-    "source": "crates/hirsel-cli/tests/cli/pubsub_relay_30.rs",
-    "inputs": []
-  },
   "ownership_trace_49::ownership_trace_49_run_agrees_on_lifetimes_across_engines": {
     "source": "crates/hirsel-cli/tests/cli/ownership_trace_49.rs",
     "config": [
@@ -301,18 +277,6 @@
     "config": [
       "hirsel.ownership_trace=true"
     ]
-  },
-  "pubsub_relay_30::historical_native_prefix_complements": {
-    "source": "crates/hirsel-cli/tests/cli/pubsub_relay_30.rs",
-    "inputs": []
-  },
-  "ownership_execution_49::ownership_selected_source_objects_execute_original_lineage_on_both_backends": {
-    "source": "crates/hirsel-driver/tests/it/ownership_execution_49.rs",
-    "inputs": [],
-    "config": [
-      "hirsel.ownership_trace=true"
-    ],
-    "target": "//:hirsel-driver-test-it-shard-1"
   },
   "ownership_trace::ownership_native_owned_direct_calls_keep_arguments_results_and_equal_tokens_on_four_engines": {
     "source": "crates/hirsel-driver/tests/it/ownership_trace.rs",
@@ -394,23 +358,7 @@
     ],
     "target": "//:hirsel-driver-test-it-shard-1"
   },
-  "ownership_trace::ownership_native_uncalled_once_environment_drops_nested_original_children_on_four_engines": {
-    "source": "crates/hirsel-driver/tests/it/ownership_trace.rs",
-    "inputs": [],
-    "config": [
-      "hirsel.ownership_trace=true"
-    ],
-    "target": "//:hirsel-driver-test-it-shard-1"
-  },
   "ownership_trace::ownership_native_failed_nested_capture_cleanup_retires_actual_children_on_four_engines": {
-    "source": "crates/hirsel-driver/tests/it/ownership_trace.rs",
-    "inputs": [],
-    "config": [
-      "hirsel.ownership_trace=true"
-    ],
-    "target": "//:hirsel-driver-test-it-shard-1"
-  },
-  "ownership_trace::ownership_native_called_once_environment_drops_only_retained_nested_children_on_four_engines": {
     "source": "crates/hirsel-driver/tests/it/ownership_trace.rs",
     "inputs": [],
     "config": [

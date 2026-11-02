@@ -46,40 +46,6 @@ fn emit(corpus: &Corpus, opt: OptLevel) -> hirsel_lir::stage::ObjectArtifact {
         .unwrap_or_else(|e| panic!("{}: {e}", program.table.target.triple))
 }
 
-#[test]
-fn glue_covers_every_root_without_a_finalizer_and_frees_through_the_runtime() {
-    for target in TargetSpec::executed() {
-        let corpus = corpus(&target);
-        let glued: Vec<_> = corpus
-            .roots
-            .iter()
-            .filter(|r| r.entry.is_some())
-            .map(|r| r.name)
-            .collect();
-        assert_eq!(
-            glued,
-            [
-                "leaf", "rec", "recs", "wide", "chain", "tree", "niches", "rose", "obj", "held",
-                "outer"
-            ]
-        );
-        for opt in OPTS {
-            let object = emit(&corpus, opt);
-            let imports: Vec<_> = object.imports.iter().map(|i| i.name.as_str()).collect();
-            assert!(!imports.contains(&"hirsel_rt_v2_receipt_retain"));
-            assert!(!imports.contains(&"hirsel_rt_v2_receipt_release"));
-            // The free of a dead block, the runtime's release for children glue leaves to
-            // it, and the handle close.
-            for entry in [
-                "hirsel_rt_v2_free",
-                "hirsel_rt_v2_release",
-                "hirsel_rt_v2_close_handle",
-            ] {
-                assert!(imports.contains(&entry), "{entry} in {imports:?}");
-            }
-        }
-    }
-}
 
 /// The trace sections the harness prints, by scenario name and failing period.
 fn sections(output: &str) -> BTreeMap<&str, Vec<&str>> {

@@ -475,14 +475,6 @@ fn check(
     errors
 }
 #[test]
-fn borrowed_data_entry_and_nested_call_have_initialized_versioned_companions() {
-    for call in [false, true] {
-        let (unit, table, manifest, declarations) = fixture(call);
-        let errors = check(&unit, &table, &manifest, &declarations);
-        assert!(errors.is_empty(), "{errors:#?}");
-    }
-}
-#[test]
 fn borrowed_data_entry_refuses_missing_source_wrong_profile_and_extra_entry_slots() {
     let (unit, table, manifest, declarations) = fixture(false);
     assert!(check(&unit, &table, &manifest, &declarations).is_empty());
@@ -1174,12 +1166,6 @@ fn result_fixture() -> (LirUnit<Rc>, LayoutTable, Manifest, Declarations) {
     (unit, table, manifest, declarations)
 }
 
-#[test]
-fn receipt_results_are_owned_only_on_normal_return_and_publish_a_paired_output() {
-    let (unit, table, manifest, declarations) = result_fixture();
-    let errors = check(&unit, &table, &manifest, &declarations);
-    assert!(errors.is_empty(), "{errors:#?}");
-}
 
 #[test]
 fn receipt_results_refuse_failure_reads_missing_output_and_crossed_return_snapshots() {

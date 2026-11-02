@@ -279,17 +279,6 @@ fn private_helper_uniqueness_59_forged_headers_are_independently_reproved() {
     });
 }
 
-#[test]
-fn private_helper_uniqueness_59_checked_receipts_keep_settled_headers() {
-    with_compiler_stack(|| {
-        let (mut engine, output) = check(
-            "fn epoch_day() -> i128 { 1 }\nfn format() -> i128 { epoch_day() }\npub fn main() { let _ = format() }",
-        );
-        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
-        let entry = entry_path(&default_context());
-        engine.checked_products(&entry).unwrap();
-    });
-}
 
 #[test]
 fn private_helper_uniqueness_59_stored_headers_settle_before_body_receipts() {

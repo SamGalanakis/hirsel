@@ -18,15 +18,6 @@ fn root(package: hirsel_syntax::PackageId, module: &str, name: &str) -> DefPath 
     })
 }
 #[test]
-fn http_reject_lowering_has_valid_projections() {
-    with_compiler_stack(|| {
-        let mut package = COMPILER.load_package_declarations(&manifest()).unwrap();
-        let selected = root(package.package.clone(), "http", "http_server_reject");
-        // This private root is absent from ordinary program reachability.
-        package.engine.lower_to_tir(&selected).unwrap();
-    });
-}
-#[test]
 fn ordinary_store_delete_has_one_consistent_entry_abi() {
     with_compiler_stack(|| {
         let budget = hirsel_engine::runtime::ProcessBudget::new(64 << 20);

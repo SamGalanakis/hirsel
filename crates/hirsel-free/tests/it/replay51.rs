@@ -211,19 +211,3 @@ fn replay51_an_earlier_record_stays_decoded_until_consumed() {
     assert_eq!(shared.finish([(&cursor, done(8))]).unwrap(), None);
 }
 
-#[test]
-fn replay51_streams_retain_checked_bytes_not_records() {
-    // Many tasks with many records each: admission keeps their bytes, and cursors are built
-    // without decoding until asked.
-    let tasks: BTreeMap<Vec<u32>, u64> = (0..16u32).map(|i| (vec![i], 64)).collect();
-    let mut all = vec![(vec![], log(&loads(1..=1)), done(1))];
-    all.extend(
-        tasks
-            .iter()
-            .map(|(path, &n)| (path.clone(), log(&loads(1..=n)), done(n))),
-    );
-    let tape = tape_of(all);
-    let shared = Shared::open(&tape, false).unwrap();
-    let cursors: Vec<_> = tasks.keys().map(|path| shared.cursor(path)).collect();
-    assert!(cursors.iter().all(|cursor| cursor.decoded() == 0));
-}

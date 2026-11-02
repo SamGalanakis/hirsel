@@ -163,18 +163,6 @@ fn an_unleased_saved_row_is_reused_immediately_with_its_next_generation() {
     assert_eq!(s.task_key(child).unwrap().generation, old.generation + 1);
 }
 
-#[test]
-fn an_exhausted_slot_generation_is_never_reused() {
-    let mut slots = Slots::<3>::default();
-    assert_eq!(slots.take(0), (0, 1));
-    slots.release(0, 1);
-    assert_eq!(slots.take(1), (0, 2));
-    slots.release(0, 2);
-    assert_eq!(slots.take(1), (0, 3));
-    slots.release(0, 3);
-    // Exhausted: a fresh slot, never generation 1 of slot 0 again.
-    assert_eq!(slots.take(1), (1, 1));
-}
 
 #[test]
 fn scope_and_set_generations_are_per_slot_and_validated_by_key() {

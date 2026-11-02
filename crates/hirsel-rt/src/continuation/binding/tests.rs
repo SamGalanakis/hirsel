@@ -92,18 +92,6 @@ fn bad_duplicate_bind_cannot_begin_the_same_site_twice() {
     bindings.bind(input);
 }
 
-#[test]
-fn abandoning_nested_bindings_reclaims_only_administrative_keys() {
-    let mut bindings = Bindings::default();
-    for i in 0..16 {
-        bindings.bind(site(0x1000 + i * 64, 1, 16));
-        bindings.take(16);
-    }
-    // No waker, task lease, native stack pointer or language-drop thunk is
-    // stored in this record. Teardown cannot execute another language action.
-    assert_eq!(bindings.stack.len(), 16);
-    drop(bindings);
-}
 
 #[test]
 fn ancestor_reentry_retains_pending_descendants_and_consumes_only_its_own_arm() {

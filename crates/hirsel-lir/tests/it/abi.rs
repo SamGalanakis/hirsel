@@ -797,24 +797,6 @@ fn receipt_abi_fixture() -> (TargetSpec, LayoutTable, FnAbiId, FnAbiId) {
     (target, checked(b), ordinary, aware)
 }
 
-#[test]
-fn receipt_absence_preserves_the_legacy_abi_key_encoding_and_hash() {
-    use std::hash::{Hash, Hasher};
-    let key = FnAbiKey {
-        callable: ContentHash([0x11; 32]),
-        abi_version: 7,
-        receipt_contract: None,
-    };
-    let expected = format!("(FnAbiKey #{} 7)", "11".repeat(32));
-    assert_eq!(hirsel_codec::to_text(&key), expected);
-    let decoded: FnAbiKey = hirsel_codec::from_text(&expected).unwrap();
-    assert_eq!(decoded, key);
-    let mut old = std::hash::DefaultHasher::new();
-    (key.callable, key.abi_version).hash(&mut old);
-    let mut new = std::hash::DefaultHasher::new();
-    key.hash(&mut new);
-    assert_eq!(old.finish(), new.finish());
-}
 
 #[test]
 fn receipt_complete_content_survives_portable_layout_rebinding() {

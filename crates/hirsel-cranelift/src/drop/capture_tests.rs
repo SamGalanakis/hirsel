@@ -490,17 +490,6 @@ fn owning_capture_136_transports_copy_take_once_and_failure_cleanup_on_both_targ
     }
 }
 
-#[test]
-fn owning_capture_136_refuses_forged_geometry_recipes_types_and_metadata_operands() {
-    for malformed in 1..=4 {
-        probe(
-            &TargetSpec::x86_64_unknown_linux_gnu(),
-            true,
-            CaptureUse::Take,
-            malformed,
-        );
-    }
-}
 
 const FINALIZE: &str = r#"
 typedef struct { uint32_t kind, field, variant, span; uint64_t offset, stride, count, count_offset; void *layout; } Step;

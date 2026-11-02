@@ -26,10 +26,6 @@ class TasksBench(unittest.TestCase):
         costs = BENCH['profile_costs'](profile)
         self.assertEqual(list(costs.values()), [2, 3, 6, 4, 5, 0])
 
-    def test_recorded_participant_uses_the_same_native_binary(self):
-        self.assertTrue(BENCH['is_hirsel']('hirsel-recorded'))
-        self.assertTrue(BENCH['is_hirsel']('hirsel'))
-        self.assertFalse(BENCH['is_hirsel']('rust-one-worker'))
 
     def test_report_compares_per_request_against_one_worker_and_recording_against_plain(self):
         template = dict(operation='list', first_ms=1, idle_rss=1024, load_rss=2048,

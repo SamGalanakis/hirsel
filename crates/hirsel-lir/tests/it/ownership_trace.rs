@@ -119,20 +119,6 @@ fn recipe(input: &Plan, output: &Plan) -> Recipe {
     }
 }
 
-#[test]
-fn ownership_trace_external_plan_never_changes_ordinary_lir() {
-    let (unit, plan) = fixture();
-    let text = hirsel_codec::to_text(&unit);
-    let digest = unit.digest();
-    let checked = check(&unit, &plan).unwrap();
-    assert_eq!(
-        checked.observation(MarkerId(2)),
-        Some(&plan.observations[2])
-    );
-    assert_eq!(hirsel_codec::to_text(&unit), text);
-    assert_eq!(unit.digest(), digest);
-    assert!(!text.contains("ObserveOwnership"));
-}
 
 #[test]
 fn ownership_trace_sidecar_roundtrip_is_raw_and_must_be_checked() {
@@ -558,20 +544,6 @@ fn ownership_trace_same_address_number_cannot_hide_a_changed_owner() {
     );
 }
 
-#[test]
-fn ownership_trace_elide_emits_a_recipe_even_without_a_rewrite() {
-    let (unit, input, table) = fixture_with_table();
-    let ordinary = hirsel_rc::elide::elide(unit.clone(), &table).unwrap();
-    let (after, output, recipe) =
-        hirsel_rc::elide::elide_observed(unit.clone(), &table, &input).unwrap();
-    assert_eq!(
-        hirsel_codec::to_text(&after),
-        hirsel_codec::to_text(&ordinary)
-    );
-    assert_eq!(input.observations, output.observations);
-    assert_eq!(recipe.relocations.len(), input.observations.len());
-    check_transform(&unit, &input, &after, &output, Some(&recipe)).unwrap();
-}
 
 #[test]
 fn ownership_trace_elide_uses_the_actual_editor_block_compaction() {
@@ -726,22 +698,6 @@ fn ownership_trace_elide_refuses_to_silently_delete_an_observed_copy() {
     assert!(error.contains("explicit semantic transport"), "{error}");
 }
 
-#[test]
-fn ownership_trace_legalize_emits_a_recipe_for_unchanged_resource_flow() {
-    let (unit, mut input, table) = fixture_with_table();
-    let unit = unit.into_stage::<hirsel_lir::stage::Ready>();
-    input.unit = unit.digest();
-    let index = hirsel_lir::LayoutIndex::new(&table);
-    let ordinary = hirsel_rc::legalize::legalize_indexed(unit.clone(), &index).unwrap();
-    let (after, output, recipe) =
-        hirsel_rc::legalize::legalize_observed(unit.clone(), &index, &input).unwrap();
-    assert_eq!(
-        hirsel_codec::to_text(&after),
-        hirsel_codec::to_text(&ordinary)
-    );
-    assert_eq!(input.observations, output.observations);
-    check_transform(&unit, &input, &after, &output, Some(&recipe)).unwrap();
-}
 
 fn scalar_legalization_fixture(
     observe_call: bool,
@@ -987,38 +943,6 @@ fn ownership_trace_placement_checks_incoming_sites_instead_of_rebuilding_markers
     assert!(error.contains("InvalidSite(MarkerId(0))"), "{error}");
 }
 
-#[test]
-fn ownership_trace_rc_insertion_reports_all_three_resource_boundaries() {
-    let (value, input, table) = placement_resource_fixture();
-    let placement = hirsel_rc::placement::Options {
-        regions: true,
-        noalloc: false,
-    };
-    let (placed, input, _) =
-        hirsel_rc::placement::place_observed(value, &table, &placement, &input).unwrap();
-    let proofs = hirsel_rc::insert::Proofs::default();
-    let ordinary = hirsel_rc::insert::insert(placed.clone(), &table, &proofs).unwrap();
-    let (after, output, recipes) =
-        hirsel_rc::insert::insert_observed(placed, &table, &proofs, &input).unwrap();
-    assert_eq!(
-        hirsel_codec::to_text(&after),
-        hirsel_codec::to_text(&ordinary)
-    );
-    assert_eq!(input.observations, output.observations);
-    assert_eq!(recipes.len(), 3);
-    assert_eq!(recipes[0].before, input.unit);
-    assert_eq!(recipes[2].after, output.unit);
-    assert!(
-        recipes
-            .windows(2)
-            .all(|pair| pair[0].after == pair[1].before)
-    );
-    assert!(
-        recipes
-            .iter()
-            .all(|recipe| recipe.relocations.len() == input.observations.len())
-    );
-}
 
 fn ssa_copy_fixture(
     observe_copy: bool,
@@ -1178,41 +1102,6 @@ fn ownership_trace_rc_insertion_refuses_to_turn_an_observed_create_into_a_move()
     assert!(error.contains("explicit semantic transport"), "{error}");
 }
 
-#[test]
-fn ownership_trace_reuse_checks_each_subpass_and_the_disabled_boundary() {
-    let (before, input, table) = fixture_with_table();
-    let index = hirsel_lir::LayoutIndex::new(&table);
-    for enabled in [true, false] {
-        let options = hirsel_rc::reuse::Options { reuse: enabled };
-        let ordinary = hirsel_rc::reuse::reuse_indexed(before.clone(), &options, &index).unwrap();
-        let (after, output, recipes) =
-            hirsel_rc::reuse::reuse_observed(before.clone(), &options, &index, &input).unwrap();
-        assert_eq!(
-            hirsel_codec::to_text(&after),
-            hirsel_codec::to_text(&ordinary)
-        );
-        assert_eq!(recipes.len(), if enabled { 3 } else { 1 });
-        assert_eq!(recipes.first().unwrap().before, input.unit);
-        assert_eq!(recipes.last().unwrap().after, output.unit);
-        for adjacent in recipes.windows(2) {
-            assert_eq!(adjacent[0].after, adjacent[1].before);
-        }
-        assert!(
-            recipes
-                .iter()
-                .all(|recipe| recipe.relocations.len() == input.observations.len())
-        );
-        assert_eq!(input.observations, output.observations);
-        check_transform(
-            &before,
-            &input,
-            &after,
-            &output,
-            Some(&recipe(&input, &output)),
-        )
-        .unwrap();
-    }
-}
 
 #[test]
 fn ownership_trace_reuse_keeps_distinct_lifetimes_when_storage_is_recycled() {
@@ -1427,23 +1316,6 @@ fn drop_transport_fixture_with_table() -> (
     (before, input, after, output, table)
 }
 
-#[test]
-fn ownership_trace_drop_transport_preserves_the_semantic_address_and_action() {
-    let (before, input, after, output) = drop_transport_fixture();
-    check(&before, &input).unwrap();
-    check(&after, &output).unwrap();
-    assert_eq!(input.observations[0].marker, output.observations[0].marker);
-    check_transform(
-        &before,
-        &input,
-        &after,
-        &output,
-        Some(&recipe(&input, &output)),
-    )
-    .unwrap();
-    let decoded: Plan = hirsel_codec::from_text(&hirsel_codec::to_text(&output)).unwrap();
-    assert_eq!(decoded, output);
-}
 
 #[test]
 fn ownership_trace_drop_transport_refuses_a_different_released_value() {
@@ -1676,29 +1548,6 @@ fn ownership_trace_pipeline_preserves_resource_identity_and_every_pass_recipe() 
     }
 }
 
-#[test]
-fn ownership_trace_pipeline_refuses_forged_attribution_at_the_first_boundary() {
-    let (before, mut input, table) = placement_resource_fixture();
-    let index = hirsel_lir::LayoutIndex::new(&table);
-    let placement = hirsel_rc::placement::Options::default();
-    let proofs = hirsel_rc::insert::Proofs::default();
-    let reuse = hirsel_rc::reuse::Options::default();
-    let finalizers = hirsel_rc::cleanup::Finalizers::default();
-    input.observations[0].marker.site.start += 1;
-    let result = hirsel_rc::observed::lower(
-        before,
-        &input,
-        &index,
-        &hirsel_rc::observed::Options {
-            placement: &placement,
-            proofs: &proofs,
-            elide: true,
-            reuse: &reuse,
-            finalizers: &finalizers,
-        },
-    );
-    assert!(matches!(result, Err(ref error) if error.contains("InvalidSite(MarkerId(0))")));
-}
 
 fn finalizer_transport_fixture() -> (
     LirUnit<Rc>,

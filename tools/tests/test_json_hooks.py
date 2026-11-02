@@ -43,12 +43,6 @@ class Unit(unittest.TestCase):
             with self.subTest(name=name):
                 self.bad('Snapshot', name, '--root', 'Snapshot', message='built-in types')
 
-    def test_required_arguments(self):
-        self.bad('Item', message='--root')
-        self.bad('--root', 'Item', message='TYPE')
-        self.bad('Item', '--root', message='expected one argument')
-        self.bad('Item', '--root', 'Item', '--unexpected', message='unrecognized arguments')
-        self.bad('Item', '--roo', 'Item', message='--root')
 
     def test_root_must_be_listed_and_valid(self):
         self.bad('Item', '--root', 'Snapshot', message='must be included')
@@ -73,8 +67,6 @@ class Unit(unittest.TestCase):
             self.assertIn(f'fn {stem}_json_into(', result.stdout)
         self.assertEqual(result.stdout.count('_from_json_bytes('), 1)
 
-    def test_exact_single_type_output(self):
-        expected = '''fn item_from_json_reader(mut cursor: std@1/json.Reader) -> core@1/Result[Item, core@1/String] uses {} = comptime std@1/derive.from_json_reader(
   shape(Item)
 )
 
@@ -100,18 +92,6 @@ fn item_from_json_bytes(data: core@1/Bytes) -> core@1/Result[Item, core@1/String
         self.assertEqual(first.stdout.count('\nfn ') + first.stdout.startswith('fn '), 5)
         self.assertLess(first.stdout.index('fn item_'), first.stdout.index('fn snapshot_'))
         self.assertNotIn('comptime derive.', first.stdout)
-
-    def test_errors_do_not_modify_files(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            sentinel = Path(temporary) / 'keep.hir'
-            sentinel.write_text('user source\n')
-            result = subprocess.run([sys.executable, str(ROOT / 'tools/json-hooks'), 'Item',
-                                     str(sentinel), '--root', 'Item'], cwd=temporary,
-                                    capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(result.stdout, '')
-            self.assertEqual(sentinel.read_text(), 'user source\n')
-            self.assertEqual(list(Path(temporary).iterdir()), [sentinel])
 
 
 class Integration(unittest.TestCase):

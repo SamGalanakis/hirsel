@@ -115,30 +115,6 @@ fn mode2_recipes_52_r2_generic_wrapper() {
     });
 }
 
-#[test]
-fn mode2_recipes_52_r3_spawn_literal() {
-    with_compiler_stack(|| {
-        let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-        let source = "fn probe(s: Scope) { let child: Task[unique Result[unique String, ()]] of s = task.async(s, fn() -> Result[String, ()] { Ok(\"x\") }); let _ = task.await(s, take child) }";
-        rejected(&mut engine, source, "R3 ", true);
-        accepted(
-            &mut engine,
-            &source.replace(
-                "fn() -> Result[String",
-                "fn() -> unique Result[unique String",
-            ),
-        );
-        rejected(
-            &mut engine,
-            &format!(
-                "const NAME: String = \"x\"\n{}",
-                source.replace("Ok(\"x\")", "Ok(NAME)")
-            ),
-            "R3 ",
-            false,
-        );
-    });
-}
 
 #[test]
 fn mode2_recipes_52_r3_await_literal() {

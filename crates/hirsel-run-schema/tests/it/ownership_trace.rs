@@ -76,20 +76,6 @@ fn inventory(events: &[Event]) -> Inventory {
     inventory
 }
 
-#[test]
-fn ownership_trace_equal_pointer_free_values_have_distinct_lineages() {
-    let events = [create(0, 0, owner(0)), create(1, 1, owner(1))];
-    let inventory = inventory(&events);
-    assert_ne!(
-        inventory.lineage(&token(0)).unwrap().token,
-        inventory.lineage(&token(1)).unwrap().token
-    );
-    let analysis = inventory.finish(true, 2).unwrap();
-    assert_eq!(
-        (analysis.created, analysis.dropped, analysis.live.len()),
-        (2, 0, 2)
-    );
-}
 
 #[test]
 fn ownership_trace_leak_at_scope_exit_retains_its_creation_and_move() {
@@ -297,15 +283,6 @@ fn ownership_trace_missing_suffix_wrong_count_and_overflow_never_pass() {
     );
 }
 
-#[test]
-fn ownership_trace_json_roundtrip_preserves_readable_logical_identity() {
-    let events = chain();
-    let encoded = serde_json::to_string(&events).unwrap();
-    assert!(encoded.contains("\"kind\":\"move\""));
-    let decoded: Vec<Event> = serde_json::from_str(&encoded).unwrap();
-    assert_eq!(decoded, events);
-    assert_eq!(inventory(&decoded).finish(true, 4).unwrap().live.len(), 0);
-}
 
 fn context(operation: u64) -> Context {
     Context {

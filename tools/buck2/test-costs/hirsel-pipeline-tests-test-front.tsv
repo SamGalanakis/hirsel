@@ -109,13 +109,11 @@ process_timed_41::timed_b01_terminal_status_complement	73.712
 process_timed_41::timed_b02_kill_write_and_closed_input_checks	79.525
 process_timed_41::timed_b03_drop_before_gate_removes_future_events	13.109
 process_timed_41::timed_c01_borrowing_cancel_keeps_buffer	14.335
-process_timed_41::timed_c02_native_complement	6.151
 process_timed_41::timed_c02_scope_cancellation_wins_deadline_equality	11.518
 process_timed_41::timed_c03_explicit_cancel_before_read_and_after_commit	137.797
 process_timed_41::timed_c03_kill_before_gate_and_after_due_batch	163.490
 process_timed_41::timed_d01_before_deadline	2.428
 process_timed_41::timed_d02_deadline_equality	1.856
-process_timed_41::timed_d02_native_complement	5.987
 process_timed_41::timed_d03_after_deadline	2.569
 process_timed_41::timed_d04_already_reached_deadline	2.710
 process_timed_41::timed_e01_expect_hides_gate_until_late_write	14.741
@@ -137,10 +135,7 @@ process_timed_41::timed_p02_gate_boundary	13.980
 process_timed_41::timed_r01_r02_r03_four_consumer_refusals	156.789
 process_timed_41::timed_r02_forged_at_behind_unmet_expect_four_consumers	72.852
 process_timed_41::timed_r04_delayed_read_and_exact_replay	2.141
-process_timed_41::timed_r04_four_producer_complement	13.203
 process_timed_41::timed_refusal_controls	120.000
-process_timed_41::timed_s01_checked_outcome_diagnostic	68.966
-process_timed_41::timed_s01_missing_native_complements	97.870
 process_timed_41::timed_s01_suite_runner_timeout_oracle	120.000
 process_timed_41::timed_u01_unchanged_provider_native_and_replay_companion	80.886
 process_timed_41::timed_u02_kill_preserves_terminal_status_companions	59.823

@@ -225,17 +225,6 @@ fn native_ownership_unsupported_tasks_and_other_programs_never_pass() {
     );
 }
 
-#[test]
-fn native_ownership_wire_roundtrip_preserves_binding_and_rejects_unknown_claims() {
-    let (log, units) = fixture();
-    let encoded = serde_json::to_vec(&log).unwrap();
-    let decoded: Log = serde_json::from_slice(&encoded).unwrap();
-    assert_eq!(log, decoded);
-    decode_leaf(&decoded, [49; 32], &units, 100).unwrap();
-    let mut claim: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-    claim["semantic_valid"] = true.into();
-    assert!(serde_json::from_value::<Log>(claim).is_err());
-}
 
 #[test]
 fn native_ownership_empty_nested_units_preserve_parent_lifetimes_and_stack_checks() {

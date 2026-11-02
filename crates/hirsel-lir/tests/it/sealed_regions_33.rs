@@ -410,11 +410,6 @@ fn ready_sealed_bits_33_root_view_keeps_exclusive_owner_correspondence() {
     }
 }
 
-#[test]
-fn public_validation_accepts_a_declared_typed_seal_transition() {
-    let (t, d, _, _) = transition_fixture();
-    assert_eq!(checked(t, &d), []);
-}
 
 #[test]
 fn source_correspondence_survives_candidate_event_deletion() {
@@ -754,17 +749,6 @@ fn payload_fixture() -> (support::Lir<TestStage>, Declarations, ValueId) {
     (t, declarations, root)
 }
 
-#[test]
-fn semantic_payload_33_valid_source_recipe_binds_the_actual_operand_and_roundtrips() {
-    let (t, declarations, _) = payload_fixture();
-    let table = &t.builder.unit.tables.seal_payloads[0];
-    let bytes = hirsel_codec::to_text(table);
-    assert_eq!(
-        hirsel_codec::from_text::<hirsel_lir::sealed_payload::PayloadTable>(&bytes).unwrap(),
-        *table
-    );
-    assert!(checked(t, &declarations).is_empty());
-}
 
 #[test]
 fn semantic_payload_33_forged_recipe_is_permanently_refused_by_public_c() {

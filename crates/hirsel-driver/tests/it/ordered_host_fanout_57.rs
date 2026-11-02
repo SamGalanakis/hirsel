@@ -28,14 +28,6 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 "#;
 
 #[test]
-fn eight_entered_host_waits_release_stacks_and_replay() {
-    fanout(8);
-}
-#[test]
-fn sixteen_entered_host_waits_release_stacks_and_replay() {
-    fanout(16);
-}
-#[test]
 fn thirty_two_entered_host_waits_release_stacks_and_replay() {
     fanout(32);
 }

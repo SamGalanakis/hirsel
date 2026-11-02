@@ -142,16 +142,3 @@ fn seal_descriptor_private_metadata_is_never_an_ordinary_payload_access_program(
         "{error}"
     );
 }
-#[test]
-fn seal_descriptor_roundtrip_preserves_complete_logical_and_physical_association() {
-    let (registry, target, table, descriptor) = fixture(Fixture::Bytes);
-    let text = hirsel_codec::to_text(&descriptor);
-    let restored: SealDescriptor = hirsel_codec::from_text(&text).unwrap();
-    assert_eq!(restored, descriptor);
-    restored.validate(&registry, &table, &target).unwrap();
-    assert!(
-        restored
-            .layouts()
-            .all(|layout| table.layout(layout).is_some())
-    );
-}

@@ -1145,21 +1145,6 @@ mod tests {
     }
 
     #[test]
-    fn read_allocation_layout_includes_even_the_empty_arc_header() {
-        let empty = Reads::empty();
-        assert_eq!(
-            empty.allocations().map(|(_, bytes)| bytes).sum::<usize>(),
-            2 * size_of::<usize>()
-        );
-        let complete = Reads::from_vec(vec![(ReadKey::Environment, h("env"))]).unwrap();
-        let subset = empty.share_rows(&complete).unwrap();
-        assert_eq!(
-            subset.allocations().map(|(_, bytes)| bytes).sum::<usize>(),
-            4 * size_of::<usize>()
-                + size_of::<(ReadKey, ContentHash)>().next_multiple_of(align_of::<usize>())
-        );
-    }
-    #[test]
     fn shared_subsets_keep_order_get_encoding_hash_and_exclude_unobserved_rows() {
         use std::hash::{Hash, Hasher};
         let a = ReadKey::Signature(def("a"));

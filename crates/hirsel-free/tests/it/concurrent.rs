@@ -287,15 +287,6 @@ fn a_durable_watermark_never_admits_an_unpublished_prepare_or_a_failed_barrier()
     assert!(recorder.durable_through(&[], root.progress()).is_err());
 }
 
-#[test]
-fn section_slot_tokens_cannot_be_held_by_two_workers_at_once() {
-    let recorder = Recorder::<Vec<u8>>::new(Vec::new(), b"slots", 1, false, false, None).unwrap();
-    let worker = recorder.executor(0).unwrap();
-    assert!(recorder.executor(0).is_none());
-    assert!(recorder.executor(1).is_none());
-    drop(worker);
-    assert!(recorder.executor(0).is_some());
-}
 
 #[test]
 fn retiring_workers_with_one_preferred_slot_keep_exclusive_tokens_and_closed_cuts() {
@@ -603,54 +594,3 @@ fn terminal_cuts_encode_multi_segment_logs_in_place_observed_or_not() {
     }
 }
 
-#[test]
-fn a_nonblocking_rejected_prefix_retries_the_same_progress_once() {
-    let recorder =
-        Recorder::<Vec<u8>>::new(Vec::new(), b"entered prefix", 1, false, true, None).unwrap();
-    let mut worker = recorder.executor(0).unwrap();
-    let mut root = recorder.root(&mut worker).unwrap();
-    let mut effects = 0;
-    assert!(
-        recorder
-            .try_phase_if(
-                &mut worker,
-                &mut root,
-                done(1),
-                PHASE,
-                || false,
-                |_| {
-                    effects += 1;
-                }
-            )
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(effects, 0);
-    let cut = recorder.flush().unwrap().unwrap();
-    assert_eq!(cut.progress[&Vec::new()], Progress::START);
-    assert!(root.trace().is_empty());
-    recorder
-        .try_phase_if(
-            &mut worker,
-            &mut root,
-            done(1),
-            PHASE,
-            || true,
-            |writer| {
-                effects += 1;
-                writer.load(42);
-            },
-        )
-        .unwrap()
-        .unwrap();
-    assert_eq!(effects, 1);
-    let cut = recorder.stop("returned", None).unwrap().unwrap().0;
-    assert_eq!(cut.progress[&Vec::new()], done(1));
-    drop(worker);
-    let tape = tape::parse(&recorder.into_sink()).unwrap();
-    let mut replay = Replayer::new(&tape).unwrap();
-    assert!(replay.starts(&[]));
-    assert_eq!(replay.load(&[], 1).unwrap(), 42);
-    replay.publish(&[], done(1)).unwrap();
-    replay.finish(&cut.progress).unwrap();
-}

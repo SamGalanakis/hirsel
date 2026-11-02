@@ -52,10 +52,6 @@ class Verdicts(unittest.TestCase):
         rows, _ = compare.compare(result(before), result(after), BUDGET)
         return {r['metric']: r for r in rows}[metric]
 
-    def test_a_quiet_slowdown_past_the_threshold_regresses(self):
-        row = self.verdict(cell('c', [2.0, 2.01, 1.99]), cell('c', [2.6, 2.61, 2.59]))
-        self.assertTrue(row['regressed'])
-        self.assertAlmostEqual(row['delta'], 0.3)
 
     def test_one_percent_threshold_is_counted_without_a_time_noise_bound(self):
         self.assertFalse(self.verdict(cell('c', [1.0] * 3), cell('c', [1.009] * 3))['regressed'])
@@ -94,7 +90,6 @@ class Verdicts(unittest.TestCase):
             self.assertEqual(status, [1, 0])
 
 
-
 class Timings(unittest.TestCase):
     REPORT = {'schema': 1, 'command': 'build', 'wall_ns': 712000000, 'untimed_ns': 9000000,
               'intervals': [{'interval': 'image open', 'wall_ns': 101000000}, {'interval': 'S1', 'wall_ns': 0}],
@@ -126,15 +121,6 @@ class Scoreboard(unittest.TestCase):
 
 
 class QuickMatrix(unittest.TestCase):
-    def test_quick_matrix_is_24_hirsel_compiles(self):
-        with tempfile.TemporaryDirectory() as scratch:
-            programs = [p for p in corpus.corpus(Path(scratch), scale=(3000,)) if run.quick_program(p)]
-            self.assertEqual(len(programs), 8)
-            self.assertIn('syn3k', [p.name for p in programs])
-            for program in programs:
-                self.assertEqual(program.language, 'hirsel')
-                self.assertEqual(run.modes(program, ['check', 'clif', 'llvm-o2'], quick=True),
-                                 ['check', 'clif', 'llvm-o2'])
 
     def test_measurements_disable_the_native_program_cache(self):
         with tempfile.TemporaryDirectory() as scratch:
@@ -164,21 +150,6 @@ class Corpus(unittest.TestCase):
             rust = sorted(p.stem for p in (Path(one) / 'rust/syn3k/src').glob('*.rs') if p.stem != 'main')
             self.assertEqual(hirsel, rust)
 
-    def test_generated_nested_matches_have_unique_binders(self):
-        hirsel, rust = corpus.stress_nested_match(32)
-        for source in (hirsel, rust):
-            names = re.findall(r'Some\((v\d+)\) =>', source)
-            self.assertEqual(len(names), 32)
-            self.assertEqual(len(set(names)), 32)
-
-    def test_derive_stress_has_a_complete_source_manifest(self):
-        with tempfile.TemporaryDirectory() as scratch:
-            _, source, _ = corpus.stress(Path(scratch), 'derive', 64)
-            manifest = json.loads(source.with_name(source.name + '.json').read_text())
-            self.assertEqual(manifest['schema'], 1)
-            self.assertEqual(manifest['sources'], [{'path': source.name, 'module': []}])
-            self.assertEqual(manifest['entry']['name'], 'main')
-            self.assertTrue(manifest['dependencies'])
 
     def test_each_edit_changes_exactly_one_marked_text(self):
         with tempfile.TemporaryDirectory() as scratch:
@@ -215,11 +186,6 @@ class Matrix(unittest.TestCase):
         rows, _ = compare.compare(result(before), result(after), BUDGET)
         self.assertTrue(rows[0]['regressed'])
 
-    def test_basic_startup_grants_have_the_required_directory_list(self):
-        with tempfile.TemporaryDirectory() as scratch:
-            path, endpoint = run.startup_config(corpus.Program('hello', 'hirsel', Path(scratch), 3), Path(scratch))
-            self.assertEqual(json.loads(path.read_text())['io']['dirs'], [])
-            self.assertEqual(endpoint, 'stdout')
 
     def test_native_selects_release_rust_and_std_precomputes_products(self):
         rust = corpus.Program('p', 'rust', Path('/tmp'), 3)

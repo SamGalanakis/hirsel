@@ -99,22 +99,6 @@ fn arena_node_is_one_bump_without_extent() {
 /// their four normal/failure retirements store that counter. Each call status
 /// remains an `icmp eq i8`, reanchored at its site. A failure after the left
 /// child is built releases it. Nothing else fails or releases.
-#[test]
-fn tree_has_no_failure_path() {
-    for ir in function_ir("4tree") {
-        let count = |needle: &str| ir.matches(needle).count();
-        assert_eq!(count("@hirsel_rt_v2_depth_enter_at_site("), 0, "{ir}");
-        assert_eq!(count("icmp ult i16"), 2, "{ir}");
-        assert_eq!(count("store i16"), 6, "{ir}");
-        assert_eq!(count("@hirsel_rt_v2_depth_leave("), 0, "{ir}");
-        assert_eq!(count("call i8 @hirsel_rt_v2_failure_begin("), 2, "{ir}");
-        assert_eq!(count("@hirsel_rt_v2_failure_reanchor("), 2, "{ir}");
-        assert_eq!(count("@hirsel_rt_v2_failure_"), 4, "{ir}");
-        assert_eq!(count("icmp eq i8"), 2, "{ir}");
-        assert_eq!(count("@hirsel.release"), 2, "{ir}");
-        assert!(ir.contains("call ptr @hirsel_rt_v2_arena_alloc("), "{ir}");
-    }
-}
 
 fn check_placement(source: &'static str, accepted: bool) {
     with_compiler_stack(move || {

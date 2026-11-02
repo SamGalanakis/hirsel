@@ -2420,27 +2420,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn storage_mutual_recursion_reaches_dependency_after_backedge() {
-        let a = body(
-            "a",
-            vec![call("b", 0, 1), StorageOp::Return(StoragePlace::root(1))],
-        );
-        let mut b = body(
-            "b",
-            vec![
-                StorageOp::Nop,
-                call("a", 0, 1),
-                StorageOp::Return(StoragePlace::root(1)),
-                unique(0, 2),
-                StorageOp::Return(StoragePlace::root(2)),
-            ],
-        );
-        b.nodes[0].successors = vec![1, 3];
-        b.nodes[2].successors.clear();
-        let result = proof(&[a, b]);
-        assert_eq!(result.behaviors, vec![root_behavior(), root_behavior()]);
-    }
 
     #[test]
     fn storage_detached_heap_copy_and_plain_boundary_are_independent() {

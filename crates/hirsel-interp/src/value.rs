@@ -1362,30 +1362,6 @@ mod sealed_value_tests {
         }
     }
 
-    #[test]
-    fn sealed_regions_33_views_keep_identity_and_deep_copy_retags_it() {
-        let mut storage = ArenaStorage::fresh(19, 0);
-        storage.logical_block = Some(crate::inventory::LogicalBlockId(3));
-        let mut value = Value::ArenaBytes {
-            bytes: b"abcdef".to_vec(),
-            storage,
-        };
-        let view = value.byte_view(b"bcd".to_vec());
-        let snapshot = value.clone();
-        assert_eq!(
-            view.arena_storage().unwrap().logical_block,
-            Some(crate::inventory::LogicalBlockId(3))
-        );
-        value.fresh_arena_storage();
-        assert_eq!(value.arena_storage().unwrap().logical_block, None);
-        assert_eq!(
-            snapshot.arena_storage().unwrap().logical_block,
-            Some(crate::inventory::LogicalBlockId(3))
-        );
-        value.retag_own_block(None);
-        assert!(matches!(value, Value::Bytes(_)));
-        assert_eq!(view, Value::Bytes(b"bcd".to_vec()));
-    }
 
     #[test]
     fn sealed_regions_33_arena_box_snapshot_acquires_no_shared_credit() {

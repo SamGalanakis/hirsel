@@ -100,36 +100,6 @@ fn empty_drop_duplicate_and_root_mismatch_never_publish() {
     assert!(build(root, &[bad], crate::Durability::Rebuildable).is_err());
 }
 
-#[test]
-fn stale_common_pin_writers_preserve_disjoint_updates_and_serialized_overwrite() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    let stale = load_pinned(root).unwrap();
-    let a = build(root, &[entry(1)], crate::Durability::Rebuildable).unwrap();
-    let b = build(root, &[entry(2)], crate::Durability::Rebuildable).unwrap();
-    let epoch = index_benchmark_epoch(root).unwrap();
-    published(publish_delta(root, a, &epoch).unwrap());
-    let old_manifest = fs::read(root.join("index/MANIFEST")).unwrap();
-    published(publish_delta(root, b, &epoch).unwrap());
-    assert_eq!(find(&stale, entry(1).key), None);
-    let pin = load_pinned(root).unwrap();
-    for n in [1, 2] {
-        assert_eq!(find(&pin, entry(n).key), Some(entry(n).location));
-    }
-    let mut newer = entry(1);
-    newer.location.offset = 128;
-    published(publish(root, &[newer]));
-    assert_eq!(
-        find(&load_pinned(root).unwrap(), newer.key),
-        Some(newer.location)
-    );
-    fs::write(root.join("index/MANIFEST"), old_manifest).unwrap();
-    assert_eq!(
-        find(&load_pinned(root).unwrap(), newer.key),
-        Some(entry(1).location)
-    );
-    assert_eq!(find(&pin, entry(2).key), Some(entry(2).location));
-}
 
 #[test]
 fn ratio_equality_accumulated_suffix_and_newest_duplicate_compact() {

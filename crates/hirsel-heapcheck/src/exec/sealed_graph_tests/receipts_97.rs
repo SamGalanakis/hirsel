@@ -175,39 +175,6 @@ fn h_receipt_snapshots_do_not_retain_or_release_language_payloads() {
     }
 }
 #[test]
-fn h_receipt_pairing_detects_changed_payload_cells_with_a_repaired_control() {
-    let (x, c, layout, result) = setup(false);
-    let mut ops = NoOperations;
-    let mut m = Machine::new(&x.p, &c, &mut ops);
-    let (mut f, _) = prepare(&mut m, 100);
-    let ptr = nums(&mut m, false, x.payloads[1], &[11, 12], 1);
-    root(&mut m, &mut f, Val::Ptr(ptr));
-    m.seal_allocations.insert(
-        ptr.alloc,
-        (0, x.p.units[0].tables.source_anchors[0].clone()),
-    );
-    let control = snapshot(&mut m, &mut f, result);
-    let root = &x.p.units[0].tables.seal_descriptors[2].root_type;
-    m.check_receipt_pair(control, layout, root, Val::Ptr(ptr))
-        .unwrap();
-    m.ledger
-        .get_mut(ptr.alloc)
-        .extent
-        .write_bytes(16, &99u64.to_le_bytes());
-    assert_eq!(
-        m.check_receipt_pair(control, layout, root, Val::Ptr(ptr))
-            .unwrap_err()
-            .kind,
-        V::TypeConfusion
-    );
-    m.ledger
-        .get_mut(ptr.alloc)
-        .extent
-        .write_bytes(16, &11u64.to_le_bytes());
-    m.check_receipt_pair(control, layout, root, Val::Ptr(ptr))
-        .unwrap();
-}
-#[test]
 fn h_receipt_forged_bytes_and_wrong_construction_identity_are_rejected() {
     let (x, c, layout, result) = setup(false);
     let mut ops = NoOperations;

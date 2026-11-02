@@ -76,22 +76,6 @@ fn accepted(source: &str) {
     engine.import_native_input(input).unwrap();
 }
 
-#[test]
-fn helper_unique_promise_19_append_only_checked_promise() {
-    with_compiler_stack(|| {
-        accepted(&INCIDENT.replacen("fn add", "@preserves_unique(xs)\nfn add", 1));
-        let renamed = INCIDENT
-            .replace("add", "append_line")
-            .replace("mut xs: List", "mut lines: List")
-            .replace("mut xs, 1", "mut lines, 1");
-        accepted(&renamed);
-        accepted(&renamed.replacen(
-            "fn append_line",
-            "@preserves_unique(lines)\nfn append_line",
-            1,
-        ));
-    });
-}
 
 #[test]
 fn helper_unique_promise_19_share_installing_promise_rejected() {

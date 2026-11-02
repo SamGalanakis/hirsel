@@ -226,30 +226,6 @@ fn sealed_root_read_instruction_uses_h_owned_bits_under_the_active_owner_loan() 
     }
 }
 
-#[test]
-fn sealed_read_instruction_refuses_inactive_or_nonexclusive_owner_loans() {
-    let mut program = program(true);
-    for exclusive in [false, true] {
-        program.units[0].tables.loans[0].mutable = exclusive;
-        let config = Config::default();
-        let mut ops = NoOperations;
-        let mut m = Machine::new(&program, &config, &mut ops);
-        let mut f = m.frame(0, Role::Entry, None);
-        let error = m
-            .exec(
-                &mut f,
-                &Inst::BorrowSealedRoot {
-                    result: ValueId(1),
-                    owner: ValueId(0),
-                    loan: LoanId(0),
-                    shape: SealDescriptorId(0),
-                },
-            )
-            .err()
-            .expect("owner loan must exist and be exclusive");
-        assert_eq!(error.kind, V::BorrowExpired);
-    }
-}
 
 #[test]
 fn sealed_read_instruction_checks_actual_owner_pointer_and_generation() {

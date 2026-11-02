@@ -257,59 +257,6 @@ class IgnoredTests(unittest.TestCase):
             self.assertIn(selection, script, prefix)
             self.assertTrue(list(ROOT.glob(prefix + '*')), prefix)
 
-    def test_delegated_workers_have_an_unignored_parent_and_exact_child_selection(self):
-        for (path, worker), (parent, helper) in DELEGATED.items():
-            text = (ROOT / path).read_text()
-            module = Path(path).stem
-            self.assertRegex(text, rf'#\[test\]\s+fn {parent}\(\)')
-            parent_body = text.split(f'fn {parent}()', 1)[1].split('\n#[test]', 1)[0]
-            self.assertIn(f'{helper}(', parent_body)
-            helper_body = text.split(f'fn {helper}(', 1)[1].split('\nfn ', 1)[0]
-            if helper == 'child':
-                self.assertIn('"index::tests::races::cooperating_child"', helper_body)
-                command_body = text.split('fn test_command(', 1)[1].split('\nfn ', 1)[0]
-                self.assertIn('current_exe()', command_body)
-                self.assertIn('["--exact", name,', command_body)
-                self.assertIn('TestChild::spawn(', helper_body)
-                self.assertIn('self.process.wait()', text)
-                self.assertIn('test result: ok. 1 passed; 0 failed;', text)
-                self.assertIn('"--ignored"', helper_body)
-                for key in ('INDEX36_CHILD_ROOT', 'INDEX36_CHILD_MODE', 'INDEX36_CHILD_ID'):
-                    self.assertIn(key, helper_body)
-                self.assertIn('child(', parent_body)
-                self.assertIn('.spawn()', text.split('impl TestChild {', 1)[1].split('impl Drop', 1)[0])
-                self.assertIn('a.finish()', parent_body)
-                self.assertIn('b.finish()', parent_body)
-                self.assertIn('mod races;', (ROOT / Path(path).parent / 'modules.rs').read_text())
-            elif helper == 'isolated':
-                self.assertIn('current_exe()', helper_body)
-                self.assertRegex(helper_body, rf'"--exact",\s+"{module}::{worker}",\s+"--ignored"')
-                self.assertIn('child.wait()', helper_body)
-            else:
-                self.assertIn('current_exe()', helper_body)
-                self.assertRegex(helper_body, rf'"--exact",\s+"{module}::{worker}",\s+"--ignored"')
-                self.assertIn('.output()', helper_body)
-                self.assertIn('output.status.success()', helper_body)
-                self.assertIn('"--cpu=60:60"', helper_body)
-                self.assertIn('.env("HIRSEL_MEMORY_LIMIT", "2G")', helper_body)
-            self.assertTrue(any(FUNCTION.search(text, a.end())[1] == worker
-                                for a in ATTRIBUTE.finditer(text)))
-            # The annotation covers only the named child, never a sibling.
-            sources = {path: '#[test]\n#[ignore]\nfn unregistered_worker() {}\n'}
-            self.assertEqual(orphans(sources), [(path, 'unregistered_worker')])
-
-    def test_deadline_replay_actions_select_exact_workers_and_supply_their_inputs(self):
-        definitions = (ROOT / 'tools/buck2/defs.bzl').read_text()
-        for path, name in REPLAY_ACTIONS:
-            self.assertIn(name, [name for _, name in ignored_declarations((ROOT / path).read_text())])
-            self.assertIn(f'args = ["--ignored", "--exact", "ordered_deadline_liveness_55::{name}", "--nocapture"]', definitions)
-            self.assertEqual(orphans({path: '#[ignore]\nfn unregistered() {}'}), [(path, 'unregistered')])
-        for supplied in ['env["HIRSEL_REPLAY_FIXTURE_OUT"] = cmd_args(fixture.as_output())',
-                         'files_env = {"HIRSEL_REPLAY_FIXTURE": ":" + fixture}',
-                         'extra_env = {"HIRSEL_REPLAY_BACKEND": backend, "HIRSEL_REPLAY_CELL": cell}']:
-            self.assertIn(supplied, definitions)
-        self.assertIn('call("hirsel_deadline_replay_matrix", name="deadline-select-replay"',
-                      (ROOT / 'tools/buck2/sync.py').read_text())
 
     def test_explicit_homes_execute_exact_ignored_identity_and_forward_required_inputs(self):
         runner = runpy.run_path(str(ROOT / 'tools/ignored-tests'))

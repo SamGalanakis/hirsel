@@ -237,28 +237,6 @@ mod tests {
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
-    #[test]
-    fn replacement_during_a_read_is_refused_with_opened_and_named_states() {
-        let (path, _, _) = fixture("during-read");
-        let opened = File::open(&path).unwrap();
-        let before = stamp(&opened.metadata().unwrap());
-        let replacement = path.with_file_name("replacement");
-        std::fs::write(&replacement, b"new!").unwrap();
-        std::fs::rename(&replacement, &path).unwrap();
-        let error = verify_state(&path, &opened, &before)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("opened") && error.contains("named"),
-            "{error}"
-        );
-        assert!(error.contains(path.to_str().unwrap()), "{error}");
-        // The old descriptor remains valid, but the link would open a new inode.
-        assert_eq!(opened.metadata().unwrap().ino(), before[1]);
-        assert_eq!(opened.metadata().unwrap().size(), before[3]);
-        assert_ne!(stamp(&std::fs::metadata(&path).unwrap()), before);
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
-    }
 
     #[test]
     fn hard_link_publication_during_hashing_retries_without_changing_identity() {

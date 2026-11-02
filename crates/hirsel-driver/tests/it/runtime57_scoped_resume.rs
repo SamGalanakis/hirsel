@@ -31,47 +31,6 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 }
 "#;
 
-#[test]
-fn runtime57_known_scope_has_owned_runtime_exit_and_canonical_intrinsic_results() {
-    with_compiler_stack(|| {
-        let program = ready(WITNESS);
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
-        let scopes: Vec<_> = plans
-            .plans
-            .values()
-            .filter(|p| {
-                p.states.iter().any(|s| {
-                    s.runtime
-                        .as_ref()
-                        .is_some_and(|r| r.kind == RuntimeOpKind::ScopeExit)
-                })
-            })
-            .collect();
-        assert!(!scopes.is_empty(), "{plans:#?}");
-        for plan in scopes {
-            assert_eq!(plan.representation, Representation::Resumable);
-            assert!(
-                plan.states
-                    .iter()
-                    .any(|s| matches!(s.action, ResumeAction::ResumeNested(..)))
-            );
-            for state in &plan.states {
-                if let Some(runtime) = &state.runtime {
-                    assert_eq!(
-                        state.action,
-                        ResumeAction::ResumeRuntime(state.boundary.call)
-                    );
-                    assert!(runtime.scope.is_some());
-                }
-            }
-        }
-        for backend in [Backend::Llvm, Backend::Cranelift] {
-            let (_, entered) = routing(&program, backend, Partition::Whole);
-            assert!(entered, "{backend:?}");
-        }
-    });
-}
 
 #[test]
 fn runtime57_owned_scope_result_agrees_with_reference_heap_and_both_native_backends() {

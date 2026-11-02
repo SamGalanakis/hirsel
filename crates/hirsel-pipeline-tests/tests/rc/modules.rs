@@ -38,7 +38,6 @@ mod placement_boundary_21;
 mod plain_contract_22;
 mod prepared_argument_failure_24;
 mod pretransfer_31;
-mod rc_append_into;
 mod rc_arena_credit;
 mod rc_borrow_cursor_8;
 mod rc_borrow_cursor_compose_13;

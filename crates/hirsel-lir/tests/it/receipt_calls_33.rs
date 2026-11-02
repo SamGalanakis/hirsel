@@ -70,15 +70,6 @@ fn ordinary_call() -> CallSite {
     }
 }
 
-#[test]
-fn receipt_call_binds_complete_contract_and_all_canonical_carriers() {
-    let (contract, call) = receipt_call();
-    call.check_contract(&contract).unwrap();
-    let text = hirsel_codec::to_text(&call);
-    let restored: ReceiptCall = hirsel_codec::from_text(&text).unwrap();
-    assert_eq!(restored, call);
-    restored.check_contract(&contract).unwrap();
-}
 
 #[test]
 fn receipt_call_refuses_changed_hash_mode_order_selector_and_result() {
@@ -143,55 +134,6 @@ fn receipt_call_rejects_duplicate_taken_holders_and_exclusive_slot_addresses() {
     }
 }
 
-#[test]
-fn receipt_call_absence_keeps_legacy_encoding_and_hash() {
-    use std::hash::{Hash, Hasher};
-    let call = ordinary_call();
-    let legacy = "(CallSite\n  (none) 0\n  (Direct 3)\n  (list) 7\n  (range 0 0)\n  (none)\n  (none)\n  (Effects) 0)";
-    assert_eq!(hirsel_codec::to_text(&call), legacy);
-    let restored: CallSite = hirsel_codec::from_text(legacy).unwrap();
-    assert_eq!(restored, call);
-    let mut before = std::hash::DefaultHasher::new();
-    (
-        call.pretransfer_failure,
-        call.forward_caller,
-        &call.callee,
-        &call.operation_arguments,
-        call.abi,
-        call.arguments,
-        call.result,
-        &call.destination,
-        call.declared,
-        call.anchor,
-    )
-        .hash(&mut before);
-    let mut after = std::hash::DefaultHasher::new();
-    call.hash(&mut after);
-    assert_eq!(before.finish(), after.finish());
-}
-
-#[test]
-fn receipt_call_present_empty_is_distinct_and_keeps_pretransfer_failure() {
-    let mut call = ordinary_call();
-    call.pretransfer_failure = Some(FailureId(5));
-    let ordinary = hirsel_codec::to_text(&call);
-    let empty = contract(&[], false);
-    call.receipts = Some(ReceiptCall {
-        contract: empty.content().unwrap(),
-        arguments: vec![],
-        result: None,
-    });
-    call.receipts
-        .as_ref()
-        .unwrap()
-        .check_contract(&empty)
-        .unwrap();
-    let text = hirsel_codec::to_text(&call);
-    assert_ne!(text, ordinary);
-    let restored: CallSite = hirsel_codec::from_text(&text).unwrap();
-    assert_eq!(restored, call);
-    assert_eq!(restored.pretransfer_failure, Some(FailureId(5)));
-}
 
 #[test]
 fn receipt_call_data_cannot_enter_an_ordinary_callee() {

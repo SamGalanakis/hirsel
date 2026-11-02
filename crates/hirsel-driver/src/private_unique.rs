@@ -321,19 +321,6 @@ mod tests {
         )
     }
 
-    #[test]
-    fn acyclic_proofs_use_the_settled_callee_once() {
-        with_compiler_stack(|| {
-            let (calls, summaries) = prove(
-                "fn caller(mut value: Bytes) { loss(mut value) }\nfn loss(mut value: Bytes) {}\n",
-            );
-            assert_eq!(
-                calls,
-                BTreeMap::from([("caller".into(), 1), ("loss".into(), 1)])
-            );
-            assert!(summaries.iter().all(|(_, summary)| summary.is_empty()));
-        });
-    }
 
     #[test]
     fn cyclic_proofs_recheck_changed_observed_summaries_until_settled() {

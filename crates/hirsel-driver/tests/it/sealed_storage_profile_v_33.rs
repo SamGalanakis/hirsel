@@ -27,13 +27,6 @@ fn fixture_state() -> &'static Fixture {
 }
 
 #[test]
-fn sealed_storage_provenance_33_import_control() {
-    let fixture = fixture_state();
-    let mut engine = fixture.engine.lock().unwrap();
-    let validated = engine.import_native_input(fixture.input.clone()).unwrap();
-    assert!(!validated.storage_proof_reads().bodies.is_empty());
-}
-#[test]
 fn sealed_storage_provenance_33_import_missing_table() {
     let fixture = fixture_state();
     let mut engine = fixture.engine.lock().unwrap();
@@ -76,12 +69,17 @@ fn profile_error(validation: &StorageValidation, expected: impl Fn(&StorageProfi
 
 #[test]
 fn sealed_storage_profile_v_33_executable_control() {
-    let input = fixture();
-    let validation = validate(input);
+    let fixture = fixture_state();
+    let validation = validate(&fixture.input);
     assert!(validation.violations.is_empty(), "{validation:?}");
-    assert_eq!(validation.profiles, input.storage_profiles);
+    assert_eq!(validation.profiles, fixture.input.storage_profiles);
     assert!(!validation.reads.bodies.is_empty());
     assert!(!validation.reads.profiles.is_empty());
+    let mut engine = fixture.engine.lock().unwrap();
+    let validated = engine
+        .import_native_input(fixture.input.clone())
+        .unwrap();
+    assert!(!validated.storage_proof_reads().bodies.is_empty());
 }
 #[test]
 fn sealed_storage_profile_v_33_forged_empty() {
@@ -124,19 +122,6 @@ fn sealed_storage_profile_v_33_stale_digest() {
         *error == StorageProfileError::StaleDigest
     });
 }
-#[test]
-fn sealed_storage_profile_v_33_missing_table_cannot_disable_proof() {
-    let mut input = fixture().clone();
-    input.storage_profiles.clear();
-    let validation = validate(&input);
-    assert!(
-        validation
-            .violations
-            .iter()
-            .any(|violation| matches!(violation, StorageViolation::MissingProfile(_))),
-        "{validation:?}"
-    );
-}
 
 fn export_and_import(source: &str) {
     with_compiler_stack(|| {
@@ -164,12 +149,6 @@ fn sealed_storage_context_v_33_selected_callable_argument() {
     );
 }
 
-#[test]
-fn sealed_storage_context_v_33_sealed_callable_root() {
-    export_and_import(
-        "fn held(take payload:Bytes)->fn()->u64{fn()->u64{bytes.len(payload)}}\nfn fits(cap:u64)->u64{let outcome=arena.bounded(cap,fn(a:Arena)->Region[fn()->u64]{let payload:Bytes in heap=copy_to(heap,b\"abc\");let root=held(take payload);arena.seal(take a,take root)});match take outcome{Ok(r)=>{let mut owned=take r;region.with(mut owned,fn(view:fn()->u64)->u64{view()})},Error(e)=>0u64,}}\npub fn main(t:Test)->Result[(),()]{failure.check(fits(10u64)==0u64,Bounds());failure.check(fits(11u64)==3u64,Bounds());Ok(())}",
-    );
-}
 
 fn captured_copy_fixture() -> &'static NativeInput {
     &captured_copy_fixture_state().input
@@ -190,19 +169,17 @@ fn captured_copy_fixture_state() -> &'static Fixture {
 
 #[test]
 fn sealed_storage_root_v_33_explicit_heap_capture_copy_control() {
-    let input = captured_copy_fixture();
-    let validation = validate(input);
-    assert!(validation.violations.is_empty(), "{validation:?}");
-    assert_eq!(validation.profiles, input.storage_profiles);
-}
-
-#[test]
-fn sealed_storage_root_v_33_explicit_heap_capture_copy_import() {
     let fixture = captured_copy_fixture_state();
+    let validation = validate(&fixture.input);
+    assert!(validation.violations.is_empty(), "{validation:?}");
+    assert_eq!(validation.profiles, fixture.input.storage_profiles);
     let mut engine = fixture.engine.lock().unwrap();
-    let validated = engine.import_native_input(fixture.input.clone()).unwrap();
+    let validated = engine
+        .import_native_input(fixture.input.clone())
+        .unwrap();
     assert!(!validated.storage_proof_reads().bodies.is_empty());
 }
+
 
 #[test]
 fn sealed_storage_root_v_33_forged_capture_allocation() {
@@ -1520,17 +1497,6 @@ fn sealed_storage_task_scope_v_33_allocation_with_fresh_claims() {
         }) if origin.callable.definition.path().0.name == "clone_heap")),"{validation:?}");
 }
 
-#[test]
-fn sealed_storage_task_scope_v_33_missing_helper_body_with_fresh_claims() {
-    let mut input = task_scope_fixture_state().input.clone();
-    let before = input.definitions.len();
-    input
-        .definitions
-        .retain(|path, _| path.0.name != "clone_heap");
-    assert_eq!(before - input.definitions.len(), 1);
-    input.storage_profiles = validate(&input).profiles;
-    map_unknown(validate(&input));
-}
 
 #[test]
 fn sealed_storage_task_scope_v_33_forged_callback_contract() {

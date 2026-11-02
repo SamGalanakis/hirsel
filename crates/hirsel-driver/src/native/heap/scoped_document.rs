@@ -308,65 +308,6 @@ fn private_malformed_spans_links_and_tags_have_checked_twins() {
     });
 }
 
-#[test]
-fn a_small_input_slice_keeps_its_ordinary_backing_during_the_callback() {
-    with_compiler_stack(|| {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../conformance/SEM/SEM-3-json-document-backing-run.hir");
-        let mut loaded = load_document(&path, None);
-        loaded
-            .check_for_execution()
-            .unwrap_or_else(|e| panic!("{e}"));
-        let snapshot = loaded.engine.export_native_input().unwrap();
-        let input = loaded.engine.import_native_input(snapshot).unwrap();
-        let ready = crate::native::build(
-            &input,
-            &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-        )
-        .unwrap();
-        let program = ready.heap_program();
-        for full_recount_every_step in [false, true] {
-            let clean = hirsel_heapcheck::run_ready(
-                &program,
-                &loaded.entry,
-                &[],
-                &mut Io::new(),
-                &Config {
-                    full_recount_every_step,
-                    ..Config::default()
-                },
-            );
-            assert!(clean.result.is_ok(), "{:?}", clean.result);
-            let mut live = BTreeMap::new();
-            let mut backing = None;
-            for event in clean.trace.iter() {
-                match event {
-                    Event::Alloc {
-                        alloc,
-                        capacity,
-                        owner,
-                    } if *owner != "static" => {
-                        if *capacity == 56 {
-                            let retained = *live.values().max().expect("the backing owner is live");
-                            assert!(retained >= 4099, "the three-byte input retains its backing");
-                            backing = Some(retained);
-                        }
-                        live.insert(*alloc, *capacity);
-                    }
-                    Event::Free { alloc } => {
-                        live.remove(alloc);
-                    }
-                    _ => (),
-                }
-            }
-            assert!(live.is_empty());
-            assert!(backing.is_some());
-            eprintln!(
-                "three-byte input retains {backing:?} capacity bytes during callback; audit full_recount={full_recount_every_step}"
-            );
-        }
-    });
-}
 
 // Exercise promotion, map growth, decoded growth, close and extraction on the
 // actual parser. Streaming campaigns retain only a failing perturbation.

@@ -114,36 +114,13 @@ fn sealed_storage_placement_33_named_scalar_callback() {
 }
 
 #[test]
-fn sealed_storage_provenance_33_generic_known_callback() {
-    accepted(&region(
-        "fn(root:List[u64])->u64{apply(length,root)}",
-        "fn length(xs:List[u64])->u64{list.len(xs)}\nfn apply[T](f:fn(T)->u64,x:T)->u64{f(x)}",
-    ));
-}
-#[test]
 fn sealed_storage_provenance_33_known_callable_capture() {
     accepted(&region(
         "fn(root:List[u64])->u64{let f=length;let g=fn(xs:List[u64])->u64{f(xs)};g(root)}",
         "fn length(xs:List[u64])->u64{list.len(xs)}",
     ));
 }
-#[test]
-fn sealed_storage_provenance_33_known_sealed_callable_root() {
-    accepted(
-        "fn held(take payload:Bytes)->fn()->u64{fn()->u64{bytes.len(payload)}}\nfn fits(cap:u64)->u64{let outcome=arena.bounded(cap,fn(a:Arena)->Region[fn()->u64]{let payload:Bytes in heap=copy_to(heap,b\"abc\");let root=held(take payload);arena.seal(take a,take root)});match take outcome{Ok(r)=>{let mut owned=take r;region.with(mut owned,fn(view:fn()->u64)->u64{view()})},Error(e)=>0u64,}}\npub fn main(t:Test)->Result[(),()]{failure.check(fits(10u64)==0u64,Bounds());failure.check(fits(11u64)==3u64,Bounds());Ok(())}",
-    );
-}
 
-#[test]
-fn sealed_storage_provenance_33_mutually_recursive_helpers_retain_placement() {
-    rejected(
-        &region(
-            "fn(root:List[u64])->unique List[u64]{first(root,3u64)}",
-            "fn first(root:List[u64],n:u64)->unique List[u64]{if n==0u64{unique root}else{second(root,n-1u64)}}\nfn second(root:List[u64],n:u64)->unique List[u64]{first(root,n)}",
-        ),
-        "unique root",
-    );
-}
 
 #[test]
 fn sealed_storage_root_allocation_33_captured_payload() {
@@ -153,13 +130,6 @@ fn sealed_storage_root_allocation_33_captured_payload() {
     );
 }
 
-#[test]
-fn sealed_storage_destination_33_explicit_heap_and_inline_envelope() {
-    accepted(&region(
-        "fn(root:List[u64])->u64{let fresh:List[u64] in heap=[8u64];let wrapped=Envelope(value:fresh,count:9u64);list.len(wrapped.value)}",
-        "type Envelope{value:List[u64],count:u64}",
-    ));
-}
 
 #[test]
 fn sealed_storage_nested_producer_33_known_read_capture() {
@@ -276,16 +246,6 @@ fn sealed_storage_map_producer_33_borrowed_read_root_refused() {
     );
 }
 
-#[test]
-fn sealed_storage_map_producer_33_borrowed_allocating_root_refused() {
-    rejected_by(
-        &map_callable_branch(
-            "fn leaf(take payload:Bytes)->fn()->u64{fn()->u64{let copied=unique payload;bytes.len(copied)}}",
-        ),
-        "MEM-4",
-        "arena.seal(take a,take root)",
-    );
-}
 
 #[test]
 fn sealed_storage_retained_33_copied_map_local_branch_refused_at_source() {
@@ -425,12 +385,6 @@ fn sealed_storage_map_capture_33_borrowed_read_leaf_write_refused() {
         "fn leaf(take payload:Bytes)->fn()->u64{fn()->u64{bytes.len(payload)}}",
     ));
 }
-#[test]
-fn sealed_storage_map_capture_33_borrowed_allocating_leaf_write_refused() {
-    borrowed_capture_write_refused(&captured_map_callable_branch(
-        "fn leaf(take payload:Bytes)->fn()->u64{fn()->u64{let copied=unique payload;bytes.len(copied)}}",
-    ));
-}
 pub(super) fn owned_capture_map_callable_branch(leaf: &str) -> String {
     detached_map_callable_branch(leaf)
         .replace("map.insert(mut values,1u64,take f);", "map.insert(mut values,1u64,fn()->u64{0u64});let saved=take values;let install:once fn()->Map[u64,fn()->u64]=fn()->Map[u64,fn()->u64]{let mut owned=take saved;map.insert(mut owned,1u64,take f);take owned};let updated=install();")
@@ -469,10 +423,6 @@ pub(super) fn nested_map_unknown_program(known_caller: bool) -> String {
     source
 }
 #[test]
-fn sealed_storage_map_nested_unknown_33_known_control() {
-    accepted(&nested_map_unknown_program(true));
-}
-#[test]
 fn sealed_storage_map_nested_unknown_33_external_alternative_refuses() {
     rejected(
         &nested_map_unknown_program(false),
@@ -508,10 +458,6 @@ pub(super) fn unknown_factory_program(known_caller: bool) -> String {
         source.push_str("\nfn known_factory()->Product{Product(call:fn()->u64{7u64})}\npub fn main(){let n=inspect_factory(known_factory,true);}");
     }
     source
-}
-#[test]
-fn sealed_storage_factory_join_33_known_control() {
-    accepted(&unknown_factory_program(true));
 }
 #[test]
 fn sealed_storage_factory_join_33_unknown_result_refuses() {

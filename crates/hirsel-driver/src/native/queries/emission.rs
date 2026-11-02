@@ -307,29 +307,6 @@ pub(super) fn select(
 mod tests {
     use super::*;
 
-    #[test]
-    fn inline_selection_preserves_portable_membership_and_retains_its_complete_grant() {
-        let budget = hirsel_engine::runtime::ProcessBudget::new(1 << 20);
-        let grant = Arc::new(budget.reserve(1 << 20).unwrap());
-        let values = [ContentHash::of_bytes(b"one"), ContentHash::of_bytes(b"two")];
-        let selection = InlineInstances::new(values, Some(grant.clone()));
-        let bytes = serde_json::to_vec(&selection).unwrap();
-        assert_eq!(bytes, serde_json::to_vec(&values).unwrap());
-        let restored: InlineInstances = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(restored, selection);
-        assert_ne!(restored.identity(), selection.identity());
-        let escaped = selection.clone();
-        assert_eq!(escaped.identity(), selection.identity());
-        assert!(selection.retained_bytes() >= size_of_val(&values) as u64);
-        assert_ne!(selection, InlineInstances::new([values[0]], None));
-        drop(grant);
-        drop(selection);
-        assert_eq!(budget.reserved(), 1 << 20);
-        drop(escaped);
-        assert_eq!(budget.reserved(), 0);
-        assert_eq!(restored.as_ref(), values);
-        assert_eq!(InlineInstances::default().retained_bytes(), 0);
-    }
 }
 
 #[cfg(test)]

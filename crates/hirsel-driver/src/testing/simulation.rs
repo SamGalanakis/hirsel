@@ -23,7 +23,18 @@ pub fn observe_tir(
         simulation.callees = std::sync::Arc::new(input.callees.clone());
     }
     let mut runtime = (*input.runtime).clone();
-    runtime.checked = checked.then(|| (*input.checked_runtime).clone());
+    runtime.checked = if checked {
+        // A computed checked runtime always names arena.with (MEM-4); a product
+        // lacking those facts cannot run checked and must not run unchecked.
+        if input.checked_runtime.arena_with.is_none() {
+            return Err(ToolError::Runtime(
+                "checked execution has no checked runtime".into(),
+            ));
+        }
+        Some((*input.checked_runtime).clone())
+    } else {
+        None
+    };
     let mut interpreter = hirsel_engine::InterpreterAdapter {
         limits,
         ..Default::default()
@@ -108,6 +119,24 @@ mod tests {
                 assert_eq!(actual.observation, expected.observation);
                 assert_eq!(actual.step_usage, expected.step_usage);
             }
+            let mut tampered = input.clone();
+            std::sync::Arc::make_mut(&mut tampered).checked_runtime =
+                std::sync::Arc::new(hirsel_interp::checked::CheckedRuntime::default());
+            assert!(
+                matches!(
+                    observe_tir(&tampered, &run, SimulationConfig::default(), Default::default(), true),
+                    Err(ToolError::Runtime(message)) if message.contains("no checked runtime")
+                ),
+                "checked=true without checked facts must fail loudly, not run unchecked"
+            );
+            observe_tir(
+                &tampered,
+                &run,
+                SimulationConfig::default(),
+                Default::default(),
+                false,
+            )
+            .unwrap();
             drop(requests);
             let mut wrong = run;
             wrong.entry.0.name = "other".into();

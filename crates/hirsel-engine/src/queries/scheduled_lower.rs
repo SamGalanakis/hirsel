@@ -1480,66 +1480,98 @@ impl FrontLowerQueries {
             .and_then(|bytes| bytes.checked_add(live_bytes))
             .and_then(|bytes| bytes.checked_add(outcome_table_bytes(1)))
             .ok_or(self.errors.resource)?;
-        while *self.retention.lock().unwrap_or_else(|e| e.into_inner()) < required {
-            if !query_reads.evict_body().await {
-                return Err(self.errors.resource);
+        // Each draw below debits the shared retained counter. A body whose
+        // reservation does not fit waits for in-flight work to release bytes
+        // (or for a settled body to evict) instead of refusing; it refuses
+        // only when the runtime reports nothing in flight can free memory.
+        let mut outcome = Some(outcome);
+        let (archive, live) = loop {
+            while *self.retention.lock().unwrap_or_else(|e| e.into_inner()) < required {
+                if !query_reads.evict_body().await {
+                    return Err(self.errors.resource);
+                }
             }
-        }
-        let archive = if failed {
-            None
-        } else {
-            Some(
-                ProductArchive::from_retained_bytes(
+            let archive = if failed {
+                None
+            } else {
+                match ProductArchive::from_retained_bytes(
                     record,
-                    bytes,
+                    bytes.clone(),
                     self._allowance.clone(),
                     self.retention.clone(),
-                )
-                .map_err(|_| self.errors.resource)?,
-            )
-        };
-        if let Some(original) = &mut original {
-            original.query_observations = archive.clone();
-        }
-        let live = original
-            .map(|original| {
-                LiveLowerProduct::from_retained(
+                ) {
+                    Ok(archive) => Some(archive),
+                    // A peer's draw landed between the estimate and this take.
+                    Err(_) => {
+                        if !query_reads.evict_body().await {
+                            return Err(self.errors.resource);
+                        }
+                        continue;
+                    }
+                }
+            };
+            if let Some(original) = &mut original {
+                original.query_observations = archive.clone();
+            }
+            let live = match original.take() {
+                Some(output) => match LiveLowerProduct::from_retained(
                     (id.address, action),
-                    original,
+                    output,
                     self.anchors.clone(),
                     self.records.clone(),
                     self.source.clone(),
                     self._allowance.clone(),
                     self.retention.clone(),
-                )
-                .ok_or(self.errors.resource)
-            })
-            .transpose()?;
-        if let Ok(Value::Lower(lower)) = &mut outcome.result {
-            lower.live = live.as_ref().map(LiveLowerProduct::downgrade);
-        }
-        let charge = outcome.retained_bytes().ok_or(self.errors.resource)?;
-        let mut retention = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-        let mut outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
-        let selected = (id.kind, id.address.0);
-        let old = outcomes.get(&selected).map(|(_, _, charge)| *charge);
-        let next_len = outcomes
-            .len()
-            .checked_add(usize::from(old.is_none()))
-            .ok_or(self.errors.resource)?;
-        let table_growth = outcome_table_bytes(next_len)
-            .checked_sub(outcome_table_bytes(outcomes.len()))
-            .ok_or(self.errors.resource)?;
-        let remaining = retention
-            .checked_add(old.unwrap_or(0))
-            .and_then(|n| n.checked_sub(charge))
-            .and_then(|n| n.checked_sub(table_growth))
-            .ok_or(self.errors.resource)?;
-        let replaced = outcomes.insert(selected, (record, Box::new(outcome), charge));
-        *retention = remaining;
-        drop(outcomes);
-        drop(retention);
-        drop(replaced);
+                ) {
+                    LiveAdmission::Admitted(live) => Some(live),
+                    LiveAdmission::Blocked(output) => {
+                        original = Some(*output);
+                        if !query_reads.evict_body().await {
+                            return Err(self.errors.resource);
+                        }
+                        continue;
+                    }
+                    LiveAdmission::Refused => return Err(self.errors.resource),
+                },
+                None => None,
+            };
+            let outcome_ref = outcome.as_mut().expect("unadmitted outcome");
+            if let Ok(Value::Lower(lower)) = &mut outcome_ref.result {
+                lower.live = live.as_ref().map(LiveLowerProduct::downgrade);
+            }
+            let charge = outcome_ref.retained_bytes().ok_or(self.errors.resource)?;
+            let admitted = {
+                let mut retention = self.retention.lock().unwrap_or_else(|e| e.into_inner());
+                let mut outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
+                let selected = (id.kind, id.address.0);
+                let old = outcomes.get(&selected).map(|(_, _, charge)| *charge);
+                let next_len = outcomes
+                    .len()
+                    .checked_add(usize::from(old.is_none()))
+                    .ok_or(self.errors.resource)?;
+                let table_growth = outcome_table_bytes(next_len)
+                    .checked_sub(outcome_table_bytes(outcomes.len()))
+                    .ok_or(self.errors.resource)?;
+                retention
+                    .checked_add(old.unwrap_or(0))
+                    .and_then(|n| n.checked_sub(charge))
+                    .and_then(|n| n.checked_sub(table_growth))
+                    .map(|remaining| {
+                        let admitted = outcome.take().expect("unadmitted outcome");
+                        let replaced =
+                            outcomes.insert(selected, (record, Box::new(admitted), charge));
+                        *retention = remaining;
+                        drop(replaced);
+                    })
+            };
+            if admitted.is_none() {
+                if !query_reads.evict_body().await {
+                    return Err(self.errors.resource);
+                }
+                continue;
+            }
+            break (archive, live);
+        };
         if failed {
             return Err(record);
         }

@@ -713,6 +713,15 @@ impl LiveGrowthProduct {
 /// remains in its existing verifier-owned product, outside facet equality.
 #[derive(Clone)]
 pub struct LiveLowerProduct(Arc<Owner<LowerValue>>);
+/// The retained-partition admission of one live Lower product.
+pub(crate) enum LiveAdmission {
+    Admitted(LiveLowerProduct),
+    /// The retained counter was short; the output is handed back so the
+    /// producer can wait for progress and retry.
+    Blocked(Box<crate::FrontLowerOutput>),
+    /// Type coverage or layout overflow; waiting cannot admit the body.
+    Refused,
+}
 #[derive(Clone)]
 pub(crate) struct WeakLowerProduct(Weak<Owner<LowerValue>>);
 impl WeakLowerProduct {
@@ -804,6 +813,8 @@ impl LiveLowerProduct {
     }
     /// Transfer a settled producer's existing partition into its live value.
     /// Clones share this one lease; the last owner returns the exact charge.
+    /// A short partition hands the output back so admission can wait and retry;
+    /// coverage or layout refusal keeps the producer's existing error.
     pub(crate) fn from_retained(
         identity: (Address, Action),
         output: crate::FrontLowerOutput,
@@ -812,13 +823,18 @@ impl LiveLowerProduct {
         backing: Arc<dyn Send + Sync>,
         allowance: Arc<MemoryReservation>,
         remaining: Arc<Mutex<u64>>,
-    ) -> Option<Self> {
+    ) -> LiveAdmission {
         if !records.uses_types(context.record_types()) {
-            return None;
+            return LiveAdmission::Refused;
         }
-        let bytes = Self::retained_required_bytes(&output)?;
+        let Some(bytes) = Self::retained_required_bytes(&output) else {
+            return LiveAdmission::Refused;
+        };
         let mut available = remaining.lock().unwrap_or_else(|e| e.into_inner());
-        *available = available.checked_sub(bytes)?;
+        let Some(next) = available.checked_sub(bytes) else {
+            return LiveAdmission::Blocked(Box::new(output));
+        };
+        *available = next;
         drop(available);
         let owner = Arc::new(RetainedArchiveLease {
             _allowance: allowance.clone(),
@@ -836,7 +852,7 @@ impl LiveLowerProduct {
             })),
             _backing: backing,
         };
-        Some(Self(Arc::new(Owner {
+        LiveAdmission::Admitted(Self(Arc::new(Owner {
             address: identity.0,
             action: identity.1,
             domain: LIVE_LOWER,

@@ -15,7 +15,7 @@ pub use product::{
     LiveGrowthProduct, LiveLowerProduct, LiveSummaryProduct, ProductArchive, SummaryFacet,
 };
 pub(crate) use product::{
-    ProductSource, SharedProductSource, WeakAnalyzedProduct, WeakLowerProduct,
+    LiveAdmission, ProductSource, SharedProductSource, WeakAnalyzedProduct, WeakLowerProduct,
 };
 pub use scheduler::{
     AdmittedRuntime, RuntimeCompletion, RuntimeErrors, RuntimeEvent, RuntimeObserver, RuntimeStats,

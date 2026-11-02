@@ -58,6 +58,10 @@ class FreshWorktree(unittest.TestCase):
 
     def test_bootstrap_makes_a_fresh_tree_build_and_a_bare_buck2_without_its_files_names_sync(self):
         self.assertFalse(any((self.tree / path).exists() for path in generated.BUILD_INPUTS))
+        # A daemon started before prepare.py writes `.buckconfig.local` (a query
+        # run first) must not keep a remote-execution client with no engine.
+        self.script('bootstrap.py')
+        self.assertEqual(self.buck2('uquery', TARGET).returncode, 0)
         self.script('prepare.py')
         self.assertTrue(generated.current(self.tree))
         built = self.buck2('build', '-c', 'hirsel.priority=75', '--materializations', 'none', TARGET)

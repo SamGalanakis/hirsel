@@ -13,7 +13,9 @@ private pool: its endpoint, credentials and the platform properties its workers
 match (`hirsel.remote_properties`), rewriting the file only when its content
 changes. When the hook is missing or fails, an existing remote
 `.buckconfig.local` is kept; with no remote configuration at all, prepare.py
-fails. Running everything on this host is only ever chosen with `--local`: an
+fails. A changed `.buckconfig.local` stops the checkout's running Buck2 daemon:
+a daemon builds its remote-execution client once, at start, so one started
+before the file was written would send every action to no engine. Running everything on this host is only ever chosen with `--local`: an
 unattended caller (tools/land, tools/main-runs) that silently fell back to it
 would redo every compile, test and toolchain unpack here.
 """
@@ -47,6 +49,15 @@ def is_remote(config):
 
 
 def main():
+    local = ROOT / '.buckconfig.local'
+    before = local.read_bytes() if local.is_file() else None
+    status = configure()
+    if (local.read_bytes() if local.is_file() else None) != before:
+        subprocess.run([str(ROOT / '.buck2/bin/buck2'), 'kill'], cwd=ROOT, capture_output=True)
+    return status
+
+
+def configure():
     arguments = sys.argv[1:]
     if arguments not in ([], ['--local']):
         print(__doc__, file=sys.stderr)

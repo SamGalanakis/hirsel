@@ -281,11 +281,13 @@ fn partition(group: &str, offset: usize, reference_only: bool, split_reference: 
         let mut toolchain =
             Toolchain::for_matrix(&directory.path().join("runtime"), &matrix).unwrap();
         toolchain.launch_timeout = std::time::Duration::from_secs(60);
+        let mut ready =
+            crate::native_ready::supplier(&path, None, &loaded.entry, &toolchain).unwrap();
         for configuration in &matrix {
             let engine = configuration.name();
             eprintln!("UNICODE_STARTED {engine} {group}/{offset} ids={ids:?}");
-            let results = differential_in(
-                &validated,
+            let results = differential_ready(
+                &mut ready,
                 &loaded.entry,
                 &expected,
                 std::slice::from_ref(configuration),

@@ -377,9 +377,7 @@ pub fn main()->Result[(),u64] uses {} {
         )
         .unwrap();
         tool_seal(directory.path(), "before");
-        let mut engine = checked(source);
-        let input = engine.export_native_input().unwrap();
-        let validated = engine.import_native_input(input).unwrap();
+        checked(source);
         let matrix = [
             Configuration {
                 options: Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
@@ -399,8 +397,15 @@ pub fn main()->Result[(),u64] uses {} {
         ];
         let toolchain = Toolchain::for_matrix(&directory.path().join("runtime"), &matrix).unwrap();
         let entry = entry_path(&default_context());
-        let outcomes = runner_oracle_in(
-            &validated,
+        let mut ready = crate::native_ready::supplier(
+            &directory.path().join("main.hir"),
+            None,
+            &entry,
+            &toolchain,
+        )
+        .unwrap();
+        let outcomes = runner_oracle_ready(
+            &mut ready,
             &entry,
             &matrix,
             &toolchain,

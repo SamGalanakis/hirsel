@@ -431,8 +431,6 @@ fn tiny_commit_denied_and_affected_native_build() {
         std::fs::write(&path, source).unwrap();
         let mut loaded = hirsel_driver::load_program(&path).unwrap();
         loaded.check_for_execution().unwrap();
-        let input = loaded.engine.export_native_input().unwrap();
-        let validated = loaded.engine.import_native_input(input).unwrap();
         let matrix = [Configuration {
             options: Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
             engine: Engine::Native {
@@ -452,8 +450,9 @@ fn tiny_commit_denied_and_affected_native_build() {
             roots: vec![],
         };
         eprintln!("HEAP_FILE_FAULT_STARTED tiny-commit-denied llvm-build");
-        for (name, result) in differential_in(
-            &validated,
+        let mut ready = crate::native_ready::supplier(&path, None, &loaded.entry, &tools).unwrap();
+        for (name, result) in differential_ready(
+            &mut ready,
             &loaded.entry,
             &expected,
             &matrix,

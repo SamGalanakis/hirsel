@@ -59,8 +59,6 @@ fn run(engine: &str) {
                 failures: vec![],
                 roots: vec![],
             };
-            let input = program.engine.export_native_input().unwrap();
-            let validated = program.engine.import_native_input(input).unwrap();
             let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
             let matrix = vec![native::Configuration {
                 options,
@@ -82,8 +80,10 @@ fn run(engine: &str) {
                 .join(engine);
             std::fs::create_dir_all(&dir).unwrap();
             let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &matrix).unwrap();
-            let outcomes = native::differential_in(
-                &validated,
+            let mut ready =
+                crate::native_ready::supplier(&path, None, &program.entry, &tools).unwrap();
+            let outcomes = native::differential_ready(
+                &mut ready,
                 &program.entry,
                 &expected,
                 &matrix,

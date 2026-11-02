@@ -153,8 +153,6 @@ fn partition(group: &str) {
             },
             ..Default::default()
         }));
-        let input = loaded.engine.export_native_input().unwrap();
-        let validated = loaded.engine.import_native_input(input).unwrap();
         let reference = run_observed_snapshot(
             &mut loaded.engine,
             &RunConfiguration {
@@ -201,8 +199,10 @@ fn partition(group: &str) {
         .collect();
         let mut toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
         toolchain.launch_timeout = std::time::Duration::from_secs(60);
-        let outcomes = differential_in(
-            &validated,
+        let mut ready =
+            crate::native_ready::supplier(&path, None, &loaded.entry, &toolchain).unwrap();
+        let outcomes = differential_ready(
+            &mut ready,
             &loaded.entry,
             &expected,
             &matrix,

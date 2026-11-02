@@ -40,8 +40,6 @@ fn check(name: &str, cases: usize) {
             reference.outcome
         );
         let expected = native::Observation::of_reference(reference.observation.as_ref().unwrap());
-        let input = loaded.engine.export_native_input().unwrap();
-        let validated = loaded.engine.import_native_input(input).unwrap();
         let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
         let configs = vec![
             native::Configuration {
@@ -67,8 +65,9 @@ fn check(name: &str, cases: usize) {
         let dir =
             PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("quoted-printable-8-{name}"));
         let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &configs).unwrap();
-        for (config, outcome) in native::differential_in(
-            &validated,
+        let mut ready = crate::native_ready::supplier(&path, None, &loaded.entry, &tools).unwrap();
+        for (config, outcome) in native::differential_ready(
+            &mut ready,
             &loaded.entry,
             &expected,
             &configs,

@@ -5,6 +5,9 @@ hirsel_guard::install!();
 
 #[path = "../support/image_fixture.rs"]
 mod image_fixture;
+#[allow(dead_code)]
+#[path = "../support/native_ready.rs"]
+mod native_ready;
 #[path = "../support/source_std.rs"]
 mod source_std;
 

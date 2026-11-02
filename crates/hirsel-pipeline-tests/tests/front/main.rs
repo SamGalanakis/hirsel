@@ -12,6 +12,8 @@ hirsel_guard::install!();
 #[path = "../../../hirsel-llvm/tests/support/mod.rs"]
 mod llvm_support;
 // hirsel-rt's integration-test helpers, shared with its own tests; the rt_ modules use a part.
+#[path = "../../../hirsel-driver/tests/support/native_ready.rs"]
+mod native_ready;
 #[allow(dead_code)]
 #[path = "../../../hirsel-rt/tests/support/mod.rs"]
 mod rt_support;

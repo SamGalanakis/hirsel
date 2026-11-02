@@ -164,8 +164,9 @@ fn campaign(source: &str, gate: FileReadScript, expected: &[u8]) {
             },
         ];
         let tools = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
-        for (name, outcome) in differential_in(
-            &input,
+        let mut ready = crate::native_ready::supplier(&path, None, &loaded.entry, &tools).unwrap();
+        for (name, outcome) in differential_ready(
+            &mut ready,
             &loaded.entry,
             &observation,
             &matrix,
@@ -348,12 +349,11 @@ fn fixture_keeps_root_free_entries_and_validates_snapshot_paths() {
         let reference =
             run_observed_snapshot(&mut loaded.engine, &run, Default::default()).unwrap();
         let observation = Observation::of_reference(reference.observation.as_ref().unwrap());
-        let input = loaded.engine.export_native_input().unwrap();
-        let input = loaded.engine.import_native_input(input).unwrap();
         let matrix = smoke_matrix();
         let tools = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
-        for (name, outcome) in differential_in(
-            &input,
+        let mut ready = crate::native_ready::supplier(&path, None, &loaded.entry, &tools).unwrap();
+        for (name, outcome) in differential_ready(
+            &mut ready,
             &loaded.entry,
             &observation,
             &matrix,

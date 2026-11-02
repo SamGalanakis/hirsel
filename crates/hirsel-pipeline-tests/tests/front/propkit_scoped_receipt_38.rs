@@ -238,19 +238,16 @@ fn expected(output: &[u8]) -> Observation {
     }
 }
 
-fn native_engines(
-    dir: &Path,
-    input: &ValidatedNativeInput,
-    entry: &hirsel_syntax::DefPath,
-    expected: &Observation,
-) {
+fn native_engines(dir: &Path, entry: &hirsel_syntax::DefPath, expected: &Observation) {
     eprintln!("PROPKIT38 TOOLS {}", provenance());
     let configurations = native_matrix();
     let mut toolchain = Toolchain::for_matrix(&dir.join("runtime"), &configurations).unwrap();
     toolchain.launch_timeout = std::time::Duration::from_secs(60);
     std::fs::create_dir_all(dir.join("engines")).unwrap();
-    let outcomes = differential_in(
-        input,
+    let manifest = dir.join("hirsel.json");
+    let mut ready = crate::native_ready::supplier(&manifest, None, entry, &toolchain).unwrap();
+    let outcomes = differential_ready(
+        &mut ready,
         entry,
         expected,
         &configurations,
@@ -271,9 +268,7 @@ fn original_native() {
         let dir = original();
         let mut program = load_program_source(&dir.path().join("hirsel.json"), None).unwrap();
         program.check_for_execution().unwrap();
-        let input = program.engine.export_native_input().unwrap();
-        let validated = program.engine.import_native_input(input).unwrap();
-        native_engines(dir.path(), &validated, &program.entry, &expected(b""));
+        native_engines(dir.path(), &program.entry, &expected(b""));
     });
 }
 
@@ -312,8 +307,6 @@ fn inline_and_helper_values_cleanup_four_engines() {
             std::fs::write(dir.path().join("runner.hir"), runner).unwrap();
             let mut program = load_program_source(&dir.path().join("hirsel.json"), None).unwrap();
             program.check_for_execution().unwrap();
-            let input = program.engine.export_native_input().unwrap();
-            let validated = program.engine.import_native_input(input).unwrap();
             let run = RunConfiguration {
                 entry: program.entry.clone(),
                 hash_seed: 38,
@@ -329,7 +322,7 @@ fn inline_and_helper_values_cleanup_four_engines() {
             let observation = Observation::of_reference(reference.observation.as_ref().unwrap());
             assert_eq!(observation, expected(b"0:1;21"), "{label}");
             eprintln!("PROPKIT38 {label} reference/H values and ordered cleanup PASS");
-            native_engines(dir.path(), &validated, &program.entry, &observation);
+            native_engines(dir.path(), &program.entry, &observation);
         }
     });
 }

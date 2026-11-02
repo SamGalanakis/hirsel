@@ -277,7 +277,10 @@ fn constructors_remain_independently_validated() {
         definition.types = hirsel_tir::definition_types(engine.types(), &definition);
         let report =
             hirsel_validate::validate(&definition, engine.types(), &signatures, &mut vec![]);
-        assert!(!report.violations.is_empty(), "wrong_length={wrong_length}");
+        assert!(
+            !report.unwrap().violations.is_empty(),
+            "wrong_length={wrong_length}"
+        );
     }
 }
 
@@ -415,7 +418,7 @@ fn v_rejects_resource_copy_in_an_inferred_list() {
     assert_eq!(operand.usage, UseKind::Take);
     operand.usage = UseKind::Copy;
     let report = hirsel_validate::validate(&definition, engine.types(), &signatures, &mut vec![]);
-    assert!(!report.violations.is_empty());
+    assert!(!report.unwrap().violations.is_empty());
 }
 
 #[test]

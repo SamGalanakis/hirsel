@@ -238,7 +238,9 @@ fn related_literal_21_v_rejects_forged_multiplicity() {
         }
         forged.types = definition_types(engine.types(), &forged);
         let violations =
-            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]).violations;
+            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![])
+                .unwrap()
+                .violations;
         assert!(
             violations.iter().any(|v| matches!(
                 v.kind,
@@ -322,7 +324,9 @@ fn related_literal_21_v_rejects_relabelled_result_source() {
         child.result = engine.types().intern(result);
         forged.types = definition_types(engine.types(), &forged);
         let violations =
-            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]).violations;
+            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![])
+                .unwrap()
+                .violations;
         assert!(
             violations.iter().any(|v| matches!(
                 v.kind,

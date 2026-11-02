@@ -152,6 +152,7 @@ fn loop_place_52_v_reproves_projected_cursor_loan() {
         signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
         assert!(
             hirsel_validate::validate(definition, engine.types(), &signatures, &mut vec![])
+                .unwrap()
                 .violations
                 .is_empty()
         );
@@ -195,7 +196,9 @@ fn loop_place_52_v_reproves_projected_cursor_loan() {
         }
         assert!(changed);
         let violations =
-            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]).violations;
+            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![])
+                .unwrap()
+                .violations;
         assert!(
             violations.iter().any(|v| matches!(
                 v.kind,

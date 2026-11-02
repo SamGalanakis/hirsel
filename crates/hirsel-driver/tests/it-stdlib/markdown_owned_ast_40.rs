@@ -405,7 +405,8 @@ fn markdown_owned_ast_40_independent_v() {
             }
         }
         assert_eq!(changed.len(), 1);
-        let report = hirsel_validate::validate(&wrong, &input.types, &signatures, &mut vec![]);
+        let report =
+            hirsel_validate::validate(&wrong, &input.types, &signatures, &mut vec![]).unwrap();
         assert!(
             report
                 .violations

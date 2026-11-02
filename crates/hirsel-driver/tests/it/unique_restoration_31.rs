@@ -260,7 +260,7 @@ fn unique_restoration_31_v_requires_actual_release() {
         let mut signatures = hirsel_validate::SignatureMap::new(input.types.clone());
         signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
         let baseline =
-            hirsel_validate::validate(original, engine.types(), &signatures, &mut vec![]);
+            hirsel_validate::validate(original, engine.types(), &signatures, &mut vec![]).unwrap();
         assert!(baseline.violations.is_empty(), "{:?}", baseline.violations);
         let body = &original.bodies[0];
         let (block, index, place) = body
@@ -309,6 +309,7 @@ fn unique_restoration_31_v_requires_actual_release() {
             }
             let violations =
                 hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![])
+                    .unwrap()
                     .violations;
             assert!(!violations.is_empty(), "V accepted {mutant}");
             if mutant != "forged" {
@@ -354,7 +355,9 @@ fn unique_restoration_31_v_rejects_share_instead_of_deep_copy() {
         let mut signatures = hirsel_validate::SignatureMap::new(input.types.clone());
         signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
         let violations =
-            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]).violations;
+            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![])
+                .unwrap()
+                .violations;
         assert!(
             violations.iter().any(|v| matches!(
                 v.kind,
@@ -442,7 +445,8 @@ fn unique_restoration_31_v_retains_independent_holders() {
             let mut signatures = hirsel_validate::SignatureMap::new(input.types.clone());
             signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
             let baseline =
-                hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]);
+                hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![])
+                    .unwrap();
             assert!(
                 baseline.violations.is_empty(),
                 "{name}: {:?}",
@@ -465,6 +469,7 @@ fn unique_restoration_31_v_retains_independent_holders() {
             assert!(changes > 0, "{name}: no deep copy");
             let violations =
                 hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![])
+                    .unwrap()
                     .violations;
             assert!(
                 violations.iter().any(|v| matches!(
@@ -490,7 +495,8 @@ fn unique_restoration_31_v_rejects_branch_only_release() {
         let mut forged = (*input.definitions[&path]).clone();
         let mut signatures = hirsel_validate::SignatureMap::new(input.types.clone());
         signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
-        let baseline = hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]);
+        let baseline =
+            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]).unwrap();
         assert!(baseline.violations.is_empty(), "{:?}", baseline.violations);
         let body = &mut forged.bodies[0];
         let (cleanup, holder) = body
@@ -531,7 +537,9 @@ fn unique_restoration_31_v_rejects_branch_only_release() {
             .collect();
         body.set_cleanup(cleanup, actions);
         let violations =
-            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]).violations;
+            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![])
+                .unwrap()
+                .violations;
         assert!(
             violations.iter().any(|v| matches!(
                 v.kind,
@@ -557,7 +565,8 @@ fn unique_restoration_31_v_rejects_failure_before_replacement() {
         let mut forged = (*input.definitions[&path]).clone();
         let mut signatures = hirsel_validate::SignatureMap::new(input.types.clone());
         signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
-        let baseline = hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]);
+        let baseline =
+            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]).unwrap();
         assert!(baseline.violations.is_empty(), "{:?}", baseline.violations);
         let mut replacements = 0;
         for block in &mut forged.bodies[0].blocks {
@@ -572,7 +581,9 @@ fn unique_restoration_31_v_rejects_failure_before_replacement() {
         }
         assert_eq!(replacements, 1);
         let violations =
-            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]).violations;
+            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![])
+                .unwrap()
+                .violations;
         assert!(
             violations.iter().any(|v| matches!(
                 v.kind,

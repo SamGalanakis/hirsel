@@ -277,7 +277,8 @@ fn while_consume_mode_30_v_rejects_forged_cursor_modes() {
             }
             forged.types = hirsel_tir::definition_types(&input.types, &forged);
             let report =
-                hirsel_validate::validate(&forged, signatures.types(), &signatures, &mut vec![]);
+                hirsel_validate::validate(&forged, signatures.types(), &signatures, &mut vec![])
+                    .unwrap();
             assert!(
                 report.violations.iter().any(|v| v.kind
                     == ViolationKind::TypeMismatch {

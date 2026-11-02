@@ -275,6 +275,7 @@ fn capture_crossing_matrix(payload: &str, initial: &str, measure: &str, stable: 
                         &signatures,
                         &mut vec![],
                     )
+                    .unwrap()
                     .violations;
                     if crosses {
                         assert!(violations.is_empty(), "{label}: {violations:?}");
@@ -462,6 +463,7 @@ fn stale_capture_and_environment_claims_are_reproved_from_live_operands() {
             }
             let violations =
                 hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![])
+                    .unwrap()
                     .violations;
             let expected = match claim {
                 "unique capture" => "value modes",
@@ -532,6 +534,7 @@ fn shared_taken_capture_cannot_satisfy_a_unique_parameter() {
         signatures.insert(consume.definition, consume);
         let violations =
             hirsel_validate::validate(definition, &input.types, &signatures, &mut vec![])
+                .unwrap()
                 .violations;
         assert!(
             violations.iter().any(|v| v.kind

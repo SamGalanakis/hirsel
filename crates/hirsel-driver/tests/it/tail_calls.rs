@@ -241,12 +241,14 @@ fn independent_ir_validation_rejects_forged_tail_obligations_and_continuations()
         signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
         assert!(
             hirsel_validate::validate(&base, engine.types(), &signatures, &mut vec![])
+                .unwrap()
                 .violations
                 .is_empty()
         );
         let rejected = |definition: &hirsel_tir::Definition| {
             assert!(
                 hirsel_validate::validate(definition, engine.types(), &signatures, &mut vec![])
+                    .unwrap()
                     .violations
                     .iter()
                     .any(|v| matches!(
@@ -349,6 +351,7 @@ fn a_diverging_self_tail_call_is_a_checked_loop_site() {
         };
         assert!(
             hirsel_validate::validate(&base, engine.types(), &signatures, &mut vec![])
+                .unwrap()
                 .violations
                 .is_empty()
         );
@@ -370,6 +373,7 @@ fn a_diverging_self_tail_call_is_a_checked_loop_site() {
         bad.types = hirsel_tir::definition_types(engine.types(), &bad);
         assert!(
             hirsel_validate::validate(&bad, engine.types(), &signatures, &mut vec![])
+                .unwrap()
                 .violations
                 .iter()
                 .any(|v| matches!(

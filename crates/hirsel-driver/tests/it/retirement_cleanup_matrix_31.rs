@@ -724,6 +724,7 @@ fn mutation_partition(start: usize, end: usize) {
             );
             assert!(
                 hirsel_validate::validate(original, &input.types, &signatures, &mut vec![])
+                    .unwrap()
                     .violations
                     .is_empty()
             );
@@ -768,7 +769,8 @@ fn mutation_partition(start: usize, end: usize) {
             let old = body.blocks[block_id].instructions[i].on_failure;
             let new = without_owner(body, old, root);
             body.blocks[block_id].instructions[i].on_failure = new;
-            let result = hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]);
+            let result =
+                hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]).unwrap();
             assert!(result.violations.iter().any(|v|matches!(&v.kind,hirsel_validate::ViolationKind::CleanupMismatch{expected,actual,..} if expected.contains(&root) && !actual.contains(&root))),"seed {seed} omission of {root:?}: {result:?}");
             history::persist(
                 &dir,

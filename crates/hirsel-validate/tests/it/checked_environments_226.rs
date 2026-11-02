@@ -11,13 +11,7 @@ fn table(
     types: &Arc<TypeInterner>,
     rows: impl IntoIterator<Item = SignatureRef>,
 ) -> Arc<ViewTable> {
-    Arc::new(ViewTable::new(
-        types,
-        rows,
-        None,
-        &mut ValidatedSignatures::default(),
-        None,
-    ))
+    Arc::new(ViewTable::new(types, rows, None, &mut ValidatedSignatures::default(), None).unwrap())
 }
 
 #[test]
@@ -36,7 +30,8 @@ fn checked_evidence_binds_body_type_policy_and_private_snapshot() {
         &*first as &dyn hirsel_validate::CheckedEnvironment,
         policy,
         None,
-    );
+    )
+    .unwrap();
     assert!(ran && report.violations.is_empty(), "{report:?}");
     let evidence = evidence.unwrap();
     assert!(evidence.holds(
@@ -90,7 +85,8 @@ fn checked_evidence_binds_body_type_policy_and_private_snapshot() {
         [View::new(&types, Arc::new(changed), None)],
         &mut ValidatedSignatures::default(),
         None,
-    );
+    )
+    .unwrap();
     assert!(
         !evidence.environment_holds(policy, &private as &dyn hirsel_validate::CheckedEnvironment)
     );
@@ -106,7 +102,8 @@ fn checked_evidence_binds_body_type_policy_and_private_snapshot() {
         &*first as &dyn hirsel_validate::CheckedEnvironment,
         policy,
         None,
-    );
+    )
+    .unwrap();
     assert!(ran && !report.violations.is_empty());
     assert!(accepted.is_none() && proof.is_none());
     let copy = Arc::new((*definition).clone());
@@ -135,7 +132,8 @@ fn checked_snapshot_stamp_cannot_hide_unrelated_universe_errors_or_missing_owner
         &*first as &dyn hirsel_validate::CheckedEnvironment,
         policy,
         None,
-    );
+    )
+    .unwrap();
     assert!(report.violations.is_empty());
     let evidence = evidence.unwrap();
     assert!(
@@ -183,7 +181,8 @@ fn foreign_interner_cannot_reuse_a_clean_environment() {
         &*first as &dyn hirsel_validate::CheckedEnvironment,
         policy,
         None,
-    );
+    )
+    .unwrap();
     assert!(report.violations.is_empty());
     let evidence = evidence.unwrap();
     // A foreign universe is rejected even if all of its numeric rows happen to
@@ -217,7 +216,8 @@ fn checked_environment_revalidates_first_heap_even_when_all_prior_views_hold() {
         &*first as &dyn hirsel_validate::CheckedEnvironment,
         policy,
         None,
-    );
+    )
+    .unwrap();
     assert!(report.violations.is_empty(), "{report:?}");
     let evidence = evidence.unwrap();
     assert!(

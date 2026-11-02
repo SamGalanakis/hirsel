@@ -167,7 +167,8 @@ fn digests(source: &str) -> (hirsel_syntax::ContentHash, hirsel_syntax::ContentH
         let package = default_context().package;
         let before = engine
             .signature_snapshot()
-            .validation_input_digest(&package);
+            .validation_input_digest(&package)
+            .unwrap();
         let path = |name: &str| {
             hirsel_syntax::DefPath(hirsel_syntax::ItemPath {
                 package: package.clone(),
@@ -181,7 +182,11 @@ fn digests(source: &str) -> (hirsel_syntax::ContentHash, hirsel_syntax::ContentH
         engine.signature(id).unwrap();
         let snapshot = engine.signature_snapshot();
         let held = matches!(snapshot.signature(id), Some(Ok(_)));
-        (before, snapshot.validation_input_digest(&package), held)
+        (
+            before,
+            snapshot.validation_input_digest(&package).unwrap(),
+            held,
+        )
     })
 }
 

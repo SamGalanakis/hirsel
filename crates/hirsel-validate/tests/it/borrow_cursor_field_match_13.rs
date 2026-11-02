@@ -175,7 +175,8 @@ fn field_match_cursor_v_rejects_foreign_field_payload_loop() {
         interner(),
         &f.signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert!(
         verdict
             .violations

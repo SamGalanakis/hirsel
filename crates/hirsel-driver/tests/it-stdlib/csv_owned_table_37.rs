@@ -360,7 +360,8 @@ fn csv_owned_table_37_independent_v_adversary() {
             }
         }
         assert_eq!(changed, 1);
-        let report = hirsel_validate::validate(&wrong, &input.types, &signatures, &mut vec![]);
+        let report =
+            hirsel_validate::validate(&wrong, &input.types, &signatures, &mut vec![]).unwrap();
         assert!(
             !report.violations.is_empty(),
             "forged take accepted: {report:?}"

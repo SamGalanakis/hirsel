@@ -319,7 +319,8 @@ fn sealed_data_callback_sum_is_independently_proved_by_v_and_c() {
         &program.types,
         &signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert!(proof.violations.is_empty(), "V: {:?}", proof.violations);
     let target = target();
     let mut layouts = LayoutBuilder::new(&target, &program.owners);

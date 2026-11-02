@@ -1046,13 +1046,7 @@ impl FrontBodyQueries {
             ReadKey::ValidationUniverse(package) => {
                 self.snapshot.validation_input_digest(&package.id()).ok()?
             }
-            ReadKey::UniverseErrors => {
-                self.snapshot
-                    .validation(package)
-                    .ok()?
-                    .universe_errors()
-                    .0
-            }
+            ReadKey::UniverseErrors => self.snapshot.validation(package).ok()?.universe_errors().0,
             ReadKey::FirstHeap => self
                 .snapshot
                 .validation(package)

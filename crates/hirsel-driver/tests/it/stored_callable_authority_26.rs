@@ -31,7 +31,8 @@ fn source_case(id: &str, source: &str, expected: Option<&str>) -> bool {
             signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
             for definition in input.definitions.values() {
                 let report =
-                    hirsel_validate::validate(definition, &input.types, &signatures, &mut vec![]);
+                    hirsel_validate::validate(definition, &input.types, &signatures, &mut vec![])
+                        .unwrap();
                 assert!(report.violations.is_empty(), "{id}: {report:?}");
             }
             println!(
@@ -676,7 +677,8 @@ fn mutant_case(id: &str, source: &str, fields: &[&str]) {
             .find(|(p, _)| p.0.name == "choose")
             .unwrap()
             .1;
-        let valid = hirsel_validate::validate(base, &input.types, &signatures, &mut vec![]);
+        let valid =
+            hirsel_validate::validate(base, &input.types, &signatures, &mut vec![]).unwrap();
         assert!(valid.violations.is_empty(), "{id}: {valid:?}");
         println!(
             "AUTH26 {}",
@@ -684,7 +686,8 @@ fn mutant_case(id: &str, source: &str, fields: &[&str]) {
         );
         for field in fields {
             let (bad, signatures) = mutated_definition(&input, "choose", field);
-            let got = hirsel_validate::validate(&bad, &input.types, &signatures, &mut vec![]);
+            let got =
+                hirsel_validate::validate(&bad, &input.types, &signatures, &mut vec![]).unwrap();
             println!(
                 "AUTH26 {}",
                 serde_json::json!({"id":format!("{id}-{field}"),"engine":"V-mutant","observed":format!("{:?}",got.violations)})
@@ -810,9 +813,9 @@ fn paired_v_negative(id: &str, input: &NativeInput, signatures: &hirsel_validate
         }
         def.types = definition_types(&input.types, &def);
     }
-    let base = hirsel_validate::validate(original, &input.types, signatures, &mut vec![]);
+    let base = hirsel_validate::validate(original, &input.types, signatures, &mut vec![]).unwrap();
     assert!(base.violations.is_empty(), "{id}: {base:?}");
-    let got = hirsel_validate::validate(&def, &input.types, &sigs, &mut vec![]);
+    let got = hirsel_validate::validate(&def, &input.types, &sigs, &mut vec![]).unwrap();
     println!(
         "AUTH26 {}",
         serde_json::json!({"id":id,"engine":"V-negative-twin","observed":format!("{:?}",got.violations)})

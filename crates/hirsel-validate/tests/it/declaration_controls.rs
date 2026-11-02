@@ -85,6 +85,7 @@ fn verdict_with(s: Signature, extras: Vec<Signature>, accepted: bool) {
     );
     assert_eq!(
         universe
+            .unwrap()
             .errors
             .iter()
             .map(|v| v.kind.clone())
@@ -1105,6 +1106,7 @@ fn growing_schema_limits_remain_operational_and_owner_replacement_clears_them() 
                 f.signatures.keys().collect::<Vec<_>>(),
                 &f.signatures,
             )
+            .unwrap()
             .errors
             .into_iter()
             .map(|v| v.kind)
@@ -1275,8 +1277,12 @@ fn a_private_shape_edit_under_an_unchanged_fingerprint_rechecks_exactly_its_read
         );
     }
     let mut verdicts = ValidatedSignatures::default();
-    let hidden = verdicts.verdict(interner(), id("Hidden"), &signatures);
-    let other = verdicts.verdict(interner(), id("Other"), &signatures);
+    let hidden = verdicts
+        .verdict(interner(), id("Hidden"), &signatures)
+        .unwrap();
+    let other = verdicts
+        .verdict(interner(), id("Other"), &signatures)
+        .unwrap();
     assert_eq!((&hidden.error, &other.error), (&None, &None));
     assert!(reads_view(&hidden, "Inner") && !reads_view(&other, "Inner"));
     let original = signatures.get(&path("Inner")).unwrap().clone();
@@ -1291,17 +1297,23 @@ fn a_private_shape_edit_under_an_unchanged_fingerprint_rechecks_exactly_its_read
     assert_eq!(signatures.get(&path("Inner")).unwrap().fingerprint, before);
     assert_ne!(signatures.view(id("Inner")).unwrap().digest(), digest);
     assert!(!holds(&hidden, &signatures) && holds(&other, &signatures));
-    let again = verdicts.verdict(interner(), id("Hidden"), &signatures);
+    let again = verdicts
+        .verdict(interner(), id("Hidden"), &signatures)
+        .unwrap();
     assert!(!std::sync::Arc::ptr_eq(&hidden, &again) && reads_view(&again, "Inner"));
     assert!(std::sync::Arc::ptr_eq(
         &other,
-        &verdicts.verdict(interner(), id("Other"), &signatures)
+        &verdicts
+            .verdict(interner(), id("Other"), &signatures)
+            .unwrap()
     ));
     // Back to the old shape: the first verdict holds again and is reused.
     signatures.insert(id("Inner"), original);
     assert!(std::sync::Arc::ptr_eq(
         &hidden,
-        &verdicts.verdict(interner(), id("Hidden"), &signatures)
+        &verdicts
+            .verdict(interner(), id("Hidden"), &signatures)
+            .unwrap()
     ));
 }
 
@@ -1320,7 +1332,10 @@ fn malformed_rows_under_an_unchanged_producer_fingerprint_are_checked_again() {
     );
     let mut verdicts = ValidatedSignatures::default();
     assert_eq!(
-        verdicts.verdict(interner(), id("Data"), &signatures).error,
+        verdicts
+            .verdict(interner(), id("Data"), &signatures)
+            .unwrap()
+            .error,
         None
     );
     let fingerprint = signatures.get(&path("Data")).unwrap().fingerprint;
@@ -1336,6 +1351,7 @@ fn malformed_rows_under_an_unchanged_producer_fingerprint_are_checked_again() {
     assert_eq!(
         verdicts
             .verdict(interner(), id("Data"), &signatures)
+            .unwrap()
             .error
             .as_ref()
             .map(|v| v.kind.clone()),
@@ -1347,6 +1363,7 @@ fn malformed_rows_under_an_unchanged_producer_fingerprint_are_checked_again() {
     let mut reads = vec![];
     assert!(
         validate(&tabled(&f.definition), interner(), &universe, &mut reads)
+            .unwrap()
             .violations
             .is_empty()
     );
@@ -1354,6 +1371,7 @@ fn malformed_rows_under_an_unchanged_producer_fingerprint_are_checked_again() {
     assert!(!reads.iter().all(|read| read_holds(read, &universe)));
     assert_eq!(
         validate(&tabled(&f.definition), interner(), &universe, &mut vec![])
+            .unwrap()
             .violations
             .iter()
             .map(|v| v.kind.clone())
@@ -1381,12 +1399,16 @@ fn a_lookup_going_from_missing_to_present_invalidates() {
     let mut signatures = SignatureMap::new(session());
     signatures.insert(id("Hidden"), s);
     let mut verdicts = ValidatedSignatures::default();
-    let missing = verdicts.verdict(interner(), id("Hidden"), &signatures);
+    let missing = verdicts
+        .verdict(interner(), id("Hidden"), &signatures)
+        .unwrap();
     assert!(missing.reads.contains(&VRead::Missing(id("Gate"))));
     assert!(missing.error.is_some());
     signatures.insert(id("Gate"), capability());
     assert!(!holds(&missing, &signatures));
-    let present = verdicts.verdict(interner(), id("Hidden"), &signatures);
+    let present = verdicts
+        .verdict(interner(), id("Hidden"), &signatures)
+        .unwrap();
     assert!(reads_view(&present, "Gate"));
     assert_eq!(present.error, None);
 }
@@ -1458,11 +1480,13 @@ fn restored_success_rechecks_private_shape_reads_under_unchanged_fingerprints() 
     let cache = std::sync::Arc::new(hirsel_validate::VerifierCache::default());
     let policy = hirsel_syntax::ContentHash::of_bytes(b"view-receipt-context");
     let mut original = ValidatedSignatures::with_cache(Some(cache.clone()), policy);
-    let verdict = original.verdict(interner(), id("Hidden"), &signatures);
+    let verdict = original
+        .verdict(interner(), id("Hidden"), &signatures)
+        .unwrap();
     assert!(verdict.error.is_none() && reads_view(&verdict, "Inner"));
     let before = work::read(Counter::ValidateSignatureRows);
     let mut next = ValidatedSignatures::with_cache(Some(cache), policy);
-    let reused = next.verdict(interner(), id("Hidden"), &signatures);
+    let reused = next.verdict(interner(), id("Hidden"), &signatures).unwrap();
     assert_eq!(*reused, *verdict);
     assert_eq!(work::read(Counter::ValidateSignatureRows), before);
     let fingerprint = signatures.get(&path("Inner")).unwrap().fingerprint;
@@ -1475,7 +1499,7 @@ fn restored_success_rechecks_private_shape_reads_under_unchanged_fingerprints() 
         signatures.get(&path("Inner")).unwrap().fingerprint,
         fingerprint
     );
-    let recomputed = next.verdict(interner(), id("Hidden"), &signatures);
+    let recomputed = next.verdict(interner(), id("Hidden"), &signatures).unwrap();
     assert!(!std::sync::Arc::ptr_eq(&reused, &recomputed));
     assert_eq!(work::read(Counter::ValidateSignatureRows), before + 1);
     // Hidden's own declared nominal bounds can still hold. Its newly recorded
@@ -1489,6 +1513,7 @@ fn restored_success_rechecks_private_shape_reads_under_unchanged_fingerprints() 
             signatures.get(id("Hidden")).unwrap(),
             &signatures
         )
+        .unwrap()
     );
     let universe = next.universe(
         interner(),
@@ -1497,6 +1522,7 @@ fn restored_success_rechecks_private_shape_reads_under_unchanged_fingerprints() 
     );
     assert!(
         universe
+            .unwrap()
             .errors
             .iter()
             .any(|v| v.kind == ViolationKind::InvalidSignature(path("Inner")))

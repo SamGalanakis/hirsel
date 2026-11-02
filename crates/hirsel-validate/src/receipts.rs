@@ -1285,6 +1285,7 @@ mod tests {
             Some(cache),
             &mut vec![],
         )
+        .unwrap()
     }
     fn key(artifact: &Artifact<'_>, policy: ContentHash) -> ContentHash {
         ContentHash::of_parts(
@@ -1296,13 +1297,15 @@ mod tests {
     fn view(f: &Fixture, cache: &VerifierCache, policy: ContentHash) -> Arc<crate::ViewVerdict> {
         let definition = f.definition.path;
         let signature = f.signatures.get(definition).unwrap();
-        cache.view_verdict(
-            &session(),
-            definition,
-            crate::IdentifiedSignature::new(session(), Arc::new(signature.clone())).input(),
-            &f.signatures,
-            policy,
-        )
+        cache
+            .view_verdict(
+                &session(),
+                definition,
+                crate::IdentifiedSignature::new(session(), Arc::new(signature.clone())).input(),
+                &f.signatures,
+                policy,
+            )
+            .unwrap()
     }
 
     #[test]
@@ -1418,6 +1421,7 @@ mod tests {
         assert!(
             verdicts
                 .verdict(&types, f.definition.path, &f.signatures)
+                .unwrap()
                 .error
                 .is_none()
         );
@@ -1432,7 +1436,8 @@ mod tests {
             &views,
             ContentHash::default(),
             None,
-        );
+        )
+        .unwrap();
         assert!(
             !report.violations.is_empty(),
             "foreign owner must not be treated as optional absence"
@@ -1441,6 +1446,7 @@ mod tests {
         assert!(
             verdicts
                 .verdict(&types, f.definition.path, &views)
+                .unwrap()
                 .error
                 .is_some()
         );
@@ -1453,6 +1459,7 @@ mod tests {
                     &views,
                     ContentHash::default()
                 )
+                .unwrap()
                 .error
                 .is_some()
         );
@@ -1472,7 +1479,8 @@ mod tests {
             &f.signatures,
             policy,
             None,
-        );
+        )
+        .unwrap();
         assert!(ran && report.violations.is_empty());
         assert!(
             accepted.is_some(),
@@ -1498,7 +1506,8 @@ mod tests {
             &f.signatures,
             policy,
             None,
-        );
+        )
+        .unwrap();
         assert!(!rejected.violations.is_empty());
         assert!(accepted.is_none());
         assert!(rejected_evidence.is_none());
@@ -1526,7 +1535,7 @@ mod tests {
         let current = crate::IdentifiedSignature::new(session(), Arc::new(changed));
         assert_ne!(old.input().digest(), current.input().digest());
         assert_eq!(
-            old.input().signature().metadata.visibility,
+            old.input().signature().unwrap().metadata.visibility,
             hirsel_syntax::Visibility::Private
         );
     }
@@ -1600,7 +1609,7 @@ mod tests {
                 &f.signatures,
                 policy,
             );
-            assert!(verdict.error.is_some());
+            assert!(verdict.unwrap().error.is_some());
         }
         let bad_digest = crate::digest(&session(), &broken);
         assert_ne!(bad_digest, good_digest);
@@ -1612,7 +1621,7 @@ mod tests {
                 &f.signatures,
                 policy,
             );
-            assert!(verdict.error.is_some());
+            assert!(verdict.unwrap().error.is_some());
         }
         assert_eq!(work::read(Counter::ValidateSignatureRows), before + 4);
         assert!(
@@ -1710,7 +1719,8 @@ mod tests {
             policy,
             Some(&cache),
             &mut vec![],
-        );
+        )
+        .unwrap();
         assert!(report.violations.is_empty());
         let contexts = vec![(
             path("main").0.package,
@@ -1723,7 +1733,11 @@ mod tests {
         let subject = ContentHash::of_bytes(b"complete evaluated value and action");
         cache.publish_execution(subject, &receipt);
         let reopened = VerifierCache::directory(directory.0.clone());
-        assert!(reopened.execution(subject, |_| Some(contexts[0].1)).is_some());
+        assert!(
+            reopened
+                .execution(subject, |_| Some(contexts[0].1))
+                .is_some()
+        );
         assert!(
             reopened
                 .execution(subject, |_| Some(ContentHash::default()))
@@ -1731,7 +1745,7 @@ mod tests {
         );
         assert!(
             reopened
-                .execution(ContentHash::default(), |_| contexts[0].1)
+                .execution(ContentHash::default(), |_| Some(contexts[0].1))
                 .is_none()
         );
         // Even exact output bytes do not transfer the issuer's associations.
@@ -1783,7 +1797,8 @@ mod tests {
             policy,
             Some(&cache),
             &mut vec![],
-        );
+        )
+        .unwrap();
         let accepted = accepted.unwrap();
         let package = path("main").0.package;
         let old = ContentHash::of_bytes(b"old universe");
@@ -1843,7 +1858,8 @@ mod tests {
             ContentHash::default(),
             Some(&cache),
             &mut vec![],
-        );
+        )
+        .unwrap();
         let old = ContentHash::of_bytes(b"old");
         let mut other = path("main").0.package;
         other.name = "other".into();
@@ -1899,7 +1915,8 @@ mod tests {
             policy,
             Some(&cache),
             &mut reads,
-        );
+        )
+        .unwrap();
         assert!(report.violations.is_empty(), "{report:?}");
         assert!(
             reads.contains(&VRead::FirstHeap(Some(hirsel_syntax::DefId::intern(
@@ -2015,7 +2032,8 @@ mod tests {
         );
         let policy = ContentHash::default();
         let (_, _, accepted) =
-            validate_with_receipt(&exact, &f.signatures, policy, Some(&cache), &mut vec![]);
+            validate_with_receipt(&exact, &f.signatures, policy, Some(&cache), &mut vec![])
+                .unwrap();
         let accepted = accepted.unwrap();
         let anchor = f.definition.bodies[0].blocks[0].span.anchor;
         assert!(

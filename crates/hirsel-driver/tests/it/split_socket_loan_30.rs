@@ -242,7 +242,8 @@ fn split_socket_loan_30_v_rejects_early_capture_loan_end() {
                 body.blocks[block].instructions.insert(index, end);
             }
             let report =
-                hirsel_validate::validate(&forged, signatures.types(), &signatures, &mut vec![]);
+                hirsel_validate::validate(&forged, signatures.types(), &signatures, &mut vec![])
+                    .unwrap();
             assert!(
                 report.violations.iter().any(|v| v.kind
                     == ViolationKind::ExpiredLoan {

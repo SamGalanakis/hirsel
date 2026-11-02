@@ -74,6 +74,7 @@ pub(crate) fn tabled(definition: &Definition) -> Definition {
 }
 fn kinds_of(definition: &Definition, signatures: &SignatureMap) -> Vec<ViolationKind> {
     validate(definition, interner(), signatures, &mut vec![])
+        .unwrap()
         .violations
         .into_iter()
         .map(|v| v.kind)

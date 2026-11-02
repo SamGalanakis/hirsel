@@ -379,7 +379,7 @@ fn execute(runner: &Runner, name: &str, source: &str) -> Report {
     signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
     for definition in input.definitions.values() {
         let validation =
-            hirsel_validate::validate(definition, &input.types, &signatures, &mut vec![]);
+            hirsel_validate::validate(definition, &input.types, &signatures, &mut vec![]).unwrap();
         if !validation.violations.is_empty() {
             return Report {
                 validated: false,
@@ -742,7 +742,8 @@ fn eight_direct_v_premature_loan_ends() {
                 };
                 body.blocks[block].instructions.insert(index, end);
                 let validation =
-                    hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]);
+                    hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![])
+                        .unwrap();
                 persist(
                     &directory,
                     &format!("seed-{seed_index}-at-call-{at_call}"),

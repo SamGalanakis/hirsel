@@ -171,12 +171,9 @@ impl QueryEngine {
             };
             let snapshot = self.signature_snapshot();
             // A refused universe holds nothing: the receipt is not reused.
-            if !snapshot
-                .validation(&path.0.package)
-                .is_ok_and(|views| {
-                    evidence.environment_holds(self.source_verification_policy(), views)
-                })
-            {
+            if !snapshot.validation(&path.0.package).is_ok_and(|views| {
+                evidence.environment_holds(self.source_verification_policy(), views)
+            }) {
                 return Ok(false);
             }
         }
@@ -212,11 +209,9 @@ impl QueryEngine {
             };
             let snapshot = self.signature_snapshot();
             if evidence.owner() != DefId::intern(path)
-                || !snapshot
-                    .validation(&path.0.package)
-                    .is_ok_and(|views| {
-                        evidence.environment_holds(snapshot.source_verification_policy(), views)
-                    })
+                || !snapshot.validation(&path.0.package).is_ok_and(|views| {
+                    evidence.environment_holds(snapshot.source_verification_policy(), views)
+                })
             {
                 return false;
             }

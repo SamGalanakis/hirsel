@@ -24,7 +24,8 @@ fn check(source: &str, expected: Option<&str>) {
             signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
             for definition in input.definitions.values() {
                 let report =
-                    hirsel_validate::validate(definition, &input.types, &signatures, &mut vec![]);
+                    hirsel_validate::validate(definition, &input.types, &signatures, &mut vec![])
+                        .unwrap();
                 assert!(report.violations.is_empty(), "{source}\n{report:?}");
             }
         }
@@ -191,7 +192,8 @@ fn verifier_rejects_forged_own_selectors() {
             .find(|(p, _)| p.0.name == "choose")
             .unwrap()
             .1;
-        let valid = hirsel_validate::validate(original, &input.types, &signatures, &mut vec![]);
+        let valid =
+            hirsel_validate::validate(original, &input.types, &signatures, &mut vec![]).unwrap();
         assert!(valid.violations.is_empty(), "{valid:?}");
         let old = original
             .bodies
@@ -233,7 +235,8 @@ fn verifier_rejects_forged_own_selectors() {
                 }
             }
             forged.types = definition_types(&input.types, &forged);
-            let report = hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]);
+            let report =
+                hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]).unwrap();
             println!("OWN27 V selector={selected}: {:?}", report.violations);
             assert!(
                 !report.violations.is_empty(),

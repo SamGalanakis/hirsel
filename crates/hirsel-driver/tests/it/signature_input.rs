@@ -126,13 +126,15 @@ fn hand_built_opaque_construction_needs_the_owner_input_and_checks_fields() {
         definition.types = hirsel_tir::definition_types(engine.types(), &definition);
         assert!(
             !hirsel_validate::validate(&definition, engine.types(), &public_input, &mut vec![])
+                .unwrap()
                 .violations
                 .is_empty()
         );
-        let owner_input = snapshot.validation(&context.package);
+        let owner_input = snapshot.validation(&context.package).unwrap();
         definition.types = hirsel_tir::definition_types(engine.types(), &definition);
         let report =
-            hirsel_validate::validate(&definition, engine.types(), owner_input, &mut vec![]);
+            hirsel_validate::validate(&definition, engine.types(), owner_input, &mut vec![])
+                .unwrap();
         assert!(report.violations.is_empty(), "{:?}", report.violations);
         let foreign = hirsel_syntax::PackageId {
             name: context.package.name.clone(),
@@ -143,9 +145,10 @@ fn hand_built_opaque_construction_needs_the_owner_input_and_checks_fields() {
             !hirsel_validate::validate(
                 &definition,
                 engine.types(),
-                snapshot.validation(&foreign),
+                snapshot.validation(&foreign).unwrap(),
                 &mut vec![]
             )
+            .unwrap()
             .violations
             .is_empty()
         );
@@ -157,6 +160,7 @@ fn hand_built_opaque_construction_needs_the_owner_input_and_checks_fields() {
         forged.types = hirsel_tir::definition_types(engine.types(), &forged);
         assert!(
             !hirsel_validate::validate(&forged, engine.types(), owner_input, &mut vec![])
+                .unwrap()
                 .violations
                 .is_empty()
         );
@@ -602,12 +606,18 @@ fn validation_universe_receipts_distinguish_valid_changes_and_originating_privat
         let file = engine.sources.add("universe.hir", base.into()).unwrap();
         engine.parse_file(file, &context).unwrap();
         let initial = engine.signature_snapshot();
-        let initial_errors = initial.validation(&context.package).universe_errors().0;
+        let initial_errors = initial
+            .validation(&context.package)
+            .unwrap()
+            .universe_errors()
+            .0;
         let mut reads = ReadsBuilder::new();
         let own = FrozenProvider::for_body(&initial, context.package.clone(), &mut reads)
-            .validation_universe();
-        let foreign_before =
-            FrozenProvider::for_body(&initial, foreign.clone(), &mut reads).validation_universe();
+            .validation_universe()
+            .unwrap();
+        let foreign_before = FrozenProvider::for_body(&initial, foreign.clone(), &mut reads)
+            .validation_universe()
+            .unwrap();
         let reads = reads.finish().unwrap();
         assert_eq!(
             reads.get(&ReadKey::ValidationUniverse(PackageKey::of(
@@ -627,7 +637,12 @@ fn validation_universe_receipts_distinguish_valid_changes_and_originating_privat
         let file = engine.sources.add("universe.hir", body.clone()).unwrap();
         engine.parse_file(file, &context).unwrap();
         let body_snapshot = engine.signature_snapshot();
-        assert_eq!(body_snapshot.validation_input_digest(&context.package), own);
+        assert_eq!(
+            body_snapshot
+                .validation_input_digest(&context.package)
+                .unwrap(),
+            own
+        );
         let private = body.replace("value: u8", "value: u16");
         let file = engine.sources.add("universe.hir", private.clone()).unwrap();
         engine.parse_file(file, &context).unwrap();
@@ -635,16 +650,19 @@ fn validation_universe_receipts_distinguish_valid_changes_and_originating_privat
         assert_eq!(
             private_snapshot
                 .validation(&context.package)
+                .unwrap()
                 .universe_errors()
                 .0,
             initial_errors
         );
         assert_ne!(
-            private_snapshot.validation_input_digest(&context.package),
+            private_snapshot
+                .validation_input_digest(&context.package)
+                .unwrap(),
             own
         );
         assert_eq!(
-            private_snapshot.validation_input_digest(&foreign),
+            private_snapshot.validation_input_digest(&foreign).unwrap(),
             foreign_before
         );
         let header = private.replace("fn f() -> u8 { 2u8 }", "fn f() -> u16 { 2u16 }");
@@ -652,11 +670,15 @@ fn validation_universe_receipts_distinguish_valid_changes_and_originating_privat
         engine.parse_file(file, &context).unwrap();
         let changed = engine.signature_snapshot();
         assert_eq!(
-            changed.validation(&context.package).universe_errors().0,
+            changed
+                .validation(&context.package)
+                .unwrap()
+                .universe_errors()
+                .0,
             initial_errors
         );
         assert_ne!(
-            changed.validation_input_digest(&foreign),
+            changed.validation_input_digest(&foreign).unwrap(),
             foreign_before,
             "valid changed rows change the input receipt even with the same empty error digest"
         );
@@ -704,7 +726,8 @@ fn installed_std_publishes_the_universe_summary_its_full_table_computes() {
             }),
             &mut ValidatedSignatures::default(),
             None,
-        );
+        )
+        .unwrap();
         assert!(
             table.views().iter().any(|v| v.d.path().0.package == std),
             "the full table holds std's rows"

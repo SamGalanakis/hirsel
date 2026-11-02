@@ -228,7 +228,8 @@ fn independent_v_rejects_wrong_source_and_expired_loan() {
         let mut wrong = (**definition).clone();
         // Same types, different lifetime: the declared result may only use value.
         wrong.bodies[0].parameters.swap(0, 1);
-        let report = hirsel_validate::validate(&wrong, &input.types, &signatures, &mut vec![]);
+        let report =
+            hirsel_validate::validate(&wrong, &input.types, &signatures, &mut vec![]).unwrap();
         assert!(
             report.violations.iter().any(|v| matches!(
                 v.kind,
@@ -260,7 +261,8 @@ fn independent_v_rejects_wrong_source_and_expired_loan() {
             span: block.span,
             on_failure: hirsel_tir::CleanupId(0),
         });
-        let report = hirsel_validate::validate(&expired, &input.types, &signatures, &mut vec![]);
+        let report =
+            hirsel_validate::validate(&expired, &input.types, &signatures, &mut vec![]).unwrap();
         assert!(
             report
                 .violations

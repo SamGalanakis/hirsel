@@ -339,7 +339,9 @@ fn check_encoding(f: &Fixture, expected: Expected) {
         (&tabled(&f.definition), interner(), &f.signatures),
         (&definition, types.as_ref(), &signatures),
     ] {
-        let errors = validate(definition, types, signatures, &mut vec![]).violations;
+        let errors = validate(definition, types, signatures, &mut vec![])
+            .unwrap()
+            .violations;
         match expected {
             Expected::Valid => assert!(errors.is_empty(), "{errors:?}"),
             Expected::Mismatch(entity) => {

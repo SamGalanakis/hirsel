@@ -105,7 +105,7 @@ fn v_rejects_the_original_conditional_replacement_and_a_moved_owner() {
     path.0.name = "run_scalar".into();
     let original = engine.lower_to_tir(&path).unwrap().value;
     let signatures = engine.signature_snapshot();
-    let signatures = signatures.validation(&path.0.package);
+    let signatures = signatures.validation(&path.0.package).unwrap();
     hirsel_validate::assert_valid(&original, engine.types(), signatures);
     let mut conditional = (*original).clone();
     let body = &mut conditional.bodies[conditional.entry.0 as usize];
@@ -151,7 +151,8 @@ fn v_rejects_the_original_conditional_replacement_and_a_moved_owner() {
         }
     }
     assert_eq!(changed, 1);
-    let report = hirsel_validate::validate(&conditional, engine.types(), signatures, &mut vec![]);
+    let report =
+        hirsel_validate::validate(&conditional, engine.types(), signatures, &mut vec![]).unwrap();
     assert!(
         report
             .violations
@@ -178,7 +179,8 @@ fn v_rejects_the_original_conditional_replacement_and_a_moved_owner() {
         })
         .unwrap();
     moved_operand.usage = UseKind::Take;
-    let report = hirsel_validate::validate(&moved, engine.types(), signatures, &mut vec![]);
+    let report =
+        hirsel_validate::validate(&moved, engine.types(), signatures, &mut vec![]).unwrap();
     assert!(
         report.violations.iter().any(|v| matches!(
             v.kind,

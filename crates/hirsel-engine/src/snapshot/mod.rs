@@ -891,12 +891,10 @@ impl SignatureSnapshot {
         &self,
         d: DefId,
     ) -> Option<Result<(SignatureRef, ValidationDigest), QueryError>> {
-        Some(self.representation_identity(d)?.and_then(|view| {
-            Ok((
-                view.signature().map_err(QueryError::from)?,
-                view.digest(),
-            ))
-        }))
+        Some(
+            self.representation_identity(d)?
+                .and_then(|view| Ok((view.signature().map_err(QueryError::from)?, view.digest()))),
+        )
     }
     /// The identity of that view: holding it never pins a header row.
     pub(crate) fn representation_identity(
@@ -1390,11 +1388,24 @@ mod tests {
             })
         };
         let first = snapshot(dep.clone(), None, dependencies.clone());
-        assert!(first.validation(&dependency).view(app.definition).is_none());
-        assert!(first.validation(&middle).view(dep.definition).is_some());
         assert!(
             first
                 .validation(&dependency)
+                .unwrap()
+                .view(app.definition)
+                .is_none()
+        );
+        assert!(
+            first
+                .validation(&middle)
+                .unwrap()
+                .view(dep.definition)
+                .is_some()
+        );
+        assert!(
+            first
+                .validation(&dependency)
+                .unwrap()
                 .view(core.definition)
                 .is_some()
         );
@@ -1437,6 +1448,7 @@ mod tests {
         assert!(
             incomplete
                 .validation(&middle)
+                .unwrap()
                 .view(app.definition)
                 .is_some(),
             "incomplete package inputs retain full-world validation"
@@ -1751,7 +1763,7 @@ extern "unused" fn unused()"#
         let first = build(signature.clone(), None);
         let reflected = first.representation(d).unwrap().unwrap().1;
         let product = first.public_views[&d].get().unwrap().identified().clone();
-        let state = first.validation_state();
+        let state = first.validation_state().unwrap();
         assert!(Arc::ptr_eq(
             &product,
             state.views.get(d).unwrap().identified()
@@ -1761,7 +1773,7 @@ extern "unused" fn unused()"#
         let next_state = next.validation_state();
         assert!(Arc::ptr_eq(
             &product,
-            next_state.views.get(d).unwrap().identified()
+            next_state.unwrap().views.get(d).unwrap().identified()
         ));
 
         let mut changed = (*signature).clone();
@@ -1770,7 +1782,7 @@ extern "unused" fn unused()"#
             generics: Default::default(),
         };
         let changed = build(Arc::new(changed), Some(&next));
-        let changed_state = changed.validation_state();
+        let changed_state = changed.validation_state().unwrap();
         assert!(!Arc::ptr_eq(
             &product,
             changed_state.views.get(d).unwrap().identified()
@@ -1791,7 +1803,7 @@ extern "unused" fn unused()"#
             vec![],
             cache.clone(),
         );
-        assert!(!snapshot.validated().is_empty());
+        assert!(!snapshot.validated().unwrap().is_empty());
         // Ordinary view bytes cross interners; only the shared local verifier
         // capability retains proof. No producer seed carries success claims.
         let views = vec![signature.clone()];
@@ -1814,6 +1826,7 @@ extern "unused" fn unused()"#
         assert!(
             imported
                 .validation(&signature.definition.path().0.package)
+                .unwrap()
                 .universe_errors()
                 .1
                 .is_empty()
@@ -1830,11 +1843,12 @@ extern "unused" fn unused()"#
         assert!(
             !changed
                 .validation(&signature.definition.path().0.package)
+                .unwrap()
                 .universe_errors()
                 .1
                 .is_empty()
         );
-        assert_eq!(changed.validated().successful().count(), 0);
+        assert_eq!(changed.validated().unwrap().successful().count(), 0);
     }
 
     #[test]
@@ -1889,7 +1903,14 @@ extern "unused" fn unused()"#
         );
         assert_eq!(work::read(Counter::ValidateSignatureRows), before);
         let package = &public.definition.path().0.package;
-        assert!(imported.validation(package).universe_errors().1.is_empty());
+        assert!(
+            imported
+                .validation(package)
+                .unwrap()
+                .universe_errors()
+                .1
+                .is_empty()
+        );
         let changed_private = Arc::make_mut(&mut private);
         let SignatureKind::Type(declaration) = &mut changed_private.kind else {
             unreachable!()
@@ -1902,8 +1923,15 @@ extern "unused" fn unused()"#
         assert_eq!(changed_private.fingerprint, public.fingerprint);
         let changed = cached_views(types, vec![public.clone()], vec![private], cache);
         assert_eq!(work::read(Counter::ValidateSignatureRows), before + 1);
-        assert!(!changed.validation(package).universe_errors().1.is_empty());
-        assert_eq!(changed.validated().successful().count(), 1);
+        assert!(
+            !changed
+                .validation(package)
+                .unwrap()
+                .universe_errors()
+                .1
+                .is_empty()
+        );
+        assert_eq!(changed.validated().unwrap().successful().count(), 1);
     }
     #[test]
     fn local_verdicts_reuse_without_granting_declaration_authority() {

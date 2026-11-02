@@ -48,7 +48,8 @@ mod tests {
             &fixture.signatures,
             policy,
             Some(&cache),
-        );
+        )
+        .unwrap();
         assert!(live_report.violations.is_empty());
         assert!(live_ran);
         let (report, ran, accepted, evidence) = validate_definition(
@@ -58,7 +59,8 @@ mod tests {
             &fixture.signatures,
             policy,
             None,
-        );
+        )
+        .unwrap();
         assert!(report.violations.is_empty());
         assert!(ran, "an archive without local authority still runs V");
         assert_eq!(accepted, live_accepted);
@@ -109,7 +111,8 @@ mod tests {
             &fixture.signatures,
             policy,
             Some(&cache),
-        );
+        )
+        .unwrap();
         assert!(cached.violations.is_empty());
         assert!(!ran, "the same local receipt serves either raw owner");
         let mut changed = fixture.signatures.clone();
@@ -157,11 +160,13 @@ mod tests {
                 &fixture.signatures,
                 policy,
                 Some(&cache),
-            );
+            )
+            .unwrap();
             assert!(ran);
             assert_eq!(
                 report.violations,
                 crate::validate(&definition, &session(), &fixture.signatures, &mut vec![])
+                    .unwrap()
                     .violations
             );
             assert_eq!(accepted.is_some(), !malformed);
@@ -176,7 +181,8 @@ mod tests {
                 &fixture.signatures,
                 policy,
                 Some(&cache),
-            );
+            )
+            .unwrap();
             assert!(
                 ran,
                 "a locally cached receipt cannot bind foreign numeric IDs"
@@ -200,7 +206,8 @@ mod tests {
             &fixture.signatures,
             policy,
             Some(&cache),
-        );
+        )
+        .unwrap();
         assert!(report.violations.is_empty());
         let evidence = evidence.unwrap();
         let output = cache
@@ -229,7 +236,7 @@ mod tests {
             Artifact::new(&definition, session(), |_| Some((path("main"), 0))).identity
         );
         let (direct, ran, accepted_raw) =
-            validate_with_receipt(&raw, &fixture.signatures, policy, None, &mut vec![]);
+            validate_with_receipt(&raw, &fixture.signatures, policy, None, &mut vec![]).unwrap();
         assert!(
             ran,
             "raw indexed V must derive its own verdict without a local receipt"
@@ -273,7 +280,7 @@ mod tests {
         .unwrap();
         let raw = Artifact::new(&malformed, session(), |_| Some((path("main"), 0)));
         let (refused, ran, accepted_raw) =
-            validate_with_receipt(&raw, &fixture.signatures, policy, None, &mut vec![]);
+            validate_with_receipt(&raw, &fixture.signatures, policy, None, &mut vec![]).unwrap();
         assert!(ran);
         assert!(!refused.violations.is_empty());
         assert!(
@@ -389,7 +396,8 @@ mod tests {
             &f.signatures,
             policy,
             Some(&request),
-        );
+        )
+        .unwrap();
         assert!(report.violations.is_empty(), "{report:?}");
         let output = request
             .definition_output_from_evidence(
@@ -465,7 +473,8 @@ mod tests {
             &f.signatures,
             policy,
             Some(&cache),
-        );
+        )
+        .unwrap();
         assert!(report.violations.is_empty(), "{report:?}");
         let output = cache
             .definition_output_from_evidence(
@@ -588,7 +597,8 @@ mod tests {
                 &f.signatures,
                 policy,
                 Some(&cache),
-            );
+            )
+            .unwrap();
             assert!(report.violations.is_empty(), "{report:?}");
             let evidence = evidence.unwrap();
             let accepted = evidence.accepted.as_ref().unwrap();
@@ -660,7 +670,8 @@ mod tests {
             &f.signatures,
             policy,
             Some(&cache),
-        );
+        )
+        .unwrap();
         assert!(report.violations.is_empty(), "{report:?}");
         let evidence = evidence.unwrap();
         let output = cache
@@ -770,7 +781,8 @@ mod tests {
             &f.signatures,
             policy,
             Some(&cache),
-        );
+        )
+        .unwrap();
         let output = cache
             .publish_definition(
                 policy,
@@ -825,7 +837,8 @@ mod tests {
             &f.signatures,
             policy,
             Some(&cache),
-        );
+        )
+        .unwrap();
         assert!(report.violations.is_empty(), "{report:?}");
         let current = cache
             .publish_definition(

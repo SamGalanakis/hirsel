@@ -248,7 +248,9 @@ fn v_rejects_erased_generic_cursor_uses() {
         };
         function.uses = Uses::Only(AuthoritySummary::inert());
         let violations =
-            hirsel_validate::validate(original, &input.types, &signatures, &mut vec![]).violations;
+            hirsel_validate::validate(original, &input.types, &signatures, &mut vec![])
+                .unwrap()
+                .violations;
         assert!(
             violations.iter().any(|v| matches!(
                 v.kind,
@@ -292,6 +294,7 @@ fn v_rejects_lost_owner_modes_and_alias_before_consume() {
             forged.types = definition_types(&input.types, &forged);
             let violations =
                 hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![])
+                    .unwrap()
                     .violations;
             assert!(
                 violations.iter().any(|v| matches!(

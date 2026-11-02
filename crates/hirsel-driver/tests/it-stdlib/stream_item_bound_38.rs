@@ -239,6 +239,7 @@ fn v_refuses_erased_capture_relation() {
         signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
         assert!(
             hirsel_validate::validate(original, &input.types, &signatures, &mut vec![])
+                .unwrap()
                 .violations
                 .is_empty()
         );
@@ -279,7 +280,8 @@ fn v_refuses_erased_capture_relation() {
             }
         }
         forged.types = hirsel_tir::definition_types(&input.types, &forged);
-        let report = hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]);
+        let report =
+            hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]).unwrap();
         assert!(
             !report.violations.is_empty(),
             "missing V refusal: {report:?}"
@@ -557,6 +559,7 @@ fn unique_payload_aliased_v_refused() {
         signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
         assert!(
             hirsel_validate::validate(original, &input.types, &signatures, &mut vec![])
+                .unwrap()
                 .violations
                 .is_empty()
         );
@@ -576,7 +579,8 @@ fn unique_payload_aliased_v_refused() {
             unreachable!()
         };
         operand.usage = hirsel_types::UseKind::Copy;
-        let report = hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]);
+        let report =
+            hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]).unwrap();
         assert!(
             report.violations.iter().any(|v| matches!(
                 v.kind,

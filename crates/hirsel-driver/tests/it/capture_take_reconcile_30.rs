@@ -33,6 +33,7 @@ fn v_rejects_taking_a_copied_capture_from_a_many_invocation() {
             let original = &input.definitions[&make];
             assert!(
                 hirsel_validate::validate(original, &input.types, &signatures, &mut vec![])
+                    .unwrap()
                     .violations
                     .is_empty()
             );
@@ -60,7 +61,8 @@ fn v_rejects_taking_a_copied_capture_from_a_many_invocation() {
                     };
                     taken.usage = UseKind::Take;
                     let report =
-                        hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]);
+                        hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![])
+                            .unwrap();
                     assert!(report.violations.iter().any(|v| matches!(v.kind, hirsel_validate::ViolationKind::BorrowedMove(p) if p == operand.place)), "{report:?}");
                     probes += 1;
                 }

@@ -374,7 +374,8 @@ fn independent_v_checks_current_nested_receipts_at_unique_receivers() {
                         &input.types,
                         &signatures,
                         &mut vec![],
-                    );
+                    )
+                    .unwrap();
                     let expected = matches!(variant, Variant::Repair | Variant::NoCopy);
                     assert_eq!(
                         report.violations.is_empty(),

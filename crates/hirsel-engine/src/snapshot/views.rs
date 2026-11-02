@@ -19,13 +19,16 @@ mod tests {
             .get(DefId::intern(&hirsel_syntax::DefPath::core("Result")))
             .unwrap();
         let table = |rows: Vec<SignatureRef>| {
-            Arc::new(ViewTable::new(
-                &types,
-                rows,
-                None,
-                &mut ValidatedSignatures::default(),
-                None,
-            ))
+            Arc::new(
+                ViewTable::new(
+                    &types,
+                    rows,
+                    None,
+                    &mut ValidatedSignatures::default(),
+                    None,
+                )
+                .unwrap(),
+            )
         };
         let first = table(vec![option.clone(), result.clone()]);
         let reordered = table(vec![result.clone(), option.clone()]);
@@ -45,7 +48,7 @@ mod tests {
             &mut ValidatedSignatures::default(),
             None,
         );
-        assert_eq!(package.input_digest(), second.input_digest());
+        assert_eq!(package.unwrap().input_digest(), second.input_digest());
         assert_eq!(
             first.input_digest(),
             reordered.input_digest(),

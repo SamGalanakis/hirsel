@@ -230,7 +230,9 @@ fn independent_v_requires_shape_and_rejects_forged_or_client_projection() {
         .find(|d| d.path.path().0.name == "buffered")
         .unwrap();
     let check = |d: &hirsel_tir::Definition, s: &hirsel_validate::SignatureMap| {
-        hirsel_validate::qualify_scoped_transport(d, &p.types, s, &mut vec![]).violations
+        hirsel_validate::qualify_scoped_transport(d, &p.types, s, &mut vec![])
+            .unwrap()
+            .violations
     };
     assert!(!check(buffered, &public).is_empty());
     let mut owner = public.clone();

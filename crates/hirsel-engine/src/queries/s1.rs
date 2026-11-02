@@ -763,7 +763,7 @@ mod tests {
                     .get(&ReadKey::ValidationUniverse(crate::memo::PackageKey::of(
                         &root.0.package
                     ))),
-                Some(snapshot.validation_input_digest(&root.0.package))
+                Some(snapshot.validation_input_digest(&root.0.package).unwrap())
             );
             let artifact = reading_artifact(&types, &root, &dependency);
             let unchecked =

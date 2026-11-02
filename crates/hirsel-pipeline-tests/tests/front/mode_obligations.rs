@@ -319,7 +319,8 @@ fn mode_obligations_forged_nested_contracts_rejected_by_v() {
             function.parameters[0].ty = types.intern(row);
             forged_signatures.insert(signature.definition, signature);
         }
-        let report = hirsel_validate::validate(&definition, types, &forged_signatures, &mut vec![]);
+        let report =
+            hirsel_validate::validate(&definition, types, &forged_signatures, &mut vec![]).unwrap();
         assert!(
             report.violations.iter().any(|v| matches!(
                 v.kind,

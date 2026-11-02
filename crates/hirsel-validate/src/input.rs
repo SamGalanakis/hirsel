@@ -68,7 +68,11 @@ impl std::fmt::Display for ViewRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unreadable { definition, cause } => {
-                write!(f, "V view {} cannot be read again: {cause:?}", definition.path())
+                write!(
+                    f,
+                    "V view {} cannot be read again: {cause:?}",
+                    definition.path()
+                )
             }
             Self::Stale { definition } => write!(
                 f,

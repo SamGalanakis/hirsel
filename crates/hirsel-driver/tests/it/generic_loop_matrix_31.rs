@@ -704,7 +704,8 @@ fn v_result_adversaries(seeds: &[usize], conservative_control: bool) {
                     signatures.types(),
                     &signatures,
                     &mut vec![],
-                );
+                )
+                .unwrap();
                 let types: Vec<_> = forged
                     .types
                     .iter()

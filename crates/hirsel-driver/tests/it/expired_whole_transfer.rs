@@ -181,7 +181,8 @@ fn whole_transfers_and_expired_reads_agree_with_independent_validation() {
                     .lower(&t, engine.type_memo(), &analyzed, &comptime, declared)
                     .unwrap()
                     .value;
-                let checked = hirsel_validate::validate(&definition, &t, &signatures, &mut vec![]);
+                let checked =
+                    hirsel_validate::validate(&definition, &t, &signatures, &mut vec![]).unwrap();
                 if accepted {
                     assert!(
                         checked.violations.is_empty(),

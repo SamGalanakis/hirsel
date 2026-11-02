@@ -149,11 +149,14 @@ fn nominal_authority_22_owner_views_and_client_access() {
             // each declaration independently of source normalization.
             let snapshot = program.engine.signature_snapshot();
             for package in ["owner", "client"] {
-                let views = snapshot.validation(&path(package, "probe").0.package);
+                let views = snapshot
+                    .validation(&path(package, "probe").0.package)
+                    .unwrap();
                 let input = views.view(public.definition).unwrap();
-                let view = input.signature();
+                let view = input.signature().unwrap();
                 assert!(
-                    check_view(program.engine.types(), public.definition, view, views)
+                    check_view(program.engine.types(), public.definition, &view, views)
+                        .unwrap()
                         .error
                         .is_none()
                 );

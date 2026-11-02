@@ -59,7 +59,9 @@ fn initialized_local_receivers_cannot_export_borrowed_content_as_global() {
         forged.bodies[0].result = engine.types().intern(row);
         forged.types = hirsel_tir::definition_types(engine.types(), &forged);
         let violations =
-            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]).violations;
+            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![])
+                .unwrap()
+                .violations;
         assert!(
             violations.iter().any(|v| matches!(
                 v.kind,
@@ -174,7 +176,9 @@ fn current_call_content_cannot_launder_a_borrowed_result_as_global() {
         signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
         forged.types = hirsel_tir::definition_types(engine.types(), &forged);
         let violations =
-            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]).violations;
+            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![])
+                .unwrap()
+                .violations;
         assert!(
             violations.iter().any(|v| matches!(
                 v.kind,
@@ -244,6 +248,7 @@ fn local_iterator_receivers_cannot_invent_sendable_content() {
             forged.types = hirsel_tir::definition_types(engine.types(), &forged);
             let violations =
                 hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![])
+                    .unwrap()
                     .violations;
             assert!(
                 violations.iter().any(|v| matches!(
@@ -283,6 +288,7 @@ fn local_function_receivers_cannot_invent_sendable_content() {
         let original = (*input.definitions[&path]).clone();
         assert!(
             hirsel_validate::validate(&original, engine.types(), &signatures, &mut vec![])
+                .unwrap()
                 .violations
                 .is_empty()
         );
@@ -314,7 +320,9 @@ fn local_function_receivers_cannot_invent_sendable_content() {
         }
         forged.types = hirsel_tir::definition_types(engine.types(), &forged);
         let violations =
-            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]).violations;
+            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![])
+                .unwrap()
+                .violations;
         assert!(
             violations.iter().any(|v| matches!(
                 v.kind,

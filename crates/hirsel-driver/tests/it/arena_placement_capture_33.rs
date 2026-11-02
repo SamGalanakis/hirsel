@@ -96,7 +96,8 @@ fn placement_mutations(mutations: std::ops::Range<usize>) {
             }
             forged.types = hirsel_tir::definition_types(engine.types(), &forged);
             let report =
-                hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]);
+                hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![])
+                    .unwrap();
             assert!(
                 report.violations.iter().any(|v| match (&v.kind, mutation) {
                     (hirsel_validate::ViolationKind::ReadBeforeInit(_), 1) => true,

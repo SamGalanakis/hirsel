@@ -236,7 +236,8 @@ fn taskset_await_mode_27_v_rejects_forged_arm_modes() {
             }
             forged.types = hirsel_tir::definition_types(&input.types, &forged);
             let report =
-                hirsel_validate::validate(&forged, signatures.types(), &signatures, &mut vec![]);
+                hirsel_validate::validate(&forged, signatures.types(), &signatures, &mut vec![])
+                    .unwrap();
             assert!(!report.violations.is_empty());
             assert!(
                 report.violations.iter().all(|v| v.kind

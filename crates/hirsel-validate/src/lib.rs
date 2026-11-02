@@ -82,8 +82,7 @@ use input::Reader;
 pub use input::{
     IdentifiedSignature, Pin, SignatureLookup, SignatureMap, SignatureSource, UniverseErrors,
     VRead, ValidatedSignatures, ValidationDigest, ViewInput, ViewRefusal, ViewVerdict, check_view,
-    digest,
-    errors_digest, read_holds,
+    digest, errors_digest, read_holds,
 };
 pub use instances::{
     InstanceViolation, validate_instance_bodies, validate_instance_catalog, validate_instance_rows,

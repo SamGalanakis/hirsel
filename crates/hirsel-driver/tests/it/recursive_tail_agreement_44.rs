@@ -49,7 +49,8 @@ fn recursive_tail_agreement_44_original_helper() {
             kind: hirsel_tir::TailKind::SelfTail,
             owned_loop_arguments: vec![(hirsel_types::ParamId(0), arguments[0].value.place)],
         });
-        let report = hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]);
+        let report =
+            hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]).unwrap();
         assert!(
             report.violations.iter().any(|v| matches!(
                 v.kind,

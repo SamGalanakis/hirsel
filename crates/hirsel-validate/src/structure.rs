@@ -665,6 +665,7 @@ mod tests {
                 &crate::SignatureMap::new(support::session()),
                 &mut vec![]
             )
+            .unwrap()
             .is_none()
         );
         assert_eq!(

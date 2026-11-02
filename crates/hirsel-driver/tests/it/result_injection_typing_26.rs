@@ -561,7 +561,7 @@ fn mutation_case(shape: usize) {
         let verdict = |d: &hirsel_tir::Definition| {
             hirsel_validate::validate(d, engine.types(), &signatures, &mut vec![])
         };
-        assert!(verdict(&base).violations.is_empty());
+        assert!(verdict(&base).unwrap().violations.is_empty());
         for field in 0..4 {
             let id = format!("V{}", shape * 4 + field);
             receipt(
@@ -630,7 +630,7 @@ fn mutation_case(shape: usize) {
                 }
             }
             // No canonical digest/import guard can stand in for V's type check.
-            let result = verdict(&edited);
+            let result = verdict(&edited).unwrap();
             assert!(
                 !result.violations.is_empty(),
                 "{id}: forged propagation accepted"

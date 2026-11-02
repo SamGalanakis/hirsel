@@ -2235,7 +2235,8 @@ fn unresolved_call_origins_fail_closed() {
         interner(),
         &f.signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert!(
         report
             .violations
@@ -2257,6 +2258,7 @@ fn unresolved_call_origins_fail_closed() {
             &f.signatures,
             &mut vec![]
         )
+        .unwrap()
         .violations
         .is_empty()
     );
@@ -2274,6 +2276,7 @@ fn unresolved_call_origins_fail_closed() {
             &f.signatures,
             &mut vec![]
         )
+        .unwrap()
         .violations
         .is_empty()
     );
@@ -2343,7 +2346,8 @@ fn dependent_result_origins_require_a_live_binding() {
         interner(),
         &f.signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert!(
         report.violations.iter().any(|v| v.kind
             == ViolationKind::TypeMismatch {
@@ -4703,7 +4707,8 @@ fn local_result_source_is_checked_independently_of_matching_types() {
         interner(),
         &f.signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert!(report.violations.is_empty(), "{report:?}");
     let callee = f.signatures.get_mut(&path("callee")).unwrap();
     let SignatureKind::Function(fun) = &mut callee.kind else {
@@ -5284,7 +5289,8 @@ fn loop_backedge_expires_a_handle_of_an_iteration_owner() {
         interner(),
         &f.signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert!(report.violations.is_empty(), "{report:?}");
     f.body().blocks[2].instructions.extend([
         inst(
@@ -5307,7 +5313,8 @@ fn loop_backedge_expires_a_handle_of_an_iteration_owner() {
         interner(),
         &f.signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert!(
         report
             .violations
@@ -5334,7 +5341,8 @@ fn loop_backedge_expires_a_handle_of_an_iteration_owner() {
         interner(),
         &f.signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert!(
         report.violations.iter().any(|v| v.block == Some(BlockId(1))
             && v.instruction == Some(0)
@@ -6388,7 +6396,8 @@ fn loop_backedge_expires_a_retained_parameter_handle() {
         interner(),
         &f.signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert!(
         report.violations.iter().any(|v| v.block == Some(BlockId(1))
             && v.instruction == Some(0)
@@ -7127,7 +7136,7 @@ fn view_verdicts_preserve_universe_errors_and_their_order() {
             signatures,
         )
     };
-    let checked = universe(&mut verdicts, &f.signatures);
+    let checked = universe(&mut verdicts, &f.signatures).unwrap();
     assert_eq!(
         (checked.digest, checked.errors.as_slice()),
         f.signatures.universe_errors()
@@ -7140,6 +7149,7 @@ fn view_verdicts_preserve_universe_errors_and_their_order() {
             &f.signatures,
             &mut reads
         )
+        .unwrap()
         .violations,
         checked.errors
     );
@@ -7152,13 +7162,15 @@ fn view_verdicts_preserve_universe_errors_and_their_order() {
             }
             let mut replaced = f.signatures.clone();
             replaced.insert(id(name), replacement);
-            let checked = universe(&mut verdicts, &replaced);
+            let checked = universe(&mut verdicts, &replaced).unwrap();
             assert_eq!(
                 (checked.digest, checked.errors.as_slice()),
                 replaced.universe_errors()
             );
             assert_eq!(
-                validate(&tabled(&f.definition), interner(), &replaced, &mut vec![]).violations,
+                validate(&tabled(&f.definition), interner(), &replaced, &mut vec![])
+                    .unwrap()
+                    .violations,
                 checked.errors
             );
         }
@@ -7172,6 +7184,7 @@ fn view_verdicts_preserve_universe_errors_and_their_order() {
             &f.signatures,
             &mut vec![]
         )
+        .unwrap()
         .violations[..],
         [Violation {
             kind: ViolationKind::InvalidId { .. },
@@ -7622,7 +7635,8 @@ fn loop_feedback_expires_exact_written_prefixes_and_owned_aliases() {
             interner(),
             &f.signatures,
             &mut vec![],
-        );
+        )
+        .unwrap();
         assert!(report.violations.is_empty(), "acyclic {mode}: {report:?}");
         f.body().blocks[1].terminator = Terminator::Branch {
             condition: copy(condition),
@@ -7634,7 +7648,8 @@ fn loop_feedback_expires_exact_written_prefixes_and_owned_aliases() {
             interner(),
             &f.signatures,
             &mut vec![],
-        );
+        )
+        .unwrap();
         if mode == "sibling" {
             assert!(report.violations.is_empty(), "{mode}: {report:?}");
         } else {

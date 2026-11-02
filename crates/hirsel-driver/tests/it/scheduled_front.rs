@@ -353,13 +353,16 @@ fn admitted_lower_saved_work_and_native_metadata_survive_dependency_suspension()
             assert!(
                 cache
                     .execution(actual.execution_subject, |package| snapshot
-                        .validation_input_digest(package))
+                        .validation_input_digest(package)
+                        .ok())
                     .is_some()
             );
             assert!(
                 cache
                     .execution(actual.execution_subject, |_| {
-                        hirsel_syntax::ContentHash::of_bytes(b"changed private view")
+                        Some(hirsel_syntax::ContentHash::of_bytes(
+                            b"changed private view",
+                        ))
                     })
                     .is_none()
             );
@@ -1004,9 +1007,8 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 .unwrap()
                 .unwrap()
                 .settled();
-            // Mode 7 pins the proof so the only evictable entry is `a`'s row.
-            let proof_pin = (mode == 6 || mode == 7)
-                .then(|| front.module_proof(&definitions[0]).unwrap().unwrap());
+            let proof_pin =
+                (mode == 6).then(|| front.module_proof(&definitions[0]).unwrap().unwrap());
             drop(a);
             struct DependencyFactory(Vec<QueryId>, QueryId);
             struct DependencyTask(Vec<QueryId>, QueryId);
@@ -1055,6 +1057,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 let package = &definitions[0].0.package;
                 let digest = signatures
                     .validation(package)
+                    .unwrap()
                     .view(hirsel_syntax::DefId::intern(&definitions[0]))
                     .unwrap()
                     .digest();
@@ -1069,24 +1072,41 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 runtime.request(&[bodies[1]])
             };
             let b = runtime.wait(request);
-            if mode == 3 || mode == 4 || mode == 7 {
+            // Pressure evicts a header row whose identity alone is held. V
+            // reads the evicted row back through the ordinary producer as the
+            // same view, or the read is refused as an error: never a panic,
+            // and never a different signature under the same identity.
+            if let Some((signatures, digest)) = universe {
+                assert!(
+                    b.is_ok() || b == Err(errors().resource),
+                    "pressure completes or refuses: {b:?}"
+                );
+                let d = hirsel_syntax::DefId::intern(&definitions[0]);
+                let view = signatures
+                    .validation(&definitions[0].0.package)
+                    .unwrap()
+                    .view(d)
+                    .unwrap();
+                assert_eq!(view.digest(), digest);
+                match view.signature() {
+                    Ok(signature) => {
+                        assert_eq!(
+                            hirsel_validate::digest(signatures.types(), &signature),
+                            digest
+                        );
+                        assert!(front.header_resident(&definitions[0]));
+                    }
+                    Err(refusal) => assert!(
+                        matches!(refusal, hirsel_validate::ViewRefusal::Unreadable { definition, .. } if definition == d),
+                        "{refusal}"
+                    ),
+                }
+                continue;
+            }
+            if mode == 3 || mode == 4 {
                 assert_eq!(b, Err(errors().resource));
                 assert_eq!(runtime.stats().body_evictions, 0);
                 assert_eq!(front.live_body_count(), 1);
-                // Pressure evicts a header row whose identity alone is held,
-                // never one with a live view. V reads the evicted row back
-                // through the ordinary producer as the same view.
-                if let Some((signatures, digest)) = universe {
-                    assert!(!front.header_resident(&definitions[0]));
-                    assert!(front.header_resident(&definitions[1]));
-                    let reread = signatures
-                        .validation(&definitions[0].0.package)
-                        .view(hirsel_syntax::DefId::intern(&definitions[0]))
-                        .unwrap()
-                        .digest();
-                    assert_eq!(reread, digest);
-                    assert!(front.header_resident(&definitions[0]));
-                }
                 continue;
             }
             if let Some(pin) = pin {

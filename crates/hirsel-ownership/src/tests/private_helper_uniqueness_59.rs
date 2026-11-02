@@ -271,7 +271,7 @@ fn private_helper_uniqueness_59_forged_headers_are_independently_reproved() {
             signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
             let refused = input.definitions.values().any(|definition| {
                 !hirsel_validate::validate(definition, &input.types, &signatures, &mut vec![])
-                    .violations
+                    .unwrap().violations
                     .is_empty()
             });
             assert!(refused, "V accepted forged summary: {source}");

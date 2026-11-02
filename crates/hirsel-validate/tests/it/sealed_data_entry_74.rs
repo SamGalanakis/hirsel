@@ -68,6 +68,7 @@ fn qualified(f: &Fixture) -> Vec<hirsel_validate::ViolationKind> {
         &f.signatures,
         &mut vec![],
     )
+    .unwrap()
     .violations
     .into_iter()
     .map(|v| v.kind)

@@ -316,7 +316,8 @@ fn validate(input: &NativeInput) -> Result<(), String> {
     let mut signatures = hirsel_validate::SignatureMap::new(input.types.clone());
     signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
     for (path, definition) in &input.definitions {
-        let report = hirsel_validate::validate(definition, &input.types, &signatures, &mut vec![]);
+        let report =
+            hirsel_validate::validate(definition, &input.types, &signatures, &mut vec![]).unwrap();
         if !report.violations.is_empty() {
             return Err(format!("{path:?}: {:?}", report.violations));
         }
@@ -813,7 +814,8 @@ fn mutation_partition(part: usize) {
                 unreachable!()
             };
             operand.usage = UseKind::Take;
-            let report = hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]);
+            let report =
+                hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]).unwrap();
             retain(
                 &dir,
                 &format!("mutation-{seed}"),
@@ -1344,7 +1346,8 @@ fn sheet_originals_runtime_and_capture_transfer_adversaries() {
                 unreachable!()
             };
             captures[ci].usage = UseKind::Take;
-            let report = hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]);
+            let report =
+                hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]).unwrap();
             history::persist(
                 &dir,
                 &format!("{name}-mutation"),

@@ -410,7 +410,8 @@ fn wider_tags_do_not_simulate_the_exact_audit_class() {
         interner(),
         &f.signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert!(baseline.violations.is_empty(), "{baseline:?}");
     with_model(&f, |checker, model, initial| {
         let mut narrow = initial.clone();
@@ -537,7 +538,8 @@ fn union_of_locations_can_invent_the_nonempty_binding_precondition() {
         interner(),
         &good.signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert!(good_verdict.violations.is_empty(), "{good_verdict:?}");
     let bad = late_binding(false);
     let bad_verdict = validate(
@@ -545,7 +547,8 @@ fn union_of_locations_can_invent_the_nonempty_binding_precondition() {
         interner(),
         &bad.signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert_eq!(
         bad_verdict.violations,
         vec![Violation {
@@ -620,13 +623,15 @@ fn union_of_locations_can_invent_the_nonempty_binding_precondition() {
             interner(),
             &bad.signatures,
             &mut first_reads,
-        );
+        )
+        .unwrap();
         let second = validate(
             &tabled(&bad.definition),
             interner(),
             &bad.signatures,
             &mut second_reads,
-        );
+        )
+        .unwrap();
         assert_eq!(before, first);
         assert_eq!(first, second);
         assert_eq!(first_reads, second_reads);
@@ -858,7 +863,8 @@ fn normal_flow_cannot_hide_incomplete_instruction_failure_cleanup() {
         interner(),
         &f.signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert!(accepted.violations.is_empty(), "{accepted:?}");
     f.body().blocks[0]
         .instructions
@@ -870,7 +876,8 @@ fn normal_flow_cannot_hide_incomplete_instruction_failure_cleanup() {
         interner(),
         &f.signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert!(
         rejected.violations.iter().any(|v| matches!(
             v.kind,

@@ -1784,7 +1784,8 @@ fn sealed_storage_task_carrier_v_33_stale_result_evidence_refuses() {
     definition.types = hirsel_tir::definition_types(&input.types, definition);
     let mut signatures = hirsel_validate::SignatureMap::new(input.types.clone());
     signatures.extend_signatures(input.signatures.values().map(|s| s.as_ref().clone()));
-    let report = hirsel_validate::validate(definition, &input.types, &signatures, &mut vec![]);
+    let report =
+        hirsel_validate::validate(definition, &input.types, &signatures, &mut vec![]).unwrap();
     assert!(
         report.violations.iter().any(|v| matches!(
             v.kind,

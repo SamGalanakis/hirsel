@@ -60,7 +60,8 @@ fn tuple_compare_incompatible_nested_rows_are_still_rejected_by_v() {
     parts[1] = engine.types().intern(part);
     body.places[right.0 as usize].ty = engine.types().intern(row);
     definition.types = hirsel_tir::definition_types(engine.types(), &definition);
-    let report = hirsel_validate::validate(&definition, engine.types(), &signatures, &mut vec![]);
+    let report =
+        hirsel_validate::validate(&definition, engine.types(), &signatures, &mut vec![]).unwrap();
     assert!(
         report.violations.iter().any(|v| matches!(
             v.kind,

@@ -168,7 +168,8 @@ fn scope_closure_origin_27_v_rejects_fresh_names_on_capture_storage() {
         }
         let changed = changed.expect("one fresh loop binding");
         let report =
-            hirsel_validate::validate(&forged, signatures.types(), &signatures, &mut vec![]);
+            hirsel_validate::validate(&forged, signatures.types(), &signatures, &mut vec![])
+                .unwrap();
         assert!(
             report
                 .violations

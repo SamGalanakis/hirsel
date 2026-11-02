@@ -118,7 +118,7 @@ proptest! {
             Err(e) => return Err(TestCaseError::fail(format!("unexpected source result {e:?}"))),
         };
         let (definition, signatures) = matrix_ir(4, &rows);
-        let report = hirsel_validate::validate(&definition, signatures.types(), &signatures, &mut vec![]);
+        let report = hirsel_validate::validate(&definition, signatures.types(), &signatures, &mut vec![]).unwrap();
         let v = report.violations.is_empty();
         prop_assert_eq!(h, v, "{:?}", report.violations);
         prop_assert!(report.violations.iter().all(|e| e.kind == hirsel_validate::ViolationKind::MatchCoverage));
@@ -135,6 +135,7 @@ fn missing_product_case_and_pattern_edge_mutations_fail_closed() {
     definition.bodies[0].matches[0].patterns.truncate(6);
     assert!(
         hirsel_validate::validate(&definition, signatures.types(), &signatures, &mut vec![])
+            .unwrap()
             .violations
             .iter()
             .any(|v| v.kind == hirsel_validate::ViolationKind::MatchCoverage)
@@ -145,6 +146,7 @@ fn missing_product_case_and_pattern_edge_mutations_fail_closed() {
     }
     assert!(
         !hirsel_validate::validate(&definition, signatures.types(), &signatures, &mut vec![])
+            .unwrap()
             .violations
             .is_empty()
     );
@@ -153,6 +155,7 @@ fn missing_product_case_and_pattern_edge_mutations_fail_closed() {
         MatchPatternKind::Literal(Constant::Integer(1));
     assert!(
         hirsel_validate::validate(&definition, signatures.types(), &signatures, &mut vec![])
+            .unwrap()
             .violations
             .iter()
             .any(|v| matches!(
@@ -201,7 +204,8 @@ fn adversarial_product_coverage_has_a_deterministic_work_budget() {
         let (definition, signatures) = matrix_ir(n * (n - 1), &rows);
         let before = hirsel_intern::work::read(hirsel_intern::work::Counter::ValidateMatchWork);
         let report =
-            hirsel_validate::validate(&definition, signatures.types(), &signatures, &mut vec![]);
+            hirsel_validate::validate(&definition, signatures.types(), &signatures, &mut vec![])
+                .unwrap();
         let work =
             hirsel_intern::work::read(hirsel_intern::work::Counter::ValidateMatchWork) - before;
         eprintln!(
@@ -292,6 +296,7 @@ fn guard_restarts_require_their_own_false_edge_and_preserve_earlier_coverage() {
         Terminator::Goto(BlockId(restarts[0] as u32));
     assert!(
         hirsel_validate::validate(&bypass, signatures.types(), &signatures, &mut vec![])
+            .unwrap()
             .violations
             .iter()
             .any(|e| e.kind == hirsel_validate::ViolationKind::MatchCoverage)
@@ -299,6 +304,7 @@ fn guard_restarts_require_their_own_false_edge_and_preserve_earlier_coverage() {
     definition.bodies[0].entry = BlockId(restarts[0] as u32);
     assert!(
         hirsel_validate::validate(&definition, signatures.types(), &signatures, &mut vec![])
+            .unwrap()
             .violations
             .iter()
             .any(|e| e.kind == hirsel_validate::ViolationKind::MatchCoverage)
@@ -343,6 +349,7 @@ fn binding_metadata_cannot_disguise_guard_takes_or_commit_borrows() {
     }
     assert!(
         hirsel_validate::validate(&forged, signatures.types(), &signatures, &mut vec![])
+            .unwrap()
             .violations
             .iter()
             .any(|v| matches!(v.kind, hirsel_validate::ViolationKind::InvalidUse(_)))
@@ -358,6 +365,7 @@ fn binding_metadata_cannot_disguise_guard_takes_or_commit_borrows() {
     }
     assert!(
         hirsel_validate::validate(&forged, signatures.types(), &signatures, &mut vec![])
+            .unwrap()
             .violations
             .iter()
             .any(|v| matches!(v.kind, hirsel_validate::ViolationKind::InvalidUse(_)))
@@ -431,6 +439,7 @@ fn a_failed_guard_cannot_replace_the_value_covered_by_earlier_arms() {
     // after the true arm and leave no arm to select despite whole-table coverage.
     assert!(
         hirsel_validate::validate(&forged, signatures.types(), &signatures, &mut vec![])
+            .unwrap()
             .violations
             .iter()
             .any(|v| v.kind == hirsel_validate::ViolationKind::MatchCoverage)

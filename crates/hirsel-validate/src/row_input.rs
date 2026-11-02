@@ -345,6 +345,7 @@ mod tests {
                 &wrong_type.signatures,
                 &mut vec![]
             )
+            .unwrap()
             .violations
             .is_empty()
         );
@@ -360,7 +361,8 @@ mod tests {
                 support::interner(),
                 &fixture.signatures,
                 &mut live_reads,
-            );
+            )
+            .unwrap();
             accepted += usize::from(live.violations.is_empty());
             let store = Arc::new(Memory::default());
             let records = TypeRecords::new(support::session(), store.clone());
@@ -392,7 +394,7 @@ mod tests {
                 &mut reads,
             )
             .unwrap();
-            assert_eq!(actual.violations, live.violations);
+            assert_eq!(actual.unwrap().violations, live.violations);
             assert_eq!(reads, live_reads);
         }
         assert!(accepted > 0);

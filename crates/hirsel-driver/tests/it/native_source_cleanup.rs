@@ -162,6 +162,7 @@ fn native_selected_source_survives_call_and_aggregate_transfer_before_unique_ope
             assert_eq!(count, 1);
             assert!(
                 !hirsel_validate::validate(output, &input.types, &signatures, &mut vec![])
+                    .unwrap()
                     .violations
                     .is_empty()
             );
@@ -309,6 +310,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {{
             child.cleanup_nodes[chain[1].0 as usize].action = first;
             let violations =
                 hirsel_validate::validate(definition, &input.types, &signatures, &mut vec![])
+                    .unwrap()
                     .violations;
             assert!(
                 violations.iter().any(|violation| matches!(
@@ -348,6 +350,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {{
             assert!(changed > 0);
             assert!(
                 !hirsel_validate::validate(definition, &input.types, &signatures, &mut vec![])
+                    .unwrap()
                     .violations
                     .is_empty()
             );
@@ -419,6 +422,7 @@ let xs:List[String]=["old\n"];probe(grant_stdout,unique xs);Ok(())}
         *value = hirsel_tir::Rvalue::Use(source);
         let violations =
             hirsel_validate::validate(definition, &input.types, &signatures, &mut vec![])
+                .unwrap()
                 .violations;
         assert!(
             violations.iter().any(|violation| matches!(

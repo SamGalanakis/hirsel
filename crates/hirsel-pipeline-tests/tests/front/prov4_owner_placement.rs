@@ -82,7 +82,7 @@ fn rejects_at(
     signatures: &hirsel_validate::SignatureMap,
     entity: &'static str,
 ) {
-    let report = hirsel_validate::validate(definition, types, signatures, &mut vec![]);
+    let report = hirsel_validate::validate(definition, types, signatures, &mut vec![]).unwrap();
     assert!(report.violations.iter().any(|v| matches!(&v.kind, hirsel_validate::ViolationKind::TypeMismatch { entity: found } if *found == entity)), "{:#?}", report.violations);
 }
 

@@ -90,7 +90,8 @@ fn borrow_cursor_8_real_loan_expiry_is_not_carrier_retirement() {
         interner(),
         &f.signatures,
         &mut reads,
-    );
+    )
+    .unwrap();
     assert!(
         verdict.violations.iter().any(|v| v.kind
             == ViolationKind::ExpiredLoan {
@@ -191,7 +192,8 @@ fn borrow_cursor_8_real_owner_drop_conflicts_with_saved_view() {
         interner(),
         &f.signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert!(
         verdict.violations.iter().any(|v| v.instruction == Some(8)
             && v.kind

@@ -271,7 +271,8 @@ fn independent_validation_compares_nested_set_keys_without_using_insertion_order
     }
     assert_eq!(changed, 1);
     forged.types = hirsel_tir::definition_types(engine.types(), &forged);
-    let report = hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]);
+    let report =
+        hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]).unwrap();
     assert!(
         report
             .violations

@@ -39,7 +39,8 @@ fn related_result_loop_source_v_agreement() {
                         &input.types,
                         &signatures,
                         &mut vec![],
-                    );
+                    )
+                    .unwrap();
                     assert!(
                         control.violations.is_empty(),
                         "{name}: original V control: {control:?}"
@@ -81,7 +82,8 @@ fn related_result_loop_source_v_agreement() {
                     assert_eq!(mutations, 1, "{name}: missing related helper call");
                     forged.types = hirsel_tir::definition_types(&input.types, &forged);
                     let report =
-                        hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]);
+                        hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![])
+                            .unwrap();
                     assert!(
                         report.violations.iter().any(|v| v.kind
                             == hirsel_validate::ViolationKind::TypeMismatch {

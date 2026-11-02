@@ -214,7 +214,8 @@ fn unique_if_join_detached_destination_is_still_rejected_by_v() {
             place.ty = body.result;
         }
     }
-    let report = hirsel_validate::validate(&definition, engine.types(), &signatures, &mut vec![]);
+    let report =
+        hirsel_validate::validate(&definition, engine.types(), &signatures, &mut vec![]).unwrap();
     assert!(
         report.violations.iter().any(|v| matches!(
             v.kind,

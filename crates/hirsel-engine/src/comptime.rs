@@ -946,15 +946,12 @@ impl QueryEngine {
         }
         receipt.is_none_or(|receipt| {
             let snapshot = self.signature_snapshot();
-            receipt
-                .contexts()
-                .iter()
-                .all(|(package, digest)| {
-                    // A refused read does not hold: the evaluation runs again.
-                    snapshot
-                        .validation_input_digest(package)
-                        .is_ok_and(|current| current == *digest)
-                })
+            receipt.contexts().iter().all(|(package, digest)| {
+                // A refused read does not hold: the evaluation runs again.
+                snapshot
+                    .validation_input_digest(package)
+                    .is_ok_and(|current| current == *digest)
+            })
         })
     }
     pub(crate) fn merge_lower_acceptance(

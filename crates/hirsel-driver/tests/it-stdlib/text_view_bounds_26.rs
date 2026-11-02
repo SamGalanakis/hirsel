@@ -351,7 +351,8 @@ fn independent_v_rejects_wrong_helper_receiver() {
         let mut path = loaded.entry.clone();
         path.0.name = "use_position".into();
         let mut definition = input.definitions[&path].as_ref().clone();
-        let good = hirsel_validate::validate(&definition, &input.types, &signatures, &mut vec![]);
+        let good =
+            hirsel_validate::validate(&definition, &input.types, &signatures, &mut vec![]).unwrap();
         assert!(good.violations.is_empty(), "{good:?}");
         let mut changed = 0;
         for body in &mut definition.bodies {
@@ -371,7 +372,8 @@ fn independent_v_rejects_wrong_helper_receiver() {
             }
         }
         assert_eq!(changed, 1);
-        let bad = hirsel_validate::validate(&definition, &input.types, &signatures, &mut vec![]);
+        let bad =
+            hirsel_validate::validate(&definition, &input.types, &signatures, &mut vec![]).unwrap();
         eprintln!(
             "TEXT_STATIC wrong-helper-receiver independent-V {:?}",
             bad.violations

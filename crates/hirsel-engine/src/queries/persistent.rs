@@ -1539,7 +1539,9 @@ impl QueryEngine {
     ) -> Option<hirsel_validate::ExecutionReceipt> {
         let cache = self.result_store.as_ref()?.verifier()?;
         let snapshot = self.signature_snapshot();
-        cache.execution(subject, |package| snapshot.validation_input_digest(package).ok())
+        cache.execution(subject, |package| {
+            snapshot.validation_input_digest(package).ok()
+        })
     }
     fn load_execution_receipt(
         &mut self,
@@ -3720,7 +3722,8 @@ mod malformed_tests {
             ContentHash::default(),
             Some(&hirsel_validate::VerifierCache::default()),
             &mut vec![],
-        );
+        )
+        .unwrap();
         assert!(report.violations.is_empty(), "{:?}", report.violations);
         let package = syntax.item.definition.0.package.clone();
         let digest = ContentHash::of_bytes(b"complete private universe");

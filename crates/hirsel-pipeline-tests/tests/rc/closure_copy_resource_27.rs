@@ -242,6 +242,7 @@ fn v_rejects_releasing_a_many_callables_environment_field() {
         let original = &input.definitions[&entry];
         assert!(
             hirsel_validate::validate(original, &input.types, &signatures, &mut vec![])
+                .unwrap()
                 .violations
                 .is_empty()
         );
@@ -306,7 +307,8 @@ fn v_rejects_releasing_a_many_callables_environment_field() {
                         );
                     }
                     let report =
-                        hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![]);
+                        hirsel_validate::validate(&forged, &input.types, &signatures, &mut vec![])
+                            .unwrap();
                     assert!(report.violations.iter().any(|v| matches!(v.kind, hirsel_validate::ViolationKind::BorrowedMove(p) if p == place)), "{report:?}");
                     probes += 1;
                 }

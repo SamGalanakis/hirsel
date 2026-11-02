@@ -78,6 +78,7 @@ fn verdict(s: Signature, accepted: bool) {
     );
     assert_eq!(
         universe
+            .unwrap()
             .errors
             .iter()
             .map(|v| v.kind.clone())

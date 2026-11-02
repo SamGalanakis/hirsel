@@ -139,7 +139,8 @@ pub fn main() -> Result[(), u64] {
                     &probe.types,
                     &signatures,
                     &mut vec![],
-                );
+                )
+                .unwrap();
                 assert!(verdict.violations.is_empty(), "{verdict:?}");
                 let compiled = crate::rc_support::program(&probe);
                 let sites = Sites::new(validated.snapshot());

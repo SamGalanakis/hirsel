@@ -216,6 +216,7 @@ fn unique_empty_builder_29_v_rejects_forged_unique_cursor_results() {
             forged.types = hirsel_tir::definition_types(engine.types(), &forged);
             let violations =
                 hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![])
+                    .unwrap()
                     .violations;
             assert!(
                 violations.iter().any(|v| matches!(

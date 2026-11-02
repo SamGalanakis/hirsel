@@ -68,7 +68,8 @@ fn compose_13_immutable_expired_source_is_rejected_by_v() {
             on_failure: cleanup,
         },
     );
-    let verdict = hirsel_validate::validate(&definition, &program.types, &signatures, &mut vec![]);
+    let verdict =
+        hirsel_validate::validate(&definition, &program.types, &signatures, &mut vec![]).unwrap();
     assert!(
         verdict.violations.iter().any(|v| matches!(v.kind,
         hirsel_validate::ViolationKind::ExpiredLoan { loan: ended, .. } if ended == loan)),
@@ -210,7 +211,7 @@ fn compose_13_join_independent_v_adversarial_controls() {
     let mut detached = (**definition).clone();
     detached.bodies[0].borrow_cursors.clear();
     assert!(
-        validate(&detached).violations.is_empty(),
+        validate(&detached).unwrap().violations.is_empty(),
         "{:?}",
         validate(&detached)
     );
@@ -319,7 +320,7 @@ fn compose_13_join_independent_v_adversarial_controls() {
                 });
             }
         }
-        let verdict = validate(&d);
+        let verdict = validate(&d).unwrap();
         assert!(
             verdict.violations.iter().any(|v| match mutation {
                 0 => matches!(v.kind, ViolationKind::ExpiredLoan { .. }),
@@ -528,7 +529,7 @@ fn compose_14_mutable_alias_independent_v_controls() {
         |d: &Definition| hirsel_validate::validate(d, &program.types, &signatures, &mut vec![]);
     let mut detached = (**original).clone();
     detached.bodies[0].borrow_cursors.clear();
-    assert!(validate(&detached).violations.is_empty());
+    assert!(validate(&detached).unwrap().violations.is_empty());
     for expire_storage in [false, true] {
         let mut definition = (**original).clone();
         let body = &mut definition.bodies[0];
@@ -560,7 +561,7 @@ fn compose_14_mutable_alias_independent_v_controls() {
                 ..exemplar
             },
         );
-        let verdict = validate(&definition);
+        let verdict = validate(&definition).unwrap();
         assert!(
             verdict.violations.iter().any(|v| if expire_storage {
                 matches!(v.kind, ViolationKind::LoanOutlivesSource { loan: id, .. } if id == loan)

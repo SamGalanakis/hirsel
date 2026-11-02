@@ -174,7 +174,8 @@ fn evidence_cases(pair: bool, cases: &[Case], crossing: bool) {
                 signatures.insert(signature.definition, signature);
             }
             let verdict =
-                hirsel_validate::validate(&definition, relaxed.types(), &signatures, &mut vec![]);
+                hirsel_validate::validate(&definition, relaxed.types(), &signatures, &mut vec![])
+                    .unwrap();
             if case.unique {
                 assert!(
                     verdict.violations.is_empty(),

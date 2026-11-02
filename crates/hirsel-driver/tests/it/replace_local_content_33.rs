@@ -168,6 +168,7 @@ fn replace_local_content_33_v_rejects_forged_displaced_lifetime() {
         );
         assert!(
             hirsel_validate::validate(&output.value, engine.types(), &signatures, &mut vec![])
+                .unwrap()
                 .violations
                 .is_empty()
         );
@@ -198,7 +199,8 @@ fn replace_local_content_33_v_rejects_forged_displaced_lifetime() {
             }
         }
         forged.types = hirsel_tir::definition_types(engine.types(), &forged);
-        let report = hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]);
+        let report =
+            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]).unwrap();
         assert!(
             report.violations.iter().any(|v| v.kind
                 == hirsel_validate::ViolationKind::TypeMismatch {
@@ -316,7 +318,8 @@ fn replace_local_content_33_v_rejects_forged_mutation_acceptance() {
                     .clone(),
             );
         }
-        let report = hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]);
+        let report =
+            hirsel_validate::validate(&forged, engine.types(), &signatures, &mut vec![]).unwrap();
         assert!(
             report.violations.iter().any(|v| matches!(
                 v.kind,

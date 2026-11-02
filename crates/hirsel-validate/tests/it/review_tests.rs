@@ -1244,6 +1244,7 @@ fn exhaustive_switch_defaults_also_validate_their_closure_bodies() {
     );
     assert!(
         report
+            .unwrap()
             .violations
             .iter()
             .any(|v| v.body == Some(BodyId(1)) && v.kind == ViolationKind::LeakedSlot(LocalId(1)))
@@ -4826,7 +4827,8 @@ fn lexical_declarations_inspect_each_instruction_once() {
             interner(),
             &f.signatures,
             &mut vec![],
-        );
+        )
+        .unwrap();
         assert!(
             validation.violations.is_empty(),
             "{:?}",
@@ -5105,7 +5107,7 @@ fn validation_interns_working_rows_bounded_by_the_owner() {
         let definition = tabled(&f.definition);
         let before =
             hirsel_intern::work::read(hirsel_intern::work::Counter::InternedTypeRows) as usize;
-        let result = validate(&definition, interner(), &f.signatures, &mut vec![]);
+        let result = validate(&definition, interner(), &f.signatures, &mut vec![]).unwrap();
         assert!(result.violations.is_empty(), "{:?}", result.violations);
         let interned = hirsel_intern::work::read(hirsel_intern::work::Counter::InternedTypeRows)
             as usize

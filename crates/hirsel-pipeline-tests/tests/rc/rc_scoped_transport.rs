@@ -33,7 +33,8 @@ fn heap_baseline(source: &str, qualify: bool) -> hirsel_heapcheck::Run {
                 &program.types,
                 &signatures,
                 &mut vec![],
-            );
+            )
+            .unwrap();
             assert!(
                 proof.violations.is_empty(),
                 "{}: {proof:?}",
@@ -160,7 +161,7 @@ fn stripped_source_selectors_and_linked_body_mismatch_are_refused() {
         signatures.insert(hirsel_syntax::DefId::intern(p), (**s).clone());
     }
     let errors = hirsel_validate::validate(&forged, &program.types, &signatures, &mut vec![]);
-    assert!(!errors.violations.is_empty());
+    assert!(!errors.unwrap().violations.is_empty());
     let targets: Vec<_> = lowered
         .units
         .iter()
@@ -285,6 +286,7 @@ fn unsupported_generic_borrow_preserves_execution_but_not_qualification() {
     let definition = &program.definitions[&path("invoke")];
     assert!(
         hirsel_validate::validate(definition, &program.types, &signatures, &mut vec![])
+            .unwrap()
             .violations
             .is_empty()
     );
@@ -293,7 +295,8 @@ fn unsupported_generic_borrow_preserves_execution_but_not_qualification() {
         &program.types,
         &signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert!(
         proof.violations.iter().any(|v| matches!(
             v.kind,

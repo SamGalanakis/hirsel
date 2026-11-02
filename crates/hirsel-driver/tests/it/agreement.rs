@@ -51,6 +51,7 @@ fn kinds(definition: &hirsel_tir::Definition, signatures: &Signatures) -> Vec<Vi
     let mut definition = definition.clone();
     definition.types = hirsel_tir::definition_types(types(), &definition);
     validate(&definition, types(), signatures, &mut vec![])
+        .unwrap()
         .violations
         .into_iter()
         .map(|v| v.kind)

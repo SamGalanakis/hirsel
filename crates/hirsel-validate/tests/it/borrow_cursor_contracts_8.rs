@@ -59,7 +59,8 @@ fn rejects_at(f: &Fixture, instruction: u32, expected: ViolationKind) {
         interner(),
         &f.signatures,
         &mut vec![],
-    );
+    )
+    .unwrap();
     assert!(
         verdict
             .violations

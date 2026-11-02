@@ -355,6 +355,7 @@ fn replace_local_type(
 fn rejected(definition: &Definition, input: &NativeInput, entity: &'static str) {
     let violations =
         hirsel_validate::validate(definition, &input.types, &signatures(input), &mut vec![])
+            .unwrap()
             .violations;
     assert!(
         violations

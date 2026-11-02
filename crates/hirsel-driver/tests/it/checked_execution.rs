@@ -168,6 +168,7 @@ fn validator_rejects(engine: &mut QueryEngine, definition: &Definition) -> bool 
     let mut definition = definition.clone();
     definition.types = hirsel_tir::definition_types(engine.types(), &definition);
     !hirsel_validate::validate(&definition, engine.types(), &signatures, &mut vec![])
+        .unwrap()
         .violations
         .is_empty()
 }

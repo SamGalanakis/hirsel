@@ -864,6 +864,153 @@ fn admitted_front_zero_hold_retains_only_archives_after_settlement() {
     });
 }
 
+/// A body whose citation read is refused under pressure is a resource
+/// refusal, never a cached verdict: the same front, given room, produces the
+/// diagnostic with its citation.
+#[test]
+fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_cited_diagnostic() {
+    with_compiler_stack(|| {
+        struct Transport(MemStore);
+        impl ResultStore for Transport {
+            fn persistence(&self) -> hirsel_engine::store::Persistence {
+                hirsel_engine::store::Persistence::Disabled
+            }
+            fn transports(&self) -> bool {
+                true
+            }
+            fn get(
+                &self,
+                key: &hirsel_engine::store::EntryKey,
+            ) -> Option<hirsel_engine::store::Bytes> {
+                self.0.get(key)
+            }
+            fn put(&self, key: &hirsel_engine::store::EntryKey, value: &[u8]) {
+                self.0.put(key, value);
+            }
+            fn name(&self) -> &'static str {
+                "evictable-body-transport"
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("main.hir");
+        // `main`'s MODE-2 cites `code`'s failed unique-result claim, which
+        // only `code`'s module proof records.
+        std::fs::write(
+            &path,
+            "const NAME:String=\"shared\"\nfn code()->String{NAME}\nfn need(take value:unique String){}\npub fn main(){need(code())}\n",
+        )
+        .unwrap();
+        let budget = ProcessBudget::new(1 << 30);
+        let weight = MemoryWeight {
+            retained: 1 << 20,
+            scratch: 8 << 20,
+            stack: 0,
+        };
+        let cites =
+            |front: &Arc<FrontBodyQueries>,
+             body: Result<ProductRef, hirsel_engine::store::Reference>| {
+                let output = front.outcome(body).expect("a computed body has an outcome");
+                match output.outcome.result {
+                    Err(QueryError::Diagnostics(diagnostics)) => diagnostics.iter().any(|d| {
+                        d.rule.as_str() == "MODE-2"
+                            && d.secondary.iter().any(|l| {
+                                l.message
+                                    .contains("`code` no longer returns unique content")
+                            })
+                    }),
+                    other => panic!("main is rejected by MODE-2: {other:?}"),
+                }
+            };
+        let mut limit = 8 << 20;
+        for mode in 0..2 {
+            let mut program = COMPILER
+                .with_config(CompileConfig {
+                    store: Arc::new(Transport(MemStore::default())),
+                    hold_bytes: 0,
+                    ..Default::default()
+                })
+                .with_owned_engines()
+                .load_program(&path)
+                .unwrap();
+            let definitions = ["code", "need", "main"].map(|name| {
+                let mut definition = program.entry.clone();
+                definition.0.name = name.into();
+                definition
+            });
+            let mut runtime = AdmittedRuntime::with_query_capacity(
+                hirsel_intern::jobs::Jobs::ONE,
+                budget
+                    .reserve(hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + 2 * weight.scratch)
+                    .unwrap(),
+                errors(),
+                6,
+            )
+            .unwrap();
+            let front = program
+                .engine
+                .front_body_queries(
+                    &definitions,
+                    weight,
+                    budget.reserve(limit).unwrap(),
+                    errors(),
+                )
+                .unwrap();
+            runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
+            let _header_pins = definitions
+                .iter()
+                .map(|definition| {
+                    front
+                        .signatures()
+                        .signature(hirsel_syntax::DefId::intern(definition))
+                        .unwrap()
+                        .unwrap()
+                        .clone()
+                })
+                .collect::<Vec<_>>();
+            let summaries = definitions
+                .each_ref()
+                .map(|definition| front.query(definition).unwrap());
+            let request = runtime.request(&summaries[..2]);
+            runtime.wait(request).unwrap();
+            let bodies = definitions
+                .each_ref()
+                .map(|definition| front.body_query(definition).unwrap());
+            let request = runtime.request(&[bodies[0]]);
+            let code = runtime.wait(request).unwrap().pop().unwrap();
+            if mode == 0 {
+                // Measured: the metadata, the module proof and one body.
+                limit = front.retained_bytes();
+                let request = runtime.request(&[bodies[2]]);
+                let main = runtime.wait(request).unwrap_err();
+                assert!(cites(&front, Err(main)), "with room the citation is read");
+                continue;
+            }
+            // `code`'s pinned body fills the partition; `need`'s demand
+            // evicts the unpinned settled proof, which cannot be admitted
+            // again while the pin holds.
+            let pin = front.outcome(Ok(code.clone())).unwrap();
+            assert!(front.module_proof_resident(&definitions[0]));
+            let request = runtime.request(&[bodies[1]]);
+            let _ = runtime.wait(request);
+            assert!(!front.module_proof_resident(&definitions[0]));
+            let request = runtime.request(&[bodies[2]]);
+            assert_eq!(
+                runtime.wait(request),
+                Err(errors().resource),
+                "a body read under a refused citation is refused"
+            );
+            // With room, the next demand computes the body again and reads
+            // the citation: nothing was cached under the refusal.
+            drop(pin);
+            drop(code);
+            runtime.evict_to(0);
+            let request = runtime.request(&[bodies[2]]);
+            let main = runtime.wait(request).unwrap_err();
+            assert!(cites(&front, Err(main)), "the recomputed body cites `code`");
+        }
+    });
+}
+
 #[test]
 fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_equal() {
     with_compiler_stack(|| {

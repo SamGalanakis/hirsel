@@ -69,7 +69,21 @@ const HEADER: &str = "fn helper(x:u64)->u64{x+2u64}\n\
 const BROKEN_HEADER: &str = "fn helper(x:u64)->u64{x+2u64}\n\
                              pub fn twice(x:u64,y:u32)->u64{helper(x)*y}\n\
                              pub fn main()->u64{twice(3u64,2u64)}\n";
-const STEPS: [Step; 7] = [
+/// `generated` is produced at compile time by `body()`, which reads `source()`.
+const GENERATOR: &str = "fn helper(x:u64)->u64{x+2u64}\n\
+                         pub fn twice(x:u64,y:u64)->u64{helper(x)*y}\n\
+                         fn source()->String{\"fn(x:u64)->u64 uses {} {x+3u64}\"}\n\
+                         fn body()->Result[Body[fn(u64)->u64 uses {}],String]{Ok(codegen.body(source()))}\n\
+                         fn generated(x:u64)->u64 uses {} = comptime body()\n\
+                         pub fn main()->u64{twice(generated(3u64),2u64)}\n";
+/// Only the generator's input `source()` changes, so `generated` must too.
+const GENERATOR_INPUT: &str = "fn helper(x:u64)->u64{x+2u64}\n\
+                               pub fn twice(x:u64,y:u64)->u64{helper(x)*y}\n\
+                               fn source()->String{\"fn(x:u64)->u64 uses {} {x+4u64}\"}\n\
+                               fn body()->Result[Body[fn(u64)->u64 uses {}],String]{Ok(codegen.body(source()))}\n\
+                               fn generated(x:u64)->u64 uses {} = comptime body()\n\
+                               pub fn main()->u64{twice(generated(3u64),2u64)}\n";
+const STEPS: [Step; 9] = [
     Step {
         name: "cold",
         source: BASE,
@@ -103,6 +117,16 @@ const STEPS: [Step; 7] = [
     Step {
         name: "repair",
         source: HEADER,
+        valid: true,
+    },
+    Step {
+        name: "generator",
+        source: GENERATOR,
+        valid: true,
+    },
+    Step {
+        name: "generator input edit",
+        source: GENERATOR_INPUT,
         valid: true,
     },
 ];

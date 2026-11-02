@@ -1895,6 +1895,12 @@ impl BodyTask {
             resolution: None,
             checked: None,
         });
+        // A body computed under a refused citation read is a resource
+        // refusal: no failure record is published for it, and the next
+        // demand computes it again.
+        if done.refused().is_some() {
+            return Err(queries.errors.resource);
+        }
         if let Some(registration) = &input.registration {
             registration.explain(&mut done.result, &queries.citations.sources);
             if let Some(Product::Computed(stage)) = &mut done.resolution {

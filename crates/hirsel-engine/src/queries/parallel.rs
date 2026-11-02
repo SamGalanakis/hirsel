@@ -62,6 +62,8 @@ pub(crate) struct Stage<T> {
     detail: DependencyReads,
     observed: Observed,
     unavailable: Option<QueryKind>,
+    /// A refused citation read: the stage's result is not kept.
+    refused: Option<hirsel_types::OperationalFailure>,
 }
 impl<T> Stage<T> {
     fn complete(
@@ -138,6 +140,19 @@ impl Completed {
             work.push(QueryKind::Modes);
         }
         work
+    }
+    /// Whether a phase this task computed read a refused citation. Its
+    /// result is a resource refusal, never a body to publish.
+    pub(crate) fn refused(&self) -> Option<&hirsel_types::OperationalFailure> {
+        fn stage<T>(product: &Option<Product<T>>) -> Option<&hirsel_types::OperationalFailure> {
+            match product {
+                Some(Product::Computed(stage)) => stage.refused.as_ref(),
+                _ => None,
+            }
+        }
+        stage(&self.resolution)
+            .or_else(|| stage(&self.checked))
+            .or_else(|| stage(&self.modes))
     }
     /// Modes carries the final successful output. `result` otherwise records
     /// the earlier phase that stopped the task before modes was produced.
@@ -259,6 +274,7 @@ impl Worker<'_> {
                     detail: DependencyReads::default(),
                     observed: Observed::default(),
                     unavailable: None,
+                    refused: None,
                 };
                 let mut products = PhaseProducts::default();
                 let mut provider = WorkerRecorder::new(self, owner, &mut stage);
@@ -321,6 +337,7 @@ impl Worker<'_> {
                 detail: initial,
                 observed: Observed::default(),
                 unavailable: None,
+                refused: None,
             };
             let initial_signatures = stage.detail.signatures.len();
             let mut provider = WorkerRecorder::new(self, owner, &mut stage);
@@ -401,6 +418,7 @@ impl Worker<'_> {
             detail: initial,
             observed: Observed::default(),
             unavailable: None,
+            refused: None,
         };
         let mut products = PhaseProducts::default();
         let mut provider = WorkerRecorder::new(self, owner, &mut stage);
@@ -433,6 +451,7 @@ struct WorkerRecorder<'a> {
     snapshot: &'a SignatureSnapshot,
     detail: &'a mut DependencyReads,
     unavailable: &'a mut Option<QueryKind>,
+    refused: &'a mut Option<hirsel_types::OperationalFailure>,
 }
 impl<'a> WorkerRecorder<'a> {
     fn new<T>(worker: &'a Worker<'_>, owner: DefId, stage: &'a mut Stage<T>) -> Self {
@@ -446,6 +465,7 @@ impl<'a> WorkerRecorder<'a> {
             snapshot: worker.snapshot,
             detail: &mut stage.detail,
             unavailable: &mut stage.unavailable,
+            refused: &mut stage.refused,
         }
     }
 }
@@ -483,6 +503,10 @@ impl SignatureProvider for WorkerRecorder<'_> {
         claim: hirsel_types::UniqueClaim,
     ) -> Option<hirsel_types::UniqueFailure> {
         let failure = self.provider.cite_unique_failure(definition, claim);
+        if let Some(refusal) = self.provider.refused() {
+            self.refused.get_or_insert_with(|| refusal.clone());
+            self.detail.operational_failure = Some(refusal.clone());
+        }
         self.detail
             .citations
             .push((definition.clone(), failure.as_ref().map(|f| f.span)));

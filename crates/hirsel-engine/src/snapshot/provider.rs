@@ -17,6 +17,7 @@ pub struct FrozenProvider<'a> {
     private_shapes: bool,
     definition: Option<DefId>,
     citations: Option<&'a dyn super::CitationSource>,
+    refused: Option<hirsel_types::OperationalFailure>,
 }
 impl<'a> FrozenProvider<'a> {
     pub fn new(
@@ -31,6 +32,7 @@ impl<'a> FrozenProvider<'a> {
             private_shapes: false,
             definition: None,
             citations: None,
+            refused: None,
         }
     }
     /// A body query's provider, selecting its package's private views while
@@ -48,6 +50,7 @@ impl<'a> FrozenProvider<'a> {
             private_shapes: true,
             definition: None,
             citations: None,
+            refused: None,
         }
     }
     /// A body worker's complete signature/citation provider over immutable
@@ -62,6 +65,11 @@ impl<'a> FrozenProvider<'a> {
         provider.definition = Some(owner);
         provider.citations = Some(citations);
         provider
+    }
+    /// The first refused citation read. A body computed under one is
+    /// refused, never cached: the citation it lacks is not a verdict.
+    pub fn refused(&self) -> Option<&hirsel_types::OperationalFailure> {
+        self.refused.as_ref()
     }
     /// `d`'s view as the owner's bodies see it, recording `Signature(d)` (or
     /// `FailedSignature(d)`) and, for an opaque type seen privately,
@@ -188,12 +196,25 @@ impl SignatureProvider for FrozenProvider<'_> {
         let target = DefId::intern(target);
         self.reads
             .record(ReadKey::CitedText(target), source.cited_text(target));
-        source.unique_failure(owner, target, claim).or_else(|| {
-            source.cited_name(owner, target)?;
-            self.snapshot
-                .header_products()?
-                .unique_failure(target, claim)
-        })
+        if let Some(failure) = source.unique_failure(owner, target, claim) {
+            return Some(failure);
+        }
+        source.cited_name(owner, target)?;
+        match self
+            .snapshot
+            .header_products()?
+            .unique_failure(target, claim)
+        {
+            Ok(failure) => failure,
+            Err(error) => {
+                // The citation cannot carry the refusal; the provider keeps it
+                // so the citing body is refused rather than kept citing nothing.
+                if let QueryError::Operational(failure) = error {
+                    self.refused.get_or_insert(failure);
+                }
+                None
+            }
+        }
     }
     fn cite_name(&mut self, target: &hirsel_syntax::DefPath) -> Option<hirsel_span::Span> {
         let source = self.citations?;

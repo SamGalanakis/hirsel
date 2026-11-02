@@ -426,19 +426,22 @@ impl HeaderProducts {
                 .map(|(_, proof)| proof.summary.clone())
         }))
     }
+    /// The cited failure of `id`'s proof for `claim`. A refused proof read is
+    /// Err: the citing body must not be kept, never a body that cites nothing.
     pub(crate) fn unique_failure(
         &self,
         id: DefId,
         claim: hirsel_types::UniqueClaim,
-    ) -> Option<hirsel_types::UniqueFailure> {
-        // A citation carries no error: a refused proof cites nothing.
-        let product = self.proof_for_reader(id).ok()??;
-        let proof = product
+    ) -> Result<Option<hirsel_types::UniqueFailure>, QueryError> {
+        let Some(product) = self.proof_for_reader(id)? else {
+            return Ok(None);
+        };
+        Ok(product
             .facts
             .proofs
             .iter()
-            .find(|(definition, _)| *definition == id)?;
-        proof.1.failures.iter().find(|f| f.claim == claim).cloned()
+            .find(|(definition, _)| *definition == id)
+            .and_then(|proof| proof.1.failures.iter().find(|f| f.claim == claim).cloned()))
     }
     pub(crate) fn adopt_private_products(
         &self,

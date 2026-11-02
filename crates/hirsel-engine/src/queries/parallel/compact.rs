@@ -3,43 +3,6 @@
 //! Immutable receipts and summaries survive until canonical serial publication.
 use super::*;
 
-#[derive(Clone)]
-pub(super) enum FrontResult {
-    Resident(ModeResult),
-    Compact(PublishedResult),
-}
-impl FrontResult {
-    pub(super) fn phase(&self) -> Option<QueryKind> {
-        match self {
-            Self::Resident(o) => o.phase,
-            Self::Compact(o) => o.phase,
-        }
-    }
-    pub(super) fn unavailable(&self) -> bool {
-        match self {
-            Self::Resident(o) => matches!(o.result, Err(QueryError::NotImplemented)),
-            Self::Compact(o) => matches!(o.result, Err(QueryError::NotImplemented)),
-        }
-    }
-}
-pub(super) enum WorkerCompleted {
-    Resident(Completed),
-    Compact(CompactCompleted),
-}
-impl WorkerCompleted {
-    pub(super) fn definition(&self) -> &DefPath {
-        match self {
-            Self::Resident(o) => &o.definition,
-            Self::Compact(o) => o.definition(),
-        }
-    }
-    pub(super) fn index(&self) -> usize {
-        match self {
-            Self::Resident(o) => o.index,
-            Self::Compact(o) => o.index,
-        }
-    }
-}
 pub(super) fn missing_summary() -> QueryError {
     QueryError::Operational(hirsel_types::OperationalFailure {
         operation: "definition publication".into(),
@@ -144,7 +107,9 @@ impl CompactCompleted {
             (QueryKind::Modes, &self.modes),
         ] {
             if let Some(stage) = stage {
-                if stage.consistent {
+                if stage.consistent
+                    && matches!(stage.error, None | Some(QueryError::Diagnostics(_)))
+                {
                     rows.push((
                         crate::memo::MemoKey::new(kind, definition),
                         stage.reads.clone(),
@@ -296,7 +261,9 @@ impl CompactCompleted {
         let mut resolution_reads = done
             .resolution
             .as_ref()
-            .filter(|_| consistent)
+            .filter(|product| {
+                consistent && matches!(product.result(), Ok(_) | Err(QueryError::Diagnostics(_)))
+            })
             .map(|_| inherited.clone());
         let mut checked = done.checked.map(|product| {
             let mut stage = CompactStage::capture(&done.definition, product, &inherited, source);
@@ -376,199 +343,6 @@ impl CompactCompleted {
                 reads: inherited,
                 diagnostic_phases,
             },
-        }
-    }
-}
-
-impl QueryEngine {
-    pub(crate) fn merge_compact_completed(&mut self, done: CompactCompleted) -> PublishedResult {
-        // Retire older aggregate products before installing the task's fresh
-        // lint/lowering inputs. Standalone query users need no aggregate.
-        let changes = self
-            .front_changes
-            .is_active()
-            .then(|| self.invalidate_front_definition(DefId::intern(done.definition())));
-        let CompactCompleted {
-            text,
-            resolution,
-            checked,
-            modes,
-            checked_summary,
-            dead_arms,
-            lowering_inputs,
-            payload,
-            store_write,
-            mode_archive,
-            mut outcome,
-            ..
-        } = done;
-        debug_assert!(
-            payload.is_none(),
-            "worker payload must be drained before publication"
-        );
-        let path = &outcome.definition;
-        let id = DefId::intern(path);
-        if let Some(product) = resolution {
-            let entry = self.merge_stage(path, QueryKind::Resolve, text, product, None);
-            keep(
-                &mut self.resolutions,
-                &mut self.graph,
-                entry,
-                self.s1.failure_is_own(),
-            );
-        }
-        if let Some(stage) = checked {
-            if stage.consistent
-                && let Some(summary) = checked_summary
-            {
-                if let Some(inputs) = dead_arms {
-                    self.front_products.dead_arms.insert(id, inputs);
-                }
-                self.start(path, QueryKind::CheckedSummary)
-                    .expect("front workers cannot reenter queries");
-                self.record_checked_summary(
-                    id,
-                    summary,
-                    text,
-                    stage.reads.clone(),
-                    stage.detail.clone(),
-                    false,
-                );
-                self.active
-                    .remove(&(path.clone(), QueryKind::CheckedSummary));
-            }
-            if let Some(entry) =
-                self.merge_compact_stage::<TypedBody>(path, QueryKind::Check, text, stage)
-            {
-                keep(
-                    &mut self.checked,
-                    &mut self.graph,
-                    entry,
-                    self.s1.failure_is_own(),
-                );
-            }
-        }
-        if let Some(stage) = modes {
-            let mut store_failed = false;
-            if let Some(write) = store_write {
-                self.finish_mode_write(path);
-                if let Err(error) = write {
-                    outcome.result = Err(error);
-                    store_failed = true;
-                }
-            }
-            let detail = stage.detail.clone();
-            if let Some(entry) =
-                self.merge_compact_stage::<AnalyzedBody>(path, QueryKind::Modes, text, stage)
-            {
-                keep(
-                    &mut self.modes,
-                    &mut self.graph,
-                    entry,
-                    self.s1.failure_is_own(),
-                );
-            }
-            if store_failed {
-                self.forget(&MemoKey::new(QueryKind::Modes, id));
-            }
-            if let Ok(published) = &outcome.result {
-                self.start(path, QueryKind::Summary)
-                    .expect("front workers cannot reenter queries");
-                self.record_summary_products(
-                    published.summary.clone(),
-                    detail,
-                    false,
-                    Arc::new(PhaseProducts {
-                        mode_diagnostics: outcome.diagnostic_phases.clone(),
-                        mode_archive: (!store_failed).then_some(mode_archive).flatten(),
-                        ..Default::default()
-                    }),
-                );
-                if let Some(inputs) = lowering_inputs {
-                    self.front_products.lowering_inputs.insert(id, inputs);
-                }
-                self.active.remove(&(path.clone(), QueryKind::Summary));
-            }
-        }
-        let representations: Vec<_> = outcome
-            .reads
-            .iter()
-            .filter_map(|(key, _)| {
-                if let ReadKey::Representation(id) = key {
-                    Some(id.path().clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for path in representations {
-            self.read_layout_body(&path);
-        }
-        if outcome.result.is_ok()
-            && self
-                .resolutions
-                .get(&id)
-                .is_some_and(|entry| entry.memo.value.is_ok())
-        {
-            self.forget(&MemoKey::new(QueryKind::Resolve, id));
-        }
-        self.last_phase = outcome.phase;
-        self.unavailable = matches!(outcome.result, Err(QueryError::NotImplemented))
-            .then_some(outcome.phase)
-            .flatten();
-        if let Some(changes) = changes {
-            self.retain_front_completion(&outcome, &changes);
-        }
-        if let Err(error) = self.store_publication(&outcome) {
-            outcome.result = Err(error);
-        }
-        outcome
-    }
-
-    /// Successes charge actual phase work, then retire their body key. Compact
-    /// summary keys own the surviving subscriptions. Failures retain the same
-    /// typed error entry, products and cacheability rules as scalar publication.
-    fn merge_compact_stage<T>(
-        &mut self,
-        path: &DefPath,
-        kind: QueryKind,
-        text: ContentHash,
-        stage: CompactStage,
-    ) -> Option<Arc<Entry<T>>> {
-        let key = MemoKey::new(kind, DefId::intern(path));
-        if !stage.computed {
-            if stage.error.is_none() {
-                self.forget(&key);
-            }
-            return None;
-        }
-        self.start(path, kind)
-            .expect("front workers cannot reenter queries");
-        self.active.remove(&(path.clone(), kind));
-        let durability = stage.reads.durability(|read| self.durability_of(read));
-        if let Some(error) = stage.error {
-            if kind == QueryKind::Check {
-                self.retire_after_check_rejection(key.def);
-            }
-            let memo = self
-                .graph
-                .insert(key, text, Err(error), stage.reads, durability, false);
-            Some(Arc::new(Entry {
-                memo,
-                detail: stage.detail,
-                products: stage.products,
-                covered: vec![],
-                depth: None,
-                acceptance: None,
-                verification: Default::default(),
-                selections: vec![],
-                consistent: stage.consistent,
-            }))
-        } else {
-            self.graph
-                .insert(key, text, Ok(Arc::new(())), stage.reads, durability, false);
-            self.forget(&key);
-            None
         }
     }
 }

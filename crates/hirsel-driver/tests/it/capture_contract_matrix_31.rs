@@ -308,7 +308,7 @@ fn retain(
 fn check(text: &str) -> (QueryEngine, CheckOutput) {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("main.hir", text.into()).unwrap();
-    let output = check_progress(&mut engine, file, &default_context())
+    let output = source_check_request(&mut engine, file, &default_context())
         .expect("source API error, not a source diagnostic");
     (engine, output)
 }

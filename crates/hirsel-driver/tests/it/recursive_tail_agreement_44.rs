@@ -76,7 +76,7 @@ fn checked_source(source: &str) -> QueryEngine {
         .sources
         .add("recursive-tail-44.hir", source.into())
         .unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(
         checked.diagnostics.is_empty(),
         "{source}\n{:?}",

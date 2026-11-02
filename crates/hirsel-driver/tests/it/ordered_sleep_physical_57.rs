@@ -9,7 +9,7 @@ fn entered_sleep_and_join_release_stacks_at_widths_one_and_four_and_replay() {
         let source = super::ordered_sleep_resume_57::CERTIFIED_SOURCE;
         let mut engine = crate::source_std::engine();
         let file = engine.sources.add("main.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&default_context());
         let fixture = Fixture {

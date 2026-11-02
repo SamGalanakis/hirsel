@@ -43,7 +43,7 @@ pub fn main() { let got = fits(19u64) }
             .sources
             .add("storage-sorted-map.hir", source.to_owned())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(checked.completion, CheckCompletion::Complete);
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
@@ -116,7 +116,7 @@ pub fn main() {{
                 .sources
                 .add("storage-custom-order.hir", source)
                 .unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(checked.completion, CheckCompletion::Complete);
             if allocating {
                 assert!(
@@ -159,7 +159,7 @@ pub fn main() {
             .sources
             .add("storage-sorted-removal.hir", source.to_owned())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(checked.completion, CheckCompletion::Complete);
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();

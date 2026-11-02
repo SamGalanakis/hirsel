@@ -20,7 +20,7 @@ fn contract_pseudo_values_are_rejected_before_lowering_outside_ensures() {
         ] {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("contracts.hir", source.into()).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(output.completion, CheckCompletion::Complete, "{source}");
             let diagnostic = output.diagnostics.first().unwrap();
             assert_eq!(diagnostic.rule.as_str(), "FACT-1", "{source}");
@@ -38,7 +38,7 @@ fn contract_pseudo_values_are_rejected_before_lowering_outside_ensures() {
                 "fn f(a:u8)->u8 ensures result == before(a) { a }".into(),
             )
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     });
 }

@@ -26,7 +26,8 @@ fn accepts(source: &str) {
 fn unique_if_join_matches_reference_heap_llvm_and_cranelift() {
     use hirsel_driver::native::*;
     use hirsel_engine::{
-        RunConfiguration, check_progress, entry_path, run_observed_snapshot, with_compiler_stack,
+        RunConfiguration, entry_path, run_observed_snapshot, source_check_request,
+        with_compiler_stack,
     };
     with_compiler_stack(|| {
         let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
@@ -129,7 +130,7 @@ pub fn main(rt:Io,args:Args)->Result[(),GrantError] {
                 .sources
                 .add(format!("unique-{name}.hir"), source.into())
                 .unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{name}: {:?}",

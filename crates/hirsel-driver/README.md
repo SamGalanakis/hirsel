@@ -240,7 +240,7 @@ Failure observations retain and compare the original operation site independentl
 of the primary attribution. Tooling reports render both complete locations.
 
 Conformance `native::Fixture` supplies a virtual monotonic start and validated scripted
-network/process grants to `differential_in` and `real_io_replay_in`. H receives its
+network/process grants to `differential_ready` and `real_io_replay_ready`. H receives its
 model world; LLVM and Cranelift use the same harness adapter. Production launch
 records and capability seeds remain independent of semantic fixtures.
 
@@ -269,7 +269,7 @@ executable, counted by reason (`native::counts`). Served runs go to a pool of
 fork servers, one request at a time each over a Unix socket that carries the
 run's streams (`SCM_RIGHTS`); the server replies with the child's process ID and
 then its raw wait status, and a timeout kills the child's process group.
-`runner_oracle_in` holds a configuration's executable and image to byte-identical
+`runner_oracle_ready` holds a configuration's executable and image to byte-identical
 output, status and observation record, and cross-replays their tapes.
 
 `tests/it-stdlib/stdlib_table.rs` runs the typed-table storage fixtures through

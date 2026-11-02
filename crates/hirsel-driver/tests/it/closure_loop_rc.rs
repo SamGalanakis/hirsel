@@ -5,7 +5,7 @@
 //! closure and a callee replaced during its arguments keep theirs.
 use hirsel_driver::compiler_adapters;
 use hirsel_engine::{
-    QueryEngine, check_progress, default_context, default_environment, with_compiler_stack,
+    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
 use hirsel_lir::ir::{Inst, LirUnit, Terminator};
 use hirsel_lir::{Ready, TargetSpec};
@@ -16,7 +16,7 @@ fn ready(source: &str) -> Vec<LirUnit<Ready>> {
     with_compiler_stack(move || {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("closure.hir", source).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let raw = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(raw).unwrap();

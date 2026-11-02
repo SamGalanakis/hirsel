@@ -203,7 +203,7 @@ fn bounded_order_and_failure_chain_on_h() {
             .sources
             .add("destructure.hir", SOURCE.into())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let raw = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(raw).unwrap();
@@ -243,7 +243,7 @@ fn bounded_order_and_failure_chain_on_both_backends() {
             .sources
             .add("destructure.hir", SOURCE.into())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let raw = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(raw).unwrap();
@@ -327,7 +327,7 @@ pub fn main() -> Result[(), ()] {{
             let mut engine =
                 QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
             let file = engine.sources.add("guard.hir", source).unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let raw = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(raw).unwrap();

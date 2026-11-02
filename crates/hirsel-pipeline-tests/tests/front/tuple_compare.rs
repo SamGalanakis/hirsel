@@ -78,7 +78,8 @@ fn tuple_compare_incompatible_nested_rows_are_still_rejected_by_v() {
 fn tuple_compare_matches_reference_heap_llvm_and_cranelift() {
     use hirsel_driver::native::*;
     use hirsel_engine::{
-        RunConfiguration, check_progress, entry_path, run_observed_snapshot, with_compiler_stack,
+        RunConfiguration, entry_path, run_observed_snapshot, source_check_request,
+        with_compiler_stack,
     };
     with_compiler_stack(|| {
         let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
@@ -116,7 +117,7 @@ fn tuple_compare_matches_reference_heap_llvm_and_cranelift() {
                 .sources
                 .add(format!("tuple-{name}.hir"), source)
                 .unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{name}: {:?}",

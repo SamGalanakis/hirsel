@@ -104,8 +104,8 @@ fn callers_detach_lists_the_storage_primitives_write() {
 fn direct_and_wrapper_calls_preserve_arena_and_shared_owners() {
     use hirsel_driver::{compiler_adapters, native};
     use hirsel_engine::{
-        QueryEngine, RunConfiguration, check_progress, default_context, default_environment,
-        entry_path, run_observed_snapshot, with_compiler_stack,
+        QueryEngine, RunConfiguration, default_context, default_environment, entry_path,
+        run_observed_snapshot, source_check_request, with_compiler_stack,
     };
     let shared = SOURCE
         .replace(" in a = ", " = ")
@@ -117,7 +117,7 @@ fn direct_and_wrapper_calls_preserve_arena_and_shared_owners() {
         with_compiler_stack(|| {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("test.hir", source.into()).unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let entry = entry_path(&default_context());
             let run = run_observed_snapshot(

@@ -1,6 +1,6 @@
 use hirsel_driver::{compiler_adapters, native};
 use hirsel_engine::{
-    QueryEngine, check_progress, default_context, default_environment, entry_path,
+    QueryEngine, default_context, default_environment, entry_path, source_check_request,
     with_compiler_stack,
 };
 use std::{fs, process::Command};
@@ -27,7 +27,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {{
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("cpu.hir", source).unwrap();
         let context = default_context();
-        let output = check_progress(&mut engine, file, &context).unwrap();
+        let output = source_check_request(&mut engine, file, &context).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();

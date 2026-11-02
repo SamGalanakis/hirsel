@@ -550,7 +550,8 @@ fn actual_ready_fixture_emits_links_restores_and_exits_on_both_backends() {
                 "pub fn main()->Result[(),String]{Ok(())}".into(),
             )
             .unwrap();
-        let checked = hirsel_engine::check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked =
+            hirsel_engine::source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&default_context());
         let reference = hirsel_engine::run_observed_snapshot(

@@ -12,7 +12,7 @@ fn mutual_alias_cycles_are_language_failures_in_either_declaration_order() {
         ] {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("aliases.hir", source.into()).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(output.completion, CheckCompletion::Complete, "{source}");
             let diagnostic = output.diagnostics.first().unwrap();
             assert_eq!(
@@ -49,7 +49,7 @@ fn borrowed_capture_repairs_19_alias_declaration_order_keeps_the_checked_repair(
             ] {
                 let mut engine = crate::source_std::engine();
                 let file = engine.sources.add("aliases.hir", source.clone()).unwrap();
-                let output = check_progress(&mut engine, file, &default_context()).unwrap();
+                let output = source_check_request(&mut engine, file, &default_context()).unwrap();
                 assert_eq!(output.completion, CheckCompletion::Complete);
                 if accepted {
                     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);

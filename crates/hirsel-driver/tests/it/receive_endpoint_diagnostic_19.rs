@@ -7,9 +7,9 @@ const DIRECT: &str = "// café 🐑\npub type Status { url: String }\npub fn mai
 fn checked(source: &str) -> CheckOutput {
     let mut engine = crate::source_std::engine();
     let file = engine.sources.add("endpoint.hir", source.into()).unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(output.completion, CheckCompletion::Complete);
-    let warm = check_progress(&mut engine, file, &default_context()).unwrap();
+    let warm = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(
         output
             .diagnostics
@@ -165,7 +165,7 @@ pub fn main(t: Test) -> Result[(), ChannelError] {
         );
         let mut engine = crate::source_std::engine();
         let file = engine.sources.add("repaired.hir", source).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let execution = run_observed_checked(
             &mut engine,

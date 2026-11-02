@@ -10,7 +10,7 @@ fn accepted(source: &str) {
         .sources
         .add("related-literal.hir", source.into())
         .unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(output.completion, CheckCompletion::Complete);
     assert!(
         output.diagnostics.is_empty(),
@@ -52,7 +52,7 @@ fn related_literal_21_true_relation_mismatches_have_human_and_json_diagnostics()
         for (source, rule) in sources {
             let mut engine = crate::source_std::engine();
             let file = engine.sources.add("negative.hir", source.clone()).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(!output.diagnostics.is_empty(), "accepted {source}");
             assert!(
                 output.diagnostics.iter().any(|d| d.rule.as_str() == rule),
@@ -129,7 +129,7 @@ fn related_literal_21_interpreter_h_llvm_cranelift() {
         use hirsel_driver::native::*;
         let mut engine = crate::source_std::engine();
         let file = engine.sources.add("runtime.hir", RUNTIME.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let entry = entry_path(&default_context());
         let run = run_observed_snapshot(
@@ -201,7 +201,7 @@ fn related_literal_21_v_rejects_forged_multiplicity() {
         let source = "fn need(take f:once fn()->u64 uses{}){}\npub fn main(){let n=7u64;need(fn()->u64{take n})}";
         let mut engine = crate::source_std::engine();
         let file = engine.sources.add("forgery.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let mut signatures = hirsel_validate::SignatureMap::new(input.types.clone());
@@ -264,7 +264,7 @@ fn related_literal_21_v_rejects_relabelled_result_source() {
             .sources
             .add("source-forgery.hir", source.into())
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let mut signatures = hirsel_validate::SignatureMap::new(input.types.clone());

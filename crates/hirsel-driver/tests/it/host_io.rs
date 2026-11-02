@@ -6,7 +6,7 @@ fn execute(source: &str, simulation: SimulationConfig) -> hirsel_engine::Observe
     let mut engine = source_std::engine();
     let file = engine.sources.add("host-io.hir", source.into()).unwrap();
     let context = default_context();
-    let checked = check_progress(&mut engine, file, &context).unwrap();
+    let checked = source_check_request(&mut engine, file, &context).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let run = RunConfiguration {
         entry: entry_path(&context),
@@ -145,7 +145,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
         let mut engine = source_std::engine();
         let file = engine.sources.add("sim-points.hir", source.into()).unwrap();
         let context = default_context();
-        let checked = check_progress(&mut engine, file, &context).unwrap();
+        let checked = source_check_request(&mut engine, file, &context).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&context);
         let signature = engine.item_signature(&entry).unwrap().value;

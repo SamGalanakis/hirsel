@@ -352,8 +352,8 @@ fn tool_receipt() {
 fn checked(source: &str) -> Result<QueryEngine, String> {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("main.hir", source.into()).unwrap();
-    let checked =
-        check_progress(&mut engine, file, &default_context()).map_err(|e| format!("API:{e:?}"))?;
+    let checked = source_check_request(&mut engine, file, &default_context())
+        .map_err(|e| format!("API:{e:?}"))?;
     let errors: Vec<_> = checked
         .diagnostics
         .iter()
@@ -640,7 +640,7 @@ fn negative_twins_require_the_source_rule_and_site() {
             engine.import_native_input(input).unwrap();
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("main.hir", negative.clone()).unwrap();
-            let output = check_progress(&mut engine, file, &default_context())
+            let output = source_check_request(&mut engine, file, &default_context())
                 .unwrap_or_else(|e| panic!("API error, not diagnostic: {e:?}"));
             let errors: Vec<_> = output
                 .diagnostics
@@ -830,7 +830,7 @@ fn permanent_manifest_twins() {
         assert_eq!(accepted.replace("transfer(take x", "transfer(x"), rejected);
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("main.hir", rejected.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         let errors: Vec<_> = output
             .diagnostics
             .iter()

@@ -1,6 +1,6 @@
 use hirsel_driver::{compiler_adapters, native};
 use hirsel_engine::{
-    QueryEngine, check_progress, default_context, default_environment, with_compiler_stack,
+    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
 use hirsel_lir::ahead::{Refusal, ScalarGraph, scalar_graph};
 use hirsel_syntax::ContentHash;
@@ -9,7 +9,7 @@ fn analyze(source: &str, name: &str) -> Result<ScalarGraph, Refusal> {
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("ahead.hir", source.to_owned()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
@@ -96,7 +96,7 @@ fn scalar_alternate_loop_ir() {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let source = "fn main(seed:u64,count:u64)->u64 uses {} {let mut x=seed; for i in 0u64..count {x=int.wrapping_add(int.wrapping_mul(x ^ (x >> 7),0x9e3779b97f4a7c15u64),i)}; x}";
         let file = engine.sources.add("chunk.hir", source.to_owned()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();

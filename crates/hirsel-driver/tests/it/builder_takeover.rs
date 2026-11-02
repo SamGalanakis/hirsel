@@ -10,7 +10,7 @@ use hirsel_driver::native::{
     OptLevel, Options, Partition, ReadyProgram, TargetSpec, Toolchain, build, emit_ir, launch, link,
 };
 use hirsel_engine::{
-    QueryEngine, check_progress, default_context, default_environment, entry_path,
+    QueryEngine, default_context, default_environment, entry_path, source_check_request,
     with_compiler_stack,
 };
 use hirsel_lir::ir::*;
@@ -57,7 +57,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
 fn ready(target: &TargetSpec) -> ReadyProgram {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("takeover.hir", SOURCE.into()).unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     let input = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(input).unwrap();

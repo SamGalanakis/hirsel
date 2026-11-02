@@ -23,7 +23,7 @@ fn v_rejects_taking_a_copied_capture_from_a_many_invocation() {
                 .sources
                 .add("capture-take.hir", source.into())
                 .unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
             let input = engine.export_native_input().unwrap();
             let mut signatures = hirsel_validate::SignatureMap::new(input.types.clone());

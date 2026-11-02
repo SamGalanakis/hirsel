@@ -9,11 +9,9 @@ use hirsel_syntax::{DefId, DefMap};
 pub(crate) struct FrontProducts {
     outcomes: DefMap<PublishedResult>,
     pub(crate) checked: DefMap<CheckedSummary>,
-    lowered: DefMap<LowerProduct>,
     selection: DefMap<std::sync::Arc<PublishedSummary>>,
     pub(crate) dead_arms: DefMap<DeadArmUse>,
     pub(crate) lowering_inputs: DefMap<crate::queries::lowering::LoweringUse>,
-    verify: Option<Verify>,
     invalidated: DefMap<u64>,
 }
 /// The body facts the package's dead-error-arm lint consumes, independently
@@ -22,13 +20,6 @@ pub(crate) struct FrontProducts {
 pub(crate) struct DeadArmUse {
     pub(crate) errors: std::collections::BTreeSet<DefPath>,
     pub(crate) constructed: std::collections::BTreeSet<(DefPath, u32)>,
-}
-#[derive(Clone)]
-struct LowerProduct {
-    text: hirsel_syntax::ContentHash,
-    result: Result<Vec<Diagnostic>, QueryError>,
-    phase: Option<QueryKind>,
-    reads: std::sync::Arc<Reads>,
 }
 impl FrontProducts {
     fn invalidate(&mut self, definition: DefId, generation: u64) {
@@ -56,9 +47,6 @@ impl FrontProducts {
                 self.checked.remove(&key.def);
                 self.dead_arms.remove(&key.def);
             }
-            QueryKind::Lower => {
-                self.lowered.remove(&key.def);
-            }
             _ => {
                 if self.outcomes.get(&key.def).is_some_and(|outcome| {
                     outcome.result.is_err() && outcome.phase == Some(key.kind)
@@ -85,10 +73,6 @@ impl QueryEngine {
         &mut self,
         changes: crate::queries::FrontChanges,
     ) -> crate::queries::FrontChanges {
-        if self.front_products.verify != Some(self.verify) {
-            self.front_products.lowered.clear();
-            self.front_products.verify = Some(self.verify);
-        }
         for (definition, generation) in changes.generations() {
             if self.front_products.invalidated.get(&definition) == Some(&generation) {
                 continue;
@@ -140,30 +124,8 @@ impl QueryEngine {
         self.acknowledge_frontier(&changes, &removed);
         for definition in removed {
             self.front_products.invalidated.remove(&definition);
-            self.front_products.lowered.remove(&definition);
         }
         changes
-    }
-
-    /// Reuse completed diagnostics without confirming or adopting a Lower
-    /// memo. Direct changes still demand Lower; broad V notifications can be
-    /// discharged for these facts only when their exact inputs are unchanged.
-    fn current_lower_facts(&mut self, definition: DefId) -> Option<LowerProduct> {
-        let product = self.front_products.lowered.get(&definition)?.clone();
-        let reads = self
-            .graph
-            .pending_context_reads(&crate::memo::MemoKey::new(QueryKind::Lower, definition))?;
-        if self.key_text(definition.path(), QueryKind::Lower).ok()? != product.text
-            || reads.into_iter().any(|read| {
-                product
-                    .reads
-                    .get(&read)
-                    .is_none_or(|expected| self.observe(definition.path(), &read) != Some(expected))
-            })
-        {
-            return None;
-        }
-        Some(product)
     }
 
     /// Compact input of program selection. A hit reads no body memo, but
@@ -202,345 +164,6 @@ impl QueryEngine {
                             .result()
                             .is_ok_and(|output| std::sync::Arc::ptr_eq(&output.value, summary))
                 })
-    }
-
-    /// Classify source publication barriers without demanding bodies. A static
-    /// prefix settles before staged/generic roots can publish declarations;
-    /// consecutive dynamic roots still share the compact worker schedule.
-    pub(crate) fn static_constant_frontier(&mut self, root: &DefPath) -> bool {
-        if self.adapters.phases.is_none() {
-            return false;
-        }
-        self.invalidate_front_products();
-        if self.current_lower_facts(DefId::intern(root)).is_some() {
-            return true;
-        }
-        let mut pending = vec![DefId::intern(root)];
-        let mut seen = std::collections::BTreeSet::new();
-        while let Some(definition) = pending.pop() {
-            if !seen.insert(definition) {
-                continue;
-            }
-            let Some(syntax) = self
-                .items
-                .get(definition.path())
-                .and_then(|items| items.first())
-                .cloned()
-            else {
-                return false;
-            };
-            if crate::queries::generation::serial(&syntax)
-                || crate::queries::generation::instance_bodied(&syntax)
-            {
-                return false;
-            }
-            // Eligibility is read-only: unavailable or dirty compact inputs
-            // cannot run another query before an earlier file prefix settles.
-            let Some(published) = self
-                .front_products
-                .selection
-                .get(&definition)
-                .cloned()
-                .filter(|summary| self.current_front_summary(summary))
-            else {
-                return false;
-            };
-            let summary = &published.summary;
-            if !summary.staged.is_empty() || summary.frames.iter().any(|frame| frame.generic) {
-                return false;
-            }
-            // Indirect, intrinsic and constructor calls absent from the
-            // symbolic static-call list require a dynamic publication barrier.
-            if syntax.tree.expressions.iter().any(|expression| {
-                matches!(expression.kind, hirsel_syntax::ExprKind::Call { .. })
-                    && !summary
-                        .calls
-                        .iter()
-                        .any(|call| call.site == expression.origin.span)
-            }) {
-                return false;
-            }
-            for call in &summary.calls {
-                if !call.arguments.is_empty() {
-                    return false;
-                }
-                if call.target_frame.is_none() {
-                    pending.push(call.callee);
-                }
-            }
-            for (read, _) in published.reads.iter() {
-                if let crate::memo::ReadKey::Signature(dependency) = read
-                    && self
-                        .items
-                        .get(dependency.path())
-                        .and_then(|items| items.first())
-                        .is_some_and(|item| {
-                            matches!(item.item.kind, hirsel_syntax::ItemKind::Const { .. })
-                        })
-                {
-                    pending.push(*dependency);
-                }
-            }
-        }
-        true
-    }
-
-    /// Consume complete dynamic lower facts after GEN-5. Cached roots remain
-    /// ordered boundaries: preceding misses settle before their receipts are
-    /// rechecked against any newly published declarations.
-    pub(crate) fn front_lowerings(
-        &mut self,
-        definitions: Vec<DefPath>,
-        jobs: hirsel_intern::jobs::Jobs,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) -> Result<(), QueryError> {
-        // Image writers still need closure-local scalar evidence. Fake phase
-        // adapters keep the scalar contract without a complete frozen source.
-        if self.adapters.phases.is_none() {
-            for definition in definitions {
-                diagnostics.extend(self.front_lower(&definition)?);
-            }
-            return Ok(());
-        }
-        let mut pending = vec![];
-        let mut static_prefix = None;
-        for definition in definitions {
-            self.invalidate_front_products();
-            let static_root = self.static_constant_frontier(&definition);
-            if static_prefix.is_some_and(|previous| previous != static_root) {
-                self.front_lower_frontier(std::mem::take(&mut pending), jobs, diagnostics)?;
-            }
-            static_prefix = Some(static_root);
-            if self
-                .current_lower_facts(DefId::intern(&definition))
-                .is_some()
-            {
-                self.front_lower_frontier(std::mem::take(&mut pending), jobs, diagnostics)?;
-                self.invalidate_front_products();
-                if self
-                    .current_lower_facts(DefId::intern(&definition))
-                    .is_some()
-                {
-                    diagnostics.extend(self.front_lower(&definition)?);
-                } else {
-                    self.front_lower_frontier(vec![definition], jobs, diagnostics)?;
-                }
-            } else {
-                pending.push(definition);
-            }
-        }
-        self.front_lower_frontier(pending, jobs, diagnostics)
-    }
-
-    fn front_lower_frontier(
-        &mut self,
-        definitions: Vec<DefPath>,
-        jobs: hirsel_intern::jobs::Jobs,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) -> Result<(), QueryError> {
-        self.work.front_lower_visits += definitions.len() as u64;
-        if definitions.is_empty() {
-            return Ok(());
-        }
-        let outcomes = self.check_lower_definition_prefix(definitions, jobs);
-        let changes = self.invalidate_front_products();
-        for outcome in outcomes {
-            self.checked_scope
-                .lowered
-                .insert(outcome.definition.clone());
-            if outcome.result.is_err() {
-                self.checked_scope
-                    .failed_lowered
-                    .insert(outcome.definition.clone());
-            }
-            // Keep the delivered failure's reads even when no Lower memo can
-            // retain it. Receipt collection never retries that settled root.
-            let reads = self
-                .checked_scope
-                .front
-                .entry(outcome.definition.clone())
-                .or_default();
-            *reads = std::sync::Arc::new(
-                Reads::from_vec(
-                    reads
-                        .iter()
-                        .chain(outcome.reads.iter())
-                        .map(|(key, value)| (*key, *value))
-                        .collect(),
-                )
-                .map_err(|error| {
-                    QueryError::Operational(hirsel_types::OperationalFailure {
-                        operation: "candidate reads".into(),
-                        message: format!(
-                            "conflicting complete read values for {}: {error:?}",
-                            outcome.definition
-                        ),
-                    })
-                })?,
-            );
-            if outcome.worker_recomputed {
-                // This counts the admitted logical miss, independently of
-                // whether its facts survive. Scalar fallbacks already count
-                // through start(); discarded speculative attempts are separate.
-                self.record_worker_lower_recompute(&outcome.definition);
-            }
-            let cacheable = self.retain_lower_facts(&outcome);
-            self.last_phase = outcome.phase;
-            self.unavailable = matches!(outcome.result, Err(QueryError::NotImplemented))
-                .then_some(outcome.phase)
-                .flatten();
-            self.last_comptime_limit = outcome.limit;
-            self.merge_execution(&outcome.reads);
-            let result = outcome.result.map(|output| output.diagnostics);
-            if cacheable {
-                let id = DefId::intern(&outcome.definition);
-                let text = self.key_text(&outcome.definition, QueryKind::Lower)?;
-                self.front_products.lowered.insert(
-                    id,
-                    LowerProduct {
-                        text,
-                        result: result.clone(),
-                        phase: outcome.phase,
-                        reads: outcome.reads,
-                    },
-                );
-                self.acknowledge_frontier(&changes, &[id]);
-            }
-            diagnostics.extend(result?);
-        }
-        Ok(())
-    }
-
-    /// Program-level lowering diagnostics. Lowered IR stays in the ordinary
-    /// Lower memo, whose complete execution/V receipts mark this owner on edits.
-    pub(crate) fn front_lower(
-        &mut self,
-        definition: &DefPath,
-    ) -> Result<Vec<Diagnostic>, QueryError> {
-        self.checked_scope.lowered.insert(definition.clone());
-        self.work.front_lower_visits += 1;
-        let changes = self.invalidate_front_products();
-        let id = DefId::intern(definition);
-        if let Some(product) = self.current_lower_facts(id) {
-            self.merge_execution(&product.reads);
-            self.last_phase = product.phase;
-            self.unavailable = matches!(product.result, Err(QueryError::NotImplemented))
-                .then_some(product.phase)
-                .flatten();
-            if product.result.is_err() {
-                self.checked_scope.failed_lowered.insert(definition.clone());
-            }
-            self.acknowledge_frontier(&changes, &[id]);
-            return product.result;
-        }
-        let result = self
-            .lower_to_tir(definition)
-            .map(|output| output.diagnostics);
-        if result.is_err() {
-            self.checked_scope.failed_lowered.insert(definition.clone());
-        }
-        let phase = self.unavailable.or(self.last_phase);
-        if let Some(reads) = self.shared_memo_reads(definition, QueryKind::Lower)
-            && !reads.is_empty()
-            && self
-                .graph
-                .memos_of(id)
-                .any(|key| key.kind == QueryKind::Lower)
-            && !self
-                .graph
-                .is_dirty(&crate::memo::MemoKey::new(QueryKind::Lower, id))
-            && !result.as_ref().is_err_and(|error| !error.cacheable())
-            && let Ok(text) = self.key_text(definition, QueryKind::Lower)
-        {
-            self.front_products.lowered.insert(
-                id,
-                LowerProduct {
-                    text,
-                    result: result.clone(),
-                    phase,
-                    reads,
-                },
-            );
-            // P may already have acknowledged this generation. A lower-only
-            // subscriber still needs its own refreshed result before settling.
-            self.acknowledge_frontier(&changes, &[id]);
-        }
-        result
-    }
-
-    pub(crate) fn front_definitions(
-        &mut self,
-        definitions: Vec<DefPath>,
-        jobs: hirsel_intern::jobs::Jobs,
-    ) -> Vec<PublishedResult> {
-        self.prepare_private_summaries();
-        self.work.front_outcome_visits += definitions.len() as u64;
-        let changes = self.invalidate_front_products();
-        // Preserve caller order, duplicate occurrences and generator boundaries.
-        // Every miss is evaluated by the same fused P implementation.
-        let missing = definitions
-            .iter()
-            .filter(|path| {
-                !self
-                    .front_products
-                    .outcomes
-                    .contains_key(&DefId::intern(path))
-            })
-            .cloned()
-            .collect();
-        let refreshed = self.publish_definitions(missing, jobs, self.retention);
-        let mut current = DefMap::default();
-        let mut acknowledged = vec![];
-        for outcome in refreshed {
-            let definition = DefId::intern(&outcome.definition);
-            if !outcome.reads.is_empty()
-                && (outcome
-                    .result
-                    .as_ref()
-                    .is_ok_and(|published| self.current_front_summary(&published.summary))
-                    || outcome.phase.is_some_and(|phase| {
-                        self.graph
-                            .memos_of(definition)
-                            .any(|key| key.kind == phase && !self.graph.is_dirty(key))
-                    }))
-                && !outcome
-                    .result
-                    .as_ref()
-                    .is_err_and(|error| !error.cacheable())
-            {
-                self.front_products
-                    .outcomes
-                    .insert(definition, outcome.clone());
-                acknowledged.push(definition);
-            }
-            if let Ok(published) = &outcome.result
-                && self.current_front_summary(&published.summary)
-            {
-                self.front_products
-                    .selection
-                    .insert(definition, published.summary.clone());
-            }
-            current.insert(definition, outcome);
-        }
-        self.acknowledge_frontier(&changes, &acknowledged);
-        let outputs: Vec<_> = definitions
-            .into_iter()
-            .map(|path| {
-                let definition = DefId::intern(&path);
-                current
-                    .get(&definition)
-                    .or_else(|| self.front_products.outcomes.get(&definition))
-                    .expect("one compact outcome per requested definition")
-                    .clone()
-            })
-            .collect();
-        if let Some(last) = outputs.last() {
-            self.last_phase = last.phase;
-            self.unavailable = matches!(last.result, Err(QueryError::NotImplemented))
-                .then_some(last.phase)
-                .flatten();
-        }
-        outputs
     }
 
     /// S1 body tasks publish the same complete diagnostic/summary product as

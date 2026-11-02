@@ -11,7 +11,7 @@ fn checked(source: &str) -> QueryEngine {
         .sources
         .add("closure-loop.hir", source.into())
         .unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     engine
 }
@@ -106,7 +106,7 @@ fn scope_closure_origin_27_borrowed_content_stays_local() {
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("local-content.hir", "fn probe(files:List[String]) {let f=fn(){let mut previous:List[String]=[];for name in files {list.push(mut previous,copy name)}};f()}".into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.diagnostics.len(), 1, "{:?}", output.diagnostics);
         assert_eq!(output.diagnostics[0].rule.as_str(), "MODE-1");
     });

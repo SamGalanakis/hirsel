@@ -4,7 +4,7 @@ use hirsel_engine::*;
 
 fn checked(engine: &mut QueryEngine, source: &str) -> CheckOutput {
     let file = engine.sources.add("recipes.hir", source.into()).unwrap();
-    check_progress(engine, file, &default_context()).unwrap()
+    source_check_request(engine, file, &default_context()).unwrap()
 }
 fn rejected(engine: &mut QueryEngine, source: &str, recipe: &str, offered: bool) {
     let output = checked(engine, source);

@@ -314,9 +314,12 @@ mod scoped_consumer_9_tests {
                 .sources
                 .add("scoped-profile.hir", source.into())
                 .unwrap();
-            let checked =
-                hirsel_engine::check_progress(&mut engine, file, &hirsel_engine::default_context())
-                    .unwrap();
+            let checked = hirsel_engine::source_check_request(
+                &mut engine,
+                file,
+                &hirsel_engine::default_context(),
+            )
+            .unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let raw = engine.export_native_input().unwrap();
             let input = engine.import_native_input(raw).unwrap();

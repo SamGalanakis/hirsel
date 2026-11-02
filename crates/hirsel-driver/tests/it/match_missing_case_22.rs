@@ -17,7 +17,7 @@ fn engine() -> QueryEngine {
 fn checked(source: &str) -> CheckOutput {
     let mut engine = engine();
     let file = engine.sources.add("missing.hir", source.into()).unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(output.completion, CheckCompletion::Complete);
     output
 }
@@ -73,7 +73,7 @@ fn rejected(source: &str, expected: &[&str], more: usize) {
 fn accepted(source: &str) {
     let mut engine = engine();
     let file = engine.sources.add("repair.hir", source.into()).unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(output.completion, CheckCompletion::Complete);
     assert!(
         output.diagnostics.is_empty(),

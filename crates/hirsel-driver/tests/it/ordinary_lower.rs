@@ -94,7 +94,8 @@ fn program_check_reuses_current_ordinary_lower_products_without_worker_relowerin
             // A cache candidate later than the first failed root must remain
             // unadopted. Metadata/snapshot reads do not authorize Lower work.
             let mut failed = compiler.load_check_package(&manifest).unwrap();
-            let output = failed.engine.lower_definition_prefix(
+            let output = crate::request_graph::lower_prefix(
+                &mut failed.engine,
                 vec![path("missing"), path("second")],
                 hirsel_intern::jobs::Jobs::new(jobs),
             );

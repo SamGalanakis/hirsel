@@ -785,6 +785,12 @@ impl QueryEngine {
             LoweringPolicy::Reachable,
         ))
     }
+    pub(crate) fn indexed_diagnostics(&self, file: FileId) -> Vec<hirsel_diag::Diagnostic> {
+        self.parsed
+            .get(&file)
+            .and_then(|(_, _, result)| result.as_ref().ok())
+            .map_or_else(Vec::new, |output| output.diagnostics.clone())
+    }
     /// Index an immutable source's ordinary declaration heads. A hit restores
     /// names and anchors only. Explicit parse/body queries demand syntax later.
     pub fn index_source(&mut self, file: FileId, context: &FileContext) -> Result<(), QueryError> {

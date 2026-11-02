@@ -19,7 +19,7 @@ pub type LaunchError = Grant(GrantError) | Output(OutputError)
             .sources
             .add("payload-join.hir", source.into())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &context).unwrap();
+        let checked = source_check_request(&mut engine, file, &context).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&context);
         let config = RunConfiguration {

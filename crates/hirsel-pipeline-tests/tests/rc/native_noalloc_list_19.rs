@@ -140,7 +140,7 @@ fn parity(cases: &[(&str, &str)]) {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let context = default_context();
             let file = engine.sources.add("noalloc.hir", source.into()).unwrap();
-            let checked = check_progress(&mut engine, file, &context).unwrap();
+            let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{name}: {:?}",
@@ -616,7 +616,7 @@ fn capacity_and_hash_native_controls() {
         let context = default_context();
         let file = engine.sources.add("observer.hir", ORIGINAL.into()).unwrap();
         assert!(
-            check_progress(&mut engine, file, &context)
+            source_check_request(&mut engine, file, &context)
                 .unwrap()
                 .diagnostics
                 .is_empty()
@@ -837,7 +837,7 @@ fn empty_variant_observers_preserve_regional_construction_provenance() {
             .sources
             .add("empty-variant.hir", EMPTY_VARIANT.into())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &context).unwrap();
+        let checked = source_check_request(&mut engine, file, &context).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&context);
         let reference = run_observed_snapshot(

@@ -717,6 +717,12 @@ impl FrontLowerQueries {
         path: &DefPath,
         arguments: &[u64],
     ) -> Result<MaterializedRef, QueryError> {
+        if arguments.is_empty()
+            && self.front.query(path).is_none()
+            && let Some(value) = self.snapshot.builtin_dictionary_value(&self.memo, path)?
+        {
+            return Ok(Arc::new(value));
+        }
         let selected = if arguments.is_empty() {
             path.clone()
         } else {
@@ -1653,7 +1659,8 @@ impl FrontLowerQueries {
             &mut FrozenProvider::new(&self.snapshot, path.0.package.clone(), &mut observed),
         );
         source.merge(&observed.finish().map_err(|_| QueryError::NotImplemented)?);
-        let staged = staged?;
+        let staged = staged
+            .map_err(|error| lower_input_error(path, "preparing staged type inputs", error))?;
         let mut values = Values {
             source: source.clone(),
             pending: None,
@@ -1676,7 +1683,8 @@ impl FrontLowerQueries {
                     )
                     .map(|r| r.map(|v| v.to_vec()))
             })
-            .await?
+            .await
+            .map_err(|error| lower_input_error(path, "preparing compile-time values", error))?
         };
         if let Some(selection) = selection {
             let declaration = &self.staged.declarations[&selection.declaration];
@@ -1780,16 +1788,18 @@ impl FrontLowerQueries {
         }
         let lowering = self.lowering.as_deref().ok_or(QueryError::NotImplemented)?;
         self.count(path, |work| work.lowerings += 1);
-        let output = lowering.lower(
-            self.snapshot.types(),
-            &self.memo,
-            &analyzed.value,
-            &Comptime {
-                materialized: constants.clone(),
-                staged,
-            },
-            &signature,
-        )?;
+        let output = lowering
+            .lower(
+                self.snapshot.types(),
+                &self.memo,
+                &analyzed.value,
+                &Comptime {
+                    materialized: constants.clone(),
+                    staged,
+                },
+                &signature,
+            )
+            .map_err(|error| lower_input_error(path, "lowering the accepted body", error))?;
         let definition = Arc::new(output.value);
         for dependency in &output.dependencies {
             source.record(
@@ -2016,10 +2026,19 @@ impl Source {
         result
     }
     async fn value(&self, path: &DefPath, kind: u32, site: Span) -> Result<Value, QueryError> {
-        let id = self
-            .owner
-            .id(path, kind)
-            .ok_or(QueryError::NotImplemented)?;
+        let id = self.owner.id(path, kind).ok_or_else(|| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "Lower dependency".into(),
+                message: format!(
+                    "no {} producer is registered for {path}",
+                    if kind == FRONT_EVALUATE_KIND {
+                        "constant evaluation"
+                    } else {
+                        "body lowering"
+                    }
+                ),
+            })
+        })?;
         self.selected_value(id, path, kind, site).await
     }
     async fn selected_value(
@@ -2075,8 +2094,7 @@ impl Source {
             self.owner
                 .inputs
                 .get(path)
-                .ok_or(QueryError::NotImplemented)?
-                .site,
+                .map_or(Span::default(), |input| input.site),
         )
         .await
     }
@@ -2085,6 +2103,16 @@ impl Source {
         path: &DefPath,
         site: Span,
     ) -> Result<(Materialized, Vec<(hirsel_syntax::ExprId, Materialized)>), QueryError> {
+        if self.owner.front.query(path).is_none() {
+            if let Some(value) = self
+                .owner
+                .snapshot
+                .builtin_dictionary_value(&self.owner.memo, path)?
+            {
+                self.signature(path)?;
+                return Ok((value, vec![]));
+            }
+        }
         match self.value(path, FRONT_EVALUATE_KIND, site).await? {
             Value::Constant(value) => value
                 .decoded(
@@ -2567,5 +2595,15 @@ mod retention_tests {
         assert_eq!(outcome_table_bytes(0), 0);
         assert!(outcome_table_bytes(1) >= std::mem::size_of::<(Reference, Outcome, u64)>() as u64);
         assert!(outcome_table_bytes(6) > outcome_table_bytes(1));
+    }
+}
+
+fn lower_input_error(path: &DefPath, stage: &str, error: QueryError) -> QueryError {
+    match error {
+        QueryError::NotImplemented => QueryError::Operational(hirsel_types::OperationalFailure {
+            operation: "Lower request".into(),
+            message: format!("{stage} for {path} requires an unavailable compiler input"),
+        }),
+        error => error,
     }
 }

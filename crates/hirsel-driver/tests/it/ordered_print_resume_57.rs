@@ -178,7 +178,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
         let fixture = Fixture::default();
         let mut engine = crate::source_std::engine();
         let file = engine.sources.add("main.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&default_context());
         let reference = crate::source_std::observe(
@@ -210,8 +210,16 @@ pub fn main(rt:Io)->Result[(),GrantError] {
             std::slice::from_ref(&configuration),
         )
         .unwrap();
-        for (_, outcome) in differential_in(
-            &validated,
+        let mut ready = crate::native_ready::supplier(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/std_source/main.hir"),
+            Some(source),
+            &entry,
+            &tools,
+        )
+        .unwrap();
+        for (_, outcome) in differential_ready(
+            &mut ready,
             &entry,
             &expected,
             &[configuration],

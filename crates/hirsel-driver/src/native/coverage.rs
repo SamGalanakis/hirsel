@@ -310,9 +310,12 @@ mod tests {
             );
             let source = "pub fn main(io: Io, args: Args) -> Result[(), GrantError] {\n let x = add(3i32, 4i32);\n let s = io.stdout(io)?;\n let _ = out.print(s, if x == 7i32 { \"hello\" } else { \"wrong\" });\n Ok(())\n}\nfn add(x: i32, y: i32) -> i32 { x + y }\n";
             let file = engine.sources.add("coverage.hir", source.into()).unwrap();
-            let checked =
-                hirsel_engine::check_progress(&mut engine, file, &hirsel_engine::default_context())
-                    .unwrap();
+            let checked = hirsel_engine::source_check_request(
+                &mut engine,
+                file,
+                &hirsel_engine::default_context(),
+            )
+            .unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let raw = engine.export_native_input().unwrap();
             let input = engine.import_native_input(raw).unwrap();

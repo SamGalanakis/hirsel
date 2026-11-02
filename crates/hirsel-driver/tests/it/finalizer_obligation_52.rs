@@ -26,7 +26,7 @@ fn source_program(source: &str) -> native::ReadyProgram {
         .sources
         .add("finalizer-obligation.hir", source.to_owned())
         .unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let input = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(input).unwrap();

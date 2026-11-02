@@ -18,9 +18,9 @@ fn checked_in(engine: &mut QueryEngine, source: &str) -> CheckOutput {
         .sources
         .add("generic-element.hir", source.into())
         .unwrap();
-    let output = check_progress(engine, file, &default_context()).unwrap();
+    let output = source_check_request(engine, file, &default_context()).unwrap();
     assert_eq!(output.completion, CheckCompletion::Complete);
-    let warm = check_progress(engine, file, &default_context()).unwrap();
+    let warm = source_check_request(engine, file, &default_context()).unwrap();
     assert_eq!(
         output
             .diagnostics
@@ -45,7 +45,7 @@ fn accepted_in(engine: &mut QueryEngine, source: &str) {
         .sources
         .add("generic-element.hir", source.into())
         .unwrap();
-    let output = check_progress(engine, file, &default_context()).unwrap();
+    let output = source_check_request(engine, file, &default_context()).unwrap();
     assert_eq!(output.completion, CheckCompletion::Complete);
     assert!(
         output.diagnostics.is_empty(),

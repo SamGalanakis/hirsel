@@ -162,7 +162,7 @@ fn reference_checked_h_llvm_cranelift() {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let context = default_context();
             let file = engine.sources.add("closure-resource.hir", source).unwrap();
-            let checked = check_progress(&mut engine, file, &context).unwrap();
+            let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{name}: {:?}",
@@ -231,7 +231,7 @@ fn v_rejects_releasing_a_many_callables_environment_field() {
             .sources
             .add("capture-owner.hir", WITNESS.into())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &context).unwrap();
+        let checked = source_check_request(&mut engine, file, &context).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let mut signatures = hirsel_validate::SignatureMap::new(input.types.clone());
@@ -326,7 +326,7 @@ fn noncopyable_environment_cannot_be_copied() {
     ] {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("once-copy.hir", source).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(
             checked
                 .diagnostics

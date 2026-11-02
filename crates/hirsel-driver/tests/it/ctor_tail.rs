@@ -71,10 +71,10 @@ fn agree(source: &str, function: &str, grant: Grant) -> (Vec<TailKind>, native::
     });
     let scratch = tempfile::tempdir().unwrap();
     let tools = native::Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
-    let input = program.engine.export_native_input().unwrap();
-    let validated = program.engine.import_native_input(input).unwrap();
-    let outcomes = native::differential_in(
-        &validated,
+    let mut ready =
+        crate::native_ready::supplier(&fixture, Some(source), &run.entry, &tools).unwrap();
+    let outcomes = native::differential_ready(
+        &mut ready,
         &run.entry,
         &observation,
         &matrix,

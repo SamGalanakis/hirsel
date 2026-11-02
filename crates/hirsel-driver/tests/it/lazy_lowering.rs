@@ -536,7 +536,7 @@ fn a_later_generator_respects_its_files_operational_stop() {
                 "fn first() -> u32 {{ {value} }}\nfn body() -> Result[Body[fn() -> u32 uses {{}}], String] {{ Ok(codegen.body(\"fn() -> u32 uses {{}} {{ 7u32 }}\")) }}\nfn later() -> u32 uses {{}} = comptime body()\n"
             );
             let file = engine.sources.add("partial.hir", source).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             if unavailable {
                 assert_eq!(
                     output.completion,

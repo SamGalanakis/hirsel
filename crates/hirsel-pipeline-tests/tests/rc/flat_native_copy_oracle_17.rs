@@ -38,7 +38,7 @@ fn flat_native_copy_oracle_17_both_backends() {
             .sources
             .add("flat-native-copy-oracle-17.hir", source)
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let snapshot = engine.export_native_input().unwrap();
         let input = engine.import_native_input(snapshot).unwrap();

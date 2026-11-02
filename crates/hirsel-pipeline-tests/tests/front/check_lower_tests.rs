@@ -27,7 +27,7 @@ fn copies_of_flat_indexed_elements_remain_copies_across_iterations() {
 #[test]
 fn a_callee_snapshot_survives_its_slots_replacement_in_an_argument() {
     let source = "fn make(base:u64)->fn(u64)->u64 uses {} {let payload:List[u64]=[base]; fn(x:u64)->u64 uses {} {payload[0u64]+x}}\nfn snapshot()->u64 {let mut f=make(7u64);let other=make(99u64);f({f=other;0u64})}\nfn main()->u64 {snapshot()}";
-    assert_eq!(bits(execute_source(source)), 7);
+    assert_eq!(bits(execute_text(source)), 7);
 }
 
 #[test]
@@ -57,19 +57,19 @@ fn borrowed_tails_and_joins_lend_storage_that_outlives_them() {
     use hirsel_types::UseKind;
     // A borrowed tail naming outer storage is that place: the loop body can
     // run again because no non-owning slot was started for it.
-    let run = execute_source(
+    let run = execute_text(
         "fn one(s: String) -> u64 { 1 }\nfn main() -> u64 { let s: String = \"ab\"\n let mut n: u64 = 0\n while n < 3 { n = n + one({ s }) }\n n }",
     );
     assert_eq!(bits(run), 3);
     // One arm borrows and two compute: the computed strings stay in their own
     // temporaries, are lent to the join, and are dropped where they were made.
-    let run = execute_source(
+    let run = execute_text(
         "fn one(s: String) -> u64 { 1 }\nfn pick(s: String, n: u64) -> u64 { one(match n { 0 => s, 1 => \"four\", _ => \"x\" }) }\nfn main() -> u64 { let s: String = \"ab\"\n pick(s, 0) * 100 + pick(s, 1) * 10 + pick(s, 2) }",
     );
     assert_eq!(bits(run), 111);
     // A plain part read out of a block is a copy: mutating it leaves the
     // storage unchanged.
-    let run = execute_source(
+    let run = execute_text(
         "fn one(mut a: u64) { a = 9 }\nfn main() -> u64 { let mut xs: Array[u64] = [1, 2]\n one(mut { xs }[1])\n xs[0] * 10 + xs[1] }",
     );
     assert_eq!(bits(run), 12);
@@ -132,7 +132,7 @@ fn scalar_and_nominal_plain_values_have_no_cleanup_actions() {
     ] {
         let (_types, d) = source_definition(source);
         assert!(d.bodies.iter().all(|body| body.cleanup_nodes.is_empty()));
-        assert_eq!(bits(execute_source(source)), 3);
+        assert_eq!(bits(execute_text(source)), 3);
     }
 }
 
@@ -167,27 +167,27 @@ fn indirect_callee_storage(source: &str) -> Vec<Storage> {
 fn stable_heap_environment_calls_borrow_the_original_slot() {
     let source = "fn make(base:u64)->fn(u64)->u64 uses {} {let payload:List[u64]=[base]; fn(x:u64)->u64 uses {} {payload[0u64]+x}}\nfn main()->u64 {let mut f=make(7u64);f(0u64)}";
     assert_eq!(indirect_callee_storage(source), vec![Storage::Local]);
-    assert_eq!(bits(execute_source(source)), 7);
+    assert_eq!(bits(execute_text(source)), 7);
 }
 
 #[test]
 fn stable_indexed_calls_allow_readonly_sibling_arguments() {
     let source = "type Stage {call:fn(u64,u64)->u64 uses {},environment:u64}\nfn add(x:u64,n:u64)->u64 {x+n}\nfn main()->u64 {let stages:List[Stage]=[Stage(call:add,environment:7u64)];stages[0u64].call(0u64,stages[0u64].environment)}";
     assert_eq!(indirect_callee_storage(source), vec![Storage::Local]);
-    assert_eq!(bits(execute_source(source)), 7);
+    assert_eq!(bits(execute_text(source)), 7);
 }
 
 #[test]
 fn stable_calls_keep_borrowed_result_dependencies_through_last_use() {
     let source = "fn main()->u64 {let bytes:Bytes=b\"abc\";let f=fn(n:u64)->Bytes in env uses {} {bytes};let view=f(0u64);let _=view;3u64}";
     assert_eq!(indirect_callee_storage(source), vec![Storage::Local]);
-    assert_eq!(bits(execute_source(source)), 3);
+    assert_eq!(bits(execute_text(source)), 3);
 }
 
 #[test]
 fn replacing_an_indexed_callee_invokes_the_previously_selected_environment() {
     let source = "type Stage {call:fn(u64)->u64 uses {}}\nfn make(base:u64)->fn(u64)->u64 uses {} {let payload:List[u64]=[base];fn(n:u64)->u64 uses {} {payload[0u64]+n}}\nfn main()->u64{let mut stages:List[Stage]=[Stage(call:make(7u64))];stages[0u64].call({stages=[Stage(call:make(99u64))];0u64})}";
-    assert_eq!(bits(execute_source(source)), 7);
+    assert_eq!(bits(execute_text(source)), 7);
 }
 
 #[test]

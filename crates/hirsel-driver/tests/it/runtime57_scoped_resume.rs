@@ -379,11 +379,11 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 #[test]
 fn runtime57_free_owned_scope_physically_leaves_its_pending_exit_and_replays() {
     use hirsel_driver::native::{OptLevel, TargetSpec, Toolchain};
-    use hirsel_engine::{QueryEngine, check_progress, default_context};
+    use hirsel_engine::{QueryEngine, default_context, source_check_request};
     with_compiler_stack(|| {
         let mut engine: QueryEngine = crate::source_std::engine();
         let file = engine.sources.add("main.hir", PHYSICAL.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let sites = native::Sites::new(&input);

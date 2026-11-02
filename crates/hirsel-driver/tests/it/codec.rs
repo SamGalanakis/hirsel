@@ -1,8 +1,8 @@
 //! Cross-engine boundary: the corpus cannot invoke the Rust codec directly.
 use hirsel_driver::compiler_adapters;
 use hirsel_engine::{
-    DefinitionQueries, QueryEngine, RunConfiguration, check_progress, default_context,
-    default_environment, entry_path, with_compiler_stack,
+    DefinitionQueries, QueryEngine, RunConfiguration, default_context, default_environment,
+    entry_path, source_check_request, with_compiler_stack,
 };
 use hirsel_interp::{Outcome, Value, library::Library};
 use hirsel_types::{
@@ -46,7 +46,7 @@ fn rust_vectors_cross_source_in_both_directions() {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let context = default_context();
             let file = engine.sources.add("codec.hir", source.clone()).unwrap();
-            let checked = check_progress(&mut engine, file, &context).unwrap();
+            let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{source}\n{:?}",

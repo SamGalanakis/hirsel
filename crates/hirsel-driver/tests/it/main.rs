@@ -12,3 +12,11 @@ mod native_ready;
 mod source_std;
 
 include!("modules.rs");
+
+#[allow(dead_code)]
+#[path = "../support/requests.rs"]
+mod request_graph;
+
+#[allow(dead_code)]
+#[path = "../support/test_requests.rs"]
+mod test_requests;

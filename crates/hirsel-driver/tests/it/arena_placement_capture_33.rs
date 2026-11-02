@@ -10,7 +10,7 @@ fn prepared(source: &str) -> (QueryEngine, NativeInput) {
         .sources
         .add("arena-placement-capture.hir", source.into())
         .unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     let input = engine.export_native_input().unwrap();
     engine.import_native_input(input.clone()).unwrap();

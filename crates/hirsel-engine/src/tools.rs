@@ -259,7 +259,10 @@ pub(crate) fn association_diagnostics(
 ) -> Result<Vec<Diagnostic>, QueryError> {
     let _timing = hirsel_intern::timings::interval(hirsel_intern::timings::Interval::S0);
     engine.index_source(file, context)?;
-    let mut diagnostics = vec![];
+    let mut diagnostics = engine.indexed_diagnostics(file);
+    if crate::queries::has_errors(&diagnostics) {
+        return Ok(diagnostics);
+    }
     for item in engine.source_items(file) {
         engine.work.association_visits += 1;
         for (kind, start, end) in item.facts.associations {
@@ -304,348 +307,56 @@ pub(crate) fn association_diagnostics(
     Ok(diagnostics)
 }
 
-/// A partial pipeline can produce rejection diagnostics, but never a clean acceptance.
-/// A standalone file is its own program package: every executable body lowers.
-pub fn check_progress(
+/// Check a selected source through the immutable compiler request graph.
+pub fn source_check_request(
     engine: &mut QueryEngine,
     file: FileId,
     context: &FileContext,
 ) -> Result<CheckOutput, QueryError> {
-    check_file_lowering(engine, file, context, LoweringPolicy::Reachable)
-}
-pub(crate) fn check_file_lowering(
-    engine: &mut QueryEngine,
-    file: FileId,
-    context: &FileContext,
-    lowering: LoweringPolicy,
-) -> Result<CheckOutput, QueryError> {
-    let mut outputs = check_files(engine, &[(file, context, lowering)])?;
-    let output = outputs.pop().expect("one file's check").1;
-    Ok(CheckOutput {
-        sources: engine.sources.clone(),
-        diagnostics: output.diagnostics,
-        completion: output.completion,
-        unsafe_ffi: vec![],
-    })
-}
-
-/// A file's verdict, sharing the program's source map until final output.
-pub(crate) struct FileCheckOutput {
-    pub diagnostics: Vec<Diagnostic>,
-    pub completion: CheckCompletion,
-}
-
-/// One file's state through `check_files`.
-struct FileCheck {
-    parsed: Option<Vec<crate::queries::catalog::SourceItem>>,
-    diagnostics: Vec<Diagnostic>,
-    /// The first error that stopped the file's steps.
-    stopped: Option<QueryError>,
-    missing_phase: Option<QueryKind>,
-}
-impl FileCheck {
-    /// The file goes on to the next step: nothing stopped it and it has no error.
-    fn clean(&self) -> bool {
-        self.stopped.is_none() && !crate::queries::has_errors(&self.diagnostics)
-    }
-    /// Runs one step of the file unless it is no longer clean; a step's
-    /// diagnostics error is its diagnostics, any other error stops the file.
-    fn step(
-        &mut self,
-        engine: &mut QueryEngine,
-        step: impl FnOnce(
-            &mut QueryEngine,
-            &[crate::queries::catalog::SourceItem],
-            &mut Vec<Diagnostic>,
-        ) -> Result<(), QueryError>,
-    ) -> bool {
-        if !self.clean() {
-            return false;
-        }
-        let Some(parsed) = &self.parsed else {
-            return false;
-        };
-        match step(engine, parsed, &mut self.diagnostics) {
-            Ok(()) => return true,
-            Err(QueryError::Diagnostics(errors)) => self.diagnostics.extend(errors),
-            Err(error) => {
-                self.missing_phase = engine.unavailable.or(engine.last_phase);
-                self.stopped = Some(error);
-            }
-        }
-        false
-    }
-}
-
-/// Publish one ordinary frontier's input-ordered outcomes into its files.
-/// Source diagnostics accumulate throughout P; an operational failure stops
-/// that file before any later generator request is admitted.
-fn mode_frontier(
-    engine: &mut QueryEngine,
-    checks: &mut [FileCheck],
-    pending: &mut Vec<(usize, DefPath)>,
-    jobs: hirsel_intern::jobs::Jobs,
-) {
-    if pending.is_empty() {
-        return;
-    }
-    let (owners, definitions): (Vec<_>, Vec<_>) = std::mem::take(pending).into_iter().unzip();
-    for (owner, mode) in owners
-        .into_iter()
-        .zip(engine.front_definitions(definitions, jobs))
-    {
-        engine
-            .checked_scope
-            .front
-            .insert(mode.definition.clone(), mode.reads.clone());
-        let check = &mut checks[owner];
-        if check.stopped.is_some() {
-            continue;
-        }
-        match mode.result {
-            Ok(output) => check.diagnostics.extend(output.diagnostics.iter().cloned()),
-            Err(QueryError::Diagnostics(errors)) => check.diagnostics.extend(errors),
-            Err(error) => {
-                check.missing_phase = mode.phase;
-                check.stopped = Some(error);
-            }
-        }
-    }
-}
-
-/// A program check's schedule over `files` (design §1c): S0 parses every
-/// file and checks its associations; P checks and mode-checks every item of
-/// every clean file; GEN-5 runs once, over the summaries P published; S1
-/// lowers each clean file's compile-time bodies and selects its CT-5
-/// instances; P2 lowers the rest under `Reachable`. A file with an error
-/// after a step takes no later step. Each file's diagnostics and completion
-/// are its own, in `files` order.
-///
-/// GEN-5 runs after every body is checked, as Go's checker runs `monomorph`
-/// once after `processDelayed` (types2/check.go:446-465, mono.go:82) and
-/// rustc type-checks every body owner before crate-wide passes
-/// (rustc_hir_analysis/src/lib.rs:146-220). Before, GEN-5 ran in the first
-/// clean file's step and forced every other definition's check from there.
-pub(crate) fn check_files(
-    engine: &mut QueryEngine,
-    files: &[(FileId, &FileContext, LoweringPolicy)],
-) -> Result<Vec<(FileId, FileCheckOutput)>, QueryError> {
-    check_files_impl(engine, files, true)
-}
-pub(crate) fn check_files_impl(
-    engine: &mut QueryEngine,
-    files: &[(FileId, &FileContext, LoweringPolicy)],
-    recipes: bool,
-) -> Result<Vec<(FileId, FileCheckOutput)>, QueryError> {
-    use hirsel_intern::timings::{Interval, interval};
-    engine.checked_scope = Default::default();
-    let _reads = engine
-        .result_store
-        .as_ref()
-        .and_then(|store| store.read_scope());
-    // Canonical type records are written while queries encode their products,
-    // before the per-record writers run. Capacity spills stay private; a
-    // completed request explicitly publishes its last bounded subepoch.
-    let publication = engine
-        .result_store
-        .as_ref()
-        .and_then(|store| store.local_product_store())
-        .map(|store| store.request());
-    let s0 = interval(Interval::S0);
-    let mut checks: Vec<FileCheck> = files
-        .iter()
-        .map(|&(file, context, _)| {
-            let mut check = FileCheck {
-                parsed: None,
-                diagnostics: vec![],
-                stopped: None,
-                missing_phase: None,
-            };
-            match engine.index_source(file, context) {
-                Ok(()) => check.parsed = Some(engine.source_items(file)),
-                Err(QueryError::Diagnostics(errors)) => check.diagnostics.extend(errors),
-                Err(error) => {
-                    check.missing_phase = engine.unavailable.or(engine.last_phase);
-                    check.stopped = Some(error);
-                }
-            }
-            check.step(engine, |engine, _, diagnostics| {
-                diagnostics.extend(association_diagnostics(engine, file, context)?);
-                Ok(())
+    match engine.index_source(file, context) {
+        Ok(()) => {}
+        Err(QueryError::Diagnostics(diagnostics)) => {
+            return Ok(CheckOutput {
+                sources: engine.sources.clone(),
+                diagnostics,
+                completion: CheckCompletion::Complete,
+                unsafe_ffi: vec![],
             });
-            check
-        })
-        .collect();
-    drop(s0);
-    let p = interval(Interval::Parallel);
-    // Keep source order for per-file diagnostics, while the engine publishes
-    // worker products in DefPath order. Every clean file contributes its body
-    // tasks and distinct-type fact helpers to P, draining before generators.
-    let mut planned = vec![];
-    for (owner, check) in checks.iter().enumerate().filter(|(_, check)| check.clean()) {
-        let Some(parsed) = &check.parsed else {
-            continue;
-        };
-        for item in parsed {
-            engine.work.planning_visits += 1;
-            planned.push((owner, item.definition.clone(), item.facts.generator));
-            if item.facts.fact {
-                planned.push((
-                    owner,
-                    hirsel_check_protocol::fact::fact_path(&item.definition),
-                    false,
-                ));
-            }
         }
-    }
-    let jobs = engine.jobs();
-    let mut pending = vec![];
-    for (owner, definition, generates) in planned {
-        if generates {
-            // A generator executes S1. Publish earlier ordinary outcomes first
-            // so an unavailable phase in this file can withhold that execution.
-            mode_frontier(engine, &mut checks, &mut pending, jobs);
-            if checks[owner].stopped.is_none() {
-                pending.push((owner, definition));
-                mode_frontier(engine, &mut checks, &mut pending, jobs);
-            }
-        } else if checks[owner].stopped.is_none() {
-            pending.push((owner, definition));
+        Err(QueryError::NotImplemented) => {
+            return Ok(CheckOutput {
+                sources: engine.sources.clone(),
+                diagnostics: vec![],
+                completion: CheckCompletion::Incomplete {
+                    phase: engine
+                        .unavailable
+                        .or(engine.last_phase)
+                        .unwrap_or(QueryKind::Parse),
+                },
+                unsafe_ffi: vec![],
+            });
         }
+        Err(error) => return Err(error),
     }
-    mode_frontier(engine, &mut checks, &mut pending, jobs);
-    drop(p);
-    // GEN-5 is the program's: every clean file reports its verdict.
-    if checks.iter().any(FileCheck::clean) {
-        let verdict = crate::generic_graph::check(engine);
-        for check in checks.iter_mut().filter(|c| c.clean()) {
-            match &verdict {
-                Ok(errors) => check.diagnostics.extend(errors.iter().cloned()),
-                Err(QueryError::Diagnostics(errors)) => {
-                    check.diagnostics.extend(errors.iter().cloned())
-                }
-                Err(error) => {
-                    check.missing_phase = engine.unavailable.or(engine.last_phase);
-                    check.stopped = Some(error.clone());
-                }
-            }
-        }
-    }
-    let s1 = interval(Interval::S1);
-    let mut rests = vec![vec![]; files.len()];
-    let mut prepare = vec![false; files.len()];
-    for ((check, rest), prepare) in checks.iter_mut().zip(&mut rests).zip(&mut prepare) {
-        *prepare = check.step(engine, |engine, parsed, diagnostics| {
-            // Every policy reports the diagnostics of the compile-time bodies
-            // and CT-5 selection first; only then, and only for an accepted
-            // file, does `Reachable` lower the rest, which reports none.
-            let comptime: Vec<_>;
-            (comptime, *rest) = parsed
-                .iter()
-                .filter(|item| item.facts.executable)
-                .map(|item| item.definition.clone())
-                .partition(|definition| {
-                    engine.lowers_at_check(definition, LoweringPolicy::Comptime)
-                });
-            engine.front_lowerings(comptime, jobs, diagnostics)?;
-            // CT-5: each instance a body selects is generated and checked here.
-            let roots = parsed.iter().map(|item| item.definition.clone());
-            match engine.select_generated_instances(roots) {
-                Ok(instances) => {
-                    engine.front_lowerings(instances.into_iter().collect(), jobs, diagnostics)?;
-                }
-                Err(QueryError::Diagnostics(errors)) => diagnostics.extend(errors),
-                Err(error) => return Err(error),
-            }
-            Ok(())
-        });
-    }
-    drop(s1);
-    let p2 = interval(Interval::Parallel2);
-    for (((check, rest), &(_, _, lowering)), prepare) in
-        checks.iter_mut().zip(rests).zip(files).zip(prepare)
-    {
-        let lower_rest = check.clean();
-        let completed = check.step(engine, |engine, _, diagnostics| {
-            if lowering == LoweringPolicy::Reachable {
-                for definition in rest {
-                    diagnostics.extend(engine.front_lower(&definition)?);
-                }
-            }
-            Ok(())
-        });
-        if prepare
-            && (!lower_rest || completed)
-            && let Err(error) = engine.prepare_staged_instances()
-        {
-            match error {
-                QueryError::Diagnostics(errors) => check.diagnostics.extend(errors),
-                error => {
-                    check.missing_phase = engine.unavailable.or(engine.last_phase);
-                    check.stopped = Some(error);
-                }
-            }
-        }
-    }
-    drop(p2);
-    let absent = if engine.adapters.checker.is_none() {
-        Some(QueryKind::Check)
-    } else if engine.adapters.modes.is_none() {
-        Some(QueryKind::Modes)
-    } else if engine.adapters.lowering.is_none() {
-        Some(QueryKind::Lower)
-    } else {
-        None
+    let selection = crate::requests::source_graph::SourceSelection {
+        files: vec![(file, context.clone(), LoweringPolicy::Reachable)],
+        input_bytes: engine
+            .sources
+            .file(file)
+            .map_or(0, |source| source.text().len() as u64),
+        entry: entry_path(context),
+        lint_package: Some(context.package.clone()),
+        unsafe_ffi: vec![],
     };
-    let mut outputs = Vec::with_capacity(files.len());
-    for (check, &(file, _, _)) in checks.into_iter().zip(files) {
-        let incomplete = match check.stopped {
-            None => absent,
-            Some(QueryError::NotImplemented) => {
-                Some(check.missing_phase.unwrap_or(QueryKind::Check))
-            }
-            Some(error) => return Err(error),
-        };
-        let completion = if let Some(phase) = incomplete {
-            engine.unavailable = Some(phase);
-            CheckCompletion::Incomplete { phase }
-        } else {
-            CheckCompletion::Complete
-        };
-        outputs.push((
-            file,
-            FileCheckOutput {
-                diagnostics: select_diagnostics(check.diagnostics, Some(&engine.sources)),
-                completion,
-            },
-        ));
-    }
-    if outputs
-        .iter()
-        .all(|(_, output)| output.completion == CheckCompletion::Complete)
-        && engine.last_comptime_limit.is_none()
-    {
-        engine.checked_scope.completed = Some(engine.graph.revision());
-    }
-    if outputs
-        .iter()
-        .all(|(_, output)| output.completion == CheckCompletion::Complete)
-        && let Some(publication) = publication
-    {
-        let _ = publication.finish();
-    }
-    if recipes {
-        for ((file, context, lowering), (_, output)) in files.iter().zip(&mut outputs) {
-            crate::queries::recipes::offer(
-                engine,
-                *file,
-                context,
-                *lowering,
-                &mut output.diagnostics,
-            );
-        }
-    }
-    Ok(outputs)
+    engine
+        .check_scheduled(&selection)
+        .map_err(|error| match error {
+            ToolError::Query { error, .. } => error,
+            error => QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "source Check request".into(),
+                message: error.to_string(),
+            }),
+        })
 }
 /// Compatibility helper for execution: only a complete, error-free check may run.
 pub fn check_snapshot(
@@ -653,7 +364,7 @@ pub fn check_snapshot(
     file: FileId,
     context: &FileContext,
 ) -> Result<Vec<Diagnostic>, QueryError> {
-    let output = check_progress(engine, file, context)?;
+    let output = source_check_request(engine, file, context)?;
     if crate::queries::has_errors(&output.diagnostics) {
         return Err(QueryError::Diagnostics(output.diagnostics));
     }

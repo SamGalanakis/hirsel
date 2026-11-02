@@ -147,7 +147,7 @@ fn checked_capture(source: &str) -> hirsel_engine::CheckOutput {
     let mut engine = crate::source_std::engine();
     let file = engine.sources.add("snapshot.hir", source.into()).unwrap();
     let output =
-        hirsel_engine::check_progress(&mut engine, file, &hirsel_engine::default_context())
+        hirsel_engine::source_check_request(&mut engine, file, &hirsel_engine::default_context())
             .unwrap();
     assert_eq!(output.completion, hirsel_engine::CheckCompletion::Complete);
     output

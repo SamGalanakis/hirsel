@@ -10,7 +10,7 @@ fn engine(source: &str) -> QueryEngine {
         .sources
         .add("numeric-work.hir", source.into())
         .unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(
         output
             .diagnostics

@@ -15,7 +15,7 @@ fn diagnostics(source: &str) -> Vec<hirsel_diag::Diagnostic> {
         .sources
         .add("repair-probe.hir", source.into())
         .unwrap();
-    let output = check_progress(&mut engine, file, &default_context())
+    let output = source_check_request(&mut engine, file, &default_context())
         .unwrap_or_else(|error| panic!("{source}\n{error:?}"));
     assert_eq!(output.completion, CheckCompletion::Complete, "{source}");
     output.diagnostics

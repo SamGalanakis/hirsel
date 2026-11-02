@@ -90,7 +90,7 @@ fn engine(source: &str) -> QueryEngine {
         .sources
         .add("arena-effects.hir", source.to_owned())
         .unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     engine
 }

@@ -206,7 +206,7 @@ fn actual_gen5_fixtures_preserve_verdicts_and_exact_sites() {
         ] {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("gen5.hir", source.clone()).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             let expected = source_compare(&mut engine);
             assert_eq!(!expected.is_empty(), growing, "{source}");
             if growing {

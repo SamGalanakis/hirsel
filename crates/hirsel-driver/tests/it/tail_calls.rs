@@ -7,7 +7,7 @@ fn prepare(source: &str) -> (QueryEngine, DefinitionRef) {
     if !source.contains("std@1/") {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("source.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(
             output
                 .diagnostics

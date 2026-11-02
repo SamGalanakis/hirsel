@@ -6,7 +6,7 @@ use hirsel_interp::{Integer, Outcome, Value, library::Library};
 fn engine(source: &str) -> QueryEngine {
     let mut engine = source_std::engine();
     let file = engine.sources.add("clocks.hir", source.to_owned()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     engine
 }

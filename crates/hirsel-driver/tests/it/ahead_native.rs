@@ -1,6 +1,6 @@
 //! Ordinary scalar tasks: final object custody, partitions and four-engine semantics.
 use hirsel_driver::native;
-use hirsel_engine::{QueryEngine, check_progress, default_context, with_compiler_stack};
+use hirsel_engine::{QueryEngine, default_context, source_check_request, with_compiler_stack};
 use hirsel_lir::emission::{EmitInputs, OptLevel};
 use hirsel_syntax::ContentHash;
 use std::collections::BTreeSet;
@@ -33,7 +33,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 fn checked() -> (QueryEngine, hirsel_engine::ValidatedNativeInput) {
     let mut engine = crate::source_std::engine();
     let file = engine.sources.add("main.hir", SOURCE.to_owned()).unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     let snapshot = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(snapshot).unwrap();

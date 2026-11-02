@@ -55,7 +55,7 @@ fn checked(source: &str) -> QueryEngine {
         .sources
         .add("socket-loan.hir", source.into())
         .unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     engine
 }
@@ -152,12 +152,12 @@ fn split_socket_loan_30_original_and_twins_on_four_engines() {
                 assert!(operations.contains(&"read_half.close"), "{operations:?}");
                 assert!(operations.contains(&"write_half.close"), "{operations:?}");
             }
-            let input = engine.export_native_input().unwrap();
-            let validated = engine.import_native_input(input).unwrap();
             let dir = scratch.path().join(name);
             std::fs::create_dir_all(&dir).unwrap();
-            let outcomes = differential_in(
-                &validated,
+            let mut ready =
+                crate::native_ready::source_supplier(source, &entry, &toolchain).unwrap();
+            let outcomes = differential_ready(
+                &mut ready,
                 &entry,
                 &reference,
                 &configurations,
@@ -263,7 +263,7 @@ fn split_socket_loan_30_borrowed_resource_cannot_be_captured_by_take() {
         let source = MINIMAL.replace("take tx: Sender[u64]", "tx: Sender[u64]");
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("borrowed-endpoint.hir", source).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(
             output
                 .diagnostics

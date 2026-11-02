@@ -139,7 +139,7 @@ fn checked_signal_cancel_twin_runs_fresh() {
             .sources
             .add("cancel-twin.hir", PROGRAM.into())
             .unwrap();
-        let checked = hirsel_engine::check_progress(&mut engine, file, &context).unwrap();
+        let checked = hirsel_engine::source_check_request(&mut engine, file, &context).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let config = hirsel_engine::RunConfiguration {
             entry: hirsel_engine::entry_path(&context),

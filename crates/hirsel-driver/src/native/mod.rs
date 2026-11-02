@@ -44,10 +44,10 @@ pub use adapt::{input_identity, manifest, manifest_for_operations, program};
 pub use coverage::backend_features;
 pub use differential::{
     Configuration, Engine, Fixture, MATRIX_VERSION, Outcome, ReadyExecution, ReadySupplier,
-    Runtime, SnapshotReady, differential, differential_in, differential_ready, full_matrix,
-    migrate_matrix, real_io_replay, real_io_replay_in, real_io_replay_options,
-    real_io_replay_ready, real_io_replay_with_config, runner_oracle_in, runner_oracle_ready,
-    runtime_builds, same_options, smoke_matrix, topology_matrix, trace_roots_matrix,
+    Runtime, SnapshotReady, differential, differential_ready, full_matrix, migrate_matrix,
+    real_io_replay, real_io_replay_options, real_io_replay_ready, real_io_replay_with_config,
+    runner_oracle_ready, runtime_builds, same_options, smoke_matrix, topology_matrix,
+    trace_roots_matrix,
 };
 pub use emit::{
     Backend, KIND_BUG, check_runtime_calls, emit, emit_clif, emit_glue, emit_ir, failure_codes,

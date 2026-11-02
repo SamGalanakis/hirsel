@@ -211,10 +211,19 @@ impl SignaturePhase for Fake {
         Ok(out(Signature {
             metadata: Default::default(),
             definition: DefId::intern(&item.definition),
-            kind: SignatureKind::Const {
-                ty: unit,
+            kind: SignatureKind::Function(FunctionType {
+                state_promises: Default::default(),
                 generics: Default::default(),
-            },
+                parameters: Default::default(),
+                result: unit,
+                error: None,
+                allocation: Allocation::MayAllocate,
+                authority: AuthoritySummary::inert(),
+                uses: Uses::Unrestricted,
+                contracts: Default::default(),
+                incomplete: false,
+                foreign: None,
+            }),
             fingerprint,
         }))
     }
@@ -612,10 +621,12 @@ fn phases_run_in_order_and_stop_at_every_error_boundary_on_compiler_thread() {
             .sources
             .add("fixture.hir", "fn a () { 1 }\n".into())
             .unwrap();
-        assert!(matches!(
-            check_snapshot(&mut engine, file, &default_context()),
-            Err(QueryError::Diagnostics(_))
-        ));
+        let result = check_snapshot(&mut engine, file, &default_context());
+        assert!(
+            matches!(result, Err(QueryError::Diagnostics(_))),
+            "stop {}: {result:?}",
+            phases[stop]
+        );
         let expected = match stop {
             0 => vec!["lex"],
             1 => vec!["lex", "parse"],
@@ -1131,7 +1142,7 @@ fn partial_check_preserves_diagnostics_and_reports_the_missing_phase_on_compiler
     let (mut engine, _) = make_engine(Some("resolve"), false);
     engine.adapters.checker = None;
     let file = parse(&mut engine, "fn a {}\n");
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(output.diagnostics.len(), 1);
     assert_eq!(
         output.completion,
@@ -1294,7 +1305,6 @@ fn frozen_frontier_preserves_reads_failures_and_warm_hits() {
 #[test]
 fn frozen_frontier_reports_each_missing_phase_and_retries_it() {
     with_compiler_stack(|| {
-        use hirsel_intern::jobs::Jobs;
         for jobs in [1, 2, 8] {
             for missing in [
                 QueryKind::Resolve,
@@ -1302,25 +1312,43 @@ fn frozen_frontier_reports_each_missing_phase_and_retries_it() {
                 QueryKind::Check,
                 QueryKind::Modes,
             ] {
-                let (mut engine, _) = make_engine(None, false);
-                match missing {
-                    QueryKind::Resolve => engine.adapters.resolver = None,
-                    QueryKind::Signature => engine.adapters.signature = None,
-                    QueryKind::Check => engine.adapters.checker = None,
-                    QueryKind::Modes => engine.adapters.modes = None,
-                    _ => unreachable!(),
-                }
-                parse(&mut engine, "fn a () { 1 }\nfn b () { 2 }\n");
                 let paths = vec![path("b"), path("a")];
+                let mut attempts = vec![0; paths.len()];
                 for _ in 0..2 {
-                    for result in engine.mode_definitions(paths.clone(), Jobs::new(jobs)) {
-                        assert_eq!(result.phase, Some(missing));
-                        assert!(matches!(result.result, Err(QueryError::NotImplemented)));
-                        assert!(engine.memo_reads(&result.definition, missing).is_none());
+                    let (mut engine, _) = make_engine_with_store(None, false);
+                    match missing {
+                        QueryKind::Resolve => engine.adapters.resolver = None,
+                        QueryKind::Signature => engine.adapters.signature = None,
+                        QueryKind::Check => engine.adapters.checker = None,
+                        QueryKind::Modes => engine.adapters.modes = None,
+                        _ => unreachable!(),
+                    }
+                    parse(&mut engine, "fn a () { 1 }\nfn b () { 2 }\n");
+
+                    let mut front = admitted_front(&mut engine, &paths, jobs);
+                    for result in front.request(&paths) {
+                        assert_eq!(result.outcome.phase, Some(missing));
+                        assert!(matches!(
+                            result.outcome.result,
+                            Err(QueryError::NotImplemented)
+                        ));
+                        assert!(
+                            admitted_memo_reads(&front, &result.outcome.definition, missing)
+                                .is_none(),
+                            "missing {missing:?} memo for {} with jobs={jobs}",
+                            result.outcome.definition
+                        );
+                    }
+                    for (attempts, path) in attempts.iter_mut().zip(&paths) {
+                        *attempts += if missing == QueryKind::Signature {
+                            u64::try_from(engine.recompute_count(path, missing)).unwrap()
+                        } else {
+                            front.queries.recompute_count(path, missing)
+                        };
                     }
                 }
-                for p in paths {
-                    assert!(engine.recompute_count(&p, missing) >= 2);
+                for count in attempts {
+                    assert!(count >= 2);
                 }
             }
         }
@@ -1398,36 +1426,42 @@ fn frozen_frontier_retries_operational_headers_only_in_the_next_snapshot() {
     }
     with_compiler_stack(|| {
         for jobs in [1, 2, 8] {
-            let (mut engine, _) = make_engine(None, false);
+            let (mut engine, _) = make_engine_with_store(None, false);
             let adapter = Arc::new(Flaky {
                 original: engine.adapters.signature.take().unwrap(),
                 calls: std::sync::atomic::AtomicU32::new(0),
             });
             engine.adapters.signature = Some(adapter.clone());
             parse(&mut engine, "fn a () { 1 }\nfn b () { 2 }\n");
-            let results = engine.mode_definitions(
-                vec![path("b"), path("a")],
-                hirsel_intern::jobs::Jobs::new(jobs),
-            );
+            let paths = vec![path("b"), path("a")];
+            let mut front = admitted_front(&mut engine, &paths, jobs);
+            let results = front.request(&paths);
             assert!(
                 results
                     .iter()
-                    .all(|r| matches!(r.result, Err(QueryError::Operational(_))))
+                    .all(|r| matches!(r.outcome.result, Err(QueryError::Operational(_))))
             );
             assert_eq!(
                 adapter.calls.load(std::sync::atomic::Ordering::Relaxed),
                 1,
                 "no post-freeze retry"
             );
-            for p in [path("a"), path("b")] {
-                assert!(engine.memo_reads(&p, QueryKind::Modes).is_none());
+            for p in &paths {
+                assert!(admitted_memo_reads(&front, p, QueryKind::Modes).is_none());
             }
-            let results = engine.mode_definitions(
-                vec![path("b"), path("a")],
-                hirsel_intern::jobs::Jobs::new(jobs),
+            drop(front);
+            let (mut engine, _) = make_engine_with_store(None, false);
+            engine.adapters.signature = Some(adapter.clone());
+            parse(&mut engine, "fn a () { 1 }\nfn b () { 2 }\n");
+            engine.item_signature(&path("a")).unwrap();
+            let mut front = admitted_front(&mut engine, &paths, jobs);
+            let results = front.request(&paths);
+            assert!(results.iter().all(|r| r.outcome.result.is_ok()));
+            assert_eq!(
+                adapter.calls.load(std::sync::atomic::Ordering::Relaxed),
+                2,
+                "jobs={jobs}"
             );
-            assert!(results.iter().all(|r| r.result.is_ok()));
-            assert_eq!(adapter.calls.load(std::sync::atomic::Ordering::Relaxed), 2);
         }
     });
 }

@@ -283,8 +283,8 @@ fn model(h: &History) -> Option<Model> {
 fn check_source(source: &str) -> Result<QueryEngine, String> {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("main.hir", source.to_owned()).unwrap();
-    let checked =
-        check_progress(&mut engine, file, &default_context()).map_err(|e| format!("API:{e:?}"))?;
+    let checked = source_check_request(&mut engine, file, &default_context())
+        .map_err(|e| format!("API:{e:?}"))?;
     let diagnostics: Vec<_> = checked
         .diagnostics
         .iter()
@@ -330,10 +330,11 @@ fn artifacts(label: &str) -> std::path::PathBuf {
 fn source_report(source: &str) -> Result<QueryEngine, Report> {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("main.hir", source.into()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).map_err(|e| Report {
-        validated: false,
-        cells: vec![query_error("source", e)],
-    })?;
+    let checked =
+        source_check_request(&mut engine, file, &default_context()).map_err(|e| Report {
+            validated: false,
+            cells: vec![query_error("source", e)],
+        })?;
     let diagnostics: Vec<_> = checked
         .diagnostics
         .iter()
@@ -653,7 +654,7 @@ fn twelve_source_negative_twins() {
             );
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("main.hir", source).unwrap();
-            let checked = check_progress(&mut engine, file, &default_context())
+            let checked = source_check_request(&mut engine, file, &default_context())
                 .expect("API failure, not source rejection");
             let errors: Vec<_> = checked
                 .diagnostics
@@ -822,7 +823,7 @@ fn permanent_manifest_source_twins() {
         let source = include_str!("../fixtures/scoped_loan_matrix_31/borrowed.hir");
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("borrowed.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(checked.diagnostics.len(), 1, "{:?}", checked.diagnostics);
         assert_eq!(checked.diagnostics[0].rule.as_str(), "OWN-1");
     });
@@ -888,7 +889,7 @@ fn call_result_retention_has_exact_source_scope() {
             );
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("main.hir", source).unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             let diagnostics: Vec<_> = checked
                 .diagnostics
                 .iter()

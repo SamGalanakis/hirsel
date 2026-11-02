@@ -31,7 +31,7 @@ fn receipt(id: &str, phase: &str, source: &str, expected: &str) {
 fn checked(source: &str) -> QueryEngine {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("main.hir", source.into()).unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(output.completion, CheckCompletion::Complete);
     let errors: Vec<_> = output
         .diagnostics
@@ -191,7 +191,7 @@ fn local_case(index: usize, explicit: bool) {
     );
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("main.hir", source.clone()).unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(output.completion, CheckCompletion::Complete);
     let errors: Vec<_> = output
         .diagnostics

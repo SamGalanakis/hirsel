@@ -185,7 +185,7 @@ fn paired_cursor_recipes_17_bounded_matrix_engines() {
             .add("paired-recipes.hir", SOURCE.into())
             .unwrap();
         let context = hirsel_engine::default_context();
-        let checked = hirsel_engine::check_progress(&mut engine, file, &context).unwrap();
+        let checked = hirsel_engine::source_check_request(&mut engine, file, &context).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();

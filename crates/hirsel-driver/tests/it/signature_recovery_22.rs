@@ -155,7 +155,8 @@ fn signature_recovery_22_headers_and_repaired_neighbors() {
                     let text = source(case, stage, repaired);
                     let (mut engine, file) = parse(&text);
                     if repaired {
-                        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+                        let output =
+                            source_check_request(&mut engine, file, &default_context()).unwrap();
                         assert!(
                             output.diagnostics.is_empty(),
                             "{} stage {stage}: {:?}",
@@ -195,7 +196,8 @@ fn signature_recovery_22_protocol_preflight_rejects_unused_bad_associations() {
                     let (mut engine, file) = parse(&text);
                     // Association signatures are intentionally checked in stage two.
                     engine.item_signature(&path(case.owner)).unwrap();
-                    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+                    let output =
+                        source_check_request(&mut engine, file, &default_context()).unwrap();
                     assert_eq!(output.completion, CheckCompletion::Complete);
                     let rules: Vec<_> =
                         output.diagnostics.iter().map(|d| d.rule.as_str()).collect();

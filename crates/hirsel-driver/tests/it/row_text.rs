@@ -2,8 +2,8 @@
 //! must contain independent MEM-12 owners without an importer extension.
 use hirsel_driver::{compiler_adapters, native};
 use hirsel_engine::{
-    QueryEngine, RunConfiguration, SimulationConfig, check_progress, default_context,
-    default_environment, entry_path, run_observed_snapshot, with_compiler_stack,
+    QueryEngine, RunConfiguration, SimulationConfig, default_context, default_environment,
+    entry_path, run_observed_snapshot, source_check_request, with_compiler_stack,
 };
 
 // The historical helper fixture stays byte-for-byte intact. Only direct field
@@ -37,7 +37,7 @@ fn ordinary_indexed_rows_with_nested_text_owners() {
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("row-text.hir", SOURCE.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&default_context());
         let observed = run_observed_snapshot(
@@ -184,7 +184,7 @@ fn detached_title_minimal_probe_and_ordinary_twin() {
             };
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("title.hir", source).unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let entry = entry_path(&default_context());
             let observed = run_observed_snapshot(
@@ -254,7 +254,7 @@ fn a_live_title_relation_prevents_overlapping_replacement() {
                 .sources
                 .add("loan.hir", format!("{header}{body}"))
                 .unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             if live {
                 assert!(
                     checked
@@ -461,7 +461,7 @@ pub fn main() -> Result[(), ()] {{
                 );
                 let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
                 let file = engine.sources.add("row-cost.hir", source).unwrap();
-                let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+                let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
                 assert!(
                     checked.diagnostics.is_empty(),
                     "{name}: {:?}",

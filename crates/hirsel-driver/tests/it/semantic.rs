@@ -214,7 +214,7 @@ fn v20_mem_rejections_reach_their_owner_or_report_an_incomplete_pipeline_on_comp
         adapters.checker = None;
         let mut engine = QueryEngine::new(default_environment(), adapters);
         let file = parse(&mut engine, &source);
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         if let Some(first) = checked.diagnostics.first() {
             assert_eq!(first.rule.as_str(), rule, "{relative}");
             assert_eq!(
@@ -243,7 +243,7 @@ fn a_partial_check_keeps_the_exact_opaque_clause_diagnostic_and_completion_on_co
     adapters.checker = None;
     let mut engine = QueryEngine::new(default_environment(), adapters);
     let file = parse(&mut engine, "pub opaque type Marker uses {}\n");
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(checked.diagnostics[0].rule.as_str(), "LANG-6");
     assert_eq!(
         checked.sources.slice(checked.diagnostics[0].primary),

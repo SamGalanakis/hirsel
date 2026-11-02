@@ -68,7 +68,13 @@ pub fn reference(source: &str, warm: Option<&str>) -> Option<Observation> {
 /// Missing execution observations and tooling errors remain errors, never failures.
 pub fn reference_status(source: &str, warm: Option<&str>) -> Result<(Observation, i32), String> {
     let prepared = prepare_reference(source, warm)?;
-    let sites = hirsel_driver::native::Sites::new(prepared.input.snapshot());
+    let ready = prepared
+        .input
+        .ready(&hirsel_driver::native::Options::new(
+            hirsel_driver::native::TargetSpec::x86_64_unknown_linux_gnu(),
+        ))
+        .map_err(|error| error.to_string())?;
+    let sites = ready.sites();
     // Wait details do not affect process status. Keep the observation unchanged.
     let outcome = prepared
         .reference
@@ -78,18 +84,7 @@ pub fn reference_status(source: &str, warm: Option<&str>) -> Result<(Observation
 }
 
 fn prepare_reference(source: &str, warm: Option<&str>) -> Result<super::Prepared, String> {
-    let mut engine = hirsel_engine::QueryEngine::new(
-        hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
-    );
-    if let Some(warm) = warm {
-        let file = engine
-            .sources
-            .add("warm.hir", warm.into())
-            .ok_or("warm source too large")?;
-        let _ = hirsel_engine::check_progress(&mut engine, file, &hirsel_engine::default_context());
-    }
-    super::checked(&mut engine, "<reference>", source, None)
+    super::checked(warm, "<reference>", source, None)
 }
 
 /// The reference interpreter against one native configuration.
@@ -105,22 +100,13 @@ pub struct NativeProbe<'a> {
 
 impl Probe for NativeProbe<'_> {
     fn observe(&self, source: &str) -> Option<(Observation, Observation)> {
-        let mut engine = hirsel_engine::QueryEngine::new(
-            hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
-        );
-        if let Some(warm) = self.warm {
-            let file = engine.sources.add("warm.hir", warm.into())?;
-            let _ =
-                hirsel_engine::check_progress(&mut engine, file, &hirsel_engine::default_context());
-        }
         let super::Prepared {
             input: validated,
             entry,
             reference,
             ..
         } = super::checked_with_config(
-            &mut engine,
+            self.warm,
             "<artifact>",
             source,
             self.source_path.as_deref(),
@@ -128,13 +114,14 @@ impl Probe for NativeProbe<'_> {
             false,
         )
         .ok()?;
-        let outcomes = hirsel_driver::native::differential(
-            &validated,
+        let outcomes = hirsel_driver::native::differential_ready(
+            &mut |options| validated.ready(options),
             &entry,
             &reference,
             std::slice::from_ref(&self.configuration),
             self.toolchain,
             self.dir,
+            &hirsel_driver::native::Fixture::default(),
         );
         match outcomes.into_iter().next()?.1 {
             Outcome::Agree => Some((reference.clone(), reference)),

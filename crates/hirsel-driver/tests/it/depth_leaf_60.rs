@@ -2,7 +2,7 @@
 use hirsel_driver::compiler_adapters;
 use hirsel_driver::native::{OptLevel, Options, TargetSpec, build, emit_ir};
 use hirsel_engine::{
-    QueryEngine, check_progress, default_context, default_environment, with_compiler_stack,
+    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
 
 #[test]
@@ -10,7 +10,7 @@ fn inline_record_callee_uses_only_a_room_guard() {
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("leaf.hir", "fn pair(x:f64,y:f64)->(f64,f64) {(x,y)}\npub fn main()->(f64,f64) {pair(1.0,2.0)}\n".into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
@@ -50,7 +50,7 @@ fn fixed_construction_proof_excludes_box_allocation() {
                 "fn boxed(x:f64)->box f64 {box x}\npub fn main()->box f64 {boxed(1.0)}\n".into(),
             )
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
@@ -80,7 +80,7 @@ fn fixed_inline_constructor_keeps_the_exact_last_admissible_depth() {
                 "fn pair(x:u64,y:u64)->(u64,u64) {{(x,y)}}\nfn descend(n:u64)->u64 {{if n==0u64 {{let (x,y)=pair(1u64,2u64);x+y}} else {{1u64+descend(n-1u64)}}}}\npub fn main()->Result[(),()] {{let _=descend({n}u64);Ok(())}}\n"
             );
             let file = engine.sources.add("limit.hir", source.into()).unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let entry = entry_path(&default_context());
             let execution = run_observed_snapshot(

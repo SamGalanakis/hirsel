@@ -26,7 +26,7 @@ fn parity(source: &str, native: bool) {
             .sources
             .add("nested-copy.hir", source.into())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &context).unwrap();
+        let checked = source_check_request(&mut engine, file, &context).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&context);
         let run = run_observed_snapshot(
@@ -101,7 +101,7 @@ fn copied_nested_unique_witness() {
         .sources
         .add("nested-copy.hir", WITNESS.into())
         .unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     let diagnostic = checked
         .diagnostics
         .iter()
@@ -346,7 +346,8 @@ fn independent_v_checks_current_nested_receipts_at_unique_receivers() {
                 with_compiler_stack(|| {
                     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
                     let file = engine.sources.add("unique-receiver.hir", source).unwrap();
-                    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+                    let checked =
+                        source_check_request(&mut engine, file, &default_context()).unwrap();
                     assert!(
                         checked.diagnostics.is_empty(),
                         "{name}: {:?}",

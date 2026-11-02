@@ -449,7 +449,7 @@ fn runtime55_escaping_exclusive_capture_is_refused() {
                     .into(),
             )
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(
             checked.diagnostics.len() == 1
                 && checked.diagnostics[0].rule.as_str() == "CLO-4"

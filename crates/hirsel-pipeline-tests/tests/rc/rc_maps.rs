@@ -5,7 +5,7 @@ use crate::rc_support as support;
 use hirsel_driver::compiler_adapters;
 use hirsel_driver::native::{Options, TargetSpec, build_program, manifest, program};
 use hirsel_engine::{
-    QueryEngine, check_progress, default_context, default_environment, with_compiler_stack,
+    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
 use hirsel_heapcheck::{Config, NoOperations, Observed};
 
@@ -22,7 +22,7 @@ fn execute_with_collisions(body: &str, expected: u64, collisions: bool) {
             QueryEngine::new(default_environment(), compiler_adapters())
         };
         let file = engine.sources.add("map-test.hir", source.clone()).unwrap();
-        let check = check_progress(&mut engine, file, &default_context()).unwrap();
+        let check = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(
             !check
                 .diagnostics
@@ -128,7 +128,7 @@ fn borrowed_set_iteration_can_replace_its_source_after_the_last_advance() {
     let file = engine.sources.add("next-use.hir", String::from(
         "fn probe() { let mut s: Set[u64] = set.empty(); let empty: Set[u64] = set.empty(); for x in s { s = copy empty; continue } }",
     )).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(
         checked.diagnostics[0].rule.as_str(),
         "MODE-1",
@@ -202,7 +202,7 @@ fn heap_independently_rejects_undeclared_borrowed_returns_and_early_loan_end() {
             .sources
             .add("borrowed-return.hir", source.into())
             .unwrap();
-        check_progress(&mut engine, file, &default_context()).unwrap();
+        source_check_request(&mut engine, file, &default_context()).unwrap();
         let input = engine.export_native_input().unwrap();
         let input = engine.import_native_input(input).unwrap();
         let ready = hirsel_driver::native::build(
@@ -342,7 +342,7 @@ fn compile_cursor_case(source: &str) {
             .sources
             .add("cursor-case.hir", source.into())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let input = engine.import_native_input(input).unwrap();

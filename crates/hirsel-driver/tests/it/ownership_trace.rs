@@ -139,19 +139,20 @@ fn ownership_simulation_test_entry_preserves_source_results_and_restores_the_ada
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("tests.hir");
     std::fs::write(&source,"resource type Token {}\ndrop(x) {}\n@test\nfn resource_lifetime(t: Test) {\n let first = Token()\n let second = take first\n test.check(t, true)\n}\n").unwrap();
-    let mut program = COMPILER
-        .with_verify(Verify::On)
-        .load_test_package(&source)
-        .unwrap_or_else(|error| panic!("source fixture: {error}"));
-    let tests = testing::discover_source(&mut program, &[], Some(49), Selection::Tests)
-        .unwrap_or_else(|error| panic!("source fixture: {error}"));
+    let (tests, batch) = crate::test_requests::suite(&source, Some(49));
     assert_eq!(tests.len(), 1);
     let mut traces = vec![];
     for checked in [false, true] {
-        let ordinary = testing::execute_source(&mut program, &tests[0], checked, 0)
-            .unwrap_or_else(|error| panic!("source fixture: {error}"));
+        let ordinary = testing::execute(
+            &batch.entry(&tests[0].entry).unwrap(),
+            &tests[0],
+            checked,
+            0,
+            hirsel_interp::Limits::default(),
+        )
+        .unwrap_or_else(|error| panic!("source fixture: {error}"));
         let traced = execute_test_resources(
-            &mut program,
+            &batch.entry(&tests[0].entry).unwrap(),
             &tests[0],
             checked,
             0,
@@ -171,16 +172,15 @@ fn ownership_simulation_test_entry_preserves_source_results_and_restores_the_ada
             (analysis.created, analysis.dropped, analysis.live.len()),
             (1, 1, 0)
         );
-        assert!(
-            program
-                .engine
-                .adapters
-                .interpreter
-                .as_mut()
-                .unwrap()
-                .take_resource_trace()
-                .is_none()
-        );
+        let again = testing::execute(
+            &batch.entry(&tests[0].entry).unwrap(),
+            &tests[0],
+            checked,
+            0,
+            hirsel_interp::Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(again.observation, ordinary.observation);
         traces.push(trace);
     }
     assert_eq!(traces[0], traces[1]);
@@ -216,49 +216,20 @@ fn observed_task_source(body: &str, creates: usize) -> hirsel_run_schema::owners
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("tasks.hir");
     std::fs::write(&source, body).unwrap();
-    let mut program = COMPILER
-        .with_verify(Verify::On)
-        .load_test_package(&source)
-        .unwrap_or_else(|error| {
-            if let hirsel_engine::ToolError::Query {
-                error: hirsel_engine::QueryError::Diagnostics(diagnostics),
-                sources,
-                ..
-            } = &error
-            {
-                let rendered = diagnostics
-                    .iter()
-                    .take(4)
-                    .map(|diagnostic| diagnostic.render_human(sources))
-                    .collect::<String>();
-                panic!("task fixture: {rendered}");
-            }
-            panic!("task fixture: {error}");
-        });
-    let tests = testing::discover_source(&mut program, &[], Some(49), Selection::Tests)
-        .unwrap_or_else(|error| {
-            if let hirsel_engine::ToolError::Query {
-                error: hirsel_engine::QueryError::Diagnostics(diagnostics),
-                sources,
-                ..
-            } = &error
-            {
-                let rendered = diagnostics
-                    .iter()
-                    .take(4)
-                    .map(|diagnostic| diagnostic.render_human(sources))
-                    .collect::<String>();
-                panic!("task fixture: {rendered}");
-            }
-            panic!("task fixture: {error}");
-        });
+    let (tests, batch) = crate::test_requests::suite(&source, Some(49));
     assert_eq!(tests.len(), 1);
     let mut traces = vec![];
     for checked in [false, true] {
-        let ordinary = testing::execute_source(&mut program, &tests[0], checked, 0)
-            .unwrap_or_else(|error| panic!("task fixture: {error}"));
+        let ordinary = testing::execute(
+            &batch.entry(&tests[0].entry).unwrap(),
+            &tests[0],
+            checked,
+            0,
+            hirsel_interp::Limits::default(),
+        )
+        .unwrap_or_else(|error| panic!("task fixture: {error}"));
         let traced = execute_test_resources(
-            &mut program,
+            &batch.entry(&tests[0].entry).unwrap(),
             &tests[0],
             checked,
             0,

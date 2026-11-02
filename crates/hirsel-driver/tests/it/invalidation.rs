@@ -10,7 +10,7 @@ fn check(engine: &mut QueryEngine, source: &str) -> CheckOutput {
         .sources
         .add("invalidation.hir", source.into())
         .unwrap();
-    check_progress(engine, file, &default_context()).unwrap()
+    source_check_request(engine, file, &default_context()).unwrap()
 }
 fn counts(engine: &QueryEngine, name: &str) -> [usize; 5] {
     [

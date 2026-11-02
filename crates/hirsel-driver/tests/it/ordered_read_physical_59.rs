@@ -8,7 +8,7 @@ fn retained_stdin_pending_releases_its_pooled_stack_and_replays_on_both_backends
         let mut engine = crate::source_std::engine();
         let source = super::ordered_read_resume_59::STDIN;
         let file = engine.sources.add("main.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let sites = native::Sites::new(&input);

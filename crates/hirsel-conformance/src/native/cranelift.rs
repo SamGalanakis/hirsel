@@ -208,33 +208,25 @@ pub fn judge(
 
 /// One case's Ready program as Cranelift IR text (`native --cranelift --clif`).
 pub fn clif(case: &Case) -> Result<String, String> {
-    let mut engine = hirsel_engine::QueryEngine::new(
-        hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
-    );
-    let prepared = super::checked(&mut engine, &case.id, &case.source, case.path.as_deref())?;
-    let program = hirsel_driver::native::build(
-        &prepared.input,
-        &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-    )
-    .map_err(|e| e.to_string())?;
+    let prepared = super::checked(None, &case.id, &case.source, case.path.as_deref())?;
+    let ready = prepared
+        .input
+        .ready(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
+        .map_err(|error| error.to_string())?;
+    let program = &ready.program;
     hirsel_driver::native::emit_clif(&program).map_err(|e| e.to_string())
 }
 
 /// One case's emission wall time per backend, in the order `BACKENDS` names
 /// them: the same Ready program lowered to one object by each.
 pub fn compile_times(case: &Case) -> Result<Vec<std::time::Duration>, String> {
-    use hirsel_driver::native::{Backend, build, emit_backend_objects};
-    let mut engine = hirsel_engine::QueryEngine::new(
-        hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
-    );
-    let prepared = super::checked(&mut engine, &case.id, &case.source, case.path.as_deref())?;
-    let program = build(
-        &prepared.input,
-        &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-    )
-    .map_err(|e| e.to_string())?;
+    use hirsel_driver::native::{Backend, emit_backend_objects};
+    let prepared = super::checked(None, &case.id, &case.source, case.path.as_deref())?;
+    let ready = prepared
+        .input
+        .ready(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
+        .map_err(|error| error.to_string())?;
+    let program = &ready.program;
     BACKENDS
         .iter()
         .map(|(_, backend, opt)| {

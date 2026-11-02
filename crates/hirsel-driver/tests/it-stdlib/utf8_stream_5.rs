@@ -156,7 +156,7 @@ fn cranelift() {
     });
 }
 
-fn execute_source(source: &str, steps: u64) {
+fn execute_text(source: &str, steps: u64) {
     let outcome = source_outcome(source, steps);
     assert!(
         matches!(
@@ -297,7 +297,7 @@ fn go_vectors_and_seeded_random_rust_oracle() {
             source += &oracle_row(&bytes);
         }
         source += "Ok(())\n}\n";
-        execute_source(&source, 60_000_000);
+        execute_text(&source, 60_000_000);
         let program = GeneratedProgram::new("oracle", &source);
         for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
             native_fixture(&program.0, backend);
@@ -396,7 +396,7 @@ fn state_memory_is_bounded_for_long_one_byte_input() {
               Ok(())
             }}"#
             );
-            execute_source(&source, 10_000_000);
+            execute_text(&source, 10_000_000);
             if iterations == 1024 {
                 // Keep 4096 interpreter feeds. H's instruction ledger is much
                 // denser; 256/1024 feeds compare peak storage within its limit.
@@ -452,7 +452,7 @@ fn offset_overflow_poisoning_at_unreachable_stream_size() {
           Ok(())
         }}"#
         );
-        execute_source(&source, 1_000_000);
+        execute_text(&source, 1_000_000);
         let (loaded, input, ready) = ready_source(&source);
         let run =
             native::heap_campaign(&ready, &loaded.entry, &native::Sites::new(&input)).unwrap();

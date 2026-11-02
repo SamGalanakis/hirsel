@@ -334,7 +334,7 @@ fn finite_exits_all_engines() {
             let mut engine =
                 QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
             let file = engine.sources.add("main.hir", source.clone()).unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{case:?}: {:?}\n{source}",

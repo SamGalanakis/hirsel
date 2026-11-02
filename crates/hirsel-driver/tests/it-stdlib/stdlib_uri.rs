@@ -1,7 +1,7 @@
 //! Zig lib/std/Uri.zig's 22 test groups, bff490a2 (MIT).
 //! Resolution adds the actual RFC3986 §5.4 reference/target pairs; Zig's named
 //! RFC test lists only absolute results. See third-party/NOTICES.md.
-use super::stdlib_net::{execute, execute_source};
+use super::stdlib_net::{execute, execute_text};
 
 #[test]
 fn parse_result_survives_helper_scope_exit() {
@@ -12,7 +12,7 @@ fn parse_result_survives_helper_scope_exit() {
 
 #[test]
 fn deep_copy_of_borrowed_string_has_no_parameter_root() {
-    execute_source(
+    execute_text(
         "fn own(text: String) -> String uses {} { unique text }\n\
          pub fn main(t: Test) -> Result[(), ()] {\n\
            let value = own(\"x\")\n\

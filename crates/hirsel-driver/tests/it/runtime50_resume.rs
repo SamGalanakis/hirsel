@@ -175,7 +175,7 @@ pub(crate) fn agree_on(
 ) -> Observation {
     let mut engine = crate::source_std::engine();
     let file = engine.sources.add("main.hir", source.into()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let entry = entry_path(&default_context());
     let reference = crate::source_std::observe(
@@ -189,8 +189,6 @@ pub(crate) fn agree_on(
     )
     .unwrap();
     let expected = Observation::of_reference(reference.observation.as_ref().unwrap());
-    let input = engine.export_native_input().unwrap();
-    let validated = engine.import_native_input(input).unwrap();
     let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
     let mut configurations = vec![
         Configuration {
@@ -226,8 +224,16 @@ pub(crate) fn agree_on(
         .unwrap();
     let toolchain =
         Toolchain::for_matrix(&scratch.path().join("runtime"), &configurations).unwrap();
-    for (configuration, outcome) in differential_in(
-        &validated,
+    let mut ready = crate::native_ready::supplier(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/std_source/main.hir"),
+        Some(source),
+        &entry,
+        &toolchain,
+    )
+    .unwrap();
+    for (configuration, outcome) in differential_ready(
+        &mut ready,
         &entry,
         &expected,
         &configurations,
@@ -242,8 +248,8 @@ pub(crate) fn agree_on(
         );
     }
     if replay {
-        let outcome = real_io_replay_in(
-            &validated,
+        let outcome = real_io_replay_ready(
+            &mut ready,
             &entry,
             &expected,
             &toolchain,
@@ -300,7 +306,7 @@ fn runtime50_migrate_every_suspension_continuations() {
 pub(crate) fn checked_heap_agrees(source: &str) {
     let mut engine = crate::source_std::engine();
     let file = engine.sources.add("main.hir", source.into()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let entry = entry_path(&default_context());
     let reference = crate::source_std::observe(
@@ -314,16 +320,22 @@ pub(crate) fn checked_heap_agrees(source: &str) {
     )
     .unwrap();
     let expected = Observation::of_reference(reference.observation.as_ref().unwrap());
-    let input = engine.export_native_input().unwrap();
-    let validated = engine.import_native_input(input).unwrap();
     let configurations = [Configuration {
         options: Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
         engine: Engine::Heap { campaign: false },
     }];
     let scratch = tempfile::tempdir().unwrap();
     let tools = Toolchain::for_matrix(&scratch.path().join("runtime"), &configurations).unwrap();
-    for (configuration, outcome) in differential_in(
-        &validated,
+    let mut ready = crate::native_ready::supplier(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/std_source/main.hir"),
+        Some(source),
+        &entry,
+        &tools,
+    )
+    .unwrap();
+    for (configuration, outcome) in differential_ready(
+        &mut ready,
         &entry,
         &expected,
         &configurations,
@@ -370,7 +382,7 @@ pub(crate) fn compact_runs_recording(
 ) -> Vec<Vec<Line>> {
     let mut engine = crate::source_std::engine();
     let file = engine.sources.add("main.hir", source.into()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let entry = entry_path(&default_context());
     let reference = crate::source_std::observe(

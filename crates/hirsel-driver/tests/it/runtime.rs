@@ -481,7 +481,7 @@ fn grant_error(refusal: GrantError) -> () uses {} { () }
 "#;
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("sizes.hir", source.into()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     assert_eq!(checked.completion, CheckCompletion::Complete);
     let mut stdout = vec![];
@@ -525,7 +525,7 @@ fn grant_error(refusal: GrantError) -> () uses {} { () }
 "#;
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("branches.hir", source.into()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     assert_eq!(checked.completion, CheckCompletion::Complete);
     let mut stdout = vec![];
@@ -556,7 +556,7 @@ fn ambient_heap_token_executes_without_an_allocation_or_capability() {
 fn ambient_heap_token_executes_without_an_allocation_or_capability_on_compiler_thread() {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("heap.hir", "@noalloc pub fn main() -> Result[(),OutputError] { let destination = heap; let alias = destination; Ok(()) }".into()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let result = run_snapshot(
         &mut engine,
@@ -619,7 +619,7 @@ pub fn main(rt:Io) -> Result[(),GrantError] {{
             );
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("consume.hir", source.clone()).unwrap();
-            let checked = check_progress(&mut engine, file, &default_context())
+            let checked = source_check_request(&mut engine, file, &default_context())
                 .unwrap_or_else(|e| panic!("{source}: {e:?}"));
             assert!(
                 checked.diagnostics.is_empty(),
@@ -660,7 +660,7 @@ fn observed_api_failure_retains_stdout_and_inner_cause() {
     hirsel_engine::with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("unavailable.hir", "fn charge[T: copyable](x: T) -> u8 { match arena.bounded(64, fn(a: Arena) -> u8 { let c = copy_to(a, x); 0u8 }) { Ok(n) => n, Error(e) => 1u8 } }\npub fn main(rt: Io, args: Args) -> Result[(), GrantError] { let _ = out.print(io.stdout(rt)?, \"before unavailable\\n\"); let n = charge(7u8); Ok(()) }".into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let result = run_observed_snapshot(
             &mut engine,
@@ -705,7 +705,7 @@ fn strict_and_mixed_replacement_failures_keep_the_new_value_in_named_cleanup_ord
                 .sources
                 .add("replace-failure.hir", source.into())
                 .unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let mut stdout = vec![];
             let result = run_snapshot(
@@ -740,7 +740,7 @@ fn all_four_projection_controls_propagate_not_granted_without_dummy_capabilities
             for granted in [false, true] {
                 let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
                 let file = engine.sources.add("grant.hir", source.into()).unwrap();
-                let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+                let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
                 assert!(
                     checked.diagnostics.is_empty(),
                     "{operation}: {:?}",

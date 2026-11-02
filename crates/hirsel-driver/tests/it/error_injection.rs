@@ -34,7 +34,7 @@ fn check_text(source: &str) -> CheckOutput {
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("repair.hir", source.into()).unwrap();
-        check_progress(&mut engine, file, &default_context()).unwrap()
+        source_check_request(&mut engine, file, &default_context()).unwrap()
     })
 }
 

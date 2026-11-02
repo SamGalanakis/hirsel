@@ -285,6 +285,16 @@ impl ValidationState {
     }
 }
 impl SignatureSnapshot {
+    pub(crate) fn builtin_dictionary_value(
+        &self,
+        memo: &hirsel_types::TypeMemo,
+        path: &DefPath,
+    ) -> Result<Option<hirsel_tir::Materialized>, QueryError> {
+        self.lookup
+            .registry
+            .dictionary_value(&self.types, memo, path)
+    }
+
     /// The snapshot of `signatures` (every public signature, by path, or the
     /// error that normalizing it reported) and `private` (each opaque owner's
     /// private view), reusing `previous`'s digests and verdicts that still hold.

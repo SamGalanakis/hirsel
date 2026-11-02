@@ -9,7 +9,7 @@ fn checked(engine: &mut QueryEngine, source: &str) -> (hirsel_span::FileId, Chec
     let file = engine.sources.add("edits.hir", source.into()).unwrap();
     (
         file,
-        check_progress(engine, file, &default_context()).unwrap(),
+        source_check_request(engine, file, &default_context()).unwrap(),
     )
 }
 fn json_diagnostics(output: &CheckOutput) -> Vec<String> {
@@ -377,7 +377,7 @@ fn observe_files(
     let mut ds = vec![];
     let mut complete = true;
     for id in &ids {
-        let output = check_progress(engine, *id, &default_context()).unwrap();
+        let output = source_check_request(engine, *id, &default_context()).unwrap();
         complete &= output.completion == CheckCompletion::Complete;
         ds.extend(json_diagnostics(&output));
     }

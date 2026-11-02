@@ -1461,6 +1461,32 @@ impl FrontBodyQueries {
 
     /// An immutable outcome, including exact error-phase and read evidence.
     /// This lookup never adopts a product into a mutable source namespace.
+    pub fn publication(&self, selected: Result<ProductRef, Reference>) -> Option<PublishedResult> {
+        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let key = self.selection_key(&selected, &slots)?;
+        let outcome = match slots.get(&key)? {
+            FrontSlot::Archived(_) => return None,
+            FrontSlot::Live { outcome, .. } => outcome,
+        };
+        let result = match &outcome.state {
+            FrontState::Failed { error, .. } => Err((**error).clone()),
+            FrontState::Settled {
+                publication,
+                diagnostics,
+                ..
+            } => Ok(PublishedDefinition {
+                summary: publication.summary_value()?.value_arc(),
+                diagnostics: diagnostics.clone(),
+            }),
+        };
+        Some(PublishedResult {
+            definition: outcome.definition.path().clone(),
+            result,
+            phase: outcome.phase,
+            reads: outcome.reads.clone(),
+            diagnostic_phases: outcome.diagnostic_phases.clone(),
+        })
+    }
     pub fn outcome(
         self: &Arc<Self>,
         selected: Result<ProductRef, Reference>,

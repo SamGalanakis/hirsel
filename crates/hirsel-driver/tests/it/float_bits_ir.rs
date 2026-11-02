@@ -5,7 +5,7 @@
 use hirsel_driver::compiler_adapters;
 use hirsel_driver::native::{OptLevel, Options, TargetSpec, build, emit_ir};
 use hirsel_engine::{
-    QueryEngine, check_progress, default_context, default_environment, with_compiler_stack,
+    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
 
 /// The optimized IR of `source` for `target`, whole.
@@ -14,7 +14,7 @@ fn module_ir(source: &str, target: TargetSpec) -> String {
     with_compiler_stack(move || {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("bits.hir", source).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();

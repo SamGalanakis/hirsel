@@ -26,9 +26,12 @@ fn lower_valid(source: &str) -> (Program, hirsel_rc::import::Lowered) {
             crate::compiler_adapters(),
         );
         let file = engine.sources.add("root-proof.hir", source.into()).unwrap();
-        let output =
-            hirsel_engine::check_progress(&mut engine, file, &hirsel_engine::default_context())
-                .unwrap();
+        let output = hirsel_engine::source_check_request(
+            &mut engine,
+            file,
+            &hirsel_engine::default_context(),
+        )
+        .unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();

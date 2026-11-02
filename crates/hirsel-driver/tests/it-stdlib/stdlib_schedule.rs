@@ -84,7 +84,7 @@ pub fn main(rt: Io, args: Args) -> Result[(),GrantError] {
             .sources
             .add("schedule-errors.hir", source.into())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         for operation in ["random.bytes", "clock.sleep_until", "clock.monotonic"] {
             let mut config = clocked();

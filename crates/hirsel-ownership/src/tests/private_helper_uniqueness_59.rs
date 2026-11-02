@@ -10,7 +10,7 @@ fn check(source: &str) -> (QueryEngine, CheckOutput) {
         .sources
         .add("private-helper.hir", source.into())
         .unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     (engine, output)
 }
 
@@ -301,7 +301,7 @@ fn private_helper_uniqueness_59_stored_headers_settle_before_body_receipts() {
         engine.set_retention(hirsel_engine::memo::Retention::Batch);
         let source = "fn epoch_day() -> i128 { 1 }\nfn format() -> i128 { epoch_day() }\npub fn main() { let _ = format() }";
         let file = engine.sources.add("stored.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         engine
             .checked_products(&entry_path(&default_context()))
@@ -395,7 +395,7 @@ fn private_helper_uniqueness_59_body_edit_invalidates_summary_and_caller() {
                 good.replace("list.push(mut xs, 1)", "xs = EMPTY"),
             )
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         let diagnostic = output
             .diagnostics
             .iter()

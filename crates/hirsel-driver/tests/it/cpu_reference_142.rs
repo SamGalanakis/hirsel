@@ -1,7 +1,7 @@
 use hirsel_driver::{compiler_adapters, native};
 use hirsel_engine::{
-    QueryEngine, RunConfiguration, check_progress, default_context, default_environment,
-    entry_path, run_observed_checked, run_observed_snapshot, with_compiler_stack,
+    QueryEngine, RunConfiguration, default_context, default_environment, entry_path,
+    run_observed_checked, run_observed_snapshot, source_check_request, with_compiler_stack,
 };
 
 fn grant(workers: u32) -> hirsel_run_schema::CpuGrant {
@@ -29,7 +29,7 @@ fn agree_in(
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("cpu.hir", source.to_owned()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&default_context());
         let fixture = native::Fixture {

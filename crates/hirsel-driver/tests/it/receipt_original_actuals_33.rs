@@ -6,8 +6,9 @@ use hirsel_driver::native::{
     TargetSpec, Toolchain,
 };
 use hirsel_engine::{
-    QueryEngine, RunConfiguration, SimulationConfig, ValidatedNativeInput, Verify, check_progress,
-    default_context, default_environment, entry_path, run_observed_snapshot, with_compiler_stack,
+    QueryEngine, RunConfiguration, SimulationConfig, ValidatedNativeInput, Verify, default_context,
+    default_environment, entry_path, run_observed_snapshot, source_check_request,
+    with_compiler_stack,
 };
 use hirsel_rc::instance::{Actuals, key_of};
 use hirsel_rc::sealed_source::contract::registry::{Context, Registry};
@@ -51,7 +52,7 @@ fn checked_source(source: &str) -> (QueryEngine, ValidatedNativeInput) {
         .sources
         .add("receipt-original-actuals-33.hir", source.into())
         .unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let original = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(original).unwrap();

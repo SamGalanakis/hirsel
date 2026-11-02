@@ -220,9 +220,12 @@ fn heap_callable_representation_survives_both_native_backends() {
             hirsel_driver::compiler_adapters(),
         );
         let file = engine.sources.add("scoped.hir", source).unwrap();
-        let checked =
-            hirsel_engine::check_progress(&mut engine, file, &hirsel_engine::default_context())
-                .unwrap();
+        let checked = hirsel_engine::source_check_request(
+            &mut engine,
+            file,
+            &hirsel_engine::default_context(),
+        )
+        .unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = hirsel_engine::entry_path(&hirsel_engine::default_context());
         let reference = hirsel_engine::run_observed_snapshot(

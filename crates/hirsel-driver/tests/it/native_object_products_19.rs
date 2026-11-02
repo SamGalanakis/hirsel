@@ -581,7 +581,7 @@ pub fn main()->Result[(),()] {
                 .into(),
             )
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let actual = compile(
             &mut engine,

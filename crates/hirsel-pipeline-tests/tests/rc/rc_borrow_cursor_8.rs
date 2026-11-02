@@ -104,7 +104,7 @@ pub fn main() -> Result[(), u64] {
                 .sources
                 .add("borrow-cursor-projection.hir", source.into())
                 .unwrap();
-            let checked = check_progress(&mut engine, file, &context).unwrap();
+            let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{name}: {:?}",
@@ -655,7 +655,7 @@ fn cursor_native_parity_with_stack(cases: &[(&str, &str)], stack: Option<u64>) {
                     .sources
                     .add("borrow-cursor-source.hir", source.into())
                     .unwrap();
-                let checked = check_progress(&mut engine, file, &context).unwrap();
+                let checked = source_check_request(&mut engine, file, &context).unwrap();
                 assert!(
                     checked.diagnostics.is_empty(),
                     "{name}: {:?}",
@@ -845,7 +845,7 @@ pub fn main()->Result[(),u64] {
                 .sources
                 .add("cursor-cost.hir", source.clone())
                 .unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let entry = entry_path(&default_context());
             let snapshot = engine.export_native_input().unwrap();

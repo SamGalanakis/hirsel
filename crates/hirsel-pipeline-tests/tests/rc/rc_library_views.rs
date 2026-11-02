@@ -4,8 +4,8 @@ use hirsel_driver::native::{
     Toolchain, differential,
 };
 use hirsel_engine::{
-    InterpreterAdapter, RunConfiguration, RunOutcome, SimulationConfig, check_progress,
-    default_context, entry_path, run_observed_snapshot, with_compiler_stack,
+    InterpreterAdapter, RunConfiguration, RunOutcome, SimulationConfig, default_context,
+    entry_path, run_observed_snapshot, source_check_request, with_compiler_stack,
 };
 use hirsel_interp::Limits;
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ fn agree(source: String, configurations: Vec<Configuration>, name: &str, limits:
             .engine;
         let context = default_context();
         let file = engine.sources.add("views.hir", source.clone()).unwrap();
-        let checked = check_progress(&mut engine, file, &context).unwrap();
+        let checked = source_check_request(&mut engine, file, &context).unwrap();
         assert!(
             checked.diagnostics.is_empty(),
             "{source}\n{:?}",

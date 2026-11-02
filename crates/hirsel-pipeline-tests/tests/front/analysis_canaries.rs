@@ -24,7 +24,7 @@ fn export(name: &str) -> String {
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add(name, source.clone()).unwrap();
-        let result = check_progress(&mut engine, file, &default_context())
+        let result = source_check_request(&mut engine, file, &default_context())
             .unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert!(
             result.diagnostics.is_empty(),

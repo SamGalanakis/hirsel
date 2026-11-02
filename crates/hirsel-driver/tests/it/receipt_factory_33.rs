@@ -69,7 +69,7 @@ fn source_at(text: &str, name: &str) -> (NativeOriginalReader, DefPath) {
         .sources
         .add("receipt-factory.hir", text.into())
         .unwrap();
-    let report = check_progress(&mut engine, file, &default_context()).unwrap();
+    let report = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
     let mut path = entry_path(&default_context());
     path.0.name = name.into();
@@ -896,7 +896,7 @@ pub fn main()->u64 {
                 .into(),
             )
             .unwrap();
-        let report = check_progress(&mut engine, file, &default_context()).unwrap();
+        let report = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(
             report
                 .diagnostics

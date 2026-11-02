@@ -199,7 +199,8 @@ fn publish(store: Arc<Observed>, source: &str, jobs: usize) -> (QueryEngine, Vec
         .iter()
         .map(|s| s.item.definition.clone())
         .collect();
-    let outputs = engine.publish_definitions(
+    let outputs = crate::request_graph::publications(
+        &mut engine,
         definitions,
         hirsel_intern::jobs::Jobs::new(jobs),
         memo::Retention::Batch,
@@ -1034,6 +1035,7 @@ fn damaged_or_misnamed_remote_closures_recompute_with_cold_parity() {
 fn private_evaluation_uses_independent_receipts_in_scalar_and_worker_sessions() {
     let run = || {
         with_compiler_stack(|| {
+            use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
             use hirsel_intern::timings::{self, Count};
             timings::enable();
             let runs = || {
@@ -1046,34 +1048,76 @@ fn private_evaluation_uses_independent_receipts_in_scalar_and_worker_sessions() 
             };
             let source = "const A:u8=comptime 7u8\nconst B:u8=comptime 8u8\n";
             let paths = vec![definition("A"), definition("B")];
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(directory.path().join("signatures.hir"), source).unwrap();
+            let manifest = directory.path().join("hirsel.json");
+            std::fs::write(
+                &manifest,
+                r#"{"schema":1,"package":{"name":"standalone","version":"0"},"sources":[{"path":"signatures.hir","module":[]}],"dependencies":[]}"#,
+            )
+            .unwrap();
+            let make_requests = |store: Arc<store::MemStore>, jobs| {
+                let config = CompileConfig {
+                    store,
+                    jobs: hirsel_intern::jobs::Jobs::new(jobs),
+                    ..CompileConfig::for_memory_cap(None)
+                };
+                let compiler = COMPILER
+                    .clone()
+                    .with_phase_adapters(compiler_adapters, [0; 32])
+                    .with_config(config.clone());
+                CompilerRequests::for_host(compiler, config)
+            };
+            let kinds = |result: &CompileResult| {
+                let CompileResult::Precomputed { sources, .. } = result else {
+                    panic!("expected Precomputed");
+                };
+                paths
+                    .iter()
+                    .map(|path| {
+                        let bound = sources.source_product_bytes(path).unwrap().unwrap();
+                        let budget = hirsel_engine::runtime::ProcessBudget::new(bound);
+                        sources
+                            .source_products(path, budget.reserve(bound).unwrap())
+                            .unwrap()
+                            .unwrap()
+                            .constant()
+                            .unwrap()
+                            .root
+                            .kind
+                            .clone()
+                    })
+                    .collect::<Vec<_>>()
+            };
             for jobs in [1, 2, 4, 8] {
                 let store = Arc::new(store::MemStore::default());
-                let mut seed = signature_session(store.clone(), source, true);
+                let mut seed = make_requests(store.clone(), jobs);
                 let before = runs();
-                let expected =
-                    seed.materialize_values(paths.clone(), hirsel_intern::jobs::Jobs::new(jobs));
-                assert!(expected.iter().all(Result::is_ok));
+                let output = seed
+                    .execute(&manifest, CompileOperation::Precompute)
+                    .unwrap();
+                let expected = kinds(&output.result);
                 assert_eq!(runs() - before, 2, "first private V at jobs={jobs}");
-                let mut fresh = signature_session(store.clone(), source, true);
-                let before = runs();
-                let actual =
-                    fresh.materialize_values(paths.clone(), hirsel_intern::jobs::Jobs::new(jobs));
-                assert!(actual.iter().all(Result::is_ok));
                 assert_eq!(
-                    actual
-                        .iter()
-                        .map(|v| &v.as_ref().unwrap().root.kind)
-                        .collect::<Vec<_>>(),
-                    expected
-                        .iter()
-                        .map(|v| &v.as_ref().unwrap().root.kind)
-                        .collect::<Vec<_>>()
+                    expected,
+                    vec![
+                        hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(7)),
+                        hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(8)),
+                    ],
+                    "cold precompute values at jobs={jobs}"
                 );
+                let mut fresh = make_requests(store.clone(), jobs);
+                let before = runs();
+                let output = fresh
+                    .execute(&manifest, CompileOperation::Precompute)
+                    .unwrap();
+                let actual = kinds(&output.result);
                 assert_eq!(
                     runs(),
                     before,
                     "verifier-owned private receipts at jobs={jobs}"
                 );
+                assert_eq!(actual, expected);
                 let changed = source.replace("7u8", "9u8");
                 let mut edited = signature_session(store, &changed, true);
                 let before = runs();
@@ -1193,37 +1237,124 @@ fn scalar_evaluation_products_require_local_completion_and_skip_analyzed_bodies(
 #[test]
 fn worker_evaluation_products_adopt_only_local_complete_verdicts() {
     with_compiler_stack(|| {
+        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
         let source =
             "fn helper()->u32{7u32}\nconst A:u32=comptime helper()\nconst B:u32=comptime A+1u32\n";
         let paths = vec![definition("A"), definition("B")];
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("signatures.hir"), source).unwrap();
+        let manifest = directory.path().join("hirsel.json");
+        std::fs::write(
+            &manifest,
+            r#"{"schema":1,"package":{"name":"standalone","version":"0"},"sources":[{"path":"signatures.hir","module":[]}],"dependencies":[]}"#,
+        )
+        .unwrap();
+        let make_requests =
+            |store: Arc<store::MemStore>,
+             jobs: usize,
+             adapters: fn() -> hirsel_engine::PhaseAdapters| {
+                let config = CompileConfig {
+                    store,
+                    jobs: hirsel_intern::jobs::Jobs::new(jobs),
+                    ..CompileConfig::for_memory_cap(None)
+                };
+                let compiler = COMPILER
+                    .clone()
+                    .with_phase_adapters(adapters, [0; 32])
+                    .with_config(config.clone());
+                CompilerRequests::for_host(compiler, config)
+            };
+        let kinds = |requests: &CompilerRequests, result: &CompileResult| {
+            let CompileResult::Precomputed { sources, .. } = result else {
+                panic!("expected Precomputed");
+            };
+            paths
+                .iter()
+                .map(|path| {
+                    let bound = sources.source_product_bytes(path).unwrap().unwrap();
+                    sources
+                        .source_products(path, requests.budget().reserve(bound).unwrap())
+                        .unwrap()
+                        .unwrap()
+                        .constant()
+                        .unwrap()
+                        .root
+                        .kind
+                        .clone()
+                })
+                .collect::<Vec<_>>()
+        };
         for jobs in [1, 2, 4, 8] {
             let store = Arc::new(store::MemStore::default());
-            let mut seed = signature_session(store.clone(), source, true);
-            for name in ["helper", "A", "B"] {
-                seed.item_signature(&definition(name)).unwrap();
-            }
-            let expected =
-                seed.materialize_values(paths.clone(), hirsel_intern::jobs::Jobs::new(jobs));
-            assert!(expected.iter().all(Result::is_ok), "{expected:?}");
-            let mut fresh = signature_session(store.clone(), source, false);
-            fresh.adapters.modes = None;
-            fresh.adapters.lowering = None;
-            let actual =
-                fresh.materialize_values(paths.clone(), hirsel_intern::jobs::Jobs::new(jobs));
-            assert!(actual.iter().all(Result::is_ok), "jobs={jobs}: {actual:?}");
+            let mut seed = make_requests(store.clone(), jobs, compiler_adapters);
+            let output = seed
+                .execute(&manifest, CompileOperation::Precompute)
+                .unwrap();
+            let expected = kinds(&seed, &output.result);
             assert_eq!(
-                actual
-                    .iter()
-                    .map(|v| &v.as_ref().unwrap().root.kind)
-                    .collect::<Vec<_>>(),
-                expected
-                    .iter()
-                    .map(|v| &v.as_ref().unwrap().root.kind)
-                    .collect::<Vec<_>>()
+                expected,
+                vec![
+                    hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(7)),
+                    hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(8)),
+                ],
+                "cold precompute values at jobs={jobs}"
             );
+            let mut fresh = make_requests(store.clone(), jobs, compiler_adapters);
+            let output = fresh
+                .execute(&manifest, CompileOperation::Precompute)
+                .unwrap();
+            let actual = kinds(&fresh, &output.result);
+            assert_eq!(actual, expected);
+            let inspected = fresh
+                .execute(
+                    &manifest,
+                    CompileOperation::Inspect {
+                        definitions: paths.clone(),
+                    },
+                )
+                .unwrap();
+            let CompileResult::Inspect(inspection) = &inspected.result else {
+                panic!("expected Inspect");
+            };
             for path in &paths {
-                assert_eq!(fresh.recompute_count(path, QueryKind::Modes), 0);
+                let work = inspection
+                    .definitions
+                    .iter()
+                    .find(|work| work.definition == *path)
+                    .unwrap();
+                let modes = work
+                    .recomputations
+                    .iter()
+                    .find(|(kind, _)| *kind == QueryKind::Modes)
+                    .map_or(0, |(_, count)| *count);
+                assert_eq!(modes, 0);
             }
+            let earlier = directory.path().join("earlier.hir");
+            std::fs::write(&earlier, "fn unrelated(){}\n").unwrap();
+            std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"standalone","version":"0"},"sources":[{"path":"earlier.hir","module":[]},{"path":"signatures.hir","module":[]}],"dependencies":[]}"#).unwrap();
+            let mut relocated = make_requests(store.clone(), jobs, compiler_adapters);
+            let output = relocated
+                .execute(&manifest, CompileOperation::Precompute)
+                .unwrap();
+            assert_eq!(
+                kinds(&relocated, &output.result),
+                expected,
+                "relocated values at jobs={jobs}"
+            );
+            let counts = relocated
+                .recompute_counts(
+                    &paths
+                        .iter()
+                        .cloned()
+                        .map(|path| (path, QueryKind::Lower))
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+            assert!(
+                counts.iter().all(|(_, _, count)| *count == 0),
+                "request reopen recomputed: {counts:?}"
+            );
+            std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"standalone","version":"0"},"sources":[{"path":"signatures.hir","module":[]}],"dependencies":[]}"#).unwrap();
             let copied = Arc::new(store::MemStore::default());
             for (key, bytes) in store.take() {
                 store::ResultStore::put(&*copied, &key, &bytes);
@@ -1232,12 +1363,12 @@ fn worker_evaluation_products_adopt_only_local_complete_verdicts() {
             let mut untrusted = signature_session(copied, source, false);
             untrusted.adapters.modes = None;
             untrusted.adapters.lowering = None;
-            assert!(
-                untrusted
-                    .materialize_values(paths.clone(), hirsel_intern::jobs::Jobs::new(jobs))
-                    .iter()
-                    .all(Result::is_err)
-            );
+            for path in &paths {
+                assert!(
+                    untrusted.materialize_constant(path).is_err(),
+                    "copied values cannot supply private V completion at jobs={jobs}: {path}"
+                );
+            }
             let mut edited = signature_session(store, &source.replace("7u32", "9u32"), true);
             assert_eq!(
                 edited.materialize_constant(&definition("B")).unwrap(),
@@ -1411,8 +1542,19 @@ fn staged_evaluation_products_bind_arguments_and_local_completion_before_body_de
 #[test]
 fn worker_staged_products_publish_only_prefix_selected_instances() {
     with_compiler_stack(|| {
+        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
+        use hirsel_engine::memo::MemoKey;
         use hirsel_tir::TirProvider;
         let source = "fn scaled[n:size](xs:Inline[u8,n])->u64{let _=xs;comptime (n*n)}\nconst FIRST:u64=comptime {let xs:Inline[u8,2]=[1,2];scaled(xs)}\nfn BAD()->u64{comptime {let zero=0u64;1u64/zero}}\nfn LATER()->u64{comptime {let xs:Inline[u8,3]=[1,2,3];scaled(xs)}}\n";
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("signatures.hir");
+        std::fs::write(&source_path, source).unwrap();
+        let manifest = directory.path().join("hirsel.json");
+        std::fs::write(
+            &manifest,
+            r#"{"schema":1,"package":{"name":"standalone","version":"0"},"sources":[{"path":"signatures.hir","module":[]}],"dependencies":[]}"#,
+        )
+        .unwrap();
         for jobs in [1, 2, 4, 8] {
             let store = Arc::new(store::MemStore::default());
             let mut seed = signature_session(store.clone(), source, true);
@@ -1429,38 +1571,123 @@ fn worker_staged_products_publish_only_prefix_selected_instances() {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(declarations.len(), 1, "one explicit staged expression");
-            let hidden = declarations[0].clone();
-            let outcomes = seed.check_lower_definition_prefix(
-                vec![definition("FIRST"), definition("BAD"), definition("LATER")],
-                hirsel_intern::jobs::Jobs::new(jobs),
-            );
-            assert_eq!(outcomes.len(), 2, "jobs={jobs}");
-            assert!(outcomes[0].result.is_ok());
-            assert!(outcomes[1].result.is_err());
-            let mut fresh = signature_session(store.clone(), source, true);
-            fresh.adapters.modes = None;
-            fresh.adapters.lowering = None;
-            fresh
-                .register_staged_definition(&definition("scaled"))
+            drop(seed);
+            let config = CompileConfig {
+                jobs: hirsel_intern::jobs::Jobs::new(jobs),
+                store: store.clone(),
+                ..CompileConfig::for_memory_cap(None)
+            };
+            let compiler = COMPILER
+                .clone()
+                .with_phase_adapters(compiler_adapters, [0; 32])
+                .with_config(config.clone());
+            let mut requests = CompilerRequests::for_host(compiler, config);
+            let checked = requests
+                .execute(
+                    &manifest,
+                    CompileOperation::Check {
+                        lowering: LoweringPolicy::Comptime,
+                    },
+                )
                 .unwrap();
-            assert_eq!(
-                fresh.constant_instance(&hidden, &[2]).unwrap().root.kind,
-                hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(4)),
+            let CompileResult::Check(checked) = &checked.result else {
+                panic!("expected Check");
+            };
+            assert_eq!(checked.completion, CheckCompletion::Complete);
+            assert!(
+                checked.diagnostics.iter().any(|diagnostic| {
+                    checked
+                        .sources
+                        .location(diagnostic.primary)
+                        .is_some_and(|location| location.line == 3)
+                }),
+                "BAD diagnostic must point to original line 3"
+            );
+            let definitions = vec![definition("FIRST"), definition("BAD"), definition("LATER")];
+            let inspected = requests
+                .execute(
+                    &manifest,
+                    CompileOperation::Inspect {
+                        definitions: definitions.clone(),
+                    },
+                )
+                .unwrap();
+            let CompileResult::Inspect(inspection) = &inspected.result else {
+                panic!("expected Inspect");
+            };
+            let has_memo = |path: &DefPath, kind| {
+                inspection
+                    .memos
+                    .iter()
+                    .any(|(key, _)| *key == MemoKey::new(kind, hirsel_syntax::DefId::intern(path)))
+            };
+            assert!(has_memo(&definitions[0], QueryKind::Lower), "jobs={jobs}");
+            assert!(
+                has_memo(&definitions[0], QueryKind::Evaluate),
                 "jobs={jobs}"
             );
             assert!(
-                fresh.constant_instance(&hidden, &[3]).is_err(),
-                "later speculative size cannot publish at jobs={jobs}"
+                !has_memo(&definitions[2], QueryKind::Lower),
+                "later Lower was published at jobs={jobs}"
             );
-            let mut oracle = signature_session(store, source, true)
-                .with_verify_store(store::VerifyStore::Recompute);
-            oracle
-                .register_staged_definition(&definition("scaled"))
-                .unwrap();
-            assert_eq!(
-                oracle.constant_instance(&hidden, &[2]).unwrap().root.kind,
-                hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(4))
+            assert!(
+                !has_memo(&definitions[2], QueryKind::Evaluate),
+                "later Evaluate was published at jobs={jobs}"
             );
+            drop(inspected);
+            drop(checked);
+            drop(requests);
+            std::fs::write(&source_path, source.split("fn BAD").next().unwrap()).unwrap();
+            for (verify_store, expected_recomputations) in [
+                (store::VerifyStore::Off, 0),
+                (store::VerifyStore::Recompute, 1),
+            ] {
+                let config = CompileConfig {
+                    jobs: hirsel_intern::jobs::Jobs::new(jobs),
+                    store: store.clone(),
+                    verify_store,
+                    ..CompileConfig::for_memory_cap(None)
+                };
+                let mut reopened =
+                    CompilerRequests::for_host(COMPILER.with_config(config.clone()), config);
+                let output = reopened
+                    .execute(&manifest, CompileOperation::Precompute)
+                    .unwrap();
+                let CompileResult::Precomputed { sources, .. } = &output.result else {
+                    panic!("expected Precomputed")
+                };
+                let bound = sources
+                    .source_product_bytes(&definition("FIRST"))
+                    .unwrap()
+                    .unwrap();
+                let products = sources
+                    .source_products(
+                        &definition("FIRST"),
+                        reopened.budget().reserve(bound).unwrap(),
+                    )
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    products.constant().unwrap().root.kind,
+                    hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(4)),
+                    "jobs={jobs}"
+                );
+                assert_eq!(
+                    reopened
+                        .recompute_counts(&[(definition("FIRST"), QueryKind::Lower)])
+                        .unwrap()[0]
+                        .2,
+                    expected_recomputations,
+                    "request reopen/canonical oracle at jobs={jobs}"
+                );
+                assert!(
+                    !sources
+                        .definitions()
+                        .any(|path| path.0.name.contains("$constant:$comptime:scaled:2:3")),
+                    "suffix selection was not published"
+                );
+            }
+            std::fs::write(&source_path, source).unwrap();
         }
     });
 }
@@ -1486,8 +1713,11 @@ fn enclosing_evaluations_replay_exact_staged_selections_before_body_free_adoptio
                     _ => None,
                 })
                 .unwrap();
-            let expected =
-                seed.materialize_values(roots.clone(), hirsel_intern::jobs::Jobs::new(jobs));
+            let expected = crate::request_graph::constants(
+                &mut seed,
+                roots.clone(),
+                hirsel_intern::jobs::Jobs::new(jobs),
+            );
             assert!(
                 expected.iter().all(Result::is_ok),
                 "jobs={jobs}: {expected:?}"
@@ -1495,8 +1725,11 @@ fn enclosing_evaluations_replay_exact_staged_selections_before_body_free_adoptio
             let mut fresh = signature_session(store.clone(), source, false);
             fresh.adapters.modes = None;
             fresh.adapters.lowering = None;
-            let actual =
-                fresh.materialize_values(roots.clone(), hirsel_intern::jobs::Jobs::new(jobs));
+            let actual = crate::request_graph::constants(
+                &mut fresh,
+                roots.clone(),
+                hirsel_intern::jobs::Jobs::new(jobs),
+            );
             assert!(actual.iter().all(Result::is_ok), "jobs={jobs}: {actual:?}");
             assert_eq!(
                 actual
@@ -1528,10 +1761,13 @@ fn enclosing_evaluations_replay_exact_staged_selections_before_body_free_adoptio
             remote.adapters.modes = None;
             remote.adapters.lowering = None;
             assert!(
-                remote
-                    .materialize_values(roots.clone(), hirsel_intern::jobs::Jobs::new(jobs))
-                    .iter()
-                    .all(Result::is_err),
+                crate::request_graph::constants(
+                    &mut remote,
+                    roots.clone(),
+                    hirsel_intern::jobs::Jobs::new(jobs)
+                )
+                .iter()
+                .all(Result::is_err),
                 "producer transactions cannot transfer private completion"
             );
             let mut oracle = signature_session(store.clone(), source, true)
@@ -1631,7 +1867,8 @@ fn worker_generated_text_persists_only_admitted_roots_and_matches_scalar_records
         for jobs in [1, 2, 4, 8] {
             let store = Arc::new(store::MemStore::default());
             let mut seed = signature_session(store.clone(), source, true);
-            let outcomes = seed.check_lower_definition_prefix(
+            let outcomes = crate::request_graph::checked_prefix(
+                &mut seed,
                 vec![definition("FIRST"), definition("BAD"), definition("later")],
                 hirsel_intern::jobs::Jobs::new(jobs),
             );
@@ -1806,8 +2043,11 @@ fn worker_enclosing_generated_values_replay_only_selected_canonical_instances() 
             let store = Arc::new(store::MemStore::default());
             let mut seed = signature_session(store.clone(), source, true);
             let roots = vec![definition("A"), definition("B")];
-            let values =
-                seed.materialize_values(roots.clone(), hirsel_intern::jobs::Jobs::new(jobs));
+            let values = crate::request_graph::constants(
+                &mut seed,
+                roots.clone(),
+                hirsel_intern::jobs::Jobs::new(jobs),
+            );
             assert!(values.iter().all(Result::is_ok), "jobs={jobs}: {values:?}");
             seed.lower_to_tir(&definition("value")).unwrap();
             let selected: Vec<_> = seed
@@ -1818,7 +2058,11 @@ fn worker_enclosing_generated_values_replay_only_selected_canonical_instances() 
             let mut fresh = signature_session(store.clone(), source, true);
             fresh.adapters.modes = None;
             fresh.adapters.lowering = None;
-            let actual = fresh.materialize_values(roots, hirsel_intern::jobs::Jobs::new(jobs));
+            let actual = crate::request_graph::constants(
+                &mut fresh,
+                roots,
+                hirsel_intern::jobs::Jobs::new(jobs),
+            );
             assert!(actual.iter().all(Result::is_ok), "jobs={jobs}: {actual:?}");
             assert_eq!(
                 actual
@@ -2232,7 +2476,8 @@ fn ordinary_summary_demands_restore_compact_facts_without_syntax() {
                 .add("summary-heads.hir", source.into())
                 .unwrap();
             writer.index_source(file, &context).unwrap();
-            let outcomes = writer.publish_definitions(
+            let outcomes = crate::request_graph::publications(
+                &mut writer,
                 paths.clone(),
                 hirsel_intern::jobs::Jobs::new(jobs),
                 memo::Retention::Batch,
@@ -2283,7 +2528,8 @@ fn ordinary_summary_demands_restore_compact_facts_without_syntax() {
                 .add("summary-heads.hir", source.into())
                 .unwrap();
             oracle.index_source(file, &context).unwrap();
-            let checked = oracle.publish_definitions(
+            let checked = crate::request_graph::publications(
+                &mut oracle,
                 paths,
                 hirsel_intern::jobs::Jobs::new(jobs),
                 memo::Retention::Batch,
@@ -2412,7 +2658,8 @@ fn ordinary_source_heads_keep_growth_rejections_and_private_execution_authority(
             .add("growth-heads.hir", source.into())
             .unwrap();
         writer.index_source(file, &default_context()).unwrap();
-        let outcomes = writer.publish_definitions(
+        let outcomes = crate::request_graph::publications(
+            &mut writer,
             vec![definition("first"), definition("second")],
             hirsel_intern::jobs::Jobs::new(2),
             memo::Retention::Batch,
@@ -2992,8 +3239,11 @@ fn frozen_workers_reuse_locally_validated_constant_inputs_without_rechecking() {
             hirsel_tir::Constant::Integer(1)
         );
         assert_eq!(reader.recompute_count(&base, QueryKind::Check), 0);
-        let result = reader
-            .materialize_value_outcomes(vec![next.clone()], hirsel_intern::jobs::Jobs::new(1));
+        let result = crate::request_graph::constant_outcomes(
+            &mut reader,
+            vec![next.clone()],
+            hirsel_intern::jobs::Jobs::new(1),
+        );
         assert_eq!(result.len(), 1);
         assert_eq!(
             result[0].result.as_ref().unwrap().root.kind,
@@ -3006,8 +3256,11 @@ fn frozen_workers_reuse_locally_validated_constant_inputs_without_rechecking() {
         );
         let mut changed =
             signature_session(store, &source.replace("BASE:u8=1u8", "BASE:u8=2u8"), true);
-        let result =
-            changed.materialize_value_outcomes(vec![next], hirsel_intern::jobs::Jobs::new(1));
+        let result = crate::request_graph::constant_outcomes(
+            &mut changed,
+            vec![next],
+            hirsel_intern::jobs::Jobs::new(1),
+        );
         assert_eq!(
             result[0].result.as_ref().unwrap().root.kind,
             hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(3))
@@ -3026,24 +3279,37 @@ fn frozen_nested_body_demand_restores_ordinary_modes_before_rechecking() {
         seed.mode_definition(&helper).unwrap();
         drop(seed);
         let mut reader = signature_session(store.clone(), source, true);
-        let result = reader
-            .materialize_value_outcomes(vec![next.clone()], hirsel_intern::jobs::Jobs::new(1));
+        let mut reader_graph =
+            crate::request_graph::Graph::new(&mut reader, hirsel_intern::jobs::Jobs::new(1));
+        let result = reader_graph.constant(&next).unwrap();
         assert_eq!(
-            result[0].result.as_ref().unwrap().root.kind,
+            result.root.kind,
             hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(2))
         );
         assert_eq!(
-            reader.recompute_count(&helper, QueryKind::Check),
+            reader_graph
+                .installed
+                .front
+                .recompute_count(&helper, QueryKind::Check),
             0,
             "nested execution must try its persisted Modes before running P again"
         );
+        reader_graph.finish();
         let mut edited = signature_session(store, &source.replace("x+1u8", "x+2u8"), true);
-        let result =
-            edited.materialize_value_outcomes(vec![next], hirsel_intern::jobs::Jobs::new(1));
+        let mut edited_graph =
+            crate::request_graph::Graph::new(&mut edited, hirsel_intern::jobs::Jobs::new(1));
+        let result = edited_graph.constant(&next).unwrap();
         assert_eq!(
-            result[0].result.as_ref().unwrap().root.kind,
+            result.root.kind,
             hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(3))
         );
-        assert!(edited.recompute_count(&helper, QueryKind::Check) > 0);
+        assert!(
+            edited_graph
+                .installed
+                .front
+                .recompute_count(&helper, QueryKind::Check)
+                > 0
+        );
+        edited_graph.finish();
     });
 }

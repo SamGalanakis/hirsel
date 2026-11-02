@@ -83,7 +83,8 @@ fn mode_obligations_nested_container_twins() {
 fn mode_obligations_nested_matches_h_heap_llvm_cranelift() {
     use hirsel_driver::native::*;
     use hirsel_engine::{
-        RunConfiguration, check_progress, entry_path, run_observed_snapshot, with_compiler_stack,
+        RunConfiguration, entry_path, run_observed_snapshot, source_check_request,
+        with_compiler_stack,
     };
     with_compiler_stack(|| {
         let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
@@ -186,7 +187,7 @@ fn mode_obligations_nested_matches_h_heap_llvm_cranelift() {
                 .sources
                 .add(format!("mode-{name}.hir"), source.into())
                 .unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{name}: {:?}",

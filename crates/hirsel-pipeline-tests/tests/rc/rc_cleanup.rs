@@ -95,7 +95,7 @@ fn validate_driver_ready(source: &'static str) {
             hirsel_driver::compiler_adapters(),
         );
         let file = engine.sources.add("test.hir", source.to_string()).unwrap();
-        hirsel_engine::check_progress(&mut engine, file, &hirsel_engine::default_context())
+        hirsel_engine::source_check_request(&mut engine, file, &hirsel_engine::default_context())
             .unwrap();
         hirsel_driver::native::manifest(&engine.export_native_input().unwrap()).unwrap()
     });

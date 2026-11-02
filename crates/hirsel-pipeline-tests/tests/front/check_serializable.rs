@@ -1,14 +1,14 @@
 //! SER-1 source twins exercise the complete pipeline, including independent V.
 use hirsel_driver::compiler_adapters;
 use hirsel_engine::{
-    QueryEngine, check_progress, default_context, default_environment, with_compiler_stack,
+    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
 
 fn check(source: &str, expected: Option<&str>) {
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("schema.hir", source.into()).unwrap();
-        let result = check_progress(&mut engine, file, &default_context()).unwrap();
+        let result = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(
             result.diagnostics.first().map(|d| d.rule.as_str()),
             expected,
@@ -90,7 +90,7 @@ fn growing_recursive_schemas_report_operational_exhaustion() {
                 "@serializable type Growing[T:serializable] = Step(List[Growing[List[T]]])".into(),
             )
             .unwrap();
-        let result = check_progress(&mut engine, file, &default_context());
+        let result = source_check_request(&mut engine, file, &default_context());
         assert!(
             matches!(result,Err(hirsel_types::QueryError::Operational(ref failure)) if failure.operation=="type-proof-tooling-limit"),
             "{result:?}"

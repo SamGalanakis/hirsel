@@ -2691,7 +2691,7 @@ fn tir_rejects_source_replacement_when_the_iteration_loan_is_still_live() {
         let file = engine.sources.add("last-use.hir", String::from(
             "fn value() { let mut s: Set[u64] = set.empty(); let empty: Set[u64] = set.empty(); for x in s { s = copy empty; break } }",
         )).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let definition = input

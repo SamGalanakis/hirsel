@@ -72,7 +72,7 @@ fn full_gate_shared_std_fixture_reuses_bodies_modes_and_lowering() {
             .sources
             .add("client.hir", "pub fn main() {}\n".into())
             .unwrap();
-        let output = check_progress(&mut second, file, &default_context()).unwrap();
+        let output = source_check_request(&mut second, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         for path in &paths {

@@ -342,9 +342,12 @@ fn authoring_repairs_11_shadow_binding_sites_follow_relocated_declarations() {
             format!("{main}// λ\nfn counts() {{ let _ = 1u64 }}\n"),
         ] {
             let file = engine.sources.add("edits.hir", source.clone()).unwrap();
-            let output =
-                hirsel_engine::check_progress(&mut engine, file, &hirsel_engine::default_context())
-                    .unwrap();
+            let output = hirsel_engine::source_check_request(
+                &mut engine,
+                file,
+                &hirsel_engine::default_context(),
+            )
+            .unwrap();
             assert_eq!(output.diagnostics.len(), 1, "{:?}", output.diagnostics);
             let d = &output.diagnostics[0];
             assert_eq!(output.sources.slice(d.primary), Some("counts"));
@@ -757,7 +760,7 @@ fn authoring_repairs_11_partial_move_fresh_names_follow_module_edits() {
             let source = format!("{prefix}{main}");
             let file = engine.sources.add("partial-move.hir", source).unwrap();
             for _ in 0..2 {
-                let output = hirsel_engine::check_progress(
+                let output = hirsel_engine::source_check_request(
                     &mut engine,
                     file,
                     &hirsel_engine::default_context(),

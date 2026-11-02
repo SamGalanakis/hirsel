@@ -248,7 +248,7 @@ handles. LookupOutput always carries the current manifest revision, including on
 misses. Recorder operational failures override swallowed phase rejections and are
 never retained in deterministic result caches.
 
-`check_progress`/`CheckOutput.completion` report diagnostics so far and Complete or
+`CheckOutput.completion` report diagnostics so far and Complete or
 Incomplete { phase }. The production runner uses this status instead of its global
 complete hook; matching rejection diagnostics remain usable from partial checks.
 check_snapshot is the stricter execution helper: it requires no errors and complete
@@ -847,17 +847,14 @@ proof to the wrapper's callers, including through another wrapper. The verdict
 shares the existing program-verdict invalidation and adds no signature or TIR
 metadata. Programs without table calls build no schema for this check.
 
-`mode_definitions` runs a source frontier through `jobs::map` at every worker
+`FrontBodyQueries` runs source requests on the admitted executor at every worker
 count. Workers share immutable declarations, type tables, phase handles and the
 signature snapshot; each owns its dependency collector and phase products.
-Publication records resolve/check/modes memos in DefPath order, while returned
-`ModeResult`s retain input order and each input's stopping phase. Repeated paths
-share one task. Current-source citation inputs are borrowed separately from the
-body-stable signature snapshot. A generator drains the preceding source frontier
-and uses the existing exclusive S1 path before a new frontier is frozen.
-This front API does not yet provide parallel S1 execution or budgeted body holds.
-Program checking retains body-free outcomes and lowering diagnostics, refreshing
-changed owners and actual reverse subscribers through the same P implementation.
+Repeated paths share one producer. Compact publications retain summaries,
+complete reads, diagnostics and stopping phases. Body materialization uses a
+separate request. Staged source registration settles before the final immutable
+source graph is installed. `LoadedProgram::check` and source checks use that
+same graph through `FrontCheckQueries`.
 Generator drains and per-file operational gates remain in source order. GEN-5
 retains keyed checked inputs separately from final-mode selection summaries.
 
@@ -906,12 +903,13 @@ and an older acknowledgment cannot erase a newer S1 publication. Tracking is
 inactive in scalar-only sessions. The driver still owns compact aggregation.
 
 Successful P workers, resident/store hits and serial generator boundaries publish
-final summaries directly from completed mode entries. `publish_definitions`
+final summaries directly from completed mode entries. `FrontBodyQueries`
 returns compact results and per-diagnostic phase provenance without retaining
 body products. `Retention::Batch` releases body values after capturing the
 outcomes. Body-free failure memos keep complete receipts and reverse
-subscriptions; a released body is recomputed by its ordinary query. The caller still bounds the in-flight frontier and decides
-when S1 work has settled. This API does not yet enforce a production hold budget.
+subscriptions; a released body is recomputed by its ordinary query. The admitted
+runtime bounds retained products and active continuations under the request's
+host allowance.
 
 Each `ModeResult` captures its summary, shared complete reads and diagnostic
 provenance at completion, before subsequent serial generators can change the
@@ -948,21 +946,17 @@ for P/S1 work that has not refreshed yet. Overlapping changed inputs combine
 their memo mark requests before applying them, retaining first-read provenance
 and text-mark priority without changing memo-touch accounting.
 
-Program checking lowers compile-time roots and selected generated instances through
-ordered compact S1 prefixes after GEN-5, using the same worker path at every jobs
-count. Static and dynamic source-publication boundaries settle in source order.
-Workers drop root TIR before queuing diagnostics, ordered dependencies, complete
-reads, depth and stopping-phase evidence. Current successful facts retain body-free
-Lower receipts; failed or limited products take the ordinary retry path. Ordinary
-P2 artifact demands retain scalar store and precise validation-read handling.
+Program checking selects compile-time roots and generated instances after GEN-5.
+`FrontCheckQueries` consumes their `FrontLowerQueries` results in source order,
+then selects any runtime roots required by the lowering policy. Lower and Evaluate
+share the admitted executor, immutable source inputs and validation receipts.
+Failed or unavailable results retain their stopping phase and diagnostics.
+Registry ordering dictionaries materialize from the captured registry and record
+their signature reads even when no source Evaluate producer exists.
 
-S1 body publication refreshes the complete compact P outcome before dropping its
-body. A pending notification revalidates earlier P products against their own text
-and complete reads, preserving unchanged summary/lint inputs while Lower products
-retire according to their separate execution and validation dependencies.
-`recompute_count` counts admitted logical misses. `lower_adapter_calls` counts actual
-scalar and worker Lower adapter calls, including discarded speculative work;
-`lower_evaluation` is a separate operation.
+`recompute_count` counts logical misses. Request Lower adapter calls and validation
+runs are recorded from the actual scheduled producers; scalar leaf queries retain
+their independent accounting. `lower_evaluation` is a separate operation.
 
 The admitted runtime caches settled analyzed bodies and compact Front facts
 until explicit eviction or Front admission pressure. Pressure selects settled
@@ -999,12 +993,10 @@ owned strings and literals, Arc headers/alignment and deduplicated shared path o
 slice allocations within each artifact. Session interner rows and interned DefId
 storage are session costs; no serialization runs to estimate a hold's bytes.
 
-The hold cache returns within its byte budget even at zero or for one oversized
-artifact. Active callers retain in-flight Arcs independently. `Holds::clear`
-retires root-local entries and eviction markers while preserving cumulative
-counters. `peak_bytes` includes transient insertion-before-eviction occupancy.
-Worker lowering weights also include receipt/depth backing and staged signature
-payloads; the inline wrapper's Arc layout is accounted separately.
+The scalar leaf hold cache returns within its byte budget even at zero or for
+one oversized artifact. Active callers retain in-flight Arcs independently.
+Request products use the admitted runtime's reservations, including retained
+receipts and staged signature inputs.
 
 `CompileConfig` selects jobs, verification, retention, lowering, ResultStore,
 VerifyStore and a total `hold_bytes` budget. `Compiler::with_config` owns this

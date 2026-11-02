@@ -11,9 +11,9 @@ fn checked(source: &str) -> CheckOutput {
         .sources
         .add("result-tail.hir", source.into())
         .unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(output.completion, CheckCompletion::Complete);
-    let warm = check_progress(&mut engine, file, &default_context()).unwrap();
+    let warm = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(
         output
             .diagnostics

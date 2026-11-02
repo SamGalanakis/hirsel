@@ -54,7 +54,7 @@ fn source(text: &str) -> (QueryEngine, NativeOriginalReader, DefPath) {
         .sources
         .add("receipt-selection.hir", text.into())
         .unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let path = entry_path(&default_context());
     let facts = crate::native_front_fixture::products(&mut engine, &[path.clone()]).unwrap();

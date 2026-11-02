@@ -135,7 +135,7 @@ fn helper_runner() -> String {
 fn source_input(source: &str) -> NativeInput {
     let mut engine = QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
     let file = engine.sources.add("capture.hir", source.into()).unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     engine.export_native_input().unwrap()
 }
@@ -536,7 +536,7 @@ fn counted_local_stale_and_symbolic_source_negatives() {
                 FRONTIER.replace("inspect(state.current)", "inspect(take state.current)"),
             )
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(
             output
                 .diagnostics

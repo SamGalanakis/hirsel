@@ -28,7 +28,7 @@ fn actual_root_rejects_changed_owner_policy_and_c_bound_ready_summary() {
                 "fn helper(x:u64)->u64{x+1u64}\nfn main()->u64{helper(7u64)}".into(),
             )
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let _validated = engine.import_native_input(input).unwrap();

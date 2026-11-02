@@ -1,6 +1,6 @@
 //! Validated continuation plans (runtime-native-50).
 use hirsel_driver::native;
-use hirsel_engine::{QueryEngine, check_progress, default_context, with_compiler_stack};
+use hirsel_engine::{QueryEngine, default_context, source_check_request, with_compiler_stack};
 use hirsel_lir::continuation::{
     ContinuationError, ContinuationPlan, ContinuationPlans, RegionKind, RegionTokenLayout,
     Representation, ResumeAction,
@@ -65,7 +65,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 pub(crate) fn ready(source: &str) -> native::ReadyProgram {
     let mut engine: QueryEngine = crate::source_std::engine();
     let file = engine.sources.add("main.hir", source.to_owned()).unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     let snapshot = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(snapshot).unwrap();

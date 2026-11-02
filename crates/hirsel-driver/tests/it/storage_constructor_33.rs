@@ -1,7 +1,7 @@
 //! Constructor names are declarations, while constructed values have actual type arguments.
 use hirsel_driver::compiler_adapters;
 use hirsel_engine::{
-    CheckCompletion, QueryEngine, check_progress, default_context, default_environment,
+    CheckCompletion, QueryEngine, default_context, default_environment, source_check_request,
     with_compiler_stack,
 };
 
@@ -27,7 +27,7 @@ fn generic_constructor_heads_do_not_enter_value_path_domains() {
                 .sources
                 .add("storage-constructor.hir", source)
                 .unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(checked.completion, CheckCompletion::Complete);
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let input = engine.export_native_input().unwrap();

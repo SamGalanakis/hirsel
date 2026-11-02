@@ -30,7 +30,7 @@ fn named(bounded: bool) {
             .sources
             .add("arena-named-callback.hir", source)
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         engine.import_native_input(input).unwrap();

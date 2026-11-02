@@ -17,7 +17,7 @@ fn mutable_pattern_diagnostics_17_rejected_originals() {
         ] {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("original.hir", source.into()).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(
                 output.diagnostics.len(),
                 1,
@@ -113,7 +113,7 @@ fn mutable_pattern_diagnostics_17_checked_repairs_execute_on_both_backends() {
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("repaired.hir", REPAIRED.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let entry = entry_path(&default_context());
         let execution = run_observed_checked(
@@ -200,7 +200,7 @@ fn mutable_pattern_diagnostics_17_borrowed_payload_cannot_be_taken_or_mutated() 
             );
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("borrowed.hir", source).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(output.diagnostics.len(), 1, "{:?}", output.diagnostics);
             assert_eq!(
                 output.diagnostics[0].rule.as_str(),

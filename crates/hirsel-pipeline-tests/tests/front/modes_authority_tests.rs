@@ -226,7 +226,8 @@ fn capture_crossing_matrix(payload: &str, initial: &str, measure: &str, stable: 
                         .sources
                         .add("capture.hir", program("sendable "))
                         .unwrap();
-                    let checked = check_progress(&mut strict, file, &default_context()).unwrap();
+                    let checked =
+                        source_check_request(&mut strict, file, &default_context()).unwrap();
                     assert_eq!(
                         checked.diagnostics.first().map(|d| d.rule.as_str()),
                         (!crosses).then_some("MODE-4"),
@@ -235,7 +236,8 @@ fn capture_crossing_matrix(payload: &str, initial: &str, measure: &str, stable: 
                     );
                     let mut relaxed = QueryEngine::new(default_environment(), compiler_adapters());
                     let file = relaxed.sources.add("capture-v.hir", program("")).unwrap();
-                    let checked = check_progress(&mut relaxed, file, &default_context()).unwrap();
+                    let checked =
+                        source_check_request(&mut relaxed, file, &default_context()).unwrap();
                     assert!(
                         checked.diagnostics.is_empty(),
                         "{label}: {:?}",
@@ -322,7 +324,7 @@ fn handle_capture_copies_cross_without_owning_the_payload() {
                 );
                 let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
                 let file = engine.sources.add("handles.hir", source).unwrap();
-                let output = check_progress(&mut engine, file, &default_context()).unwrap();
+                let output = source_check_request(&mut engine, file, &default_context()).unwrap();
                 assert!(
                     output.diagnostics.is_empty(),
                     "{payload}/{usage}: {:?}",
@@ -348,7 +350,7 @@ fn owning_factory_crossing_requires_a_proved_public_contract() {
             );
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("factory.hir", source.clone()).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(
                 output.diagnostics.first().map(|d| d.rule.as_str()),
                 (!accepted).then_some("MODE-4"),
@@ -371,7 +373,7 @@ fn scoped_borrowing_cannot_be_converted_to_owning_by_current_uniqueness() {
             );
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("scoped.hir", source).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(
                 output.diagnostics.first().map(|d| d.rule.as_str()),
                 Some("OWN-1"),
@@ -391,7 +393,7 @@ fn stale_capture_and_environment_claims_are_reproved_from_live_operands() {
             .sources
             .add("stale-capture.hir", source.into())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let mut signatures = hirsel_validate::SignatureMap::new(input.types.clone());
@@ -495,7 +497,7 @@ fn shared_taken_capture_cannot_satisfy_a_unique_parameter() {
             .sources
             .add("unique-capture.hir", source("unique "))
             .unwrap();
-        let checked = check_progress(&mut strict, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut strict, file, &default_context()).unwrap();
         assert_eq!(
             checked.diagnostics.first().map(|d| d.rule.as_str()),
             Some("MODE-2"),
@@ -507,7 +509,7 @@ fn shared_taken_capture_cannot_satisfy_a_unique_parameter() {
             .sources
             .add("unique-capture-v.hir", source(""))
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let mut signatures = hirsel_validate::SignatureMap::new(input.types.clone());

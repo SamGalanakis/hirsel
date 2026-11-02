@@ -18,12 +18,13 @@ pub mod diet;
 pub mod generate;
 mod oracle;
 pub mod scratch;
+pub(crate) mod source_request;
 
 pub use scratch::{runtime_cache, scratch};
 
 use hirsel_driver::native::{
     Configuration, Engine, MATRIX_VERSION, NativeError, OBSERVATION_SCHEMA, Observation, Outcome,
-    StageName, Toolchain, differential_in,
+    StageName, Toolchain, differential_ready,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -374,7 +375,7 @@ impl CaseResult {
 }
 
 struct Prepared {
-    input: hirsel_engine::ValidatedNativeInput,
+    input: source_request::Source,
     entry: hirsel_engine::DefPath,
     reference: Observation,
     compiled_only: bool,
@@ -383,16 +384,16 @@ struct Prepared {
 }
 
 fn checked(
-    engine: &mut hirsel_engine::QueryEngine,
+    warm: Option<&str>,
     id: &str,
     source: &str,
     path: Option<&Path>,
 ) -> Result<Prepared, String> {
-    checked_with_config(engine, id, source, path, Default::default(), false)
+    checked_with_config(warm, id, source, path, Default::default(), false)
 }
 
 fn checked_with_config(
-    engine: &mut hirsel_engine::QueryEngine,
+    warm: Option<&str>,
     id: &str,
     source: &str,
     path: Option<&Path>,
@@ -401,45 +402,36 @@ fn checked_with_config(
 ) -> Result<Prepared, String> {
     let expected = oracle::expected_stdout(id, source, path)?;
     let compiled_only = expected.is_some();
-    let (output, entry) = if let Some(path) = path.filter(|p| p.with_extension("hir.json").exists())
-    {
-        let mut program =
-            hirsel_driver::load_program_source(path, Some(source)).map_err(|e| e.to_string())?;
-        let output = program
-            .check(hirsel_engine::LoweringPolicy::Reachable)
-            .map_err(|e| format!("{e:?}"))?;
-        let entry = program.entry;
-        *engine = program.engine;
-        (output, entry)
-    } else {
-        let context = hirsel_engine::default_context();
-        let file = engine
-            .sources
-            .add("case.hir", source.into())
-            .ok_or("source too large")?;
-        let output =
-            hirsel_engine::check_progress(engine, file, &context).map_err(|e| format!("{e:?}"))?;
-        (output, crate::selected_entry(source, &context))
-    };
-    if let Some(d) = output
+    let input = source_request::Source::new(path, source).map_err(|error| error.to_string())?;
+    if let Some(warm) = warm {
+        input.warm(warm).map_err(|error| error.to_string())?;
+    }
+    let output = input.check().map_err(|error| format!("check: {error}"))?;
+    if let Some(diagnostic) = output
         .diagnostics
         .iter()
-        .find(|d| d.severity == hirsel_diag::Severity::Error)
+        .find(|diagnostic| diagnostic.severity == hirsel_diag::Severity::Error)
     {
-        return Err(format!("check: {} {}", d.rule, d.message));
+        return Err(format!("check: {} {}", diagnostic.rule, diagnostic.message));
     }
+    if output.completion != hirsel_engine::CheckCompletion::Complete {
+        return Err(format!("check: {:?}", output.completion));
+    }
+    let entry = input.entry.clone();
+    let mut callees = BTreeMap::new();
     let reference = if let Some(expected) = expected {
         crate::fixture(source)?;
         expected
     } else {
+        let tir = input.tir().map_err(|error| format!("reference: {error}"))?;
+        callees = tir.callees.clone();
         let config = hirsel_engine::RunConfiguration {
             entry: entry.clone(),
             hash_seed: launch.hash_seed,
             inputs: vec![],
         };
-        engine.adapters.interpreter = Some(crate::interpreter(source)?);
-        let execution = hirsel_engine::run_observed_snapshot(
-            engine,
+        let execution = hirsel_driver::testing::observe_tir(
+            &tir,
             &config,
             hirsel_engine::SimulationConfig {
                 random_seed: launch.random_seed,
@@ -447,36 +439,18 @@ fn checked_with_config(
                 trace_roots,
                 ..crate::simulation(source)?
             },
+            crate::interpreter(source)?.limits,
+            false,
         )
-        .map_err(|e| format!("reference: {e}"))?;
+        .map_err(|error| format!("reference: {error}"))?;
         execution
             .observation
             .as_ref()
             .map(Observation::of_reference)
             .ok_or("reference: no observation")?
     };
-    let callees = if crate::fixture(source)?.runners.is_empty() {
-        Default::default()
-    } else {
-        hirsel_engine::callee_facts(engine, &entry).map_err(|e| format!("callee facts: {e:?}"))?
-    };
-    let input = engine.export_native_input().map_err(|e| {
-        let text = format!("{e:?}");
-        let head = text.split("DefPath").next().unwrap_or(&text).to_string();
-        let _ = head;
-        format!(
-            "export: {}",
-            stable(&text).chars().take(110).collect::<String>()
-        )
-    })?;
-    let validated = engine.import_native_input(input).map_err(|e| {
-        stable(&format!("import: {e:?}"))
-            .chars()
-            .take(110)
-            .collect::<String>()
-    })?;
     Ok(Prepared {
-        input: validated,
+        input,
         entry,
         reference,
         compiled_only,
@@ -506,12 +480,8 @@ fn run_source_path(
     if source.lines().any(|line| line.trim() == "// expect: test") {
         return run_test_suite(id, source, path, matrix, toolchain, dir, probe);
     }
-    let mut engine = hirsel_engine::QueryEngine::new(
-        hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
-    );
     match checked_with_config(
-        &mut engine,
+        None,
         id,
         source,
         path,
@@ -551,8 +521,8 @@ fn run_source_path(
                 .filter(|c| !compiled_only || !matches!(c.engine, Engine::Heap { .. }))
                 .cloned()
                 .collect();
-            let outcomes = differential_in(
-                &validated,
+            let outcomes = differential_ready(
+                &mut |options| validated.ready(options),
                 &entry,
                 &reference,
                 &matrix,
@@ -600,13 +570,14 @@ fn run_test_suite(
             .map(|c| c.options.launch.clone())
             .unwrap_or_default(),
         probe.trace_roots,
-        |validated, test, reference, test_dir| {
+        toolchain,
+        |ready, test, reference, test_dir| {
             let mut configurations = matrix.to_vec();
             for c in &mut configurations {
                 c.options.launch.test_seed = test.seed;
             }
-            differential_in(
-                validated,
+            hirsel_driver::native::differential_ready(
+                ready,
                 &test.entry,
                 reference,
                 &configurations,
@@ -635,8 +606,12 @@ fn visit_test_suite(
     dir: &Path,
     launch: hirsel_driver::native::LaunchInputs,
     trace_roots: bool,
+    toolchain: &Toolchain,
     probe: impl Fn(
-        &hirsel_engine::ValidatedNativeInput,
+        &mut hirsel_driver::native::ReadySupplier<
+            '_,
+            std::sync::Arc<hirsel_driver::requests::NativeReady>,
+        >,
         &hirsel_driver::testing::Test,
         &Observation,
         &Path,
@@ -651,28 +626,69 @@ fn visit_test_suite(
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             std::fs::write(&fallback, source).map_err(|e| e.to_string())?;
         }
-        let mut program =
-            hirsel_driver::load_program_source(path.unwrap_or(&fallback), Some(source))
-                .map_err(|e| e.to_string())?;
-        program.engine.adapters.interpreter = Some(crate::interpreter(source)?);
-        let tests = hirsel_driver::testing::discover_source(
-            &mut program,
+        use hirsel_driver::requests::{
+            CompileOperation, CompileRequest, CompileResult, CompilerRequests, NativeOutput,
+            NativeRequest,
+        };
+        let path = path.unwrap_or(&fallback);
+        let compiler = crate::compiler::verifying_compiler();
+        let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration())
+            .with_toolchain(std::sync::Arc::new(toolchain.clone()));
+        let (primary, inputs) = hirsel_engine::requests::observe_inputs(
+            requests.input_limits(),
+            requests.capture_attempts(),
+            |inputs| {
+                let program = compiler.load_program_inputs(path, inputs, false)?;
+                Ok::<_, hirsel_engine::ToolError>(
+                    program
+                        .engine
+                        .sources
+                        .file(program.primary)
+                        .unwrap()
+                        .path
+                        .clone(),
+                )
+            },
+        )
+        .map_err(|_| "test inputs changed during capture".to_string())?;
+        let inputs = inputs
+            .replace_sources(
+                &BTreeMap::from([(
+                    primary.map_err(|e| e.to_string())?,
+                    std::sync::Arc::<[u8]>::from(source.as_bytes()),
+                )]),
+                requests.input_limits().bytes,
+            )
+            .map_err(|e| e.to_string())?;
+        let discovery = hirsel_driver::testing::discover(
+            &mut requests,
+            path,
+            inputs,
             &[],
             None,
             hirsel_driver::testing::Selection::Tests,
         )
         .map_err(|e| e.to_string())?;
-        if tests.is_empty() {
+        if discovery.tests.is_empty() {
             return Err("expect: test selected no @test functions".into());
         }
-        let input = program
-            .engine
-            .export_native_input()
-            .map_err(|e| format!("export: {e:?}"))?;
-        let validated = program
-            .engine
-            .import_native_input(input)
-            .map_err(|e| format!("import: {e:?}"))?;
+        let inputs = discovery
+            .execution_inputs(requests.input_limits().bytes)
+            .map_err(|e| e.to_string())?;
+        let tests = discovery.tests;
+        let output = requests
+            .execute_request(&CompileRequest {
+                path: path.to_owned(),
+                inputs: inputs.clone().into(),
+                operation: CompileOperation::TirBatch {
+                    definitions: tests.iter().map(|test| test.entry.clone()).collect(),
+                },
+            })
+            .map_err(|e| e.to_string())?;
+        let CompileResult::TirBatch(batch) = &output.result else {
+            return Err("test request returned another operation".into());
+        };
+        let limits = crate::interpreter(source)?.limits;
         let mut outcomes: Vec<(String, Class, Outcome)> = Vec::new();
         let mut first_reference = None;
         for (index, test) in tests.iter().enumerate() {
@@ -688,8 +704,9 @@ fn visit_test_suite(
                 trace_roots,
                 ..Default::default()
             };
+            let input = batch.entry(&test.entry).map_err(|e| e.to_string())?;
             let execution =
-                hirsel_engine::run_observed_snapshot(&mut program.engine, &config, simulation)
+                hirsel_driver::testing::observe_tir(&input, &config, simulation, limits, false)
                     .map_err(|e| e.to_string())?;
             let reference = execution
                 .observation
@@ -701,7 +718,42 @@ fn visit_test_suite(
             }
             let test_dir = dir.join(format!("test-{index}"));
             std::fs::create_dir_all(&test_dir).map_err(|e| e.to_string())?;
-            let results = probe(&validated, test, &reference, &test_dir);
+            let mut ready = |options: &hirsel_driver::native::Options| {
+                let failure = |message: String| NativeError {
+                    stage: StageName::Ready,
+                    definition: None,
+                    validator: false,
+                    message,
+                };
+                let output = requests
+                    .execute_request(&CompileRequest {
+                        path: path.to_owned(),
+                        inputs: inputs.clone().into(),
+                        operation: CompileOperation::NativeBuild(NativeRequest {
+                            definition: Some(test.entry.clone()),
+                            test_entries: vec![],
+                            supplemental_sources: vec![],
+                            output: NativeOutput::Ready,
+                            options: hirsel_driver::native::BuildOptions::new(
+                                options.clone(),
+                                hirsel_driver::native::Backend::Llvm,
+                                hirsel_driver::native::OptLevel::Default,
+                            ),
+                            run: None,
+                            fuel: false,
+                            evidence: None,
+                        }),
+                    })
+                    .map_err(|e| failure(e.to_string()))?;
+                match &output.result {
+                    CompileResult::NativeReady(ready) => Ok(ready.clone()),
+                    CompileResult::NativeError(error) => Err(error.clone()),
+                    _ => Err(failure(
+                        "test native request returned another operation".into(),
+                    )),
+                }
+            };
+            let results = probe(&mut ready, test, &reference, &test_dir);
             if outcomes.is_empty() {
                 outcomes = results;
             } else {
@@ -754,29 +806,27 @@ pub fn replay_source_with_config(
             dir,
             launch.clone(),
             false,
-            |validated, test, reference, test_dir| {
+            toolchain,
+            |ready, test, reference, test_dir| {
                 let mut inputs = launch.clone();
                 inputs.test_seed = test.seed;
                 vec![(
                     "x86_64/real-io-record-and-replay".into(),
                     Class::Llvm,
-                    hirsel_driver::native::real_io_replay_with_config(
-                        validated,
+                    hirsel_driver::native::real_io_replay_ready(
+                        ready,
                         &test.entry,
                         reference,
                         toolchain,
                         test_dir,
                         inputs,
+                        &hirsel_driver::native::Fixture::default(),
                     ),
                 )]
             },
         );
     }
-    let mut engine = hirsel_engine::QueryEngine::new(
-        hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
-    );
-    match checked_with_config(&mut engine, id, source, path, launch.clone(), false) {
+    match checked_with_config(None, id, source, path, launch.clone(), false) {
         Err(reason) => CaseResult {
             id: id.to_string(),
             snapshot: Some(reason),
@@ -796,8 +846,8 @@ pub fn replay_source_with_config(
             outcomes: vec![(
                 "x86_64/real-io-record-and-replay".into(),
                 Class::Llvm,
-                hirsel_driver::native::real_io_replay_in(
-                    &validated,
+                hirsel_driver::native::real_io_replay_ready(
+                    &mut |options| validated.ready(options),
                     &entry,
                     &reference,
                     toolchain,
@@ -815,7 +865,7 @@ pub fn replay_source_with_config(
     }
 }
 
-/// Run one source's runner oracle (`runner_oracle_in`) under `matrix`'s native
+/// Run one source's Ready runner oracle under `matrix`'s native
 /// configurations, cross-replaying tapes under the first. Must be called on a compiler stack.
 pub fn oracle_source(
     id: &str,
@@ -830,7 +880,7 @@ pub fn oracle_source(
         .map(|c| c.options.launch.clone())
         .unwrap_or_default();
     let probe =
-        |validated: &hirsel_engine::ValidatedNativeInput,
+        |validated: &source_request::Source,
          entry: &hirsel_engine::DefPath,
          matrix: &[Configuration],
          dir: &Path,
@@ -848,8 +898,8 @@ pub fn oracle_source(
                 .iter()
                 .enumerate()
                 .flat_map(|(index, configuration)| {
-                    hirsel_driver::native::runner_oracle_in(
-                        validated,
+                    hirsel_driver::native::runner_oracle_ready(
+                        &mut |options| validated.ready(options),
                         entry,
                         std::slice::from_ref(configuration),
                         toolchain,
@@ -870,26 +920,34 @@ pub fn oracle_source(
             dir,
             launch,
             false,
-            |validated, test, _, test_dir| {
+            toolchain,
+            |ready, test, _, test_dir| {
                 let mut configurations = matrix.to_vec();
                 for c in &mut configurations {
                     c.options.launch.test_seed = test.seed;
                 }
-                probe(
-                    validated,
-                    &test.entry,
-                    &configurations,
-                    test_dir,
-                    Default::default(),
-                )
+                configurations
+                    .iter()
+                    .filter(|configuration| !matches!(configuration.engine, Engine::Heap { .. }))
+                    .enumerate()
+                    .flat_map(|(index, configuration)| {
+                        hirsel_driver::native::runner_oracle_ready(
+                            ready,
+                            &test.entry,
+                            std::slice::from_ref(configuration),
+                            toolchain,
+                            test_dir,
+                            &hirsel_driver::native::Fixture::default(),
+                            index == 0,
+                        )
+                        .into_iter()
+                        .map(|(name, outcome)| (name, Class::of(configuration), outcome))
+                    })
+                    .collect()
             },
         );
     }
-    let mut engine = hirsel_engine::QueryEngine::new(
-        hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
-    );
-    match checked_with_config(&mut engine, id, source, path, launch, false) {
+    match checked_with_config(None, id, source, path, launch, false) {
         Err(reason) => CaseResult {
             id: id.to_string(),
             snapshot: Some(reason),

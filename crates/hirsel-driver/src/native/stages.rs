@@ -972,9 +972,12 @@ pub fn main(rt:Io)->Result[(),GrantError] {
                 crate::compiler_adapters(),
             );
             let file = engine.sources.add("budget.hir", source.into()).unwrap();
-            let checked =
-                hirsel_engine::check_progress(&mut engine, file, &hirsel_engine::default_context())
-                    .unwrap();
+            let checked = hirsel_engine::source_check_request(
+                &mut engine,
+                file,
+                &hirsel_engine::default_context(),
+            )
+            .unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let entry = hirsel_engine::entry_path(&hirsel_engine::default_context());
             let config = hirsel_engine::RunConfiguration {
@@ -1103,9 +1106,12 @@ pub fn main(rt:Io)->Result[(),GrantError] {
                 crate::compiler_adapters(),
             );
             let file = engine.sources.add("semantic.hir", "fn helper()->u64 { 7u64 }\npub fn main()->Result[(),()] { let _ = helper(); Ok(()) }\n".into()).unwrap();
-            let output =
-                hirsel_engine::check_progress(&mut engine, file, &hirsel_engine::default_context())
-                    .unwrap();
+            let output = hirsel_engine::source_check_request(
+                &mut engine,
+                file,
+                &hirsel_engine::default_context(),
+            )
+            .unwrap();
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
             let input = engine.export_native_input().unwrap();
             let input = engine.import_native_input(input).unwrap();
@@ -1160,7 +1166,7 @@ fn main() -> u64 {
 }
 "#;
                 let file = engine.sources.add("pipeline.hir", source.into()).unwrap();
-                let checked = hirsel_engine::check_progress(
+                let checked = hirsel_engine::source_check_request(
                     &mut engine,
                     file,
                     &hirsel_engine::default_context(),

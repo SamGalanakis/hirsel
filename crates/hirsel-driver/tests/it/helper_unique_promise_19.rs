@@ -18,7 +18,7 @@ pub fn main() {
 fn checked(source: &str) -> CheckOutput {
     let mut engine = crate::source_std::engine();
     let file = engine.sources.add("helper.hir", source.into()).unwrap();
-    check_progress(&mut engine, file, &default_context()).unwrap()
+    source_check_request(&mut engine, file, &default_context()).unwrap()
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn accepted(source: &str) {
     let mut engine = crate::source_std::engine();
     engine.verify = Verify::On;
     let file = engine.sources.add("accepted.hir", source.into()).unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(output.completion, CheckCompletion::Complete);
     assert!(
         output.diagnostics.is_empty(),
@@ -170,7 +170,7 @@ fn helper_unique_promise_19_imported_bodyless_and_indirect_contracts() {
             )
             .unwrap();
         assert!(
-            check_progress(&mut engine, file, &context)
+            source_check_request(&mut engine, file, &context)
                 .unwrap()
                 .diagnostics
                 .is_empty()
@@ -180,7 +180,7 @@ fn helper_unique_promise_19_imported_bodyless_and_indirect_contracts() {
             context.package.name, context.package.version
         );
         let file = engine.sources.add("caller.hir", source).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         let [d] = &output.diagnostics[..] else {
             panic!("{:?}", output.diagnostics)
         };

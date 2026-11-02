@@ -16,7 +16,7 @@ fn checked(source: &str) -> QueryEngine {
         .sources
         .add("replace-local-content-33.hir", source.into())
         .unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     engine
 }
@@ -289,7 +289,7 @@ fn replace_local_content_33_v_rejects_forged_mutation_acceptance() {
             .with_types(engine.types().clone());
         let source = MUTATION.replace("source: T in xs", "source: T");
         let file = erased.sources.add("erased.hir", source).unwrap();
-        let check = check_progress(&mut erased, file, &default_context()).unwrap();
+        let check = source_check_request(&mut erased, file, &default_context()).unwrap();
         assert!(check.diagnostics.is_empty(), "{:?}", check.diagnostics);
         let lowered = erased.lower_to_tir(&named("probe")).unwrap();
         let mut forged = lowered.value.as_ref().clone();

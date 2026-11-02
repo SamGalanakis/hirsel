@@ -8,7 +8,7 @@ fn checked(source: &str) -> QueryEngine {
         .sources
         .add("unique-restoration-31.hir", source.into())
         .unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     engine
 }
@@ -198,7 +198,7 @@ fn unique_restoration_31_matrix() {
         for (name, source, expected) in CASES {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add(name, (*source).into()).unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             if *expected == "accept" {
                 assert!(
                     checked.diagnostics.is_empty(),
@@ -400,7 +400,7 @@ fn unique_restoration_31_excluded_payloads_stay_unproved() {
         ] {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("excluded.hir", source.into()).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(
                 output
                     .diagnostics
@@ -615,7 +615,7 @@ fn unique_restoration_31_diagnostics_name_unproved_evidence() {
             let (_, source, _) = CASES.iter().find(|(n, _, _)| *n == name).unwrap();
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add(name, (*source).into()).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             let diagnostic = output
                 .diagnostics
                 .iter()

@@ -515,27 +515,6 @@ pub fn differential(
     toolchain: &Toolchain,
     dir: &Path,
 ) -> Vec<(String, Outcome)> {
-    differential_in(
-        validated,
-        entry,
-        reference,
-        configurations,
-        toolchain,
-        dir,
-        &Fixture::default(),
-    )
-}
-
-/// Run the matrix in an explicitly selected deterministic fixture world.
-pub fn differential_in(
-    validated: &ValidatedNativeInput,
-    entry: &DefPath,
-    reference: &Observation,
-    configurations: &[Configuration],
-    toolchain: &Toolchain,
-    dir: &Path,
-    fixture: &Fixture,
-) -> Vec<(String, Outcome)> {
     differential_ready(
         &mut |options: &Options| SnapshotReady::build(validated, options),
         entry,
@@ -543,7 +522,7 @@ pub fn differential_in(
         configurations,
         toolchain,
         dir,
-        fixture,
+        &Fixture::default(),
     )
 }
 
@@ -683,33 +662,7 @@ pub fn differential_ready<P: ReadyExecution>(
     out
 }
 
-/// The runner oracle (link design §2): under each native configuration of `configurations`,
-/// the program's linked executable and its image in the runner, each launched once in the
-/// fixture world, give byte-identical stdout, stderr, exit status and observation records.
-/// With `tapes`, each path then records its Io completion tape and the other path replays it,
-/// and both replays observe what the recordings did. A configuration whose program runs as an
-/// executable anyway (a fallback, [`super::counts`]) compares the executable with itself.
-pub fn runner_oracle_in(
-    validated: &ValidatedNativeInput,
-    entry: &DefPath,
-    configurations: &[Configuration],
-    toolchain: &Toolchain,
-    dir: &Path,
-    fixture: &Fixture,
-    tapes: bool,
-) -> Vec<(String, Outcome)> {
-    runner_oracle_ready(
-        &mut |options: &Options| SnapshotReady::build(validated, options),
-        entry,
-        configurations,
-        toolchain,
-        dir,
-        fixture,
-        tapes,
-    )
-}
-
-/// `runner_oracle_in` over supplied Ready programs.
+/// Compare executable and runner launches of supplied Ready programs.
 pub fn runner_oracle_ready<P: ReadyExecution>(
     ready: &mut ReadySupplier<'_, P>,
     entry: &DefPath,
@@ -907,27 +860,6 @@ pub fn real_io_replay_with_config(
     dir: &Path,
     launch_config: super::LaunchInputs,
 ) -> Outcome {
-    real_io_replay_in(
-        validated,
-        entry,
-        reference,
-        toolchain,
-        dir,
-        launch_config,
-        &Fixture::default(),
-    )
-}
-
-/// Record and replay with the fixture's virtual clock and scripted providers.
-pub fn real_io_replay_in(
-    validated: &ValidatedNativeInput,
-    entry: &DefPath,
-    reference: &Observation,
-    toolchain: &Toolchain,
-    dir: &Path,
-    launch_config: super::LaunchInputs,
-    fixture: &Fixture,
-) -> Outcome {
     real_io_replay_ready(
         &mut |options: &Options| SnapshotReady::build(validated, options),
         entry,
@@ -935,7 +867,7 @@ pub fn real_io_replay_in(
         toolchain,
         dir,
         launch_config,
-        fixture,
+        &Fixture::default(),
     )
 }
 
@@ -946,7 +878,7 @@ pub fn real_io_replay_options(launch: super::LaunchInputs) -> Options {
     options
 }
 
-/// `real_io_replay_in` over a supplied Ready program.
+/// Record and replay a supplied Ready program.
 pub fn real_io_replay_ready<P: ReadyExecution>(
     ready: &mut ReadySupplier<'_, P>,
     entry: &DefPath,

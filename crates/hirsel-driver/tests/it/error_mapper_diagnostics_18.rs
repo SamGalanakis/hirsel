@@ -6,9 +6,9 @@ use std::path::PathBuf;
 fn checked(source: &str) -> CheckOutput {
     let mut engine = crate::source_std::engine();
     let file = engine.sources.add("mapper.hir", source.into()).unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(output.completion, CheckCompletion::Complete);
-    let warm = check_progress(&mut engine, file, &default_context()).unwrap();
+    let warm = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(
         output
             .diagnostics
@@ -163,7 +163,7 @@ pub fn main() -> Result[(), String] {
 "#;
         let mut engine = crate::source_std::engine();
         let file = engine.sources.add("repaired.hir", repaired.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let entry = entry_path(&default_context());
         let execution = run_observed_checked(

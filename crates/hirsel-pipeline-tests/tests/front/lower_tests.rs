@@ -683,7 +683,7 @@ fn source_capture_preserves_selected_types(annotation: &str, context: CaptureCon
         .unwrap();
     assert_eq!(field.ty, capture.ty);
     assert_eq!(
-        crate::check_support::bits(crate::check_support::execute_source(&source)),
+        crate::check_support::bits(crate::check_support::execute_text(&source)),
         8
     );
 }

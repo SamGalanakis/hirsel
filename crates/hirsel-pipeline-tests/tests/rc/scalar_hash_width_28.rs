@@ -5,7 +5,7 @@
 use hirsel_driver::compiler_adapters;
 use hirsel_driver::native::*;
 use hirsel_engine::{
-    QueryEngine, check_progress, default_context, default_environment, with_compiler_stack,
+    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
 use hirsel_lir::layout::sequence_elements_offset;
 use hirsel_lir::layout_types::{LayoutKind, SizeSpec};
@@ -241,7 +241,7 @@ fn native_cached_hashes_exact_across_widths_and_seeds() {
             .sources
             .add("scalar-hash-width-28.hir", source)
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(
             !checked
                 .diagnostics

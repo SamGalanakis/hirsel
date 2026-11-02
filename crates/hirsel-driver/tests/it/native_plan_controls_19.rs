@@ -25,7 +25,7 @@ fn bodyless_keyed_inventory_survives_cross_open_and_refuses_missing_metadata() {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
                 .with_result_store(store.clone());
             let file = engine.sources.add("plan.hir", source.into()).unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let mut options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
             options.validation = native::Validation::Ready;

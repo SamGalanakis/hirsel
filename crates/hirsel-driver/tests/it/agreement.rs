@@ -22,7 +22,7 @@ fn new_engine() -> QueryEngine {
 fn lowered(source: &str, name: &str) -> (hirsel_tir::Definition, Signatures) {
     let mut engine = new_engine();
     let file = engine.sources.add("agreement.hir", source.into()).unwrap();
-    let result = check_progress(&mut engine, file, &default_context())
+    let result = source_check_request(&mut engine, file, &default_context())
         .unwrap_or_else(|e| panic!("{source}\n{e:?}"));
     assert!(
         result.diagnostics.is_empty(),
@@ -103,7 +103,7 @@ fn a_mixed_local_result_retains_only_its_local_argument_storage() {
             .sources
             .add("rejected.hir", rejected.clone())
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         let diagnostic = &output.diagnostics[0];
         assert_eq!(diagnostic.rule.as_str(), "MODE-1");
         let start = output.sources.resolve(diagnostic.primary).start as usize;
@@ -128,7 +128,7 @@ fn an_indexed_write_detaches_a_copied_containers_identity() {
             );
             let mut engine = new_engine();
             let file = engine.sources.add("indexed.hir", source.clone()).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             if accepted {
                 assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
             } else {
@@ -203,7 +203,8 @@ fn renewed_container_brands_agree_with_independent_validation() {
                 } else {
                     let mut engine = new_engine();
                     let file = engine.sources.add("renewal.hir", source.clone()).unwrap();
-                    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+                    let output =
+                        source_check_request(&mut engine, file, &default_context()).unwrap();
                     assert!(
                         output
                             .diagnostics
@@ -227,7 +228,7 @@ fn renewed_container_brands_agree_with_independent_validation() {
             } else {
                 let mut engine = new_engine();
                 let file = engine.sources.add("sibling.hir", source).unwrap();
-                let output = check_progress(&mut engine, file, &default_context()).unwrap();
+                let output = source_check_request(&mut engine, file, &default_context()).unwrap();
                 assert!(
                     output
                         .diagnostics
@@ -255,7 +256,7 @@ fn renewed_container_brands_survive_continuing_joins() {
             let stale = source.replace("inspect(r,selected)", "inspect(r,old)");
             let mut engine = new_engine();
             let file = engine.sources.add("stale-join.hir", stale.clone()).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(
                 output
                     .diagnostics
@@ -1393,7 +1394,7 @@ pub fn main() -> Result[(), ()] { probe(); Ok(()) }
         assert_eq!(kinds(&probe, &signatures), []);
         let mut engine = new_engine();
         let file = engine.sources.add("joined.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();

@@ -662,16 +662,203 @@ fn materialized_text(engine: &QueryEngine, value: &hirsel_tir::Materialized) -> 
     );
     hirsel_codec::to_text_with(value, context).0
 }
-fn frontier_text(
-    engine: &mut QueryEngine,
-    paths: Vec<DefPath>,
-    jobs: usize,
-) -> Vec<Result<String, String>> {
-    engine
-        .materialize_values(paths, hirsel_intern::jobs::Jobs::new(jobs))
-        .into_iter()
-        .map(|value| outcome_text(engine, value))
-        .collect()
+
+#[derive(Debug, PartialEq, Eq)]
+struct FrontierText {
+    errors: std::collections::BTreeSet<String>,
+    values: Option<Vec<String>>,
+}
+struct RequestFrontier {
+    text: FrontierText,
+    sources: Option<std::sync::Arc<hirsel_driver::requests::PrecomputedSources>>,
+    inspection: Option<std::sync::Arc<hirsel_driver::requests::CompileInspection>>,
+    budget: std::sync::Arc<hirsel_engine::runtime::ProcessBudget>,
+}
+fn diagnostic_text(
+    sources: &hirsel_span::SourceMap,
+    diagnostic: &hirsel_diag::Diagnostic,
+) -> String {
+    format!(
+        "{:?}",
+        (
+            diagnostic.rule.as_str(),
+            diagnostic.severity,
+            &diagnostic.message,
+            sources.slice(diagnostic.primary),
+            diagnostic
+                .secondary
+                .iter()
+                .map(|label| (sources.slice(label.span), &label.message))
+                .collect::<Vec<_>>(),
+            &diagnostic.notes
+        )
+    )
+}
+fn record_case_error(text: &mut FrontierText, sources: &hirsel_span::SourceMap, error: QueryError) {
+    match error {
+        QueryError::Diagnostics(diagnostics) => {
+            text.errors.extend(
+                diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic_text(sources, diagnostic)),
+            );
+        }
+        error => {
+            text.errors.insert(format!("{error:?}"));
+        }
+    }
+    text.values = None;
+}
+fn scalar_frontier_text(engine: &mut QueryEngine, paths: &[DefPath]) -> FrontierText {
+    let mut text = FrontierText {
+        errors: Default::default(),
+        values: Some(vec![]),
+    };
+    for path in paths {
+        match engine.materialize_value(path) {
+            Ok(value) => {
+                if let Some(values) = &mut text.values {
+                    values.push(materialized_text(engine, &value));
+                }
+            }
+            Err(error) => record_case_error(&mut text, &engine.sources, error),
+        }
+    }
+    text
+}
+/// Each declaration has its own file. A failed root cannot withhold another
+/// file, while Check remains one source-ordered request over the package.
+fn frontier_text(engine: &mut QueryEngine, paths: Vec<DefPath>, jobs: usize) -> RequestFrontier {
+    use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
+    use std::sync::Arc;
+    let file = engine
+        .sources
+        .anchors()
+        .filter_map(|(_, file, _)| {
+            engine
+                .sources
+                .file(file)
+                .filter(|source| source.path.ends_with("comptime.hir"))
+                .map(|_| file)
+        })
+        .max()
+        .unwrap();
+    let source = engine.sources.file(file).unwrap().text().to_owned();
+    let items = engine
+        .parse_file(file, &default_context())
+        .unwrap()
+        .value
+        .items;
+    let directory = tempfile::tempdir().unwrap();
+    let mut entries = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let start = engine.sources.anchor(item.anchor).unwrap().1 as usize;
+        let end = items.get(index + 1).map_or(source.len(), |next| {
+            engine.sources.anchor(next.anchor).unwrap().1 as usize
+        });
+        let name = format!("{index}-{}.hir", item.item.definition.0.name);
+        std::fs::write(directory.path().join(&name), &source[start..end]).unwrap();
+        entries.push(serde_json::json!({"path":name,"module":[]}));
+    }
+    let manifest = directory.path().join("hirsel.json");
+    std::fs::write(&manifest, serde_json::json!({"schema":1,"package":{"name":"standalone","version":"0"},"sources":entries,"dependencies":[]}).to_string()).unwrap();
+    let store = engine
+        .product_store()
+        .unwrap_or_else(|| Arc::new(store::MemStore::default()));
+    let config = CompileConfig {
+        jobs: hirsel_intern::jobs::Jobs::new(jobs),
+        store: store.clone(),
+        verify: engine.verify,
+        hold_bytes: engine.hold_bytes(),
+        ..Default::default()
+    };
+    let compiler = COMPILER
+        .with_config(config.clone())
+        .with_comptime_limits(engine.comptime_limits);
+    let mut requests = CompilerRequests::for_host(compiler, config);
+    let budget = requests.budget().clone();
+    let mut text = FrontierText {
+        errors: Default::default(),
+        values: None,
+    };
+    let mut sources = None;
+    let mut inspection = None;
+    match requests.execute(
+        &manifest,
+        CompileOperation::Check {
+            lowering: LoweringPolicy::Comptime,
+        },
+    ) {
+        Ok(output) => {
+            let CompileResult::Check(checked) = &output.result else {
+                panic!("expected Check")
+            };
+            text.errors.extend(
+                checked
+                    .diagnostics
+                    .iter()
+                    .filter(|diagnostic| diagnostic.severity == hirsel_diag::Severity::Error)
+                    .map(|diagnostic| diagnostic_text(&checked.sources, diagnostic)),
+            );
+            assert_eq!(checked.completion, CheckCompletion::Complete);
+            if text.errors.is_empty() {
+                let output = requests
+                    .execute(&manifest, CompileOperation::Precompute)
+                    .unwrap();
+                let CompileResult::Precomputed {
+                    sources: products, ..
+                } = &output.result
+                else {
+                    panic!("expected Precompute")
+                };
+                text.values = Some(
+                    paths
+                        .iter()
+                        .map(|path| {
+                            let bytes = products.source_product_bytes(path).unwrap().unwrap();
+                            let product = products
+                                .source_products(path, budget.reserve(bytes).unwrap())
+                                .unwrap()
+                                .unwrap();
+                            let context = hirsel_proof_export::Cx::new(
+                                std::rc::Rc::new(|_| hirsel_proof_export::Location::unknown()),
+                                products.signatures().types().clone(),
+                            );
+                            hirsel_codec::to_text_with(product.constant().unwrap(), context).0
+                        })
+                        .collect(),
+                );
+                sources = Some(products.clone());
+            }
+            let output = requests
+                .execute(
+                    &manifest,
+                    CompileOperation::Inspect {
+                        definitions: vec![],
+                    },
+                )
+                .unwrap();
+            let CompileResult::Inspect(observed) = &output.result else {
+                panic!("expected Inspect")
+            };
+            inspection = Some(observed.clone());
+        }
+        Err(ToolError::Query { error, sources, .. }) => {
+            record_case_error(&mut text, &sources, error)
+        }
+        Err(error) => panic!("request Check failed: {error}"),
+    }
+    let owned = std::mem::replace(
+        engine,
+        QueryEngine::new(default_environment(), Default::default()),
+    );
+    *engine = owned.with_result_store(store);
+    RequestFrontier {
+        text,
+        sources,
+        inspection,
+        budget,
+    }
 }
 
 /// Fresh requests over one store agree with scalar evaluation for duplicate
@@ -767,61 +954,13 @@ fn frozen_frontier_cycles_and_failures_match_serial() {
         for jobs in [1, 2, 8] {
             for warm in [false, true] {
                 let mut control = engine(source);
-                let expected: Vec<_> = paths
-                    .iter()
-                    .map(|p| {
-                        let result = control.materialize_value(p);
-                        outcome_text(&control, result)
-                    })
-                    .collect();
+                let expected = scalar_frontier_text(&mut control, &paths);
                 let mut candidate = engine(source);
                 if warm {
                     candidate.materialize_value(&path("GOOD")).unwrap();
                 }
                 let actual = frontier_text(&mut candidate, paths.clone(), jobs);
-                assert_eq!(actual, expected, "jobs={jobs} warm={warm}");
-            }
-        }
-    });
-}
-
-#[test]
-fn frozen_frontier_depth_and_last_limit_match_serial_with_partial_hits() {
-    with_compiler_stack(|| {
-        let source = "const LEAF: u32 = 1u32\nfn helper() -> u32 { comptime LEAF }\nconst C2: u32 = comptime helper()\nconst C1: u32 = comptime C2\nconst C0: u32 = comptime C1\nconst GOOD: u32 = comptime 7\n";
-        for jobs in [1, 2, 8] {
-            for warm in [false, true] {
-                for names in [["C0", "GOOD"], ["GOOD", "C0"]] {
-                    let paths: Vec<_> = names.map(path).into();
-                    let mut control = engine(source);
-                    control.comptime_limits.call_depth = 3;
-                    let expected: Vec<_> = paths
-                        .iter()
-                        .map(|p| {
-                            let result = control.materialize_value(p);
-                            outcome_text(&control, result)
-                        })
-                        .collect();
-                    let mut candidate = engine(source);
-                    candidate.comptime_limits.call_depth = 3;
-                    candidate.materialize_value(&path("GOOD")).unwrap();
-                    if warm {
-                        candidate.lower_to_tir(&path("helper")).unwrap();
-                    }
-                    let actual = frontier_text(&mut candidate, paths, jobs);
-                    assert_eq!(actual, expected, "jobs={jobs} warm={warm} names={names:?}");
-                    assert_eq!(
-                        placed_evidence(
-                            &candidate.sources,
-                            format!("{:?}", candidate.last_comptime_limit)
-                        ),
-                        placed_evidence(
-                            &control.sources,
-                            format!("{:?}", control.last_comptime_limit)
-                        ),
-                        "jobs={jobs} warm={warm} names={names:?}"
-                    );
-                }
+                assert_eq!(actual.text, expected, "jobs={jobs} warm={warm}");
             }
         }
     });
@@ -1086,65 +1225,6 @@ fn frozen_frontier_staged_rounds_evaluate_on_workers() {
 }
 
 #[test]
-fn frozen_frontier_outcomes_capture_each_stopping_phase_and_limit() {
-    with_compiler_stack(|| {
-        for jobs in [1, 2, 8] {
-            let mut adapters = compiler_adapters();
-            adapters.checker = None;
-            let mut candidate = QueryEngine::new(default_environment(), adapters);
-            let file = candidate
-                .sources
-                .add(
-                    "outcomes.hir",
-                    "const ABSENT:u32=comptime 2\nconst BAD:u32=comptime missing\n".into(),
-                )
-                .unwrap();
-            candidate.parse_file(file, &default_context()).unwrap();
-            let outcomes = candidate.materialize_value_outcomes(
-                vec![path("ABSENT"), path("BAD")],
-                hirsel_intern::jobs::Jobs::new(jobs),
-            );
-            assert!(matches!(
-                outcomes[0].result,
-                Err(QueryError::NotImplemented)
-            ));
-            assert_eq!(outcomes[0].phase, Some(QueryKind::Check));
-            assert!(matches!(
-                outcomes[1].result,
-                Err(QueryError::Diagnostics(_))
-            ));
-            assert_eq!(outcomes[1].phase, Some(QueryKind::Resolve));
-            assert_eq!(candidate.last_phase, outcomes[1].phase);
-            assert!(outcomes.iter().all(|outcome| outcome.limit.is_none()));
-            assert!(outcomes.iter().all(|outcome| !outcome.reads.is_empty()));
-
-            let source = "const LEAF:u32=1u32\nconst C1:u32=comptime LEAF\nconst C0:u32=comptime C1\nconst GOOD:u32=comptime 7\n";
-            let mut candidate = engine(source);
-            candidate.comptime_limits.call_depth = 2;
-            let outcomes = candidate.materialize_value_outcomes(
-                vec![path("C0"), path("GOOD")],
-                hirsel_intern::jobs::Jobs::new(jobs),
-            );
-            assert!(matches!(
-                outcomes[0].result,
-                Err(QueryError::Operational(_))
-            ));
-            assert_eq!(outcomes[0].phase, Some(QueryKind::Lower));
-            assert_eq!(
-                outcomes[0].limit.as_ref().unwrap().kind,
-                hirsel_tir::ToolingLimitKind::CallDepth
-            );
-            assert!(outcomes[1].result.is_ok());
-            assert!(outcomes[1].limit.is_none());
-            assert!(candidate.last_comptime_limit.is_none());
-            assert_eq!(outcomes[1].phase, Some(QueryKind::Lower));
-            assert!(outcomes[0].reads.iter().any(|(key, _)| *key
-                == memo::ReadKey::ExecutedBody(hirsel_syntax::DefId::intern(&path("C0")))));
-        }
-    });
-}
-
-#[test]
 fn frozen_frontier_generator_failures_keep_scalar_cycle_and_literal_sites() {
     with_compiler_stack(|| {
         let make = |body: &str| {
@@ -1165,23 +1245,16 @@ fn frozen_frontier_generator_failures_keep_scalar_cycle_and_literal_sites() {
         ] {
             let paths = vec![path("B"), path("A"), path("B")];
             let mut control = engine(&source);
-            let expected: Vec<_> = paths
-                .iter()
-                .map(|p| {
-                    let result = control.materialize_value(p);
-                    outcome_text(&control, result)
-                })
-                .collect();
+            let expected = scalar_frontier_text(&mut control, &paths);
             assert!(
-                expected
-                    .iter()
-                    .all(|result| result.as_ref().is_err_and(|error| error.contains(rule))),
+                (!expected.errors.is_empty()
+                    && expected.errors.iter().all(|error| error.contains(rule))),
                 "{expected:?}; expected {rule}"
             );
             for jobs in [1, 2, 8] {
                 let mut candidate = engine(&source);
                 let actual = frontier_text(&mut candidate, paths.clone(), jobs);
-                assert_eq!(actual, expected, "jobs={jobs} source={source}");
+                assert_eq!(actual.text, expected, "jobs={jobs} source={source}");
             }
         }
     });
@@ -1206,24 +1279,35 @@ fn frozen_frontier_generator_helper_edits_refresh_text_and_execution_reads() {
                     .unwrap();
                 candidate.parse_file(file, &default_context()).unwrap();
                 let mut control = engine(&revision);
-                let expected: Vec<_> = paths
-                    .iter()
-                    .map(|p| {
-                        let result = control.materialize_value(p);
-                        outcome_text(&control, result)
-                    })
-                    .collect();
+                let expected = scalar_frontier_text(&mut control, &paths);
                 let actual = frontier_text(&mut candidate, paths.clone(), jobs);
-                assert_eq!(actual, expected, "jobs={jobs} source={revision}");
+                assert_eq!(actual.text, expected, "jobs={jobs} source={revision}");
                 if revision.contains("missing_text()") {
-                    assert!(actual.iter().all(Result::is_err));
+                    assert!(!actual.text.errors.is_empty());
                 }
-                if actual.iter().all(Result::is_ok) {
+                if actual.text.errors.is_empty() {
                     let scalar = control.check_definition(&path("chosen")).unwrap();
-                    let worker = candidate.check_definition(&path("chosen")).unwrap();
-                    assert_eq!(worker.dependencies, scalar.dependencies);
-                    let reads = candidate
-                        .memo_reads(&path("chosen"), QueryKind::Check)
+                    let sources = actual.sources.as_ref().unwrap();
+                    let bytes = sources
+                        .checked_dependency_decode_bytes(&path("chosen"))
+                        .unwrap();
+                    let worker = sources
+                        .checked_dependencies(
+                            &path("chosen"),
+                            actual.budget.reserve(bytes).unwrap(),
+                        )
+                        .unwrap();
+                    assert_eq!(worker.dependencies(), &*scalar.dependencies);
+                    let reads = actual
+                        .inspection
+                        .as_ref()
+                        .unwrap()
+                        .memos
+                        .iter()
+                        .find(|(key, _)| {
+                            key.def.path() == &path("chosen") && key.kind == QueryKind::Check
+                        })
+                        .map(|(_, reads)| reads)
                         .unwrap();
                     assert!(
                         reads.iter().any(|(key, _)| *key
@@ -1274,28 +1358,21 @@ fn frozen_frontier_generic_generator_failures_keep_selecting_site_labels() {
                         assert!(control.materialize_value(&path("A")).is_err());
                         assert!(candidate.materialize_value(&path("A")).is_err());
                     }
-                    let expected: Vec<_> = paths
-                        .iter()
-                        .map(|p| {
-                            let result = control.materialize_value(p);
-                            outcome_text(&control, result)
-                        })
-                        .collect();
+                    let expected = scalar_frontier_text(&mut control, &paths);
                     assert!(
-                        expected
-                            .iter()
-                            .all(|result| result.as_ref().is_err_and(|error| error.contains(rule)))
+                        (!expected.errors.is_empty()
+                            && expected.errors.iter().all(|error| error.contains(rule)))
                     );
                     if !warm {
                         assert!(
-                            expected[0]
-                                .as_ref()
-                                .unwrap_err()
-                                .contains("selects instance")
+                            expected
+                                .errors
+                                .iter()
+                                .any(|error| error.contains("selects instance"))
                         );
                     }
                     let actual = frontier_text(&mut candidate, paths, jobs);
-                    assert_eq!(actual, expected, "jobs={jobs} warm={warm} rule={rule}");
+                    assert_eq!(actual.text, expected, "jobs={jobs} warm={warm} rule={rule}");
                 }
             }
         }
@@ -1349,8 +1426,11 @@ fn frozen_frontier_releases_completed_typed_bodies_before_next_root() {
             let file = candidate.sources.add("bounded-s1.hir", source).unwrap();
             candidate.parse_file(file, &default_context()).unwrap();
             let paths: Vec<_> = (0..64).rev().map(|i| path(&format!("task{i}"))).collect();
-            let outcomes = candidate
-                .materialize_value_outcomes(paths.clone(), hirsel_intern::jobs::Jobs::new(jobs));
+            let outcomes = crate::request_graph::constant_outcomes(
+                &mut candidate,
+                paths.clone(),
+                hirsel_intern::jobs::Jobs::new(jobs),
+            );
             assert!(outcomes.iter().all(|outcome| outcome.result.is_ok()));
             assert_eq!(
                 outcomes.iter().map(|o| &o.definition).collect::<Vec<_>>(),
@@ -1412,8 +1492,11 @@ fn frozen_lowering_frontier_matches_scalar_for_nonconstant_comptime_and_edits() 
                     expected[0].is_ok() && expected[1].is_ok(),
                     "expected accepted nonconstant roots: {expected:?}"
                 );
-                let actual = candidate
-                    .lower_definition_outcomes(paths.clone(), hirsel_intern::jobs::Jobs::new(jobs));
+                let actual = crate::request_graph::lowers(
+                    &mut candidate,
+                    paths.clone(),
+                    hirsel_intern::jobs::Jobs::new(jobs),
+                );
                 assert_eq!(
                     actual
                         .iter()
@@ -1423,7 +1506,7 @@ fn frozen_lowering_frontier_matches_scalar_for_nonconstant_comptime_and_edits() 
                 );
                 for outcome in &actual {
                     assert!(!outcome.reads.is_empty());
-                    assert!(outcome.limit.is_none());
+
                     assert_eq!(
                         outcome.phase,
                         Some(if outcome.result.is_ok() {
@@ -1543,11 +1626,14 @@ fn frozen_lowering_frontier_keeps_lower_warnings_and_current_hit_metadata() {
                     expected.diagnostics[0].severity,
                     hirsel_diag::Severity::Warning
                 );
-                let expected_depth = control
-                    .lower_definition_outcomes(vec![path("A")], hirsel_intern::jobs::Jobs::new(1))
-                    .remove(0)
-                    .depth
-                    .unwrap();
+                let expected_depth = crate::request_graph::lowers(
+                    &mut control,
+                    vec![path("A")],
+                    hirsel_intern::jobs::Jobs::new(1),
+                )
+                .remove(0)
+                .depth
+                .unwrap();
                 let scalar_reads = control.memo_reads(&path("A"), QueryKind::Lower).unwrap();
                 let (mut candidate, guard) = make();
                 if warm {
@@ -1561,13 +1647,14 @@ fn frozen_lowering_frontier_keeps_lower_warnings_and_current_hit_metadata() {
                     );
                 }
                 guard.store(jobs > 1, Ordering::Relaxed);
-                let outcomes = candidate.lower_definition_outcomes(
+                let outcomes = crate::request_graph::lowers(
+                    &mut candidate,
                     vec![path("A"), path("A")],
                     hirsel_intern::jobs::Jobs::new(jobs),
                 );
                 for outcome in outcomes {
                     assert_eq!(outcome.phase, Some(QueryKind::Lower));
-                    assert!(outcome.limit.is_none());
+
                     let depth = outcome
                         .depth
                         .as_ref()
@@ -1609,14 +1696,15 @@ fn frozen_lowering_frontier_keeps_lower_warnings_and_current_hit_metadata() {
                             .any(|(key, _)| matches!(key, memo::ReadKey::ValidationUniverse(_)))
                     );
                 }
-                let compact = candidate.check_lower_definition_prefix(
+                let compact = crate::request_graph::checked_prefix(
+                    &mut candidate,
                     vec![path("A"), path("A")],
                     hirsel_intern::jobs::Jobs::new(jobs),
                 );
                 assert_eq!(compact.len(), 2);
                 for outcome in compact {
                     assert_eq!(outcome.phase, Some(QueryKind::Lower));
-                    assert!(outcome.limit.is_none());
+
                     assert_eq!(
                         placed_evidence(
                             &candidate.sources,
@@ -1672,11 +1760,7 @@ fn frozen_frontier_hold_budgets_preserve_staged_generated_cycle_and_depth_outcom
                 .iter()
                 .map(|root| {
                     let result = control.materialize_value(root);
-                    let limit = format!("{:?}", control.last_comptime_limit);
-                    (
-                        outcome_text(&control, result),
-                        placed_evidence(&control.sources, limit),
-                    )
+                    outcome_text(&control, result)
                 })
                 .collect();
             for jobs in [1, 2, 8] {
@@ -1688,22 +1772,14 @@ fn frozen_frontier_hold_budgets_preserve_staged_generated_cycle_and_depth_outcom
                     });
                     candidate.comptime_limits.call_depth = limit;
                     for warm in [false, true] {
-                        let actual: Vec<_> = candidate
-                            .materialize_value_outcomes(
-                                roots.clone(),
-                                hirsel_intern::jobs::Jobs::new(jobs),
-                            )
-                            .into_iter()
-                            .map(|outcome| {
-                                (
-                                    outcome_text(&candidate, outcome.result),
-                                    placed_evidence(
-                                        &candidate.sources,
-                                        format!("{:?}", outcome.limit),
-                                    ),
-                                )
-                            })
-                            .collect();
+                        let actual: Vec<_> = crate::request_graph::constant_outcomes(
+                            &mut candidate,
+                            roots.clone(),
+                            hirsel_intern::jobs::Jobs::new(jobs),
+                        )
+                        .into_iter()
+                        .map(|outcome| outcome_text(&candidate, outcome.result))
+                        .collect();
                         assert_eq!(
                             actual, expected,
                             "jobs={jobs} budget={bytes} warm={warm} source={text}"
@@ -1723,7 +1799,8 @@ fn frozen_lowering_prefix_withholds_later_generated_and_staged_publication() {
             let mut control = engine(source);
             let expected = control.lower_to_tir(&path("FIRST")).unwrap_err();
             let mut candidate = engine(source);
-            let outcomes = candidate.check_lower_definition_prefix(
+            let outcomes = crate::request_graph::checked_prefix(
+                &mut candidate,
                 vec![path("FIRST"), path("LATER")],
                 hirsel_intern::jobs::Jobs::new(jobs),
             );
@@ -1795,20 +1872,21 @@ fn frozen_lowering_prefix_keeps_demanded_closure_and_final_outcomes_across_edits
                     depths.push(if failed {
                         None
                     } else {
-                        control
-                            .lower_definition_outcomes(
-                                vec![root.clone()],
-                                hirsel_intern::jobs::Jobs::ONE,
-                            )
-                            .remove(0)
-                            .depth
+                        crate::request_graph::lowers(
+                            &mut control,
+                            vec![root.clone()],
+                            hirsel_intern::jobs::Jobs::ONE,
+                        )
+                        .remove(0)
+                        .depth
                     });
                     if failed {
                         break;
                     }
                 }
                 for warm in [false, true] {
-                    let actual = candidate.lower_definition_prefix(
+                    let actual = crate::request_graph::lower_prefix(
+                        &mut candidate,
                         roots.clone(),
                         hirsel_intern::jobs::Jobs::new(jobs),
                     );
@@ -1816,7 +1894,7 @@ fn frozen_lowering_prefix_keeps_demanded_closure_and_final_outcomes_across_edits
                     for (outcome, depth) in actual.iter().zip(&depths) {
                         assert!(!outcome.reads.is_empty());
                         assert_eq!(outcome.phase, Some(QueryKind::Lower));
-                        assert!(outcome.limit.is_none());
+
                         assert_eq!(
                             placed_evidence(&candidate.sources, format!("{:?}", outcome.depth)),
                             placed_evidence(&control.sources, format!("{depth:?}")),
@@ -1870,7 +1948,8 @@ fn frozen_lowering_prefix_generator_rejections_keep_serial_selection_and_limits(
                         assert!(candidate.lower_to_tir(&path("A")).is_err());
                     }
                     let expected = control.lower_to_tir(&path("B"));
-                    let actual = candidate.lower_definition_prefix(
+                    let actual = crate::request_graph::lower_prefix(
+                        &mut candidate,
                         vec![path("B"), path("A"), path("UNUSED")],
                         hirsel_intern::jobs::Jobs::new(jobs),
                     );
@@ -1879,13 +1958,6 @@ fn frozen_lowering_prefix_generator_rejections_keep_serial_selection_and_limits(
                         lowering_text(&candidate, actual[0].result.clone()),
                         lowering_text(&control, expected),
                         "jobs={jobs} warm={warm} source={source}"
-                    );
-                    assert_eq!(
-                        placed_evidence(&candidate.sources, format!("{:?}", actual[0].limit)),
-                        placed_evidence(
-                            &control.sources,
-                            format!("{:?}", control.last_comptime_limit)
-                        )
                     );
                     assert!(
                         candidate
@@ -1904,7 +1976,8 @@ fn frozen_lowering_prefix_generator_rejections_keep_serial_selection_and_limits(
                 candidate.comptime_limits.call_depth = limit;
                 let expected = control.lower_to_tir(&path("FIRST"));
                 let failed = expected.is_err();
-                let actual = candidate.lower_definition_prefix(
+                let actual = crate::request_graph::lower_prefix(
+                    &mut candidate,
                     vec![path("FIRST"), path("UNUSED")],
                     hirsel_intern::jobs::Jobs::new(jobs),
                 );
@@ -1912,13 +1985,6 @@ fn frozen_lowering_prefix_generator_rejections_keep_serial_selection_and_limits(
                 assert_eq!(
                     lowering_text(&candidate, actual[0].result.clone()),
                     lowering_text(&control, expected)
-                );
-                assert_eq!(
-                    placed_evidence(&candidate.sources, format!("{:?}", actual[0].limit)),
-                    placed_evidence(
-                        &control.sources,
-                        format!("{:?}", control.last_comptime_limit)
-                    )
                 );
             }
         }
@@ -1957,7 +2023,8 @@ fn frozen_s1_prefix_tir_receipts_and_diagnostics_are_invariant_under_jobs_and_sa
                             ..CompileConfig::for_memory_cap(None)
                         });
                         for warm in [false, true] {
-                            let outcomes = candidate.lower_definition_prefix(
+                            let outcomes = crate::request_graph::lower_prefix(
+                                &mut candidate,
                                 roots.clone(),
                                 hirsel_intern::jobs::Jobs::new(jobs),
                             );
@@ -1974,10 +2041,7 @@ fn frozen_s1_prefix_tir_receipts_and_diagnostics_are_invariant_under_jobs_and_sa
                                 current.push_str(&format!("{value:?}\n{:?}\n", outcome.phase));
                                 current.push_str(&placed_evidence(
                                     &candidate.sources,
-                                    format!(
-                                        "{:?}\n{:?}\n{:?}\n",
-                                        outcome.limit, outcome.depth, outcome.reads
-                                    ),
+                                    format!("{:?}\n{:?}\n", outcome.depth, outcome.reads),
                                 ));
                             }
                             if let Some(expected) = &expected {
@@ -2036,7 +2100,8 @@ fn frozen_s1_prefix_resident_and_second_process_store_equal_cold_after_edits() {
                 "child must restore the persisted helper before S1 expansion"
             );
         }
-        let outcomes = engine.lower_definition_prefix(
+        let outcomes = crate::request_graph::lower_prefix(
+            engine,
             vec![path("A"), path("B"), path("A")],
             hirsel_intern::jobs::Jobs::new(jobs),
         );
@@ -2049,10 +2114,7 @@ fn frozen_s1_prefix_resident_and_second_process_store_equal_cold_after_edits() {
             ));
             transcript.push_str(&placed_evidence(
                 &engine.sources,
-                format!(
-                    "{:?}\n{:?}\n{:?}\n",
-                    outcome.limit, outcome.depth, outcome.reads
-                ),
+                format!("{:?}\n{:?}\n", outcome.depth, outcome.reads),
             ));
         }
         transcript
@@ -2202,7 +2264,7 @@ fn batch_staged_exports_keep_cached_instances_after_unrelated_edits() {
             .sources
             .add("staged-export.hir", source.into())
             .unwrap();
-        let checked = check_progress(engine, file, &default_context()).unwrap();
+        let checked = source_check_request(engine, file, &default_context()).unwrap();
         assert_eq!(checked.completion, CheckCompletion::Complete);
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     }
@@ -2279,23 +2341,23 @@ fn frozen_lowering_prefix_publishes_exact_staged_instances_through_cache_hits() 
                     for warm in [false, true] {
                         let roots = vec![path("FIRST"), path("FIRST"), path("BAD"), path("LATER")];
                         let outcomes: Vec<_> = if compact {
-                            candidate
-                                .check_lower_definition_prefix(
-                                    roots,
-                                    hirsel_intern::jobs::Jobs::new(jobs),
-                                )
-                                .into_iter()
-                                .map(|outcome| outcome.result.map(|_| ()))
-                                .collect()
+                            crate::request_graph::checked_prefix(
+                                &mut candidate,
+                                roots,
+                                hirsel_intern::jobs::Jobs::new(jobs),
+                            )
+                            .into_iter()
+                            .map(|outcome| outcome.result.map(|_| ()))
+                            .collect()
                         } else {
-                            candidate
-                                .lower_definition_prefix(
-                                    roots,
-                                    hirsel_intern::jobs::Jobs::new(jobs),
-                                )
-                                .into_iter()
-                                .map(|outcome| outcome.result.map(|_| ()))
-                                .collect()
+                            crate::request_graph::lower_prefix(
+                                &mut candidate,
+                                roots,
+                                hirsel_intern::jobs::Jobs::new(jobs),
+                            )
+                            .into_iter()
+                            .map(|outcome| outcome.result.map(|_| ()))
+                            .collect()
                         };
                         assert_eq!(outcomes.len(), 3);
                         assert!(outcomes[0].is_ok() && outcomes[1].is_ok() && outcomes[2].is_err());
@@ -2306,105 +2368,6 @@ fn frozen_lowering_prefix_publishes_exact_staged_instances_through_cache_hits() 
                         );
                     }
                 }
-            }
-        }
-    });
-}
-
-#[test]
-fn frozen_lowering_workers_share_only_unoccupied_scalar_hold_bytes() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-    struct CountHelper {
-        inner: Arc<dyn LoweringPhase>,
-        calls: AtomicUsize,
-        workers: bool,
-    }
-    impl LoweringPhase for CountHelper {
-        fn lower(
-            &self,
-            t: &hirsel_types::TypeInterner,
-            m: &hirsel_types::TypeMemo,
-            body: &AnalyzedBody,
-            comptime: &Comptime,
-            signature: &hirsel_types::Signature,
-        ) -> Result<QueryOutput<hirsel_tir::Definition>, QueryError> {
-            if self.workers {
-                assert_eq!(std::thread::current().name(), Some("hirsel-job"));
-            }
-            if body.typed.syntax.item.definition.0.name.as_str() == "helper" {
-                self.calls.fetch_add(1, Ordering::Relaxed);
-            }
-            self.inner.lower(t, m, body, comptime, signature)
-        }
-        fn lower_evaluation(
-            &self,
-            t: &hirsel_types::TypeInterner,
-            m: &hirsel_types::TypeMemo,
-            body: &AnalyzedBody,
-            staged: &[(hirsel_syntax::ExprId, hirsel_types::TypeId)],
-            signature: &hirsel_types::Signature,
-            expression: hirsel_syntax::ExprId,
-            result: hirsel_types::TypeId,
-            constants: &[(hirsel_syntax::ExprId, hirsel_tir::Materialized)],
-        ) -> Result<hirsel_tir::Definition, QueryError> {
-            if self.workers {
-                assert_eq!(std::thread::current().name(), Some("hirsel-job"));
-            }
-            self.inner
-                .lower_evaluation(t, m, body, staged, signature, expression, result, constants)
-        }
-        fn entry_body(&self) -> hirsel_tir::BodyId {
-            self.inner.entry_body()
-        }
-    }
-    with_compiler_stack(|| {
-        let source = format!(
-            "fn filler()->u64{{{}7u64}}\nfn helper()->u64{{7u64}}\nfn A()->u64{{let a=comptime helper();let b=comptime helper();a+b}}\nfn B()->u64{{let a=comptime helper();let b=comptime helper();a+b}}\n",
-            (0..64)
-                .map(|i| format!("let _={i}u64; "))
-                .collect::<String>()
-        );
-        for jobs in [1, 2, 8] {
-            for occupied in [false, true] {
-                let config = |hold_bytes| CompileConfig {
-                    hold_bytes,
-                    retention: memo::Retention::Batch,
-                    ..CompileConfig::for_memory_cap(None)
-                };
-                let mut candidate = engine(&source).with_config(config(u64::MAX));
-                drop(candidate.lower_to_tir(&path("filler")).unwrap());
-                let bytes = candidate.lower_hold_stats().bytes;
-                assert!(bytes > 0);
-                candidate =
-                    candidate.with_config(config(if occupied { bytes } else { bytes + (1 << 20) }));
-                assert_eq!(
-                    candidate.available_hold_bytes(),
-                    if occupied { 0 } else { 1 << 20 }
-                );
-                let counter = Arc::new(CountHelper {
-                    inner: candidate.adapters.lowering.take().unwrap(),
-                    calls: AtomicUsize::new(0),
-                    workers: jobs > 1,
-                });
-                candidate.adapters.lowering = Some(counter.clone());
-                let outcomes = candidate.check_lower_definition_prefix(
-                    vec![path("A"), path("B")],
-                    hirsel_intern::jobs::Jobs::new(jobs),
-                );
-                assert_eq!(outcomes.len(), 2);
-                assert!(
-                    outcomes.iter().all(|outcome| outcome.result.is_ok()),
-                    "{outcomes:?}"
-                );
-                assert_eq!(
-                    counter.calls.load(Ordering::Relaxed),
-                    if occupied { 4 } else { 2 },
-                    "jobs={jobs} occupied={occupied}: only free bytes can retain a helper within a root"
-                );
-                assert!(candidate.lower_hold_stats().bytes <= candidate.hold_bytes());
             }
         }
     });

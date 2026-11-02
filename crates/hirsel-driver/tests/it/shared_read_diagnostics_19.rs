@@ -46,9 +46,9 @@ fn check(source: &str, expected: &[(&str, &str)]) -> Vec<serde_json::Value> {
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("shared.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         let json = rendered(&output, expected);
-        let warm = check_progress(&mut engine, file, &default_context()).unwrap();
+        let warm = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(json, rendered(&warm, expected));
         json
     })

@@ -5,7 +5,7 @@ use std::sync::Arc;
 fn engine(text: &str) -> QueryEngine {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("snapshot.hir", text.into()).unwrap();
-    let result = check_progress(&mut engine, file, &default_context()).unwrap();
+    let result = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
     engine
 }
@@ -64,7 +64,7 @@ fn native_import_reuses_exact_verdicts_and_validates_detached_tir() {
                 .sources
                 .add("off-on.hir", "fn main() {}".into())
                 .unwrap();
-            let output = check_progress(&mut unchecked, file, &default_context()).unwrap();
+            let output = source_check_request(&mut unchecked, file, &default_context()).unwrap();
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
             let input = unchecked.export_native_input().unwrap();
             let before = runs();
@@ -179,7 +179,7 @@ fn same_signature_body_edits_make_an_old_native_snapshot_stale() {
     let old = engine.export_native_input().unwrap();
     let changed = PROGRAM.replace("let n = answer;", "let n = answer + 1u64;");
     let file = engine.sources.add("snapshot.hir", changed).unwrap();
-    check_progress(&mut engine, file, &default_context()).unwrap();
+    source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(engine.import_native_input(old).is_err());
     let new = engine.export_native_input().unwrap();
     engine.import_native_input(new).unwrap();

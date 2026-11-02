@@ -95,7 +95,7 @@ fn compile_source(
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
         .with_result_store(store.clone());
     let file = engine.sources.add(name, SOURCE.into()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let input = engine.export_native_input().unwrap();
     let _validated = engine.import_native_input(input).unwrap();

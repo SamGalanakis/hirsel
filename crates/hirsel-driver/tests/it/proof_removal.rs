@@ -34,7 +34,7 @@ fn hex(hash: &hirsel_syntax::ContentHash) -> String {
 fn engine(source: &str) -> QueryEngine {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("bump.hir", source.into()).unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     engine
 }
@@ -933,7 +933,7 @@ fn native_discovery_reports_actual_removals_on_cold_and_body_free_fresh_hits() {
             let mut producer = QueryEngine::new(default_environment(), compiler_adapters())
                 .with_result_store(store.clone());
             let file = producer.sources.add("bump.hir", BUMP.into()).unwrap();
-            let checked = check_progress(&mut producer, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut producer, file, &default_context()).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let entry = entry_path(&default_context());
             let export = hirsel_proof_export::build(&producer.proof_export_input(&entry).unwrap());

@@ -706,7 +706,7 @@ fn native_flat_region_copy_parity() {
                 .sources
                 .add("flat-region-copy.hir", source.into())
                 .unwrap();
-            let checked = check_progress(&mut engine, file, &context).unwrap();
+            let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let entry = entry_path(&context);
             let reference = run_observed_snapshot(

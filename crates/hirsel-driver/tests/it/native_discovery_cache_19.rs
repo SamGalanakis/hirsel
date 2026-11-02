@@ -55,7 +55,7 @@ fn native_discovery_cache_reuses_requirements_without_demanding_source_bodies() 
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
                 .with_result_store(store.clone());
             let file = engine.sources.add("discovery.hir", EDGES.into()).unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             engine
         };

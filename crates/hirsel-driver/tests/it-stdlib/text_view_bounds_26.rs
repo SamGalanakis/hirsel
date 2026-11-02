@@ -184,11 +184,6 @@ fn partition(text: usize, depth: usize) {
             ToolError::Query { error, .. } => panic!("source check: {error:?}"),
             e => panic!("source check: {e}"),
         });
-        let input = loaded.engine.export_native_input().expect("export");
-        let validated = loaded
-            .engine
-            .import_native_input(input)
-            .expect("independent V");
         let configurations = [
             native::Engine::Heap { campaign: false },
             native::Engine::Native {
@@ -257,8 +252,10 @@ fn partition(text: usize, depth: usize) {
                 continue;
             }
             eprintln!("TEXT_STARTED {id} H/LLVM/Cranelift");
-            let results = native::differential_in(
-                &validated,
+            let mut ready =
+                crate::native_ready::supplier(&fixture(), Some(&source), &entry, &tools).unwrap();
+            let results = native::differential_ready(
+                &mut ready,
                 &entry,
                 &oracle,
                 &configurations,

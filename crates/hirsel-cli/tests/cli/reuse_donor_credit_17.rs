@@ -12,7 +12,7 @@ fn reuse_donor_credit_17_engines() {
         );
         let file = engine.sources.add("donor.hir", SOURCE.into()).unwrap();
         let context = hirsel_engine::default_context();
-        let checked = hirsel_engine::check_progress(&mut engine, file, &context).unwrap();
+        let checked = hirsel_engine::source_check_request(&mut engine, file, &context).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
@@ -81,7 +81,7 @@ fn original_paired_programs_keep_owned_credit() {
             );
             let file = engine.sources.add("paired.hir", source.into()).unwrap();
             let context = hirsel_engine::default_context();
-            let checked = hirsel_engine::check_progress(&mut engine, file, &context).unwrap();
+            let checked = hirsel_engine::source_check_request(&mut engine, file, &context).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let input = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(input).unwrap();

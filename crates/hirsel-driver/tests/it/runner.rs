@@ -11,7 +11,7 @@ use hirsel_driver::native::{
     launch_runnable, link_objects, link_runnable, runner,
 };
 use hirsel_engine::{
-    DefPath, QueryEngine, check_progress, default_context, default_environment, entry_path,
+    DefPath, QueryEngine, default_context, default_environment, entry_path, source_check_request,
     with_compiler_stack,
 };
 use std::path::{Path, PathBuf};
@@ -142,7 +142,7 @@ fn compiled(source: &str, target: &TargetSpec, backend: Backend) -> Compiled {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let context = default_context();
     let file = engine.sources.add("runner.hir", source.into()).unwrap();
-    let output = check_progress(&mut engine, file, &context).unwrap();
+    let output = source_check_request(&mut engine, file, &context).unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     let input = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(input).unwrap();

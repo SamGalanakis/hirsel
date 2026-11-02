@@ -21,7 +21,7 @@ fn cleanup_version_joins_share_unchanged_dataflow() {
             source += "\n}\n";
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("version-joins.hir", source).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
             let snapshot = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(snapshot).unwrap();

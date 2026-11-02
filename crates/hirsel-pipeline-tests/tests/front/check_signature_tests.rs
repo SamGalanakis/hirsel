@@ -44,7 +44,8 @@ fn flat_storage_proves_actual_nominal_and_generic_fields() {
 fn represented_seals_prove_ceilings_and_exported_bounds() {
     use hirsel_driver::compiler_adapters;
     use hirsel_engine::{
-        QueryEngine, check_progress, default_context, default_environment, with_compiler_stack,
+        QueryEngine, default_context, default_environment, source_check_request,
+        with_compiler_stack,
     };
     with_compiler_stack(|| {
         for (declaration, expected) in [
@@ -139,7 +140,7 @@ fn represented_seals_prove_ceilings_and_exported_bounds() {
         ] {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("seal.hir", declaration.into()).unwrap();
-            let result = check_progress(&mut engine, file, &default_context()).unwrap();
+            let result = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(
                 result.diagnostics.first().map(|d| d.rule.as_str()),
                 expected,

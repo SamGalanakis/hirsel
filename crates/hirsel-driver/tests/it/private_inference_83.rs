@@ -20,7 +20,7 @@ fn concurrent_standalone_checks_wait_for_the_existing_inference_partition() {
                     let file = engine.sources.add("concurrent.hir", source).unwrap();
                     engine.parse_file(file, &context).unwrap();
                     ready.wait();
-                    let checked = check_progress(&mut engine, file, &context).unwrap();
+                    let checked = source_check_request(&mut engine, file, &context).unwrap();
                     assert!(
                         checked
                             .diagnostics
@@ -518,7 +518,7 @@ fn changed_private_result_proofs_invalidate_unchanged_callers() {
                 .sources
                 .add("private-result-edits.hir", source.into())
                 .unwrap();
-            check_progress(engine, file, &default_context()).unwrap()
+            source_check_request(engine, file, &default_context()).unwrap()
         };
         let accepted = check(&mut engine, source);
         assert!(
@@ -618,7 +618,7 @@ fn failed_private_inference_cannot_reuse_a_successful_signature_snapshot() {
             )
             .unwrap();
         assert!(
-            check_progress(&mut engine, file, &context)
+            source_check_request(&mut engine, file, &context)
                 .unwrap()
                 .diagnostics
                 .is_empty()

@@ -216,7 +216,7 @@ impl Runner {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let context = default_context();
             let file = engine.sources.add("main.hir", source.into()).unwrap();
-            let checked = match check_progress(&mut engine, file, &context) {
+            let checked = match source_check_request(&mut engine, file, &context) {
                 Ok(checked) => checked,
                 Err(e) => {
                     report.cells.push(query_error("source", e));

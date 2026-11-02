@@ -18,7 +18,7 @@ fn runtime(source: &str) {
         .sources
         .add("loop-place-52.hir", source.into())
         .unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(checked.completion, CheckCompletion::Complete);
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let entry = entry_path(&default_context());
@@ -116,7 +116,7 @@ fn loop_place_52_negative_witnesses() {
                 .sources
                 .add("loop-place-negative.hir", source)
                 .unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(output.completion, CheckCompletion::Complete);
             assert_eq!(
                 output.diagnostics.first().unwrap().rule.as_str(),
@@ -142,7 +142,7 @@ fn loop_place_52_v_reproves_projected_cursor_loan() {
             .sources
             .add("loop-place-cursor.hir", vector("paths-run"))
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let mut path = entry_path(&default_context());
@@ -224,7 +224,7 @@ fn loop_place_52_owned_sources_still_share() {
         ] {
             let mut engine = crate::source_std::engine();
             let file = engine.sources.add("owned-loop-source.hir", source).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(output.completion, CheckCompletion::Complete);
             assert!(
                 output

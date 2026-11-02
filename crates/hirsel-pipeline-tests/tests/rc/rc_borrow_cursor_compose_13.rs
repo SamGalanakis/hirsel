@@ -118,7 +118,7 @@ fn native_parity(cases: &[(&str, &str)]) {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let context = default_context();
             let file = engine.sources.add("compose.hir", source.into()).unwrap();
-            let checked = check_progress(&mut engine, file, &context).unwrap();
+            let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{name}: {:?}",
@@ -366,7 +366,7 @@ pub fn main() -> Result[(), u64] {{
                 QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
             let context = default_context();
             let file = engine.sources.add("result-count.hir", source).unwrap();
-            let checked = check_progress(&mut engine, file, &context).unwrap();
+            let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let snapshot = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(snapshot).unwrap();
@@ -417,7 +417,7 @@ fn compose_13_checked_interpreter_retains_underlying_bounds() {
                 .add("checked-compose.hir", source.into())
                 .unwrap();
             let context = default_context();
-            let checked = check_progress(&mut engine, file, &context).unwrap();
+            let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{name}: {:?}",
@@ -594,7 +594,7 @@ fn compose_14_mutable_alias_checked_interpreter() {
                 .add("mutable-alias.hir", source.into())
                 .unwrap();
             let context = default_context();
-            let checked = check_progress(&mut engine, file, &context).unwrap();
+            let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let execution = run_observed_checked(
                 &mut engine,

@@ -108,11 +108,12 @@ impl QueryEngine {
             .get(&DefId::intern(path))
             .copied()
             .unwrap_or(0)
-            + self.s1_lower_work(path).adapter_calls
+            + self.request_lower_work(path).adapter_calls
     }
 
-    pub(crate) fn record_worker_lower_recompute(&mut self, path: &DefPath) {
-        self.record_worker_recomputes(path, QueryKind::Lower, 1);
+    /// Physical adapter calls made by scheduled Lower requests only.
+    pub fn request_lower_adapter_calls(&self, path: &DefPath) -> u64 {
+        self.request_lower_work(path).adapter_calls
     }
 
     pub(crate) fn record_worker_recomputes(&mut self, path: &DefPath, kind: QueryKind, count: u64) {
@@ -136,7 +137,10 @@ impl QueryEngine {
         initializers: u64,
         validation_runs: u64,
     ) {
-        let work = self.s1_lower_work.entry(DefId::intern(path)).or_default();
+        let work = self
+            .request_lower_work
+            .entry(DefId::intern(path))
+            .or_default();
         work.query_attempts = work
             .query_attempts
             .saturating_add(lowerings)
@@ -212,78 +216,6 @@ impl QueryEngine {
         self.merge_lower_acceptance(receipt.acceptance.as_ref(), required);
         self.merge_execution(receipt.reads());
         Ok(true)
-    }
-
-    /// Retain a completed root's facts without manufacturing an artifact or
-    /// charging another phase recomputation. Execution inputs are authoritative
-    /// even if the frozen origin predates a later root's signature publication.
-    pub(crate) fn retain_lower_facts(&mut self, outcome: &s1::LoweringResult<()>) -> bool {
-        let path = &outcome.definition;
-        if outcome.reads.is_empty()
-            || outcome.limit.is_some()
-            // Failed root products do not carry context-free depth evidence.
-            // Return them in order; a later request takes the ordinary path.
-            || outcome.result.is_err()
-            || !self.execution_valid(path, &outcome.reads)
-        {
-            return false;
-        }
-        if self.verify == Verify::On {
-            let Some(evidence) = &outcome.verification else {
-                return false;
-            };
-            let snapshot = self.signature_snapshot();
-            if evidence.owner() != DefId::intern(path)
-                || !snapshot.validation(&path.0.package).is_ok_and(|views| {
-                    evidence.environment_holds(snapshot.source_verification_policy(), views)
-                })
-            {
-                return false;
-            }
-        }
-        let Ok(text) = self.key_text(path, QueryKind::Lower) else {
-            return false;
-        };
-        let id = DefId::intern(path);
-        let key = MemoKey::new(QueryKind::Lower, id);
-        self.front_products.forget(&key);
-        let durability = outcome.reads.durability(|read| self.durability_of(read));
-        let mut detail = self
-            .summaries
-            .get(&id)
-            .map(|entry| entry.detail.clone())
-            .unwrap_or_default();
-        if let Ok(output) = &outcome.result {
-            detail.signatures = output.dependencies.clone();
-        }
-        let memo = self.graph.adopt_value(
-            key,
-            text,
-            outcome.result.clone().map(Arc::new),
-            outcome.reads.clone(),
-            durability,
-        );
-        self.lowered.remove(&id);
-        self.lower_holds.forget(&key);
-        self.lower_receipts.insert(
-            id,
-            Arc::new(LowerReceipt {
-                entry: Entry {
-                    memo,
-                    detail,
-                    products: Default::default(),
-                    covered: vec![],
-                    depth: outcome.depth.clone(),
-                    acceptance: None,
-                    verification: Default::default(),
-                    selections: vec![],
-                    consistent: true,
-                },
-                verdict: outcome.verification.clone(),
-                retained_artifact: false,
-            }),
-        );
-        true
     }
 
     /// Retained scalar lowering occupancy, including wrappers and V receipts.

@@ -237,123 +237,41 @@ impl LoadedProgram {
             Ok(())
         }
     }
-    /// Check every package of the program, lowering what `lowering` selects:
-    /// the diagnostics do not depend on it. The root package lowers under
-    /// `lowering`, each dependency only what compile-time evaluation executes,
-    /// and `Reachable` then lowers the dependency bodies the root reaches.
+    /// Check the selected package through the immutable request graph.
     pub fn check(&mut self, lowering: LoweringPolicy) -> Result<CheckOutput, QueryError> {
-        let _reads = self
-            .engine
-            .result_store
-            .as_ref()
-            .and_then(|store| store.read_scope());
-        self.check_with(lowering, |_, _| Ok(()))
-    }
-    /// `check`, calling `checked` with each file that checked from source
-    /// complete and with no diagnostics, in source order after S1/P2.
-    fn check_with(
-        &mut self,
-        lowering: LoweringPolicy,
-        mut checked: impl FnMut(&mut QueryEngine, FileId) -> Result<(), QueryError>,
-    ) -> Result<CheckOutput, QueryError> {
-        // The program check's own steps; per-definition checking and
-        // lowering, GEN-5 and publication below are their own intervals.
-        let _interval = hirsel_intern::timings::interval(hirsel_intern::timings::Interval::S0);
-        let mut diagnostics = Vec::new();
-        let mut completion = CheckCompletion::Complete;
-        for (file, context) in &self.files {
-            if self.package_kinds[&context.package] == DependencyKind::Installed {
-                continue;
-            }
-            match crate::tools::association_diagnostics(&mut self.engine, *file, context) {
-                Ok(errors) | Err(QueryError::Diagnostics(errors)) => {
-                    diagnostics.extend(errors);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        if crate::queries::has_errors(&diagnostics) {
-            return Ok(CheckOutput {
-                diagnostics: select_diagnostics(diagnostics, Some(&self.engine.sources)),
-                completion,
-                sources: self.engine.sources.clone(),
-                unsafe_ffi: self.unsafe_ffi.clone(),
-            });
-        }
         let root = self.entry.0.package.clone();
-        let policy = |package: &PackageId| {
-            if *package == root {
-                lowering
-            } else {
-                LoweringPolicy::Comptime
-            }
-        };
-        let files: Vec<_> = self
+        let files = self
             .files
             .iter()
             .filter(|(_, context)| self.package_kinds[&context.package] == DependencyKind::Source)
-            .map(|(file, context)| (*file, context, policy(&context.package)))
-            .collect();
-        for (file, output) in crate::tools::check_files(&mut self.engine, &files)? {
-            if output.completion != CheckCompletion::Complete {
-                completion = output.completion;
-            } else if output.diagnostics.is_empty() {
-                checked(&mut self.engine, file)?;
-            }
-            diagnostics.extend(output.diagnostics);
-        }
-        // The root package's dead error arms (LANG-8) are warnings of the
-        // files declaring them.
-        if !crate::queries::has_errors(&diagnostics) && completion == CheckCompletion::Complete {
-            let files: Vec<_> = self
-                .files
-                .iter()
-                .filter(|(_, c)| c.package == root)
-                .map(|(file, _)| *file)
-                .collect();
-            diagnostics.extend(self.engine.dead_arm_warnings(&files));
-        }
-        // Dependencies lower only what the program's own package reaches.
-        if lowering == LoweringPolicy::Reachable
-            && !crate::queries::has_errors(&diagnostics)
-            && completion == CheckCompletion::Complete
-        {
-            let roots = self
-                .files
-                .iter()
-                .filter(|(_, c)| c.package == root)
-                .flat_map(|(file, _)| self.engine.file_definitions(*file))
-                .collect::<Vec<_>>();
-            match self.engine.lower_reachable(roots) {
-                Ok(()) => {}
-                Err(QueryError::Diagnostics(errors)) => diagnostics.extend(errors),
-                Err(QueryError::NotImplemented) => {
-                    let phase = self
-                        .engine
-                        .unavailable
-                        .or(self.engine.last_phase)
-                        .unwrap_or(QueryKind::Lower);
-                    self.engine.unavailable = Some(phase);
-                    completion = CheckCompletion::Incomplete { phase };
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        let _merge = hirsel_intern::timings::interval(hirsel_intern::timings::Interval::Merge);
-        let mut diagnostics = select_diagnostics(diagnostics, Some(&self.engine.sources));
-        let files: Vec<_> = self.files.iter().map(|(file, cx)| (*file, cx)).collect();
-        diagnostic_guidance::append(
-            &files,
-            &self.engine.sources,
-            &self.engine.declarations.frozen(),
-            &mut diagnostics,
-        );
-        Ok(CheckOutput {
-            diagnostics,
-            completion,
-            sources: self.engine.sources.clone(),
+            .map(|(file, context)| {
+                (
+                    *file,
+                    context.clone(),
+                    if context.package == root {
+                        lowering
+                    } else {
+                        LoweringPolicy::Comptime
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let selection = crate::requests::source_graph::SourceSelection {
+            input_bytes: crate::requests::source_graph::source_bytes(&self.engine.sources, &files),
+            files,
+            entry: self.entry.clone(),
+            lint_package: Some(root),
             unsafe_ffi: self.unsafe_ffi.clone(),
-        })
+        };
+        self.engine
+            .check_scheduled(&selection)
+            .map_err(|error| match error {
+                ToolError::Query { error, .. } => error,
+                error => QueryError::Operational(hirsel_types::OperationalFailure {
+                    operation: "package Check request".into(),
+                    message: error.to_string(),
+                }),
+            })
     }
     /// The manifest-selected entry, if this package can be launched.
     pub fn launch_entry(&self) -> Option<&DefPath> {

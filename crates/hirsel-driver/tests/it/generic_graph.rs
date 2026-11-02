@@ -4,7 +4,7 @@ use hirsel_engine::*;
 fn check(source: &str) -> CheckOutput {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("graph.hir", source.into()).unwrap();
-    check_progress(&mut engine, file, &default_context()).unwrap()
+    source_check_request(&mut engine, file, &default_context()).unwrap()
 }
 
 #[test]
@@ -63,7 +63,7 @@ fn graph_verdict_updates_after_same_signature_body_edits_on_compiler_thread() {
                 format!("fn grow[T: copyable](x:T) {{ {body} }}"),
             )
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(
             output
                 .diagnostics
@@ -101,7 +101,7 @@ fn graph_source_order_does_not_depend_on_file_discovery_on_compiler_thread() {
                 first = Some(file);
             }
         }
-        let output = check_progress(&mut engine, first.unwrap(), &default_context()).unwrap();
+        let output = source_check_request(&mut engine, first.unwrap(), &default_context()).unwrap();
         assert_eq!(output.diagnostics[0].rule.as_str(), "GEN-5");
         assert_eq!(
             output
@@ -118,7 +118,7 @@ fn graph_source_order_does_not_depend_on_file_discovery_on_compiler_thread() {
 fn native_engine(source: &str) -> QueryEngine {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("graph.hir", source.into()).unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     engine
 }

@@ -12,8 +12,8 @@ use hirsel_driver::native::{
 };
 use hirsel_engine::{
     DefPath, DefinitionQueries, QueryEngine, RunConfiguration, SimulationConfig,
-    ValidatedNativeInput, check_progress, default_context, default_environment, entry_path,
-    run_observed_snapshot, with_compiler_stack,
+    ValidatedNativeInput, default_context, default_environment, entry_path, run_observed_snapshot,
+    source_check_request, with_compiler_stack,
 };
 use std::path::PathBuf;
 
@@ -47,7 +47,7 @@ fn checked_in(engine: &mut QueryEngine, source: &str) -> Checked {
         *engine = loaded.engine;
     } else {
         let file = engine.sources.add("native.hir", source.into()).unwrap();
-        let output = check_progress(engine, file, &context).unwrap();
+        let output = source_check_request(engine, file, &context).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     }
     checked_engine(engine)
@@ -302,7 +302,7 @@ fn a_diverging_self_tail_call_loops_a_million_times_within_the_stack() {
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("serve.hir", SERVE.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
@@ -1266,7 +1266,7 @@ fn zero_parameter_native_launch_refuses_non_result_and_non_unit_success() {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let context = default_context();
             let file = engine.sources.add("entry.hir", source.into()).unwrap();
-            let output = check_progress(&mut engine, file, &context).unwrap();
+            let output = source_check_request(&mut engine, file, &context).unwrap();
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
             let input = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(input).unwrap();
@@ -1769,7 +1769,7 @@ fn intrinsic_static_objects_survive_unrelated_layouts_and_import_replay() {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
                 .with_result_store(store.clone());
             let file = engine.sources.add("statics.hir", text.into()).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
             let input = engine.export_native_input().unwrap();
             let _validated = engine.import_native_input(input).unwrap();
@@ -2125,7 +2125,7 @@ fn generated_body_origins_follow_item_moves_without_stale_source_names() {
                 engine.parse_file(file, &default_context()).unwrap();
             }
             for file in files {
-                let output = check_progress(engine, file, &default_context()).unwrap();
+                let output = source_check_request(engine, file, &default_context()).unwrap();
                 assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
             }
             let run = RunConfiguration {
@@ -2191,7 +2191,7 @@ fn generated_body_objects_rebind_debug_and_failures_after_source_moves() {
                 engine.parse_file(file, &default_context()).unwrap();
             }
             for file in files {
-                let output = check_progress(engine, file, &default_context()).unwrap();
+                let output = source_check_request(engine, file, &default_context()).unwrap();
                 assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
             }
             checked_engine(engine)

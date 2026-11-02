@@ -48,9 +48,12 @@ fn borrow_cursor_evidence_13_environment_diagnostic_preserves_ordinary_bindings(
                 .sources
                 .add("cursor.hir", format!("{source}\nfn main()->u64 {{0}}"))
                 .unwrap();
-            let output =
-                hirsel_engine::check_progress(&mut engine, file, &hirsel_engine::default_context())
-                    .unwrap();
+            let output = hirsel_engine::source_check_request(
+                &mut engine,
+                file,
+                &hirsel_engine::default_context(),
+            )
+            .unwrap();
             let rules: Vec<_> = output.diagnostics.iter().map(|d| d.rule.as_str()).collect();
             assert_eq!(rules, [rule], "{source}: {:?}", output.diagnostics);
         });
@@ -68,7 +71,7 @@ fn borrow_cursor_evidence_13_native_import_rejects_owned_refill_with_old_audit()
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("cursor-attestation.hir", "fn f(a:List[u64])->u64 {let mut c=a; c=a; list.len(c)}\npub fn main()->Result[(),u64] {if f([1])==1 {Ok(())}else{Error(1)}}".into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let original = engine.export_native_input().unwrap();
         assert_eq!(original.completed_source_stages, NativeStatus::Complete);
@@ -226,7 +229,7 @@ pub(super) fn bounds_failure_evidence() {
             .sources
             .add("cursor-bounds.hir", BOUNDS.into())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let execution = run_observed_checked(
             &mut engine,

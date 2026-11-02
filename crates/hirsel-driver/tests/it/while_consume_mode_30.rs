@@ -31,7 +31,7 @@ fn modules(batch: &str, main: &str) -> QueryEngine {
             file = Some(id);
         }
     }
-    let checked = check_progress(&mut engine, file.unwrap(), &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file.unwrap(), &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     engine
 }
@@ -204,7 +204,7 @@ fn while_consume_mode_30_minimal_exports() {
                 include_str!("../fixtures/while_consume_mode_30/minimal.hir").into(),
             )
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         runtime(engine);
     });

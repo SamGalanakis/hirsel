@@ -199,7 +199,7 @@ fn library_recipe_rebinds_its_environment_without_reconstructing_the_requiring_v
                 .sources
                 .add("library-recipe.hir", SOURCE.into())
                 .unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             engine
         };

@@ -6,7 +6,7 @@ use hirsel_interp::observation::Effect;
 fn run(source: &str, config: SimulationConfig) {
     let mut engine = source_std::engine();
     let file = engine.sources.add("waits.hir", source.to_owned()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let run = RunConfiguration {
         entry: entry_path(&default_context()),
@@ -149,7 +149,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 "#;
     let mut engine = source_std::engine();
     let file = engine.sources.add("overdue.hir", source.into()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let runtime = engine.runtime_types().unwrap();
     let sources = engine.sources.clone();
@@ -289,7 +289,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 "#;
     let mut engine = source_std::engine();
     let file = engine.sources.add("woken.hir", source.into()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let runtime = engine.runtime_types().unwrap();
     let sources = engine.sources.clone();
@@ -439,7 +439,7 @@ pub fn main(rt: Io) -> Result[(), AppError] {
 "#;
     let mut engine = source_std::engine();
     let file = engine.sources.add("drop-waits.hir", source.into()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let runtime = engine.runtime_types().unwrap();
     let sources = engine.sources.clone();
@@ -610,7 +610,7 @@ pub fn main(rt: Io) -> Result[(), E] {
         .sources
         .add("callback-check-waits.hir", source.into())
         .unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let runtime = engine.runtime_types().unwrap();
     let sources = engine.sources.clone();

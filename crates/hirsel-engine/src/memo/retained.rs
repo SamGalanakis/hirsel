@@ -12,7 +12,7 @@ pub(crate) use source_entry::{
 mod syntax;
 #[cfg(test)]
 mod type_storage;
-use super::{DepthEvidence, ReadKey, Reads};
+use super::{ReadKey, Reads};
 use crate::comptime::StagedRegistration;
 use hirsel_syntax::{ContentHash, DefPath};
 use hirsel_tir::*;
@@ -70,29 +70,6 @@ pub(crate) fn retained_arc_bytes<T: ?Sized>(value: &T) -> u64 {
     arc_bytes(value) as u64
 }
 
-/// Backing allocations of a worker's Lowered wrapper, excluding the wrapper's
-/// own Arc/inline layout and its DefinitionRef (charged by retained_tir_bytes).
-/// Signature and other shared payloads are deduplicated within the registration
-/// vector. Session interned rows are excluded, as with the TIR weight.
-pub(crate) fn retained_lowering_metadata_bytes(
-    reads: &Reads,
-    depth: &DepthEvidence<hirsel_span::Span>,
-    registrations: &Vec<StagedRegistration>,
-) -> u64 {
-    let mut weight = Weight::default();
-    for (identity, bytes) in reads.allocations() {
-        weight.allocation(identity, bytes);
-    }
-    weight.add(size_of_val(&*depth.first));
-    weight.vec(registrations, |w, registration| {
-        w.def_path(&registration.path);
-        w.def_path(&registration.constant.owner);
-        w.flat_vec(&registration.constant.inputs);
-        w.signature(&registration.constant.signature);
-    });
-    weight.bytes
-}
-
 /// Owned buffers of lowering's returned warnings and ordered signature
 /// dependencies, excluding the containing Vec/inline fields of its wrapper.
 pub(crate) fn retained_lowering_output_bytes(
@@ -122,18 +99,6 @@ pub(crate) fn retained_staged_declaration_bytes(registrations: &Vec<StagedRegist
 pub(crate) fn retained_query_error_bytes(error: &hirsel_types::QueryError) -> u64 {
     let mut weight = Weight::default();
     weight.error(error);
-    weight.bytes
-}
-
-/// Exact worker staged-use closure. DefIds belong to the session; argument
-/// vector capacities are retained by the lower memo and charged in its hold.
-pub(crate) fn retained_staged_request_bytes(requests: &Vec<crate::comptime::Selection>) -> u64 {
-    let mut weight = Weight::default();
-    weight.vec(requests, |w, selection| {
-        if let crate::comptime::Selection::Staged(_, arguments) = selection {
-            w.flat_vec(arguments);
-        }
-    });
     weight.bytes
 }
 
@@ -1009,6 +974,7 @@ impl Weight<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memo::DepthEvidence;
     use hirsel_types::{Type, TypeInterner};
 
     fn definition() -> Definition {
@@ -1321,67 +1287,6 @@ mod tests {
         assert_eq!(
             retained_lowering_output_bytes(&diagnostics, &dependencies),
             warned
-        );
-    }
-
-    #[test]
-    fn lowering_metadata_accounts_for_receipts_depth_and_shared_registration_signatures() {
-        use std::sync::Arc;
-        let types = TypeInterner::new(None);
-        let signature = Arc::new(hirsel_types::Signature {
-            metadata: hirsel_types::SignatureMetadata::default(),
-            definition: hirsel_syntax::DefId::intern(&DefPath::core("staged")),
-            kind: hirsel_types::SignatureKind::Const {
-                ty: types.intern(Type::unit()),
-                generics: vec![hirsel_types::GenericParameter::Size {
-                    name: "n".repeat(65_536),
-                }]
-                .into(),
-            },
-            fingerprint: Default::default(),
-        });
-        let reads = Reads::from_vec(vec![(
-            super::super::ReadKey::Environment,
-            Default::default(),
-        )])
-        .unwrap();
-        let mut depth = DepthEvidence::leaf(3);
-        let mut registrations = Vec::with_capacity(2);
-        let no_registration = retained_lowering_metadata_bytes(&reads, &depth, &registrations);
-        depth.first = vec![None; 128].into_boxed_slice();
-        assert!(retained_lowering_metadata_bytes(&reads, &depth, &registrations) > no_registration);
-        let registration = StagedRegistration {
-            path: DefPath::core("staged"),
-            constant: crate::comptime::StagedConstant {
-                owner: DefPath::core("owner"),
-                expression: hirsel_syntax::ExprId(0),
-                inputs: Vec::with_capacity(512),
-                signature,
-            },
-        };
-        registrations.push(registration.clone());
-        let one = retained_lowering_metadata_bytes(&reads, &depth, &registrations);
-        registrations.push(registration);
-        let shared = retained_lowering_metadata_bytes(&reads, &depth, &registrations);
-        assert!(one > 65_536);
-        assert!(
-            shared - one < 65_536,
-            "same signature allocation charged once"
-        );
-        let mut independent = (*registrations[1].constant.signature).clone();
-        // Cloning a signature shares its generic list. Detach that list so the
-        // second registration now owns a separate large name allocation.
-        let hirsel_types::SignatureKind::Const { generics, .. } = &mut independent.kind else {
-            unreachable!()
-        };
-        *generics = generics.iter().cloned().collect();
-        registrations[1].constant.signature = Arc::new(independent);
-        assert!(
-            retained_lowering_metadata_bytes(&reads, &depth, &registrations) >= shared + 65_536
-        );
-        let with_reads = retained_lowering_metadata_bytes(&reads, &depth, &registrations);
-        assert!(
-            with_reads > retained_lowering_metadata_bytes(&Reads::empty(), &depth, &registrations)
         );
     }
 

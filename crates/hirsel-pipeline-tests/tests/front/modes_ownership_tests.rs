@@ -396,7 +396,7 @@ fn local_temporary_views_require_a_receiving_lexical_scope() {
         engine.parse_file(file, &context).unwrap();
         let mut definition = hirsel_engine::entry_path(&context);
         definition.0.name = "probe".into();
-        let output = hirsel_engine::check_progress(&mut engine, file, &context)
+        let output = hirsel_engine::source_check_request(&mut engine, file, &context)
             .unwrap_or_else(|error| panic!("{source}: {error:?}"));
         assert_eq!(
             output.diagnostics.is_empty(),
@@ -440,7 +440,7 @@ fn constant_field_receipts_preserve_the_physical_declaration() {
         engine.parse_file(file, &context).unwrap();
         let mut definition = hirsel_engine::entry_path(&context);
         definition.0.name = "probe".into();
-        let output = hirsel_engine::check_progress(&mut engine, file, &context).unwrap();
+        let output = hirsel_engine::source_check_request(&mut engine, file, &context).unwrap();
         assert!(
             output.diagnostics.is_empty(),
             "{source}: {:?}",
@@ -497,7 +497,7 @@ fn illegal_taken_result_origins_reach_the_declaration_diagnostic() {
             .sources
             .add("invalid-clause-origin.hir", source.into())
             .unwrap();
-        let output = hirsel_engine::check_progress(&mut engine, file, &context).unwrap();
+        let output = hirsel_engine::source_check_request(&mut engine, file, &context).unwrap();
         assert_eq!(
             output.diagnostics.len(),
             1,

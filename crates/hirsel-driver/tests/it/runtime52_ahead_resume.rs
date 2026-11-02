@@ -26,7 +26,7 @@ fn net() -> serde_json::Value {
 fn checked() -> (QueryEngine, ReadyProgram) {
     let mut engine = crate::source_std::engine();
     let file = engine.sources.add("main.hir", SOURCE.into()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let input = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(input).unwrap();

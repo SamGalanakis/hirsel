@@ -3,14 +3,15 @@
 //! worker-local function work from completed products. Hirsel uses jobs::map
 //! and publishes by DefPath because subscriber and diagnostic order is semantic.
 use super::*;
+#[cfg(test)]
+use hirsel_intern::jobs::Jobs;
 mod signature_reads;
-use hirsel_intern::jobs::{self, Jobs};
 use hirsel_types::SignatureRef;
 pub(crate) use signature_reads::OrderedSignatureReads;
 mod compact;
 mod scheduled;
 pub(crate) use compact::CompactCompleted;
-use compact::{FrontResult, WorkerCompleted};
+
 pub use scheduled::{
     FRONT_BODY_KIND, FRONT_STORAGE_KIND, FrontBodyOutput, FrontBodyQueries, FrontCarry,
     FrontCheckedOutput, FrontInputFootprint, FrontMemoryRefusal, FrontStorageOutput,
@@ -19,7 +20,7 @@ pub use scheduled::{
 pub(in crate::queries) use scheduled::{SpecializationDependencies, load_scheduled_publication};
 
 /// One input's outcome, including the phase that completed or stopped it.
-/// Results from `mode_definitions` always retain the caller's input order.
+/// A completed body query with its captured reads.
 #[derive(Clone, Debug)]
 pub struct ModeResult {
     pub definition: DefPath,
@@ -566,30 +567,6 @@ impl SignatureProvider for WorkerRecorder<'_> {
 }
 
 impl QueryEngine {
-    /// Publish compact outcomes before releasing bodies according to the
-    /// selected retention policy. No returned product retains a TypedBody.
-    /// Batch workers release bodies before accepting their next task; compact
-    /// receipts await serial publication; encoded store bytes are drained by
-    /// the producing worker before it accepts another task.
-    pub fn publish_definitions(
-        &mut self,
-        definitions: Vec<DefPath>,
-        jobs: Jobs,
-        retention: crate::memo::Retention,
-    ) -> Vec<PublishedResult> {
-        self.run_front(
-            definitions,
-            jobs,
-            retention == crate::memo::Retention::Batch,
-        )
-        .into_iter()
-        .map(|outcome| match outcome {
-            FrontResult::Compact(outcome) => outcome,
-            FrontResult::Resident(outcome) => self.compact_front_outcome(outcome, false),
-        })
-        .collect()
-    }
-
     fn compact_front_outcome(&mut self, outcome: ModeResult, release: bool) -> PublishedResult {
         let definition = DefId::intern(&outcome.definition);
         self.remember_front_facts(definition);
@@ -639,22 +616,6 @@ impl QueryEngine {
             published.result = Err(error);
         }
         published
-    }
-
-    fn front_output(
-        &mut self,
-        definition: DefPath,
-        result: Result<Arc<QueryOutput<AnalyzedBody>>, QueryError>,
-        phase: Option<QueryKind>,
-        inherited: Option<Arc<Reads>>,
-        compact: bool,
-    ) -> FrontResult {
-        let outcome = self.front_outcome(definition, result, phase, inherited);
-        if compact {
-            FrontResult::Compact(self.compact_front_outcome(outcome, true))
-        } else {
-            FrontResult::Resident(outcome)
-        }
     }
 
     /// Select whether completed program fronts retain intermediate bodies.
@@ -796,350 +757,9 @@ impl QueryEngine {
             diagnostic_phases,
         }
     }
-    /// Fused resolve/check/modes work for one frontier. Every worker count uses
-    /// jobs::map; only preparation and memo publication mutate the engine.
-    /// Declarations that execute generators keep their ordinary serial S1 path.
-    pub fn mode_definitions(&mut self, definitions: Vec<DefPath>, jobs: Jobs) -> Vec<ModeResult> {
-        self.run_front(definitions, jobs, false)
-            .into_iter()
-            .map(|outcome| {
-                let FrontResult::Resident(outcome) = outcome else {
-                    unreachable!()
-                };
-                outcome
-            })
-            .collect()
-    }
-    fn run_front(
-        &mut self,
-        definitions: Vec<DefPath>,
-        jobs: Jobs,
-        compact: bool,
-    ) -> Vec<FrontResult> {
-        self.prepare_private_summaries();
-        let mut outputs = Vec::with_capacity(definitions.len());
-        let mut frontier = Vec::new();
-        for definition in definitions {
-            self.last_phase = None;
-            self.unavailable = None;
-            if self
-                .source_facts(&definition)
-                .is_some_and(|facts| !facts.generator)
-            {
-                frontier.push(definition);
-                continue;
-            }
-            match self
-                .materialize(&definition)
-                .and_then(|_| self.snapshot(&definition))
-            {
-                Ok(syntax) if !generation::serial(&syntax) => frontier.push(definition),
-                state => {
-                    let materialization_phase = self.unavailable.or(self.last_phase);
-                    let materialization_failed = state.is_err();
-                    // Generators can change source/signature inputs. Publish
-                    // the preceding frontier before serial S1 work, then build
-                    // a fresh immutable context for the following frontier.
-                    outputs.extend(self.mode_source_definitions(
-                        std::mem::take(&mut frontier),
-                        jobs,
-                        compact,
-                    ));
-                    self.last_phase = None;
-                    self.unavailable = None;
-                    let result = state.and_then(|_| self.mode_query(&definition));
-                    let phase = if materialization_failed {
-                        materialization_phase
-                    } else if result.is_ok() {
-                        Some(QueryKind::Modes)
-                    } else {
-                        self.unavailable.or(self.last_phase)
-                    };
-                    outputs.push(self.front_output(definition, result, phase, None, compact));
-                }
-            }
-        }
-        outputs.extend(self.mode_source_definitions(frontier, jobs, compact));
-        if let Some(last) = outputs.last() {
-            self.last_phase = last.phase();
-            self.unavailable = if last.unavailable() {
-                last.phase()
-            } else {
-                None
-            };
-        }
-        outputs
-    }
-    fn mode_source_definitions(
-        &mut self,
-        definitions: Vec<DefPath>,
-        jobs: Jobs,
-        compact: bool,
-    ) -> Vec<FrontResult> {
-        self.prepare_private_summaries();
-        let prepare = timings::interval(Interval::FrontPrepare);
-        let mut outputs: Vec<Option<FrontResult>> = (0..definitions.len()).map(|_| None).collect();
-        let mut sources = Vec::new();
-        let mut first = BTreeMap::new();
-        let mut duplicates = Vec::new();
-        for (index, definition) in definitions.into_iter().enumerate() {
-            if let Some(&previous) = first.get(&definition) {
-                duplicates.push((index, previous));
-                continue;
-            }
-            first.insert(definition.clone(), index);
-            self.last_phase = None;
-            self.unavailable = None;
-            if compact && let Some(outcome) = self.load_publication(&definition) {
-                outputs[index] = Some(FrontResult::Compact(outcome));
-                continue;
-            }
-            let syntax = self
-                .materialize(&definition)
-                .and_then(|_| self.snapshot(&definition));
-            match syntax {
-                Ok(syntax) if !generation::serial(&syntax) => {
-                    sources.push((index, definition, syntax))
-                }
-                Ok(_) => {
-                    let result = self.mode_query(&definition);
-                    outputs[index] = Some(self.front_output(
-                        definition,
-                        result,
-                        self.unavailable.or(self.last_phase),
-                        None,
-                        compact,
-                    ));
-                }
-                Err(error) => {
-                    outputs[index] = Some(self.front_output(
-                        definition,
-                        Err(error),
-                        self.unavailable.or(self.last_phase),
-                        None,
-                        compact,
-                    ))
-                }
-            }
-        }
-        if sources.is_empty() {
-            for (index, previous) in duplicates {
-                outputs[index] = outputs[previous].clone();
-            }
-            return outputs
-                .into_iter()
-                .map(|result| result.expect("one outcome per input"))
-                .collect();
-        }
-        let mut tasks = Vec::new();
-        for (index, definition, syntax) in sources {
-            let id = DefId::intern(&definition);
-            let text = match self.key_text(&definition, QueryKind::Modes) {
-                Ok(text) => text,
-                Err(error) => {
-                    outputs[index] =
-                        Some(self.front_output(definition, Err(error), None, None, compact));
-                    continue;
-                }
-            };
-            if let Some(entry) = self.modes.get(&id).cloned()
-                && self.memo_valid(&definition, &entry, text)
-            {
-                let reads = entry.memo.reads.clone();
-                let result = self.mode_result(entry);
-                outputs[index] = Some(self.front_output(
-                    definition,
-                    result,
-                    Some(QueryKind::Modes),
-                    Some(reads),
-                    compact,
-                ));
-                continue;
-            }
-            if let Some(entry) = self.load_mode(&definition) {
-                self.modes.insert(id, entry.clone());
-                let reads = entry.memo.reads.clone();
-                let result = self.mode_result(entry);
-                outputs[index] = Some(self.front_output(
-                    definition,
-                    result,
-                    Some(QueryKind::Modes),
-                    Some(reads),
-                    compact,
-                ));
-                continue;
-            }
-            self.syntax_views(&definition)
-                .expect("preflight materialized the syntax");
-            let checked = self
-                .checked
-                .get(&id)
-                .cloned()
-                .filter(|entry| self.memo_valid(&definition, entry, text));
-            let resolution = if checked.is_none() {
-                self.resolutions
-                    .get(&id)
-                    .cloned()
-                    .filter(|entry| self.memo_valid(&definition, entry, text))
-            } else {
-                None
-            };
-            tasks.push(Task {
-                index,
-                definition,
-                syntax,
-                signature: Err(QueryError::NotImplemented),
-                signature_reads: Arc::new(Reads::empty()),
-                registration: None,
-                resolution,
-                checked,
-                text,
-            });
-        }
-        // Restored and resident hits need no worker inputs. In particular,
-        // freezing here would validate the entire universe for an empty batch.
-        if tasks.is_empty() {
-            for (index, previous) in duplicates {
-                outputs[index] = outputs[previous].clone();
-            }
-            return outputs
-                .into_iter()
-                .map(|result| result.expect("one outcome per input"))
-                .collect();
-        }
-        // Validation of dirty predecessors may normalize a signature. Freeze
-        // only afterwards, and never retry a failed header after freezing: a
-        // transient provider failure must not mix two universes in one task.
-        let saved_phase = (self.last_phase, self.unavailable);
-        let snapshot = self.signature_inputs();
-        let declarations = self.frozen_declarations();
-        (self.last_phase, self.unavailable) = saved_phase;
-        for task in &mut tasks {
-            task.signature_reads = self
-                .shared_memo_reads(&task.definition, QueryKind::Signature)
-                .unwrap_or_else(|| Arc::new(Reads::empty()));
-            let id = DefId::intern(&task.definition);
-            task.signature = match snapshot.signature(id) {
-                Some(Ok(signature)) => self
-                    .signatures
-                    .get(&id)
-                    .and_then(|entry| entry.result().ok())
-                    .map(Ok)
-                    .unwrap_or_else(|| Ok(Arc::new(output(signature.clone())))),
-                Some(Err(error)) => Err(error.clone()),
-                None => Err(QueryError::NotImplemented),
-            };
-        }
-        let environment = if compact {
-            self.environment_value()
-        } else {
-            ContentHash::default()
-        };
-        let candidates: BTreeMap<_, _> = if compact {
-            tasks
-                .iter()
-                .map(|task| {
-                    (
-                        task.definition.clone(),
-                        self.candidates_value(&task.definition),
-                    )
-                })
-                .collect()
-        } else {
-            BTreeMap::new()
-        };
-        let capture_store = compact
-            && self.result_store.is_some()
-            && self.s1.is_empty()
-            && self.s1.failure_is_own();
-        let writers: BTreeMap<_, _> = if capture_store {
-            tasks
-                .iter()
-                .filter_map(|task| {
-                    self.mode_writer(&task.definition)
-                        .map(|writer| (task.definition.clone(), writer))
-                })
-                .collect()
-        } else {
-            BTreeMap::new()
-        };
-        drop(prepare);
-        let completed = {
-            let citations = self.citation_source();
-            let worker = Worker {
-                owners: self.source_records(),
-                types: &self.types,
-                memo: &self.memo,
-                snapshot: &snapshot,
-                declarations: &declarations,
-                citations: &citations,
-                sources: &self.sources,
-                items: &self.items,
-                resolver: self.adapters.resolver.as_deref(),
-                checker: self.adapters.checker.as_deref(),
-                modes: self.adapters.modes.as_deref(),
-            };
-            jobs::map(
-                jobs,
-                tasks,
-                |task| task.syntax.tree.expressions.len() as u64,
-                |task| {
-                    let done = worker.run(task);
-                    if compact {
-                        let mut source = FrozenReadSource {
-                            declarations: &declarations,
-                            citations: &citations,
-                            candidates: candidates.get(&done.definition).copied(),
-                            environment,
-                        };
-                        let writer = writers.get(&done.definition);
-                        let mut done = CompactCompleted::capture(
-                            done,
-                            &worker,
-                            self.types.clone(),
-                            &mut source,
-                            writer.map(|writer| &*writer.types),
-                        );
-                        done.write_payload(writer);
-                        WorkerCompleted::Compact(done)
-                    } else {
-                        WorkerCompleted::Resident(done)
-                    }
-                },
-            )
-        };
-        let mut completed = completed;
-        completed.sort_by(|a, b| {
-            a.definition()
-                .cmp(b.definition())
-                .then(a.index().cmp(&b.index()))
-        });
-        for done in completed {
-            let index = done.index();
-            outputs[index] = Some(match done {
-                WorkerCompleted::Resident(done) => {
-                    FrontResult::Resident(self.merge_completed(done))
-                }
-                WorkerCompleted::Compact(done) => {
-                    FrontResult::Compact(self.merge_compact_completed(done))
-                }
-            });
-        }
-        for (index, previous) in duplicates {
-            outputs[index] = outputs[previous].clone();
-        }
-        let outputs: Vec<_> = outputs
-            .into_iter()
-            .map(|result| result.expect("one outcome per input"))
-            .collect();
-        if let Some(last) = outputs.last() {
-            self.last_phase = last.phase();
-            self.unavailable = last.unavailable().then_some(last.phase()).flatten();
-        }
-        outputs
-    }
     /// Publish one completed immutable task through the same tables, receipts,
     /// summary capture and diagnostic metadata as an ordinary P frontier.
+    #[cfg(test)]
     pub(crate) fn merge_completed(&mut self, done: Completed) -> ModeResult {
         let mut inherited = None;
         if let Some(product) = done.resolution {
@@ -1205,6 +825,7 @@ impl QueryEngine {
         };
         self.front_outcome(done.definition, result, Some(done.phase), inherited)
     }
+    #[cfg(test)]
     fn merge_stage<T>(
         &mut self,
         definition: &DefPath,

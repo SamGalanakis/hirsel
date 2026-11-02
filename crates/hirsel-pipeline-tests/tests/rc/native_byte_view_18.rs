@@ -157,7 +157,7 @@ fn nested_and_named_views_agree_on_all_executors() {
                 QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
             let context = default_context();
             let file = engine.sources.add("byte-view.hir", source.into()).unwrap();
-            let checked = check_progress(&mut engine, file, &context).unwrap();
+            let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{name}: {:?}",

@@ -57,7 +57,6 @@ pub use parallel::{
     FrontCheckedOutput, FrontInputFootprint, FrontMemoryRefusal, FrontStorageOutput,
     FrontStorageQueries, ModeResult, PublishedDefinition, PublishedResult,
 };
-pub use s1::{LoweringResult, S1LowerWork};
 pub use scheduled_growth::{FRONT_GROWTH_KIND, FrontGrowthOutput, FrontGrowthQueries};
 pub use scheduled_lower::{
     DefinitionDecodeLayout, FRONT_EVALUATE_KIND, FRONT_LOWER_KIND, FRONT_REGISTRATION_KIND,
@@ -86,15 +85,12 @@ pub(crate) struct OwnedProofSource {
     _proof: Option<Arc<FrontProofExport>>,
     checked: Option<(Arc<FrontCheckScope>, Arc<FrontCheckedSignatures>)>,
 }
-/// One S1 root's captured outcome. Phase, tooling limit and complete execution
-/// reads belong to this root, including when another root finished afterward.
-#[derive(Clone, Debug)]
-pub struct MaterializationResult {
-    pub definition: DefPath,
-    pub result: Result<hirsel_tir::Materialized, QueryError>,
-    pub phase: Option<QueryKind>,
-    pub limit: Option<hirsel_tir::ToolingLimit>,
-    pub reads: Arc<Reads>,
+/// Physical work performed by the immutable Lower/Evaluate request producers.
+#[derive(Clone, Copy, Default)]
+struct RequestLowerWork {
+    query_attempts: u64,
+    adapter_calls: u64,
+    validation_runs: u64,
 }
 
 mod dead_arms;
@@ -379,11 +375,11 @@ pub struct QueryEngine {
     recomputes: BTreeMap<(DefPath, QueryKind), usize>,
     scalar_lower_calls: hirsel_syntax::DefMap<u64>,
     scalar_validation_runs: hirsel_syntax::DefMap<u64>,
-    s1_lower_work: hirsel_syntax::DefMap<S1LowerWork>,
     catalog: catalog::Catalog,
     pub unavailable: Option<QueryKind>,
     /// Accepted front facts and Lower outcomes this engine's scheduled
     /// Checks carry from one fresh source graph to the next.
+    request_lower_work: hirsel_syntax::DefMap<RequestLowerWork>,
     pub(crate) source_carry: Option<crate::requests::source_graph::SourceCarry>,
     pub last_phase: Option<QueryKind>,
     /// Interpretation refuses to enter a definition outside its entry's
@@ -469,7 +465,6 @@ impl Drop for QueryEngine {
             "engine: validation work",
             take(&mut self.scalar_validation_runs),
         );
-        released("engine: S1 lower work", take(&mut self.s1_lower_work));
         released("engine: constant values", take(&mut self.constant_values));
         released("engine: sources", take(&mut self.sources));
         released("engine: adapters", take(&mut self.adapters));
@@ -750,10 +745,10 @@ impl QueryEngine {
             recomputes: BTreeMap::new(),
             scalar_lower_calls: Default::default(),
             scalar_validation_runs: Default::default(),
-            s1_lower_work: Default::default(),
             catalog: catalog::Catalog::with_ownership(source_ownership.clone()),
             source_ownership,
             unavailable: None,
+            request_lower_work: Default::default(),
             source_carry: None,
             last_phase: None,
             closure_assertions: cfg!(debug_assertions),
@@ -871,7 +866,15 @@ impl QueryEngine {
             .get(&DefId::intern(definition))
             .copied()
             .unwrap_or(0)
-            + self.s1_lower_work(definition).validation_runs
+            + self.request_lower_work(definition).validation_runs
+    }
+
+    /// Work performed by scheduled Lower requests, independently of scalar holds.
+    fn request_lower_work(&self, path: &DefPath) -> RequestLowerWork {
+        self.request_lower_work
+            .get(&DefId::intern(path))
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Inventory the distinct query records read or written by one host request.

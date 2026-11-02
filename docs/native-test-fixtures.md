@@ -45,11 +45,10 @@ when a sibling successfully writes another snapshot file, use
 resolved from the snapshot root, including their mount selectors. A write in
 another `test.dir` tree cannot release this read.
 
-Run the reference and checked interpreter with `simulation.clone()`. Freeze and
-validate the loaded program's native input, select `Options` and construct a
-`Toolchain` as in the existing native integration tests. `differential_in` takes
+Run the reference and checked interpreter with `simulation.clone()`. Select a request-produced Ready program, `Options` and a
+`Toolchain` as in the existing native integration tests. `differential_ready` takes
 the same `fixture` for checked H, LLVM and Cranelift. For explicit recording and
-cross-engine replay, use the public link/launch pair after `build`:
+cross-engine replay, use the public link/launch pair over that Ready program:
 
 ```rust,ignore
 let objects = emit_backend_objects(
@@ -76,7 +75,7 @@ link and launch. `link_runnable` alone binds its default empty-Args harness;
 `link_fixture_runnable` binds the fixture's Args and mounts. The launch creates
 fresh in-memory files each time. Mutations never reach a host mount. Select
 `Backend::Llvm` to emit LLVM objects; the remaining recipe is identical.
-`real_io_replay_in` and `runner_oracle_in` also accept this extended fixture.
+`real_io_replay_ready` and `runner_oracle_ready` also accept this extended fixture.
 
 Snapshot run records use a stable synthetic host designator, which the test
 launcher never admits as host authority. This keeps run bindings identical

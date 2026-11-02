@@ -18,7 +18,7 @@ fn check(text: &str) -> (QueryEngine, CheckOutput) {
         .sources
         .add("expression-generics.hir", text.into())
         .unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(output.completion, CheckCompletion::Complete);
     (engine, output)
 }
@@ -109,7 +109,7 @@ fn rejected_with_context(text: &str, primary: &str, other_errors: &[(&str, &str)
     }
     assert!(!human.contains("qualify its constructor"));
     let file = span.file;
-    let warm = check_progress(&mut engine, file, &default_context()).unwrap();
+    let warm = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(warm.completion, CheckCompletion::Complete);
     assert_eq!(
         output

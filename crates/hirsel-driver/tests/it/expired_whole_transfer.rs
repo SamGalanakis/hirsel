@@ -252,7 +252,7 @@ fn whole_transfers_execute_on_h_llvm_and_cranelift() {
                 "{source}\npub fn main() -> Result[(), ()] {{ probe(take [0u64]); Ok(()) }}\n"
             );
             let file = engine.sources.add("execute.hir", source).unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{name}: {:?}",

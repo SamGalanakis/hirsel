@@ -8,7 +8,7 @@ mod source_std;
 use hirsel_driver::native::{
     Launched, OptLevel, Options, Partition, Sites, Toolchain, build, link, observe,
 };
-use hirsel_engine::{check_progress, default_context, entry_path, with_compiler_stack};
+use hirsel_engine::{default_context, entry_path, source_check_request, with_compiler_stack};
 use hirsel_lir::layout_types::TargetSpec;
 use hirsel_rt::io::Request;
 use std::io::{Read, Write};
@@ -209,7 +209,7 @@ fn campaign(targets: Vec<TargetSpec>, opts: &'static [OptLevel], scratch_name: &
         let mut engine = source_std::engine();
         let context = default_context();
         let file = engine.sources.add("net-stream.hir", source).unwrap();
-        let checked = check_progress(&mut engine, file, &context).unwrap();
+        let checked = source_check_request(&mut engine, file, &context).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&context);
         let input = engine.export_native_input().unwrap();
@@ -474,7 +474,7 @@ fn read_into_body_calls_its_fixed_entry_and_validation_refuses_forged_calls() {
         let mut engine = source_std::engine();
         let context = default_context();
         let file = engine.sources.add("read-into.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &context).unwrap();
+        let checked = source_check_request(&mut engine, file, &context).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let input = engine.import_native_input(input).unwrap();

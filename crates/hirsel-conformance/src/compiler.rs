@@ -98,50 +98,31 @@ fn source_rejection(
     };
     (verdict(expect, &actual, &observation.actual), observation)
 }
-/// Programs whose request Check(Reachable) ends Incomplete at Lower with no
-/// diagnostic while the loaded-program check completes: they keep that path
-/// until the request divergence is fixed (corpus-requests-d1d-351 REPORT.md).
-const REQUEST_LOWER_DIVERGENCES: &[&str] = &[
-    "DROP/DROP-2-std-sorted-map-remove-run.hir",
-    "MEM/MEM-6-std-sorted-map-arena-get-run.hir",
-    "MODE/MODE-2-std-container-empty-run.hir",
-    "PROV/PROV-1-facade-alias-package-ok.hir",
-    "SEM/SEM-5-std-sorted-map-access-run.hir",
-    "SEM/SEM-5-std-sorted-map-owned-cycle-run.hir",
-    "SEM/SEM-5-std-sorted-map-string-get-run.hir",
-];
 fn evaluate_on_compiler_thread(
     path: &Path,
     expect: &Expect,
     hash_seed: u64,
 ) -> (Status, Observation) {
     let compiler = verifying_compiler();
-    let mut requested = None;
-    let diverges = REQUEST_LOWER_DIVERGENCES
-        .iter()
-        .any(|case| path.ends_with(case));
-    let loaded = if !diverges {
-        let requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
-        let compiler = requests.compiler().clone();
-        match hirsel_engine::requests::observe_inputs(
-            requests.input_limits(),
-            requests.capture_attempts(),
-            |inputs| compiler.load_program_inputs(path, inputs, false),
-        ) {
-            Ok((loaded, inputs)) => {
-                requested = Some(RequestedProgram {
-                    path: path.to_owned(),
-                    inputs: inputs.into(),
-                    requests,
-                });
-                loaded
-            }
-            Err(_) => Err(ToolError::Runtime(
-                "corpus inputs changed during capture".into(),
-            )),
+    let requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
+    let input_compiler = requests.compiler().clone();
+    let (loaded, inputs) = match hirsel_engine::requests::observe_inputs(
+        requests.input_limits(),
+        requests.capture_attempts(),
+        |inputs| input_compiler.load_program_inputs(path, inputs, false),
+    ) {
+        Ok(observed) => observed,
+        Err(_) => {
+            return (
+                Status::Fail("corpus inputs changed during capture".into()),
+                Observation::default(),
+            );
         }
-    } else {
-        compiler.load_program(path)
+    };
+    let mut requested = RequestedProgram {
+        path: path.to_owned(),
+        inputs: inputs.into(),
+        requests,
     };
     let mut program = match loaded {
         Ok(program) => program,
@@ -182,39 +163,26 @@ fn evaluate_on_compiler_thread(
             ..Default::default()
         };
         let discovered = (|| {
-            if let Some(requested) = &mut requested {
-                let discovery = hirsel_driver::testing::discover(
-                    &mut requested.requests,
-                    path,
-                    requested.inputs.clone(),
-                    &[],
-                    None,
-                    hirsel_driver::testing::Selection::Tests,
-                )?;
-                requested.inputs =
-                    discovery.execution_inputs(requested.requests.input_limits().bytes)?;
-                let tests = discovery.tests;
-                if tests.is_empty() {
-                    return Ok((tests, None));
-                }
-                let output = requested.execute(CompileOperation::TirBatch {
-                    definitions: tests.iter().map(|test| test.entry.clone()).collect(),
-                })?;
-                let CompileResult::TirBatch(batch) = &output.result else {
-                    return Err(ToolError::Runtime(
-                        "corpus tests returned another operation".into(),
-                    ));
-                };
-                Ok((tests, Some(batch.clone())))
-            } else {
-                hirsel_driver::testing::discover_source(
-                    &mut program,
-                    &[],
-                    None,
-                    hirsel_driver::testing::Selection::Tests,
-                )
-                .map(|tests| (tests, None))
-            }
+            let discovery = hirsel_driver::testing::discover(
+                &mut requested.requests,
+                path,
+                requested.inputs.clone(),
+                &[],
+                None,
+                hirsel_driver::testing::Selection::Tests,
+            )?;
+            requested.inputs =
+                discovery.execution_inputs(requested.requests.input_limits().bytes)?;
+            let tests = discovery.tests;
+            let output = requested.execute(CompileOperation::TirBatch {
+                definitions: tests.iter().map(|test| test.entry.clone()).collect(),
+            })?;
+            let CompileResult::TirBatch(batch) = &output.result else {
+                return Err(ToolError::Runtime(
+                    "corpus tests returned another operation".into(),
+                ));
+            };
+            Ok((tests, batch.clone()))
         })();
         let (tests, batch) = match discovered {
             Ok((tests, batch)) if !tests.is_empty() => (tests, batch),
@@ -228,12 +196,8 @@ fn evaluate_on_compiler_thread(
         };
         for test in &tests {
             let mut execute = |checked| {
-                if let Some(batch) = &batch {
-                    let input = batch.entry(&test.entry)?;
-                    hirsel_driver::testing::execute(&input, test, checked, hash_seed, limits)
-                } else {
-                    hirsel_driver::testing::execute_source(&mut program, test, checked, hash_seed)
-                }
+                let input = batch.entry(&test.entry)?;
+                hirsel_driver::testing::execute(&input, test, checked, hash_seed, limits)
             };
             let ordinary = execute(false);
             let checked = execute(true);
@@ -277,11 +241,7 @@ fn evaluate_on_compiler_thread(
         .unwrap()
         .1
         .clone();
-    let entry = if requested.is_some() {
-        program.entry.clone()
-    } else {
-        crate::selected_entry(&text, &context)
-    };
+    let entry = crate::selected_entry(&text, &context);
     // The verdict is `hirsel check`'s, which lowers only what compile-time
     // evaluation executes. Run and build then lower and validate every
     // reachable body, which must not change a single diagnostic.
@@ -291,7 +251,7 @@ fn evaluate_on_compiler_thread(
     let mut rejected = None;
     let checked = (|| {
         use hirsel_engine::LoweringPolicy::{Comptime, Reachable};
-        if let Some(requested) = &mut requested {
+        {
             let (comptime, phase) = match requested.check(Comptime) {
                 Ok(checked) => checked,
                 Err(ToolError::Query {
@@ -324,20 +284,6 @@ fn evaluate_on_compiler_thread(
             };
             return Ok((comptime, reachable.map_err(|e| format!("{e:?}"))?.0));
         }
-        let comptime = program.check(Comptime).map_err(|e| format!("{e:?}"))?;
-        let reachable = if comptime
-            .diagnostics
-            .iter()
-            .any(|d| d.severity == Severity::Error)
-        {
-            verifying_compiler()
-                .load_program(path)
-                .map_err(|e| e.to_string())?
-                .check(Reachable)
-        } else {
-            program.check(Reachable)
-        };
-        Ok::<_, String>((comptime, reachable.map_err(|e| format!("{e:?}"))?))
     })();
     if let Some(rejected) = rejected {
         return rejected;
@@ -377,9 +323,7 @@ fn evaluate_on_compiler_thread(
             return (Status::Fail(observation.actual.clone()), observation);
         }
     };
-    if requested.is_some() {
-        engine.sources = output.sources.clone();
-    }
+    engine.sources = output.sources.clone();
     if let Some(d) = output
         .diagnostics
         .iter()
@@ -457,8 +401,8 @@ fn evaluate_on_compiler_thread(
         Ok(simulation) => simulation,
         Err(error) => return (Status::Fail(error), observation),
     };
-    observation.phase = "interpretation".into();
-    let prepared = if let Some(requested) = &mut requested {
+    observation.phase = "TIR preparation".into();
+    let prepared = {
         let prepared = requested.execute(CompileOperation::Tir {
             definition: Some(config.entry.clone()),
         });
@@ -466,7 +410,7 @@ fn evaluate_on_compiler_thread(
             Ok(output) => match &output.result {
                 CompileResult::Tir(input) => {
                     engine.sources = input.sources.clone();
-                    Some(input.clone())
+                    input.clone()
                 }
                 _ => {
                     observation.actual = "corpus TIR returned another operation".into();
@@ -475,9 +419,10 @@ fn evaluate_on_compiler_thread(
             },
             Err(ToolError::Query {
                 error: QueryError::NotImplemented,
+                phase,
                 ..
             }) => {
-                observation.actual = "not implemented".into();
+                observation.actual = format!("TIR request unavailable at {phase:?}");
                 return (Status::NotImplemented, observation);
             }
             Err(error) => {
@@ -485,17 +430,10 @@ fn evaluate_on_compiler_thread(
                 return (Status::Fail(observation.actual.clone()), observation);
             }
         }
-    } else {
-        None
     };
+    observation.phase = "interpretation".into();
     let mut execute = |checked| {
-        if let Some(input) = &prepared {
-            hirsel_driver::testing::observe_tir(input, &config, simulation.clone(), limits, checked)
-        } else if checked {
-            hirsel_engine::run_observed_checked(&mut engine, &config, simulation.clone())
-        } else {
-            hirsel_engine::run_observed_snapshot(&mut engine, &config, simulation.clone())
-        }
+        hirsel_driver::testing::observe_tir(&prepared, &config, simulation.clone(), limits, checked)
     };
     let execution = match execute(false) {
         Ok(outcome) => outcome,

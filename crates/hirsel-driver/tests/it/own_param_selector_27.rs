@@ -9,7 +9,7 @@ fn check(source: &str, expected: Option<&str>) {
             .sources
             .add("own-selector.hir", source.into())
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         let rules: Vec<_> = output.diagnostics.iter().map(|d| d.rule.as_str()).collect();
         assert_eq!(
@@ -181,7 +181,7 @@ fn verifier_rejects_forged_own_selectors() {
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("forged-selector.hir", "fn pure() uses {} {}\nfn choose() uses {} {let callback=fn(f:fn()->(),g:fn()->()) uses {f} {f()};callback(pure,pure)}\npub fn main() uses {} {choose()}".into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let mut signatures = hirsel_validate::SignatureMap::new(input.types.clone());

@@ -1,0 +1,372 @@
+//! Request executor fixtures for tests that start with an indexed engine.
+use hirsel_engine::requests::source_graph::InstalledSource;
+use hirsel_engine::{requests::source_graph::*, runtime::*, store::*, *};
+use hirsel_intern::jobs::Jobs;
+use std::{collections::BTreeMap, sync::Arc};
+
+pub struct Graph {
+    pub installed: InstalledSource,
+    pub runtime: AdmittedRuntime,
+    pub check: Arc<FrontCheckQueries>,
+    _store: Arc<RequestStore>,
+    operation: Option<StoreOperation>,
+}
+impl Graph {
+    pub fn new(engine: &mut QueryEngine, jobs: Jobs) -> Self {
+        let (budget, cap) = host_budget();
+        let limits = host_limits(cap, jobs.get());
+        let mut loading = LoadingAdmission::reserve(budget, limits, 0).unwrap();
+        let store = Arc::new(
+            RequestStore::with_scratch_and_verifier_transport(
+                engine
+                    .product_store()
+                    .unwrap_or_else(|| Arc::new(NoneStore)),
+                loading.take_transport(),
+                &std::env::temp_dir(),
+                limits.runtime_bytes + limits.snapshot_bytes + limits.transport_bytes,
+            )
+            .unwrap(),
+        );
+        let operation = store.operation_scope();
+        let previous = engine
+            .product_store()
+            .unwrap_or_else(|| Arc::new(NoneStore));
+        let owned = std::mem::replace(
+            engine,
+            QueryEngine::new(default_environment(), Default::default()),
+        );
+        *engine = owned.with_result_store(store.clone());
+        let definitions = engine.indexed_definitions();
+        let mut files = BTreeMap::new();
+        for path in &definitions {
+            let syntax = engine.parse_definition(path).unwrap().value;
+            let file = engine.sources.resolve(syntax.item.name_span).file;
+            files.insert(
+                file,
+                FileContext {
+                    package: path.0.package.clone(),
+                    modules: path.0.modules.clone(),
+                },
+            );
+        }
+        let files = files
+            .into_iter()
+            .map(|(file, context)| (file, context, LoweringPolicy::Comptime))
+            .collect::<Vec<_>>();
+        let selection = SourceSelection {
+            input_bytes: source_bytes(&engine.sources, &files),
+            files,
+            entry: definitions
+                .first()
+                .cloned()
+                .unwrap_or_else(|| entry_path(&default_context())),
+            lint_package: None,
+            unsafe_ffi: vec![],
+        };
+        let mut installed = install(
+            engine,
+            &selection,
+            SourceShape {
+                storage: true,
+                ..Default::default()
+            },
+            jobs,
+            limits,
+            &BudgetHost(budget),
+            loading,
+            &*store,
+            None,
+        )
+        .unwrap();
+        let check = installed.check(engine, &selection).unwrap();
+        let allowance = engine.release_private_inference_admission().unwrap();
+        let mut runtime = AdmittedRuntime::with_query_capacity(
+            jobs,
+            allowance,
+            installed.errors,
+            installed.plan.query_capacity,
+        )
+        .unwrap();
+        installed.register(&mut runtime, &check).unwrap();
+        let owned = std::mem::replace(
+            engine,
+            QueryEngine::new(default_environment(), Default::default()),
+        );
+        *engine = owned.with_result_store(previous);
+        Self {
+            installed,
+            runtime,
+            check,
+            _store: store,
+            operation: Some(operation),
+        }
+    }
+    pub fn finish(&mut self) {
+        self.runtime.shutdown();
+        self.operation.take().unwrap().finish().unwrap();
+    }
+    pub fn body(&mut self, path: &DefPath) -> ModeResult {
+        let query = self.installed.front.body_query(path).unwrap();
+        let request = self.runtime.request(&[query]);
+        let result = self
+            .runtime
+            .wait(request)
+            .map(|mut products| products.remove(0));
+        self.installed
+            .front
+            .outcome(result)
+            .expect("body request has an outcome")
+            .outcome
+    }
+    pub fn bodies(&mut self, paths: &[DefPath]) -> Vec<ModeResult> {
+        let requests: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                let query = self.installed.front.body_query(path).unwrap();
+                self.runtime.request(&[query])
+            })
+            .collect();
+        requests
+            .into_iter()
+            .map(|request| {
+                let result = self
+                    .runtime
+                    .wait(request)
+                    .map(|mut products| products.remove(0));
+                self.installed
+                    .front
+                    .outcome(result)
+                    .expect("body request has an outcome")
+                    .outcome
+            })
+            .collect()
+    }
+    pub fn lower(&mut self, path: &DefPath) -> Result<FrontLowerOutput, QueryError> {
+        let query = self
+            .installed
+            .lower
+            .query(path)
+            .ok_or(QueryError::NotImplemented)?;
+        let request = self.runtime.request(&[query]);
+        match self.runtime.wait(request) {
+            Ok(mut products) => self
+                .installed
+                .lower
+                .outcome(products.remove(0))
+                .ok_or(QueryError::NotImplemented),
+            Err(failure) => Err(self
+                .installed
+                .lower
+                .failure(failure)
+                .or_else(|| {
+                    self.installed
+                        .front
+                        .outcome(Err(failure))
+                        .and_then(|outcome| outcome.outcome.result.err())
+                })
+                .unwrap_or(QueryError::NotImplemented)),
+        }
+    }
+    pub fn constant(&mut self, path: &DefPath) -> Result<hirsel_tir::Materialized, QueryError> {
+        let query = self
+            .installed
+            .lower
+            .evaluate_query(path)
+            .ok_or(QueryError::NotImplemented)?;
+        let request = self.runtime.request(&[query]);
+        match self.runtime.wait(request) {
+            Ok(_) => self
+                .installed
+                .lower
+                .settled_constant(path, &[])
+                .map(|value| (*value).clone()),
+            Err(failure) => Err(self
+                .installed
+                .lower
+                .failure(failure)
+                .or_else(|| {
+                    self.installed
+                        .front
+                        .outcome(Err(failure))
+                        .and_then(|outcome| outcome.outcome.result.err())
+                })
+                .unwrap_or(QueryError::NotImplemented)),
+        }
+    }
+}
+impl Drop for Graph {
+    fn drop(&mut self) {
+        self.runtime.shutdown();
+    }
+}
+
+pub fn front(engine: &mut QueryEngine, paths: Vec<DefPath>, jobs: Jobs) -> Vec<ModeResult> {
+    let mut graph = Graph::new(engine, jobs);
+    let outputs = graph.bodies(&paths);
+    graph.finish();
+    outputs
+}
+pub fn publications(
+    engine: &mut QueryEngine,
+    paths: Vec<DefPath>,
+    jobs: Jobs,
+    retention: hirsel_engine::memo::Retention,
+) -> Vec<PublishedResult> {
+    engine.set_retention(retention);
+    let mut graph = Graph::new(engine, jobs);
+    let outputs = paths
+        .iter()
+        .map(|path| {
+            let query = graph.installed.front.query(path).unwrap();
+            let request = graph.runtime.request(&[query]);
+            let selected = graph
+                .runtime
+                .wait(request)
+                .map(|mut outputs| outputs.remove(0));
+            graph
+                .installed
+                .front
+                .publication(selected)
+                .expect("front request has compact publication")
+        })
+        .collect();
+    graph.finish();
+    outputs
+}
+
+#[derive(Debug)]
+pub struct LowerOutcome<T> {
+    pub definition: DefPath,
+    pub result: Result<QueryOutput<T>, QueryError>,
+    pub phase: Option<QueryKind>,
+    pub reads: Arc<Reads>,
+    pub depth: Option<hirsel_engine::memo::DepthEvidence<hirsel_span::Span>>,
+}
+#[derive(Debug)]
+pub struct ConstantOutcome {
+    pub definition: DefPath,
+    pub result: Result<hirsel_tir::Materialized, QueryError>,
+    pub phase: Option<QueryKind>,
+    pub reads: Arc<Reads>,
+}
+pub fn constants(
+    engine: &mut QueryEngine,
+    paths: Vec<DefPath>,
+    jobs: Jobs,
+) -> Vec<Result<hirsel_tir::Materialized, QueryError>> {
+    let mut graph = Graph::new(engine, jobs);
+    let outputs = paths.iter().map(|path| graph.constant(path)).collect();
+    graph.finish();
+    outputs
+}
+pub fn constant_outcomes(
+    engine: &mut QueryEngine,
+    paths: Vec<DefPath>,
+    jobs: Jobs,
+) -> Vec<ConstantOutcome> {
+    let mut graph = Graph::new(engine, jobs);
+    let outputs = paths
+        .into_iter()
+        .map(|definition| {
+            let result = graph.constant(&definition);
+            let phase = if result.is_ok() {
+                Some(QueryKind::Lower)
+            } else {
+                graph.body(&definition).phase.or(Some(QueryKind::Lower))
+            };
+            let reads = graph
+                .installed
+                .lower
+                .settled_reads(&definition, QueryKind::Evaluate)
+                .unwrap_or_else(|| Arc::new(Reads::empty()));
+            ConstantOutcome {
+                definition,
+                result,
+                phase,
+                reads,
+            }
+        })
+        .collect();
+    graph.finish();
+    outputs
+}
+pub fn lowers(
+    engine: &mut QueryEngine,
+    paths: Vec<DefPath>,
+    jobs: Jobs,
+) -> Vec<LowerOutcome<hirsel_tir::DefinitionRef>> {
+    lower_requests(engine, paths, jobs, false)
+}
+pub fn lower_prefix(
+    engine: &mut QueryEngine,
+    paths: Vec<DefPath>,
+    jobs: Jobs,
+) -> Vec<LowerOutcome<hirsel_tir::DefinitionRef>> {
+    lower_requests(engine, paths, jobs, true)
+}
+fn lower_requests(
+    engine: &mut QueryEngine,
+    paths: Vec<DefPath>,
+    jobs: Jobs,
+    prefix: bool,
+) -> Vec<LowerOutcome<hirsel_tir::DefinitionRef>> {
+    let mut graph = Graph::new(engine, jobs);
+    let mut outcomes = Vec::new();
+    for definition in paths {
+        let (result, reads, depth, phase) = match graph.lower(&definition) {
+            Ok(output) => (
+                Ok(output.output),
+                Arc::new(output.reads),
+                Some(output.depth),
+                Some(QueryKind::Lower),
+            ),
+            Err(error) => {
+                let phase = graph
+                    .installed
+                    .front
+                    .body_query(&definition)
+                    .and_then(|_| graph.body(&definition).phase)
+                    .or(Some(QueryKind::Lower));
+                let reads = graph
+                    .installed
+                    .lower
+                    .settled_reads(&definition, QueryKind::Lower)
+                    .unwrap_or_else(|| Arc::new(Reads::empty()));
+                (Err(error), reads, None, phase)
+            }
+        };
+        let failed = result.is_err();
+        outcomes.push(LowerOutcome {
+            definition,
+            result,
+            reads,
+            depth,
+            phase,
+        });
+        if prefix && failed {
+            break;
+        }
+    }
+    graph.finish();
+    outcomes
+}
+pub fn checked_prefix(
+    engine: &mut QueryEngine,
+    paths: Vec<DefPath>,
+    jobs: Jobs,
+) -> Vec<LowerOutcome<()>> {
+    lower_prefix(engine, paths, jobs)
+        .into_iter()
+        .map(|outcome| LowerOutcome {
+            definition: outcome.definition,
+            result: outcome.result.map(|output| QueryOutput {
+                value: (),
+                diagnostics: output.diagnostics,
+                dependencies: output.dependencies,
+            }),
+            reads: outcome.reads,
+            depth: outcome.depth,
+            phase: outcome.phase,
+        })
+        .collect()
+}

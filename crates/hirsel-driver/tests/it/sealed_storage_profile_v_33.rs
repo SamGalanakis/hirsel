@@ -18,7 +18,7 @@ fn fixture_state() -> &'static Fixture {
         let source = "fn clone_heap(xs:List[u64])->unique List[u64]{unique xs}\npub fn main(){let mut r=arena.with(fn(a:Arena)->Region[List[u64]]{let root:List[u64] in a=[7u64];arena.seal(take a,take root)});let independent=region.with(mut r,fn(root:List[u64])->unique List[u64]{let fresh:List[u64] in heap=[8u64];clone_heap(fresh)});}";
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("storage-profile-v.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
@@ -145,7 +145,7 @@ fn export_and_import(source: &str) {
             .sources
             .add("storage-context-v.hir", source.into())
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
@@ -180,7 +180,7 @@ fn captured_copy_fixture_state() -> &'static Fixture {
         let source = "fn held(take payload:Bytes)->fn()->unique Bytes{fn()->unique Bytes{let detached:Bytes in heap=copy_to(heap,payload);unique detached}}\npub fn main(){let mut r=arena.with(fn(a:Arena)->Region[fn()->unique Bytes]{let payload:Bytes in heap=copy_to(heap,b\"abc\");let root=held(take payload);arena.seal(take a,take root)});let independent=region.with(mut r,fn(view:fn()->unique Bytes)->unique Bytes{view()});}";
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("storage-root-capture-v.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
@@ -251,7 +251,7 @@ fn destination_fixture_state() -> &'static Fixture {
         let source = "pub fn main(){let mut r=arena.with(fn(a:Arena)->Region[List[u64]]{let root:List[u64] in a=[7u64];arena.seal(take a,take root)});let independent=region.with(mut r,fn(root:List[u64])->unique List[u64]{let fresh:List[u64] in heap=[list.len(root)];unique fresh});}";
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("storage-destination-v.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
@@ -328,7 +328,7 @@ fn nested_copy_fixture_state() -> &'static Fixture {
         let source = "fn leaf(take payload:Bytes)->fn()->unique Bytes{fn()->unique Bytes{let fresh:Bytes in heap=copy_to(heap,payload);unique fresh}}\nfn wrap(take f:fn()->unique Bytes)->fn()->unique Bytes{fn()->unique Bytes{f()}}\nfn held(take payload:Bytes)->fn()->unique Bytes{let f=leaf(take payload);let middle=wrap(take f);wrap(take middle)}\npub fn main(){let mut r=arena.with(fn(a:Arena)->Region[fn()->unique Bytes]{let payload:Bytes in heap=copy_to(heap,b\"abc\");let root=held(take payload);arena.seal(take a,take root)});let independent=region.with(mut r,fn(view:fn()->unique Bytes)->unique Bytes{view()});}";
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("storage-nested-capture-v.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
@@ -394,7 +394,7 @@ fn shared_callback_fixture_state() -> &'static Fixture {
         let source = "pub fn main(){let mut r=arena.with(fn(a:Arena)->Region[List[u64]]{let root:List[u64] in a=[7u64];arena.seal(take a,take root)});let n=region.with(mut r,fn(root:List[u64])->u64{let seed:unique Bytes=unique b\"x\";let s=shared.freeze(take seed);shared.with(s,fn(value:Bytes)->u64{let fresh:List[u64] in heap=[bytes.len(value)];let cloned=unique fresh;list.len(cloned)+list.len(root)})});}";
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("storage-shared-callback-v.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
@@ -422,7 +422,7 @@ fn shared_allocation_fixture_state() -> &'static Fixture {
         let source = "fn clone_heap(xs:List[u64])->unique List[u64]{unique xs}\npub fn main(){let mut r=arena.with(fn(a:Arena)->Region[List[u64]]{let root:List[u64] in a=[7u64];arena.seal(take a,take root)});let n=region.with(mut r,fn(root:List[u64])->u64{let seed:unique Bytes=unique b\"x\";let s=shared.freeze(take seed);shared.with(s,fn(value:Bytes)->u64{let fresh:List[u64] in heap=[bytes.len(value)];let cloned=clone_heap(fresh);list.len(cloned)+list.len(root)})});}";
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("storage-shared-allocation-v.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
@@ -526,7 +526,7 @@ fn copied_branch_fixture_state() -> &'static Fixture {
         let source = "fn clone_heap(xs:Bytes)->unique Bytes{unique xs}\nfn leaf(take payload:Bytes)->fn()->u64{fn()->u64{let fresh:Bytes in heap=copy_to(heap,payload);let copied=clone_heap(fresh);bytes.len(copied)}}\nfn choose(flag:bool)->Region[fn()->u64]{arena.with(fn(a:Arena)->Region[fn()->u64]{let payload:Bytes in heap=copy_to(heap,b\"abc\");let f=leaf(take payload);let root:fn()->u64 in heap=if flag{copy_to(heap,f)}else{fn()->u64{0u64}};arena.seal(take a,take root)})}\npub fn main(){let mut r=choose(true);let n=region.with(mut r,fn(view:fn()->u64)->u64{view()});}";
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("storage-copied-branch-v.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
@@ -649,7 +649,7 @@ fn map_helper_fixture_state() -> &'static Fixture {
         let source = format!("fn clone_heap(xs:Bytes)->unique Bytes{{unique xs}}\n{}", super::sealed_storage_placement_33::helper_map_callable_branch("fn leaf(take payload:Bytes)->fn()->u64{fn()->u64{let fresh:Bytes in heap=copy_to(heap,payload);let copied=clone_heap(fresh);bytes.len(copied)}}", true));
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("storage-map-helper-v.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
@@ -797,7 +797,7 @@ fn map_owned_capture_fixture_state() -> &'static Fixture {
         let source=format!("fn clone_heap(xs:Bytes)->unique Bytes{{unique xs}}\n{}",super::sealed_storage_placement_33::owned_capture_map_callable_branch("fn leaf(take payload:Bytes)->fn()->u64{fn()->u64{let fresh:Bytes in heap=copy_to(heap,payload);let copied=clone_heap(fresh);bytes.len(copied)}}"));
         let mut engine=QueryEngine::new(default_environment(),compiler_adapters());
         let file=engine.sources.add("storage-map-owned-capture-v.hir",source.into()).unwrap();
-        let output=check_progress(&mut engine,file,&default_context()).unwrap();
+        let output=source_check_request(&mut engine,file,&default_context()).unwrap();
         assert_eq!(output.completion,CheckCompletion::Complete);assert!(output.diagnostics.is_empty(),"{:?}",output.diagnostics);
         let input=engine.export_native_input().unwrap();Fixture{input,engine:Mutex::new(engine)}
     }))
@@ -874,7 +874,7 @@ fn map_nested_fixture_state() -> &'static Fixture {
                 .sources
                 .add("storage-map-nested-v.hir", source.into())
                 .unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(output.completion, CheckCompletion::Complete);
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
             let input = engine.export_native_input().unwrap();
@@ -920,7 +920,7 @@ fn factory_join_fixture_state() -> &'static Fixture {
                 .sources
                 .add("storage-factory-join-v.hir", source.into())
                 .unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(output.completion, CheckCompletion::Complete);
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
             let input = engine.export_native_input().unwrap();
@@ -960,7 +960,7 @@ fn ct5_fixture_state() -> &'static Fixture {
         let mut engine=QueryEngine::new(default_environment(),compiler_adapters());
         let source=format!("fn clone_heap(xs:List[u64])->unique List[u64]{{unique xs}}\n{}",super::sealed_storage_placement_33::ct5_storage_program(false).replace("list.len(v.items)","let independent:List[u64] in heap=[9u64];let cloned=clone_heap(independent);list.len(cloned)+list.len(v.items)"));
         let file=engine.sources.add("storage-ct5-v.hir",source.into()).unwrap();
-        let output=check_progress(&mut engine,file,&default_context()).unwrap();assert_eq!(output.completion,CheckCompletion::Complete);assert!(output.diagnostics.is_empty(),"{:?}",output.diagnostics);
+        let output=source_check_request(&mut engine,file,&default_context()).unwrap();assert_eq!(output.completion,CheckCompletion::Complete);assert!(output.diagnostics.is_empty(),"{:?}",output.diagnostics);
         let input=engine.export_native_input().unwrap();assert_eq!(input.instance_bodies.declarations.len(),1);
         Fixture{input,engine:Mutex::new(engine)}
     }))
@@ -1111,7 +1111,7 @@ fn ct5_helper_fixture_state() -> &'static Fixture {
             .replace("generated_len(root)", "forward(root)")
             .replace("list.len(v.items)", "let independent:List[u64] in heap=[9u64];let cloned=clone_heap(independent);list.len(cloned)+list.len(v.items)"));
         let file = engine.sources.add("storage-ct5-helper-v.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
@@ -1300,7 +1300,7 @@ fn dictionary_fixture_state() -> &'static Fixture {
         let source = "type ReadOps{read:fn(List[u64])->u64 uses{}}\nconst READ:ReadOps=ReadOps(read:read);\nfn clone_heap(xs:List[u64])->unique List[u64]{unique xs}\nfn read(xs:List[u64])->u64 uses{}{let fresh:List[u64] in heap=[list.len(xs)];let copied=clone_heap(fresh);list.len(copied)}\npub fn main(){let mut r=arena.with(fn(a:Arena)->Region[List[u64]]{let root:List[u64] in a=[7u64];arena.seal(take a,take root)});let n=region.with(mut r,fn(root:List[u64])->u64{let ops=READ;ops.read(root)});}";
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("storage-dictionary-v.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
@@ -1463,7 +1463,7 @@ fn task_scope_fixture_state() -> &'static Fixture {
         let source = "fn clone_heap(xs:List[u64])->unique List[u64]{unique xs}\nfn inspect(tasks:Tasks)->u64{let mut r=arena.with(fn(a:Arena)->Region[List[u64]]{let root:List[u64] in a=[7u64];arena.seal(take a,take root)});region.with(mut r,fn(root:List[u64])->u64{task.scope(tasks,fn(s:Scope)->u64{let fresh:List[u64] in heap=[list.len(root)];let copied=clone_heap(fresh);list.len(copied)})})}\npub fn main(){}";
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("storage-task-scope-v.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
@@ -1576,7 +1576,7 @@ fn task_carrier_fixture_state() -> &'static Fixture {
                 .sources
                 .add("storage-task-carrier-v.hir", source.into())
                 .unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(output.completion, CheckCompletion::Complete);
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
             let input = engine.export_native_input().unwrap();

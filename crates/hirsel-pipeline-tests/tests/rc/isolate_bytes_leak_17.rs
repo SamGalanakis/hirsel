@@ -28,7 +28,7 @@ fn isolate_rejects_borrowed_counted_capture_once() {
             include_str!("../../../../conformance/CLO/CLO-3-isolate-unique-bytes-borrow-bad.hir");
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("borrowed.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(checked.diagnostics.len(), 1, "{:?}", checked.diagnostics);
         assert_eq!(checked.diagnostics[0].rule.as_str(), "CLO-3");
     });
@@ -69,7 +69,7 @@ fn native_parity(cases: &[(&str, &str)]) {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let context = default_context();
             let file = engine.sources.add("isolate.hir", source.into()).unwrap();
-            let checked = check_progress(&mut engine, file, &context).unwrap();
+            let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{name}: {:?}",

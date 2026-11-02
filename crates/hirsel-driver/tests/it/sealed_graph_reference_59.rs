@@ -94,7 +94,7 @@ fn sealed_graph_reference_59_small_charge_vectors_agree_with_direct_h() {
                 .sources
                 .add("sealed-graph-reference-59.hir", source.clone())
                 .unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{source}\n{:?}",

@@ -85,10 +85,9 @@ fn run_sealed_program(name: &str) {
         let scratch = tempfile::tempdir().unwrap();
         let tools =
             native::Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
-        let input = program.engine.export_native_input().unwrap();
-        let validated = program.engine.import_native_input(input).unwrap();
-        let outcomes = native::differential_in(
-            &validated,
+        let mut ready = crate::native_ready::supplier(&manifest, None, &run.entry, &tools).unwrap();
+        let outcomes = native::differential_ready(
+            &mut ready,
             &run.entry,
             &observation,
             &matrix,
@@ -104,8 +103,8 @@ fn run_sealed_program(name: &str) {
                 failures.push((configuration, outcome));
             }
         }
-        let replay = native::real_io_replay_in(
-            &validated,
+        let replay = native::real_io_replay_ready(
+            &mut ready,
             &run.entry,
             &observation,
             &tools,

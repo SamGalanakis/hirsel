@@ -322,7 +322,7 @@ fn path(name: &str) -> DefPath {
 fn engine(source: &str) -> QueryEngine {
     let mut e = QueryEngine::new(default_environment(), compiler_adapters());
     let file = e.sources.add("shadow-fixture.hir", source.into()).unwrap();
-    let checked = check_progress(&mut e, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut e, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     e
 }

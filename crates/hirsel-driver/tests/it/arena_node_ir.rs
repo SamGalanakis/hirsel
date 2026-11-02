@@ -3,7 +3,7 @@
 use hirsel_driver::compiler_adapters;
 use hirsel_driver::native::{OptLevel, Options, TargetSpec, build, emit_ir};
 use hirsel_engine::{
-    QueryEngine, check_progress, default_context, default_environment, with_compiler_stack,
+    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
 
 const TREE: &str = "type Tree = Leaf | Branch(left: box Tree, right: box Tree)
@@ -26,7 +26,7 @@ fn module_ir() -> Vec<String> {
     with_compiler_stack(move || {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("tree.hir", TREE.to_owned()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
@@ -48,7 +48,7 @@ fn function_ir(name: &'static str) -> Vec<String> {
     with_compiler_stack(move || {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("tree.hir", TREE.to_owned()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
@@ -126,7 +126,7 @@ fn check_placement(source: &'static str, accepted: bool) {
                 format!("type Tree = Leaf | Branch(left: box Tree, right: box Tree)\n{source}"),
             )
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         if accepted {
             assert!(
                 output.diagnostics.is_empty(),

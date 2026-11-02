@@ -11,9 +11,12 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 pub fn supplier(
     path: &Path,
     replacement: Option<&str>,
-    entry: &hirsel_syntax::DefPath,
+    entry: &hirsel_engine::DefPath,
     toolchain: &Toolchain,
-) -> Result<impl FnMut(&Options) -> Result<Arc<NativeReady>, NativeError> + 'static, ToolError> {
+) -> Result<
+    impl FnMut(&Options) -> Result<Arc<NativeReady>, NativeError> + 'static + use<>,
+    ToolError,
+> {
     let compiler = hirsel_driver::COMPILER;
     let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration())
         .with_toolchain(Arc::new(toolchain.clone()));
@@ -72,5 +75,32 @@ pub fn supplier(
             CompileResult::NativeError(error) => Err(error.clone()),
             _ => Err(failed("another operation".into())),
         }
+    })
+}
+
+pub fn source_supplier(
+    source: &str,
+    entry: &hirsel_engine::DefPath,
+    toolchain: &Toolchain,
+) -> Result<
+    impl FnMut(&Options) -> Result<Arc<NativeReady>, NativeError> + 'static + use<>,
+    ToolError,
+> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("main.hir");
+    std::fs::write(&path, source)?;
+    std::fs::write(
+        path.with_extension("hir.json"),
+        serde_json::json!({
+            "schema":1,"package":{"name":entry.0.package.name,"version":entry.0.package.version},
+            "sources":[{"path":"main.hir","module":entry.0.modules}],"dependencies":[],
+            "entry":{"module":entry.0.modules,"name":entry.0.name.as_str()}
+        })
+        .to_string(),
+    )?;
+    let mut ready = supplier(&path, None, entry, toolchain)?;
+    Ok(move |options: &Options| {
+        let _source_owner = &directory;
+        ready(options)
     })
 }

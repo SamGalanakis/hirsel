@@ -4,7 +4,7 @@ use hirsel_types::{SignatureKind, TypeKind};
 fn engine(text: &str) -> QueryEngine {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("private.hir", text.into()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     engine
 }
@@ -38,7 +38,7 @@ fn opaque_private_edits_invalidate_owner_record_without_changing_public_signatur
             "pub opaque type Hidden: () uses {} { value: u32 }\n".into(),
         )
         .unwrap();
-    check_progress(&mut engine, file, &default_context()).unwrap();
+    source_check_request(&mut engine, file, &default_context()).unwrap();
     let changed = engine.owner_representation(&path, &path).unwrap();
     assert_ne!(
         private.representation_revision,

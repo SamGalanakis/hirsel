@@ -13,7 +13,7 @@ fn loop_entry_charges_precede_rebinding_and_loan_ends_on_four_engines() {
             .sources
             .add("charge-placement.hir", source.into())
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let entry = entry_path(&default_context());
         let run = run_observed_snapshot(

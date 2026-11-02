@@ -17,7 +17,7 @@ const MINIMAL: &str = r#"pub fn main(rt: Io) -> Result[(), GrantError] {
 fn probe(source: &str) {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("probe.hir", source.into()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     engine.export_native_input().unwrap();
 }
@@ -55,7 +55,7 @@ fn checked(source: &str) -> QueryEngine {
         .sources
         .add("taskset-await.hir", source.into())
         .unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     engine
 }
@@ -152,7 +152,7 @@ fn taskset_await_mode_27_declared_and_current_uniqueness() {
         let source = format!("fn need(take row: unique String) {{}}\n{bad}");
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("receiving.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(
             checked
                 .diagnostics

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 fn check(source: &str) -> (QueryEngine, CheckOutput) {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("summary.hir", source.into()).unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     (engine, output)
 }
 fn summaries(engine: &mut QueryEngine) -> BTreeMap<String, (DefinitionSummary, ParameterGrowth)> {

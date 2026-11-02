@@ -9,7 +9,7 @@ fn root() -> PathBuf {
 fn fixture(name: &str) -> PathBuf {
     root().join(format!("conformance/SEM/SEM-3-json-{name}-run.hir"))
 }
-fn execute_source(source: &str) {
+fn execute_text(source: &str) {
     let mut loaded =
         load_program_source(&fixture("corpus"), Some(source)).unwrap_or_else(|e| panic!("{e}"));
     loaded.check_for_execution().unwrap();
@@ -48,12 +48,12 @@ fn python_oracle(fuzz: bool) -> String {
 }
 #[test]
 fn python_json_oracle_preserves_every_valid_corpus_number_lexeme() {
-    with_compiler_stack(|| execute_source(&python_oracle(false)));
+    with_compiler_stack(|| execute_text(&python_oracle(false)));
 }
 #[test]
 fn seeded_bounded_json_fuzz_matches_python_policy_and_exact_numbers() {
     // One 32-tree + 32-mutation campaign in the ordinary per-push driver tests.
-    with_compiler_stack(|| execute_source(&python_oracle(true)));
+    with_compiler_stack(|| execute_text(&python_oracle(true)));
 }
 
 fn native_measurement(source: &str, label: &str) -> String {

@@ -57,7 +57,7 @@ fn native_demand_tasks_import_and_reuse_actual_settled_source_without_a_controll
                     "fn other()->u64{9u64}\npub fn main()->u64{7u64}".into(),
                 )
                 .unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             if fresh {
                 engine.adapters.lowering = None;

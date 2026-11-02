@@ -12,7 +12,7 @@ fn source_case(id: &str, source: &str, expected: Option<&str>) -> bool {
             .sources
             .add("stored-callable.hir", source.into())
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         let rules: Vec<_> = output.diagnostics.iter().map(|d| d.rule.as_str()).collect();
         println!(
             "AUTH26 {}",
@@ -662,7 +662,7 @@ fn mutant_case(id: &str, source: &str, fields: &[&str]) {
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("mutant.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(
             checked.diagnostics.is_empty(),
             "{id}: {:?}",

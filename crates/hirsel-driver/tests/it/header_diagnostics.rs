@@ -19,7 +19,7 @@ fn header_diagnostics_point_to_the_offending_name_and_earlier_binding() {
         ] {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("header.hir", source.into()).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             let diagnostic = output.diagnostics.first().unwrap();
             assert_eq!(diagnostic.rule.as_str(), rule, "{source}");
             let start = source.rfind(primary).unwrap() as u32;
@@ -64,7 +64,7 @@ fn unknown_variant_lists_the_expected_types_variants() {
         ] {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("variant.hir", source.into()).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             let diagnostic = output.diagnostics.first().unwrap();
             assert_eq!(diagnostic.rule.as_str(), "LANG-2");
             assert_eq!(diagnostic.message, expected);
@@ -121,7 +121,7 @@ fn near_miss_names_cover_scopes_case_underscores_and_renames() {
         ] {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("near-miss.hir", source.into()).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             let diagnostic = output.diagnostics.first().unwrap();
             assert_eq!(
                 diagnostic.notes,
@@ -137,7 +137,7 @@ fn near_miss_names_cover_scopes_case_underscores_and_renames() {
             repaired.replace_range(at.start as usize..at.end as usize, &fix.replacement);
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("near-miss-fixed.hir", repaired).unwrap();
-            let fixed = check_progress(&mut engine, file, &default_context()).unwrap();
+            let fixed = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(
                 !fixed
                     .diagnostics
@@ -185,7 +185,7 @@ fn sendability_check(source: &str) -> CheckOutput {
         .sources
         .add("task-result.hir", source.into())
         .unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(output.completion, CheckCompletion::Complete);
     output
 }

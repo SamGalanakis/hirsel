@@ -94,7 +94,7 @@ fn agrees(source: &str, output: &[u8]) {
     with_compiler_stack(|| {
         let mut engine = crate::source_std::engine();
         let file = engine.sources.add("main.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&default_context());
         let reference = run_observed_snapshot(

@@ -23,7 +23,7 @@ fn import_with(
     let file = engine.sources.add("imports.hir", source.into()).unwrap();
     engine.parse_file(file, &default_context()).unwrap();
     prepare(&mut engine);
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     import_engine(engine, &[], store)
 }
@@ -464,7 +464,7 @@ fn demand_import_every_stage_reimports_warm_products() {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
             .with_result_store(store.clone());
         let file = engine.sources.add("imports.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let forced =
             import_engine_with_validation(engine, &[], store, native::Validation::EveryStage);

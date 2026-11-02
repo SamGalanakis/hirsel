@@ -232,7 +232,7 @@ fn generated_siblings_all_engines() {
             with_compiler_stack(|| {
                 let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
                 let file = engine.sources.add("main.hir", source.clone()).unwrap();
-                check_progress(&mut engine, file, &default_context()).unwrap();
+                source_check_request(&mut engine, file, &default_context()).unwrap();
                 let input = engine.export_native_input().unwrap();
                 let validated = engine.import_native_input(input).unwrap();
                 for regions in [true, false] {

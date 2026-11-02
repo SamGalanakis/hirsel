@@ -1,3 +1,7 @@
+#[allow(dead_code)]
+#[path = "../../../../hirsel-driver/tests/support/native_ready.rs"]
+mod native_ready;
+
 fn cpu_fixture_four_engine_agreement(width: u32) {
     let jobs = (1..=2 * width)
         .map(|n| format!("{n}u64"))
@@ -40,14 +44,14 @@ fn cpu_fixture_four_engine_source_grant(
 ) {
     use hirsel_driver::{compiler_adapters, native};
     use hirsel_engine::{
-        QueryEngine, RunConfiguration, check_progress, default_context, default_environment,
+        QueryEngine, RunConfiguration, source_check_request, default_context, default_environment,
         entry_path, run_observed_checked, run_observed_snapshot, with_compiler_stack,
     };
 
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-        let file = engine.sources.add("cpu.hir", source).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let file = engine.sources.add("cpu.hir", source.clone()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&default_context());
         let config = RunConfiguration {
@@ -106,12 +110,11 @@ fn cpu_fixture_four_engine_source_grant(
                 native::Observation::of_reference(checked.observation.as_ref().unwrap()),
                 reference,
             );
-            let input = engine.export_native_input().unwrap();
-            let validated = engine.import_native_input(input).unwrap();
+            let mut ready = native_ready::source_supplier(&source, &entry, &tools).unwrap();
             let dir = root.path().join(if free { "free" } else { "ordered" });
             std::fs::create_dir_all(&dir).unwrap();
-            let outcomes = native::differential_in(
-                &validated, &entry, &reference, &matrix, &tools, &dir, &fixture,
+            let outcomes = native::differential_ready(
+                &mut ready, &entry, &reference, &matrix, &tools, &dir, &fixture,
             );
             assert_eq!(outcomes.len(), matrix.len());
             for (name, outcome) in outcomes {

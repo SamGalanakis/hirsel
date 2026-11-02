@@ -8,7 +8,7 @@ fn checked(source: &str) -> QueryEngine {
         .sources
         .add("replace-unique-copy-31.hir", source.into())
         .unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     engine
 }

@@ -32,7 +32,7 @@ fn original_retained_owners_match_at_one_two_eight_under_both_validation_policie
                             .add("owner-workers.hir", source.into())
                             .unwrap();
                         let checked =
-                            check_progress(&mut engine, file, &default_context()).unwrap();
+                            source_check_request(&mut engine, file, &default_context()).unwrap();
                         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
                         let input = engine.export_native_input().unwrap();
                         let _validated = engine.import_native_input(input).unwrap();

@@ -318,57 +318,6 @@ pub fn seed(definition: &DefPath) -> u64 {
     u64::from_le_bytes(digest[..8].try_into().unwrap())
 }
 
-/// Check the whole package before selecting tests. Dependencies are never selected.
-/// Generated entries adapt unit/private definitions to the existing launch ABI;
-/// they are checked and lowered normally and never written into source files.
-pub fn discover_source(
-    program: &mut LoadedProgram,
-    filters: &[String],
-    override_seed: Option<u64>,
-    selection: Selection,
-) -> Result<Vec<Test>, ToolError> {
-    let check = program
-        .check(hirsel_engine::LoweringPolicy::Reachable)
-        .map_err(|e| program.error(e))?;
-    if check
-        .diagnostics
-        .iter()
-        .any(|d| d.severity == hirsel_diag::Severity::Error)
-    {
-        return Err(program.error(hirsel_engine::QueryError::Diagnostics(check.diagnostics)));
-    }
-    if check.completion != hirsel_engine::CheckCompletion::Complete {
-        return Err(program.error(hirsel_engine::QueryError::NotImplemented));
-    }
-    plan_entries(
-        program,
-        filters,
-        override_seed,
-        selection,
-        |program, source, entry| {
-            let file = program
-                .engine
-                .sources
-                .add(source.name, source.text.to_string())
-                .ok_or(ToolError::SourceTooLarge)?;
-            let parsed = program
-                .engine
-                .parse_file(file, &source.context)
-                .map_err(|error| program.error(error))?;
-            if !parsed.diagnostics.is_empty() {
-                return Err(
-                    program.error(hirsel_engine::QueryError::Diagnostics(parsed.diagnostics))
-                );
-            }
-            program
-                .engine
-                .lower_to_tir(entry)
-                .map_err(|error| program.error(error))?;
-            Ok(())
-        },
-    )
-}
-
 pub fn discover(
     requests: &mut crate::requests::CompilerRequests,
     path: &Path,
@@ -551,7 +500,7 @@ fn discover_program(
     })
 }
 
-pub(crate) fn discover_with_selector(
+pub fn discover_with_selector(
     path: &Path,
     filters: &[String],
     override_seed: Option<u64>,
@@ -746,70 +695,6 @@ fn plan_entries(
         });
     }
     Ok(tests)
-}
-
-pub fn run_interpreted(
-    program: &mut LoadedProgram,
-    tests: &[Test],
-    checked: bool,
-    bless: bool,
-    schedules: &Schedules,
-) -> Vec<TestResult> {
-    tests
-        .iter()
-        .map(|test| {
-            explore(test, schedules, |test| {
-                let (failure, stdout, races) = match execute_source(program, test, checked, 0) {
-                    Ok(execution) => {
-                        let stdout = match &execution.observation {
-                            Some(observation) => observation.output.clone(),
-                            None => execution.tooling_output,
-                        };
-                        let failure = match execution.outcome {
-                            Ok(outcome) => outcome_failure(&outcome, &program.engine.sources),
-                            Err(error) => Some(format!("runtime error: {error:?}")),
-                        };
-                        (failure, stdout, execution.race_candidates)
-                    }
-                    Err(error) => (Some(format!("runtime error: {error}")), vec![], vec![]),
-                };
-                let mut result = test.result(failure, &stdout, bless);
-                if result.failure.is_some() {
-                    for candidate in races {
-                        result.report.push_str(&candidate.to_string());
-                    }
-                }
-                result
-            })
-        })
-        .collect()
-}
-
-/// Retain the complete observation for conformance's checked-execution witness.
-pub fn execute_source(
-    program: &mut LoadedProgram,
-    test: &Test,
-    checked: bool,
-    hash_seed: u64,
-) -> Result<hirsel_engine::ObservedExecution, ToolError> {
-    let config = hirsel_tir::RunConfiguration {
-        entry: test.entry.clone(),
-        hash_seed,
-        inputs: vec![],
-    };
-    let simulation = SimulationConfig {
-        grants: Default::default(),
-        test_seed: test.seed,
-        scheduler: test.scheduler.clone(),
-        debug: test.simulation_debug,
-        ..Default::default()
-    };
-    let run = if checked {
-        hirsel_engine::run_observed_checked
-    } else {
-        hirsel_engine::run_observed_snapshot
-    };
-    run(&mut program.engine, &config, simulation)
 }
 
 pub fn execute(

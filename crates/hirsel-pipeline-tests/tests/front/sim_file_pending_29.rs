@@ -1,8 +1,8 @@
 //! Scripted regular files: release, structured cancellation, and replay on every engine.
 use hirsel_driver::{compiler_adapters, native::*};
 use hirsel_engine::{
-    QueryEngine, RunConfiguration, SimulationConfig, check_progress, default_context,
-    default_environment, entry_path, with_compiler_stack,
+    QueryEngine, RunConfiguration, SimulationConfig, default_context, default_environment,
+    entry_path, source_check_request, with_compiler_stack,
 };
 use hirsel_run_schema::FileReadScript;
 use std::{collections::BTreeMap, path::Path};
@@ -92,7 +92,7 @@ fn campaign(name: &str, source: &str, gate: FileReadScript) {
             .sources
             .add(format!("{name}.hir"), source.into())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &context).unwrap();
+        let checked = source_check_request(&mut engine, file, &context).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let mut entry = entry_path(&context);
         entry.0.name = "trial".into();
@@ -171,8 +171,6 @@ fn campaign(name: &str, source: &str, gate: FileReadScript) {
         assert_eq!(replayed.observation, execution.observation);
         let checked = observe(&run, config, true);
         assert_eq!(checked.observation, execution.observation);
-        let input = engine.export_native_input().unwrap();
-        let input = engine.import_native_input(input).unwrap();
         let options =
             Options::new(hirsel_lir::layout_types::TargetSpec::x86_64_unknown_linux_gnu());
         let matrix = vec![
@@ -201,14 +199,15 @@ fn campaign(name: &str, source: &str, gate: FileReadScript) {
             file_reads,
             ..Default::default()
         };
-        for (configuration, outcome) in differential_in(
-            &input, &entry, &reference, &matrix, &tools, &scratch, &fixture,
+        let mut ready = crate::native_ready::source_supplier(source, &entry, &tools).unwrap();
+        for (configuration, outcome) in differential_ready(
+            &mut ready, &entry, &reference, &matrix, &tools, &scratch, &fixture,
         ) {
             assert_eq!(outcome, Outcome::Agree, "{name}: {configuration}");
         }
         assert_eq!(
-            real_io_replay_in(
-                &input,
+            real_io_replay_ready(
+                &mut ready,
                 &entry,
                 &reference,
                 &tools,

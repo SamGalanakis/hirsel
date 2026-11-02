@@ -7,8 +7,8 @@ use hirsel_driver::native::{
     build, differential, full_matrix, launch_with, link, observe, smoke_matrix,
 };
 use hirsel_engine::{
-    QueryEngine, RunConfiguration, SimulationConfig, check_progress, default_context,
-    default_environment, entry_path, run_observed_snapshot, with_compiler_stack,
+    QueryEngine, RunConfiguration, SimulationConfig, default_context, default_environment,
+    entry_path, run_observed_snapshot, source_check_request, with_compiler_stack,
 };
 use hirsel_lir::layout_types::TargetSpec;
 use hirsel_rt::{io::Adapter, io_sim::SimIo};
@@ -90,7 +90,7 @@ fn campaign_in(include: fn(&str, bool) -> bool, matrix: Vec<Configuration>, scra
                 .sources
                 .add(format!("{name}.hir"), source.clone())
                 .unwrap();
-            let checked = check_progress(&mut engine, file, &context).unwrap();
+            let checked = source_check_request(&mut engine, file, &context).unwrap();
             if !checked.diagnostics.is_empty() {
                 failures.push(format!("{name}: {:?}", checked.diagnostics));
                 continue;
@@ -390,7 +390,7 @@ fn partial_write_replay(
             };
             let context = default_context();
             let file = engine.sources.add(format!("{name}.hir"), source).unwrap();
-            let checked = check_progress(&mut engine, file, &context).unwrap();
+            let checked = source_check_request(&mut engine, file, &context).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{name}: {:?}",

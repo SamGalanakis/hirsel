@@ -64,7 +64,7 @@ pub fn inspect(take root: List[u64]) -> u64 {
                 ),
             )
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let mut discovery = NativeDiscoveryCache::new(engine.types().clone(), store.clone());
         let mut declarations =

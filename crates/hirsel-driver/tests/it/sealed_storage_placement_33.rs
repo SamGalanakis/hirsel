@@ -12,7 +12,7 @@ fn rejected_by(source: &str, rule: &str, primary: &str) {
             .sources
             .add("sealed-placement.hir", source.into())
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         let errors: Vec<_> = output
             .diagnostics
@@ -37,7 +37,7 @@ fn accepted(source: &str) {
             .sources
             .add("sealed-placement.hir", source.into())
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         assert!(
             output.diagnostics.is_empty(),
@@ -402,7 +402,7 @@ fn borrowed_capture_write_refused(source: &str) {
             .sources
             .add("storage-borrowed-capture.hir", source.into())
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(output.completion, CheckCompletion::Complete);
         let errors: Vec<_> = output
             .diagnostics
@@ -605,7 +605,7 @@ fn sealed_storage_query_33_body_edit_invalidates_read_proof() {
             .sources
             .add("sealed-storage-edit.hir", source.clone())
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         engine.import_native_input(input).unwrap();
@@ -614,7 +614,7 @@ fn sealed_storage_query_33_body_edit_invalidates_read_proof() {
             .sources
             .add("sealed-storage-edit.hir", edited)
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         let errors: Vec<_> = output
             .diagnostics
             .iter()

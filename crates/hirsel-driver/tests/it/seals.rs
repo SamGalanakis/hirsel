@@ -5,7 +5,7 @@ use hirsel_types::{AuthoritySummary, AuthorityTerm, SignatureKind};
 fn checked(source: &str) -> QueryEngine {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("seal.hir", source.into()).unwrap();
-    let result = check_progress(&mut engine, file, &default_context()).unwrap();
+    let result = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(
         result.diagnostics.is_empty(),
         "{source}: {:?}",
@@ -71,7 +71,7 @@ fn seal_captures_and_projected_values_keep_distinct_authority() {
             );
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("seal.hir", source.clone()).unwrap();
-            let result = check_progress(&mut engine, file, &default_context()).unwrap();
+            let result = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(
                 result.diagnostics.first().map(|d| d.rule.as_str()),
                 expected,
@@ -98,7 +98,7 @@ fn hidden_tasks_cannot_enter_an_inert_callback() {
             );
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("seal.hir", source.clone()).unwrap();
-            let result = check_progress(&mut engine, file, &default_context()).unwrap();
+            let result = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(
                 result.diagnostics.first().map(|d| d.rule.as_str()),
                 expected,
@@ -147,7 +147,7 @@ fn scoped_seals_cannot_escape_through_generic_holders() {
             );
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("seal.hir", source.clone()).unwrap();
-            let result = check_progress(&mut engine, file, &default_context()).unwrap();
+            let result = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(
                 result.diagnostics.first().map(|d| d.rule.as_str()),
                 expected,
@@ -170,7 +170,7 @@ fn erased_callable_authority_cannot_hide_a_scoped_sibling() {
             );
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("seal.hir", source.clone()).unwrap();
-            let result = check_progress(&mut engine, file, &default_context()).unwrap();
+            let result = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(
                 result.diagnostics.first().map(|d| d.rule.as_str()),
                 expected,
@@ -193,7 +193,7 @@ fn global_seals_cannot_keep_scoped_callable_views() {
             );
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("seal.hir", source.clone()).unwrap();
-            let result = check_progress(&mut engine, file, &default_context()).unwrap();
+            let result = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(
                 result.diagnostics.first().map(|d| d.rule.as_str()),
                 expected,
@@ -246,7 +246,7 @@ fn scoped_siblings_and_lost_uniqueness_report_only_their_own_axis() {
             .unwrap();
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("axis.hir", source.clone()).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(
                 output
                     .diagnostics

@@ -10,7 +10,7 @@ fn check(source: &str) {
         QueryEngine::new(default_environment(), compiler_adapters())
     };
     let file = engine.sources.add("receiving.hir", source.into()).unwrap();
-    let checked = check_progress(&mut engine, file, &default_context())
+    let checked = source_check_request(&mut engine, file, &default_context())
         .unwrap_or_else(|error| panic!("{source}\n{error:?}"));
     assert!(
         checked.diagnostics.is_empty(),
@@ -39,7 +39,7 @@ fn initialized_local_receivers_cannot_export_borrowed_content_as_global() {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let source = "fn probe(x: String) -> String in x { let s: String in s = copy x; copy s }";
         let file = engine.sources.add("receiving.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let mut path = entry_path(&default_context());
@@ -103,7 +103,7 @@ fn borrowed_cursor_items_keep_their_local_source_bound() {
     with_compiler_stack(|| {
         let mut engine = source_std::engine();
         let file = engine.sources.add("receiving.hir", "fn probe(s: String) -> String { for x in std@1/unicode.graphemes(s) { return x }; \"\" }".into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(
             checked
                 .diagnostics
@@ -142,7 +142,7 @@ fn current_call_content_cannot_launder_a_borrowed_result_as_global() {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let source = "fn probe(x: Bytes) -> Bytes in x { copy x }\nfn caller(x: Bytes) -> Bytes in x { probe(x) }";
         let file = engine.sources.add("receiving.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let mut path = entry_path(&default_context());
@@ -209,7 +209,7 @@ fn local_iterator_receivers_cannot_invent_sendable_content() {
             "@noalloc\nfn next(mut n: u8) -> Option[u8] { None }\nfn change(mut it: Iter[u8]) {}\nfn probe() { let state: u8 = 0; let mut it: Iter[u8] in it = iter.from(take state,next); change(mut it); for x in take it {} }",
         ] {
             let file = engine.sources.add("receiving.hir", source.into()).unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let input = engine.export_native_input().unwrap();
             let mut path = entry_path(&default_context());
@@ -278,7 +278,7 @@ fn local_function_receivers_cannot_invent_sendable_content() {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let source = "fn double(x: u8) -> u8 { x * 2 }\nfn keep(take f: fn(u8) -> u8) -> u8 { f(1u8) }\nfn change(mut f: fn(u8) -> u8) {}\nfn probe() { let mut f: (fn(u8) -> u8) in f = double; change(mut f); let n = keep(take f) }";
         let file = engine.sources.add("receiving.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let mut path = entry_path(&default_context());
@@ -355,7 +355,7 @@ fn freezing_a_projected_box_requires_global_contents_before_uniqueness() {
         check(&source.replace("box ({r}).xs", "box unique ({r}).xs"));
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("freeze.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(checked.diagnostics[0].rule.as_str(), "MODE-1");
         // With global contents, the box's aliased contents fail MEM-11.
         let global = source
@@ -363,7 +363,7 @@ fn freezing_a_projected_box_requires_global_contents_before_uniqueness() {
             .replace("({r})", "r");
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("global.hir", global.clone()).unwrap();
-        let unique = check_progress(&mut engine, file, &default_context()).unwrap();
+        let unique = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(unique.diagnostics[0].rule.as_str(), "MEM-11");
         for checked in [&checked, &unique] {
             let diagnostic = &checked.diagnostics[0];
@@ -407,7 +407,7 @@ fn inferred_receivers_of_local_content_accept_local_writes() {
             let source = format!("{view}fn probe(p: Bytes) {{ {body} }}");
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("receiving.hir", source.clone()).unwrap();
-            let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             let first = checked.diagnostics.first();
             assert_eq!(first.map(|d| d.rule.as_str()), Some("MODE-1"), "{source}");
             if let Some(line) = line {
@@ -439,7 +439,7 @@ fn once_receiving_storage_consumes_its_function_on_call() {
         let source = "fn probe() {\n let mut g: once fn() = fn() {}\n g()\n g()\n}";
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("receiving.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         let first = checked.diagnostics.first().expect("a second once call");
         assert_eq!(first.rule.as_str(), "MODE-3");
         assert_eq!(

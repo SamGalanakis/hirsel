@@ -11,7 +11,7 @@ use std::sync::Arc;
 fn engine(text: &str) -> QueryEngine {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("snapshot.hir", text.into()).unwrap();
-    let result = check_progress(&mut engine, file, &default_context()).unwrap();
+    let result = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
     engine
 }
@@ -77,7 +77,7 @@ fn native_selected_source_survives_call_and_aggregate_transfer_before_unique_ope
                 );
                 let mut rejected = QueryEngine::new(default_environment(), compiler_adapters());
                 let file = rejected.sources.add("reject.hir", body.clone()).unwrap();
-                let output = check_progress(&mut rejected, file, &default_context()).unwrap();
+                let output = source_check_request(&mut rejected, file, &default_context()).unwrap();
                 assert_eq!(
                     output.diagnostics[0].rule.as_str(),
                     rule,
@@ -97,7 +97,7 @@ fn native_selected_source_survives_call_and_aggregate_transfer_before_unique_ope
                     .sources
                     .add("expired.hir", expired.clone())
                     .unwrap();
-                let output = check_progress(&mut rejected, file, &default_context()).unwrap();
+                let output = source_check_request(&mut rejected, file, &default_context()).unwrap();
                 // MODE-2: the dead `kept` held only a direct call's related
                 // share, which ends with it; a function value's may be kept.
                 let expected = if action.starts_with("change") {
@@ -383,7 +383,7 @@ let xs:List[String]=["old\n"];probe(grant_stdout,unique xs);Ok(())}
 "#;
         let mut rejected = QueryEngine::new(default_environment(), compiler_adapters());
         let file = rejected.sources.add("reject.hir", source.into()).unwrap();
-        let output = check_progress(&mut rejected, file, &default_context()).unwrap();
+        let output = source_check_request(&mut rejected, file, &default_context()).unwrap();
         assert_eq!(output.diagnostics[0].rule.as_str(), "MODE-4");
         assert_eq!(
             rejected.sources.slice(output.diagnostics[0].primary),

@@ -94,7 +94,7 @@ fn compile(faults: Arc<Faults>, verify: Verify) -> crate::native_object_products
             "fn helper(x:u64)->u64{x+1u64}\nfn main()->u64{helper(7u64)}".into(),
         )
         .unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let mut options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
     options.validation = native::Validation::Ready;

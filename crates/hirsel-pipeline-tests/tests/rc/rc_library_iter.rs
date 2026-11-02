@@ -2,8 +2,8 @@
 use crate::rc_support as support;
 use hirsel_driver::compiler_adapters;
 use hirsel_engine::{
-    QueryEngine, RunConfiguration, check_progress, default_context, default_environment,
-    entry_path, run_observed_snapshot, with_compiler_stack,
+    QueryEngine, RunConfiguration, default_context, default_environment, entry_path,
+    run_observed_snapshot, source_check_request, with_compiler_stack,
 };
 use support::*;
 
@@ -26,7 +26,7 @@ fn observed_heap(source: &str) -> hirsel_driver::native::HeapRun {
     with_compiler_stack(move || {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("test.hir", source.clone()).unwrap();
-        check_progress(&mut engine, file, &default_context()).unwrap();
+        source_check_request(&mut engine, file, &default_context()).unwrap();
         let entry = entry_path(&default_context());
         let config = RunConfiguration {
             entry: entry.clone(),
@@ -204,7 +204,7 @@ fn iterator_resource_cleanup_agrees_on_both_targets_and_all_native_configuration
         with_compiler_stack(move || {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("test.hir", source.clone()).unwrap();
-            check_progress(&mut engine, file, &default_context()).unwrap();
+            source_check_request(&mut engine, file, &default_context()).unwrap();
             let entry = entry_path(&default_context());
             let config = RunConfiguration {
                 entry: entry.clone(),

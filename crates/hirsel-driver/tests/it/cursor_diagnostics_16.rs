@@ -13,7 +13,7 @@ fn check(
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("cursor.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         let errors: Vec<_> = output
             .diagnostics
             .iter()
@@ -58,7 +58,7 @@ fn check(
                     "{json}"
                 );
             }
-            let warm = check_progress(&mut engine, file, &default_context()).unwrap();
+            let warm = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert_eq!(
                 warm.diagnostics
                     .iter()
@@ -166,7 +166,7 @@ fn check_recovery(source: &str, expected: &[(&str, &str)]) {
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("cursor.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         let actual: Vec<_> = output
             .diagnostics
             .iter()
@@ -186,7 +186,7 @@ fn check_recovery(source: &str, expected: &[(&str, &str)]) {
             assert!(human.contains(&d.message), "{human}");
             assert!(!human.contains("rooted in )"), "{human}");
         }
-        let warm = check_progress(&mut engine, file, &default_context()).unwrap();
+        let warm = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(
             warm.diagnostics
                 .iter()
@@ -388,7 +388,7 @@ pub fn main()->Result[(),u64] {
         );
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("lookup.hir", source.into()).unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let entry = entry_path(&default_context());
         for name in ["borrowed_length", "owned_length", "main"] {

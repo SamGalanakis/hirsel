@@ -17,7 +17,7 @@ fn named(name: &str) -> DefPath {
 fn engine(source: &str) -> QueryEngine {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("proof.hir", source.into()).unwrap();
-    let result = check_progress(&mut engine, file, &default_context())
+    let result = source_check_request(&mut engine, file, &default_context())
         .unwrap_or_else(|e| panic!("{source}\n{e:?}"));
     assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
     engine

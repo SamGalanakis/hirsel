@@ -50,7 +50,8 @@ fn a_borrowed_soa_list_count_reaches_the_vectorizer_before_unrolling() {
     use hirsel_driver::compiler_adapters;
     use hirsel_driver::native::{OptLevel, Options, TargetSpec, build, emit_ir};
     use hirsel_engine::{
-        QueryEngine, check_progress, default_context, default_environment, with_compiler_stack,
+        QueryEngine, default_context, default_environment, source_check_request,
+        with_compiler_stack,
     };
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -74,7 +75,7 @@ fn a_borrowed_soa_list_count_reaches_the_vectorizer_before_unrolling() {
                 .into(),
             )
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();

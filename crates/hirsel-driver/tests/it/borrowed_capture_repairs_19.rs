@@ -7,7 +7,7 @@ fn checked(source: &str) -> CheckOutput {
 
 fn checked_in(engine: &mut QueryEngine, source: &str) -> CheckOutput {
     let file = engine.sources.add("capture.hir", source.into()).unwrap();
-    let output = check_progress(engine, file, &default_context()).unwrap();
+    let output = source_check_request(engine, file, &default_context()).unwrap();
     assert_eq!(output.completion, CheckCompletion::Complete);
     output
 }

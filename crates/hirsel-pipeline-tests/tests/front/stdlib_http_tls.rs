@@ -4,7 +4,7 @@ mod source_std;
 use hirsel_driver::native::{
     Launched, OptLevel, Options, Partition, Sites, Toolchain, build, link, observe,
 };
-use hirsel_engine::{check_progress, default_context, entry_path, with_compiler_stack};
+use hirsel_engine::{default_context, entry_path, source_check_request, with_compiler_stack};
 use hirsel_lir::layout_types::TargetSpec;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use std::{
@@ -59,7 +59,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), ()] {{
         let mut engine = source_std::engine();
         let context = default_context();
         let file = engine.sources.add("http-tls.hir", source).unwrap();
-        let checked = check_progress(&mut engine, file, &context).unwrap();
+        let checked = source_check_request(&mut engine, file, &context).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&context);
         let input = engine.export_native_input().unwrap();

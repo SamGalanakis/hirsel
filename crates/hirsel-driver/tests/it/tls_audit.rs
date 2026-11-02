@@ -9,7 +9,7 @@ use hirsel_driver::native::{
     Backend, OptLevel, Options, Partition, TargetSpec, build, emit_backend_objects,
 };
 use hirsel_engine::{
-    QueryEngine, check_progress, default_context, default_environment, with_compiler_stack,
+    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
 use hirsel_lir::object::ObjectFile;
 
@@ -36,7 +36,7 @@ fn emitted_objects_read_no_thread_local_storage() {
             let source = std::fs::read_to_string(root.join(path)).unwrap();
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add(path, source).unwrap();
-            let output = check_progress(&mut engine, file, &default_context()).unwrap();
+            let output = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(
                 output.diagnostics.is_empty(),
                 "{path}: {:?}",

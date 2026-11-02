@@ -45,7 +45,7 @@ fn fanout(count: usize) {
         let source = SOURCE.replace("CHILDREN", &format!("{}u64", count + 1));
         let mut engine = crate::source_std::engine();
         let file = engine.sources.add("main.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&default_context());
         let fixture = Fixture {

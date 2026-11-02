@@ -5,26 +5,26 @@ use hirsel_driver::*;
 use hirsel_engine::*;
 
 pub(super) fn execute(body: &str) {
-    execute_source(&format!(
+    execute_text(&format!(
         "pub fn main(t: Test) -> Result[(), ()] {{\n{body}\nOk(())\n}}"
     ));
 }
 
-pub(super) fn execute_source(source: &str) {
+pub(super) fn execute_text(source: &str) {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/std_source/main.hir");
     let mut fixture = TirFixture::new(&path).unwrap();
-    execute_source_in(&mut fixture, source);
+    execute_text_in(&mut fixture, source);
 }
 
 pub(super) fn execute_in(fixture: &mut TirFixture, body: &str) {
-    execute_source_in(
+    execute_text_in(
         fixture,
         &format!("pub fn main(t: Test) -> Result[(), ()] {{\n{body}\nOk(())\n}}"),
     );
 }
 
-fn execute_source_in(fixture: &mut TirFixture, source: &str) {
+fn execute_text_in(fixture: &mut TirFixture, source: &str) {
     with_compiler_stack(|| {
         let prepared = fixture
             .tir(Some(source), None)

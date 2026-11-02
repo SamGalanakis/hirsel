@@ -28,7 +28,7 @@ fn check(source: &str) -> (QueryEngine, CheckOutput) {
         .sources
         .add("alias-cleanup.hir", source.into())
         .unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(output.completion, CheckCompletion::Complete);
     (engine, output)
 }

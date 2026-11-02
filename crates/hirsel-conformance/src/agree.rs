@@ -197,7 +197,7 @@ impl Native {
     /// Compare the engine's snapshot under `matrix` with `reference`.
     fn compare(
         &self,
-        engine: &mut QueryEngine,
+        program: &NativeProgram,
         matrix: &[hirsel_driver::native::Configuration],
         reference: &hirsel_driver::native::Observation,
         entry: &hirsel_engine::DefPath,
@@ -213,16 +213,6 @@ impl Native {
                 .entry(reason)
                 .or_default() += 1;
         };
-        let validated = match engine
-            .export_native_input()
-            .and_then(|input| engine.import_native_input(input))
-        {
-            Ok(validated) => validated,
-            Err(_) => {
-                unavailable("snapshot: no native input".into());
-                return None;
-            }
-        };
         let needs_files = matrix
             .iter()
             .any(|c| crate::native::Class::of(c) == crate::native::Class::Llvm);
@@ -233,8 +223,48 @@ impl Native {
         if needs_files {
             std::fs::create_dir_all(&dir).expect("scratch directory");
         }
-        let outcomes = hirsel_driver::native::differential_in(
-            &validated,
+        use hirsel_driver::requests::{
+            CompileOperation, CompileRequest, CompileResult, CompilerRequests, NativeOutput,
+            NativeRequest,
+        };
+        let mut requests =
+            CompilerRequests::for_host(program.compiler.clone(), program.compiler.configuration())
+                .with_toolchain(std::sync::Arc::new(self.toolchain.clone()));
+        let mut ready = |options: &hirsel_driver::native::Options| {
+            let failed = |message: String| hirsel_driver::native::NativeError {
+                stage: hirsel_driver::native::StageName::Ready,
+                definition: None,
+                validator: false,
+                message,
+            };
+            let output = requests
+                .execute_request(&CompileRequest {
+                    path: program.path.clone(),
+                    inputs: program.inputs.clone().into(),
+                    operation: CompileOperation::NativeBuild(NativeRequest {
+                        definition: Some(entry.clone()),
+                        test_entries: vec![],
+                        supplemental_sources: vec![],
+                        output: NativeOutput::Ready,
+                        options: hirsel_driver::native::BuildOptions::new(
+                            options.clone(),
+                            hirsel_driver::native::Backend::Llvm,
+                            hirsel_driver::native::OptLevel::Default,
+                        ),
+                        run: None,
+                        fuel: false,
+                        evidence: None,
+                    }),
+                })
+                .map_err(|error| failed(error.to_string()))?;
+            match &output.result {
+                CompileResult::NativeReady(ready) => Ok(ready.clone()),
+                CompileResult::NativeError(error) => Err(error.clone()),
+                _ => Err(failed("agreement expected Ready".into())),
+            }
+        };
+        let outcomes = hirsel_driver::native::differential_ready(
+            &mut ready,
             entry,
             reference,
             matrix,
@@ -417,7 +447,7 @@ fn classify_requested(
         return Classification::Unavailable;
     }
     drop(checked);
-    let mut program = NativeProgram::Pending {
+    let mut program = NativeProgram {
         compiler: compiler.clone(),
         path: path.to_owned(),
         inputs: inputs.clone().into(),
@@ -491,7 +521,7 @@ fn classify_requested(
             let CompileResult::TirBatch(batch) = &prepared.result else {
                 return violation("interpretation", "a TIR batch returned another operation");
             };
-            program = NativeProgram::Pending {
+            program = NativeProgram {
                 compiler,
                 path: path.to_owned(),
                 inputs,
@@ -543,136 +573,24 @@ fn classify_requested(
     Classification::Valid
 }
 
-/// A source without a path is checked alone in the engine, with core only.
-/// A standalone request would check the whole of std@1 from source for every
-/// variant, so these variants have no request input yet.
+/// Standalone variants select an explicit core-only package on the request path.
 fn classify_standalone(
     source: &str,
     execution: Execution,
     native: Option<(&Native, &[hirsel_driver::native::Configuration])>,
     hash_seed: u64,
 ) -> Classification {
-    let mut engine = engine();
-    let context = hirsel_engine::default_context();
-    let file = engine
-        .sources
-        .add("agree.hir", source.into())
-        .expect("corpus-sized source");
-    match hirsel_engine::check_progress(&mut engine, file, &context) {
-        Err(e) => return query_error(e),
-        Ok(output) => {
-            if output
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == hirsel_diag::Severity::Error)
-            {
-                return Classification::Rejected;
-            }
-            if output.completion != CheckCompletion::Complete {
-                return Classification::Unavailable;
-            }
-        }
-    }
-    match execution {
-        Execution::None => Classification::Valid,
-        Execution::Tests => violation("fixture", "a test program is loaded through its file"),
-        Execution::Entry => {
-            let (simulation, fixture) = match (crate::simulation(source), crate::fixture(source)) {
-                (Ok(simulation), Ok(fixture)) => (simulation, fixture),
-                (Err(error), _) | (_, Err(error)) => return violation("fixture", &error),
-            };
-            let config = hirsel_engine::RunConfiguration {
-                entry: crate::selected_entry(source, &context),
-                hash_seed,
-                inputs: vec![],
-            };
-            let mut program = NativeProgram::Checked(engine);
-            compare_engines(
-                &config,
-                native,
-                &mut program,
-                &fixture,
-                |program, checked| observe_engine(program, &config, &simulation, checked),
-            )
-            .unwrap_or(Classification::Valid)
-        }
+    match crate::native::source_request::Source::new(None, source) {
+        Ok(input) => classify_requested(source, execution, native, input.path(), hash_seed),
+        Err(error) => tool_error(error),
     }
 }
 
-/// Interpret `config` in the checked engine of a variant that has no
-/// request-produced TIR yet.
-fn observe_engine(
-    program: &mut NativeProgram,
-    config: &hirsel_engine::RunConfiguration,
-    simulation: &hirsel_engine::SimulationConfig,
-    checked: bool,
-) -> Result<hirsel_engine::ObservedExecution, ToolError> {
-    let NativeProgram::Checked(engine) = program else {
-        unreachable!("the engine checked the variant before it runs")
-    };
-    let run = if checked {
-        hirsel_engine::run_observed_checked
-    } else {
-        hirsel_engine::run_observed_snapshot
-    };
-    run(engine, config, simulation.clone())
-}
-
-/// The checked engine the native comparison exports its input from. A
-/// requested variant loads it on first native use; its interpretation never
-/// reads it.
-enum NativeProgram {
-    Pending {
-        compiler: hirsel_engine::Compiler,
-        path: std::path::PathBuf,
-        inputs: hirsel_driver::requests::CompileInputs,
-    },
-    Checked(QueryEngine),
-    Failed(Classification),
-}
-impl NativeProgram {
-    fn engine(&mut self) -> Result<&mut QueryEngine, Classification> {
-        if let Self::Pending {
-            compiler,
-            path,
-            inputs,
-        } = self
-        {
-            *self = match Self::load(compiler, path, inputs) {
-                Ok(engine) => Self::Checked(engine),
-                Err(classification) => Self::Failed(classification),
-            };
-        }
-        match self {
-            Self::Checked(engine) => Ok(engine),
-            Self::Failed(classification) => Err(classification.clone()),
-            Self::Pending { .. } => unreachable!("loaded above"),
-        }
-    }
-    fn load(
-        compiler: &hirsel_engine::Compiler,
-        path: &Path,
-        inputs: &hirsel_driver::requests::CompileInputs,
-    ) -> Result<QueryEngine, Classification> {
-        let mut loaded = compiler
-            .load_check_package_inputs(path, inputs, true)
-            .map_err(tool_error)?;
-        let output = loaded
-            .check(hirsel_engine::LoweringPolicy::Reachable)
-            .map_err(query_error)?;
-        if output.completion != CheckCompletion::Complete
-            || output
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == hirsel_diag::Severity::Error)
-        {
-            return Err(violation(
-                "native input",
-                "the checked engine disagrees with the request's accepted check",
-            ));
-        }
-        Ok(loaded.engine)
-    }
+/// Frozen request inputs used by the native witness of the same variant.
+struct NativeProgram {
+    compiler: hirsel_engine::Compiler,
+    path: std::path::PathBuf,
+    inputs: hirsel_driver::requests::CompileInputs,
 }
 
 /// Run `config` normally, then under checked execution (`observe(program,
@@ -718,11 +636,7 @@ fn compare_engines(
     }
     if let (Some((native, matrix)), Some(observation)) = (native, &normal.observation) {
         let reference = hirsel_driver::native::Observation::of_reference(observation);
-        let engine = match program.engine() {
-            Ok(engine) => engine,
-            Err(classification) => return Some(classification),
-        };
-        return native.compare(engine, matrix, &reference, &config.entry, fixture);
+        return native.compare(program, matrix, &reference, &config.entry, fixture);
     }
     None
 }

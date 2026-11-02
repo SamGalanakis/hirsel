@@ -22,7 +22,7 @@ fn a_line_above_a_large_file_recomputes_only_the_first_item() {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("large.hir", source.clone()).unwrap();
         let started = std::time::Instant::now();
-        let cold = check_progress(&mut engine, file, &default_context()).unwrap();
+        let cold = source_check_request(&mut engine, file, &default_context()).unwrap();
         let cold_time = started.elapsed();
         assert!(cold.diagnostics.is_empty(), "{:?}", cold.diagnostics);
         let parsed = engine.parse_file(file, &default_context()).unwrap().value;
@@ -60,7 +60,7 @@ fn a_line_above_a_large_file_recomputes_only_the_first_item() {
         let edited = format!("// a new first line\n{source}");
         let file = engine.sources.add("large.hir", edited).unwrap();
         let started = std::time::Instant::now();
-        let warm = check_progress(&mut engine, file, &default_context()).unwrap();
+        let warm = source_check_request(&mut engine, file, &default_context()).unwrap();
         let warm_time = started.elapsed();
         assert!(warm.diagnostics.is_empty(), "{:?}", warm.diagnostics);
         let after = counts(&engine);

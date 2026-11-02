@@ -1172,8 +1172,8 @@ fn loop_version_stale_join_is_rejected() {
 fn loop_version_matches_reference_heap_llvm_and_cranelift() {
     use hirsel_driver::native::*;
     use hirsel_engine::{
-        QueryEngine, RunConfiguration, check_progress, default_context, default_environment,
-        entry_path, run_observed_snapshot, with_compiler_stack,
+        QueryEngine, RunConfiguration, default_context, default_environment, entry_path,
+        run_observed_snapshot, source_check_request, with_compiler_stack,
     };
     let source = include_str!("../../../../conformance/LANG/LANG-13-loop-element-match-run.hir");
     with_compiler_stack(move || {
@@ -1183,7 +1183,7 @@ fn loop_version_matches_reference_heap_llvm_and_cranelift() {
             .sources
             .add("loop-element.hir", source.into())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&default_context());
         let config = RunConfiguration {

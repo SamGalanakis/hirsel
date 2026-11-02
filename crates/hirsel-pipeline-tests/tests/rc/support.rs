@@ -3,8 +3,8 @@
 //! (the driver wires the same adapter).
 use hirsel_driver::compiler_adapters;
 use hirsel_engine::{
-    DefinitionQueries, InstanceKind, NativeInput, QueryEngine, check_progress, default_context,
-    default_environment, with_compiler_stack,
+    DefinitionQueries, InstanceKind, NativeInput, QueryEngine, default_context,
+    default_environment, source_check_request, with_compiler_stack,
 };
 use hirsel_layout::layout::{OwnerRepresentation, Owners};
 
@@ -55,7 +55,7 @@ pub fn try_compile(source: &str) -> Result<Program, String> {
         } else {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let file = engine.sources.add("test.hir", source.clone()).unwrap();
-            let result = check_progress(&mut engine, file, &default_context())
+            let result = source_check_request(&mut engine, file, &default_context())
                 .map_err(|e| format!("check: {e:?}"))?;
             if let Some(d) = result
                 .diagnostics

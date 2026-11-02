@@ -1786,7 +1786,7 @@ pub(super) fn install(
                 Counters {
                     phases,
                     validations: program.engine.body_validation_runs(path),
-                    lower_calls: program.engine.s1_lower_work(path).adapter_calls,
+                    lower_calls: program.engine.request_lower_adapter_calls(path),
                 },
             )
         })

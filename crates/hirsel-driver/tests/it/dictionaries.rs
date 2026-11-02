@@ -82,7 +82,7 @@ fn dictionary_graph_import_preserves_actuals_and_rejects_forgery() {
             const ALIAS: Op = OP\n\
             pub fn main() -> Result[(), String] { let op = ALIAS; failure.check(op.run(9) == 9 && wrong(0u64) == 0, Bounds()); Ok(()) }\n";
         let file = engine.sources.add("dictionary.hir", text.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let text = engine.export_tir(&entry_path(&default_context())).unwrap();
         let imported = engine.import_tir(&text).unwrap();

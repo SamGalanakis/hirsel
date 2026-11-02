@@ -89,7 +89,7 @@ fn entry(rejected: bool) {
             .replace("SEAL_LINE", &format!("{seal_line}u64"));
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("sealed-entry.hir", source).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let exported = engine.export_native_input().unwrap();
         engine.import_native_input(exported).unwrap();

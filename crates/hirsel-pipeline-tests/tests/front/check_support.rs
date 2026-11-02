@@ -71,7 +71,7 @@ pub fn source_definition(source: &str) -> (Arc<hirsel_types::TypeInterner>, Defi
     (engine.types().clone(), definition)
 }
 
-pub fn execute_source(source: &str) -> Execution {
+pub fn execute_text(source: &str) -> Execution {
     let mut engine = source_engine(source);
     engine.lower_to_tir(&path("main")).unwrap();
     let runtime = engine.runtime_types().unwrap();

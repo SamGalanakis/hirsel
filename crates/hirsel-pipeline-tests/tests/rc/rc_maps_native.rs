@@ -2,7 +2,7 @@
 use hirsel_driver::compiler_adapters;
 use hirsel_driver::native::*;
 use hirsel_engine::{
-    QueryEngine, check_progress, default_context, default_environment, with_compiler_stack,
+    QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
 use hirsel_lir::layout::sequence_elements_offset;
 use hirsel_lir::layout_types::{
@@ -220,7 +220,7 @@ fn compiled_seed_law(composite: bool, slice: bool) {
     with_compiler_stack(move || {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("map-seed.hir", source).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(
             !checked
                 .diagnostics
@@ -438,7 +438,7 @@ fn internal_set_order_agrees_on_heap_and_both_native_targets() {
     with_compiler_stack(move || {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("set-order.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(
             !checked
                 .diagnostics
@@ -528,7 +528,7 @@ fn deep_key_failures_name_the_source_operation_through_nested_library_calls() {
                     .sources
                     .add("map-failure-sites.hir", source.clone())
                     .unwrap();
-                let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+                let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
                 assert!(
                     !checked
                         .diagnostics

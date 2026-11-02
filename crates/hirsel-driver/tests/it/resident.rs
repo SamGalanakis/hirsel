@@ -10,7 +10,7 @@ fn engine(store: Arc<dyn store::ResultStore>) -> QueryEngine {
 }
 fn checked(engine: &mut QueryEngine, text: &str) -> CheckOutput {
     let file = engine.sources.add("resident.hir", text.into()).unwrap();
-    check_progress(engine, file, &default_context()).unwrap()
+    source_check_request(engine, file, &default_context()).unwrap()
 }
 fn path(name: &str) -> DefPath {
     let mut path = entry_path(&default_context());
@@ -589,8 +589,11 @@ fn restored_mode_phases_retire_with_the_edited_or_removed_memo() {
             .add("phase-retire.hir", rejected.into())
             .unwrap();
         restored.parse_file(file, &default_context()).unwrap();
-        let mut result =
-            restored.mode_definitions(vec![owner.clone()], hirsel_intern::jobs::Jobs::new(2));
+        let mut result = crate::request_graph::front(
+            &mut restored,
+            vec![owner.clone()],
+            hirsel_intern::jobs::Jobs::new(2),
+        );
         let Err(QueryError::Diagnostics(errors)) = result.remove(0).result else {
             panic!("stored rejection")
         };
@@ -659,7 +662,7 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
         let file = scalar.sources.add(&source_path, source.into()).unwrap();
         scalar.parse_file(file, &default_context()).unwrap();
         assert!(
-            check_progress(&mut scalar, file, &default_context())
+            source_check_request(&mut scalar, file, &default_context())
                 .unwrap()
                 .diagnostics
                 .is_empty()
@@ -760,7 +763,8 @@ fn fully_restored_frozen_frontier_does_not_validate_a_signature_snapshot() {
             restored.parse_file(file, &default_context()).unwrap();
             let paths = vec![path("b"), path("a"), path("b")];
             let before = work::read(Counter::ValidateSignatureRows);
-            let results = restored.mode_definitions(paths.clone(), Jobs::new(jobs));
+            let results =
+                crate::request_graph::front(&mut restored, paths.clone(), Jobs::new(jobs));
             assert_eq!(results.len(), paths.len());
             for (result, path) in results.iter().zip(&paths) {
                 assert_eq!(&result.definition, path);
@@ -776,7 +780,7 @@ fn fully_restored_frozen_frontier_does_not_validate_a_signature_snapshot() {
                 "fully restored frontiers have no worker requiring a frozen snapshot"
             );
             let before = work::read(Counter::ValidateSignatureRows);
-            restored.mode_definitions(paths, Jobs::new(jobs));
+            crate::request_graph::front(&mut restored, paths, Jobs::new(jobs));
             assert_eq!(work::read(Counter::ValidateSignatureRows) - before, 0);
         }
     });
@@ -795,7 +799,11 @@ fn cold_frozen_frontier_defers_v_until_the_validation_universe_is_requested() {
             let file = frozen.sources.add("resident.hir", source.into()).unwrap();
             frozen.parse_file(file, &default_context()).unwrap();
             let before = work::read(Counter::ValidateSignatureRows);
-            let outputs = frozen.mode_definitions(vec![path("a"), path("b")], Jobs::new(jobs));
+            let outputs = crate::request_graph::front(
+                &mut frozen,
+                vec![path("a"), path("b")],
+                Jobs::new(jobs),
+            );
             assert!(
                 outputs
                     .iter()
@@ -842,17 +850,19 @@ fn deferred_snapshot_extensions_preserve_local_verifier_receipts() {
             reader.parse_file(file, &default_context()).unwrap();
             let before = work::read(Counter::ValidateSignatureRows);
             assert!(
-                reader
-                    .mode_definitions(vec![path("a"), path("b")], Jobs::new(jobs))
-                    .iter()
-                    .all(|o| o.result.is_ok())
+                crate::request_graph::front(
+                    &mut reader,
+                    vec![path("a"), path("b")],
+                    Jobs::new(jobs)
+                )
+                .iter()
+                .all(|o| o.result.is_ok())
             );
             let edited = source.replace("fn a() -> u8 { 1u8 }", "fn a() -> u16 { 1u16 }");
             let file = reader.sources.add("resident.hir", edited).unwrap();
             reader.parse_file(file, &default_context()).unwrap();
             assert!(
-                reader
-                    .mode_definitions(vec![path("a")], Jobs::new(jobs))
+                crate::request_graph::front(&mut reader, vec![path("a")], Jobs::new(jobs))
                     .iter()
                     .all(|o| o.result.is_ok())
             );
@@ -956,7 +966,7 @@ fn frozen_frontier_publishes_compact_inputs_before_bodies_are_released() {
             let file = engine.sources.add("resident.hir", source.into()).unwrap();
             engine.parse_file(file, &default_context()).unwrap();
             let paths = vec![path("main"), path("identity")];
-            let outcomes = engine.mode_definitions(paths.clone(), Jobs::new(jobs));
+            let outcomes = crate::request_graph::front(&mut engine, paths.clone(), Jobs::new(jobs));
             assert!(
                 outcomes
                     .iter()
@@ -1018,7 +1028,8 @@ fn compact_front_results_preserve_diagnostics_after_batch_body_release() {
                 let mut engine = engine(Arc::new(store::NoneStore));
                 let file = engine.sources.add("resident.hir", source.into()).unwrap();
                 engine.parse_file(file, &default_context()).unwrap();
-                let outputs = engine.publish_definitions(
+                let outputs = crate::request_graph::publications(
+                    &mut engine,
                     vec![path("id"), path("id")],
                     Jobs::new(jobs),
                     memo::Retention::Batch,
@@ -1203,7 +1214,7 @@ fn compact_lower_products_require_v_when_verification_is_enabled_after_reuse() {
         let text = "const N:u8 = 1u8\nfn main() {}\n";
         let file = forged.sources.add("verify.hir", text.into()).unwrap();
         assert!(
-            check_progress(&mut forged, file, &default_context())
+            source_check_request(&mut forged, file, &default_context())
                 .unwrap()
                 .diagnostics
                 .is_empty()
@@ -1211,7 +1222,7 @@ fn compact_lower_products_require_v_when_verification_is_enabled_after_reuse() {
         forged.verify = Verify::On;
         assert!(
             matches!(
-                check_progress(&mut forged, file, &default_context()),
+                source_check_request(&mut forged, file, &default_context()),
                 Err(QueryError::Operational(_))
             ),
             "retained lower diagnostics cannot bypass V for the forged TIR"
@@ -1341,7 +1352,8 @@ fn program_constant_frontiers_evaluate_on_workers_and_reuse_published_values() {
                 (source.replace("x+1", "x+2"), true),
             ] {
                 let file = candidate.sources.add("frontier.hir", text.clone()).unwrap();
-                let actual = check_progress(&mut candidate, file, &default_context()).unwrap();
+                let actual =
+                    source_check_request(&mut candidate, file, &default_context()).unwrap();
                 let mut cold = engine(Arc::new(store::NoneStore));
                 let expected = checked(&mut cold, &text);
                 // The logical source name participates in rendered diagnostics.
@@ -1456,7 +1468,7 @@ fn constant_frontier_keeps_earlier_lower_warnings_when_a_later_root_stops() {
                     "fn scaled[n:size](xs:Inline[u8,n])->u64{let _=xs;comptime n*n}\nconst A:u64=comptime 1\nconst B:u64=comptime 2\nconst C:u64=comptime {let xs:Inline[u8,2]=[1,2];scaled(xs)}\n".into(),
                 )
                 .unwrap();
-            let output = check_progress(&mut candidate, file, &default_context()).unwrap();
+            let output = source_check_request(&mut candidate, file, &default_context()).unwrap();
             assert_eq!(output.diagnostics.len(), 1, "{:?}", diagnostics(&output));
             assert_eq!(
                 output.diagnostics[0].severity,
@@ -1478,7 +1490,7 @@ fn constant_frontier_keeps_earlier_lower_warnings_when_a_later_root_stops() {
             );
             // A noncacheable stop is retried without losing the earlier
             // warning or admitting the later dynamic declaration.
-            let again = check_progress(&mut candidate, file, &default_context()).unwrap();
+            let again = source_check_request(&mut candidate, file, &default_context()).unwrap();
             assert_eq!(diagnostics(&again), diagnostics(&output));
             assert_eq!(again.completion, output.completion);
             assert!(lowerings.load(Ordering::Relaxed) > 0);
@@ -1538,7 +1550,8 @@ fn batch_publication_releases_completed_worker_bodies_before_the_next_task() {
             let file = candidate.sources.add("bounded.hir", source).unwrap();
             candidate.parse_file(file, &default_context()).unwrap();
             let paths: Vec<_> = (0..64).rev().map(|i| path(&format!("task{i}"))).collect();
-            let outputs = candidate.publish_definitions(
+            let outputs = crate::request_graph::publications(
+                &mut candidate,
                 paths.clone(),
                 hirsel_intern::jobs::Jobs::new(jobs),
                 memo::Retention::Batch,
@@ -1616,8 +1629,7 @@ fn persistent_frontier_control(compact: bool) {
                 }
             }
             let results: Vec<_> = if compact {
-                engine
-                    .publish_definitions(paths, jobs, memo::Retention::Batch)
+                crate::request_graph::publications(&mut engine, paths, jobs, memo::Retention::Batch)
                     .into_iter()
                     .map(|outcome| {
                         (
@@ -1627,8 +1639,7 @@ fn persistent_frontier_control(compact: bool) {
                     })
                     .collect()
             } else {
-                engine
-                    .mode_definitions(paths, jobs)
+                crate::request_graph::front(&mut engine, paths, jobs)
                     .into_iter()
                     .map(|outcome| {
                         let result = outcome.result.map(|output| output.diagnostics.clone());
@@ -1870,7 +1881,8 @@ fn batch_warning_phase_lives_with_the_summary_and_retires_with_its_owner() {
             .add("warnings.hir", "fn warn(){}\n".into())
             .unwrap();
         engine.parse_file(file, &default_context()).unwrap();
-        let outcomes = engine.publish_definitions(
+        let outcomes = crate::request_graph::publications(
+            &mut engine,
             vec![path("warn")],
             hirsel_intern::jobs::Jobs::new(2),
             memo::Retention::Batch,
@@ -1888,7 +1900,8 @@ fn batch_warning_phase_lives_with_the_summary_and_retires_with_its_owner() {
             .add("warnings.hir", "fn quiet(){}\n".into())
             .unwrap();
         engine.parse_file(file, &default_context()).unwrap();
-        let outcomes = engine.publish_definitions(
+        let outcomes = crate::request_graph::publications(
+            &mut engine,
             vec![path("quiet")],
             hirsel_intern::jobs::Jobs::new(2),
             memo::Retention::Batch,
@@ -2007,14 +2020,14 @@ fn batch_serial_compile_time_demands_release_bodies_after_each_root() {
             .flat_map(|i| [path(&format!("h{i}")), path(&format!("C{i}"))])
             .collect();
         assert!(
-            candidate
-                .publish_definitions(
-                    owners,
-                    hirsel_intern::jobs::Jobs::ONE,
-                    memo::Retention::Batch
-                )
-                .iter()
-                .all(|outcome| outcome.result.is_ok())
+            crate::request_graph::publications(
+                &mut candidate,
+                owners,
+                hirsel_intern::jobs::Jobs::ONE,
+                memo::Retention::Batch
+            )
+            .iter()
+            .all(|outcome| outcome.result.is_ok())
         );
         assert!(
             observed
@@ -2175,7 +2188,8 @@ fn durable_front_workers_drain_payloads_before_accepting_another_task() {
             candidate.parse_file(file, &default_context()).unwrap();
             assert_eq!(store.parses.load(Ordering::SeqCst), 1);
             let owners: Vec<_> = (0..64).rev().map(|i| path(&format!("p{i}"))).collect();
-            let output = candidate.publish_definitions(
+            let output = crate::request_graph::publications(
+                &mut candidate,
                 owners.clone(),
                 hirsel_intern::jobs::Jobs::new(jobs),
                 memo::Retention::Batch,
@@ -2557,7 +2571,8 @@ fn program_dynamic_lower_frontiers_use_workers_and_retain_compact_results() {
                         .sources
                         .add("dynamic-frontier.hir", text.clone())
                         .unwrap();
-                    let actual = check_progress(&mut candidate, file, &default_context()).unwrap();
+                    let actual =
+                        source_check_request(&mut candidate, file, &default_context()).unwrap();
                     let mut reference = engine(Arc::new(store::NoneStore));
                     let reference_file =
                         reference.sources.add("dynamic-frontier.hir", text).unwrap();
@@ -2570,7 +2585,8 @@ fn program_dynamic_lower_frontiers_use_workers_and_retain_compact_results() {
                     drop(reference.lower_to_tir(&path("SECOND")).unwrap());
                     drop(reference.lower_to_tir(&path("GOOD")).unwrap());
                     let expected =
-                        check_progress(&mut reference, reference_file, &default_context()).unwrap();
+                        source_check_request(&mut reference, reference_file, &default_context())
+                            .unwrap();
                     assert!(
                         expected.diagnostics.is_empty(),
                         "{:?}",
@@ -2595,7 +2611,8 @@ fn program_dynamic_lower_frontiers_use_workers_and_retain_compact_results() {
                         })
                         .collect();
                     let root_evaluations = guard.roots.load(Ordering::Relaxed);
-                    let again = check_progress(&mut candidate, file, &default_context()).unwrap();
+                    let again =
+                        source_check_request(&mut candidate, file, &default_context()).unwrap();
                     assert_eq!(diagnostics(&again), diagnostics(&actual));
                     assert_eq!(
                         candidate.memo_stats().recomputed,
@@ -2646,13 +2663,13 @@ fn dynamic_lower_facts_without_validation_cannot_survive_verification_enablement
                 .sources
                 .add("dynamic-verification.hir", source.into())
                 .unwrap();
-            let unchecked = check_progress(&mut candidate, file, &default_context()).unwrap();
+            let unchecked = source_check_request(&mut candidate, file, &default_context()).unwrap();
             assert!(unchecked.diagnostics.is_empty());
             assert_eq!(unchecked.completion, CheckCompletion::Complete);
             candidate.verify = Verify::On;
             assert!(
                 matches!(
-                    check_progress(&mut candidate, file, &default_context()),
+                    source_check_request(&mut candidate, file, &default_context()),
                     Err(QueryError::Operational(_))
                 ),
                 "jobs={jobs}: invalid TIR accepted after enabling V"
@@ -2665,7 +2682,7 @@ fn dynamic_lower_facts_without_validation_cannot_survive_verification_enablement
                 .sources
                 .add("dynamic-verification.hir", source.into())
                 .unwrap();
-            let accepted = check_progress(&mut valid, file, &default_context()).unwrap();
+            let accepted = source_check_request(&mut valid, file, &default_context()).unwrap();
             assert!(accepted.diagnostics.is_empty());
             assert_eq!(accepted.completion, CheckCompletion::Complete);
         }

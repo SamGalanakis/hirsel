@@ -167,9 +167,12 @@ pub fn main(rt:Io,args:Args)->Result[(),GrantError] {{
                 hirsel_driver::compiler_adapters(),
             );
             let file = engine.sources.add("closure.hir", source.clone()).unwrap();
-            let checked =
-                hirsel_engine::check_progress(&mut engine, file, &hirsel_engine::default_context())
-                    .unwrap();
+            let checked = hirsel_engine::source_check_request(
+                &mut engine,
+                file,
+                &hirsel_engine::default_context(),
+            )
+            .unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             let entry = hirsel_engine::entry_path(&hirsel_engine::default_context());
             let config = hirsel_engine::RunConfiguration {

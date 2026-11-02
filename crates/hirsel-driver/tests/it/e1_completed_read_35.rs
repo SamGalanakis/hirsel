@@ -13,7 +13,7 @@ fn public_completed_read_compute_agrees_on_four_engines() {
             .sources
             .add("public-read-compute.hir", source.into())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let net = serde_json::from_value(serde_json::json!({
             "provider": "net.script@2",
@@ -107,7 +107,7 @@ fn public_read_continuation_covers_active_callers_and_inert_cleanup() {
             .sources
             .add("public-read-segment.hir", source.into())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
@@ -381,7 +381,7 @@ fn ordinary_prefix_thunk_does_not_authorize_a_post_read_private_site() {
             .sources
             .add("prefix-thunk-barrier.hir", source.into())
             .unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();

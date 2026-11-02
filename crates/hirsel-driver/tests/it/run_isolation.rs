@@ -9,8 +9,8 @@ use hirsel_driver::native::{
     build, emit_backend_objects, link_host, link_library, run_host,
 };
 use hirsel_engine::{
-    QueryEngine, RunOutcome, SimulationConfig, check_progress, default_context,
-    default_environment, entry_path, with_compiler_stack,
+    QueryEngine, RunOutcome, SimulationConfig, default_context, default_environment, entry_path,
+    source_check_request, with_compiler_stack,
 };
 use std::path::PathBuf;
 
@@ -169,7 +169,7 @@ fn native_runs_that_block_stop_or_fail_end_alone_in_one_host_process_on_both_bac
                     .sources
                     .add(format!("{name}.hir"), source.into())
                     .unwrap();
-                let output = check_progress(&mut engine, file, &context).unwrap();
+                let output = source_check_request(&mut engine, file, &context).unwrap();
                 assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
                 let input = engine.export_native_input().unwrap();
                 let validated = engine.import_native_input(input).unwrap();

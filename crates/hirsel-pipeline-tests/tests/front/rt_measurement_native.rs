@@ -4,8 +4,9 @@ use hirsel_driver::native::{
     self, Observation, OptLevel, Options, Partition, RuntimeBuild, TargetSpec, Toolchain,
 };
 use hirsel_engine::{
-    QueryEngine, RunConfiguration, SimulationConfig, ValidatedNativeInput, check_progress,
-    default_context, default_environment, entry_path, run_observed_snapshot, with_compiler_stack,
+    QueryEngine, RunConfiguration, SimulationConfig, ValidatedNativeInput, default_context,
+    default_environment, entry_path, run_observed_snapshot, source_check_request,
+    with_compiler_stack,
 };
 use std::path::{Path, PathBuf};
 
@@ -13,7 +14,7 @@ fn checked(source: &str) -> (ValidatedNativeInput, hirsel_engine::DefPath, Obser
     let context = default_context();
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("native.hir", source.into()).unwrap();
-    let output = check_progress(&mut engine, file, &context).unwrap();
+    let output = source_check_request(&mut engine, file, &context).unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     let entry = entry_path(&context);
     let execution = run_observed_snapshot(

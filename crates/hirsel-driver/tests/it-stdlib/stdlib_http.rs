@@ -4,7 +4,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 
-fn execute_source(source: &str) {
+fn execute_text(source: &str) {
     with_compiler_stack(|| {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/std_source/main.hir");
@@ -63,7 +63,7 @@ fn details(e: &ToolError) -> String {
 }
 
 fn execute(body: &str) {
-    execute_source(&format!(
+    execute_text(&format!(
         r#"
 fn peer(take response: Bytes) -> NetPeer {{
   NetPeer(address: "example.com", port: 80, resolves_to: [], tls: Plain(),

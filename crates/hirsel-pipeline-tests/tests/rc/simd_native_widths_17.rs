@@ -241,7 +241,7 @@ fn parity(source: &str, expected_failure: Option<u32>, output: &[u8], name: &str
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let context = default_context();
         let file = engine.sources.add("simd.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &context).unwrap();
+        let checked = source_check_request(&mut engine, file, &context).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&context);
         let reference = run_observed_snapshot(

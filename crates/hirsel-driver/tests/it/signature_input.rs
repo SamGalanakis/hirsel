@@ -409,19 +409,31 @@ fn frozen_frontier_matches_serial_private_edits_and_tir() {
                     .iter()
                     .map(|path| serial.mode_definition(path))
                     .collect();
-                let actual = parallel.mode_definitions(paths.clone(), Jobs::new(jobs));
+                let mut graph = crate::request_graph::Graph::new(&mut parallel, Jobs::new(jobs));
+                let actual = graph.bodies(&paths);
                 for ((path, expected), actual) in paths.iter().zip(expected).zip(actual) {
                     expected.unwrap();
                     actual.result.unwrap();
                     for kind in [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes] {
                         assert_eq!(
                             serial.memo_reads(path, kind),
-                            parallel.memo_reads(path, kind),
+                            graph
+                                .installed
+                                .front
+                                .memo_snapshot()
+                                .into_iter()
+                                .find_map(|(key, reads)| (key
+                                    == hirsel_engine::memo::MemoKey::new(
+                                        kind,
+                                        DefId::intern(path)
+                                    ))
+                                .then_some(reads))
+                                .as_deref(),
                             "{jobs}/{field}/{value}/{path:?}/{kind:?}"
                         );
                     }
                     let a = serial.definition_summary(DefId::intern(path)).unwrap();
-                    let b = parallel.definition_summary(DefId::intern(path)).unwrap();
+                    let b = actual.summary.unwrap();
                     assert_eq!(a.summary.frames, b.summary.frames);
                     assert_eq!(a.summary.calls.len(), b.summary.calls.len());
                     for (a, b) in a.summary.calls.iter().zip(&b.summary.calls) {
@@ -439,6 +451,7 @@ fn frozen_frontier_matches_serial_private_edits_and_tir() {
                         parallel.export_tir(path).unwrap()
                     );
                 }
+                graph.finish();
             }
         }
     });
@@ -521,7 +534,11 @@ fn frozen_frontier_diagnostics_and_tir_are_identical_at_three_salts() {
                         .unwrap();
                     engine.parse_file(file, &default_context()).unwrap();
                     for _ in 0..2 {
-                        let results = engine.mode_definitions(paths.clone(), Jobs::new(jobs));
+                        let results = crate::request_graph::front(
+                            &mut engine,
+                            paths.clone(),
+                            Jobs::new(jobs),
+                        );
                         assert_eq!(
                             transcript(&mut engine, results),
                             expected,
@@ -549,14 +566,19 @@ fn frozen_frontier_diagnostics_and_tir_are_identical_at_three_salts() {
 #[test]
 fn frozen_frontier_keeps_serial_generation_between_source_frontiers() {
     with_compiler_stack(|| {
+        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
+        use hirsel_engine::memo::MemoKey;
         let source = "fn make() -> Result[Body[fn() -> u64 uses {}], String] uses {} { Ok(codegen.body(\"fn() -> u64 uses {} { 7 }\")) }\nfn first() -> u64 uses {} { 1 }\nfn generated() -> u64 uses {} = comptime make()\nfn last() -> u64 uses {} { generated() }\n";
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("parallel-generated.hir");
+        std::fs::write(&source_path, source).unwrap();
+        let manifest = directory.path().join("hirsel.json");
+        let manifest_base: serde_json::Value = serde_json::from_str(
+            r#"{"schema":1,"package":{"name":"standalone","version":"0"},"sources":[{"path":"parallel-generated.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"last"}}"#,
+        )
+        .unwrap();
+        std::fs::write(&manifest, manifest_base.to_string()).unwrap();
         for jobs in [1, 2, 8] {
-            let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-            let file = engine
-                .sources
-                .add("parallel-generated.hir", source.into())
-                .unwrap();
-            engine.parse_file(file, &default_context()).unwrap();
             let paths: Vec<_> = ["first", "generated", "last"]
                 .into_iter()
                 .map(|name| {
@@ -565,27 +587,61 @@ fn frozen_frontier_keeps_serial_generation_between_source_frontiers() {
                     p
                 })
                 .collect();
-            let results =
-                engine.mode_definitions(paths.clone(), hirsel_intern::jobs::Jobs::new(jobs));
-            for result in results {
-                result.result.unwrap();
+            let mut scalar = QueryEngine::new(default_environment(), compiler_adapters());
+            let file = scalar.sources.add(&source_path, source.into()).unwrap();
+            scalar.parse_file(file, &default_context()).unwrap();
+            for p in &paths {
+                scalar.mode_definition(p).unwrap();
             }
-            let mut serial = QueryEngine::new(default_environment(), compiler_adapters());
-            let file = serial
-                .sources
-                .add("parallel-generated.hir", source.into())
+            let config = CompileConfig {
+                jobs: hirsel_intern::jobs::Jobs::new(jobs),
+                verify: Verify::On,
+                retention: memo::Retention::Resident,
+                ..CompileConfig::default()
+            };
+            let mut requests =
+                CompilerRequests::for_host(COMPILER.clone().with_config(config.clone()), config);
+            let checked = requests
+                .execute(
+                    &manifest,
+                    CompileOperation::Check {
+                        lowering: LoweringPolicy::Comptime,
+                    },
+                )
                 .unwrap();
-            serial.parse_file(file, &default_context()).unwrap();
-            for p in paths {
-                serial.mode_definition(&p).unwrap();
-                assert_eq!(
-                    serial.export_tir(&p).unwrap(),
-                    engine.export_tir(&p).unwrap()
-                );
-                assert_eq!(
-                    serial.memo_reads(&p, QueryKind::Modes),
-                    engine.memo_reads(&p, QueryKind::Modes)
-                );
+            let CompileResult::Check(checked) = &checked.result else {
+                panic!("expected Check");
+            };
+            assert!(checked.diagnostics.is_empty());
+            assert_eq!(checked.completion, CheckCompletion::Complete);
+            let inspected = requests
+                .execute(
+                    &manifest,
+                    CompileOperation::Inspect {
+                        definitions: paths.clone(),
+                    },
+                )
+                .unwrap();
+            let CompileResult::Inspect(inspection) = &inspected.result else {
+                panic!("expected Inspect");
+            };
+            for p in &paths {
+                let key = MemoKey::new(QueryKind::Modes, DefId::intern(p));
+                let reads = inspection
+                    .memos
+                    .iter()
+                    .find_map(|(memo, reads)| (*memo == key).then(|| reads.clone()));
+                assert_eq!(scalar.memo_reads(p, QueryKind::Modes), reads.as_deref());
+                let mut selected = manifest_base.clone();
+                selected["entry"]["name"] = p.0.name.clone().into();
+                std::fs::write(&manifest, selected.to_string()).unwrap();
+                let exported = requests
+                    .execute(&manifest, CompileOperation::ExportTir)
+                    .unwrap();
+                let CompileResult::ExportTir(tir) = &exported.result else {
+                    panic!("expected ExportTir");
+                };
+                assert_eq!(tir, &scalar.export_tir(p).unwrap());
             }
         }
     });

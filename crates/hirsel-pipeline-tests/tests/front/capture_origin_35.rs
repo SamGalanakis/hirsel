@@ -16,7 +16,7 @@ fn main() -> u64 {
 }
 "#;
     assert_eq!(
-        crate::check_support::bits(crate::check_support::execute_source(source)),
+        crate::check_support::bits(crate::check_support::execute_text(source)),
         14
     );
 }

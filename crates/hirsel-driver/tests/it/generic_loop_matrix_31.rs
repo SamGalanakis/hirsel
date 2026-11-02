@@ -353,17 +353,18 @@ fn check(modules: &Modules) -> Result<QueryEngine, (String, String)> {
             main = Some(file);
         }
     }
-    let checked = check_progress(&mut engine, main.unwrap(), &default_context()).map_err(|e| {
-        (
-            match &e {
-                QueryError::Diagnostics(_) => "source",
-                QueryError::Operational(f) if f.operation == "TIR validation" => "V-lower",
-                _ => "source-api",
-            }
-            .into(),
-            format!("{e:?}"),
-        )
-    })?;
+    let checked =
+        source_check_request(&mut engine, main.unwrap(), &default_context()).map_err(|e| {
+            (
+                match &e {
+                    QueryError::Diagnostics(_) => "source",
+                    QueryError::Operational(f) if f.operation == "TIR validation" => "V-lower",
+                    _ => "source-api",
+                }
+                .into(),
+                format!("{e:?}"),
+            )
+        })?;
     let errors: Vec<_> = checked
         .diagnostics
         .iter()
@@ -567,7 +568,8 @@ fn generic_loop_matrix_31_negative_nested_annotations() {
                     main = Some(file);
                 }
             }
-            let checked = check_progress(&mut engine, main.unwrap(), &default_context()).unwrap();
+            let checked =
+                source_check_request(&mut engine, main.unwrap(), &default_context()).unwrap();
             let errors: Vec<_> = checked
                 .diagnostics
                 .iter()
@@ -1022,7 +1024,7 @@ fn generic_loop_matrix_31_incomplete_error_propagation() {
         ] {
             let mut engine = crate::source_std::engine();
             let file = engine.sources.add("main.hir", source.into()).unwrap();
-            let inferred = check_progress(&mut engine, file, &default_context()).unwrap();
+            let inferred = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(
                 inferred
                     .diagnostics
@@ -1040,7 +1042,7 @@ fn generic_loop_matrix_31_incomplete_error_propagation() {
             let mut engine = crate::source_std::engine();
             let file = engine.sources.add("main.hir", source.clone()).unwrap();
             // V must not be the first phase to reject the missing source contract.
-            let output = check_progress(&mut engine, file, &default_context());
+            let output = source_check_request(&mut engine, file, &default_context());
             let checked=output.expect("incomplete error annotation needs a source diagnostic, not a V operational rejection");
             let errors: Vec<_> = checked
                 .diagnostics
@@ -1074,7 +1076,7 @@ fn generic_loop_matrix_31_projected_callable_result() {
         let source = include_str!("../fixtures/generic_loop_matrix_31/call-result.hir");
         let mut engine = crate::source_std::engine();
         let file = engine.sources.add("main.hir", source.into()).unwrap();
-        let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         engine.import_native_input(input).unwrap();
@@ -1137,7 +1139,7 @@ fn generic_loop_matrix_31_error_contract_controls() {
         for (name, text, accepted) in cases {
             let mut engine = crate::source_std::engine();
             let file = engine.sources.add(format!("{name}.hir"), text).unwrap();
-            match check_progress(&mut engine, file, &default_context()) {
+            match source_check_request(&mut engine, file, &default_context()) {
                 Ok(checked) => {
                     let errors: Vec<_> = checked
                         .diagnostics

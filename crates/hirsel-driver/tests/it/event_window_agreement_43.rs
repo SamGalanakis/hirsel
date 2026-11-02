@@ -18,7 +18,7 @@ fn checked(source: &str) -> QueryEngine {
         .sources
         .add("event-window.hir", source.into())
         .unwrap();
-    let checked = check_progress(&mut engine, file, &default_context()).unwrap();
+    let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert_eq!(checked.completion, CheckCompletion::Complete);
     assert!(
         checked.diagnostics.is_empty(),

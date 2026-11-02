@@ -1,6 +1,6 @@
 //! Bounded ownership histories, independent of either production flow join.
 use hirsel_engine::{
-    DefinitionQueries, QueryEngine, check_progress, default_context, default_environment,
+    DefinitionQueries, QueryEngine, default_context, default_environment, source_check_request,
     with_compiler_stack,
 };
 use std::collections::BTreeSet;
@@ -110,7 +110,7 @@ fn evidence_cases(pair: bool, cases: &[Case], crossing: bool) {
                     source(if crossing { "sendable " } else { "unique " }),
                 )
                 .unwrap();
-            let checked = check_progress(&mut strict, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut strict, file, &default_context()).unwrap();
             if case.unique {
                 assert!(
                     checked.diagnostics.is_empty(),
@@ -140,7 +140,7 @@ fn evidence_cases(pair: bool, cases: &[Case], crossing: bool) {
                 .sources
                 .add(format!("{}-v.hir", case.name), source(""))
                 .unwrap();
-            let checked = check_progress(&mut relaxed, file, &default_context()).unwrap();
+            let checked = source_check_request(&mut relaxed, file, &default_context()).unwrap();
             assert!(
                 checked.diagnostics.is_empty(),
                 "{} twin: {:?}",

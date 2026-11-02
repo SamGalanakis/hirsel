@@ -8,7 +8,7 @@ fn check(source: &str, expected: Option<&str>, export: bool) {
         .sources
         .add("sealed-regions-33.hir", source.into())
         .unwrap();
-    let output = check_progress(&mut engine, file, &default_context()).unwrap();
+    let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     let errors: Vec<_> = output
         .diagnostics
         .iter()

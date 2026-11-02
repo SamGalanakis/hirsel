@@ -10,7 +10,7 @@ fn check(source: &str, expected: Option<&str>) {
             .sources
             .add("authority-call-22.hir", source.into())
             .unwrap();
-        let output = check_progress(&mut engine, file, &default_context()).unwrap();
+        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert_eq!(
             output.diagnostics.first().map(|d| d.rule.as_str()),
             expected,

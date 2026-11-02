@@ -885,6 +885,13 @@ impl FrontBodyQueries {
             .is_some_and(|headers| headers.module_proof_resident(DefId::intern(definition)))
     }
 
+    /// How many times each private module's proof was inferred in this
+    /// front, evictions included, by a representative definition.
+    pub fn module_inferences(&self) -> Vec<(DefPath, u64)> {
+        self.snapshot
+            .header_products()
+            .map_or_else(Vec::new, |headers| headers.module_inferences())
+    }
     /// Whether `definition`'s settled header row is retained in the admitted cache.
     pub fn header_resident(&self, definition: &DefPath) -> bool {
         self.snapshot

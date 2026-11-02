@@ -1202,12 +1202,31 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
             let universe = (mode == 7).then(|| {
                 let signatures = front.signatures();
                 let package = &definitions[0].0.package;
-                let digest = signatures
-                    .validation(package)
-                    .unwrap()
-                    .view(hirsel_syntax::DefId::intern(&definitions[0]))
-                    .unwrap()
-                    .digest();
+                let before: std::collections::BTreeMap<_, _> =
+                    front.module_inferences().into_iter().collect();
+                let built = signatures.validation(package).map(|universe| {
+                    universe
+                        .view(hirsel_syntax::DefId::intern(&definitions[0]))
+                        .unwrap()
+                        .digest()
+                });
+                // One universe build reads every row, and the partition
+                // holds one body: each module's private proof is inferred at
+                // most once per build, whether it settles or is refused.
+                let inferred: Vec<_> = front
+                    .module_inferences()
+                    .into_iter()
+                    .map(|(module, count)| {
+                        (count - before.get(&module).copied().unwrap_or(0), module)
+                    })
+                    .filter(|(count, _)| *count != 0)
+                    .collect();
+                let repeated: Vec<_> = inferred.iter().filter(|(count, _)| *count > 1).collect();
+                assert!(
+                    repeated.is_empty(),
+                    "proofs inferred more than once in one build: {repeated:?}"
+                );
+                let digest = built.unwrap();
                 header_pins.remove(0);
                 (signatures, digest)
             });

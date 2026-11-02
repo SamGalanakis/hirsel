@@ -520,18 +520,24 @@ impl SignatureSnapshot {
                 .definitions()
                 .into_iter()
                 .partition(|d| installed.contains_key(&d.path().0.package));
+            // A failed signature is no view. A row the header cache refuses
+            // to produce refuses the build: a universe never omits a view it
+            // could not read, and no later row demands the refused proof again.
             let checked: Vec<View> = checked
                 .into_iter()
-                .filter_map(|d| {
-                    self.signature(d).and_then(Result::ok).map(|s| {
-                        self.public_views[&d]
-                            .get_or_init(|| {
-                                self.view_of(d, &s, previous.and_then(|p| p.views.get(d)))
-                            })
-                            .clone()
-                    })
+                .filter_map(|d| match self.signature(d)? {
+                    Ok(s) => Some(Ok(self.public_views[&d]
+                        .get_or_init(|| self.view_of(d, &s, previous.and_then(|p| p.views.get(d))))
+                        .clone())),
+                    Err(cause @ QueryError::Operational(_)) => {
+                        Some(Err(hirsel_validate::ViewRefusal::Unreadable {
+                            definition: d,
+                            cause,
+                        }))
+                    }
+                    Err(_) => None,
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             let public = self.installed_rows(&members, None);
             // One universe over the packages `visible` admits (all: `None`).
             // An installed package's verdicts read the first heap role of its
@@ -1063,10 +1069,17 @@ impl SignatureSnapshot {
                 self.definitions()
                     .into_iter()
                     .filter(|d| visible.contains(&d.path().0.package))
-                    .filter_map(|d| {
-                        let view = self.body_view(package, d)?.ok()?;
-                        Some(View::new(t, view, None))
-                    }),
+                    .filter_map(|d| match self.body_view(package, d)? {
+                        Ok(view) => Some(Ok(View::new(t, view, None))),
+                        Err(cause @ QueryError::Operational(_)) => {
+                            Some(Err(hirsel_validate::ViewRefusal::Unreadable {
+                                definition: d,
+                                cause,
+                            }))
+                        }
+                        Err(_) => None,
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
                 &mut store,
                 Some(&state.validated),
             )?;

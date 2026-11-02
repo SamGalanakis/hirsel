@@ -30,6 +30,8 @@ struct ModuleSlot {
     state: Mutex<ProofState>,
     /// Serializes one module's producer; never held by a reader or evictor.
     producing: Mutex<()>,
+    /// How many times this module's proof was inferred, evictions included.
+    inferences: AtomicU64,
 }
 impl ModuleSlot {
     fn current(&self) -> Option<Result<Arc<ModuleProduct>, QueryError>> {
@@ -231,6 +233,23 @@ impl HeaderProducts {
             .and_then(|private| private.module(id))
             .is_some_and(|(_, slot)| matches!(slot.current(), Some(Ok(_))))
     }
+    /// How many times each module's proof was inferred, evictions included,
+    /// by a representative candidate of the module.
+    pub(crate) fn module_inferences(&self) -> Vec<(DefPath, u64)> {
+        let Some(private) = &self.private else {
+            return vec![];
+        };
+        private
+            .modules
+            .iter()
+            .filter_map(|(module, slot)| {
+                Some((
+                    private.demand_of(module)?.path().clone(),
+                    slot.inferences.load(Ordering::Relaxed),
+                ))
+            })
+            .collect()
+    }
     /// Evict one unpinned settled module proof.
     pub(super) fn evict_proof(&self) -> bool {
         self.private.as_ref().is_some_and(PrivateProducts::evict)
@@ -279,6 +298,8 @@ impl HeaderProducts {
                 engine.private_unique_failures.insert(*id, failures.clone());
             }
         }
+        // Counted before inference: a refused proof was still inferred.
+        slot.inferences.fetch_add(1, Ordering::Relaxed);
         let (facts, complete) = match engine.infer_private_module(
             working,
             private.registrations.get().map_or(&[], Vec::as_slice),

@@ -13,6 +13,7 @@ use std::io;
 use std::path::PathBuf;
 mod host_selector;
 mod inspection;
+mod memory_inputs;
 mod native_artifacts;
 mod native_assembly;
 mod native_bootstrap;
@@ -25,6 +26,7 @@ mod native_selection;
 mod native_sources;
 mod native_store;
 mod output;
+pub use memory_inputs::MemoryInputs;
 mod ownership_admission;
 mod ownership_bootstrap;
 mod ownership_selection;
@@ -50,12 +52,38 @@ pub use selector::{CompilerRequests, RequestLimits};
 pub enum CompileInputs {
     Frozen(FrozenInputs),
     Namespace(NamespaceLease),
+    Memory(MemoryInputs),
 }
 impl CompileInputs {
+    pub fn known_path(&self, path: &std::path::Path) -> Option<PathBuf> {
+        match self {
+            Self::Frozen(inputs) => inputs.known_path(path),
+            Self::Memory(inputs) => inputs.canonicalize(path).ok(),
+            Self::Namespace(inputs) => inputs.canonicalize(path).ok(),
+        }
+    }
+    pub fn replace_sources(
+        &self,
+        replacements: &std::collections::BTreeMap<PathBuf, std::sync::Arc<[u8]>>,
+        limit: usize,
+    ) -> io::Result<Self> {
+        match self {
+            Self::Frozen(inputs) => inputs
+                .replace_sources(replacements, limit)
+                .map(Self::Frozen),
+            Self::Memory(inputs) => inputs
+                .replace_sources(replacements, limit)
+                .map(Self::Memory),
+            Self::Namespace(_) => Err(io::Error::other(
+                "namespace edits require a new namespace lease",
+            )),
+        }
+    }
     pub fn retained_bytes(&self) -> usize {
         match self {
             Self::Frozen(inputs) => inputs.retained_bytes(),
             Self::Namespace(inputs) => inputs.usage().charged_bytes,
+            Self::Memory(inputs) => inputs.retained_bytes(),
         }
     }
 
@@ -63,6 +91,7 @@ impl CompileInputs {
         match self {
             Self::Frozen(inputs) => inputs.read_work(),
             Self::Namespace(inputs) => inputs.read_work(),
+            Self::Memory(_) => (0, 0),
         }
     }
 }
@@ -81,6 +110,7 @@ impl PartialEq for CompileInputs {
         match (self, other) {
             (Self::Frozen(a), Self::Frozen(b)) => a == b,
             (Self::Namespace(a), Self::Namespace(b)) => a.same_namespace(b),
+            (Self::Memory(a), Self::Memory(b)) => a == b,
             _ => false,
         }
     }
@@ -91,6 +121,7 @@ impl LoaderInputs for CompileInputs {
         match self {
             Self::Frozen(inputs) => inputs.read(path),
             Self::Namespace(inputs) => inputs.read(path),
+            Self::Memory(inputs) => inputs.read(path),
         }
     }
 
@@ -98,6 +129,7 @@ impl LoaderInputs for CompileInputs {
         match self {
             Self::Frozen(inputs) => inputs.canonicalize(path),
             Self::Namespace(inputs) => inputs.canonicalize(path),
+            Self::Memory(inputs) => inputs.canonicalize(path),
         }
     }
 
@@ -105,6 +137,7 @@ impl LoaderInputs for CompileInputs {
         match self {
             Self::Frozen(inputs) => inputs.metadata(path),
             Self::Namespace(inputs) => inputs.metadata(path),
+            Self::Memory(inputs) => inputs.metadata(path),
         }
     }
 
@@ -112,6 +145,7 @@ impl LoaderInputs for CompileInputs {
         match self {
             Self::Frozen(inputs) => inputs.directory(path),
             Self::Namespace(inputs) => inputs.directory(path),
+            Self::Memory(inputs) => inputs.directory(path),
         }
     }
 
@@ -119,6 +153,7 @@ impl LoaderInputs for CompileInputs {
         match self {
             Self::Frozen(inputs) => inputs.toolchain_std_manifest(),
             Self::Namespace(inputs) => inputs.toolchain_std_manifest(),
+            Self::Memory(inputs) => inputs.toolchain_std_manifest(),
         }
     }
 }

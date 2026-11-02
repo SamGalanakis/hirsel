@@ -648,22 +648,25 @@ fn assert_http_script_replay(relative: &str, connection: impl Fn(&str) -> HttpSc
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(relative);
-    let mut program =
-        load_program_source(&path, None).unwrap_or_else(|e| panic!("{}", details(&e)));
-    program
-        .check_for_execution()
-        .unwrap_or_else(|e| panic!("{}", details(&e)));
     let source = std::fs::read_to_string(&path).unwrap();
     let entries = if source.lines().any(|line| line == "// expect: test") {
-        let tests = testing::discover_source(&mut program, &[], None, testing::Selection::Tests)
-            .unwrap_or_else(|e| panic!("{}", details(&e)));
+        let (tests, batch) =
+            crate::source_std::tests(&source, None).unwrap_or_else(|e| panic!("{}", details(&e)));
         assert!(!tests.is_empty(), "{relative}: no tests discovered");
         tests
             .into_iter()
-            .map(|test| (test.entry, test.definition.0.name.to_string()))
+            .map(|test| {
+                (
+                    batch.entry(&test.entry).unwrap(),
+                    test.definition.0.name.to_string(),
+                )
+            })
             .collect()
     } else {
-        vec![(program.entry.clone(), program.entry.0.name.to_string())]
+        let input = crate::source_std::tir(&path, None, None)
+            .unwrap_or_else(|error| panic!("{}", details(&error)));
+        let name = input.entry.0.name.to_string();
+        vec![(input, name)]
     };
     let mut simulation = SimulationConfig::default();
     if source.lines().any(|line| line == "// grant: clock") {
@@ -675,14 +678,20 @@ fn assert_http_script_replay(relative: &str, connection: impl Fn(&str) -> HttpSc
     {
         simulation.net = Some(serde_json::from_str(net).unwrap());
     }
-    for (entry, name) in entries {
+    for (input, name) in entries {
         let config = RunConfiguration {
-            entry,
+            entry: input.entry.clone(),
             hash_seed: 0,
             inputs: vec![],
         };
-        let recorded =
-            run_observed_snapshot(&mut program.engine, &config, simulation.clone()).unwrap();
+        let recorded = testing::observe_tir(
+            &input,
+            &config,
+            simulation.clone(),
+            InterpreterAdapter::default().limits,
+            false,
+        )
+        .unwrap();
         assert!(
             matches!(
                 recorded.outcome,
@@ -742,13 +751,15 @@ fn assert_http_script_replay(relative: &str, connection: impl Fn(&str) -> HttpSc
             assert!(!events.iter().any(|e| e.operation == "net.shutdown"));
             assert_eq!(events.last().unwrap().operation, "net.close");
         }
-        let replayed = run_observed_snapshot(
-            &mut program.engine,
+        let replayed = testing::observe_tir(
+            &input,
             &RunConfiguration {
                 inputs: events,
                 ..config
             },
             simulation.clone(),
+            InterpreterAdapter::default().limits,
+            false,
         )
         .unwrap();
         assert_eq!(replayed.observation.as_ref(), Some(&observation));
@@ -872,11 +883,11 @@ fn http2_session_freeze_controls_agree_with_checked_interpreter() {
     with_compiler_stack(|| {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../native-tests/regressions/http2-session-freeze.hir");
-        let mut program = load_program_source(&path, None).unwrap();
-        let tests =
-            testing::discover_source(&mut program, &[], None, testing::Selection::Tests).unwrap();
+        let source = std::fs::read_to_string(path).unwrap();
+        let (tests, batch) = crate::source_std::tests(&source, None).unwrap();
         assert_eq!(tests.len(), 4);
         for test in tests {
+            let input = batch.entry(&test.entry).unwrap();
             let config = RunConfiguration {
                 entry: test.entry,
                 hash_seed: 0,
@@ -886,9 +897,22 @@ fn http2_session_freeze_controls_agree_with_checked_interpreter() {
                 test_seed: test.seed,
                 ..Default::default()
             };
-            let plain =
-                run_observed_snapshot(&mut program.engine, &config, simulation.clone()).unwrap();
-            let checked = run_observed_checked(&mut program.engine, &config, simulation).unwrap();
+            let plain = testing::observe_tir(
+                &input,
+                &config,
+                simulation.clone(),
+                InterpreterAdapter::default().limits,
+                false,
+            )
+            .unwrap();
+            let checked = testing::observe_tir(
+                &input,
+                &config,
+                simulation,
+                InterpreterAdapter::default().limits,
+                true,
+            )
+            .unwrap();
             for result in [&plain, &checked] {
                 assert!(
                     matches!(

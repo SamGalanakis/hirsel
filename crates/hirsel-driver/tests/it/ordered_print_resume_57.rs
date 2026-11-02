@@ -181,8 +181,8 @@ pub fn main(rt:Io)->Result[(),GrantError] {
         let checked = check_progress(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&default_context());
-        let reference = run_observed_snapshot(
-            &mut engine,
+        let reference = crate::source_std::observe(
+            source,
             &RunConfiguration {
                 entry: entry.clone(),
                 hash_seed: 50,

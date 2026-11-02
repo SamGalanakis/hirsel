@@ -126,7 +126,7 @@ fn compiler_for(
     let mut checked = CHECKED.get_or_init(Default::default).lock().unwrap();
     let existing = checked.iter().find(|entry| entry.key == key);
     let store = existing.map_or_else(
-        || Arc::new(MemStore::default()),
+        || Arc::new(MemStore::default().with_installed_products()),
         |entry| entry.store.clone(),
     );
     let compiler = hirsel_driver::COMPILER
@@ -298,4 +298,91 @@ pub fn tir(
     name: Option<&str>,
 ) -> Result<Arc<hirsel_driver::requests::TirExecution>, ToolError> {
     TirFixture::new(path)?.tir(replacement, name)
+}
+
+#[allow(dead_code)]
+pub fn observe(
+    source: &str,
+    run: &hirsel_engine::RunConfiguration,
+    simulation: hirsel_engine::SimulationConfig,
+) -> Result<hirsel_engine::ObservedExecution, ToolError> {
+    let input = tir_memory(source, Some(run.entry.clone()))?;
+    hirsel_driver::testing::observe_tir(
+        &input,
+        run,
+        simulation,
+        hirsel_interp::Limits::default(),
+        false,
+    )
+}
+
+#[allow(dead_code)]
+pub fn tir_memory(
+    source: &str,
+    definition: Option<hirsel_syntax::DefPath>,
+) -> Result<Arc<hirsel_driver::requests::TirExecution>, ToolError> {
+    use hirsel_driver::requests::*;
+    let compiler = hirsel_driver::COMPILER;
+    let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
+    let request = CompileRequest::source(
+        source,
+        &hirsel_engine::default_context(),
+        CompileOperation::Tir { definition },
+    );
+    let output = requests.execute_request(&request)?;
+    let CompileResult::Tir(input) = &output.result else {
+        return Err(ToolError::Runtime(
+            "source observation returned another operation".into(),
+        ));
+    };
+    Ok(input.clone())
+}
+
+#[allow(dead_code)]
+pub fn tests(
+    source: &str,
+    seed: Option<u64>,
+) -> Result<
+    (
+        Vec<hirsel_driver::testing::Test>,
+        Arc<hirsel_driver::requests::TirBatchExecution>,
+    ),
+    ToolError,
+> {
+    use hirsel_driver::requests::*;
+    let compiler = hirsel_driver::COMPILER;
+    let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
+    let request = CompileRequest::source(
+        source,
+        &hirsel_engine::default_context(),
+        CompileOperation::Check {
+            lowering: LoweringPolicy::Reachable,
+        },
+    );
+    let discovery = hirsel_driver::testing::discover(
+        &mut requests,
+        &request.path,
+        request.inputs.clone(),
+        &[],
+        seed,
+        hirsel_driver::testing::Selection::Tests,
+    )?;
+    let inputs = discovery.execution_inputs(requests.input_limits().bytes)?;
+    let output = requests.execute_request(&CompileRequest {
+        path: request.path,
+        inputs,
+        operation: CompileOperation::TirBatch {
+            definitions: discovery
+                .tests
+                .iter()
+                .map(|test| test.entry.clone())
+                .collect(),
+        },
+    })?;
+    let CompileResult::TirBatch(batch) = &output.result else {
+        return Err(ToolError::Runtime(
+            "source tests returned another operation".into(),
+        ));
+    };
+    Ok((discovery.tests, batch.clone()))
 }

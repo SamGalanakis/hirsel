@@ -598,6 +598,53 @@ impl Catalog {
     }
 }
 impl QueryEngine {
+    pub fn index_installed_source(
+        &mut self,
+        file: FileId,
+        context: &FileContext,
+    ) -> Result<(), QueryError> {
+        let missing = || {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "installed package".into(),
+                message: format!(
+                    "missing or corrupt declaration products for {}@{}",
+                    context.package.name, context.package.version
+                ),
+            })
+        };
+        let key = self.catalog_key(file, context).ok_or_else(missing)?;
+        let bytes = self
+            .result_store
+            .as_ref()
+            .and_then(|store| store.get(&key))
+            .ok_or_else(missing)?;
+        let record: FileHeads = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(bytes.len() as u64)
+            .reject_trailing_bytes()
+            .deserialize(&bytes)
+            .map_err(|_| missing())?;
+        if !self.valid_heads(file, context, &record) {
+            return Err(missing());
+        }
+        if !self.has_parse_syntax(file, context) {
+            return Err(missing());
+        }
+        if self.verify_store == crate::store::VerifyStore::Recompute {
+            // The explicit cache oracle still compares ordinary Parse records
+            // to recomputation from the installed immutable validation input.
+            self.index_source(file, context)?;
+        } else if self.catalog.files.get(&file) != Some(context) {
+            self.adopt_heads(file, context, record.heads);
+        }
+        self.indexed_sources.insert(
+            file,
+            (context.clone(), self.package_environment(&context.package)),
+        );
+        // Syntax is a separately checked ordinary product, demanded lazily.
+        self.installed_sources.insert(file);
+        Ok(())
+    }
     pub(crate) fn comptime_site(
         &mut self,
         path: &DefPath,
@@ -1051,6 +1098,15 @@ impl QueryEngine {
             return Ok(());
         };
         let cached = self.load_parse_syntax(file, &context);
+        if cached.is_none() && self.installed_sources.contains(&file) {
+            return Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "installed package".into(),
+                message: format!(
+                    "missing or corrupt syntax product: {}",
+                    self.sources.file(file).unwrap().path.display()
+                ),
+            }));
+        }
         let restored = cached.is_some() && self.verify_store == crate::store::VerifyStore::Off;
         let mut output = if restored {
             cached.unwrap()

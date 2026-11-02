@@ -281,6 +281,7 @@ pub struct QueryEngine {
     /// The items the last index dropped, which the next can adopt.
     detached: Vec<Arc<ItemSyntax>>,
     parsed: BTreeMap<FileId, ParsedFile>,
+    pub(crate) installed_sources: BTreeSet<FileId>,
     pub(crate) registry: crate::registry::BuiltinRegistry,
     pub(crate) builtins: BTreeMap<DefPath, hirsel_types::SignatureRef>,
     syntax_keys: BTreeMap<(DefPath, QueryKind), ContentHash>,
@@ -690,6 +691,7 @@ impl QueryEngine {
             items: native_records::SourceTable::new(source_ownership.clone()),
             detached: vec![],
             parsed: BTreeMap::new(),
+            installed_sources: BTreeSet::new(),
             registry,
             builtins: BTreeMap::new(),
             syntax_keys: BTreeMap::new(),

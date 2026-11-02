@@ -116,8 +116,8 @@ fn split_socket_loan_30_original_and_twins_on_four_engines() {
             } else {
                 Fixture::default()
             };
-            let execution = run_observed_snapshot(
-                &mut engine,
+            let execution = crate::source_std::observe(
+                source,
                 &RunConfiguration {
                     entry: entry.clone(),
                     hash_seed: 30,

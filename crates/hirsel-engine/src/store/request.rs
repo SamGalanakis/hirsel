@@ -218,6 +218,13 @@ impl hirsel_validate::VerifierRows for RequestVerifierRows {
     }
 }
 impl ResultStore for RequestStore {
+    fn installed_package(
+        &self,
+        package: &hirsel_syntax::PackageId,
+        compiler: ContentHash,
+    ) -> Result<Arc<InstalledPackage>, String> {
+        self.backend.installed_package(package, compiler)
+    }
     fn operation_scope(&self) -> StoreOperation {
         let mut operation = self.backend.operation_scope();
         operation.persistence = Arc::new(OperationPersistence::new(self.baseline));

@@ -18,6 +18,7 @@ pub struct DirStore {
     verifier_identity: Option<hirsel_syntax::ContentHash>,
     verifier: std::sync::Arc<hirsel_validate::VerifierCache>,
     operation: bool,
+    installation: Option<std::sync::Arc<std::sync::Mutex<super::installed::InstallationRecords>>>,
 }
 
 /// What a collection found and removed.
@@ -43,6 +44,7 @@ impl DirStore {
             read_only: vec![],
             cap: DEFAULT_CAP,
             operation: false,
+            installation: None,
         }
     }
     /// Select an independently constructed local verifier for installation.
@@ -57,6 +59,46 @@ impl DirStore {
     pub fn with_installation(mut self, installation: &hirsel_validate::Installation) -> Self {
         self.verifier = installation.verifier();
         self
+    }
+    /// Track the complete closure of an explicit package producer.
+    pub fn recording_installation(mut self) -> Self {
+        self.installation = Some(Default::default());
+        self
+    }
+    pub fn publish_installation(&self, package: super::InstalledPackage) -> std::io::Result<()> {
+        let records = self
+            .installation
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("installation was not recorded"))?;
+        let store = hirsel_artifact_store::Store::new(self.root.clone());
+        package.publish(
+            &store,
+            &records.lock().unwrap_or_else(|error| error.into_inner()),
+        )
+    }
+    fn record_content(&self, reference: super::Reference) {
+        if let Some(records) = &self.installation {
+            records
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contents
+                .insert(reference.output.0, reference);
+        }
+    }
+    fn record_row(
+        &self,
+        address: super::Address,
+        action: super::Action,
+        reference: super::Reference,
+    ) {
+        self.record_content(reference);
+        if let Some(records) = &self.installation {
+            records
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .rows
+                .insert(address.0, (action, reference));
+        }
     }
     /// Read installed ordinary products with the same checked format. Writes,
     /// collection and verifier associations remain in this store's own root.
@@ -141,7 +183,7 @@ impl DirStore {
             })
     }
     pub(super) fn installed_only() -> Option<Self> {
-        let root = Self::installed_root().filter(|root| root.is_dir())?;
+        let root = Self::installed_root()?;
         let verifier = Self::installed_verifier(&root);
         Some(Self {
             read_only: vec![hirsel_artifact_store::Store::new(root.clone())],
@@ -151,6 +193,7 @@ impl DirStore {
             verifier_identity: None,
             verifier,
             operation: false,
+            installation: None,
         })
     }
     /// Compose environment-selected local storage with installed ordinary
@@ -202,13 +245,36 @@ impl DirStore {
         let _batch = store.batch();
         let write = || -> std::io::Result<()> {
             let reference = store.put(super::entry_domain(key.2), value)?;
-            store.associate(Address(key.0), action, reference)
+            store.associate(Address(key.0), action, reference)?;
+            self.record_row(Address(key.0), action, reference);
+            Ok(())
         };
         let _ = write();
     }
 }
 
 impl ResultStore for DirStore {
+    fn installed_package(
+        &self,
+        package: &hirsel_syntax::PackageId,
+        compiler: hirsel_syntax::ContentHash,
+    ) -> Result<std::sync::Arc<super::InstalledPackage>, String> {
+        let mut failures = Vec::new();
+        for root in &self.read_only {
+            match super::InstalledPackage::open(root.root(), package, compiler) {
+                Ok(package) => return Ok(package),
+                Err(error) => failures.push(error),
+            }
+        }
+        if failures.is_empty() {
+            Err(format!(
+                "installed products {}: no installed package root attached",
+                self.root.display()
+            ))
+        } else {
+            Err(failures.join("; "))
+        }
+    }
     fn for_operation(&self) -> Option<std::sync::Arc<dyn ResultStore>> {
         if self.operation {
             return None;
@@ -226,6 +292,7 @@ impl ResultStore for DirStore {
             cap: self.cap,
             operation: true,
             verifier_identity: None,
+            installation: self.installation.clone(),
         };
         match self.verifier_identity {
             Some(identity) => selected
@@ -277,7 +344,9 @@ impl ResultStore for DirStore {
         // A front QueryId shares its logical address with its variant row.
         // Keep the product index disjoint, as the byte providers do.
         let address = super::Address(super::product_association_key(address).0);
-        self.roots().find_map(|(_, store)| store.lookup(address))
+        let row = self.roots().find_map(|(_, store)| store.lookup(address))?;
+        self.record_row(address, row.action, row.reference);
+        Some(row)
     }
     fn associate_product(
         &self,
@@ -293,6 +362,7 @@ impl ResultStore for DirStore {
         if self.get_content(reference).is_some() {
             let address = super::Address(super::product_association_key(address).0);
             let _ = store.associate(address, action, reference);
+            self.record_row(address, action, reference);
         }
     }
     fn verifier(&self) -> Option<std::sync::Arc<hirsel_validate::VerifierCache>> {
@@ -307,6 +377,7 @@ impl ResultStore for DirStore {
                         reference,
                     );
                 }
+                self.record_content(reference);
                 return Some(bytes);
             }
         }
@@ -314,6 +385,7 @@ impl ResultStore for DirStore {
     }
     fn put_content(&self, domain: super::Domain, bytes: &[u8]) -> Option<super::Reference> {
         let reference = self.publication_store()?.put(domain, bytes).ok()?;
+        self.record_content(reference);
         Some(reference)
     }
     fn get(&self, key: &EntryKey) -> Option<super::Bytes> {
@@ -341,6 +413,11 @@ impl ResultStore for DirStore {
             if local {
                 store.touch(hirsel_artifact_store::Address(key.0), previous.reference);
             }
+            self.record_row(
+                hirsel_artifact_store::Address(key.0),
+                previous.action,
+                previous.reference,
+            );
             return Some(bytes);
         }
         None
@@ -437,6 +514,7 @@ mod tests {
             verifier_identity: None,
             verifier: std::sync::Arc::new(verifier),
             operation: false,
+            installation: None,
         };
         // Initialize the installed store's ordinary read lock before observing
         // query writes; lock creation is independent of query publication.

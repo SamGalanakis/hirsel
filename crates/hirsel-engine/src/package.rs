@@ -154,8 +154,50 @@ pub struct LoadedProgram {
     /// manifest and, for a source, its sidecar path. A change to any of them
     /// selects another package graph, so a resident session loads again.
     pub inputs: Vec<std::path::PathBuf>,
+    pub package_kinds: BTreeMap<PackageId, DependencyKind>,
+}
+/// Package selection is a build input, independent of cache availability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DependencyKind {
+    Source,
+    Installed,
 }
 impl LoadedProgram {
+    /// Capture the discovery and validation inputs of an explicit producer.
+    /// Product closure publication belongs to the completed Precompute request.
+    pub fn installation_inputs(
+        &self,
+        compiler: ContentHash,
+        manifest: Vec<u8>,
+    ) -> crate::store::InstalledPackage {
+        let package = self.entry.0.package.clone();
+        let sources = self
+            .files
+            .iter()
+            .filter(|(_, context)| context.package == package)
+            .map(|(file, context)| {
+                let source = self.engine.sources.file(*file).unwrap();
+                crate::store::InstalledSource {
+                    path: source.path.clone(),
+                    logical: source.logical_path().to_owned(),
+                    context: context.clone(),
+                    text: source.text().to_owned(),
+                }
+            })
+            .collect();
+        let dependencies = self
+            .package_kinds
+            .keys()
+            .filter(|id| **id != package)
+            .cloned()
+            .collect();
+        crate::store::InstalledPackage::new(compiler, package, manifest, sources, dependencies)
+    }
+    pub fn source_files(&self) -> impl Iterator<Item = &(FileId, FileContext)> {
+        self.files
+            .iter()
+            .filter(|(_, context)| self.package_kinds[&context.package] == DependencyKind::Source)
+    }
     /// Check using the host's configured lowering policy.
     pub fn check_configured(&mut self) -> Result<CheckOutput, QueryError> {
         self.check(self.engine.configured_lowering)
@@ -166,8 +208,7 @@ impl LoadedProgram {
     pub(crate) fn check_scheduled(&mut self, lowering: LoweringPolicy) -> Result<(), ToolError> {
         let root = self.entry.0.package.clone();
         let files = self
-            .files
-            .iter()
+            .source_files()
             .map(|(file, context)| {
                 (
                     *file,
@@ -221,6 +262,9 @@ impl LoadedProgram {
         let mut diagnostics = Vec::new();
         let mut completion = CheckCompletion::Complete;
         for (file, context) in &self.files {
+            if self.package_kinds[&context.package] == DependencyKind::Installed {
+                continue;
+            }
             match crate::tools::association_diagnostics(&mut self.engine, *file, context) {
                 Ok(errors) | Err(QueryError::Diagnostics(errors)) => {
                     diagnostics.extend(errors);
@@ -247,6 +291,7 @@ impl LoadedProgram {
         let files: Vec<_> = self
             .files
             .iter()
+            .filter(|(_, context)| self.package_kinds[&context.package] == DependencyKind::Source)
             .map(|(file, context)| (*file, context, policy(&context.package)))
             .collect();
         for (file, output) in crate::tools::check_files(&mut self.engine, &files)? {
@@ -371,8 +416,7 @@ impl LoadedProgram {
     }
     /// The path of every source the program checks, in check order.
     pub fn source_paths(&self) -> Vec<PathBuf> {
-        self.files
-            .iter()
+        self.source_files()
             .map(|(file, _)| self.engine.sources.file(*file).unwrap().path.clone())
             .collect()
     }
@@ -390,7 +434,10 @@ impl LoadedProgram {
         else {
             return Ok(false);
         };
-        let (old, _) = self.files[index].clone();
+        let (old, context) = self.files[index].clone();
+        if self.package_kinds[&context.package] == DependencyKind::Installed {
+            return Ok(false);
+        }
         let file = self
             .engine
             .sources
@@ -409,9 +456,12 @@ impl LoadedProgram {
     /// avoid parsing unchanged bytes; changed invalid bytes fail as on a fresh load.
     pub fn parse_sources(&mut self) -> Result<(), ToolError> {
         for (file, context) in self.files.clone() {
-            self.engine
-                .index_source(file, &context)
-                .map_err(|e| self.error(e))?;
+            let indexed = if self.package_kinds[&context.package] == DependencyKind::Installed {
+                self.engine.index_installed_source(file, &context)
+            } else {
+                self.engine.index_source(file, &context)
+            };
+            indexed.map_err(|e| self.error(e))?;
         }
         Ok(())
     }
@@ -553,10 +603,12 @@ pub(crate) fn load_program_inputs_with_source_index(
         parse_sources,
     } = loading;
     let _timing = hirsel_intern::timings::interval(hirsel_intern::timings::Interval::S0);
-    let (graph, package) = Graph::program_inputs_with_links(
+    let selected_config = compiler.configuration();
+    let (graph, package) = Graph::program_inputs_with_products(
         path,
         inputs,
         !matches!(entry_selection, EntrySelection::Export),
+        Some((selected_config.store.as_ref(), compiler.identity())),
     )?;
     let root = graph.packages.get(&package).unwrap();
     let entry = if matches!(entry_selection, EntrySelection::Test)
@@ -627,7 +679,16 @@ pub(crate) fn load_program_inputs_with_source_index(
                 replacement.unwrap().to_string()
             } else {
                 // Preserve the standalone UTF-8 diagnostic policy and original bytes.
-                crate::tools::decode_source(source, inputs.read(source)?.to_vec())?
+                match &p.products {
+                    Some(products) => products
+                        .sources
+                        .iter()
+                        .find(|input| input.path == *source)
+                        .ok_or_else(|| invalid("installed source validation input is missing"))?
+                        .text
+                        .clone(),
+                    None => crate::tools::decode_source(source, inputs.read(source)?.to_vec())?,
+                }
             };
             files.push((source.clone(), context.clone()));
             texts.push(text);
@@ -805,6 +866,20 @@ pub(crate) fn load_program_inputs_with_source_index(
         primary: primary.ok_or_else(|| invalid("missing primary source"))?,
         unsafe_ffi,
         slots: graph.slots.clone(),
+        package_kinds: graph
+            .packages
+            .iter()
+            .map(|(id, package)| {
+                (
+                    id.clone(),
+                    if package.products.is_some() {
+                        DependencyKind::Installed
+                    } else {
+                        DependencyKind::Source
+                    },
+                )
+            })
+            .collect(),
         inputs: path
             .extension()
             .is_none_or(|e| e != "json")
@@ -831,10 +906,12 @@ pub(crate) fn load_program_inputs_with_source_index(
             program.engine.indexed_sources.remove(&retired);
         }
         for (file, context) in &program.files {
-            program
-                .engine
-                .index_source(*file, context)
-                .map_err(|e| program.error(e))?;
+            let indexed = if graph.packages[&context.package].products.is_some() {
+                program.engine.index_installed_source(*file, context)
+            } else {
+                program.engine.index_source(*file, context)
+            };
+            indexed.map_err(|e| program.error(e))?;
         }
         slots::check_targets(&program.engine, &program.slots)?;
         slots::check_conformance(&mut program.engine, &program.slots)?;
@@ -890,6 +967,7 @@ fn logical_source_path(source: &Path, manifest: &Path, package: &PackageId) -> P
 }
 
 struct SelectedPackage {
+    products: Option<std::sync::Arc<crate::store::InstalledPackage>>,
     path: PathBuf,
     manifest: Vec<u8>,
     sources: Vec<(PathBuf, FileContext)>,
@@ -920,6 +998,7 @@ struct Graph<'a> {
     selections: BTreeMap<PackageId, Vec<slots::Selection>>,
     /// The effective slot maps, once expanded.
     slots: PackageSlots,
+    products: Option<(&'a dyn crate::store::ResultStore, ContentHash)>,
 }
 impl Default for Graph<'static> {
     fn default() -> Self {
@@ -944,7 +1023,16 @@ impl<'a> Graph<'a> {
         inputs: &'a dyn crate::loader_inputs::LoaderInputs,
         require_link_files: bool,
     ) -> Result<(Self, PackageId), ToolError> {
+        Self::program_inputs_with_products(path, inputs, require_link_files, None)
+    }
+    fn program_inputs_with_products(
+        path: &Path,
+        inputs: &'a dyn crate::loader_inputs::LoaderInputs,
+        require_link_files: bool,
+        products: Option<(&'a dyn crate::store::ResultStore, ContentHash)>,
+    ) -> Result<(Self, PackageId), ToolError> {
         let mut graph = Self::with_inputs(inputs);
+        graph.products = products;
         graph.require_link_files = require_link_files;
         let package = if path.extension().is_some_and(|e| e == "json") {
             graph.visit(path, None)?
@@ -964,7 +1052,7 @@ impl<'a> Graph<'a> {
                         "sources": [{"path": source.file_name().unwrap().to_string_lossy(), "module": []}],
                         "entry": {"module": [], "name": "main"},
                         "dependencies": [{
-                            "manifest": crate::tools::toolchain_std_manifest_inputs(inputs)?,
+                            "manifest": "/$hirsel-installed/std@1/hirsel.json",
                             "package": {"name": "std", "version": "1"},
                             "expose": [],
                         }],
@@ -981,7 +1069,7 @@ impl<'a> Graph<'a> {
                             bindings: BTreeMap::new(),
                         });
                     let std = graph.visit_from(
-                        &crate::tools::toolchain_std_manifest_inputs(inputs)?,
+                        Path::new("/$hirsel-installed/std@1/hirsel.json"),
                         Some(&PackageId {
                             name: "std".into(),
                             version: "1".into(),
@@ -1008,6 +1096,7 @@ impl<'a> Graph<'a> {
                     graph.packages.insert(
                         package.clone(),
                         SelectedPackage {
+                            products: None,
                             path: PathBuf::from(manifest),
                             manifest: serde_json::to_vec(&value).unwrap(),
                             sources: vec![(source.clone(), context.clone())],
@@ -1037,6 +1126,7 @@ impl<'a> Graph<'a> {
             active: Vec::new(),
             selections: BTreeMap::new(),
             slots: PackageSlots::new(),
+            products: None,
         }
     }
     fn closure(&self, id: &PackageId) -> BTreeSet<PackageId> {
@@ -1104,6 +1194,64 @@ impl<'a> Graph<'a> {
         expected: Option<&PackageId>,
         via: Option<slots::Selection>,
     ) -> Result<PackageId, ToolError> {
+        if let Some(expected) = expected
+            && expected.package_is("std", "1")
+            && via
+                .as_ref()
+                .is_some_and(|selection| selection.parent.is_some())
+            && let Some((store, compiler)) = self.products
+        {
+            if self.packages.contains_key(expected) {
+                return Ok(expected.clone());
+            }
+            let products = store
+                .installed_package(expected, compiler)
+                .map_err(ToolError::Runtime)?;
+            let sources = products
+                .sources
+                .iter()
+                .map(|source| (source.path.clone(), source.context.clone()))
+                .collect();
+            let logical_sources = products
+                .sources
+                .iter()
+                .map(|source| (source.path.clone(), source.logical.clone()))
+                .collect();
+            let exposures = products
+                .sources
+                .iter()
+                .filter_map(|source| {
+                    let head = source.context.modules.first()?.clone();
+                    Some(DependencyExposure {
+                        head: head.clone(),
+                        package: expected.clone(),
+                        modules: vec![head],
+                    })
+                })
+                .collect();
+            self.selections
+                .entry(expected.clone())
+                .or_default()
+                .extend(via);
+            self.packages.insert(
+                expected.clone(),
+                SelectedPackage {
+                    path: path.to_owned(),
+                    manifest: products.manifest.clone(),
+                    sources,
+                    logical_sources,
+                    exposures,
+                    entry: None,
+                    dependencies: products.dependencies.clone(),
+                    unsafe_ffi: None,
+                    parameters: BTreeMap::new(),
+                    catalog: BTreeMap::new(),
+                    uses: BTreeMap::new(),
+                    products: Some(products),
+                },
+            );
+            return Ok(expected.clone());
+        }
         let follow_dependencies = via.is_some();
         let path = self.inputs.canonicalize(path)?;
         if self.active.contains(&path) {
@@ -1312,6 +1460,7 @@ impl<'a> Graph<'a> {
         self.packages.insert(
             package.clone(),
             SelectedPackage {
+                products: None,
                 path,
                 manifest: bytes,
                 sources,

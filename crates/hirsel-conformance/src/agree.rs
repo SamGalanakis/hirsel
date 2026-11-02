@@ -420,7 +420,7 @@ fn classify_requested(
     let mut program = NativeProgram::Pending {
         compiler: compiler.clone(),
         path: path.to_owned(),
-        inputs: inputs.clone(),
+        inputs: inputs.clone().into(),
     };
     match execution {
         Execution::None => {}
@@ -476,7 +476,7 @@ fn classify_requested(
             }
             let prepared = match requests.execute_request(&CompileRequest {
                 path: path.to_owned(),
-                inputs: inputs.clone().into(),
+                inputs: inputs.clone(),
                 operation: CompileOperation::TirBatch {
                     definitions: discovery
                         .tests
@@ -625,7 +625,7 @@ enum NativeProgram {
     Pending {
         compiler: hirsel_engine::Compiler,
         path: std::path::PathBuf,
-        inputs: hirsel_engine::loader_inputs::FrozenInputs,
+        inputs: hirsel_driver::requests::CompileInputs,
     },
     Checked(QueryEngine),
     Failed(Classification),
@@ -652,7 +652,7 @@ impl NativeProgram {
     fn load(
         compiler: &hirsel_engine::Compiler,
         path: &Path,
-        inputs: &hirsel_engine::loader_inputs::FrozenInputs,
+        inputs: &hirsel_driver::requests::CompileInputs,
     ) -> Result<QueryEngine, Classification> {
         let mut loaded = compiler
             .load_check_package_inputs(path, inputs, true)

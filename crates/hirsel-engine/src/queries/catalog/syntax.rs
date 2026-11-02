@@ -102,6 +102,11 @@ fn valid_output(
     })
 }
 impl QueryEngine {
+    pub(super) fn has_parse_syntax(&self, file: FileId, context: &FileContext) -> bool {
+        self.parse_syntax_key(file, context)
+            .and_then(|key| self.result_store.as_ref()?.get(&key))
+            .is_some()
+    }
     fn parse_syntax_key(
         &self,
         file: FileId,

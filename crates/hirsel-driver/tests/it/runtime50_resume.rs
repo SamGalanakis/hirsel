@@ -178,8 +178,8 @@ pub(crate) fn agree_on(
     let checked = check_progress(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let entry = entry_path(&default_context());
-    let reference = run_observed_snapshot(
-        &mut engine,
+    let reference = crate::source_std::observe(
+        source,
         &RunConfiguration {
             entry: entry.clone(),
             hash_seed: 50,
@@ -303,8 +303,8 @@ pub(crate) fn checked_heap_agrees(source: &str) {
     let checked = check_progress(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let entry = entry_path(&default_context());
-    let reference = run_observed_snapshot(
-        &mut engine,
+    let reference = crate::source_std::observe(
+        source,
         &RunConfiguration {
             entry: entry.clone(),
             hash_seed: 50,
@@ -373,8 +373,8 @@ pub(crate) fn compact_runs_recording(
     let checked = check_progress(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let entry = entry_path(&default_context());
-    let reference = run_observed_snapshot(
-        &mut engine,
+    let reference = crate::source_std::observe(
+        source,
         &RunConfiguration {
             entry: entry.clone(),
             hash_seed: 50,

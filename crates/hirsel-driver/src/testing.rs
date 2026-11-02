@@ -372,15 +372,16 @@ pub fn discover_source(
 pub fn discover(
     requests: &mut crate::requests::CompilerRequests,
     path: &Path,
-    inputs: hirsel_engine::loader_inputs::FrozenInputs,
+    inputs: impl Into<crate::requests::CompileInputs>,
     filters: &[String],
     override_seed: Option<u64>,
     selection: Selection,
 ) -> Result<TestDiscovery, ToolError> {
     use crate::requests::{CompileOperation, CompileRequest, CompileResult};
+    let inputs = inputs.into();
     let output = requests.execute_request(&CompileRequest {
         path: path.to_owned(),
-        inputs: inputs.clone().into(),
+        inputs: inputs.clone(),
         operation: CompileOperation::Check {
             lowering: hirsel_engine::LoweringPolicy::Reachable,
         },
@@ -404,7 +405,7 @@ pub fn discover(
 /// Source-only test plans. The eventual batch or native request checks the
 /// whole package together with these ordinary wrapper sources.
 pub struct TestDiscovery {
-    pub inputs: hirsel_engine::loader_inputs::FrozenInputs,
+    pub inputs: crate::requests::CompileInputs,
     pub tests: Vec<Test>,
     pub sources: Vec<crate::requests::NativeSourceText>,
     source_paths: Vec<PathBuf>,
@@ -414,7 +415,7 @@ impl TestDiscovery {
     pub fn execution_inputs(
         &self,
         limit: usize,
-    ) -> Result<hirsel_engine::loader_inputs::FrozenInputs, ToolError> {
+    ) -> Result<crate::requests::CompileInputs, ToolError> {
         let mut replacements: BTreeMap<PathBuf, Vec<u8>> = BTreeMap::new();
         let mut added = 0usize;
         for (source, path) in self.sources.iter().zip(&self.source_paths) {
@@ -477,7 +478,7 @@ pub(crate) fn check_empty_selection(
     };
     let mut selected = selector.select(&CompileRequest {
         path: path.to_owned(),
-        inputs: discovery.inputs.clone().into(),
+        inputs: discovery.inputs.clone(),
         operation: CompileOperation::Check {
             lowering: hirsel_engine::LoweringPolicy::Reachable,
         },
@@ -505,18 +506,19 @@ pub(crate) fn check_empty_selection(
 pub fn discover_inputs(
     compiler: &hirsel_engine::Compiler,
     path: &Path,
-    inputs: hirsel_engine::loader_inputs::FrozenInputs,
+    inputs: impl Into<crate::requests::CompileInputs>,
     filters: &[String],
     override_seed: Option<u64>,
     selection: Selection,
 ) -> Result<TestDiscovery, ToolError> {
+    let inputs = inputs.into();
     let program = compiler.load_test_package_inputs(path, &inputs)?;
     discover_program(program, inputs, filters, override_seed, selection)
 }
 
 fn discover_program(
     mut program: LoadedProgram,
-    inputs: hirsel_engine::loader_inputs::FrozenInputs,
+    inputs: crate::requests::CompileInputs,
     filters: &[String],
     override_seed: Option<u64>,
     selection: Selection,
@@ -567,7 +569,7 @@ pub(crate) fn discover_with_selector(
         |inputs| compiler.load_test_package_inputs(path, inputs),
     )
     .map_err(|_| ToolError::Runtime("test package inputs changed during capture".into()))?;
-    let discovery = discover_program(program?, inputs, filters, override_seed, selection)?;
+    let discovery = discover_program(program?, inputs.into(), filters, override_seed, selection)?;
     Ok((discovery, selector))
 }
 
@@ -578,7 +580,7 @@ pub fn native_test_sources(
     selection: Selection,
 ) -> Result<
     (
-        hirsel_engine::loader_inputs::FrozenInputs,
+        crate::requests::CompileInputs,
         Vec<Test>,
         Vec<crate::requests::NativeSourceText>,
     ),

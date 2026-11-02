@@ -7,7 +7,6 @@ use crate::requests::{
 };
 use hirsel_engine::{
     InterpreterPhase, ToolError,
-    loader_inputs::FrozenInputs,
     requests::{OutputReadiness, RequestEngine},
     runtime::QueryRuntime,
 };
@@ -19,7 +18,7 @@ use std::{
 
 pub(crate) struct Executions {
     path: PathBuf,
-    inputs: FrozenInputs,
+    inputs: crate::requests::CompileInputs,
     selector: CompilerRequests,
     entry: Option<(DefPath, Arc<TirExecution>)>,
     roots: Vec<DefPath>,
@@ -67,7 +66,7 @@ impl Executions {
         };
         let mut selected = self.selector.select(&CompileRequest {
             path: self.path.clone(),
-            inputs: self.inputs.clone().into(),
+            inputs: self.inputs.clone(),
             operation,
         })?;
         let completed = {

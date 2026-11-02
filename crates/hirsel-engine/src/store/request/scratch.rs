@@ -139,6 +139,13 @@ impl ScratchStore {
     }
 }
 impl ResultStore for ScratchStore {
+    fn installed_package(
+        &self,
+        package: &hirsel_syntax::PackageId,
+        compiler: ContentHash,
+    ) -> Result<Arc<InstalledPackage>, String> {
+        self.selected.installed_package(package, compiler)
+    }
     fn cache_product(&self, address: Address, action: Action, domain: Domain, bytes: &[u8]) {
         self.selected.cache_product(address, action, domain, bytes);
     }

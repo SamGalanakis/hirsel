@@ -16,9 +16,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 mod dir;
+mod installed;
 mod remote;
 mod request;
 pub use dir::{DirStore, FORMAT, GcReport};
+pub use installed::{InstalledPackage, InstalledSource};
 pub use remote::RemoteStore;
 pub use request::RequestStore;
 
@@ -57,6 +59,17 @@ impl EntryKey {
 /// A content-keyed byte store. Implementations never fail a compile: a
 /// missing, unreadable or corrupt entry is a miss.
 pub trait ResultStore: Send + Sync {
+    /// Attach an explicitly selected installed package, independently of cache hits.
+    fn installed_package(
+        &self,
+        package: &hirsel_syntax::PackageId,
+        _compiler: ContentHash,
+    ) -> Result<Arc<InstalledPackage>, String> {
+        Err(format!(
+            "installed products for {}@{} are not configured",
+            package.name, package.version
+        ))
+    }
     /// Retain an immutable live value in this request's existing partition.
     /// Its charge survives the producer and returns after the final reader.
     fn admit_product_memory(&self, _bytes: u64) -> Option<Arc<dyn Send + Sync>> {
@@ -750,6 +763,18 @@ impl MemStore {
     }
 }
 impl ResultStore for MemStore {
+    fn installed_package(
+        &self,
+        package: &hirsel_syntax::PackageId,
+        compiler: ContentHash,
+    ) -> Result<Arc<InstalledPackage>, String> {
+        self.installed
+            .as_ref()
+            .ok_or_else(|| {
+                "installed products: no installed package root attached to mem@1".to_string()
+            })?
+            .installed_package(package, compiler)
+    }
     fn for_operation(&self) -> Option<Arc<dyn ResultStore>> {
         let installed = self.installed.as_ref()?.clone();
         let installed = installed.for_operation().unwrap_or(installed);

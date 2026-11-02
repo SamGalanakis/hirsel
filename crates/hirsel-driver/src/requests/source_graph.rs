@@ -1130,8 +1130,7 @@ pub(super) fn install(
     let root_package = program.entry.0.package.clone();
     let selection = SourceSelection {
         files: program
-            .files
-            .iter()
+            .source_files()
             .map(|(file, context)| {
                 (
                     *file,

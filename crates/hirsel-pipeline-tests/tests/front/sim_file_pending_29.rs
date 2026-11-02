@@ -2,8 +2,7 @@
 use hirsel_driver::{compiler_adapters, native::*};
 use hirsel_engine::{
     QueryEngine, RunConfiguration, SimulationConfig, check_progress, default_context,
-    default_environment, entry_path, run_observed_checked, run_observed_snapshot,
-    with_compiler_stack,
+    default_environment, entry_path, with_compiler_stack,
 };
 use hirsel_run_schema::FileReadScript;
 use std::{collections::BTreeMap, path::Path};
@@ -107,7 +106,31 @@ fn campaign(name: &str, source: &str, gate: FileReadScript) {
             file_reads: file_reads.clone(),
             ..Default::default()
         };
-        let execution = run_observed_snapshot(&mut engine, &run, config.clone()).unwrap();
+        use hirsel_driver::requests::*;
+        let compiler = hirsel_driver::COMPILER;
+        let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
+        let request = CompileRequest::source(
+            source,
+            &context,
+            CompileOperation::Tir {
+                definition: Some(entry.clone()),
+            },
+        );
+        let output = requests.execute_request(&request).unwrap();
+        let CompileResult::Tir(input) = &output.result else {
+            panic!("expected TIR");
+        };
+        let observe = |run: &RunConfiguration, config: SimulationConfig, checked| {
+            hirsel_driver::testing::observe_tir(
+                input,
+                run,
+                config,
+                hirsel_interp::Limits::default(),
+                checked,
+            )
+            .unwrap()
+        };
+        let execution = observe(&run, config.clone(), false);
         let reference = Observation::of_reference(execution.observation.as_ref().unwrap());
         assert_eq!(
             reference.blocked,
@@ -144,9 +167,9 @@ fn campaign(name: &str, source: &str, gate: FileReadScript) {
             inputs: events,
             ..run.clone()
         };
-        let replayed = run_observed_snapshot(&mut engine, &replay, config.clone()).unwrap();
+        let replayed = observe(&replay, config.clone(), false);
         assert_eq!(replayed.observation, execution.observation);
-        let checked = run_observed_checked(&mut engine, &run, config).unwrap();
+        let checked = observe(&run, config, true);
         assert_eq!(checked.observation, execution.observation);
         let input = engine.export_native_input().unwrap();
         let input = engine.import_native_input(input).unwrap();

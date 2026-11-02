@@ -42,8 +42,8 @@ impl CompilerRequestsExt for Compiler {
             // existing producer-selected output root a source of V authority.
             store = store.with_installation_verifier(std::sync::Arc::default());
         }
-        let store = std::sync::Arc::new(store);
-        config.store = store;
+        let store = std::sync::Arc::new(store.recording_installation());
+        config.store = store.clone();
         config.retention = Retention::Batch;
         config.hold_bytes = 0;
         let compiler = self
@@ -57,6 +57,14 @@ impl CompilerRequestsExt for Compiler {
                 "precompute source product is unavailable".into(),
             ));
         }
+        use hirsel_engine::loader_inputs::LoaderInputs;
+        let loaded = self.load_check_package_inputs(manifest, &completed.inputs, false)?;
+        let manifest_path = completed.inputs.canonicalize(manifest)?;
+        let package = loaded.installation_inputs(
+            self.identity(),
+            completed.inputs.read(&manifest_path)?.to_vec(),
+        );
+        store.publish_installation(package)?;
         if let Some(installation) = installation {
             // Product installation remains usable when optional durable local
             // registration cannot be published. A later Check runs V again.

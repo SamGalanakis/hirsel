@@ -6,7 +6,7 @@ use hirsel_engine::{QueryError, ToolError};
 
 struct RequestedProgram {
     path: std::path::PathBuf,
-    inputs: hirsel_engine::loader_inputs::FrozenInputs,
+    inputs: hirsel_driver::requests::CompileInputs,
     requests: CompilerRequests,
 }
 impl RequestedProgram {
@@ -16,7 +16,7 @@ impl RequestedProgram {
     ) -> Result<std::sync::Arc<CompileOutput>, ToolError> {
         self.requests.execute_request(&CompileRequest {
             path: self.path.clone(),
-            inputs: self.inputs.clone().into(),
+            inputs: self.inputs.clone(),
             operation,
         })
     }
@@ -48,7 +48,9 @@ pub(crate) fn verifying_compiler() -> hirsel_engine::Compiler {
     let cache_bytes = usize::try_from(config.hold_bytes).unwrap_or(usize::MAX);
     hirsel_driver::COMPILER.with_config(hirsel_engine::CompileConfig {
         retention: hirsel_engine::memo::Retention::Batch,
-        store: std::sync::Arc::new(hirsel_engine::store::MemStore::bounded(cache_bytes)),
+        store: std::sync::Arc::new(
+            hirsel_engine::store::MemStore::bounded(cache_bytes).with_installed_products(),
+        ),
         verify_store: hirsel_engine::store::VerifyStore::Recompute,
         ..config
     })
@@ -118,12 +120,7 @@ fn evaluate_on_compiler_thread(
     let diverges = REQUEST_LOWER_DIVERGENCES
         .iter()
         .any(|case| path.ends_with(case));
-    let loaded = if !diverges
-        && (path.with_extension("hir.json").exists()
-            || path
-                .extension()
-                .is_some_and(|extension| extension == "json"))
-    {
+    let loaded = if !diverges {
         let requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
         let compiler = requests.compiler().clone();
         match hirsel_engine::requests::observe_inputs(
@@ -131,22 +128,10 @@ fn evaluate_on_compiler_thread(
             requests.capture_attempts(),
             |inputs| compiler.load_program_inputs(path, inputs, false),
         ) {
-            // A request Check selects std as source rather than its products
-            // (no product-backed std dependency yet) and exceeds the inner
-            // deadline, so a graph with std keeps the loaded-program path.
-            Ok((Ok(loaded), _))
-                if loaded
-                    .files
-                    .iter()
-                    .any(|(_, context)| context.package.name_is("std")) =>
-            {
-                drop(loaded);
-                compiler.load_program(path)
-            }
             Ok((loaded, inputs)) => {
                 requested = Some(RequestedProgram {
                     path: path.to_owned(),
-                    inputs,
+                    inputs: inputs.into(),
                     requests,
                 });
                 loaded

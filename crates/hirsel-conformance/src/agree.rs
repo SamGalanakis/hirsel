@@ -324,10 +324,8 @@ fn classify_package_native(
     hash_seed: u64,
 ) -> Classification {
     match catch_unwind(AssertUnwindSafe(|| {
-        hirsel_engine::with_compiler_stack(|| match (path, execution) {
-            (Some(path), Execution::Tests) => classify_tests(source, native, path, hash_seed),
-            (Some(path), _) => classify_requested(source, execution, native, path, hash_seed),
-            (None, _) => classify_standalone(source, execution, native, hash_seed),
+        hirsel_engine::with_compiler_stack(|| {
+            classify_requested(source, execution, native, path, hash_seed)
         })
     })) {
         Ok(result) => result,
@@ -359,27 +357,55 @@ fn variant_inputs(
     compiler: &hirsel_engine::Compiler,
     requests: &hirsel_driver::requests::CompilerRequests,
     source: &str,
-    path: &Path,
-) -> Result<hirsel_engine::loader_inputs::FrozenInputs, ToolError> {
+    path: Option<&Path>,
+) -> Result<
+    (
+        std::path::PathBuf,
+        hirsel_engine::loader_inputs::FrozenInputs,
+    ),
+    ToolError,
+> {
+    use hirsel_engine::loader_inputs::CaptureInputs;
     let limits = requests.input_limits();
+    let Some(path) = path else {
+        let path = std::env::current_dir()?.join("agree.hir");
+        for _ in 0..requests.capture_attempts() {
+            let capture = CaptureInputs::with_sources(
+                limits,
+                [(path.clone(), std::sync::Arc::from(source.as_bytes()))].into(),
+            )?;
+            let loaded = compiler.load_check_package_inputs(&path, &capture, true);
+            let inputs = capture.freeze();
+            if inputs.changed_on_disk().is_empty() {
+                drop(loaded?);
+                return Ok((path, inputs));
+            }
+        }
+        return Err(ToolError::Runtime(
+            "variant inputs changed during capture".into(),
+        ));
+    };
     let (loaded, inputs) =
         hirsel_engine::requests::observe_inputs(limits, requests.capture_attempts(), |inputs| {
-            compiler.load_program_inputs(path, inputs, false)
+            compiler.load_check_package_inputs(path, inputs, true)
         })
         .map_err(|_| ToolError::Runtime("variant inputs changed during capture".into()))?;
     drop(loaded?);
     let primary = inputs.known_path(path).unwrap_or_else(|| path.to_owned());
-    Ok(inputs.replace_sources(
-        &[(primary, std::sync::Arc::<[u8]>::from(source.as_bytes()))].into(),
-        limits.bytes,
-    )?)
+    Ok((
+        path.to_owned(),
+        inputs.replace_sources(
+            &[(primary, std::sync::Arc::<[u8]>::from(source.as_bytes()))].into(),
+            limits.bytes,
+        )?,
+    ))
 }
 
 fn classify_requested(
     source: &str,
     execution: Execution,
     native: Option<(&Native, &[hirsel_driver::native::Configuration])>,
-    path: &Path,
+    path: Option<&Path>,
     hash_seed: u64,
 ) -> Classification {
     use hirsel_driver::requests::{
@@ -387,7 +413,8 @@ fn classify_requested(
     };
     let compiler = crate::compiler::verifying_compiler();
     let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
-    let inputs = match variant_inputs(&compiler, &requests, source, path) {
+    let standalone = path.is_none();
+    let (path, inputs) = match variant_inputs(&compiler, &requests, source, path) {
         Ok(inputs) => inputs,
         Err(e) => return tool_error(e),
     };
@@ -418,7 +445,11 @@ fn classify_requested(
         return Classification::Unavailable;
     }
     drop(checked);
-    let mut program = NativeProgram::Pending { source, path };
+    let mut program = NativeProgram::Pending {
+        compiler: compiler.clone(),
+        path: path.clone(),
+        inputs: inputs.clone(),
+    };
     match execution {
         Execution::None => {}
         Execution::Entry => {
@@ -426,7 +457,11 @@ fn classify_requested(
                 (Ok(simulation), Ok(fixture)) => (simulation, fixture),
                 (Err(error), _) | (_, Err(error)) => return violation("fixture", &error),
             };
-            let prepared = match execute(CompileOperation::Tir { definition: None }) {
+            let prepared = match execute(CompileOperation::Tir {
+                definition: standalone.then(|| {
+                    crate::selected_entry(source, &hirsel_engine::default_context())
+                }),
+            }) {
                 Ok(output) => output,
                 Err(e) => return tool_error(e),
             };
@@ -439,7 +474,7 @@ fn classify_requested(
                 inputs: vec![],
             };
             if let Some(outcome) =
-                compare_engines(&config, native, &mut program, &fixture, |_, checked| {
+                compare_engines(&config, native, &mut program, &fixture, |checked| {
                     hirsel_driver::testing::observe_tir(
                         input,
                         &config,
@@ -452,161 +487,115 @@ fn classify_requested(
                 return outcome;
             }
         }
-        Execution::Tests => unreachable!("test programs are classified by classify_tests"),
+        Execution::Tests => {
+            let discovery = match hirsel_driver::testing::discover_inputs(
+                &compiler,
+                &path,
+                inputs,
+                &[],
+                None,
+                hirsel_driver::testing::Selection::Tests,
+            ) {
+                Ok(discovery) => discovery,
+                Err(error) => return tool_error(error),
+            };
+            let inputs = match discovery.execution_inputs(requests.input_limits().bytes) {
+                Ok(inputs) => inputs,
+                Err(error) => return tool_error(error),
+            };
+            if discovery.tests.is_empty() {
+                return Classification::Valid;
+            }
+            let prepared = match requests.execute_request(&CompileRequest {
+                path: path.clone(),
+                inputs: inputs.clone().into(),
+                operation: CompileOperation::TirBatch {
+                    definitions: discovery
+                        .tests
+                        .iter()
+                        .map(|test| test.entry.clone())
+                        .collect(),
+                },
+            }) {
+                Ok(output) => output,
+                Err(error) => return tool_error(error),
+            };
+            let CompileResult::TirBatch(batch) = &prepared.result else {
+                return violation("interpretation", "a TIR batch returned another operation");
+            };
+            program = NativeProgram::Pending {
+                compiler,
+                path,
+                inputs,
+            };
+            for test in &discovery.tests {
+                let input = match batch.entry(&test.entry) {
+                    Ok(input) => input,
+                    Err(error) => return tool_error(error),
+                };
+                let config = hirsel_engine::RunConfiguration {
+                    entry: test.entry.clone(),
+                    hash_seed,
+                    inputs: vec![],
+                };
+                let simulation = hirsel_engine::SimulationConfig {
+                    test_seed: test.seed,
+                    ..Default::default()
+                };
+                let matrix = native.map(|(native, matrix)| {
+                    let mut matrix = matrix.to_vec();
+                    for configuration in &mut matrix {
+                        configuration.options.launch.test_seed = test.seed;
+                    }
+                    (native, matrix)
+                });
+                let native = matrix
+                    .as_ref()
+                    .map(|(native, matrix)| (*native, matrix.as_slice()));
+                if let Some(outcome) = compare_engines(
+                    &config,
+                    native,
+                    &mut program,
+                    &Default::default(),
+                    |checked| {
+                        hirsel_driver::testing::observe_tir(
+                            &input,
+                            &config,
+                            simulation.clone(),
+                            limits(),
+                            checked,
+                        )
+                    },
+                ) {
+                    return outcome;
+                }
+            }
+        }
     }
     Classification::Valid
-}
-
-/// Test programs are checked and their generated Test entries run in the
-/// engine. A request Check of a test package refuses a variant whose Test
-/// parameter is passed by `take` or annotated with a brand or mode as a query
-/// protocol failure, where this check reports its diagnostics.
-fn classify_tests(
-    source: &str,
-    native: Option<(&Native, &[hirsel_driver::native::Configuration])>,
-    path: &Path,
-    hash_seed: u64,
-) -> Classification {
-    let mut loaded =
-        match crate::compiler::verifying_compiler().load_program_source(path, Some(source)) {
-            Ok(loaded) => loaded,
-            Err(e) => return tool_error(e),
-        };
-    let mut interpreter = hirsel_engine::InterpreterAdapter::default();
-    interpreter.limits = limits();
-    loaded.engine.adapters.interpreter = Some(Box::new(interpreter));
-    let tests = match hirsel_driver::testing::discover(
-        &mut loaded,
-        &[],
-        None,
-        hirsel_driver::testing::Selection::Tests,
-    ) {
-        Ok(tests) => tests,
-        Err(e) => return tool_error(e),
-    };
-    let mut program = NativeProgram::Checked(loaded.engine);
-    // `hirsel test`'s launch: a fresh Test root with the test's
-    // own seed and no other grant (testing::execute).
-    for test in &tests {
-        let config = hirsel_engine::RunConfiguration {
-            entry: test.entry.clone(),
-            hash_seed,
-            inputs: vec![],
-        };
-        let simulation = hirsel_engine::SimulationConfig {
-            test_seed: test.seed,
-            ..Default::default()
-        };
-        let matrix = native.map(|(native, matrix)| {
-            let mut matrix = matrix.to_vec();
-            for configuration in &mut matrix {
-                configuration.options.launch.test_seed = test.seed;
-            }
-            (native, matrix)
-        });
-        let native = matrix
-            .as_ref()
-            .map(|(native, matrix)| (*native, matrix.as_slice()));
-        if let Some(outcome) = compare_engines(
-            &config,
-            native,
-            &mut program,
-            &Default::default(),
-            |program, checked| observe_engine(program, &config, &simulation, checked),
-        ) {
-            return outcome;
-        }
-    }
-    Classification::Valid
-}
-
-/// A source without a path is checked alone in the engine, with core only.
-/// A standalone request would check the whole of std@1 from source for every
-/// variant, so these variants have no request input yet.
-fn classify_standalone(
-    source: &str,
-    execution: Execution,
-    native: Option<(&Native, &[hirsel_driver::native::Configuration])>,
-    hash_seed: u64,
-) -> Classification {
-    let mut engine = engine();
-    let context = hirsel_engine::default_context();
-    let file = engine
-        .sources
-        .add("agree.hir", source.into())
-        .expect("corpus-sized source");
-    match hirsel_engine::check_progress(&mut engine, file, &context) {
-        Err(e) => return query_error(e),
-        Ok(output) => {
-            if output
-                .diagnostics
-                .iter()
-                .any(|d| d.severity == hirsel_diag::Severity::Error)
-            {
-                return Classification::Rejected;
-            }
-            if output.completion != CheckCompletion::Complete {
-                return Classification::Unavailable;
-            }
-        }
-    }
-    match execution {
-        Execution::None => Classification::Valid,
-        Execution::Tests => violation("fixture", "a test program is loaded through its file"),
-        Execution::Entry => {
-            let (simulation, fixture) = match (crate::simulation(source), crate::fixture(source)) {
-                (Ok(simulation), Ok(fixture)) => (simulation, fixture),
-                (Err(error), _) | (_, Err(error)) => return violation("fixture", &error),
-            };
-            let config = hirsel_engine::RunConfiguration {
-                entry: crate::selected_entry(source, &context),
-                hash_seed,
-                inputs: vec![],
-            };
-            let mut program = NativeProgram::Checked(engine);
-            compare_engines(
-                &config,
-                native,
-                &mut program,
-                &fixture,
-                |program, checked| observe_engine(program, &config, &simulation, checked),
-            )
-            .unwrap_or(Classification::Valid)
-        }
-    }
-}
-
-/// Interpret `config` in the checked engine of a variant that has no
-/// request-produced TIR yet.
-fn observe_engine(
-    program: &mut NativeProgram<'_>,
-    config: &hirsel_engine::RunConfiguration,
-    simulation: &hirsel_engine::SimulationConfig,
-    checked: bool,
-) -> Result<hirsel_engine::ObservedExecution, ToolError> {
-    let NativeProgram::Checked(engine) = program else {
-        unreachable!("the engine checked the variant before it runs")
-    };
-    let run = if checked {
-        hirsel_engine::run_observed_checked
-    } else {
-        hirsel_engine::run_observed_snapshot
-    };
-    run(engine, config, simulation.clone())
 }
 
 /// The checked engine the native comparison exports its input from. A
 /// requested variant loads it on first native use; its interpretation never
 /// reads it.
-enum NativeProgram<'a> {
-    Pending { source: &'a str, path: &'a Path },
+enum NativeProgram {
+    Pending {
+        compiler: hirsel_engine::Compiler,
+        path: std::path::PathBuf,
+        inputs: hirsel_engine::loader_inputs::FrozenInputs,
+    },
     Checked(QueryEngine),
     Failed(Classification),
 }
-impl NativeProgram<'_> {
+impl NativeProgram {
     fn engine(&mut self) -> Result<&mut QueryEngine, Classification> {
-        if let Self::Pending { source, path } = *self {
-            *self = match Self::load(source, path) {
+        if let Self::Pending {
+            compiler,
+            path,
+            inputs,
+        } = self
+        {
+            *self = match Self::load(compiler, path, inputs) {
                 Ok(engine) => Self::Checked(engine),
                 Err(classification) => Self::Failed(classification),
             };
@@ -617,9 +606,13 @@ impl NativeProgram<'_> {
             Self::Pending { .. } => unreachable!("loaded above"),
         }
     }
-    fn load(source: &str, path: &Path) -> Result<QueryEngine, Classification> {
-        let mut loaded = crate::compiler::verifying_compiler()
-            .load_program_source(path, Some(source))
+    fn load(
+        compiler: &hirsel_engine::Compiler,
+        path: &Path,
+        inputs: &hirsel_engine::loader_inputs::FrozenInputs,
+    ) -> Result<QueryEngine, Classification> {
+        let mut loaded = compiler
+            .load_check_package_inputs(path, inputs, true)
             .map_err(tool_error)?;
         let output = loaded
             .check(hirsel_engine::LoweringPolicy::Reachable)
@@ -646,14 +639,11 @@ impl NativeProgram<'_> {
 fn compare_engines(
     config: &hirsel_engine::RunConfiguration,
     native: Option<(&Native, &[hirsel_driver::native::Configuration])>,
-    program: &mut NativeProgram<'_>,
+    program: &mut NativeProgram,
     fixture: &hirsel_driver::native::Fixture,
-    mut observe: impl FnMut(
-        &mut NativeProgram<'_>,
-        bool,
-    ) -> Result<hirsel_engine::ObservedExecution, ToolError>,
+    mut observe: impl FnMut(bool) -> Result<hirsel_engine::ObservedExecution, ToolError>,
 ) -> Option<Classification> {
-    let normal = match observe(program, false) {
+    let normal = match observe(false) {
         Ok(observed) => observed,
         Err(e) => return Some(tool_error(e)),
     };
@@ -667,7 +657,7 @@ fn compare_engines(
         }
         Err(e) => return Some(violation("interpretation", &format!("{e:?}"))),
     }
-    let checked = match observe(program, true) {
+    let checked = match observe(true) {
         Ok(observed) => observed,
         Err(e) => return Some(tool_error(e)),
     };

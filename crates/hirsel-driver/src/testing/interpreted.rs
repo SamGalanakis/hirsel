@@ -7,13 +7,12 @@ use crate::requests::{
 };
 use hirsel_engine::{
     InterpreterPhase, ToolError,
-    loader_inputs::{FrozenInputs, LoaderInputs},
+    loader_inputs::FrozenInputs,
     requests::{OutputReadiness, RequestEngine},
     runtime::QueryRuntime,
 };
 use hirsel_syntax::DefPath;
 use std::{
-    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -35,31 +34,7 @@ impl Executions {
         steps: Option<u64>,
     ) -> Result<Self, ToolError> {
         let limit = selector.input_limits().bytes;
-        let mut replacements: BTreeMap<PathBuf, Vec<u8>> = BTreeMap::new();
-        let mut added = 0usize;
-        for (source, path) in discovery.sources.iter().zip(&discovery.source_paths) {
-            added = added
-                .checked_add(source.text.len() + 1)
-                .filter(|&n| n <= limit)
-                .ok_or_else(|| {
-                    ToolError::Runtime("test wrappers exceed source admission".into())
-                })?;
-            let path = discovery
-                .inputs
-                .known_path(path)
-                .unwrap_or_else(|| path.clone());
-            if !replacements.contains_key(&path) {
-                replacements.insert(path.clone(), discovery.inputs.read(&path)?.to_vec());
-            }
-            let bytes = replacements.get_mut(&path).unwrap();
-            bytes.push(b'\n');
-            bytes.extend_from_slice(source.text.as_bytes());
-        }
-        let replacements = replacements
-            .into_iter()
-            .map(|(path, bytes)| (path, Arc::from(bytes)))
-            .collect();
-        let inputs = discovery.inputs.replace_sources(&replacements, limit)?;
+        let inputs = discovery.execution_inputs(limit)?;
         let mut roots = discovery
             .tests
             .iter()

@@ -9,7 +9,9 @@ pub(crate) fn verifying_compiler() -> hirsel_engine::Compiler {
     let cache_bytes = usize::try_from(config.hold_bytes).unwrap_or(usize::MAX);
     hirsel_driver::COMPILER.with_config(hirsel_engine::CompileConfig {
         retention: hirsel_engine::memo::Retention::Batch,
-        store: std::sync::Arc::new(hirsel_engine::store::MemStore::bounded(cache_bytes)),
+        store: std::sync::Arc::new(
+            hirsel_engine::store::MemStore::bounded(cache_bytes).with_installed_products(),
+        ),
         verify_store: hirsel_engine::store::VerifyStore::Recompute,
         ..config
     })

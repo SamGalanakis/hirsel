@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Internal candidate namespace contract. This is not a protocol version.
@@ -165,12 +165,58 @@ fn read_disk(op: &Operation, maximum: usize) -> io::Result<Value> {
         }
     })
 }
+fn normalized_virtual_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() || path.file_name().is_none() {
+        return None;
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                normalized.push(component.as_os_str());
+            }
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir | Component::ParentDir => return None,
+        }
+    }
+    (normalized.as_os_str() == path.as_os_str()).then_some(normalized)
+}
+fn sidecar_path(path: &Path) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(".json");
+    PathBuf::from(sidecar)
+}
+fn insert_synthetic(
+    state: &mut CaptureState,
+    limits: InputLimits,
+    operation: Operation,
+    observation: Observation,
+) -> io::Result<()> {
+    let charge = operation
+        .charge()
+        .checked_add(observation.charge())
+        .and_then(|charge| charge.checked_add(synthetic_charge(&operation)))
+        .ok_or_else(|| io::Error::other(InputLimit))?;
+    if state.observations.len() >= limits.operations
+        || charge > limits.bytes.saturating_sub(state.bytes)
+    {
+        return Err(io::Error::other(InputLimit));
+    }
+    state.bytes += charge;
+    state.synthetic.insert(operation.clone());
+    state.observations.insert(operation, observation);
+    Ok(())
+}
+fn synthetic_charge(operation: &Operation) -> usize {
+    operation.charge().saturating_add(64)
+}
 /// Normal public loader behavior, with no retained observations.
 pub struct DiskInputs;
 /// Published snapshot; all observations and source bytes are immutable.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrozenInputs {
     observations: Arc<BTreeMap<Operation, Observation>>,
+    synthetic: Arc<std::collections::BTreeSet<Operation>>,
     bytes: usize,
 }
 /// Read-once capture. All loader reads must go through this adapter, not be
@@ -187,6 +233,7 @@ pub struct InputLimits {
 #[derive(Default)]
 struct CaptureState {
     observations: BTreeMap<Operation, Observation>,
+    synthetic: std::collections::BTreeSet<Operation>,
     bytes: usize,
 }
 impl CaptureInputs {
@@ -196,6 +243,87 @@ impl CaptureInputs {
             limits,
         }
     }
+    pub fn with_sources(
+        limits: InputLimits,
+        sources: BTreeMap<PathBuf, Arc<[u8]>>,
+    ) -> io::Result<Self> {
+        let sources = sources
+            .into_iter()
+            .map(|(path, bytes)| {
+                let normalized = normalized_virtual_path(&path).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "ambiguous virtual source path")
+                })?;
+                Ok((normalized, bytes))
+            })
+            .collect::<io::Result<BTreeMap<_, _>>>()?;
+        for path in sources.keys() {
+            if sources
+                .keys()
+                .any(|candidate| candidate != path && candidate.starts_with(path))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "ambiguous virtual source paths",
+                ));
+            }
+        }
+        let missing_sidecars: Vec<_> = sources
+            .keys()
+            .map(|path| sidecar_path(path))
+            .filter(|sidecar| !sources.contains_key(sidecar))
+            .collect();
+        let capture = Self::new(limits);
+        let mut state = capture
+            .state
+            .lock()
+            .expect("capture input state poisoned");
+        for (path, bytes) in &sources {
+            insert_synthetic(
+                &mut state,
+                limits,
+                Operation::Read(path.clone()),
+                Observation(Ok(Value::Bytes(bytes.clone()))),
+            )?;
+            insert_synthetic(
+                &mut state,
+                limits,
+                Operation::Canonicalize(path.clone()),
+                Observation(Ok(Value::Path(path.clone()))),
+            )?;
+            insert_synthetic(
+                &mut state,
+                limits,
+                Operation::Metadata(path.clone()),
+                Observation(Ok(Value::Kind(InputKind::File))),
+            )?;
+            let error =
+                io::Error::new(io::ErrorKind::NotADirectory, "virtual source is not a directory");
+            insert_synthetic(
+                &mut state,
+                limits,
+                Operation::Directory(path.clone()),
+                Observation(Err(IoFailure::capture(error))),
+            )?;
+        }
+        for sidecar in missing_sidecars {
+            for operation in [
+                Operation::Read(sidecar.clone()),
+                Operation::Canonicalize(sidecar.clone()),
+                Operation::Metadata(sidecar),
+            ] {
+                let error =
+                    io::Error::new(io::ErrorKind::NotFound, "virtual source sidecar is absent");
+                insert_synthetic(
+                    &mut state,
+                    limits,
+                    operation,
+                    Observation(Err(IoFailure::capture(error))),
+                )?;
+            }
+        }
+        drop(state);
+        Ok(capture)
+    }
     pub fn freeze(self) -> FrozenInputs {
         let state = self
             .state
@@ -203,6 +331,7 @@ impl CaptureInputs {
             .expect("capture input state poisoned");
         FrozenInputs {
             observations: Arc::new(state.observations),
+            synthetic: Arc::new(state.synthetic),
             bytes: state.bytes,
         }
     }
@@ -243,8 +372,41 @@ impl FrozenInputs {
     /// Reobserve exactly this input footprint under the same bounded capture
     /// rules. OS failures are observations; exhausting a bound is a refusal.
     pub fn refresh(&self, limits: InputLimits) -> io::Result<Self> {
-        let capture = CaptureInputs::new(limits);
+        let sources = self
+            .observations
+            .iter()
+            .filter_map(|(operation, observation)| {
+                if !self.synthetic.contains(operation) {
+                    return None;
+                }
+                match (operation, &observation.0) {
+                    (Operation::Read(path), Ok(Value::Bytes(bytes))) => {
+                        Some((path.clone(), bytes.clone()))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        let capture = CaptureInputs::with_sources(limits, sources)?;
+        {
+            let mut state = capture
+                .state
+                .lock()
+                .expect("capture input state poisoned");
+            for (operation, observation) in self
+                .observations
+                .iter()
+                .filter(|(operation, _)| self.synthetic.contains(*operation))
+            {
+                if !state.observations.contains_key(operation) {
+                    insert_synthetic(&mut state, limits, operation.clone(), observation.clone())?;
+                }
+            }
+        }
         for operation in self.operations() {
+            if self.synthetic.contains(operation) {
+                continue;
+            }
             if let Err(error) = capture.observe(operation.clone())
                 && error
                     .get_ref()
@@ -266,6 +428,7 @@ impl FrozenInputs {
             .into_iter()
             .filter(|operation| {
                 self.observations.get(*operation) != other.observations.get(*operation)
+                    || self.synthetic.contains(*operation) != other.synthetic.contains(*operation)
             })
             .cloned()
             .collect()
@@ -339,6 +502,11 @@ impl FrozenInputs {
                     _ => 0,
                 };
                 op.charge() + value.charge() - bytes + 64
+                    + if self.synthetic.contains(op) {
+                        synthetic_charge(op)
+                    } else {
+                        0
+                    }
             })
             .sum()
     }
@@ -349,6 +517,9 @@ impl FrozenInputs {
         self.observations
             .iter()
             .filter_map(|(op, old)| {
+                if self.synthetic.contains(op) {
+                    return None;
+                }
                 let now = Observation(read_disk(op, self.bytes).map_err(IoFailure::capture));
                 (now != *old).then(|| op.clone())
             })
@@ -389,12 +560,18 @@ impl FrozenInputs {
         let bytes = observations
             .iter()
             .try_fold(0usize, |n, (op, value)| {
-                n.checked_add(op.charge())?.checked_add(value.charge())
+                let charge = n.checked_add(op.charge())?.checked_add(value.charge())?;
+                if self.synthetic.contains(op) {
+                    charge.checked_add(synthetic_charge(op))
+                } else {
+                    Some(charge)
+                }
             })
             .filter(|bytes| *bytes <= limit)
             .ok_or_else(|| io::Error::other(InputLimit))?;
         Ok(Self {
             observations: Arc::new(observations),
+            synthetic: self.synthetic.clone(),
             bytes,
         })
     }
@@ -409,12 +586,13 @@ impl FrozenInputs {
         self.observations
             .iter()
             .map(|(op, value)| {
-                let mut out = vec![match op {
+                let kind = match op {
                     Operation::Read(_) => 0,
                     Operation::Canonicalize(_) => 1,
                     Operation::Metadata(_) => 2,
                     Operation::Directory(_) => 3,
-                }];
+                };
+                let mut out = vec![kind + if self.synthetic.contains(op) { 4 } else { 0 }];
                 field(&mut out, op.path().as_os_str().as_encoded_bytes());
                 match &value.0 {
                     Ok(Value::Bytes(bytes)) => {

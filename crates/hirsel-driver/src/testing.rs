@@ -1,14 +1,16 @@
 //! Package test discovery and isolated launches over ordinary checked functions.
 //! Substring/OR filters adapt Rust libtest filter_tests (third-party/NOTICES.md).
 use hirsel_engine::{DefinitionQueries, LoadedProgram, RunOutcome, SimulationConfig, ToolError};
+use hirsel_engine::loader_inputs::LoaderInputs;
 pub use hirsel_interp::library::simulation::SimulationDebug;
 pub use hirsel_run_schema::Scheduler;
 use hirsel_syntax::{DefPath, FileContext};
 use hirsel_types::{SignatureKind, TypeKind};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -368,11 +370,42 @@ pub fn discover(
 
 /// Source-only test plans. The eventual batch or native request checks the
 /// whole package together with these ordinary wrapper sources.
-pub(crate) struct TestDiscovery {
+pub struct TestDiscovery {
     pub inputs: hirsel_engine::loader_inputs::FrozenInputs,
     pub tests: Vec<Test>,
     pub sources: Vec<crate::requests::NativeSourceText>,
     source_paths: Vec<PathBuf>,
+}
+
+impl TestDiscovery {
+    pub fn execution_inputs(
+        &self,
+        limit: usize,
+    ) -> Result<hirsel_engine::loader_inputs::FrozenInputs, ToolError> {
+        let mut replacements: BTreeMap<PathBuf, Vec<u8>> = BTreeMap::new();
+        let mut added = 0usize;
+        for (source, path) in self.sources.iter().zip(&self.source_paths) {
+            added = added
+                .checked_add(source.text.len() + 1)
+                .filter(|&n| n <= limit)
+                .ok_or_else(|| ToolError::Runtime("test wrappers exceed source admission".into()))?;
+            let path = self
+                .inputs
+                .known_path(path)
+                .unwrap_or_else(|| path.clone());
+            if !replacements.contains_key(&path) {
+                replacements.insert(path.clone(), self.inputs.read(&path)?.to_vec());
+            }
+            let bytes = replacements.get_mut(&path).unwrap();
+            bytes.push(b'\n');
+            bytes.extend_from_slice(source.text.as_bytes());
+        }
+        let replacements = replacements
+            .into_iter()
+            .map(|(path, bytes)| (path, Arc::from(bytes)))
+            .collect();
+        Ok(self.inputs.replace_sources(&replacements, limit)?)
+    }
 }
 
 pub(crate) fn accepted_check(checked: &hirsel_engine::CheckOutput) -> Result<(), ToolError> {
@@ -437,25 +470,25 @@ pub(crate) fn check_empty_selection(
     accepted_check(checked)
 }
 
-pub(crate) fn discover_with_selector(
+pub fn discover_inputs(
+    compiler: &hirsel_engine::Compiler,
     path: &Path,
+    inputs: hirsel_engine::loader_inputs::FrozenInputs,
     filters: &[String],
     override_seed: Option<u64>,
     selection: Selection,
-    verify: hirsel_engine::Verify,
-) -> Result<(TestDiscovery, crate::requests::CompilerRequests), ToolError> {
-    use crate::requests::CompilerRequests;
-    use hirsel_engine::requests::observe_inputs;
-    let compiler = crate::COMPILER.with_verify(verify);
-    let selector = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
-    let compiler = selector.compiler().clone();
-    let (program, inputs) = observe_inputs(
-        selector.input_limits(),
-        selector.capture_attempts(),
-        |inputs| compiler.load_test_package_inputs(path, inputs),
-    )
-    .map_err(|_| ToolError::Runtime("test package inputs changed during capture".into()))?;
-    let mut program = program?;
+) -> Result<TestDiscovery, ToolError> {
+    let program = compiler.load_test_package_inputs(path, &inputs)?;
+    discover_program(program, inputs, filters, override_seed, selection)
+}
+
+fn discover_program(
+    mut program: LoadedProgram,
+    inputs: hirsel_engine::loader_inputs::FrozenInputs,
+    filters: &[String],
+    override_seed: Option<u64>,
+    selection: Selection,
+) -> Result<TestDiscovery, ToolError> {
     let mut sources = Vec::new();
     let mut source_paths = Vec::new();
     let tests = plan_entries(
@@ -476,15 +509,34 @@ pub(crate) fn discover_with_selector(
             Ok(())
         },
     )?;
-    Ok((
-        TestDiscovery {
-            inputs,
-            tests,
-            sources,
-            source_paths,
-        },
-        selector,
-    ))
+    Ok(TestDiscovery {
+        inputs,
+        tests,
+        sources,
+        source_paths,
+    })
+}
+
+pub(crate) fn discover_with_selector(
+    path: &Path,
+    filters: &[String],
+    override_seed: Option<u64>,
+    selection: Selection,
+    verify: hirsel_engine::Verify,
+) -> Result<(TestDiscovery, crate::requests::CompilerRequests), ToolError> {
+    use crate::requests::CompilerRequests;
+    use hirsel_engine::requests::observe_inputs;
+    let compiler = crate::COMPILER.with_verify(verify);
+    let selector = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
+    let compiler = selector.compiler().clone();
+    let (program, inputs) = observe_inputs(
+        selector.input_limits(),
+        selector.capture_attempts(),
+        |inputs| compiler.load_test_package_inputs(path, inputs),
+    )
+    .map_err(|_| ToolError::Runtime("test package inputs changed during capture".into()))?;
+    let discovery = discover_program(program?, inputs, filters, override_seed, selection)?;
+    Ok((discovery, selector))
 }
 
 /// The selected tests of `path`'s package with the observed inputs and the

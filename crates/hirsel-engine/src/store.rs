@@ -673,11 +673,20 @@ impl ResultStore for NoneStore {
 }
 
 /// `mem@1`: one map per process, shared by every session.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct MemStore {
-    state: Mutex<MemState>,
+    state: Arc<Mutex<MemState>>,
     cap: Option<usize>,
     verifier: Arc<hirsel_validate::VerifierCache>,
+    installed: Option<Arc<dyn ResultStore>>,
+}
+impl std::fmt::Debug for MemStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemStore")
+            .field("cap", &self.cap)
+            .field("installed", &self.installed.is_some())
+            .finish_non_exhaustive()
+    }
 }
 #[derive(Debug, Default)]
 struct MemState {
@@ -701,7 +710,19 @@ impl MemStore {
     /// The process's shared store.
     pub fn shared() -> Arc<MemStore> {
         static SHARED: OnceLock<Arc<MemStore>> = OnceLock::new();
-        SHARED.get_or_init(Default::default).clone()
+        SHARED
+            .get_or_init(|| Arc::new(MemStore::default().with_installed_products()))
+            .clone()
+    }
+    pub fn with_installed_products(mut self) -> Self {
+        if let Some(installed) = DirStore::installed_only() {
+            let installed: Arc<dyn ResultStore> = Arc::new(installed);
+            self.verifier = installed
+                .verifier()
+                .unwrap_or_else(|| self.verifier.clone());
+            self.installed = Some(installed);
+        }
+        self
     }
     pub fn len(&self) -> usize {
         self.state
@@ -729,16 +750,85 @@ impl MemStore {
     }
 }
 impl ResultStore for MemStore {
+    fn for_operation(&self) -> Option<Arc<dyn ResultStore>> {
+        let installed = self.installed.as_ref()?.clone();
+        let installed = installed.for_operation().unwrap_or(installed);
+        let verifier = installed
+            .verifier()
+            .unwrap_or_else(|| self.verifier.clone());
+        Some(Arc::new(Self {
+            state: self.state.clone(),
+            cap: self.cap,
+            verifier,
+            installed: Some(installed),
+        }))
+    }
+    fn for_compiler(&self, identity: ContentHash) -> Option<Arc<dyn ResultStore>> {
+        let installed = self.installed.as_ref()?.clone();
+        let installed = installed
+            .for_compiler(identity)
+            .unwrap_or_else(|| installed.clone());
+        let verifier = installed
+            .verifier()
+            .unwrap_or_else(|| self.verifier.clone());
+        Some(Arc::new(Self {
+            state: self.state.clone(),
+            cap: self.cap,
+            verifier,
+            installed: Some(installed),
+        }))
+    }
+    fn read_scope(&self) -> Option<Box<dyn Send + Sync>> {
+        self.installed.as_ref()?.read_scope()
+    }
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         Some(self.verifier.clone())
     }
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
-        self.state
+        let cached = self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entries
+            .get(&key.0)
+            .map(|(_, bytes)| bytes.clone());
+        cached.or_else(|| self.installed.as_ref()?.get(key))
+    }
+    fn get_content(&self, reference: Reference) -> Option<Bytes> {
+        let key = content_key(reference);
+        if let Some(bytes) = self
+            .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .entries
             .get(&key.0)
             .map(|(_, bytes)| bytes.clone())
+            && reference.domain.reference(&bytes) == Some(reference)
+        {
+            return Some(bytes);
+        }
+        self.installed.as_ref()?.get_content(reference)
+    }
+    fn lookup_product(&self, address: Address) -> Option<Association> {
+        let bytes = self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entries
+            .get(&product_association_key(address).0)
+            .map(|(_, bytes)| bytes.clone());
+        if let Some(bytes) = bytes
+            && bytes.len() <= 1024
+            && let Ok((owner, action, reference)) =
+                serde_json::from_slice::<(ContentHash, ContentHash, Reference)>(&bytes)
+            && owner == address.0
+            && reference.len <= hirsel_artifact_store::MAX_RECORD as u64
+        {
+            return Some(Association {
+                action: Action(action),
+                reference,
+            });
+        }
+        self.installed.as_ref()?.lookup_product(address)
     }
     fn put(&self, key: &EntryKey, value: &[u8]) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);

@@ -8,12 +8,24 @@ pub(super) struct Selection {
     pub arguments: Vec<u64>,
     pub instance: DefId,
     pub key: EntryKey,
+    waiting: Option<Span>,
 }
 pub(super) struct Staged {
     pub declarations: BTreeMap<DefId, crate::comptime::StagedConstant>,
     selections: Mutex<BTreeMap<ContentHash, Selection>>,
 }
 impl Staged {
+    pub(super) fn with_request_site<R>(
+        &self,
+        id: QueryId,
+        update: impl FnOnce(&mut Option<Span>) -> R,
+    ) -> Option<R> {
+        if id.kind != FRONT_EVALUATE_KIND {
+            return None;
+        }
+        let mut selections = self.selections.lock().unwrap_or_else(|e| e.into_inner());
+        Some(update(&mut selections.get_mut(&id.address.0)?.waiting))
+    }
     pub(super) fn new(declarations: &BTreeMap<DefPath, crate::comptime::StagedConstant>) -> Self {
         Self {
             declarations: declarations
@@ -122,6 +134,7 @@ impl FrontLowerQueries {
                     arguments: arguments.to_vec(),
                     instance: DefId::intern(&hirsel_tir::constant_instance_path(path, arguments)),
                     key: EntryKey(hash, original.1, QueryKind::Evaluate),
+                    waiting: None,
                 },
             );
         }

@@ -127,6 +127,7 @@ impl FrontRegistrationQueries {
             Arc::new(data)
         } else {
             let mut source = Source {
+                id,
                 owner: self.lower.clone(),
                 reads,
                 observed: Rc::new(RefCell::new(ReadsBuilder::new())),

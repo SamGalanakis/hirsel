@@ -25,6 +25,7 @@ enum Eviction {
 }
 struct Reads {
     eviction: Eviction,
+    cycle: Vec<QueryId>,
     composed: Composed,
     working: MemoryWeight,
     requested: BTreeMap<Key, QueryId>,
@@ -55,6 +56,9 @@ impl Composed {
 #[derive(Clone)]
 pub struct QueryReads(Rc<RefCell<Reads>>);
 impl QueryReads {
+    pub(crate) fn take_cycle(&self) -> Vec<QueryId> {
+        std::mem::take(&mut self.0.borrow_mut().cycle)
+    }
     /// Poll one producer under this continuation's working grant. Its reads
     /// subscribe to the existing graph; the composed producer claims no node.
     /// Its frame consumes mailbox capacity until destruction.
@@ -73,6 +77,7 @@ impl QueryReads {
                         .len()
                         .saturating_add(reads.requested.len())
                         .saturating_add(composed.slots())
+                        .saturating_add(reads.cycle.len())
                         > reads.limit
                 {
                     return Poll::Ready(Err(reads.resource));
@@ -126,7 +131,11 @@ impl QueryReads {
             return Poll::Ready(result);
         }
         if !reads.requested.contains_key(&key(query)) {
-            if reads.completed.len() + reads.requested.len() + reads.composed.slots() >= reads.limit
+            if reads.completed.len()
+                + reads.requested.len()
+                + reads.composed.slots()
+                + reads.cycle.len()
+                >= reads.limit
             {
                 return Poll::Ready(Err(reads.resource));
             }
@@ -146,6 +155,7 @@ pub struct LocalFutureTask {
     reads: QueryReads,
     future: Pin<Box<dyn Future<Output = Outcome>>>,
     protocol: Reference,
+    cycle_error: Reference,
     terminal: Option<Outcome>,
 }
 impl LocalFutureTask {
@@ -177,6 +187,7 @@ impl LocalFutureTask {
             .ok_or(errors.resource)?;
         let reads = QueryReads(Rc::new(RefCell::new(Reads {
             eviction: Eviction::Idle,
+            cycle: Vec::new(),
             composed: Composed::Idle,
             working: weight,
             requested: BTreeMap::new(),
@@ -191,6 +202,7 @@ impl LocalFutureTask {
             reads,
             future,
             protocol: errors.protocol,
+            cycle_error: errors.cycle,
             terminal: None,
         })
     }
@@ -216,7 +228,21 @@ impl LocalFutureTask {
                 match cx.read(query) {
                     Poll::Pending => waiting.push(query),
                     Poll::Ready(result) => {
+                        let cycle = if result == Err(self.cycle_error) {
+                            let reads = self.reads.0.borrow();
+                            let occupied = reads.completed.len()
+                                + reads.requested.len()
+                                + reads.composed.slots();
+                            cx.cycle_members(query, reads.limit.saturating_sub(occupied))
+                        } else {
+                            None
+                        };
                         let mut reads = self.reads.0.borrow_mut();
+                        if let Some(cycle) = cycle {
+                            reads.cycle = cycle;
+                        } else if result == Err(self.cycle_error) {
+                            reads.cycle.clear();
+                        }
                         reads.requested.remove(&key(query));
                         reads.completed.insert(key(query), result);
                     }
@@ -319,6 +345,7 @@ mod tests {
     fn reads() -> QueryReads {
         QueryReads(Rc::new(RefCell::new(Reads {
             eviction: Eviction::Idle,
+            cycle: Vec::new(),
             composed: Composed::Idle,
             working: MemoryWeight::default(),
             requested: BTreeMap::new(),
@@ -401,6 +428,47 @@ mod tests {
     impl QueryContext for Completed {
         fn read(&mut self, id: QueryId) -> Poll<Outcome> {
             Poll::Ready(Ok(product(id)))
+        }
+    }
+    #[test]
+    fn cycle_members_use_the_existing_mailbox_bound_and_preserve_the_error() {
+        struct Cycle;
+        impl QueryContext for Cycle {
+            fn read(&mut self, _: QueryId) -> Poll<Outcome> {
+                Poll::Ready(Err(errors().cycle))
+            }
+            fn cycle_members(&self, dependency: QueryId, limit: usize) -> Option<Vec<QueryId>> {
+                assert_eq!(dependency, query(1));
+                (limit >= 3).then(|| vec![query(1), query(2), query(3)])
+            }
+        }
+        async fn consume(reads: QueryReads, slots: usize) -> Outcome {
+            assert_eq!(reads.read_consuming(query(1)).await, Err(errors().cycle));
+            let members = reads.take_cycle();
+            if slots == 4 {
+                assert_eq!(members, vec![query(1), query(2), query(3)]);
+            } else {
+                assert!(members.is_empty(), "a short grant keeps no partial cycle");
+            }
+            assert!(reads.take_cycle().is_empty());
+            Ok(product(query(0)))
+        }
+        for slots in [3, 4] {
+            let frame = std::mem::size_of_val(&consume(reads(), slots));
+            let mut task = LocalFutureTask::new(
+                query(0),
+                MemoryWeight {
+                    retained: LocalFutureTask::retained_bytes_for(frame, slots).unwrap(),
+                    ..Default::default()
+                },
+                slots,
+                errors(),
+                move |reads| consume(reads, slots),
+            )
+            .unwrap();
+            assert!(
+                matches!(task.poll(&mut Cycle), QueryPoll::Complete(value) if value == product(query(0)))
+            );
         }
     }
     #[test]

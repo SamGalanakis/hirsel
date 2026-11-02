@@ -196,7 +196,7 @@ impl FrontLowerQueries {
                     definition,
                     body,
                     diagnostics,
-                    dependencies: dependencies.into(),
+                    dependencies: dependencies.into_inner(),
                     archived_metadata: None,
                     verified,
                     acceptance,

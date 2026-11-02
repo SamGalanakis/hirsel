@@ -5,7 +5,7 @@ pub(super) type Descriptor = (
     DefId,
     Reference,
     Vec<Diagnostic>,
-    Vec<SignatureDependency>,
+    PackedDependencies,
     Reference,
     Reads,
     DepthEvidence<Span>,
@@ -51,7 +51,11 @@ impl Archive {
         store: &dyn ResultStore,
         allowance: u64,
     ) -> Option<Vec<SignatureDependency>> {
-        Some(self.descriptor(records, anchors, store, allowance)?.3)
+        Some(
+            self.descriptor(records, anchors, store, allowance)?
+                .3
+                .to_vec(),
+        )
     }
     fn descriptor(
         &self,
@@ -130,7 +134,7 @@ mod tests {
             definition,
             body,
             Vec::new(),
-            dependencies,
+            dependencies.into(),
             materialized,
             expected.clone(),
             depth,
@@ -142,7 +146,7 @@ mod tests {
             .unwrap();
         let bound = working
             + 2 * (size_of::<Descriptor>()
-                + size_of_val(descriptor.3.as_slice())
+                + descriptor.3.len() * size_of::<SignatureDependency>()
                 + size_of_val(&*descriptor.6.first)
                 + expected
                     .allocations()
@@ -168,7 +172,7 @@ mod tests {
         let actual_dependencies = archive
             .dependencies(&records, &anchors, &*store, bound)
             .unwrap();
-        assert_eq!(actual_dependencies, descriptor.3);
+        assert_eq!(actual_dependencies, descriptor.3.to_vec());
         let wrong_dependencies = Archive {
             dependencies: archive.dependencies - 1,
             ..archive.clone()
@@ -188,7 +192,7 @@ mod tests {
                 definition,
                 body,
                 diagnostics: Vec::new(),
-                dependencies: descriptor.3.clone().into(),
+                dependencies: descriptor.3.clone().into_inner(),
                 archived_metadata: None,
                 verified: None,
                 acceptance: None,
@@ -223,7 +227,7 @@ mod tests {
                 .unwrap()
                 .dependencies(&records, &anchors, &*store, bound)
                 .unwrap(),
-            descriptor.3,
+            descriptor.3.to_vec(),
         );
         assert!(outcome.retained_bytes().unwrap() < before);
         let wrong_count = Archive {

@@ -359,23 +359,13 @@ impl FrontLowerQueries {
                 depth,
                 executed,
                 selections,
-            ): (
-                DefId,
-                Reference,
-                Vec<Diagnostic>,
-                Vec<SignatureDependency>,
-                Reference,
-                Reads,
-                DepthEvidence<Span>,
-                bool,
-                staged::Selections,
-            ) = self.records.decode(&self.anchors, &row.descriptor)?;
+            ): reads::Descriptor = self.records.decode(&self.anchors, &row.descriptor)?;
             let lower = LowerProduct {
                 live: None,
                 definition,
                 body,
                 diagnostics,
-                dependencies: dependencies.into(),
+                dependencies: dependencies.into_inner(),
                 archived_metadata: None,
                 verified: retained.verified,
                 acceptance: retained.acceptance,

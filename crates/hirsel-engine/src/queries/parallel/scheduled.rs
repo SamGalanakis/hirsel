@@ -1876,6 +1876,7 @@ impl BodyTask {
         let restored = persistent::restore_frozen_mode(
             &queries.records,
             &queries.types,
+            input.definition,
             queries.syntax(input)?,
             &queries.citations,
             input.key.1,
@@ -1919,6 +1920,7 @@ impl BodyTask {
         let mut restored = persistent::restore_frozen_mode(
             &queries.records,
             &queries.types,
+            input.definition,
             queries.syntax(input)?,
             &queries.citations,
             input.key.1,

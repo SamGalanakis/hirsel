@@ -1058,6 +1058,28 @@ impl QueryContext for Context<'_> {
         }
     }
 
+    fn cycle_members(&self, dependency: QueryId, limit: usize) -> Option<Vec<QueryId>> {
+        let state = self.shared.lock();
+        let scratch = state
+            .nodes
+            .get_id(self.generation)?
+            .execution
+            .as_ref()?
+            .weight
+            .scratch;
+        // The slot path and its converted identities coexist during collection.
+        // Vec growth is bounded by twice their lengths.
+        let bytes_per_member = 2 * (size_of::<QueryId>() + size_of::<u32>()) as u64;
+        let limit = limit.min(usize::try_from(scratch / bytes_per_member).ok()?);
+        let target = state.nodes.node_id(key(dependency))?;
+        let path = state.nodes.cycle_path(self.generation, target, limit)?;
+        Some(
+            path.into_iter()
+                .map(|slot| id(state.nodes.key_at(slot)))
+                .collect(),
+        )
+    }
+
     fn read(&mut self, dependency: QueryId) -> Poll<Outcome> {
         let mut state = self.shared.lock();
         if state.stopped

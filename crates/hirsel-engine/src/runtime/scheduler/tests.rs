@@ -1861,6 +1861,28 @@ fn exact_reaches(edges: &[Vec<usize>], from: usize, target: usize) -> bool {
     false
 }
 #[test]
+fn rejected_cycle_path_keeps_only_its_members_and_refuses_a_short_mailbox() {
+    let mut nodes = Nodes::default();
+    let ids: Vec<_> = (0..4)
+        .map(|n| nodes.insert(key(query(n)), bare_node()))
+        .collect();
+    for (source, target) in [(2, 1), (1, 0), (2, 3)] {
+        assert!(nodes.insert_edge(ids[source], ids[target]).is_some());
+    }
+    assert!(nodes.insert_edge(ids[0], ids[2]).is_none());
+    let path = nodes.cycle_path(ids[0], ids[2], 3).unwrap();
+    assert_eq!(
+        path.into_iter()
+            .map(|slot| nodes.key_at(slot))
+            .collect::<Vec<_>>(),
+        vec![key(query(2)), key(query(1)), key(query(0))]
+    );
+    assert!(nodes.cycle_path(ids[0], ids[2], 2).is_none());
+    assert!(nodes.cycle_path(ids[3], ids[0], 4).is_none());
+    assert_eq!(nodes.cycle_path(ids[0], ids[0], 1), Some(vec![ids[0].slot]));
+    assert!(nodes.cycle_path(ids[0], ids[0], 0).is_none());
+}
+#[test]
 fn compact_topology_matches_exact_oracle_across_insertions_and_removals() {
     let mut nodes = Nodes::default();
     let size = 128;

@@ -20,7 +20,7 @@ use crate::runtime::*;
 use crate::store::{Domain, EntryKey, Reference, ResultStore};
 pub use carry::LowerCarry;
 use constants::Constants;
-use dependencies::Dependencies;
+use dependencies::{Dependencies, PackedDependencies};
 use evidence::Evidence;
 use hirsel_tir::{DefinitionRef, Materialized, MaterializedRef};
 use inputs::Inputs;
@@ -45,7 +45,7 @@ const FAILURE: Domain = Domain {
 };
 const LOWER_DESCRIPTOR: Domain = Domain {
     kind: 0x4600_0006,
-    schema: 7,
+    schema: 8,
 };
 // Ordinary immutable substitution bytes, owned by the selected provider like
 // the original body archive. Inspectors decode under their working allowance.
@@ -90,6 +90,7 @@ struct Input {
     evaluate: EntryKey,
     implementation: ContentHash,
     site: Span,
+    waiting: [Mutex<Option<Span>>; 2],
 }
 #[derive(Clone)]
 enum Value {
@@ -1161,6 +1162,7 @@ impl FrontLowerQueries {
         // Only actual settled descriptor/receipt ownership is retained below;
         // provider archives and unused maximum task weights are not ownership.
         let mut source = Source {
+            id,
             owner: self.clone(),
             reads,
             observed: Rc::new(RefCell::new(ReadsBuilder::new())),
@@ -1251,7 +1253,7 @@ impl FrontLowerQueries {
                             lower.definition,
                             lower.body,
                             &lower.diagnostics,
-                            &lower.dependencies,
+                            lower.dependencies.packed(),
                             &lower.materialized,
                             &observed,
                             &depth,
@@ -1873,7 +1875,10 @@ impl FrontLowerQueries {
             .filter(|bytes| bytes.len() as u64 <= self.weight.scratch)
             .and_then(|bytes| self.store.put_content(LOWER_MATERIALIZED, &bytes))
             .ok_or(QueryError::NotImplemented)?;
+        // Scalar Lower inherits the Modes detail and then appends its
+        // analyzed input again before the lowering adapter's dependencies.
         let mut dependencies = analyzed.dependencies.clone();
+        dependencies.extend_from_slice(&analyzed.dependencies);
         dependencies.extend(output.dependencies);
         let constant_selection_bytes = constant_selection_bytes(&definition)?;
         let raw = Some((
@@ -1944,6 +1949,7 @@ impl LocalQueryFactory for Factory {
 }
 #[derive(Clone)]
 struct Source {
+    id: QueryId,
     owner: Arc<FrontLowerQueries>,
     reads: QueryReads,
     observed: Rc<RefCell<ReadsBuilder>>,
@@ -1952,6 +1958,33 @@ struct Source {
     depth: Rc<RefCell<DepthEvidence<Span>>>,
     framed: bool,
     evidence: Rc<RefCell<Evidence>>,
+}
+struct PendingRequest<'a> {
+    owner: &'a FrontLowerQueries,
+    id: QueryId,
+}
+impl Drop for PendingRequest<'_> {
+    fn drop(&mut self) {
+        self.owner.with_request_site(self.id, |site| *site = None);
+    }
+}
+impl FrontLowerQueries {
+    fn with_request_site<R>(
+        &self,
+        id: QueryId,
+        update: impl FnOnce(&mut Option<Span>) -> R,
+    ) -> Option<R> {
+        if let Some(path) = self.paths.get(&(id.kind, id.address.0)) {
+            let input = self.inputs.get_id(*path)?;
+            let slot = usize::from(id.kind == FRONT_EVALUATE_KIND);
+            return Some(update(
+                &mut input.waiting[slot]
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            ));
+        }
+        self.staged.with_request_site(id, update)
+    }
 }
 impl Source {
     fn select(&self, rows: &[(DefId, Vec<u64>)]) -> Result<(), QueryError> {
@@ -2048,7 +2081,40 @@ impl Source {
         kind: u32,
         site: Span,
     ) -> Result<Value, QueryError> {
+        self.owner.with_request_site(self.id, |pending| {
+            *pending = (kind == FRONT_EVALUATE_KIND).then_some(site);
+        });
+        let pending = PendingRequest {
+            owner: &self.owner,
+            id: self.id,
+        };
         let selected = self.reads.read_consuming(id).await;
+        drop(pending);
+        if selected == Err(self.owner.errors.cycle) {
+            let members = self.reads.take_cycle();
+            if members.is_empty() {
+                return Err(self.refused(self.owner.errors.resource));
+            }
+            // Match the scalar coordinator's cycle_sites: pending evaluation
+            // requests contribute their expression sites, not declaration names.
+            let mut diagnostics: Vec<_> = members
+                .into_iter()
+                .filter_map(|id| self.owner.with_request_site(id, |site| *site).flatten())
+                .chain((kind == FRONT_EVALUATE_KIND).then_some(site))
+                .map(|site| {
+                    Diagnostic::error(
+                        const { hirsel_diag::RuleId::of("CT-4") },
+                        site,
+                        "compile-time dependency cycle",
+                    )
+                })
+                .collect();
+            diagnostics = crate::select_diagnostics(diagnostics, Some(&self.owner.sources));
+            if diagnostics.is_empty() {
+                return Err(self.refused(self.owner.errors.protocol));
+            }
+            return Err(QueryError::Diagnostics(vec![diagnostics.remove(0)]));
+        }
         let outcome = self
             .owner
             .selected(id, selected.clone())
@@ -2446,6 +2512,7 @@ impl QueryEngine {
                     },
                     implementation: syntax.text_hash,
                     site: syntax.item.name_span,
+                    waiting: [Mutex::new(None), Mutex::new(None)],
                 },
             ));
         }

@@ -860,6 +860,7 @@ pub(super) struct FrozenMode {
 pub(super) fn restore_frozen_mode(
     records: &Arc<TypeRecords>,
     types: &hirsel_types::TypeInterner,
+    definition: DefId,
     syntax: Arc<ItemSyntax>,
     citations: &crate::snapshot::OwnedSourceContext,
     text: ContentHash,
@@ -867,6 +868,9 @@ pub(super) fn restore_frozen_mode(
     reads: Arc<Reads>,
     signature: Option<&hirsel_types::Signature>,
 ) -> Option<FrozenMode> {
+    if signature.is_some_and(|signature| signature.definition != definition) {
+        return None;
+    }
     let record: ModeRecord = records.decode_record(bytes, |path, occurrence| {
         citations
             .items
@@ -911,7 +915,7 @@ pub(super) fn restore_frozen_mode(
     let summary = result.as_ref().ok().map(|output| {
         let (summary, growth) = summarize(types, &output.value.typed);
         Arc::new(PublishedSummary {
-            definition: DefId::intern(&syntax.item.definition),
+            definition,
             summary,
             growth,
             storage: None,
@@ -922,7 +926,7 @@ pub(super) fn restore_frozen_mode(
     });
     Some(FrozenMode {
         outcome: ModeResult {
-            definition: syntax.item.definition.clone(),
+            definition: definition.path().clone(),
             phase: result.is_err().then_some(QueryKind::Modes),
             result,
             summary,

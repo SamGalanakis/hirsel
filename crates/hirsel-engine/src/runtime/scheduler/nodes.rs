@@ -296,6 +296,46 @@ impl Nodes {
             self.rows[source.slot as usize].dependencies[edge].target.0 &= !BODY_CONSUMED;
         }
     }
+    /// Recover the rejected edge's path through the same dense DAG used by
+    /// insert_edge. Its predecessor, traversal and path slots fit the existing
+    /// twelve-byte-per-row topology workspace; no second graph is built.
+    pub fn cycle_path(&self, source: NodeId, target: NodeId, limit: usize) -> Option<Vec<u32>> {
+        self.get_id(source)?;
+        self.get_id(target)?;
+        if limit == 0 {
+            return None;
+        }
+        let mut parents = vec![u32::MAX; self.rows.len()];
+        let mut pending = Vec::with_capacity(self.rows.len());
+        pending.push(target.slot);
+        parents[target.slot as usize] = target.slot;
+        let end = self.rows[source.slot as usize].position;
+        while let Some(slot) = pending.pop() {
+            if slot == source.slot {
+                let mut path = Vec::with_capacity(limit.min(self.rows.len()));
+                let mut current = slot;
+                loop {
+                    if path.len() == limit {
+                        return None;
+                    }
+                    path.push(current);
+                    if current == target.slot {
+                        path.reverse();
+                        return Some(path);
+                    }
+                    current = parents[current as usize];
+                }
+            }
+            for edge in &self.rows[slot as usize].dependencies {
+                let next = edge.target();
+                if self.rows[next as usize].position <= end && parents[next as usize] == u32::MAX {
+                    parents[next as usize] = slot;
+                    pending.push(next);
+                }
+            }
+        }
+        None
+    }
     pub fn release_body(&mut self, source: NodeId, target: Key) {
         if self.get_id(source).is_none() {
             return;

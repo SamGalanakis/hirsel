@@ -96,6 +96,11 @@ pub trait QueryContext {
     fn poll_evict_body(&mut self) -> Poll<bool> {
         Poll::Ready(self.evict_body())
     }
+    /// The path closed by a read that returned the runtime's cycle error.
+    /// Callers bound the returned identities by their existing mailbox grant.
+    fn cycle_members(&self, _dependency: QueryId, _limit: usize) -> Option<Vec<QueryId>> {
+        None
+    }
     /// Records an actual dependency. Pending never blocks a worker thread.
     fn read(&mut self, key: QueryId) -> Poll<Result<ProductRef, Reference>>;
 }

@@ -125,6 +125,10 @@ def merge_ledger(base: str, ours: str, theirs: str) -> str:
             entries[identity] = line
         return entries
 
+    def row_date(row):
+        fields = row.split('\t')
+        return fields[3] if len(fields) > 3 else ''
+
     ancestor, left, right = (rows(text) for text in (base, ours, theirs))
     comments = [line for line in ours.splitlines() if line.startswith('#')]
     merged = []
@@ -141,7 +145,10 @@ def merge_ledger(base: str, ours: str, theirs: str) -> str:
         elif b is None:
             value = a
         else:
-            value = b
+            # Two different rows for one identity: the newer date wins, and a
+            # tie takes theirs, the change's side in a rebase — the later of
+            # the two.
+            value = b if row_date(b) >= row_date(a) else a
         if value is not None:
             merged.append(value)
     return ''.join(line + '\n' for line in comments + merged)

@@ -73,24 +73,24 @@ class Ledgers(unittest.TestCase):
             with self.subTest(base=base, ours=ours, theirs=theirs):
                 self.assertEqual(merging.resolve('tools/known-failures.tsv', base, ours, theirs), expected)
 
-    def test_both_added_rows_choose_theirs_even_when_older(self):
+    def test_both_added_rows_keep_the_newer(self):
         self.assertEqual(
             merging.resolve(
                 'tools/known-failures.tsv',
                 '',
-                'same\tnewer\tmain\t2026-11-01\n',
-                'same\tolder\tticket\t2026-10-30\n',
+                'same\tolder\tmain\t2026-10-30\n',
+                'same\tnewer\tticket\t2026-11-01\n',
             ),
-            'same\tolder\tticket\t2026-10-30\n',
+            'same\tnewer\tticket\t2026-11-01\n',
         )
 
-    def test_diverging_edits_choose_theirs_even_when_older(self):
+    def test_diverging_edits_keep_the_newer(self):
         base = 'same\tbase\towner\t2026-10-31\n'
         ours = 'same\tnewer\tmain\t2026-11-01\n'
         theirs = 'same\tolder\tticket\t2026-10-30\n'
         self.assertEqual(
             merging.resolve('tools/known-failures.tsv', base, ours, theirs),
-            'same\tolder\tticket\t2026-10-30\n',
+            'same\tnewer\tmain\t2026-11-01\n',
         )
 
     def test_concurrent_edit_and_delete_keep_the_edit_in_either_direction(self):
@@ -108,6 +108,19 @@ class Ledgers(unittest.TestCase):
             merging.resolve('tools/known-failures.tsv', base, ours, theirs),
             '# ours first\n# ours second\na\ttheirs\towner\t2026-10-30\n'
             'q\tours\towner\t2026-10-30\nz\tbase\towner\t2026-10-30\n',
+        )
+
+    def test_same_identity_added_twice_keeps_the_newer_row(self):
+        # Two lanes recording one red must leave a single row: the merge keeps
+        # the row with the newer date, whichever side holds it.
+        self.assertEqual(
+            merging.resolve(
+                'tools/known-failures.tsv',
+                '',
+                'same\tnewer\tlane-a\t2026-11-01\n',
+                'same\tolder\tlane-b\t2026-10-30\n',
+            ),
+            'same\tnewer\tlane-a\t2026-11-01\n',
         )
 
     def test_duplicate_ids_in_any_input_stay_conflicts(self):

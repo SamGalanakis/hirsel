@@ -674,10 +674,13 @@ fn frontier_text(
         .collect()
 }
 
-/// The production source, checker, V and interpreter must agree with scalar
-/// evaluation under a cold frontier, duplicate roots, partial hits and edits.
+/// Fresh requests over one store agree with scalar evaluation for duplicate
+/// roots. An edit to the helper LEAF's evaluation executed recomputes the
+/// stored LEAF value; an unchanged repeat reopens it.
 #[test]
 fn frozen_frontier_values_refresh_and_preserve_input_order() {
+    use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
+    use std::sync::Arc;
     with_compiler_stack(|| {
         let source = |leaf| {
             format!(
@@ -686,12 +689,33 @@ fn frozen_frontier_values_refresh_and_preserve_input_order() {
         };
         let paths = vec![path("B"), path("A"), path("B"), path("LEAF")];
         for jobs in [1, 2, 8] {
-            let mut candidate = engine(&source(3));
-            candidate.materialize_value(&path("LEAF")).unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let manifest = directory.path().join("hirsel.json");
+            std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"standalone","version":"0"},"sources":[{"path":"comptime.hir","module":[]}],"dependencies":[]}"#).unwrap();
+            let config = CompileConfig {
+                jobs: hirsel_intern::jobs::Jobs::new(jobs),
+                store: Arc::new(store::DirStore::new(directory.path().join("products"))),
+                hold_bytes: 0,
+                ..Default::default()
+            };
+            // Each request is a fresh graph over the same store; the count is
+            // how often it produced LEAF's value instead of reopening it.
+            let precompute = |text: &str| {
+                std::fs::write(directory.path().join("comptime.hir"), text).unwrap();
+                let mut requests = CompilerRequests::for_host(
+                    COMPILER.with_config(config.clone()),
+                    config.clone(),
+                );
+                let output = requests
+                    .execute(&manifest, CompileOperation::Precompute)
+                    .unwrap_or_else(|error| panic!("jobs={jobs}: {error}"));
+                let leaf = requests
+                    .recompute_counts(&[(path("LEAF"), QueryKind::Lower)])
+                    .unwrap();
+                (output, leaf[0].2)
+            };
             for leaf in [3, 9] {
                 let text = source(leaf);
-                let file = candidate.sources.add("comptime.hir", text.clone()).unwrap();
-                candidate.parse_file(file, &default_context()).unwrap();
                 let mut control = engine(&text);
                 let expected: Vec<_> = paths
                     .iter()
@@ -700,12 +724,35 @@ fn frozen_frontier_values_refresh_and_preserve_input_order() {
                         outcome_text(&control, result)
                     })
                     .collect();
-                for _ in 0..2 {
+                for repeat in [false, true] {
+                    let (output, computed) = precompute(&text);
+                    // LEAF is produced cold and after the `helper` edit only;
+                    // an unchanged repeat reopens the stored product.
                     assert_eq!(
-                        frontier_text(&mut candidate, paths.clone(), jobs),
-                        expected,
-                        "jobs={jobs} leaf={leaf}"
+                        computed > 0,
+                        !repeat,
+                        "jobs={jobs} leaf={leaf} repeat={repeat}"
                     );
+                    let CompileResult::Precomputed { sources, .. } = &output.result else {
+                        panic!("expected source precompute");
+                    };
+                    let actual: Vec<Result<String, String>> = paths
+                        .iter()
+                        .map(|path| {
+                            let bound = sources.source_product_bytes(path).unwrap().unwrap();
+                            let budget = hirsel_engine::runtime::ProcessBudget::new(bound);
+                            let products = sources
+                                .source_products(path, budget.reserve(bound).unwrap())
+                                .unwrap()
+                                .unwrap();
+                            let context = hirsel_proof_export::Cx::new(
+                                std::rc::Rc::new(|_| hirsel_proof_export::Location::unknown()),
+                                sources.signatures().types().clone(),
+                            );
+                            Ok(hirsel_codec::to_text_with(products.constant().unwrap(), context).0)
+                        })
+                        .collect();
+                    assert_eq!(actual, expected, "jobs={jobs} leaf={leaf} repeat={repeat}");
                 }
             }
         }

@@ -1409,9 +1409,4 @@ mod tests {
         })
     }
 
-    /// Since `.roots5`, a returned root's pointer word is the pointer itself, for sequence
-    /// roots too, whose must-unique fact has a word of its own. Under `.roots4` the
-    /// sequence pointer carried that fact in its low bits, and every loop over a
-    /// root call or inlined body masked and re-tagged it (`ptrtoint`, `and -4`,
-    /// `inttoptr`) per iteration; a headerless payload's low bits are kept the same way.
 }

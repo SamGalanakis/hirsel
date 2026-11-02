@@ -67,24 +67,6 @@ class Unit(unittest.TestCase):
             self.assertIn(f'fn {stem}_json_into(', result.stdout)
         self.assertEqual(result.stdout.count('_from_json_bytes('), 1)
 
-  shape(Item)
-)
-
-fn item_json_into(value: Item, mut out: core@1/List[core@1/u8], depth: core@1/u64) -> core@1/Result[
-  (),
-  std@1/json.JsonError
-] uses {} = comptime std@1/derive.json_into(shape(Item))
-
-fn item_from_json_bytes(data: core@1/Bytes) -> core@1/Result[Item, core@1/String] uses {} = comptime std@1/derive.from_json_bytes(
-  shape(Item)
-)
-'''
-        result = generate('Item', '--root', 'Item')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stderr, '')
-        self.assertEqual(result.stdout, expected)
-
-    def test_deterministic_complete_output(self):
         first = generate('Item', 'Snapshot', '--root', 'Snapshot')
         second = generate('--root', 'Snapshot', 'Item', 'Snapshot')
         self.assertEqual(first.returncode, 0, first.stderr)

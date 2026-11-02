@@ -306,12 +306,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_cpu_ahead_grow(
     NOT_CERTIFIED
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-}
-
 #[cfg(all(test, target_arch = "x86_64"))]
 mod naked_tests;
 

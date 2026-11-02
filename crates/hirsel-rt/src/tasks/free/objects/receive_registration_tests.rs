@@ -454,6 +454,3 @@ unsafe extern "C" fn ping(ctx: *mut TaskCtx, env: *mut Header, _: u64, _: u64) -
     }
     STATUS_OK
 }
-
-/// Each parked receive's scheduler-role acquisitions and task switches,
-/// whole-run, for the REPORT's before/after comparison.

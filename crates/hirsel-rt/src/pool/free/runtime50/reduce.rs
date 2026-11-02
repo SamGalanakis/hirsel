@@ -31,7 +31,7 @@
 //!   granularity. Here every single removal of the result is tested, a failing
 //!   one restarts ddmin, and `minimal` is set only when all of them pass.
 //! - A driver panic is a custody failure class, not a reduction error.
-use super::{Config, Divergence, Entry, Mutant, Mutation, Outcome, replay, run};
+use super::{Config, Divergence, Entry, Mutant, Mutation, Outcome, replay};
 use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::Instant;

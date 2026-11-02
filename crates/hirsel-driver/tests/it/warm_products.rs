@@ -134,8 +134,7 @@ fn worker_lower_products_match_scalar_records_without_publishing_a_failed_suffix
         };
         let (good, bad, later) = (named("GOOD"), named("BAD"), named("LATER"));
         drop(seed);
-        let mut requests =
-            CompilerRequests::for_host(compiler.clone(), compiler.configuration());
+        let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
         let checked = requests
             .execute(
                 &manifest,

@@ -1017,10 +1017,10 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         // This machine's store, carrying its verifier, under a provider
         // that retains nothing the request publishes: evicted bodies
         // recompute instead of being read back.
-        struct Transport(Arc<MemStore>);
+        struct Transport(Arc<MemStore>, bool);
         impl ResultStore for Transport {
             fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
-                self.0.verifier()
+                self.1.then(|| self.0.verifier()).flatten()
             }
             fn persistence(&self) -> hirsel_engine::store::Persistence {
                 hirsel_engine::store::Persistence::Disabled
@@ -1058,7 +1058,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         };
         let mut limit = 8 << 20;
         // First measure the complete metadata and one body through the same harness.
-        for mode in 0..8 {
+        for mode in 0..9 {
             // std is a source dependency: as in production, V gives its
             // importers std's once-computed universe summary, warmed here by
             // another program before the body fills the partition.
@@ -1075,7 +1075,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 .signature_snapshot();
             let mut program = COMPILER
                 .with_config(CompileConfig {
-                    store: Arc::new(Transport(store)),
+                    store: Arc::new(Transport(store, mode != 8)),
                     hold_bytes: 0,
                     ..Default::default()
                 })
@@ -1151,11 +1151,12 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
             // V builds its universe once the program's headers are checked,
             // before any body fills the partition. std is a dependency: its
             // rows come from its warmed summary, never its full table.
-            let universe = (mode == 7).then(|| {
+            let universe = (mode == 7 || mode == 8).then(|| {
                 let signatures = front.signatures();
                 let package = &definitions[0].0.package;
                 let before: std::collections::BTreeMap<_, _> =
                     front.module_inferences().into_iter().collect();
+                let started = std::time::Instant::now();
                 let built = signatures.validation(package).map(|universe| {
                     universe
                         .view(hirsel_syntax::DefId::intern(&definitions[0]))
@@ -1178,8 +1179,20 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     repeated.is_empty(),
                     "proofs inferred more than once in one build: {repeated:?}"
                 );
-                (signatures, built.unwrap())
+                if mode == 8 {
+                    assert!(started.elapsed() < std::time::Duration::from_secs(60));
+                }
+                (signatures, built)
             });
+            if mode == 8 {
+                let (_, built) = universe.unwrap();
+                assert!(
+                    matches!(built, Err(hirsel_validate::ViewRefusal::Unreadable { .. })),
+                    "unreadable std proof refuses the universe: {built:?}"
+                );
+                continue;
+            }
+            let universe = universe.map(|(signatures, built)| (signatures, built.unwrap()));
             let request = runtime.request(&[bodies[0]]);
             let a = runtime.wait(request).unwrap().pop().unwrap();
             let mut scratch = budget.reserve(2 << 20).unwrap();
@@ -1388,7 +1401,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         for mode in 0..5 {
             let mut program = COMPILER
                 .with_config(CompileConfig {
-                    store: Arc::new(Transport(Arc::default())),
+                    store: Arc::new(Transport(Arc::default(), true)),
                     hold_bytes: 0,
                     ..Default::default()
                 })
@@ -1552,7 +1565,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         for _ in 0..2 {
             let mut program = COMPILER
                 .with_config(CompileConfig {
-                    store: Arc::new(Transport(Arc::default())),
+                    store: Arc::new(Transport(Arc::default(), true)),
                     hold_bytes: 0,
                     ..Default::default()
                 })

@@ -655,7 +655,7 @@ fn visit_test_suite(
             hirsel_driver::load_program_source(path.unwrap_or(&fallback), Some(source))
                 .map_err(|e| e.to_string())?;
         program.engine.adapters.interpreter = Some(crate::interpreter(source)?);
-        let tests = hirsel_driver::testing::discover(
+        let tests = hirsel_driver::testing::discover_source(
             &mut program,
             &[],
             None,

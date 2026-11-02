@@ -655,7 +655,7 @@ fn assert_http_script_replay(relative: &str, connection: impl Fn(&str) -> HttpSc
         .unwrap_or_else(|e| panic!("{}", details(&e)));
     let source = std::fs::read_to_string(&path).unwrap();
     let entries = if source.lines().any(|line| line == "// expect: test") {
-        let tests = testing::discover(&mut program, &[], None, testing::Selection::Tests)
+        let tests = testing::discover_source(&mut program, &[], None, testing::Selection::Tests)
             .unwrap_or_else(|e| panic!("{}", details(&e)));
         assert!(!tests.is_empty(), "{relative}: no tests discovered");
         tests
@@ -873,7 +873,8 @@ fn http2_session_freeze_controls_agree_with_checked_interpreter() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../native-tests/regressions/http2-session-freeze.hir");
         let mut program = load_program_source(&path, None).unwrap();
-        let tests = testing::discover(&mut program, &[], None, testing::Selection::Tests).unwrap();
+        let tests =
+            testing::discover_source(&mut program, &[], None, testing::Selection::Tests).unwrap();
         assert_eq!(tests.len(), 4);
         for test in tests {
             let config = RunConfiguration {

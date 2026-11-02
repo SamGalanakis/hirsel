@@ -2,6 +2,7 @@
 //! source outcome separately from trace refusal; it does not certify transports
 //! that the reference observer cannot yet see.
 use crate::{HostLaunch, RunOutcome, ToolError};
+use hirsel_engine::InterpreterPhase;
 use hirsel_interp::ownership_trace::TraceError;
 use hirsel_run_schema::ownership_trace::Trace;
 use std::path::Path;
@@ -122,7 +123,7 @@ pub fn execute_test_resources(
                 }),
                 ..Default::default()
             }));
-    let execution = crate::testing::execute(program, test, checked, hash_seed);
+    let execution = crate::testing::execute_source(program, test, checked, hash_seed);
     let trace = program
         .engine
         .adapters
@@ -138,6 +139,63 @@ pub fn execute_test_resources(
     Ok(ResourceSimulation {
         execution: execution?,
         program: binding,
+        trace,
+    })
+}
+
+fn execute_tir_resources(
+    input: &crate::requests::TirExecution,
+    test: &crate::testing::Test,
+    limits: hirsel_interp::Limits,
+    event_limit: usize,
+) -> Result<ResourceSimulation, ToolError> {
+    let program = input.revision.digest();
+    crate::tir_execution::refuse_foreign_interpretation(input)?;
+    let mut runtime = (*input.runtime).clone();
+    runtime.checked = None;
+    let mut adapter = hirsel_engine::InterpreterAdapter {
+        limits,
+        resource_binding: Some(hirsel_interp::ownership_trace::ResourceBinding {
+            program,
+            event_limit,
+        }),
+        ..Default::default()
+    };
+    adapter.prepare(
+        input.signature.clone(),
+        runtime,
+        hirsel_engine::SimulationConfig {
+            grants: Default::default(),
+            test_seed: test.seed,
+            scheduler: test.scheduler.clone(),
+            debug: test.simulation_debug,
+            ..Default::default()
+        },
+    );
+    let config = hirsel_tir::RunConfiguration {
+        entry: test.entry.clone(),
+        hash_seed: 0,
+        inputs: vec![],
+    };
+    let execution = adapter
+        .run_observed_query(&config, &mut input.provider(), &input.sources)
+        .map_err(|error| match error {
+            hirsel_engine::RuntimeError::Query(error) => ToolError::Query {
+                error,
+                phase: Some(hirsel_engine::QueryKind::Interpret),
+                sources: input.sources.clone(),
+            },
+            hirsel_engine::RuntimeError::Tool(message) => ToolError::Runtime(message),
+            hirsel_engine::RuntimeError::Io(error) => ToolError::Io(error),
+        });
+    let trace = adapter.take_resource_trace().unwrap_or_else(|| {
+        Err(TraceError::Unsupported(
+            "simulation did not complete ownership observations".into(),
+        ))
+    });
+    Ok(ResourceSimulation {
+        execution: execution?,
+        program,
         trace,
     })
 }
@@ -158,15 +216,52 @@ pub fn test_path_resources(
     verify: hirsel_engine::Verify,
     event_limit: usize,
 ) -> Result<Vec<TestResources>, ToolError> {
-    use crate::testing::{Selection, discover, outcome_failure};
-    let mut program = crate::COMPILER
-        .with_verify(verify)
-        .load_test_package(path)?;
-    let tests = discover(&mut program, filters, override_seed, Selection::Tests)?;
+    use crate::testing::{Selection, discover_source, outcome_failure};
     let limits = hirsel_interp::Limits {
         steps: max_steps,
         ..Default::default()
     };
+    if path
+        .extension()
+        .is_some_and(|extension| extension == "json")
+        || path.extension().is_some_and(|extension| {
+            extension == "hir" && path.with_extension("hir.json").is_file()
+        })
+    {
+        let (discovery, selector) = crate::testing::discover_with_selector(
+            path,
+            filters,
+            override_seed,
+            Selection::Tests,
+            verify,
+        )?;
+        let execution = crate::testing::Executions::new(path, &discovery, selector, max_steps)?;
+        let mut execution = execution.prepare_all()?;
+        let mut results = vec![];
+        for test in &discovery.tests {
+            let input = execution.prepare(&test.entry)?;
+            let traced = execute_tir_resources(&input, test, limits, event_limit)?;
+            let stdout = match &traced.execution.observation {
+                Some(observation) => observation.output.clone(),
+                None => traced.execution.tooling_output.clone(),
+            };
+            let failure = match &traced.execution.outcome {
+                Ok(outcome) => outcome_failure(outcome, &input.sources),
+                Err(error) => Some(format!("runtime error: {error:?}")),
+            };
+            results.push(TestResources {
+                result: test.result(failure, &stdout, false),
+                program: traced.program,
+                trace: traced.trace,
+            });
+        }
+        return Ok(results);
+    }
+
+    let mut program = crate::COMPILER
+        .with_verify(verify)
+        .load_test_package(path)?;
+    let tests = discover_source(&mut program, filters, override_seed, Selection::Tests)?;
     let mut results = vec![];
     for test in &tests {
         let traced = execute_test_resources(&mut program, test, false, 0, limits, event_limit)?;

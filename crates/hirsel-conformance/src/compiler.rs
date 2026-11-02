@@ -1,5 +1,44 @@
 use crate::*;
+use hirsel_driver::requests::{
+    CompileOperation, CompileOutput, CompileRequest, CompileResult, CompilerRequests,
+};
 use hirsel_engine::{QueryError, ToolError};
+
+struct RequestedProgram {
+    path: std::path::PathBuf,
+    inputs: hirsel_engine::loader_inputs::FrozenInputs,
+    requests: CompilerRequests,
+}
+impl RequestedProgram {
+    fn execute(
+        &mut self,
+        operation: CompileOperation,
+    ) -> Result<std::sync::Arc<CompileOutput>, ToolError> {
+        self.requests.execute_request(&CompileRequest {
+            path: self.path.clone(),
+            inputs: self.inputs.clone().into(),
+            operation,
+        })
+    }
+
+    fn check(
+        &mut self,
+        lowering: hirsel_engine::LoweringPolicy,
+    ) -> Result<(hirsel_engine::CheckOutput, Option<String>), ToolError> {
+        let output = self.execute(CompileOperation::Check { lowering })?;
+        let CompileResult::Check(checked) = &output.result else {
+            return Err(ToolError::Runtime(
+                "corpus Check returned another operation".into(),
+            ));
+        };
+        let phase = checked
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.severity == Severity::Error)
+            .and_then(|diagnostic| output.diagnostic_phase(diagnostic));
+        Ok((checked.clone(), phase))
+    }
+}
 
 /// Bug-catching campaigns independently recompute every reusable result.
 /// Each compiler owns an ephemeral memory provider, so unrelated cases cannot
@@ -41,8 +80,35 @@ fn evaluate_on_compiler_thread(
     expect: &Expect,
     hash_seed: u64,
 ) -> (Status, Observation) {
-    let text = fs::read_to_string(path).unwrap_or_default();
-    let loaded = verifying_compiler().load_program(path);
+    let compiler = verifying_compiler();
+    let mut requested = None;
+    let loaded = if path.with_extension("hir.json").exists()
+        || path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+    {
+        let requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
+        let compiler = requests.compiler().clone();
+        match hirsel_engine::requests::observe_inputs(
+            requests.input_limits(),
+            requests.capture_attempts(),
+            |inputs| compiler.load_program_inputs(path, inputs, false),
+        ) {
+            Ok((loaded, inputs)) => {
+                requested = Some(RequestedProgram {
+                    path: path.to_owned(),
+                    inputs,
+                    requests,
+                });
+                loaded
+            }
+            Err(_) => Err(ToolError::Runtime(
+                "corpus inputs changed during capture".into(),
+            )),
+        }
+    } else {
+        compiler.load_program(path)
+    };
     let mut program = match loaded {
         Ok(program) => program,
         Err(ToolError::Query {
@@ -73,10 +139,20 @@ fn evaluate_on_compiler_thread(
             );
         }
     };
-    match crate::interpreter(&text) {
-        Ok(interpreter) => program.engine.adapters.interpreter = Some(interpreter),
+    let text = program
+        .engine
+        .sources
+        .file(program.primary)
+        .map(|source| source.text().to_owned())
+        .unwrap_or_default();
+    let limits = match crate::interpreter(&text) {
+        Ok(interpreter) => {
+            let limits = interpreter.limits;
+            program.engine.adapters.interpreter = Some(interpreter);
+            limits
+        }
         Err(error) => return (Status::Fail(error), Observation::default()),
-    }
+    };
     // Interpretation refuses a definition outside the entry's semantic closure
     // in every build, so every executed corpus file checks the closure.
     program.engine.closure_assertions = true;
@@ -85,13 +161,43 @@ fn evaluate_on_compiler_thread(
             phase: "test execution".into(),
             ..Default::default()
         };
-        let tests = match hirsel_driver::testing::discover(
-            &mut program,
-            &[],
-            None,
-            hirsel_driver::testing::Selection::Tests,
-        ) {
-            Ok(tests) if !tests.is_empty() => tests,
+        let discovered = (|| {
+            if let Some(requested) = &mut requested {
+                let discovery = hirsel_driver::testing::discover(
+                    &mut requested.requests,
+                    path,
+                    requested.inputs.clone(),
+                    &[],
+                    None,
+                    hirsel_driver::testing::Selection::Tests,
+                )?;
+                requested.inputs =
+                    discovery.execution_inputs(requested.requests.input_limits().bytes)?;
+                let tests = discovery.tests;
+                if tests.is_empty() {
+                    return Ok((tests, None));
+                }
+                let output = requested.execute(CompileOperation::TirBatch {
+                    definitions: tests.iter().map(|test| test.entry.clone()).collect(),
+                })?;
+                let CompileResult::TirBatch(batch) = &output.result else {
+                    return Err(ToolError::Runtime(
+                        "corpus tests returned another operation".into(),
+                    ));
+                };
+                Ok((tests, Some(batch.clone())))
+            } else {
+                hirsel_driver::testing::discover_source(
+                    &mut program,
+                    &[],
+                    None,
+                    hirsel_driver::testing::Selection::Tests,
+                )
+                .map(|tests| (tests, None))
+            }
+        })();
+        let (tests, batch) = match discovered {
+            Ok((tests, batch)) if !tests.is_empty() => (tests, batch),
             Ok(_) => {
                 return (
                     Status::Fail("expect: test selected no @test functions".into()),
@@ -101,8 +207,16 @@ fn evaluate_on_compiler_thread(
             Err(error) => return (Status::Fail(format!("test check: {error}")), observation),
         };
         for test in &tests {
-            let ordinary = hirsel_driver::testing::execute(&mut program, test, false, hash_seed);
-            let checked = hirsel_driver::testing::execute(&mut program, test, true, hash_seed);
+            let mut execute = |checked| {
+                if let Some(batch) = &batch {
+                    let input = batch.entry(&test.entry)?;
+                    hirsel_driver::testing::execute(&input, test, checked, hash_seed, limits)
+                } else {
+                    hirsel_driver::testing::execute_source(&mut program, test, checked, hash_seed)
+                }
+            };
+            let ordinary = execute(false);
+            let checked = execute(true);
             match (ordinary, checked) {
                 (Ok(ordinary), Ok(checked)) => {
                     observation.checked = checked_divergence(&ordinary, &checked);
@@ -143,7 +257,7 @@ fn evaluate_on_compiler_thread(
         .unwrap()
         .1
         .clone();
-    let entry = if path.with_extension("hir.json").exists() {
+    let entry = if requested.is_some() {
         program.entry.clone()
     } else {
         crate::selected_entry(&text, &context)
@@ -153,8 +267,31 @@ fn evaluate_on_compiler_thread(
     // reachable body, which must not change a single diagnostic.
     // A rejected program is checked again from a fresh load: a second check
     // of the same session sees the instances its first check selected.
+    let mut diagnostic_phase = None;
     let checked = (|| {
         use hirsel_engine::LoweringPolicy::{Comptime, Reachable};
+        if let Some(requested) = &mut requested {
+            let (comptime, phase) = requested.check(Comptime).map_err(|e| format!("{e:?}"))?;
+            diagnostic_phase = phase;
+            let reachable = if comptime
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Error)
+            {
+                let mut fresh = RequestedProgram {
+                    path: requested.path.clone(),
+                    inputs: requested.inputs.clone(),
+                    requests: CompilerRequests::for_host(
+                        compiler.clone(),
+                        compiler.configuration(),
+                    ),
+                };
+                fresh.check(Reachable)
+            } else {
+                requested.check(Reachable)
+            };
+            return Ok((comptime, reachable.map_err(|e| format!("{e:?}"))?.0));
+        }
         let comptime = program.check(Comptime).map_err(|e| format!("{e:?}"))?;
         let reachable = if comptime
             .diagnostics
@@ -170,7 +307,11 @@ fn evaluate_on_compiler_thread(
         };
         Ok::<_, String>((comptime, reachable.map_err(|e| format!("{e:?}"))?))
     })();
-    let primary_file = program.primary;
+    let primary_path = program
+        .engine
+        .sources
+        .file(program.primary)
+        .map(|file| file.path.clone());
     let mut engine = program.engine;
     let mut observation = Observation {
         phase: engine
@@ -201,12 +342,19 @@ fn evaluate_on_compiler_thread(
             return (Status::Fail(observation.actual.clone()), observation);
         }
     };
+    if requested.is_some() {
+        engine.sources = output.sources.clone();
+    }
     if let Some(d) = output
         .diagnostics
         .iter()
         .find(|d| d.severity == Severity::Error)
     {
-        observation.primary_external = output.sources.resolve(d.primary).file != primary_file;
+        observation.primary_external = output
+            .sources
+            .file(output.sources.resolve(d.primary).file)
+            .map(|file| &file.path)
+            != primary_path.as_ref();
         observation.primary =
             crate::corpus_format::primary_at_span(&mut engine, d.rule.as_str(), d.primary);
         let line = output
@@ -215,7 +363,7 @@ fn evaluate_on_compiler_thread(
             .map(|l| l.line)
             .unwrap_or(0);
         observation.actual = format!("{} at line {line}: {}", d.rule, d.message);
-        if let Some(phase) = engine.diagnostic_phase(d) {
+        if let Some(phase) = diagnostic_phase.or_else(|| engine.diagnostic_phase(d)) {
             observation.phase = phase;
         }
         let actual = Actual::Rejected {
@@ -275,9 +423,21 @@ fn evaluate_on_compiler_thread(
         Err(error) => return (Status::Fail(error), observation),
     };
     observation.phase = "interpretation".into();
-    let execution =
-        match hirsel_engine::run_observed_snapshot(&mut engine, &config, simulation.clone()) {
-            Ok(outcome) => outcome,
+    let prepared = if let Some(requested) = &mut requested {
+        let prepared = requested.execute(CompileOperation::Tir {
+            definition: Some(config.entry.clone()),
+        });
+        match prepared {
+            Ok(output) => match &output.result {
+                CompileResult::Tir(input) => {
+                    engine.sources = input.sources.clone();
+                    Some(input.clone())
+                }
+                _ => {
+                    observation.actual = "corpus TIR returned another operation".into();
+                    return (Status::Fail(observation.actual.clone()), observation);
+                }
+            },
             Err(ToolError::Query {
                 error: QueryError::NotImplemented,
                 ..
@@ -289,13 +449,38 @@ fn evaluate_on_compiler_thread(
                 observation.actual = format!("tool error: {error}");
                 return (Status::Fail(observation.actual.clone()), observation);
             }
-        };
+        }
+    } else {
+        None
+    };
+    let mut execute = |checked| {
+        if let Some(input) = &prepared {
+            hirsel_driver::testing::observe_tir(input, &config, simulation.clone(), limits, checked)
+        } else if checked {
+            hirsel_engine::run_observed_checked(&mut engine, &config, simulation.clone())
+        } else {
+            hirsel_engine::run_observed_snapshot(&mut engine, &config, simulation.clone())
+        }
+    };
+    let execution = match execute(false) {
+        Ok(outcome) => outcome,
+        Err(ToolError::Query {
+            error: QueryError::NotImplemented,
+            ..
+        }) => {
+            observation.actual = "not implemented".into();
+            return (Status::NotImplemented, observation);
+        }
+        Err(error) => {
+            observation.actual = format!("tool error: {error}");
+            return (Status::Fail(observation.actual.clone()), observation);
+        }
+    };
     // Third witness: the same IR under checked execution must observe the same.
-    observation.checked =
-        match hirsel_engine::run_observed_checked(&mut engine, &config, simulation.clone()) {
-            Ok(checked) => checked_divergence(&execution, &checked),
-            Err(error) => Some(format!("checked execution: tool error: {error}")),
-        };
+    observation.checked = match execute(true) {
+        Ok(checked) => checked_divergence(&execution, &checked),
+        Err(error) => Some(format!("checked execution: tool error: {error}")),
+    };
     let stdout = execution
         .observation
         .as_ref()
@@ -306,13 +491,13 @@ fn evaluate_on_compiler_thread(
         .as_ref()
         .and_then(|o| o.failures.first())
     {
-        if let Some(file) = engine
-            .definition_items(&failure.stable_site.definition)
-            .ok()
-            .and_then(|items| engine.sources.anchor(items.first()?.anchor))
-            .map(|(file, _)| file)
-        {
-            observation.primary_external = file != primary_file;
+        let file = engine.sources.anchors().find_map(|(_, file, _)| {
+            (engine.sources.file(file)?.path.to_string_lossy() == failure.stable_site.file)
+                .then_some(file)
+        });
+        if let Some(file) = file {
+            observation.primary_external =
+                engine.sources.file(file).map(|file| &file.path) != primary_path.as_ref();
             observation.primary = crate::corpus_format::primary_at_site(
                 &mut engine,
                 file,

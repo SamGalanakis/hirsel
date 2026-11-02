@@ -18,6 +18,7 @@ mod diff;
 pub mod impact;
 mod interpreted;
 mod simulation;
+pub(crate) use interpreted::Executions;
 pub use simulation::observe_tir;
 
 #[derive(Clone, Debug)]
@@ -320,7 +321,7 @@ pub fn seed(definition: &DefPath) -> u64 {
 /// Check the whole package before selecting tests. Dependencies are never selected.
 /// Generated entries adapt unit/private definitions to the existing launch ABI;
 /// they are checked and lowered normally and never written into source files.
-pub fn discover(
+pub fn discover_source(
     program: &mut LoadedProgram,
     filters: &[String],
     override_seed: Option<u64>,
@@ -365,6 +366,38 @@ pub fn discover(
                 .map_err(|error| program.error(error))?;
             Ok(())
         },
+    )
+}
+
+pub fn discover(
+    requests: &mut crate::requests::CompilerRequests,
+    path: &Path,
+    inputs: hirsel_engine::loader_inputs::FrozenInputs,
+    filters: &[String],
+    override_seed: Option<u64>,
+    selection: Selection,
+) -> Result<TestDiscovery, ToolError> {
+    use crate::requests::{CompileOperation, CompileRequest, CompileResult};
+    let output = requests.execute_request(&CompileRequest {
+        path: path.to_owned(),
+        inputs: inputs.clone().into(),
+        operation: CompileOperation::Check {
+            lowering: hirsel_engine::LoweringPolicy::Reachable,
+        },
+    })?;
+    let CompileResult::Check(checked) = &output.result else {
+        return Err(ToolError::Runtime(
+            "test package selected another operation".into(),
+        ));
+    };
+    accepted_check(checked)?;
+    discover_inputs(
+        requests.compiler(),
+        path,
+        inputs,
+        filters,
+        override_seed,
+        selection,
     )
 }
 
@@ -724,7 +757,7 @@ pub fn run_interpreted(
         .iter()
         .map(|test| {
             explore(test, schedules, |test| {
-                let (failure, stdout, races) = match execute(program, test, checked, 0) {
+                let (failure, stdout, races) = match execute_source(program, test, checked, 0) {
                     Ok(execution) => {
                         let stdout = match &execution.observation {
                             Some(observation) => observation.output.clone(),
@@ -751,7 +784,7 @@ pub fn run_interpreted(
 }
 
 /// Retain the complete observation for conformance's checked-execution witness.
-pub fn execute(
+pub fn execute_source(
     program: &mut LoadedProgram,
     test: &Test,
     checked: bool,
@@ -775,6 +808,28 @@ pub fn execute(
         hirsel_engine::run_observed_snapshot
     };
     run(&mut program.engine, &config, simulation)
+}
+
+pub fn execute(
+    input: &crate::requests::TirExecution,
+    test: &Test,
+    checked: bool,
+    hash_seed: u64,
+    limits: hirsel_interp::Limits,
+) -> Result<hirsel_engine::ObservedExecution, ToolError> {
+    let config = hirsel_tir::RunConfiguration {
+        entry: test.entry.clone(),
+        hash_seed,
+        inputs: vec![],
+    };
+    let simulation = SimulationConfig {
+        grants: Default::default(),
+        test_seed: test.seed,
+        scheduler: test.scheduler.clone(),
+        debug: test.simulation_debug,
+        ..Default::default()
+    };
+    observe_tir(input, &config, simulation, limits, checked)
 }
 
 pub(crate) fn outcome_failure(

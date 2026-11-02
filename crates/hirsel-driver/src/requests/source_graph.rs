@@ -780,12 +780,10 @@ impl GraphProducts for SourceProducts {
                         }
                         _ => return Err(uninstalled()),
                     };
-                    Ok(Arc::new(CompileOutput::new(
-                        entry.clone(),
-                        inputs.clone(),
-                        work,
-                        result,
-                    )))
+                    Ok(Arc::new(
+                        CompileOutput::new(entry.clone(), inputs.clone(), work, result)
+                            .with_check_metadata(check.clone()),
+                    ))
                 }),
                 failure,
             },

@@ -143,12 +143,12 @@ fn ownership_simulation_test_entry_preserves_source_results_and_restores_the_ada
         .with_verify(Verify::On)
         .load_test_package(&source)
         .unwrap_or_else(|error| panic!("source fixture: {error}"));
-    let tests = testing::discover(&mut program, &[], Some(49), Selection::Tests)
+    let tests = testing::discover_source(&mut program, &[], Some(49), Selection::Tests)
         .unwrap_or_else(|error| panic!("source fixture: {error}"));
     assert_eq!(tests.len(), 1);
     let mut traces = vec![];
     for checked in [false, true] {
-        let ordinary = testing::execute(&mut program, &tests[0], checked, 0)
+        let ordinary = testing::execute_source(&mut program, &tests[0], checked, 0)
             .unwrap_or_else(|error| panic!("source fixture: {error}"));
         let traced = execute_test_resources(
             &mut program,
@@ -184,6 +184,27 @@ fn ownership_simulation_test_entry_preserves_source_results_and_restores_the_ada
         traces.push(trace);
     }
     assert_eq!(traces[0], traces[1]);
+    std::fs::write(
+        source.with_extension("hir.json"),
+        serde_json::json!({
+            "schema":1,"package":{"name":"standalone","version":"0"},
+            "sources":[{"path":"tests.hir","module":[]}],"dependencies":[]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let requested = hirsel_driver::ownership_trace::test_path_resources(
+        &source,
+        &[],
+        Some(49),
+        Some(100_000),
+        Verify::On,
+        100,
+    )
+    .unwrap();
+    let [requested]: [_; 1] = requested.try_into().ok().unwrap();
+    assert!(requested.result.failure.is_none(), "{:?}", requested.result);
+    assert_eq!(requested.trace.unwrap().events, traces[0].events);
 }
 
 fn observed_task_source(body: &str, creates: usize) -> hirsel_run_schema::ownership_trace::Trace {
@@ -214,8 +235,8 @@ fn observed_task_source(body: &str, creates: usize) -> hirsel_run_schema::owners
             }
             panic!("task fixture: {error}");
         });
-    let tests =
-        testing::discover(&mut program, &[], Some(49), Selection::Tests).unwrap_or_else(|error| {
+    let tests = testing::discover_source(&mut program, &[], Some(49), Selection::Tests)
+        .unwrap_or_else(|error| {
             if let hirsel_engine::ToolError::Query {
                 error: hirsel_engine::QueryError::Diagnostics(diagnostics),
                 sources,
@@ -234,7 +255,7 @@ fn observed_task_source(body: &str, creates: usize) -> hirsel_run_schema::owners
     assert_eq!(tests.len(), 1);
     let mut traces = vec![];
     for checked in [false, true] {
-        let ordinary = testing::execute(&mut program, &tests[0], checked, 0)
+        let ordinary = testing::execute_source(&mut program, &tests[0], checked, 0)
             .unwrap_or_else(|error| panic!("task fixture: {error}"));
         let traced = execute_test_resources(
             &mut program,

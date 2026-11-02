@@ -17,7 +17,7 @@ use std::{
     sync::Arc,
 };
 
-pub(super) struct Executions {
+pub(crate) struct Executions {
     path: PathBuf,
     inputs: FrozenInputs,
     selector: CompilerRequests,

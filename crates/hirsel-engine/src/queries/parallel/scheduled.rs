@@ -299,6 +299,40 @@ const SOURCE_INPUT: Domain = Domain {
     schema: 1,
 };
 impl FrontBodyQueries {
+    pub(crate) fn diagnostic_phase(&self, diagnostic: &Diagnostic) -> Option<String> {
+        let matches = |candidate: &Diagnostic| {
+            candidate.rule == diagnostic.rule && candidate.primary == diagnostic.primary
+        };
+        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let mut live = slots.values().filter_map(|slot| match slot {
+            FrontSlot::Live { outcome, .. } => Some(outcome),
+            FrontSlot::Archived(_) => None,
+        });
+        live.clone()
+            .find_map(|outcome| {
+                outcome
+                    .diagnostic_phases
+                    .iter()
+                    .find(|(candidate, _)| matches(candidate))
+                    .map(|(_, phase)| phase.clone())
+            })
+            .or_else(|| {
+                live.find_map(|outcome| {
+                    let diagnostics = match &outcome.state {
+                        FrontState::Settled { diagnostics, .. } => diagnostics.as_slice(),
+                        FrontState::Failed { error, .. } => match error.as_ref() {
+                            QueryError::Diagnostics(diagnostics) => diagnostics.as_slice(),
+                            _ => &[],
+                        },
+                    };
+                    diagnostics
+                        .iter()
+                        .any(matches)
+                        .then(|| outcome.phase.map(|phase| phase.phase_name().to_owned()))
+                        .flatten()
+                })
+            })
+    }
     pub(crate) fn snapshot(&self) -> &Arc<SignatureSnapshot> {
         &self.snapshot
     }

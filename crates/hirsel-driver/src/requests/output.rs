@@ -94,6 +94,7 @@ pub struct CompileOutput {
     pub inputs: CompileInputs,
     pub work: RequestWork,
     pub result: CompileResult,
+    check_metadata: Option<Arc<hirsel_engine::FrontCheckQueries>>,
     owner: Arc<dyn Send + Sync>,
 }
 impl CompileOutput {
@@ -108,8 +109,19 @@ impl CompileOutput {
             inputs,
             work,
             result,
+            check_metadata: None,
             owner: Arc::new(()),
         }
+    }
+    pub fn diagnostic_phase(&self, diagnostic: &hirsel_diag::Diagnostic) -> Option<String> {
+        self.check_metadata.as_ref()?.diagnostic_phase(diagnostic)
+    }
+    pub(super) fn with_check_metadata(
+        mut self,
+        check: Arc<hirsel_engine::FrontCheckQueries>,
+    ) -> Self {
+        self.check_metadata = Some(check);
+        self
     }
     pub(crate) fn retain_owner(mut self, owner: Arc<dyn Send + Sync>) -> Self {
         match &mut self.result {

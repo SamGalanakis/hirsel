@@ -38,6 +38,40 @@ fn package_source_indexing_diagnostics_remain_language_rejections() {
 }
 
 #[test]
+fn package_test_verdict_runs_the_selected_wrapper_instead_of_main() {
+    let dir = std::env::temp_dir().join(format!("hirsel-corpus-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("suite.hir");
+    std::fs::write(
+        path.with_extension("hir.json"),
+        serde_json::json!({
+            "schema":1, "package":{"name":"suite","version":"1"},
+            "entry":{"module":[],"name":"main"},
+            "sources":[{"path":"suite.hir","module":[]}], "dependencies":[]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    for passed in [false, true] {
+        std::fs::write(
+            &path,
+            format!(
+                "pub fn main() -> Result[(), ()] {{ Ok(()) }}\n@test\nfn selected(t: Test) {{ test.check(t, {passed}) }}\n"
+            ),
+        )
+        .unwrap();
+        let (status, observation) = Compiler.evaluate(&path, &hirsel_conformance::Expect::Test);
+        if passed {
+            assert_eq!(status, Status::Pass, "{observation:?}");
+            assert!(observation.checked.is_none(), "{observation:?}");
+        } else {
+            assert!(matches!(status, Status::Fail(_)), "{observation:?}");
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn dependency_failure_tokens_and_lines_belong_to_the_dependency_snapshot() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let path = root.join("conformance/FACT/FACT-2-external-invariant-bad.hir");

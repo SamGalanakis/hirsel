@@ -188,6 +188,38 @@ impl FrontCheckQueries {
     pub fn query(&self) -> QueryId {
         self.query
     }
+    pub fn diagnostic_phase(&self, diagnostic: &Diagnostic) -> Option<String> {
+        let matches = |candidate: &Diagnostic| {
+            candidate.rule == diagnostic.rule && candidate.primary == diagnostic.primary
+        };
+        self.plan
+            .front
+            .diagnostic_phase(diagnostic)
+            .or_else(|| {
+                self.files.iter().find_map(|file| {
+                    file.diagnostics
+                        .iter()
+                        .any(matches)
+                        .then(|| file.phase.map(|phase| phase.phase_name().to_owned()))
+                        .flatten()
+                })
+            })
+            .or_else(|| {
+                let completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
+                let (_, data) = completed.as_ref()?;
+                data.failed_lowered.iter().find_map(|(_, reference)| {
+                    let QueryError::Diagnostics(diagnostics) =
+                        self.plan.lower.failure(*reference)?
+                    else {
+                        return None;
+                    };
+                    diagnostics
+                        .iter()
+                        .any(matches)
+                        .then(|| QueryKind::Lower.phase_name().to_owned())
+                })
+            })
+    }
     pub fn factory(self: &Arc<Self>) -> Arc<dyn QueryFactory> {
         Arc::new(Factory(self.clone()))
     }
@@ -1003,15 +1035,24 @@ impl QueryEngine {
                 error: None,
                 phase: None,
             };
-            match self
+            let indexed = self
                 .index_source(*file, context)
-                .and_then(|()| crate::tools::association_diagnostics(self, *file, context))
-            {
-                Ok(diagnostics) => input.diagnostics = diagnostics,
-                Err(QueryError::Diagnostics(diagnostics)) => input.diagnostics = diagnostics,
+                .and_then(|()| crate::tools::association_diagnostics(self, *file, context));
+            let phase = self.unavailable.or(self.last_phase);
+            match indexed {
+                Ok(diagnostics) => {
+                    input.diagnostics = diagnostics;
+                    if !input.diagnostics.is_empty() {
+                        input.phase = phase;
+                    }
+                }
+                Err(QueryError::Diagnostics(diagnostics)) => {
+                    input.diagnostics = diagnostics;
+                    input.phase = phase;
+                }
                 Err(error) => {
                     input.error = Some(error);
-                    input.phase = self.unavailable.or(self.last_phase);
+                    input.phase = phase;
                 }
             }
             if input.error.is_none() && !has_errors(&input.diagnostics) {

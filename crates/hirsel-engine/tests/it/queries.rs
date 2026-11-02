@@ -1,5 +1,10 @@
 use hirsel_diag::{Diagnostic, RuleId};
 use hirsel_engine::*;
+use hirsel_engine::{
+    memo::MemoKey,
+    runtime::{AdmittedRuntime, MemoryWeight, ProcessBudget, QueryRuntime, RuntimeErrors},
+    store::MemStore,
+};
 use hirsel_intern::Symbol;
 use hirsel_span::{FileId, SourceMap, Span};
 use hirsel_syntax::Origin;
@@ -91,6 +96,7 @@ impl ParserPhase for Fake {
             // Each line is one item, anchored at its start.
             let anchor = sources.item_anchor(file, offset as u32);
             let name = line.split_whitespace().nth(1).unwrap();
+            let name_start = line.find(name).unwrap();
             let body_start = line.find('{').unwrap();
             let mut tree = SyntaxTree::default();
             let body = ExprId(0);
@@ -106,7 +112,8 @@ impl ParserPhase for Fake {
                 kind: ExprKind::Literal(Literal::Bool(true)),
             });
             let item = Item {
-                name_span: Default::default(),
+                name_span: Span::new(anchor, name_start as u32, (name_start + name.len()) as u32)
+                    .unwrap(),
                 origin,
                 name: Symbol::intern("item"),
                 definition: DefPath(ItemPath {
@@ -397,10 +404,155 @@ fn make_engine(
     let engine = QueryEngine::new(default_environment(), adapters);
     (engine, events)
 }
+fn make_engine_with_store(
+    reject: Option<&'static str>,
+    missing_lookup: bool,
+) -> (QueryEngine, Arc<Mutex<Vec<String>>>) {
+    let (engine, events) = make_engine(reject, missing_lookup);
+    (
+        engine.with_result_store(Arc::new(MemStore::default())),
+        events,
+    )
+}
 fn parse(engine: &mut QueryEngine, text: &str) -> FileId {
     let file = engine.sources.add("fixture.hir", text.into()).unwrap();
     engine.parse_file(file, &default_context()).unwrap();
     file
+}
+struct AdmittedFront {
+    queries: Arc<FrontBodyQueries>,
+    runtime: AdmittedRuntime,
+    _budget: Arc<ProcessBudget>,
+}
+impl AdmittedFront {
+    fn request(&mut self, definitions: &[DefPath]) -> Vec<FrontBodyOutput> {
+        let mut order: Vec<_> = (0..definitions.len()).collect();
+        order.sort_by(|left, right| definitions[*left].cmp(&definitions[*right]));
+        let roots: Vec<_> = order
+            .iter()
+            .map(|index| self.queries.query(&definitions[*index]).unwrap())
+            .collect();
+        let request = self.runtime.request(&roots);
+        let mut outcomes: Vec<Option<FrontBodyOutput>> =
+            std::iter::repeat_with(|| None).take(roots.len()).collect();
+        let mut successful = Vec::new();
+        match self.runtime.wait(request) {
+            Ok(products) => {
+                assert_eq!(products.len(), roots.len());
+                successful.extend(order.iter().copied());
+            }
+            Err(failure) => {
+                let first = self.queries.outcome(Err(failure)).unwrap_or_else(|| {
+                    panic!("completed front failure request has no outcome: {failure:?}")
+                });
+                let first_index = definitions
+                    .iter()
+                    .position(|definition| definition == &first.outcome.definition)
+                    .expect("failure outcome belongs to a requested definition");
+                outcomes[first_index] = Some(first);
+                for (index, root) in order.iter().copied().zip(roots) {
+                    if outcomes[index].is_some() {
+                        continue;
+                    }
+                    let request = self.runtime.request(&[root]);
+                    match self.runtime.wait(request) {
+                        Ok(products) => {
+                            assert_eq!(products.len(), 1);
+                            successful.push(index);
+                        }
+                        Err(failure) => {
+                            let outcome = self
+                                .queries
+                                .outcome(Err(failure))
+                                .expect("completed front failure request has an outcome");
+                            assert_eq!(outcome.outcome.definition, definitions[index]);
+                            outcomes[index] = Some(outcome);
+                        }
+                    }
+                }
+            }
+        }
+        successful.sort_by(|left, right| definitions[*left].cmp(&definitions[*right]));
+        let body_roots: Vec<_> = successful
+            .iter()
+            .map(|index| self.queries.body_query(&definitions[*index]).unwrap())
+            .collect();
+        if !body_roots.is_empty() {
+            let request = self.runtime.request(&body_roots);
+            let products = self.runtime.wait(request).unwrap_or_else(|failure| {
+                panic!("completed body materialization failed: {failure:?}")
+            });
+            assert_eq!(products.len(), body_roots.len());
+            for (index, product) in successful.into_iter().zip(products) {
+                outcomes[index] = Some(
+                    self.queries
+                        .outcome(Ok(product))
+                        .expect("completed body request has an outcome"),
+                );
+            }
+        }
+        outcomes.into_iter().map(Option::unwrap).collect()
+    }
+}
+fn admitted_front(engine: &mut QueryEngine, definitions: &[DefPath], jobs: usize) -> AdmittedFront {
+    let budget = ProcessBudget::new(1 << 30);
+    let errors = runtime_errors();
+    let queries = engine
+        .front_body_queries(
+            definitions,
+            MemoryWeight {
+                retained: 1 << 20,
+                scratch: 8 << 20,
+                stack: 0,
+            },
+            budget.reserve(8 << 20).unwrap(),
+            errors,
+        )
+        .unwrap();
+    let mut runtime = AdmittedRuntime::new(
+        hirsel_intern::jobs::Jobs::new(jobs),
+        budget.reserve(512 << 20).unwrap(),
+        errors,
+    )
+    .unwrap();
+    runtime
+        .register(FRONT_BODY_KIND, queries.factory())
+        .unwrap();
+    AdmittedFront {
+        queries,
+        runtime,
+        _budget: budget,
+    }
+}
+fn runtime_errors() -> RuntimeErrors {
+    let reference = |text: &[u8]| {
+        hirsel_engine::store::Domain {
+            kind: 0x4600_00ff,
+            schema: 1,
+        }
+        .reference(text)
+        .unwrap()
+    };
+    RuntimeErrors {
+        resource: reference(b"resource"),
+        cycle: reference(b"cycle"),
+        cancelled: reference(b"cancelled"),
+        protocol: reference(b"protocol"),
+        panicked: reference(b"panic"),
+    }
+}
+fn admitted_memo_reads(
+    front: &AdmittedFront,
+    definition: &DefPath,
+    kind: QueryKind,
+) -> Option<Arc<Reads>> {
+    front
+        .queries
+        .memo_snapshot()?
+        .into_iter()
+        .find_map(|(key, reads)| {
+            (key == MemoKey::new(kind, DefId::intern(definition))).then_some(reads)
+        })
 }
 #[test]
 fn invalid_tir_is_never_published_and_operational_failures_retry() {
@@ -545,12 +697,13 @@ fn scalar_queries_preserve_phase_order_and_stop_at_every_error_boundary() {
 fn frozen_signature_preflight_preserves_resolution_rejection_precedence() {
     with_compiler_stack(|| {
         for jobs in [1, 2, 8] {
-            let (mut engine, events) = make_engine(Some("resolve+signature"), false);
+            let (mut engine, events) = make_engine_with_store(Some("resolve+signature"), false);
             parse(&mut engine, "fn a () { 1 }\n");
-            let outcomes =
-                engine.mode_definitions(vec![path("a")], hirsel_intern::jobs::Jobs::new(jobs));
-            assert_eq!(outcomes[0].phase, Some(QueryKind::Resolve));
-            let Err(QueryError::Diagnostics(diagnostics)) = &outcomes[0].result else {
+            let definitions = vec![path("a")];
+            let mut front = admitted_front(&mut engine, &definitions, jobs);
+            let outcomes = front.request(&definitions);
+            assert_eq!(outcomes[0].outcome.phase, Some(QueryKind::Resolve));
+            let Err(QueryError::Diagnostics(diagnostics)) = &outcomes[0].outcome.result else {
                 panic!("expected resolution rejection");
             };
             assert_eq!(diagnostics.len(), 1);
@@ -1056,7 +1209,6 @@ fn signature_hits_track_later_duplicate_headers_and_positions() {
 #[test]
 fn frozen_frontier_preserves_reads_failures_and_warm_hits() {
     with_compiler_stack(|| {
-        use hirsel_intern::jobs::Jobs;
         for jobs in [1, 2, 8] {
             for reject in [
                 None,
@@ -1066,7 +1218,7 @@ fn frozen_frontier_preserves_reads_failures_and_warm_hits() {
                 Some("modes"),
             ] {
                 let (mut serial, _) = make_engine(reject, false);
-                let (mut parallel, _) = make_engine(reject, false);
+                let (mut parallel, _) = make_engine_with_store(reject, false);
                 let text = "fn a () { 1 }\nfn b () { 2 }\n";
                 parse(&mut serial, text);
                 parse(&mut parallel, text);
@@ -1075,8 +1227,10 @@ fn frozen_frontier_preserves_reads_failures_and_warm_hits() {
                     .iter()
                     .map(|path| serial.mode_definition(path))
                     .collect();
-                let results = parallel.mode_definitions(paths.clone(), Jobs::new(jobs));
+                let mut front = admitted_front(&mut parallel, &paths, jobs);
+                let results = front.request(&paths);
                 for ((path, expected), actual) in paths.iter().zip(expected).zip(results) {
+                    let actual = actual.outcome;
                     assert_eq!(&actual.definition, path);
                     let phase = match reject {
                         Some("resolve") => QueryKind::Resolve,
@@ -1107,9 +1261,11 @@ fn frozen_frontier_preserves_reads_failures_and_warm_hits() {
                         (a, b) => panic!("jobs {jobs}, reject {reject:?}: {a:?} != {b:?}"),
                     }
                     for kind in [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes] {
+                        let scalar_reads = serial.memo_reads(path, kind);
+                        let scheduled_reads = admitted_memo_reads(&front, path, kind);
                         assert_eq!(
-                            serial.memo_reads(path, kind),
-                            parallel.memo_reads(path, kind),
+                            scalar_reads,
+                            scheduled_reads.as_deref(),
                             "jobs {jobs}, reject {reject:?}, {kind:?}, {path:?}"
                         );
                     }
@@ -1118,15 +1274,15 @@ fn frozen_frontier_preserves_reads_failures_and_warm_hits() {
                     .iter()
                     .flat_map(|p| {
                         [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes]
-                            .map(|k| parallel.recompute_count(p, k))
+                            .map(|k| front.queries.recompute_count(p, k))
                     })
                     .collect();
-                let _ = parallel.mode_definitions(paths.clone(), Jobs::new(jobs));
+                let _ = front.request(&paths);
                 let after: Vec<_> = paths
                     .iter()
                     .flat_map(|p| {
                         [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes]
-                            .map(|k| parallel.recompute_count(p, k))
+                            .map(|k| front.queries.recompute_count(p, k))
                     })
                     .collect();
                 assert_eq!(before, after, "warm jobs {jobs}, reject {reject:?}");
@@ -1195,19 +1351,18 @@ fn frozen_frontier_runs_independent_checkers_concurrently() {
         }
     }
     with_compiler_stack(|| {
-        let (mut engine, _) = make_engine(None, false);
+        let (mut engine, _) = make_engine_with_store(None, false);
         let fake = engine.adapters.checker.take().unwrap();
         engine.adapters.checker = Some(Arc::new(Together {
             fake,
             barrier: std::sync::Barrier::new(2),
         }));
         parse(&mut engine, "fn a () { 1 }\nfn b () { 2 }\n");
-        let results = engine.mode_definitions(
-            vec![path("b"), path("a")],
-            hirsel_intern::jobs::Jobs::new(2),
-        );
+        let definitions = vec![path("b"), path("a")];
+        let mut front = admitted_front(&mut engine, &definitions, 2);
+        let results = front.request(&definitions);
         assert_eq!(results.len(), 2);
-        assert!(results.iter().all(|result| result.result.is_ok()));
+        assert!(results.iter().all(|result| result.outcome.result.is_ok()));
     });
 }
 
@@ -1280,23 +1435,25 @@ fn frozen_frontier_retries_operational_headers_only_in_the_next_snapshot() {
 #[test]
 fn compact_release_does_not_retry_an_unavailable_phase_through_an_old_checked_body() {
     with_compiler_stack(|| {
-        let (mut engine, _) = make_engine(None, false);
+        let (mut engine, _) = make_engine_with_store(None, false);
         parse(&mut engine, "fn a () { 1 }\n");
         engine.mode_definition(&path("a")).unwrap();
         engine.adapters.resolver = None;
         parse(&mut engine, "fn a () { 2 }\n");
-        let before = engine.recompute_count(&path("a"), QueryKind::Resolve);
-        let outputs = engine.publish_definitions(
-            vec![path("a")],
-            hirsel_intern::jobs::Jobs::new(2),
-            memo::Retention::Batch,
-        );
-        assert!(matches!(outputs[0].result, Err(QueryError::NotImplemented)));
-        assert_eq!(outputs[0].phase, Some(QueryKind::Resolve));
+        let definitions = vec![path("a")];
+        let mut front = admitted_front(&mut engine, &definitions, 2);
+        let outputs = front.request(&definitions);
+        assert!(matches!(
+            outputs[0].outcome.result,
+            Err(QueryError::NotImplemented)
+        ));
+        assert_eq!(outputs[0].outcome.phase, Some(QueryKind::Resolve));
         assert_eq!(
-            engine.recompute_count(&path("a"), QueryKind::Resolve) - before,
+            front
+                .queries
+                .recompute_count(&path("a"), QueryKind::Resolve),
             1,
-            "retention must not reenter a stopped body query"
+            "the new owner attempts resolution once"
         );
     });
 }

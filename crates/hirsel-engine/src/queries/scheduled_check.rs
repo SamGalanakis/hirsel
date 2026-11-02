@@ -499,6 +499,11 @@ impl Task {
                                     reference.err().unwrap_or(self.queries.errors.protocol),
                                 ));
                                 file.error(error, facts.phase);
+                                if file.error.is_none()
+                                    && let Some(phase) = facts.incomplete
+                                {
+                                    file.error(QueryError::NotImplemented, Some(phase));
+                                }
                             }
                         }
                         cx.release_body(id);

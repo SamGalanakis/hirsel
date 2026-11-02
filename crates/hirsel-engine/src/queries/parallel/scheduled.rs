@@ -75,6 +75,7 @@ enum FrontSlot {
 pub(crate) struct FrontCheckFacts {
     pub result: Result<Vec<Diagnostic>, QueryError>,
     pub phase: Option<QueryKind>,
+    pub incomplete: Option<QueryKind>,
     pub reads: Arc<Reads>,
     pub source_rules: bool,
     pub lowering: Option<lowering::LoweringUse>,
@@ -1429,9 +1430,24 @@ impl FrontBodyQueries {
                 Some(lowering.clone()),
             ),
         };
+        // A rejected front result cannot certify a later unavailable stage.
+        // An accepted stored result already completed those stages, even when
+        // this host has no adapters with which to recompute them.
+        let incomplete = matches!(&result, Err(QueryError::Diagnostics(_)))
+            .then(|| {
+                [
+                    (QueryKind::Resolve, self.resolver.is_some()),
+                    (QueryKind::Check, self.checker.is_some()),
+                    (QueryKind::Modes, self.modes.is_some()),
+                ]
+                .into_iter()
+                .find_map(|(phase, available)| (!available).then_some(phase))
+            })
+            .flatten();
         Some(FrontCheckFacts {
             result,
             phase: selected.phase,
+            incomplete,
             reads: selected.reads.clone(),
             source_rules,
             lowering,

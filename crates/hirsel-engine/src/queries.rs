@@ -914,8 +914,8 @@ impl QueryEngine {
         )
     }
     /// The own content a query of `kind` keys on: the definition's headers
-    /// (signatures) or its first item's text (every body query), with the
-    /// package's closure manifest. Header hashes are taken once per index.
+    /// (signatures) or its first item's text (every body query).
+    /// Header hashes are taken once per index.
     pub(crate) fn key_text(
         &mut self,
         definition: &DefPath,
@@ -1969,17 +1969,7 @@ impl QueryEngine {
             let Some(body) = self.implementation_hash(id.path()) else {
                 continue;
             };
-            let manifest = self
-                .package_manifests
-                .get(&id.path().0.package)
-                .copied()
-                .unwrap_or(self.environment.package_manifest_hash);
-            if entry.memo.text
-                != ContentHash::of_parts(
-                    "hirsel.query.text.v1",
-                    [body.0.as_slice(), manifest.0.as_slice()],
-                )
-            {
+            if entry.memo.text != body {
                 continue;
             }
             if let Some((_, phase)) = entry

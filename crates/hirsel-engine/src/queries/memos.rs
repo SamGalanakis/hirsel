@@ -381,9 +381,10 @@ impl QueryEngine {
             }
         }
     }
-    /// The hash of the session's environment: everything every query keys on
-    /// besides source and its package's closure manifest (which is part of
-    /// each memo's own text), with the comptime limits and charging version
+    /// The session's compiler and explicit build inputs. Loaded package
+    /// manifests describe discovery; their semantic dependencies are reads.
+    /// A standalone caller's opaque manifest revision is an explicit input.
+    /// Include the comptime limits and charging version
     /// (CT-4): a budget or charging change re-evaluates every evaluation. One value per session,
     /// so the reads of different packages' memos merge without conflict.
     pub(crate) fn environment_value(&self) -> ContentHash {
@@ -399,6 +400,12 @@ impl QueryEngine {
                 &self.comptime_limits.budget.to_le_bytes(),
                 &(self.comptime_limits.call_depth as u64).to_le_bytes(),
                 &optional(self.build_inputs_revision()).0,
+                &optional(
+                    self.package_manifests
+                        .is_empty()
+                        .then_some(e.package_manifest_hash),
+                )
+                .0,
             ],
         )
     }

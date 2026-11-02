@@ -458,7 +458,7 @@ fn classify_requested(
         Execution::Tests => {
             let discovery = match hirsel_driver::testing::discover_inputs(
                 &compiler,
-                &path,
+                path,
                 inputs,
                 &[],
                 None,

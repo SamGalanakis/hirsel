@@ -830,6 +830,7 @@ impl Task {
     }
     fn complete(&mut self) -> Result<ProductRef, Reference> {
         let queries = &self.queries;
+        queries.plan.front.release_handoff();
         let reads = std::mem::take(&mut self.reads)
             .finish()
             .map_err(|_| queries.errors.protocol)?;

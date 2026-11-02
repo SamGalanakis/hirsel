@@ -667,6 +667,34 @@ fn phases_run_in_order_and_stop_at_every_error_boundary_on_compiler_thread() {
         ]
     );
 }
+#[test]
+fn front_body_handoff_reuses_only_the_latest_admitted_body() {
+    with_compiler_stack(|| {
+        let (mut engine, _) = make_engine(None, false);
+        let transport = ProcessBudget::new(8 << 20);
+        engine = engine.with_result_store(Arc::new(hirsel_engine::store::RequestStore::new(
+            Arc::new(hirsel_engine::store::NoneStore),
+            transport.reserve(8 << 20).unwrap(),
+        )));
+        parse(&mut engine, "fn a () { 1 }\nfn b () { 1 }\n");
+        let mut front = admitted_front(&mut engine, &[path("a"), path("b")], 1);
+        for name in ["a", "b"] {
+            let query = front.queries.query(&path(name)).unwrap();
+            let request = front.runtime.request(&[query]);
+            front.runtime.wait(request).unwrap();
+            assert_eq!(front.queries.live_body_count(), 1);
+        }
+        let output = front.request(&[path("b")]);
+        assert!(output[0].outcome.result.is_ok());
+        assert_eq!(
+            front.queries.recompute_count(&path("b"), QueryKind::Modes),
+            1
+        );
+        drop(output);
+        front.runtime.evict_to(0);
+        assert_eq!(front.queries.live_body_count(), 0);
+    });
+}
 /// Direct body queries still demand resolution before the owner signature;
 /// program checks freeze signatures in S0 before running the same body stages.
 #[test]

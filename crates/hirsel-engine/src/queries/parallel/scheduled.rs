@@ -261,6 +261,10 @@ pub struct FrontBodyQueries {
     memo_operations: AtomicU64,
     verify_store: crate::store::VerifyStore,
     slots: Mutex<BTreeMap<Key, FrontSlot>>,
+    /// Transfer the latest computed body to its immediate consumer. The next
+    /// body computation drops it before running a phase; compact facts never
+    /// keep a growing collection of analyzed bodies.
+    handoff: Mutex<Option<LiveAnalyzedProduct>>,
     carry: Mutex<Option<Arc<FrontCarry>>>,
     /// Subscription generations validated against this immutable source view.
     carry_changes: Mutex<Option<Arc<CarryChanges>>>,
@@ -687,6 +691,15 @@ impl FrontBodyQueries {
     }
     fn make_room(&self, cx: &mut dyn QueryContext, charge: u64) -> Option<()> {
         while *self.retention.lock().unwrap_or_else(|e| e.into_inner()) < charge {
+            if self
+                .handoff
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .is_some()
+            {
+                continue;
+            }
             if !cx.evict_body()
                 && !self.evict_idle(cx.scratch_bytes())
                 && !self
@@ -1508,6 +1521,10 @@ impl FrontBodyQueries {
                     .analyzed_value()
                     .cloned()
                     .or_else(|| body.as_ref()?.upgrade())?;
+                let mut handoff = self.handoff.lock().unwrap_or_else(|e| e.into_inner());
+                if handoff.as_ref().is_some_and(|held| held.same_owner(&owner)) {
+                    handoff.take();
+                }
                 (
                     Ok(owner.output().clone()),
                     Some(publication.summary_value()?.value_arc()),
@@ -1572,6 +1589,12 @@ impl FrontBodyQueries {
                 },
             })
             .count()
+    }
+    pub(crate) fn release_handoff(&self) {
+        self.handoff
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
     }
     #[cfg(test)]
     pub(super) fn outcomes_for_test(&self) -> Vec<Reference> {
@@ -2027,6 +2050,7 @@ impl BodyTask {
             timings::count(Count::StoreModeMisses);
         }
         let worker = queries.worker();
+        queries.release_handoff();
         let syntax = queries.syntax(input).ok_or(queries.errors.protocol)?;
         let mut done = worker.run(Task {
             index: 0,
@@ -2225,11 +2249,41 @@ impl BodyTask {
                 crate::store::query_action(&input.key, input.key.1, &outcome.reads),
             )
         };
-        let cached = queries
+        let handoff = (!failed && !queries.store.persistence().retains()).then(|| outcome.clone());
+        let mut cached = queries
             .publish_facts(
                 cx, self.input, record, action, outcome, checked, dead_arms, table_keys, memo_rows,
             )
             .ok_or(queries.errors.resource)?;
+        if let Some(outcome) = handoff
+            && let FrontState::Settled {
+                publication, body, ..
+            } = &mut cached.state
+            && let Some(summary) = publication.summary_value()
+        {
+            let charge = LiveAnalyzedProduct::shared_required_bytes(&outcome).and_then(|bytes| {
+                bytes.checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                    LiveSourceBacking,
+                >::uninit(
+                )))
+            });
+            if charge.is_some_and(|bytes| {
+                bytes <= *queries.retention.lock().unwrap_or_else(|e| e.into_inner())
+            }) && let Some(product) = queries.admit_body(
+                cx,
+                queries
+                    .body_query(input.definition.path())
+                    .ok_or(queries.errors.protocol)?
+                    .address,
+                action,
+                outcome,
+                summary.clone(),
+            ) && let Some(analyzed) = product.analyzed_value()
+            {
+                *body = Some(analyzed.downgrade());
+                *queries.handoff.lock().unwrap_or_else(|e| e.into_inner()) = Some(analyzed.clone());
+            }
+        }
         let terminal = match &cached.state {
             FrontState::Failed { record, .. } => Err(*record),
             FrontState::Settled { publication, .. } => Ok(publication.clone()),
@@ -2667,6 +2721,7 @@ impl QueryEngine {
             anchors,
             store,
             slots: Mutex::new(BTreeMap::new()),
+            handoff: Mutex::new(None),
             carry: Mutex::new(None),
             carry_changes: Mutex::new(None),
             clean_memos: Mutex::new(BTreeSet::new()),

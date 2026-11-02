@@ -394,8 +394,6 @@ fn full_gate_cron_state_30_public_fixture_witness() {
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
-        let exported = loaded.engine.export_native_input().unwrap();
-        let validated = loaded.engine.import_native_input(exported).unwrap();
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         let configurations = vec![
             Configuration {
@@ -436,8 +434,8 @@ fn full_gate_cron_state_30_public_fixture_witness() {
             steps: Some(1_000_000),
             ..Default::default()
         };
-        let results = differential_in(
-            &validated,
+        let results = differential_ready(
+            &mut crate::native_ready::supplier(&selection, &loaded.entry, &tools),
             &loaded.entry,
             &expected,
             &configurations,
@@ -516,8 +514,6 @@ fn cron_state_30_crash_boundaries() {
         assert_eq!(observation.exit_code, Some(0));
         assert!(observation.failures.is_empty());
         assert_eq!(reference.observation, checked.observation);
-        let exported = loaded.engine.export_native_input().unwrap();
-        let validated = loaded.engine.import_native_input(exported).unwrap();
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         let matrix = vec![
             Configuration {
@@ -541,8 +537,8 @@ fn cron_state_30_crash_boundaries() {
             steps: Some(STEPS),
             ..Default::default()
         };
-        for (engine, outcome) in differential_in(
-            &validated,
+        for (engine, outcome) in differential_ready(
+            &mut crate::native_ready::supplier(&selection, &loaded.entry, &tools),
             &loaded.entry,
             &Observation::of_reference(observation),
             &matrix,

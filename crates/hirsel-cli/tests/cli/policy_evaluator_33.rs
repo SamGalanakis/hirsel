@@ -352,6 +352,7 @@ fn accept(root: &Path, id: &str) {
 fn native(
     loaded: &mut hirsel_engine::LoadedProgram,
     root: &Path,
+    manifest: &Path,
     row: &Value,
     recipe: &Fixture,
     expected: &Observation,
@@ -383,8 +384,8 @@ fn native(
     let tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
     if !accepted(root, "h-differential") {
         receipt(root, "h-differential", "started");
-        for (name, result) in differential_in(
-            &input,
+        for (name, result) in differential_ready(
+            &mut crate::native_ready::supplier(manifest, &loaded.entry, &tools),
             &loaded.entry,
             expected,
             &matrix[..1],
@@ -734,7 +735,7 @@ fn policy_evaluator_33_cell() {
                 failures: vec![],
                 roots: vec![],
             };
-            native(&mut loaded, &root, &row, &recipe, &expected);
+            native(&mut loaded, &root, &manifest, &row, &recipe, &expected);
         } else {
             let prepared = hirsel_driver::request_tir(
                 &manifest,

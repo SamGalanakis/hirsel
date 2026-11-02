@@ -455,8 +455,8 @@ fn native_workflows(part: usize) {
             if ["rustfft-2", "component-over", "denial", "pending-cancel"].contains(&id)
                 && !listed(&recovery["differential"], id)
             {
-                for (name, outcome) in differential_in(
-                    &input,
+                for (name, outcome) in differential_ready(
+                    &mut crate::native_ready::supplier(&path, &loaded.entry, &tools),
                     &loaded.entry,
                     &expected,
                     &matrix,
@@ -822,8 +822,6 @@ fn spectral_audit_35_unrounded_oracle() {
             assert_eq!(observed.output, b"kernel oracle ok\n");
             eprintln!("SPECTRAL_UNROUNDED_PASS checked={checked}");
         }
-        let exported = loaded.engine.export_native_input().unwrap();
-        let input = loaded.engine.import_native_input(exported).unwrap();
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         let mut matrix = vec![
             Configuration {
@@ -867,8 +865,8 @@ fn spectral_audit_35_unrounded_oracle() {
             failures: vec![],
             roots: vec![],
         };
-        for (name, outcome) in differential_in(
-            &input,
+        for (name, outcome) in differential_ready(
+            &mut crate::native_ready::supplier(&path, &loaded.entry, &tools),
             &loaded.entry,
             &expected,
             &matrix,

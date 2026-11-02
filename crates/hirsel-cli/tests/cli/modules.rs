@@ -33,6 +33,7 @@ mod testing;
 mod timings;
 mod unix_backlog;
 mod validation;
+mod native_ready;
 mod fmt_manifest_11;
 mod authoring_input_recipes_13;
 mod borrow_cursor_recipes_13;

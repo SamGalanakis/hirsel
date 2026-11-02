@@ -1,7 +1,7 @@
 //! Three real stages on the reference interpreter, checked H and both native adapters.
 use hirsel_driver::native::{
     Configuration, Engine, Fixture, Observation, OptLevel, Options, Outcome, Partition, Runtime,
-    TargetSpec, Toolchain, differential_in,
+    TargetSpec, Toolchain, differential_ready,
 };
 use serde_json::Value;
 use std::{collections::BTreeMap, fs, path::PathBuf};
@@ -320,10 +320,12 @@ fn partition(ids: &[&str]) {
         .collect();
         let toolchain = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
         fs::create_dir(root.join("native")).unwrap();
-        let input = loaded.engine.export_native_input().unwrap();
-        let validated = loaded.engine.import_native_input(input).unwrap();
-        let results = differential_in(
-            &validated,
+        let results = differential_ready(
+            &mut crate::native_ready::supplier(
+                &root.join("hirsel.json"),
+                &loaded.entry,
+                &toolchain,
+            ),
             &loaded.entry,
             reference.as_ref().unwrap(),
             &matrix,

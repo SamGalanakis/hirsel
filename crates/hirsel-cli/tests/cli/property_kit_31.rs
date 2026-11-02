@@ -393,8 +393,6 @@ fn property_kit_31_independent_generic_contract_vectors() {
         )
         .unwrap();
         assert_eq!(reference.observation, checked.observation);
-        let input = loaded.engine.export_native_input().unwrap();
-        let input = loaded.engine.import_native_input(input).unwrap();
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         let matrix = [
             Engine::Native {
@@ -417,8 +415,8 @@ fn property_kit_31_independent_generic_contract_vectors() {
             steps: Some(STEPS),
             ..Default::default()
         };
-        for (engine, outcome) in differential_in(
-            &input,
+        for (engine, outcome) in differential_ready(
+            &mut crate::native_ready::supplier(&selection, &loaded.entry, &tools),
             &loaded.entry,
             &expected,
             &matrix,

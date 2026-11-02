@@ -338,8 +338,8 @@ fn discrete_simulation_33_native_full_entry_replay() {
                     .count()
                     < expected_cells
             {
-                for (name, outcome) in differential_in(
-                    &input,
+                for (name, outcome) in differential_ready(
+                    &mut crate::native_ready::supplier(&path, &loaded.entry, &tools),
                     &loaded.entry,
                     &expected,
                     &matrix,

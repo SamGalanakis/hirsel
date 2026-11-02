@@ -180,8 +180,6 @@ fn public_witness_four_engines() {
         loaded.check_for_execution().unwrap();
         let (old, new) = witness();
         let expected = pair(&mut loaded, &old, &new);
-        let input = loaded.engine.export_native_input().unwrap();
-        let input = loaded.engine.import_native_input(input).unwrap();
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         let configs = vec![
             Configuration {
@@ -207,8 +205,8 @@ fn public_witness_four_engines() {
             steps: Some(1_000_000),
             ..Default::default()
         };
-        for (name, outcome) in differential_in(
-            &input,
+        for (name, outcome) in differential_ready(
+            &mut crate::native_ready::supplier(&path(), &loaded.entry, &tools),
             &loaded.entry,
             &expected,
             &configs,

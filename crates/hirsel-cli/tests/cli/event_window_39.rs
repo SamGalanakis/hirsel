@@ -715,8 +715,6 @@ fn event_window_39_arithmetic_and_output_boundary() {
         )
         .unwrap();
         assert_eq!(checked.observation.as_ref(), Some(&observation));
-        let input = loaded.engine.export_native_input().unwrap();
-        let input = loaded.engine.import_native_input(input).unwrap();
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         let matrix = [
             Engine::Native {
@@ -746,8 +744,8 @@ fn event_window_39_arithmetic_and_output_boundary() {
             "prlimit".into(),
             "--cpu=60:61".into(),
         ];
-        for (engine, outcome) in differential_in(
-            &input,
+        for (engine, outcome) in differential_ready(
+            &mut crate::native_ready::supplier(&path, &loaded.entry, &tools),
             &loaded.entry,
             &Observation::of_reference(&observation),
             &matrix,

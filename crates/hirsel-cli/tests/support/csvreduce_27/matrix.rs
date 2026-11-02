@@ -122,8 +122,6 @@ pub fn partition(part: usize) {
             );
             eprintln!("csvreduce completed part={part} checked={checked} PASS");
         }
-        let input = program.engine.export_native_input().unwrap();
-        let validated = program.engine.import_native_input(input).unwrap();
         let matrix: Vec<_> = [
             Engine::Heap { campaign: false },
             Engine::Native {
@@ -147,8 +145,8 @@ pub fn partition(part: usize) {
             steps: Some(steps),
             ..Default::default()
         };
-        let results = native::differential_in(
-            &validated,
+        let results = native::differential_ready(
+            &mut crate::native_ready::supplier(&manifest, &program.entry, &toolchain),
             &program.entry,
             &expected,
             &matrix,

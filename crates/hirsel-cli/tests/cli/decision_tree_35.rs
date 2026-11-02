@@ -348,6 +348,7 @@ fn accept(root: &Path, id: &str) {
 fn native(
     loaded: &mut hirsel_engine::LoadedProgram,
     root: &Path,
+    manifest: &Path,
     row: &Value,
     recipe: &Fixture,
     expected: &Observation,
@@ -381,8 +382,8 @@ fn native(
     let prepare_only = std::env::var_os("DECISION_TREE_35_PREPARE_ONLY").is_some();
     if !prepare_only && scripted_width.is_none() && !accepted(root, "h-differential") {
         receipt(root, "h-differential", "started");
-        for (name, result) in differential_in(
-            &input,
+        for (name, result) in differential_ready(
+            &mut crate::native_ready::supplier(manifest, &loaded.entry, &tools),
             &loaded.entry,
             expected,
             &matrix[..1],
@@ -810,7 +811,7 @@ fn decision_tree_35_cell() {
                 failures: vec![],
                 roots: vec![],
             };
-            native(&mut loaded, &root, &row, &recipe, &expected);
+            native(&mut loaded, &root, &manifest, &row, &recipe, &expected);
         } else {
             if simulation(&mut loaded, &row, &recipe).is_none() {
                 return;

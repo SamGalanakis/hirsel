@@ -596,8 +596,8 @@ fn flow_audit_36_native_four_engine_replay() {
                 runnables.push((runnable, dir));
             }
             if ["classic", "malformed", "denial", "pending"].contains(&id) {
-                for (name, outcome) in differential_in(
-                    &input,
+                for (name, outcome) in differential_ready(
+                    &mut crate::native_ready::supplier(&path, &loaded.entry, &tools),
                     &loaded.entry,
                     &expected,
                     &matrix,

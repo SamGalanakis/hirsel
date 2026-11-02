@@ -549,8 +549,6 @@ fn schema_etl_30_native_scripted_entry_boundary_witness() {
         let selection = package(scratch.path());
         let mut loaded = hirsel_driver::load_program(&selection).unwrap();
         loaded.check_for_execution().unwrap();
-        let input = loaded.engine.export_native_input().unwrap();
-        let input = loaded.engine.import_native_input(input).unwrap();
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         let matrix = [
             Engine::Native {
@@ -586,8 +584,8 @@ fn schema_etl_30_native_scripted_entry_boundary_witness() {
             .into(),
             ..Default::default()
         };
-        for (engine, outcome) in differential_in(
-            &input,
+        for (engine, outcome) in differential_ready(
+            &mut crate::native_ready::supplier(&selection, &loaded.entry, &tools),
             &loaded.entry,
             &expected,
             &matrix,

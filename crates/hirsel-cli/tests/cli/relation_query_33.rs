@@ -406,8 +406,8 @@ fn relation_query_33_full_entry_native_replay() {
             if ["many-to-many", "overflow", "denial", "cancel"].contains(&id)
                 && !progress.contains(&format!("{id}/differential"))
             {
-                for (name, outcome) in differential_in(
-                    &input,
+                for (name, outcome) in differential_ready(
+                    &mut crate::native_ready::supplier(&manifest, &loaded.entry, &tools),
                     &loaded.entry,
                     &observation,
                     &matrix,

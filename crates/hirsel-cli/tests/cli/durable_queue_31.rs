@@ -588,8 +588,6 @@ fn durable_queue_31_crash_cuts() {
         );
         assert_eq!(observed.exit_code, Some(0));
         assert_eq!(plain.observation, checked.observation);
-        let input = loaded.engine.export_native_input().unwrap();
-        let input = loaded.engine.import_native_input(input).unwrap();
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         let matrix = vec![
             Configuration {
@@ -613,8 +611,8 @@ fn durable_queue_31_crash_cuts() {
             steps: Some(10_000_000),
             ..Default::default()
         };
-        for (configuration, outcome) in differential_in(
-            &input,
+        for (configuration, outcome) in differential_ready(
+            &mut crate::native_ready::supplier(&manifest, &loaded.entry, &tools),
             &loaded.entry,
             &Observation::of_reference(observed),
             &matrix,

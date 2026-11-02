@@ -861,8 +861,8 @@ fn native_workflows(native_only: bool) {
             fs::create_dir(&cell).unwrap();
             fs::write(cell.join("fixture.json"),serde_json::to_vec_pretty(&json!({"args":world.args,"files":world.files,"mounts":world.mounts,"file_reads":world.file_reads,"signals":world.signals,"file_faults":world.file_faults})).unwrap()).unwrap();
             if kind != "commit" && (!native_only || kind == "denial") && !recovered_denial {
-                let results = differential_in(
-                    &input,
+                let results = differential_ready(
+                    &mut crate::native_ready::supplier(&path, &loaded.entry, &tools),
                     &loaded.entry,
                     &expected,
                     &matrix,

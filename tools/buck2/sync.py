@@ -254,6 +254,9 @@ CASE_SHARDED = {
     # Each F1 matrix case alone takes most of the pool's 600 s action limit on
     # its eight exact CPUs; co-scheduled cases also share the one-permit CPU.
     "hirsel-cli-test-free": "crates/hirsel-cli/tests/free.rs",
+    # Each request-mode column compiles the edit sequence twice from cold std
+    # (about 90 s on one CPU); the lifecycle cases are dealt among them.
+    "hirsel-driver-test-it-resident": "crates/hirsel-driver/tests/it-resident/mode_differential.rs",
 }
 SHARD_SECONDS = 40
 COSTS = HERE / "test-costs"
@@ -891,9 +894,9 @@ def first_party(meta: dict) -> str:
 
         def test_attrs(binary: str, src: pathlib.Path) -> dict:
             # Request-lifecycle fixtures and the request-mode law compile
-            # temporary files against std products, without corpus or native runtime.
+            # temporary files against std, without corpus or native runtime.
             requests_only = binary == "hirsel-driver-test-it-resident"
-            return dict(data=[relative(package_dir / "Cargo.toml")] if requests_only else test_data(binary, name, package_dir, src),
+            return dict(data=Raw(f'glob({starlark(["stdlib/**", relative(package_dir / "Cargo.toml")], 4)})') if requests_only else test_data(binary, name, package_dir, src),
                         runtime_archives=None if requests_only or binary == "hirsel-rt-unittest" else runtime_archives,
                         products=PRODUCTS if name in PRODUCT_TESTS else None,
                         seeded=seeded(target_dir(package_dir, src), src) or None, skips=FULL_GATE_SKIPS.get(binary),

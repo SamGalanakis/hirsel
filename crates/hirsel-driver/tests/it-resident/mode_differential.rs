@@ -1,8 +1,8 @@
 //! One law across request modes. Every mode at every job count must produce
 //! the same canonical outputs (diagnostic JSON and TIR bytes) as a
 //! from-scratch fresh request at one job, across cold, no-op and edit
-//! sequences. The modes, edits and job counts are data: a new request mode
-//! adds a `Mode` variant and nothing else.
+//! sequences. The edits are data and each (mode, jobs) column is one case: a
+//! new request mode adds a `Mode` variant and its three column cases.
 use hirsel_driver::requests::{CompileOperation, CompileResult};
 use hirsel_driver::session::Session;
 use hirsel_engine::CompileConfig;
@@ -23,8 +23,6 @@ enum Mode {
     /// One kept session with no result store.
     StoreOff,
 }
-const MODES: [Mode; 4] = [Mode::Fresh, Mode::Resident, Mode::Restarted, Mode::StoreOff];
-const JOBS: [usize; 3] = [1, 2, 8];
 
 impl Mode {
     fn kept(self) -> bool {
@@ -126,6 +124,14 @@ struct Cell {
     session: Option<Session>,
 }
 impl Cell {
+    fn new(mode: Mode, jobs: usize, tree: &Path) -> Self {
+        Cell {
+            mode,
+            jobs,
+            store_root: tree.join(format!("results-{mode:?}-{jobs}")),
+            session: None,
+        }
+    }
     fn request(&mut self, entry: &Path) -> Outputs {
         let config = self.mode.config(self.jobs, &self.store_root);
         if !self.mode.kept() {
@@ -148,27 +154,19 @@ fn describe(outputs: &Outputs) -> String {
     }
 }
 
-#[test]
-fn every_request_mode_and_job_count_matches_a_fresh_compile_across_edits() {
+/// One column of the law: `mode` at `jobs` against the fresh jobs-1 oracle,
+/// both in one private tree so diagnostics name the same source path.
+fn column(mode: Mode, jobs: usize) {
     hirsel_engine::with_compiler_stack(|| {
         let tree = tempfile::tempdir().unwrap();
         let entry = tree.path().join("main.hir");
-        let mut cells: Vec<Cell> = MODES
-            .iter()
-            .flat_map(|&mode| JOBS.map(|jobs| (mode, jobs)))
-            .map(|(mode, jobs)| Cell {
-                mode,
-                jobs,
-                store_root: tree.path().join(format!("results-{mode:?}-{jobs}")),
-                session: None,
-            })
-            .collect();
-        assert_eq!((cells[0].mode, cells[0].jobs), (Mode::Fresh, 1));
+        let mut oracle = Cell::new(Mode::Fresh, 1, tree.path());
+        let mut cell = Cell::new(mode, jobs, tree.path());
         let mut divergent = Vec::new();
         for step in &STEPS {
             std::fs::write(&entry, step.source).unwrap();
-            let oracle = cells[0].request(&entry);
-            let artifacts = oracle
+            let expected = oracle.request(&entry);
+            let artifacts = expected
                 .as_ref()
                 .unwrap_or_else(|error| panic!("{}: fresh request failed: {error}", step.name));
             let diagnostics = std::str::from_utf8(&artifacts["diagnostics"]).unwrap();
@@ -177,27 +175,69 @@ fn every_request_mode_and_job_count_matches_a_fresh_compile_across_edits() {
                 (step.valid, step.valid),
                 "{}: fresh outputs disagree with the hand-derived validity\n{}",
                 step.name,
-                describe(&oracle)
+                describe(&expected)
             );
-            for cell in &mut cells[1..] {
-                let actual = cell.request(&entry);
-                if actual != oracle {
-                    divergent.push(format!(
-                        "{} / {:?} / jobs {}:\n--- fresh jobs 1\n{}\n--- actual\n{}",
-                        step.name,
-                        cell.mode,
-                        cell.jobs,
-                        describe(&oracle),
-                        describe(&actual)
-                    ));
-                }
+            let actual = cell.request(&entry);
+            if actual != expected {
+                divergent.push(format!(
+                    "{}:\n--- fresh jobs 1\n{}\n--- {mode:?} jobs {jobs}\n{}",
+                    step.name,
+                    describe(&expected),
+                    describe(&actual)
+                ));
             }
         }
         assert!(
             divergent.is_empty(),
-            "{} divergent cells; first:\n{}",
+            "{mode:?} jobs {jobs}: {} divergent steps\n{}",
             divergent.len(),
             divergent.join("\n\n")
         );
     });
+}
+
+// One case per column: each is its own shard (tools/buck2/sync.py CASE_SHARDED).
+#[test]
+fn fresh_jobs_2() {
+    column(Mode::Fresh, 2)
+}
+#[test]
+fn fresh_jobs_8() {
+    column(Mode::Fresh, 8)
+}
+#[test]
+fn resident_jobs_1() {
+    column(Mode::Resident, 1)
+}
+#[test]
+fn resident_jobs_2() {
+    column(Mode::Resident, 2)
+}
+#[test]
+fn resident_jobs_8() {
+    column(Mode::Resident, 8)
+}
+#[test]
+fn restarted_jobs_1() {
+    column(Mode::Restarted, 1)
+}
+#[test]
+fn restarted_jobs_2() {
+    column(Mode::Restarted, 2)
+}
+#[test]
+fn restarted_jobs_8() {
+    column(Mode::Restarted, 8)
+}
+#[test]
+fn store_off_jobs_1() {
+    column(Mode::StoreOff, 1)
+}
+#[test]
+fn store_off_jobs_2() {
+    column(Mode::StoreOff, 2)
+}
+#[test]
+fn store_off_jobs_8() {
+    column(Mode::StoreOff, 8)
 }

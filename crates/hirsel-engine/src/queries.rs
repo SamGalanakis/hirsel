@@ -27,12 +27,12 @@ pub use scheduled_native_root::{
     FRONT_NATIVE_ROOT_KIND, FrontNativeOutput, FrontNativePlan, FrontNativeProducts,
     FrontNativeQueries,
 };
-pub(crate) use scheduled_run::universe_query;
 pub use scheduled_run::{
     FRONT_RUN_BATCH_KIND, FRONT_RUN_KIND, FrontBuiltProof, FrontPrecomputeOutput,
     FrontPreparedProof, FrontProofExport, FrontProofInput, FrontProofText, FrontRunBatchOutput,
     FrontRunInputs, FrontRunOutput, FrontRunQueries, FrontSemanticGraph, FrontSourceProducts,
 };
+pub(crate) use scheduled_run::{UNIVERSE, universe_action, universe_query};
 
 mod scheduled_storage;
 pub use scheduled_storage::{

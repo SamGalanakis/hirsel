@@ -178,17 +178,25 @@ fn admitted_lower_saved_work_and_native_metadata_survive_dependency_suspension()
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.hir");
         std::fs::write(&path, "const A:u8=comptime 1u8;\nconst B:u8=comptime A;\nfn helper()->u8{B}\npub fn main()->u8{comptime helper()}\n").unwrap();
+        let warm = tempfile::tempdir().unwrap();
+        std::fs::write(warm.path().join("main.hir"), "pub fn main()->u8{0u8}\n").unwrap();
         for jobs in [1, 2] {
             let store = Arc::new(MemStore::default());
-            let mut program = COMPILER
+            let compiler = COMPILER
                 .with_config(CompileConfig {
                     store: store.clone(),
                     jobs: hirsel_intern::jobs::Jobs::new(jobs),
                     ..Default::default()
                 })
-                .with_owned_engines()
-                .load_program(&path)
-                .unwrap();
+                .with_owned_engines();
+            // std is a source dependency: the first V over any importer
+            // computes its universe summary once from std's exact sources.
+            compiler
+                .load_program(&warm.path().join("main.hir"))
+                .unwrap()
+                .engine
+                .signature_snapshot();
+            let mut program = compiler.load_program(&path).unwrap();
             let definitions: Vec<_> = ["A", "B", "helper", "main"]
                 .iter()
                 .map(|name| {
@@ -272,10 +280,39 @@ fn admitted_lower_saved_work_and_native_metadata_survive_dependency_suspension()
                     );
                 }
             }
+            // Every produced row is the program's own: std's universe comes
+            // from its summary, so V walks none of std's rows.
             let front_work = front.work_snapshot();
+            let foreign: Vec<_> = front_work
+                .iter()
+                .filter(|(path, _, count)| *count != 0 && path.0.package != program.entry.0.package)
+                .collect();
+            assert!(foreign.is_empty(), "dependency rows produced: {foreign:?}");
+            // Body phases: Resolve, Check and Modes once for each of the
+            // four definitions (4 x 3 = 12).
+            let body: u64 = front_work
+                .iter()
+                .filter(|(_, kind, _)| {
+                    matches!(
+                        kind,
+                        QueryKind::Resolve | QueryKind::Check | QueryKind::Modes
+                    )
+                })
+                .map(|(_, _, count)| count)
+                .sum();
+            assert_eq!(body, 12);
+            // Headers, 6 more. `main` is public and its header settles at
+            // load. A, B and helper share a module with a private function, so
+            // their headers wait for that module's proof. The proof infers
+            // helper once (PrivateInference 1), normalizes helper's signature
+            // before and after its summary (2) and B's, which helper's body
+            // names (1); helper's row is taken from the proof. The front then
+            // demands A (named by B's `comptime A`) and B (its own Check)
+            // once each (2): B's proof-time normalization is not offered to
+            // its header row, so B is normalized twice.
             assert_eq!(
                 front_work.iter().map(|(_, _, count)| count).sum::<u64>(),
-                12
+                12 + 6
             );
             assert_eq!(
                 lower

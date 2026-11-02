@@ -98,6 +98,8 @@ pub struct SignatureSnapshot {
     private: DefMap<SignatureRef>,
     /// Signature inputs are sufficient for P; V builds its universe on demand.
     validation: OnceLock<Arc<ValidationState>>,
+    /// Set once this snapshot's source dependencies' summaries are published.
+    published: OnceLock<()>,
     validation_inputs: Mutex<Option<ValidationCandidates>>,
     /// Each immutable product is identified once, shared by reflection and V.
     public_views: DefMap<OnceLock<View>>,
@@ -234,6 +236,11 @@ pub(crate) struct LookupInput {
     pub installed: BTreeMap<PackageId, InstalledUniverse>,
     /// Each package's source binding: what its published summary is keyed by.
     pub sources: BTreeMap<PackageId, ContentHash>,
+    /// The engine environment summaries are addressed under.
+    pub environment: ContentHash,
+    /// The local store this machine's V publishes source dependencies'
+    /// summaries to, once it has computed them from their exact sources.
+    pub summaries: Option<Arc<dyn crate::store::ResultStore>>,
 }
 const _: () = {
     const fn shared<T: Send + Sync>() {}
@@ -246,6 +253,20 @@ impl ValidationState {
             .get(package)
             .or_else(|| self.bases.get(package))
             .unwrap_or(&self.views)
+    }
+    /// The summary of `package`'s own V universe.
+    fn universe(&self, package: &PackageId) -> hirsel_validate::PackageUniverse {
+        match self.packages.get(package) {
+            Some(views) => views.universe(),
+            None => self.base(package).universe(),
+        }
+    }
+    /// What importers' universes hold of `package`'s public views.
+    fn exported(&self, package: &PackageId) -> hirsel_validate::PackageUniverse {
+        self.bases
+            .get(package)
+            .unwrap_or(&self.views)
+            .exported(package)
     }
 }
 impl SignatureSnapshot {
@@ -297,6 +318,7 @@ impl SignatureSnapshot {
             headers: None,
             private,
             validation: OnceLock::new(),
+            published: OnceLock::new(),
             validation_inputs: Mutex::new(Some(candidates)),
             public_views,
             private_views,
@@ -395,6 +417,53 @@ impl SignatureSnapshot {
         ))
     }
     fn validation_state(&self) -> &ValidationState {
+        let state = self.validation_universe();
+        self.published
+            .get_or_init(|| self.publish_dependency_universes(state));
+        state
+    }
+    /// Publish the summary of every source dependency this snapshot computed
+    /// from its full table. A dependency is never under check here: its
+    /// universe is a function of its exact sources alone, so later snapshots
+    /// and engines bound to those sources read the summary instead of every
+    /// row. Packages under check are no one's dependency and are not kept.
+    fn publish_dependency_universes(&self, state: &ValidationState) {
+        let Some(store) = self.lookup.summaries.as_ref() else {
+            return;
+        };
+        let dependencies: std::collections::BTreeSet<&PackageId> = self
+            .lookup
+            .package_dependencies
+            .values()
+            .flatten()
+            .collect();
+        for package in dependencies {
+            if state.installed.contains_key(package) {
+                continue;
+            }
+            let Some(sources) = self.lookup.sources.get(package) else {
+                continue;
+            };
+            let universe = InstalledUniverse {
+                own: state.universe(package),
+                exported: state.exported(package),
+            };
+            let Some(bytes) = universe.encode() else {
+                continue;
+            };
+            let Some(record) = crate::queries::UNIVERSE.reference(&bytes) else {
+                continue;
+            };
+            let query = crate::queries::universe_query(self.lookup.environment, package, *sources);
+            store.cache_product(
+                query.address,
+                crate::queries::universe_action(query, record),
+                crate::queries::UNIVERSE,
+                &bytes,
+            );
+        }
+    }
+    fn validation_universe(&self) -> &ValidationState {
         self.validation.get_or_init(|| {
             let _timing = hirsel_intern::timings::phase(hirsel_intern::timings::Phase::Verify);
             let t = &self.types;
@@ -870,23 +939,14 @@ impl SignatureSnapshot {
     /// The summary of `package`'s V universe: its input identity, errors and
     /// first heap role, as installed packages publish them for importers.
     pub fn package_universe(&self, package: &PackageId) -> hirsel_validate::PackageUniverse {
-        let state = self.validation_state();
-        match state.packages.get(package) {
-            Some(views) => views.universe(),
-            None => state.base(package).universe(),
-        }
+        self.validation_state().universe(package)
     }
     /// What importers' universes hold of `package`'s public views.
     pub(crate) fn exported_universe(
         &self,
         package: &PackageId,
     ) -> hirsel_validate::PackageUniverse {
-        let state = self.validation_state();
-        state
-            .bases
-            .get(package)
-            .unwrap_or(&state.views)
-            .exported(package)
+        self.validation_state().exported(package)
     }
     /// `package`'s published summaries when it is installed here, else its
     /// summaries as this snapshot's full tables compute them.
@@ -1022,6 +1082,11 @@ impl QueryEngine {
         let lookup = LookupInput {
             installed,
             sources,
+            environment: self.environment_value(),
+            summaries: self
+                .result_store
+                .clone()
+                .filter(|store| store.verifier().is_some()),
             package_dependencies: self.declarations.inputs().package_dependencies.clone(),
             manifest: ContentHash::of_parts(
                 "hirsel.provider.registry.v1",
@@ -1113,7 +1178,13 @@ impl QueryEngine {
         &self,
         sources: &BTreeMap<PackageId, ContentHash>,
     ) -> BTreeMap<PackageId, InstalledUniverse> {
-        let Some(store) = self.result_store.as_ref() else {
+        // A summary stands for V's verdicts: only this machine's V, holding
+        // the store's local verifier authority, produced one it may read.
+        let Some(store) = self
+            .result_store
+            .as_ref()
+            .filter(|store| store.verifier().is_some())
+        else {
             return BTreeMap::new();
         };
         let environment = self.environment_value();

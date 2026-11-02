@@ -9,7 +9,7 @@ const OUTPUT: Domain = Domain {
     schema: 2,
 };
 // 0x4600_0037 is the compact Check store's domain.
-const UNIVERSE: Domain = Domain {
+pub(crate) const UNIVERSE: Domain = Domain {
     kind: 0x4600_0038,
     schema: 1,
 };
@@ -136,6 +136,13 @@ pub fn universe_query(
         )),
     }
 }
+/// The action that produced `record` as the summary `query` addresses.
+pub(crate) fn universe_action(query: QueryId, record: Reference) -> hirsel_artifact_store::Action {
+    hirsel_artifact_store::Action(ContentHash::of_parts(
+        "hirsel.front.universe.action.v1",
+        [query.address.0.0.as_slice(), record.output.0.0.as_slice()],
+    ))
+}
 pub(super) fn create_universe(
     queries: &Arc<FrontRunQueries>,
     query: QueryId,
@@ -208,13 +215,7 @@ impl UniverseTask {
             .store
             .put_content(UNIVERSE, &bytes)
             .ok_or_else(|| operational("universe summary exceeds transport admission"))?;
-        let action = hirsel_artifact_store::Action(ContentHash::of_parts(
-            "hirsel.front.universe.action.v1",
-            [
-                self.query.address.0.0.as_slice(),
-                record.output.0.0.as_slice(),
-            ],
-        ));
+        let action = universe_action(self.query, record);
         let product = ProductRef::import_archive(
             self.query.address,
             action,

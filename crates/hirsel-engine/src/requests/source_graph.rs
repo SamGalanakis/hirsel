@@ -284,6 +284,8 @@ impl SourceHost for BudgetHost<'_> {
 #[derive(Clone, Copy, Default)]
 pub struct SourceShape {
     pub run: bool,
+    /// Comptime and Reachable Check roots share the same source producers.
+    pub check_variants: bool,
     pub native: bool,
     pub proofs: bool,
     pub ownership: bool,
@@ -360,6 +362,9 @@ impl Plan {
             inspection_bytes,
             source_index_bytes,
         } = inputs;
+        let check_inventory = check_inventory
+            .checked_mul(if shape.check_variants { 2 } else { 1 })
+            .ok_or_else(|| uninstalled())?;
         let needs_run = shape.run;
         let needs_receipt = shape.receipt;
         let needs_ownership = shape.ownership;
@@ -505,6 +510,7 @@ impl Plan {
             4 + 2 * usize::from(needs_run)
         };
         let roots = 2
+            + usize::from(shape.check_variants)
             + usize::from(shape.safe)
             + usize::from(shape.export)
             + usize::from(shape.export && needs_native)
@@ -583,7 +589,9 @@ impl Plan {
             })?;
         // Check retains data and its archive under separate bounds. A receipt
         // also captures headers from this same partition before installing it.
-        let check_continuation = if needs_receipt {
+        let check_continuation = if shape.check_variants {
+            check_slack / 4
+        } else if needs_receipt {
             check_slack / 3
         } else {
             check_slack / 2
@@ -1128,6 +1136,14 @@ impl InstalledSource {
         runtime: &mut AdmittedRuntime,
         check: &Arc<FrontCheckQueries>,
     ) -> Result<(), ToolError> {
+        self.register_checks(runtime, check.factory())
+    }
+    /// Register multiple policy roots routed by their exact query identities.
+    pub fn register_checks(
+        &self,
+        runtime: &mut AdmittedRuntime,
+        checks: Arc<dyn QueryFactory>,
+    ) -> Result<(), ToolError> {
         runtime
             .register(FRONT_BODY_KIND, self.front.factory())
             .map_err(registration)?;
@@ -1141,7 +1157,7 @@ impl InstalledSource {
             .register(FRONT_GROWTH_KIND, self.growth.factory())
             .map_err(registration)?;
         runtime
-            .register(FRONT_CHECK_KIND, check.factory())
+            .register(FRONT_CHECK_KIND, checks)
             .map_err(registration)?;
         if let Some((_, graph)) = &self.storage {
             runtime

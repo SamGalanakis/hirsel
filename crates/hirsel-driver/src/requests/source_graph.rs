@@ -187,6 +187,7 @@ struct SourceProducts {
     front: Arc<FrontBodyQueries>,
     lower: Arc<FrontLowerQueries>,
     check: Arc<FrontCheckQueries>,
+    comptime_check: Option<Arc<FrontCheckQueries>>,
     _growth: Arc<FrontGrowthQueries>,
     storage: Option<(
         Arc<hirsel_engine::FrontStorageQueries>,
@@ -280,7 +281,9 @@ impl GraphProducts for SourceProducts {
             return matches!(operation, CompileOperation::DataAbi) && self.native_sources.is_some();
         }
         match operation {
-            CompileOperation::Check { lowering } => *lowering == self.lowering,
+            CompileOperation::Check { lowering } => {
+                *lowering == self.lowering || self.comptime_check.is_some()
+            }
             CompileOperation::Precompute => self
                 .run
                 .as_ref()
@@ -371,6 +374,12 @@ impl GraphProducts for SourceProducts {
             scope: store_operation,
             completed,
         };
+        let check = match operation {
+            CompileOperation::Check {
+                lowering: LoweringPolicy::Comptime,
+            } => self.comptime_check.as_ref().unwrap_or(&self.check).clone(),
+            _ => self.check.clone(),
+        };
         let roots = match operation {
             CompileOperation::NativeOwnership(_) => {
                 vec![
@@ -399,9 +408,9 @@ impl GraphProducts for SourceProducts {
             }
             CompileOperation::Check { lowering }
             | CompileOperation::CheckedProducts { lowering, .. }
-                if *lowering == self.lowering =>
+                if *lowering == self.lowering || self.comptime_check.is_some() =>
             {
-                vec![self.check.query()]
+                vec![check.query()]
             }
             CompileOperation::Precompute => vec![
                 self.run
@@ -457,7 +466,6 @@ impl GraphProducts for SourceProducts {
         let safe = self.safe.clone();
         let export = self.export.clone();
         let lower = self.lower.clone();
-        let check = self.check.clone();
         let receipt = self.receipt.clone();
         let expansion = self.expansion.clone();
         let native_sources = self.native_sources.clone();
@@ -487,7 +495,7 @@ impl GraphProducts for SourceProducts {
         let inputs = self.inputs.clone();
         let meter = self.meter.clone();
         let store = self.store.clone();
-        let failure = self.failure_reader();
+        let failure = self.failure_reader(check.clone());
         let source_index = self.source_index.clone();
         let source_generation = self.source_generation.clone();
         let source_headers = self.front.signatures();
@@ -793,9 +801,9 @@ impl GraphProducts for SourceProducts {
 impl SourceProducts {
     fn failure_reader(
         &self,
+        check: Arc<FrontCheckQueries>,
     ) -> Arc<dyn Fn(hirsel_engine::store::Reference) -> ToolError + Send + Sync> {
         let store = self.store.clone();
-        let check = self.check.clone();
         let lower = self.lower.clone();
         let front = self.front.clone();
         let sources = self.sources.clone();
@@ -972,31 +980,36 @@ pub(super) fn install(
             "package precomputation requires V".into(),
         ));
     }
+    let shared_source = matches!(
+        request.operation,
+        CompileOperation::Check { .. }
+            | CompileOperation::Tir { .. }
+            | CompileOperation::Artifacts { native: false }
+            | CompileOperation::ExportTir
+    );
     let (lowering, needs_run) = match &request.operation {
-        CompileOperation::Check { lowering }
-        | CompileOperation::CheckedProducts { lowering, .. } => (*lowering, false),
-        CompileOperation::Precompute
+        CompileOperation::CheckedProducts { lowering, .. } => (*lowering, false),
+        CompileOperation::Expand => (LoweringPolicy::Comptime, false),
+        CompileOperation::SafeCheck => (config.lowering, true),
+        CompileOperation::Check { .. }
+        | CompileOperation::Precompute
         | CompileOperation::Tir { .. }
         | CompileOperation::TirBatch { .. }
         | CompileOperation::Hashes { .. }
         | CompileOperation::NativeOwnership(_)
         | CompileOperation::NativeSources { .. }
-        | CompileOperation::DataAbi => (LoweringPolicy::Reachable, true),
-        CompileOperation::SafeCheck => (config.lowering, true),
-        CompileOperation::Expand => (LoweringPolicy::Comptime, false),
-        // The oracle export reads the check and TIR of every reachable body.
-        CompileOperation::Artifacts { .. } | CompileOperation::ExportTir => {
-            (LoweringPolicy::Reachable, true)
-        }
-        CompileOperation::NativeBuild(_) | CompileOperation::NativeRun(_) => {
-            (LoweringPolicy::Reachable, true)
-        }
+        | CompileOperation::DataAbi
+        | CompileOperation::Artifacts { .. }
+        | CompileOperation::ExportTir
+        | CompileOperation::NativeBuild(_)
+        | CompileOperation::NativeRun(_) => (LoweringPolicy::Reachable, true),
         _ => return Err(uninstalled()),
     };
-    let artifacts = matches!(
-        request.operation,
-        CompileOperation::Artifacts { .. } | CompileOperation::ExportTir
-    );
+    let artifacts = shared_source
+        || matches!(
+            request.operation,
+            CompileOperation::Artifacts { .. } | CompileOperation::ExportTir
+        );
     let completes = artifacts || matches!(request.operation, CompileOperation::Precompute);
     // The loader reads exactly the supplied immutable observations. Declaration
     // indexing/signature metadata is S0; no P body or Lower task runs here.
@@ -1107,15 +1120,17 @@ pub(super) fn install(
     );
     let shape = SourceShape {
         run: needs_run,
+        check_variants: shared_source,
         native: needs_native,
         proofs: needs_proofs,
         ownership: needs_ownership,
-        safe: matches!(
-            request.operation,
-            CompileOperation::SafeCheck
-                | CompileOperation::Artifacts { .. }
-                | CompileOperation::ExportTir
-        ),
+        safe: shared_source
+            || matches!(
+                request.operation,
+                CompileOperation::SafeCheck
+                    | CompileOperation::Artifacts { .. }
+                    | CompileOperation::ExportTir
+            ),
         receipt: matches!(request.operation, CompileOperation::CheckedProducts { .. }),
         export: artifacts,
         storage: !matches!(request.operation, CompileOperation::Expand),
@@ -1285,14 +1300,48 @@ pub(super) fn install(
     } else {
         None
     };
+    let comptime_check = if shared_source {
+        let allowance = installed
+            .check
+            .split(installed.check.bytes() / 2)
+            .ok_or_else(|| uninstalled())?;
+        let files = selection
+            .files
+            .iter()
+            .map(|(file, context, _)| (*file, context.clone(), LoweringPolicy::Comptime))
+            .collect();
+        let check = program
+            .engine
+            .front_check_queries(
+                hirsel_engine::FrontCheckPlan {
+                    files,
+                    front: front.clone(),
+                    lower: lower.clone(),
+                    growth: growth.clone(),
+                    unsafe_ffi: selection.unsafe_ffi.clone(),
+                    lint_package: selection.lint_package.clone(),
+                },
+                installed.plan.root,
+                allowance,
+                errors,
+            )
+            .map_err(&query_error)?;
+        Some(match &storage {
+            Some((_, storage)) => check.with_storage(storage.clone()).map_err(&query_error)?,
+            None => check,
+        })
+    } else {
+        None
+    };
     let check = installed.check(&mut program.engine, &selection)?;
     let plan = &installed.plan;
-    let safe_allowance = if matches!(
-        request.operation,
-        CompileOperation::SafeCheck
-            | CompileOperation::Artifacts { .. }
-            | CompileOperation::ExportTir
-    ) {
+    let safe_allowance = if shared_source
+        || matches!(
+            request.operation,
+            CompileOperation::SafeCheck
+                | CompileOperation::Artifacts { .. }
+                | CompileOperation::ExportTir
+        ) {
         Some(
             run.split(super::safe_check::BYTES)
                 .ok_or_else(|| uninstalled())?,
@@ -1646,6 +1695,7 @@ pub(super) fn install(
     for query in [
         Some(growth.query()),
         Some(check.query()),
+        comptime_check.as_ref().map(|check| check.query()),
         safe.as_ref().map(|safe| safe.query()),
         export_products.as_ref().map(|export| export.query()),
     ]
@@ -1714,7 +1764,18 @@ pub(super) fn install(
             },
         );
     }
-    installed.register(&mut runtime, &check)?;
+    if let Some(comptime) = &comptime_check {
+        installed.register_checks(
+            &mut runtime,
+            Arc::new(CheckRoots {
+                reachable: check.clone(),
+                comptime: comptime.clone(),
+                errors,
+            }),
+        )?;
+    } else {
+        installed.register(&mut runtime, &check)?;
+    }
     if let Some(artifacts) = &native_artifacts {
         for (kind, factory) in artifacts.assembly.factories() {
             runtime.register(kind, factory).map_err(registration)?;
@@ -1855,6 +1916,7 @@ pub(super) fn install(
         front,
         lower,
         check,
+        comptime_check,
         _growth: growth,
         storage,
         sources,
@@ -1871,4 +1933,25 @@ pub(super) fn install(
         runtime: Arc::new(Mutex::new(runtime)),
         products,
     }))
+}
+
+struct CheckRoots {
+    reachable: Arc<FrontCheckQueries>,
+    comptime: Arc<FrontCheckQueries>,
+    errors: RuntimeErrors,
+}
+impl QueryFactory for CheckRoots {
+    fn create(
+        &self,
+        query: QueryId,
+    ) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference> {
+        let check = if query == self.reachable.query() {
+            &self.reachable
+        } else if query == self.comptime.query() {
+            &self.comptime
+        } else {
+            return Err(self.errors.protocol);
+        };
+        check.factory().create(query)
+    }
 }

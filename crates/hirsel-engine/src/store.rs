@@ -181,6 +181,26 @@ pub trait ResultStore: Send + Sync {
             self.put(&product_association_key(address), &bytes);
         }
     }
+    /// Make every record this request transported durable in the provider
+    /// that retains it, republishing any record a retaining write refused.
+    /// True when a fresh open of the retaining provider reads all of them;
+    /// a provider without request-local transport has nothing to move.
+    fn materialize(&self) -> bool {
+        true
+    }
+    /// Publish a request root: the association a later or restarted request
+    /// opens to adopt this request's result. Under `Complete`, every record
+    /// the request transported is made durable first and its deferred
+    /// associations become visible before the root; if any record stays
+    /// request-local nothing becomes visible. Returns whether a fresh open of
+    /// the retaining provider finds this root.
+    fn publish_root(&self, address: Address, action: Action, reference: Reference) -> bool {
+        self.associate_product(address, action, reference);
+        self.persistence().retains()
+            && self
+                .lookup_product(address)
+                .is_some_and(|association| association.reference == reference)
+    }
     /// Import a checked archive through this provider's existing admission.
     /// Providers without an admitted request partition require the caller's
     /// explicit grant through `ProductArchive::open` instead.
@@ -244,7 +264,10 @@ pub enum Persistence {
     /// a failed write is a later miss.
     Cache,
     /// Publication materializes the complete demanded component closure before
-    /// any association becomes visible (Precompute, export and restart).
+    /// any association becomes visible (Precompute, export and restart): a
+    /// request transport defers every association to `publish_root`, which
+    /// first makes each transported record durable. An abort before the root
+    /// leaves content without associations, never a root naming missing content.
     Complete,
 }
 impl Persistence {

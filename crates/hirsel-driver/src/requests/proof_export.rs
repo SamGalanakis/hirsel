@@ -210,9 +210,10 @@ impl QueryTask for Task {
             text,
             _copy: copy,
         }));
-        owner
-            .store
-            .associate_product(product.address, action, record);
+        // The export is this request's root; a Complete request publishes
+        // its deferred components first. The returned text never depends on
+        // whether the closure became durable.
+        owner.store.publish_root(product.address, action, record);
         QueryPoll::Complete(product)
     }
 }

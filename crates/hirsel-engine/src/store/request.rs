@@ -14,13 +14,15 @@ fn association_bytes(entries: usize) -> u64 {
         return 0;
     }
     let mut weight = crate::NativeMetadataWeight::default();
-    weight.tree::<ContentHash, Association>(entries);
+    weight.tree::<ContentHash, (Association, bool)>(entries);
     weight.bytes()
 }
 struct State {
     used: u64,
     contents: BTreeMap<ContentHash, (Reference, Bytes)>,
-    associations: BTreeMap<ContentHash, Association>,
+    /// Each selected association, and whether its backend publication is
+    /// deferred to the next `publish_root` (only under `Complete`).
+    associations: BTreeMap<ContentHash, (Association, bool)>,
 }
 struct Admission {
     memory: MemoryReservation,
@@ -137,6 +139,15 @@ impl RequestStore {
                 associations: BTreeMap::new(),
             }),
         }
+    }
+    /// Promise the complete demanded closure for this request's roots
+    /// (Precompute and export). A backend that persists nothing stays
+    /// `Disabled`: there is nothing for a later request to open.
+    pub fn completing(mut self) -> Self {
+        if self.persistence.retains() {
+            self.persistence = Persistence::Complete;
+        }
+        self
     }
     /// The native task reports the existing deterministic resource failure
     /// before settling a product when its admitted transport allowance is full.
@@ -348,7 +359,7 @@ impl ResultStore for RequestStore {
             .unwrap_or_else(|e| e.into_inner())
             .associations
             .get(&address.0)
-            .copied()
+            .map(|(association, _)| *association)
             .or_else(|| self.backend.lookup_product(address))
     }
     fn associate_product(&self, address: Address, action: Action, reference: Reference) {
@@ -357,6 +368,8 @@ impl ResultStore for RequestStore {
             return;
         }
         let association = Association { action, reference };
+        // A Complete request publishes no association before its root.
+        let deferred = self.persistence == Persistence::Complete;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         // Durable associations are a shared latest-result index. Another
         // admitted request can publish a different action at the same address
@@ -370,10 +383,59 @@ impl ResultStore for RequestStore {
         let growth =
             association_bytes(next).saturating_sub(association_bytes(state.associations.len()));
         if exists || self.charge(&mut state, growth) {
-            state.associations.insert(address.0, association);
+            state
+                .associations
+                .insert(address.0, (association, deferred));
             drop(state);
-            self.backend.associate_product(address, action, reference);
+            if !deferred {
+                self.backend.associate_product(address, action, reference);
+            }
         }
+    }
+    fn materialize(&self) -> bool {
+        // Request-local records exist only because the backend refused them.
+        let local = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contents
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut durable = true;
+        for (reference, bytes) in local {
+            durable &= self.backend.put_content(reference.domain, &bytes) == Some(reference);
+        }
+        self.backend.materialize() && durable
+    }
+    fn publish_root(&self, address: Address, action: Action, reference: Reference) -> bool {
+        let selected = Association { action, reference };
+        self.associate_product(address, action, reference);
+        if self.persistence != Persistence::Complete {
+            return self.persistence.retains()
+                && self.backend.lookup_product(address) == Some(selected);
+        }
+        if self.lookup_product(address) != Some(selected) || !self.materialize() {
+            return false;
+        }
+        let pending = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut pending = Vec::new();
+            for (key, (association, deferred)) in &mut state.associations {
+                if std::mem::take(deferred) && *key != address.0 {
+                    pending.push((Address(*key), *association));
+                }
+            }
+            pending
+        };
+        // Every component is durable, so each association names stored
+        // content; the root becomes visible last.
+        for (component, association) in pending {
+            self.backend
+                .associate_product(component, association.action, association.reference);
+        }
+        self.backend.associate_product(address, action, reference);
+        self.backend.lookup_product(address) == Some(selected)
     }
 }
 
@@ -545,6 +607,121 @@ mod tests {
         assert_eq!(&*physical.get(accepted).unwrap(), b"completed");
         drop((first, second));
         assert_eq!(budget.reserved(), 0);
+    }
+    /// A directory backend whose durable writes of one component domain fail
+    /// `refusals` times, as a full or failing disk would.
+    struct Refusing {
+        disk: DirStore,
+        refusals: std::sync::atomic::AtomicUsize,
+    }
+    fn component() -> Domain {
+        Domain {
+            kind: 0x4e00_0020,
+            schema: 1,
+        }
+    }
+    impl ResultStore for Refusing {
+        fn get(&self, key: &EntryKey) -> Option<Bytes> {
+            self.disk.get(key)
+        }
+        fn put(&self, key: &EntryKey, value: &[u8]) {
+            self.disk.put(key, value)
+        }
+        fn local_product_store(&self) -> Option<hirsel_artifact_store::Store> {
+            self.disk.local_product_store()
+        }
+        fn get_content(&self, reference: Reference) -> Option<Bytes> {
+            self.disk.get_content(reference)
+        }
+        fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
+            let refused = domain == component()
+                && self
+                    .refusals
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+                    .is_ok();
+            if refused {
+                return None;
+            }
+            self.disk.put_content(domain, bytes)
+        }
+        fn lookup_product(&self, address: Address) -> Option<Association> {
+            self.disk.lookup_product(address)
+        }
+        fn associate_product(&self, address: Address, action: Action, reference: Reference) {
+            self.disk.associate_product(address, action, reference)
+        }
+        fn name(&self) -> &'static str {
+            "refusing-directory"
+        }
+    }
+    #[test]
+    fn complete_roots_become_visible_only_with_their_whole_closure_and_aborts_leave_none() {
+        let cited = Address(ContentHash::of_bytes(b"cited component"));
+        // The rule itself is the oracle: a fresh open of the directory finds
+        // the root only when the component it cites is associated and stored,
+        // and no association names content the directory cannot read.
+        let reopen = |path: &std::path::Path| {
+            let fresh = DirStore::new(path.to_path_buf());
+            let found = [address(), cited].map(|at| {
+                fresh.lookup_product(at).inspect(|association| {
+                    assert!(
+                        fresh.get_content(association.reference).is_some(),
+                        "an association names missing content"
+                    )
+                })
+            });
+            if found[0].is_some() {
+                assert!(found[1].is_some(), "a root is visible without its closure");
+            }
+            found.map(|association| association.is_some())
+        };
+        // (refusals, abort before the root, abort after it) ->
+        // (root published by the request, root visible to a fresh open)
+        for (refusals, abort_before, abort_after, published, visible) in [
+            (0, false, false, true, true),
+            (1, false, false, true, true),
+            (usize::MAX, false, false, false, false),
+            (0, true, false, false, false),
+            (0, false, true, true, false),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("products");
+            let backend = Arc::new(Refusing {
+                disk: DirStore::new(path.clone()),
+                refusals: refusals.into(),
+            });
+            let budget = ProcessBudget::new(64 << 10);
+            let request =
+                RequestStore::new(backend, budget.reserve(64 << 10).unwrap()).completing();
+            assert_eq!(request.persistence(), Persistence::Complete);
+            // Content is durable before any association is attempted.
+            let contents = request.operation_scope();
+            let part = request.put_content(component(), b"component").unwrap();
+            let output = request.put_content(domain(), b"root").unwrap();
+            contents.finish().unwrap();
+            let associations = request.operation_scope();
+            request.associate_product(cited, Action(cited.0), part);
+            // The request itself reads its deferred component immediately.
+            assert!(request.lookup_product(cited).is_some());
+            if abort_before {
+                drop(associations);
+                assert_eq!(reopen(&path), [false, false]);
+                continue;
+            }
+            assert_eq!(
+                request.publish_root(address(), Action(address().0), output),
+                published,
+                "refusals {refusals}"
+            );
+            if abort_after {
+                drop(associations);
+            } else {
+                associations.finish().unwrap();
+            }
+            assert_eq!(reopen(&path), [visible, visible], "refusals {refusals}");
+            drop(request);
+            assert_eq!(budget.reserved(), 0);
+        }
     }
     #[test]
     fn request_associations_charge_their_physical_tree_and_replacements_keep_its_grant() {

@@ -19,10 +19,19 @@ struct Entry {
     domain: Domain,
     len: u64,
     offset: u64,
+    /// Whether the selected provider accepted this record's bytes.
+    durable: bool,
 }
 impl Entry {
     fn matches(self, reference: Reference) -> bool {
         self.domain == reference.domain && self.len == reference.len
+    }
+    fn reference(self, output: ContentHash) -> Reference {
+        Reference {
+            output: hirsel_artifact_store::Output(output),
+            domain: self.domain,
+            len: self.len,
+        }
     }
 }
 fn index_bytes(entries: usize) -> u64 {
@@ -116,6 +125,19 @@ impl Drop for ScratchStore {
         );
     }
 }
+impl ScratchStore {
+    fn mark_durable(&self, reference: Reference) {
+        if let Some(entry) = self
+            .files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .get_mut(&reference.output.0)
+        {
+            entry.durable = true;
+        }
+    }
+}
 impl ResultStore for ScratchStore {
     fn cache_product(&self, address: Address, action: Action, domain: Domain, bytes: &[u8]) {
         self.selected.cache_product(address, action, domain, bytes);
@@ -183,13 +205,38 @@ impl ResultStore for ScratchStore {
                 domain: expected.domain,
                 len: expected.len,
                 offset,
+                durable: false,
             },
         );
         drop(files);
         // A successful cache put is still evictable. The current request owns
         // its transport independently of later durable/cache reclamation.
-        let _ = self.selected.put_content(domain, bytes);
+        if self.selected.put_content(domain, bytes) == Some(expected) {
+            self.mark_durable(expected);
+        }
         Some(expected)
+    }
+    fn materialize(&self) -> bool {
+        let refused = self
+            .files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .iter()
+            .filter(|(_, entry)| !entry.durable)
+            .map(|(output, entry)| entry.reference(*output))
+            .collect::<Vec<_>>();
+        let mut durable = true;
+        for reference in refused {
+            let accepted = self.get_content(reference).is_some_and(|bytes| {
+                self.selected.put_content(reference.domain, &bytes) == Some(reference)
+            });
+            if accepted {
+                self.mark_durable(reference);
+            }
+            durable &= accepted;
+        }
+        self.selected.materialize() && durable
     }
     fn get_content(&self, reference: Reference) -> Option<Bytes> {
         let files = self.files.lock().unwrap_or_else(|e| e.into_inner());

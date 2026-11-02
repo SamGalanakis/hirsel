@@ -1288,6 +1288,7 @@ pub(super) fn install(
         request.operation,
         CompileOperation::Artifacts { .. } | CompileOperation::ExportTir
     );
+    let completes = artifacts || matches!(request.operation, CompileOperation::Precompute);
     // The loader reads exactly the supplied immutable observations. Declaration
     // indexing/signature metadata is S0; no P body or Lower task runs here.
     // Reserve both transports while admission may wait without holding a graph.
@@ -1313,6 +1314,8 @@ pub(super) fn install(
         scratch_parent,
         disk_bytes,
     ) {
+        // Precompute and export roots promise their complete closure.
+        Ok(store) if completes => Arc::new(store.completing()),
         Ok(store) => Arc::new(store),
         Err(error) => return Err(loading.failed(ToolError::Io(error))),
     };

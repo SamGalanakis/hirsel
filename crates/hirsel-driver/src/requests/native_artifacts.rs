@@ -249,9 +249,8 @@ impl QueryTask for Task {
             artifacts,
             _allowance: allowance,
         });
-        owner
-            .store
-            .associate_product(product.address, action, record);
+        // Native artifacts are this request's root (see proof_export).
+        owner.store.publish_root(product.address, action, record);
         QueryPoll::Complete(product)
     }
 }

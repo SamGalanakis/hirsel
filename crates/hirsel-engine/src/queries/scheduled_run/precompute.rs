@@ -397,13 +397,21 @@ impl Task {
                     .admit_archive(record, bytes)
                     .map_err(|_| queries.errors.resource)?,
             );
+            // The precompute output is the request's root: under Complete it
+            // becomes visible only after every component it folds is durable.
+            if !queries
+                .store
+                .publish_root(product.address, product.action, record)
+                && queries.store.persistence() == crate::store::Persistence::Complete
+            {
+                return Err(queries.failure_record(operational(
+                    "precompute closure could not be stored durably",
+                )));
+            }
             *queries
                 .precomputed
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()) = Some((product.clone(), output));
-            queries
-                .store
-                .associate_product(product.address, product.action, record);
             Ok(product)
         })())
     }

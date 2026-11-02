@@ -831,3 +831,108 @@ fn hello_on_installed_std_answers_v_universe_questions_without_reading_std_rows(
         assert_eq!(std_input, std_table.input_digest());
     });
 }
+
+#[test]
+fn dependency_universe_summary_without_local_verifier_is_ignored() {
+    with_compiler_stack(|| {
+        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
+        use hirsel_engine::store::ResultStore;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stdlib/std@1/hirsel.json")
+            .canonicalize()
+            .unwrap();
+        let products = Arc::new(store::MemStore::default());
+        let config = CompileConfig {
+            store: products.clone(),
+            jobs: hirsel_intern::jobs::Jobs::ONE,
+            hold_bytes: 0,
+            ..Default::default()
+        };
+        let mut requests = CompilerRequests::for_host(COMPILER.with_config(config.clone()), config);
+        let output = requests
+            .execute(&manifest, CompileOperation::Precompute)
+            .unwrap();
+        let CompileResult::Precomputed { sources, .. } = &output.result else {
+            panic!("expected precomputed std")
+        };
+        let std = hirsel_syntax::PackageId {
+            name: "std".into(),
+            version: "1".into(),
+        };
+        let published = sources.universe(&std).expect("std publishes its universe");
+        let expected_heap = published.first_heap.clone();
+        assert!(expected_heap.is_some(), "std declares the heap");
+        let mut forged = published.clone();
+        forged.first_heap = None;
+        let summary = forged.encode().unwrap();
+        let forged_bytes = bincode::serialize(&(summary.clone(), summary)).unwrap();
+        let mut universe_products = products
+            .take()
+            .into_values()
+            .filter_map(|bytes| {
+                let (address, action, reference): (
+                    hirsel_syntax::ContentHash,
+                    hirsel_syntax::ContentHash,
+                    store::Reference,
+                ) = serde_json::from_slice(&bytes).ok()?;
+                (reference.domain.kind == 0x4600_0038).then_some((address, action, reference))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            universe_products.len(),
+            1,
+            "std precompute publishes one universe product"
+        );
+        let (address, action, reference) = universe_products.pop().unwrap();
+        let address = store::Address(address);
+        let remote = store::store_by_name("remote@1", Some(dir.path().join("cas"))).unwrap();
+        assert!(remote.verifier().is_none());
+        remote.cache_product(
+            address,
+            store::Action(action),
+            reference.domain,
+            &forged_bytes,
+        );
+        let association = remote
+            .lookup_product(address)
+            .expect("remote store retains the planted universe association");
+        let planted = remote
+            .get_content(association.reference)
+            .expect("remote store retains the planted summary bytes");
+        assert_eq!(planted.as_ref(), forged_bytes.as_slice());
+
+        let path = dir.path().join("main.hir");
+        std::fs::write(&path, "pub fn main()->u64{7u64}\n").unwrap();
+        let mut program = COMPILER
+            .with_config(CompileConfig {
+                store: remote,
+                jobs: hirsel_intern::jobs::Jobs::ONE,
+                hold_bytes: 0,
+                ..Default::default()
+            })
+            .load_program(&path)
+            .unwrap();
+        let root = program.entry.0.package.clone();
+        let snapshot = program.engine.signature_snapshot();
+        let root_validation = snapshot.validation(&root).unwrap();
+        let std_validation = snapshot.validation(&std).unwrap();
+        assert!(root_validation.first_heap().is_some());
+        assert_eq!(root_validation.first_heap(), expected_heap);
+        assert!(root_validation.universe_errors().1.is_empty());
+        assert!(std_validation.first_heap().is_some());
+        assert_eq!(std_validation.first_heap(), expected_heap);
+        assert!(std_validation.universe_errors().1.is_empty());
+        for definition in snapshot
+            .definitions()
+            .into_iter()
+            .filter(|definition| definition.path().0.package == std)
+        {
+            assert!(snapshot.header_ready(definition), "{definition:?}");
+        }
+        let checked = program.check(LoweringPolicy::Reachable).unwrap();
+        assert_eq!(checked.completion, CheckCompletion::Complete);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    });
+}

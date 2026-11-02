@@ -667,6 +667,7 @@ name = "hirsel-driver"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bincode",
  "hirsel-artifact-store",
  "hirsel-authority",
  "hirsel-check",

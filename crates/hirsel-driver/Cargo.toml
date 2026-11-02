@@ -57,6 +57,7 @@ sha2 = "0.10"
 sha2 = "0.10"
 
 [dev-dependencies]
+bincode = "=1.3.3"
 hirsel-intern = { path = "../hirsel-intern", features = ["id-salt"] }
 hirsel-lexer = { path = "../hirsel-lexer" }
 hirsel-parser = { path = "../hirsel-parser" }

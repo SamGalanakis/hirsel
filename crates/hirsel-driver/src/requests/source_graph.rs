@@ -965,6 +965,7 @@ pub(super) fn install(
     scratch_parent: &std::path::Path,
     toolchain: Option<&Arc<crate::native::Toolchain>>,
     host_toolchain: bool,
+    #[cfg(test)] before_check: Option<fn(&mut LoadedProgram)>,
 ) -> Result<Arc<InstalledGraph>, ToolError> {
     if matches!(request.operation, CompileOperation::Precompute)
         && config.verify == hirsel_engine::Verify::Off
@@ -1058,6 +1059,7 @@ pub(super) fn install(
         slot.generation = Arc::new(());
         (slot.generation.clone(), slot.state.take())
     };
+    let load_started = std::time::Instant::now();
     let loaded = if matches!(request.operation, CompileOperation::DataAbi) {
         selected_compiler.load_export_package_inputs(&request.path, &request.inputs)
     } else {
@@ -1072,10 +1074,15 @@ pub(super) fn install(
             }
         }
     };
+    let load_nanos = load_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
     let mut program = match loaded {
         Ok(program) => program,
         Err(error) => return Err(loading.failed(error)),
     };
+    #[cfg(test)]
+    if let Some(before_check) = before_check {
+        before_check(&mut program);
+    }
     if let CompileOperation::NativeBuild(native) | CompileOperation::NativeRun(native) =
         &request.operation
         && let Err(error) = super::native_sources::install(
@@ -1759,10 +1766,14 @@ pub(super) fn install(
             .register(super::proof_export::KIND, export.factory())
             .map_err(registration)?;
     }
+    let peak_type_bytes = program.engine.types().stats().row_bytes;
     let (input_operations, input_bytes) = request.inputs.read_work();
     let initial = RequestWork {
         hold_bytes: config.hold_bytes,
         store_adoptions: program.engine.store_adoptions(),
+        load_nanos,
+        dropped_engines: 1,
+        peak_type_bytes,
         front: program.engine.work_stats(),
         memo_operations: program.engine.memo_stats().touched,
         input_operations,

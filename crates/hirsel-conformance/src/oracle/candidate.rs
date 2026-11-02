@@ -48,23 +48,43 @@ pub fn cold(path: &Path, config: &Config) -> Result<Artifacts, String> {
             .into_iter()
             .collect();
         let mut requests = CompilerRequests::for_host(compiler.clone(), compile_config(config));
-        let checked = requests
-            .execute(
-                path,
-                CompileOperation::Check {
-                    lowering: LoweringPolicy::Comptime,
-                },
-            )
-            .map_err(|e| format!("check: {e}"))?;
-        let CompileResult::Check(output) = &checked.result else {
-            return Err("check: source Check returned another operation".into());
+        // Language diagnostics a phase found while the graph installed are
+        // the program's complete rejection; it has no checked products.
+        let (checked, installed_rejection);
+        let mut rejected_at_install = false;
+        let output = match requests.execute(
+            path,
+            CompileOperation::Check {
+                lowering: LoweringPolicy::Comptime,
+            },
+        ) {
+            Err(hirsel_engine::ToolError::Query {
+                error: hirsel_engine::QueryError::Diagnostics(diagnostics),
+                phase: Some(_),
+                sources,
+            }) => {
+                installed_rejection = hirsel_engine::CheckOutput {
+                    sources,
+                    diagnostics,
+                    ..Default::default()
+                };
+                rejected_at_install = true;
+                &installed_rejection
+            }
+            result => {
+                checked = result.map_err(|e| format!("check: {e}"))?;
+                let CompileResult::Check(output) = &checked.result else {
+                    return Err("check: source Check returned another operation".into());
+                };
+                output
+            }
         };
         let incomplete = output.completion != CheckCompletion::Complete;
         let rejecting = output
             .diagnostics
             .iter()
             .any(|d| d.severity == hirsel_diag::Severity::Error);
-        let products = if incomplete {
+        let products = if incomplete || rejected_at_install {
             None
         } else {
             let selected = requests
@@ -299,7 +319,8 @@ pub fn matrix_cell(root: &Path, config: &Config, work: &Path, exe: &Path) -> Res
             .capture(&scenario.entry(&before))
             .map_err(|e| format!("capture: {e:?}"))?;
         let lease = submit(&workspace, &base, 1, &scenario.after)?;
-        let actual = result(&workspace, &lease, &scenario.entry(&before))?;
+        let actual = result(&workspace, &lease, &scenario.entry(&before))
+            .map_err(|e| format!("{name}: {e}"))?;
         let mut command = std::process::Command::new(exe);
         command
             .arg("cold-check")
@@ -398,7 +419,8 @@ fn eight_candidates(
     }
     w.cancel(&leases[7]).map_err(|e| format!("cancel: {e:?}"))?;
     for index in (0..7).rev() {
-        let actual = result(&w, &leases[index], &scenario.entry(&before))?;
+        let actual = result(&w, &leases[index], &scenario.entry(&before))
+            .map_err(|e| format!("eight C{}: {e}", index + 1))?;
         let after = work.join(format!("eight/cold-{index}"));
         scenario.write(&after, root, false)?;
         bounded_package(&scenario.entry(&after))?;

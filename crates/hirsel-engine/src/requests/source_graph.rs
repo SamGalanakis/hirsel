@@ -1436,8 +1436,8 @@ fn instance_bootstrap_error(
             error,
             sources,
             owner,
-        } => ToolError::Query {
-            error: error.unwrap_or_else(|| {
+        } => language_error(
+            error.unwrap_or_else(|| {
                 QueryError::Operational(hirsel_types::OperationalFailure {
                     operation: "instance bootstrap".into(),
                     message: if reference == errors.resource {
@@ -1460,18 +1460,14 @@ fn instance_bootstrap_error(
                     },
                 })
             }),
-            phase: None,
-            sources: sources.retain_owner(owner),
-        },
+            crate::QueryKind::Check,
+            sources.retain_owner(owner),
+        ),
         FrontInstanceBootstrapError::Discovery {
             error,
             sources,
             owner,
-        } => ToolError::Query {
-            error,
-            phase: None,
-            sources: sources.retain_owner(owner),
-        },
+        } => language_error(error, crate::QueryKind::Generate, sources.retain_owner(owner)),
     }
 }
 
@@ -1483,21 +1479,33 @@ fn bootstrap_error(engine: &QueryEngine, error: FrontRegistrationBootstrapError)
             sources,
             owner,
             ..
-        } => ToolError::Query {
-            error: error.unwrap_or_else(|| {
+        } => language_error(
+            error.unwrap_or_else(|| {
                 QueryError::Operational(hirsel_types::OperationalFailure {
                     operation: "generator bootstrap".into(),
                     message: "a generator task failed without a diagnostic".into(),
                 })
             }),
-            phase: None,
-            sources: sources.retain_owner(owner),
-        },
-        FrontRegistrationBootstrapError::Acceptance(failure) => ToolError::Query {
-            error: failure.error,
-            phase: None,
-            sources: failure.sources,
-        },
+            crate::QueryKind::Generate,
+            sources.retain_owner(owner),
+        ),
+        FrontRegistrationBootstrapError::Acceptance(failure) => language_error(
+            failure.error,
+            crate::QueryKind::GeneratedRegistration,
+            failure.sources,
+        ),
+    }
+}
+
+/// Language diagnostics found while bootstrapping a graph's generated
+/// instances name the phase that found them, so a request reports them as
+/// that phase's rejection rather than a load failure. Operational refusals
+/// keep no phase.
+fn language_error(error: QueryError, phase: crate::QueryKind, sources: SourceMap) -> ToolError {
+    ToolError::Query {
+        phase: matches!(error, QueryError::Diagnostics(_)).then_some(phase),
+        error,
+        sources,
     }
 }
 

@@ -24,6 +24,8 @@ pub struct CompilerRequests {
     scratch_parent: std::path::PathBuf,
     toolchain: Option<Arc<crate::native::Toolchain>>,
     host_toolchain: bool,
+    #[cfg(test)]
+    before_check: Option<fn(&mut hirsel_engine::LoadedProgram)>,
 }
 impl CompilerRequests {
     /// Capture the existing host guard cap. Construction is lazy/infallible;
@@ -186,6 +188,8 @@ impl CompilerRequests {
             scratch_parent: std::env::temp_dir(),
             toolchain: None,
             host_toolchain: false,
+            #[cfg(test)]
+            before_check: None,
         }
     }
     /// Physical request transport policy, captured before any source read.
@@ -215,6 +219,14 @@ impl CompilerRequests {
     }
     pub fn toolchain(&self) -> Option<&Arc<crate::native::Toolchain>> {
         self.toolchain.as_ref()
+    }
+    /// Test fault injection: run on each freshly loaded program before Check.
+    #[cfg(test)]
+    pub(crate) fn set_before_check(
+        &mut self,
+        before_check: Option<fn(&mut hirsel_engine::LoadedProgram)>,
+    ) {
+        self.before_check = before_check;
     }
 }
 
@@ -275,6 +287,8 @@ impl hirsel_engine::requests::RequestEngine for CompilerRequests {
         let scratch_parent = &self.scratch_parent;
         let toolchain = self.toolchain.as_ref();
         let host_toolchain = self.host_toolchain;
+        #[cfg(test)]
+        let before_check = self.before_check;
         self.graphs.select(request, |budget, may_wait| {
             super::source_graph::install(
                 compiler,
@@ -289,6 +303,8 @@ impl hirsel_engine::requests::RequestEngine for CompilerRequests {
                 scratch_parent,
                 toolchain,
                 host_toolchain,
+                #[cfg(test)]
+                before_check,
             )
         })
     }

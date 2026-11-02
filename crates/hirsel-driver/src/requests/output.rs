@@ -17,6 +17,11 @@ pub struct RequestWork {
     pub hold_bytes: u64,
     pub store_adoptions: u64,
     pub recomputations: u64,
+    /// Loader wall time of the request's one temporary S0 program.
+    pub load_nanos: u64,
+    /// Temporary loader engines this request dropped (one per installed graph).
+    pub dropped_engines: u64,
+    pub peak_type_bytes: u64,
     pub front: WorkStats,
     pub touched_memos: Vec<hirsel_engine::memo::MemoKey>,
     pub memo_operations: u64,

@@ -4,6 +4,9 @@
 mod edits;
 pub mod protocol;
 pub mod v2;
+use crate::requests::{
+    CompileInputs, CompileOperation, CompileRequest, CompileResult, CompilerRequests, RequestWork,
+};
 pub use edits::{ByteEdit, EditError};
 use hirsel_engine::loader_inputs::{
     CaptureInputs, FrozenInputs, InputLimit, InputLimits, InputUnavailable, LoaderInputs,
@@ -1391,123 +1394,191 @@ impl CandidateWorkspace {
         };
         let computed = hirsel_engine::with_compiler_stack(|| -> Result<Snapshot, ToolError> {
             w.state.lock().unwrap().counters.frozen_loads += 1;
-            let load_started = std::time::Instant::now();
-            let mut program = match if let Some(namespace) = &inputs.namespace {
-                namespace.load(&w.compiler, w.config.clone(), false)
-            } else {
-                w.compiler
-                    .load_program_inputs(&inputs.entry, &inputs.frozen, true)
-            } {
-                Ok(program) => program,
-                Err(error) => return Ok(snapshot_error(error, charge.clone(), true)),
+            let selected_config = CompileConfig {
+                verify: Verify::On,
+                lowering: LoweringPolicy::Comptime,
+                ..w.config.clone()
             };
-            w.state.lock().unwrap().counters.load_nanos += nanos(load_started);
-            #[cfg(test)]
-            if let Some(hook) = *w.before_check.lock().unwrap() {
-                hook(&mut program);
-            }
-            let selection = inputs
-                .namespace
-                .as_ref()
-                .map(|_| Arc::new(v2::Selection::of(&program)));
-            if inputs.namespace.is_some() {
-                if let Err(error) = program.parse_sources() {
-                    let mut snapshot = snapshot_error(error, charge.clone(), false);
-                    snapshot.selection = selection;
-                    return Ok(snapshot);
+            let selected_config = if inputs.namespace.is_some() {
+                CompileConfig {
+                    store: Arc::new(hirsel_engine::store::NoneStore),
+                    ..selected_config
                 }
-            }
+            } else {
+                selected_config
+            };
+            let selection = if let Some(namespace) = &inputs.namespace {
+                let program = match namespace.load(&w.compiler, selected_config.clone(), false) {
+                    Ok(program) => program,
+                    Err(error) => return Ok(snapshot_error(error, charge.clone(), true)),
+                };
+                let selection = Arc::new(v2::Selection::of(&program));
+                drop(program);
+                Some(selection)
+            } else {
+                None
+            };
+            let request_inputs = if let Some(namespace) = &inputs.namespace {
+                CompileInputs::Namespace(namespace.clone())
+            } else {
+                CompileInputs::Frozen(inputs.frozen.clone())
+            };
+            let mut requests = CompilerRequests::for_host(w.compiler.clone(), selected_config);
+            #[cfg(test)]
+            requests.set_before_check(*w.before_check.lock().unwrap());
+            // One install per candidate: the CheckedProducts graph also
+            // answers Check, so a rejected or incomplete program reads its
+            // Check outcome from the same hot graph.
+            let products_request = CompileRequest {
+                path: inputs.entry.clone(),
+                inputs: request_inputs.clone(),
+                operation: CompileOperation::CheckedProducts {
+                    lowering: LoweringPolicy::Comptime,
+                    canonical: w.limits.retain_canonical_export,
+                },
+            };
             let check_started = std::time::Instant::now();
-            let result = program.check(LoweringPolicy::Comptime);
-            w.state.lock().unwrap().counters.check_nanos += nanos(check_started);
+            let mut request_work = RequestWork::default();
+            let selected = requests.execute_request(&products_request);
+            let checked = match selected {
+                Ok(selected) => {
+                    aggregate_request_work(&mut request_work, &selected.work);
+                    match &selected.result {
+                        CompileResult::CheckedProducts { checked, products } => {
+                            Ok((checked.clone(), Some(products.clone()), None))
+                        }
+                        _ => Err(ToolError::Runtime(
+                            "checked-products request returned another operation".into(),
+                        )),
+                    }
+                }
+                Err(products_error) => {
+                    let check_request = CompileRequest {
+                        path: inputs.entry.clone(),
+                        inputs: request_inputs,
+                        operation: CompileOperation::Check {
+                            lowering: LoweringPolicy::Comptime,
+                        },
+                    };
+                    requests
+                        .execute_request(&check_request)
+                        .and_then(|checked| {
+                            aggregate_request_work(&mut request_work, &checked.work);
+                            match &checked.result {
+                                CompileResult::Check(output) => {
+                                    Ok((output.clone(), None, Some(products_error)))
+                                }
+                                _ => Err(ToolError::Runtime(
+                                    "source check request returned another operation".into(),
+                                )),
+                            }
+                        })
+                }
+            };
+            let check_nanos = nanos(check_started);
             let receipt_started = std::time::Instant::now();
-            let limit = program.engine.last_comptime_limit.is_some();
-            let snapshot = match result {
-                Ok(output) => {
-                    let complete = output.completion == CheckCompletion::Complete && !limit;
+            let snapshot = match checked {
+                // Language diagnostics a phase found while the graph installed
+                // are that program's complete rejection, not a load failure.
+                Err(ToolError::Query {
+                    error: QueryError::Diagnostics(diagnostics),
+                    phase: Some(_),
+                    sources,
+                }) => Snapshot {
+                    selection: selection.clone(),
+                    completion: Completion::Complete,
+                    phase: None,
+                    verdict: Verdict::Reject,
+                    output: Arc::new(CheckOutput {
+                        sources,
+                        diagnostics,
+                        ..Default::default()
+                    }),
+                    loader_error: None,
+                    failure_class: None,
+                    products: None,
+                    _charge: charge.clone(),
+                },
+                Err(error) => {
+                    let loader = !matches!(&error, ToolError::Query { phase: Some(_), .. });
+                    snapshot_error(error, charge.clone(), loader)
+                }
+                Ok((output, products, products_failure)) => {
+                    let complete = output.completion == CheckCompletion::Complete;
                     let rejecting = output
                         .diagnostics
                         .iter()
                         .any(|d| d.severity == hirsel_diag::Severity::Error);
-                    let products = if complete {
-                        match program.engine.checked_products(&program.entry) {
-                            Ok(mut products) => {
-                                if !w.limits.retain_canonical_export {
-                                    products.canonical = None;
-                                }
-                                Some(Arc::new(products))
-                            }
-                            Err(QueryError::NotImplemented) if rejecting => None,
-                            Err(QueryError::Diagnostics(diagnostics)) if rejecting => {
-                                let diagnostics = hirsel_engine::select_diagnostics(
-                                    diagnostics,
-                                    Some(&output.sources),
-                                );
-                                if diagnostics != output.diagnostics {
-                                    return Err(program.error(QueryError::Diagnostics(diagnostics)));
-                                }
-                                None
-                            }
-                            Err(error) => return Err(program.error(error)),
+                    // A complete accepted Check always yields products; a
+                    // rejected one fails products with exactly its diagnostics.
+                    let products_error = match products_failure {
+                        None => None,
+                        Some(_) if !complete => None,
+                        Some(ToolError::Query {
+                            error: QueryError::NotImplemented,
+                            ..
+                        }) if rejecting => None,
+                        Some(ToolError::Query {
+                            error: QueryError::Diagnostics(diagnostics),
+                            phase,
+                            sources,
+                        }) if rejecting => {
+                            let diagnostics = hirsel_engine::select_diagnostics(
+                                diagnostics,
+                                Some(&output.sources),
+                            );
+                            (diagnostics != output.diagnostics).then_some(ToolError::Query {
+                                error: QueryError::Diagnostics(diagnostics),
+                                phase,
+                                sources,
+                            })
                         }
-                    } else {
-                        None
+                        Some(error) => Some(error),
                     };
-                    Ok(Snapshot {
-                        selection: selection.clone(),
-                        phase: if complete {
-                            None
-                        } else {
-                            match output.completion {
+                    if let Some(error) = products_error {
+                        snapshot_error(error, charge.clone(), false)
+                    } else {
+                        Snapshot {
+                            selection: selection.clone(),
+                            phase: match output.completion {
+                                CheckCompletion::Complete => None,
                                 CheckCompletion::Incomplete { phase } => Some(phase),
-                                CheckCompletion::Complete => {
-                                    program.engine.unavailable.or(program.engine.last_phase)
-                                }
-                            }
-                        },
-                        completion: if complete {
-                            Completion::Complete
-                        } else if !limit {
-                            Completion::Incomplete(IncompleteReason::MissingPhase)
-                        } else {
-                            Completion::Incomplete(IncompleteReason::ResourceLimit)
-                        },
-                        verdict: if !complete {
-                            Verdict::Undecided
-                        } else if rejecting {
-                            Verdict::Reject
-                        } else {
-                            Verdict::Pass
-                        },
-                        output: Arc::new(output),
-                        loader_error: None,
-                        failure_class: None,
-                        products,
-                        _charge: charge.clone(),
-                    })
+                            },
+                            completion: if complete {
+                                Completion::Complete
+                            } else {
+                                Completion::Incomplete(IncompleteReason::MissingPhase)
+                            },
+                            verdict: if !complete {
+                                Verdict::Undecided
+                            } else if rejecting {
+                                Verdict::Reject
+                            } else {
+                                Verdict::Pass
+                            },
+                            output: Arc::new(output),
+                            loader_error: None,
+                            failure_class: None,
+                            products,
+                            _charge: charge.clone(),
+                        }
+                    }
                 }
-                Err(error) => Err(program.error(error)),
             };
             let mut state = w.state.lock().unwrap();
+            state.counters.check_nanos += check_nanos;
             state.counters.receipt_nanos += nanos(receipt_started);
-            state.counters.recomputations +=
-                program.engine.memo_stats().recomputed.values().sum::<u64>();
-            state.counters.store_adoptions += program.engine.store_adoptions();
+            state.counters.load_nanos += request_work.load_nanos;
+            state.counters.recomputations += request_work.recomputations;
+            state.counters.store_adoptions += request_work.store_adoptions;
             state.counters.peak_type_bytes = state
                 .counters
                 .peak_type_bytes
-                .max(program.engine.types().stats().row_bytes);
-            state.counters.dropped_engines += 1;
+                .max(request_work.peak_type_bytes);
+            state.counters.dropped_engines += request_work.dropped_engines;
             drop(state);
-            let mut snapshot =
-                snapshot.unwrap_or_else(|error| snapshot_error(error, charge.clone(), false));
+            let mut snapshot = snapshot;
             snapshot.selection = selection;
-            if limit {
-                snapshot.completion = Completion::Incomplete(IncompleteReason::ResourceLimit);
-                snapshot.verdict = Verdict::Undecided;
-                snapshot.phase = snapshot.phase.or(program.engine.last_phase);
-            }
-            drop(program);
             Ok(snapshot)
         });
         let mut snapshot: Snapshot = match computed {
@@ -1654,6 +1725,13 @@ fn receipt_metadata_bytes(receipt: &CheckReceipt) -> usize {
 fn nanos(started: std::time::Instant) -> u64 {
     started.elapsed().as_nanos().min(u64::MAX as u128) as u64
 }
+fn aggregate_request_work(total: &mut RequestWork, next: &RequestWork) {
+    total.load_nanos += next.load_nanos;
+    total.dropped_engines += next.dropped_engines;
+    total.peak_type_bytes = total.peak_type_bytes.max(next.peak_type_bytes);
+    total.recomputations += next.recomputations;
+    total.store_adoptions += next.store_adoptions;
+}
 fn snapshot_error(error: ToolError, charge: Arc<Charge>, loader: bool) -> Snapshot {
     let phase = match &error {
         ToolError::Query { phase, .. } => *phase,
@@ -1665,6 +1743,10 @@ fn snapshot_error(error: ToolError, charge: Arc<Charge>, loader: bool) -> Snapsh
         }
         ToolError::Io(_) => FailureClass::LoadIo,
         ToolError::Runtime(_) => FailureClass::LoadManifest,
+        ToolError::Query {
+            error: QueryError::Operational(failure),
+            ..
+        } if failure.operation == "compile-time tooling limit" => FailureClass::ResourceLimit,
         ToolError::Query { .. } if loader => FailureClass::LoadQuery,
         _ => FailureClass::CheckQuery,
     };
@@ -1717,7 +1799,18 @@ fn snapshot_error(error: ToolError, charge: Arc<Charge>, loader: bool) -> Snapsh
     }
 }
 fn is_limit(error: &ToolError) -> bool {
-    matches!(error,ToolError::Io(e) if e.get_ref().is_some_and(|e|e.is::<InputLimit>()))
+    matches!(
+        error,
+        ToolError::Io(error) if error
+            .get_ref()
+            .is_some_and(|error| error.is::<InputLimit>())
+    ) || matches!(
+        error,
+        ToolError::Query {
+            error: QueryError::Operational(failure),
+            ..
+        } if failure.operation == "compile-time tooling limit"
+    )
 }
 fn input_digest(inputs: &FrozenInputs, environment: ContentHash) -> ContentHash {
     let mut parts = inputs.identity_parts();

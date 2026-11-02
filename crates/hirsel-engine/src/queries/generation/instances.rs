@@ -311,6 +311,14 @@ impl QueryEngine {
                 }
             }
             let Some(product) = product else {
+                if fronts.iter().any(|front| {
+                    matches!(
+                        front.completed_error(&path),
+                        Some(QueryError::Diagnostics(_))
+                    )
+                }) {
+                    continue;
+                }
                 missing.insert(path);
                 continue;
             };

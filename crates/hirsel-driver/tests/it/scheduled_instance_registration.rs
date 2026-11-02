@@ -912,7 +912,7 @@ fn instance_bootstrap_failure(zero_depth: bool) {
 }
 
 #[test]
-fn bounded_instance_bootstrap_front_failure_keeps_its_admitted_source_owner() {
+fn instance_bootstrap_keeps_ordinary_failure_local_until_selected_front_demand() {
     with_compiler_stack(|| {
         for jobs in [1, 2] {
             let source = SOURCE.replace(
@@ -922,9 +922,10 @@ fn bounded_instance_bootstrap_front_failure_keeps_its_admitted_source_owner() {
             let mut detached = None;
             let mut retained = None;
             fixture(&source, jobs, |program, budget| {
+                let expected = program.engine.check_definition(&program.entry).unwrap_err();
                 let definitions = program.engine.front_source_roots();
                 let generators = program.engine.front_generator_roots(&definitions).unwrap();
-                let error = program
+                let bootstrap = program
                     .engine
                     .bootstrap_front_instances(
                         &definitions,
@@ -944,27 +945,68 @@ fn bounded_instance_bootstrap_front_failure_keeps_its_admitted_source_owner() {
                         },
                         crate::scheduled_front::errors(),
                     )
-                    .err()
-                    .expect("unresolved ordinary body");
-                let FrontInstanceBootstrapError::Front {
-                    error: Some(QueryError::Diagnostics(diagnostics)),
-                    sources,
-                    owner,
-                    ..
-                } = &error
-                else {
-                    panic!("{error:?}")
+                    .unwrap();
+                assert!(bootstrap.registrations().is_empty());
+                assert!(program.engine.generated_sources().next().is_none());
+                let front = program
+                    .engine
+                    .front_body_queries_with_registrations(
+                        bootstrap.definitions(),
+                        bootstrap.registrations(),
+                        weight(),
+                        budget.reserve(32 << 20).unwrap(),
+                        crate::scheduled_front::errors(),
+                    )
+                    .unwrap();
+                let mut runtime = AdmittedRuntime::new(
+                    hirsel_intern::jobs::Jobs::new(jobs),
+                    budget.reserve(256 << 20).unwrap(),
+                    crate::scheduled_front::errors(),
+                )
+                .unwrap();
+                runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
+                let mut ordinary = program.entry.clone();
+                ordinary.0.name = "Point".into();
+                let request = runtime.request(&[front.body_query(&ordinary).unwrap()]);
+                let product = runtime.wait(request).unwrap().remove(0);
+                assert!(front.outcome(Ok(product)).unwrap().outcome.result.is_ok());
+                let request = runtime.request(&[front.query(&program.entry).unwrap()]);
+                let reference = runtime.wait(request).unwrap_err();
+                let output = front.outcome(Err(reference)).unwrap();
+                assert_eq!(output.outcome.result.unwrap_err(), expected);
+                let QueryError::Diagnostics(diagnostics) = expected else {
+                    panic!("expected an unresolved-name diagnostic")
                 };
                 assert!(!diagnostics.is_empty());
+                let sources = program.engine.sources.clone();
                 assert!(
                     diagnostics
                         .iter()
                         .all(|d| sources.slice(d.primary).is_some())
                 );
-                assert!(owner.query(&program.entry).is_some());
-                assert!(program.engine.generated_sources().next().is_none());
+                runtime.shutdown();
+                drop(runtime);
+                let failure = bootstrap
+                    .require_complete_front()
+                    .err()
+                    .expect("complete Front keeps the ordinary rejection");
+                let FrontInstanceBootstrapError::Front {
+                    error: Some(QueryError::Diagnostics(required)),
+                    sources: required_sources,
+                    ..
+                } = &failure
+                else {
+                    panic!("{failure:?}")
+                };
+                assert_eq!(required, &diagnostics);
+                assert!(
+                    required
+                        .iter()
+                        .all(|d| required_sources.slice(d.primary).is_some())
+                );
+                drop(failure);
                 assert!(budget.reserved() > 0 && budget.reserved() < 256 << 20);
-                detached = Some(error);
+                detached = Some((diagnostics, sources, front));
                 retained = Some(budget.clone());
             });
             let budget = retained.unwrap();

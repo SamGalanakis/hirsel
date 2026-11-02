@@ -1010,13 +1010,9 @@ impl QueryEngine {
         {
             self.result_store = Some(Arc::new(crate::store::MemStore::default()));
         }
-        let result = self.bootstrap_front_instances(
-            &definitions,
-            &definitions,
-            &generators,
-            admission,
-            errors,
-        );
+        let result = self
+            .bootstrap_front_instances(&definitions, &definitions, &generators, admission, errors)
+            .and_then(FrontInstanceBootstrap::require_complete_front);
         self.result_store = previous;
         result.map(|_| ()).map_err(|error| match error {
             FrontInstanceBootstrapError::Bootstrap(FrontRegistrationBootstrapError::Admission(

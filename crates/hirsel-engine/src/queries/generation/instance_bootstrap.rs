@@ -62,6 +62,7 @@ pub struct FrontInstanceBootstrap {
     registrations: Vec<Arc<AcceptedFrontRegistration>>,
     rounds: usize,
     stats: RuntimeStats,
+    front_failure: Option<Failure>,
     _metadata: MemoryReservation,
 }
 impl FrontInstanceBootstrap {
@@ -70,6 +71,13 @@ impl FrontInstanceBootstrap {
     }
     pub fn registrations(&self) -> &[Arc<AcceptedFrontRegistration>] {
         &self.registrations
+    }
+    /// Require every captured Front to succeed, including its owned diagnostics.
+    pub fn require_complete_front(mut self) -> Result<Self, Failure> {
+        match self.front_failure.take() {
+            Some(failure) => Err(failure),
+            None => Ok(self),
+        }
     }
     pub fn rounds(&self) -> usize {
         self.rounds
@@ -510,18 +518,27 @@ impl QueryEngine {
                         .ok_or_else(|| refused("front root missing"))?,
                 );
             }
+            let mut front_failure = None;
             for roots in queries.chunks(1) {
                 let request = executor.request(roots);
-                drop(executor.wait(request).map_err(|reference| {
-                    Failure::Front {
+                if let Err(reference) = executor.wait(request) {
+                    let error = front
+                        .outcome(Err(reference))
+                        .and_then(|o| o.outcome.result.err());
+                    let language_error = matches!(error, Some(QueryError::Diagnostics(_)));
+                    let failure = Failure::Front {
                         reference,
-                        error: front
-                            .outcome(Err(reference))
-                            .and_then(|o| o.outcome.result.err()),
+                        error,
                         sources: self.sources.clone(),
                         owner: front.clone(),
+                    };
+                    if !language_error {
+                        return Err(failure);
                     }
-                })?);
+                    if front_failure.is_none() {
+                        front_failure = Some(failure);
+                    }
+                }
             }
             finish(&mut executor, &mut runtime, &mut stats)?;
             drop(executor);
@@ -621,6 +638,16 @@ impl QueryEngine {
                 weight.add(size_of::<FrontInstanceBootstrap>());
                 weight.vec(&paths, |w, p| w.path(p));
                 weight.flat_vec(&accepted);
+                if let Some(Failure::Front {
+                    error: Some(error), ..
+                }) = &front_failure
+                {
+                    weight.add(
+                        crate::memo::retained::retained_query_error_bytes(error)
+                            .try_into()
+                            .map_err(|_| refused("front diagnostic metadata overflow"))?,
+                    );
+                }
                 let retained = metadata
                     .split(weight.bytes())
                     .ok_or_else(|| refused("completed metadata exceeds its partition"))?;
@@ -630,6 +657,7 @@ impl QueryEngine {
                     registrations: accepted,
                     rounds: round,
                     stats,
+                    front_failure,
                     _metadata: retained,
                 });
             }

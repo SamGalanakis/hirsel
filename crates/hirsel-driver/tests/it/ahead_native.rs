@@ -737,17 +737,21 @@ fn cli_request_builds_define_and_adopt_ahead_on_both_backends() {
         for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
             let selected = session
                 .request(CompileOperation::NativeBuild(NativeRequest {
+                    options: {
+                        let mut options = native::BuildProfile::Default
+                            .options(
+                                backend,
+                                native::TargetSpec::x86_64_unknown_linux_gnu(),
+                                native::Validation::Ready,
+                            )
+                            .unwrap();
+                        options.opt = OptLevel::Default;
+                        options
+                    },
                     definition: None,
                     test_entries: vec![],
                     supplemental_sources: vec![],
                     output: NativeOutput::Executable,
-                    optimization: Some(OptLevel::Default),
-                    regions: None,
-                    backend,
-                    profile: native::BuildProfile::Default,
-                    target: native::TargetSpec::x86_64_unknown_linux_gnu(),
-                    validation: native::Validation::Ready,
-                    launch: Default::default(),
                     run: None,
                     fuel: false,
                     evidence: None,

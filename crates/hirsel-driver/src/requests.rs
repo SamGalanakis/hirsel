@@ -1,7 +1,7 @@
 //! Explicit immutable request selection shared by fresh and resident callers.
 //! The engine installs factories; these descriptors select operations and never
 //! accept caller-supplied tasks, caches, verifier receipts or mutable programs.
-use crate::native::{Backend, BuildProfile, LaunchInputs, TargetSpec, Validation};
+use crate::native::{BuildOptions, LaunchInputs, TargetSpec, Validation};
 use hirsel_engine::{
     LoweringPolicy,
     loader_inputs::{
@@ -35,8 +35,8 @@ mod source_graph;
 mod tir_products;
 pub use output::{
     CompileInspection, CompileOutput, CompileResult, CompilerReadiness, DefinitionWork,
-    NativeExecution, NativeObjectOutput, NativeObservation, PrecomputedSources, RequestWork,
-    TirBatchExecution, TirExecution, TirProducts,
+    NativeExecution, NativeObjectOutput, NativeObservation, NativeReady, PrecomputedSources,
+    RequestWork, TirBatchExecution, TirExecution, TirProducts,
 };
 pub use ownership_selection::{OwnershipExecution, OwnershipObjects};
 pub(crate) use selector::host_budget;
@@ -194,14 +194,9 @@ pub struct NativeRequest {
     /// These ordinary inputs are parsed and checked in the owning package.
     pub supplemental_sources: Vec<NativeSourceText>,
     pub output: NativeOutput,
-    pub optimization: Option<crate::native::OptLevel>,
-    /// Override region placement; None keeps the selected profile's policy.
-    pub regions: Option<bool>,
-    pub backend: Backend,
-    pub profile: BuildProfile,
-    pub target: TargetSpec,
-    pub validation: Validation,
-    pub launch: LaunchInputs,
+    /// Every compiler choice, including target, validation and launch inputs.
+    /// Presets such as `BuildProfile` produce this value; nothing overrides it.
+    pub options: BuildOptions,
     /// The independently validated run bound against the selected source facts.
     pub run: Option<std::sync::Arc<hirsel_run_config::ValidatedRun>>,
     /// Build-time fuel instrumentation is part of native/emission identity.
@@ -234,5 +229,10 @@ pub struct OwnershipRequest {
 #[derive(Clone, serde::Serialize)]
 pub enum NativeOutput {
     Executable,
-    Objects { roots: Vec<DefPath> },
+    Objects {
+        roots: Vec<DefPath>,
+    },
+    /// The settled Ready products of the entry and test entries, as an owned
+    /// validated execution view (`NativeReady`); no Codegen or Link runs.
+    Ready,
 }

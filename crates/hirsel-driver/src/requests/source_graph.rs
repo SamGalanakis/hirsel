@@ -526,6 +526,18 @@ impl GraphProducts for SourceProducts {
                                 return Err(uninstalled());
                             }
                             if let CompileOperation::NativeBuild(request) = &operation
+                                && matches!(request.output, super::NativeOutput::Ready)
+                            {
+                                match native
+                                    .as_ref()
+                                    .ok_or_else(|| uninstalled())?
+                                    .readiness
+                                    .ready(product.clone())
+                                {
+                                    Ok(view) => CompileResult::NativeReady(view),
+                                    Err(error) => CompileResult::NativeError(error),
+                                }
+                            } else if let CompileOperation::NativeBuild(request) = &operation
                                 && matches!(request.output, super::NativeOutput::Objects { .. })
                             {
                                 match native
@@ -1029,7 +1041,10 @@ pub(super) fn install(
             CompileOperation::NativeBuild(native) | CompileOperation::NativeRun(native),
             None,
             true,
-        ) => match crate::native::Toolchain::for_host_request(&native.target, store.clone()) {
+        ) => match crate::native::Toolchain::for_host_request(
+            &native.options.passes.target,
+            store.clone(),
+        ) {
             Ok(tools) => Some(Arc::new(tools)),
             Err(error) => return Err(loading.failed(ToolError::Runtime(error.to_string()))),
         },
@@ -1496,7 +1511,6 @@ pub(super) fn install(
                         super::native_store::capture(
                             store.clone(),
                             native_request,
-                            purpose,
                             native_transport,
                             scratch_parent,
                             disk_bytes,

@@ -4,6 +4,37 @@ use hirsel_engine::ToolError;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Every compiler choice of one native build: the Ready pass matrix, the
+/// backend, its optimization and object partitioning, and source/debug tables.
+/// A native request carries exactly this value; `BuildProfile` is only a preset.
+#[derive(Clone, Debug)]
+pub struct BuildOptions {
+    /// Target, validation, launch inputs and the Ready passes.
+    pub passes: Options,
+    pub backend: super::Backend,
+    pub opt: OptLevel,
+    pub partition: super::Partition,
+    /// Source line tables, intervals and the debug runtime archive. Independent
+    /// of `opt` and of the passes' specialization policy.
+    pub debug_tables: bool,
+}
+impl BuildOptions {
+    /// The Ready matrix `passes` under `backend`'s ordinary partition, without
+    /// source/debug tables.
+    pub fn new(passes: Options, backend: super::Backend, opt: OptLevel) -> Self {
+        Self {
+            passes,
+            backend,
+            opt,
+            partition: match backend {
+                super::Backend::Llvm => super::Partition::Whole,
+                super::Backend::Cranelift => super::Partition::Singleton,
+            },
+            debug_tables: false,
+        }
+    }
+}
+
 /// The user-facing executable profiles; runtime archives always use production settings.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BuildProfile {
@@ -15,16 +46,46 @@ pub enum BuildProfile {
     Debug,
 }
 impl BuildProfile {
-    pub(crate) fn options(self, target: TargetSpec) -> Options {
-        let mut options = Options::new(target);
-        options.scoped_specialization = matches!(self, Self::Release | Self::ReleaseLto);
-        options
-    }
-    pub(crate) fn opt(self) -> OptLevel {
-        match self {
+    /// This profile's complete build options for `backend` at `target`.
+    pub fn options(
+        self,
+        backend: super::Backend,
+        target: TargetSpec,
+        validation: super::Validation,
+    ) -> Result<BuildOptions, NativeError> {
+        if matches!(self, Self::Release | Self::ReleaseLto) && backend == super::Backend::Cranelift
+        {
+            return Err(NativeError::new(
+                StageName::Emission,
+                "release builds use LLVM; select LLVM or a non-release profile",
+            ));
+        }
+        let mut passes = Options::new(target);
+        passes.validation = validation;
+        passes.scoped_specialization = matches!(self, Self::Release | Self::ReleaseLto);
+        let opt = match self {
             Self::Default | Self::Release | Self::ReleaseLto => OptLevel::Default,
             Self::Debug => OptLevel::None,
+        };
+        Ok(BuildOptions {
+            debug_tables: self == Self::Debug,
+            ..BuildOptions::new(passes, backend, opt)
+        })
+    }
+    /// The interactive `run --native` preset: the default profile, except that
+    /// Cranelift compiles unoptimized.
+    pub fn run_options(
+        backend: super::Backend,
+        target: TargetSpec,
+        validation: super::Validation,
+    ) -> BuildOptions {
+        let mut options = Self::Default
+            .options(backend, target, validation)
+            .unwrap_or_else(|_| unreachable!("the default profile admits every backend"));
+        if backend == super::Backend::Cranelift {
+            options.opt = OptLevel::None;
         }
+        options
     }
 }
 
@@ -183,30 +244,20 @@ pub fn build_path_native_backend_with_validation(
     policy: crate::session::Policy,
     validation: super::Validation,
 ) -> Result<Result<Vec<String>, NativeError>, ToolError> {
-    if matches!(profile, BuildProfile::Release | BuildProfile::ReleaseLto)
-        && backend == super::Backend::Cranelift
-    {
-        return Ok(Err(NativeError::new(
-            StageName::Emission,
-            "release builds use LLVM; select LLVM or a non-release profile",
-        )));
-    }
+    let options = match profile.options(backend, target, validation) {
+        Ok(options) => options,
+        Err(error) => return Ok(Err(error)),
+    };
     let selected = crate::session::request(
         source,
         policy,
         crate::requests::CompileOperation::NativeBuild(crate::requests::NativeRequest {
-            backend,
-            profile,
-            target,
-            validation,
-            launch: super::LaunchInputs::default(),
+            options,
             run: None,
             definition: None,
             test_entries: vec![],
             supplemental_sources: vec![],
             output: crate::requests::NativeOutput::Executable,
-            optimization: None,
-            regions: None,
             fuel,
             evidence: evidence.cloned().map(std::sync::Arc::new),
         }),
@@ -277,9 +328,15 @@ mod scoped_consumer_9_tests {
                 BuildProfile::Release,
                 BuildProfile::ReleaseLto,
             ] {
-                let options = profile.options(TargetSpec::x86_64_unknown_linux_gnu());
+                let options = profile
+                    .options(
+                        super::super::Backend::Llvm,
+                        TargetSpec::x86_64_unknown_linux_gnu(),
+                        super::super::Validation::EveryStage,
+                    )
+                    .unwrap();
                 let release = matches!(profile, BuildProfile::Release | BuildProfile::ReleaseLto);
-                let ready = super::super::build(&input, &options).unwrap();
+                let ready = super::super::build(&input, &options.passes).unwrap();
                 let run = super::super::run_heap(&ready, &entry, &sites).unwrap();
                 assert!(run.observation.failures.is_empty());
                 assert_eq!(run.observation.exit_code, Some(1));

@@ -8,7 +8,10 @@ use hirsel_cli_args::{
     parse_or_exit,
 };
 use hirsel_driver::native::{
-    self, OptLevel, Options, Partition, RuntimeBuild, TargetSpec, Toolchain,
+    self, BuildOptions, OptLevel, Options, Partition, RuntimeBuild, TargetSpec, Toolchain,
+};
+use hirsel_driver::requests::{
+    CompileOperation, CompileResult, CompilerRequests, NativeOutput, NativeReady, NativeRequest,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -73,6 +76,35 @@ fn arguments() -> Result<Arguments, lexopt::Error> {
     })
 }
 
+/// The program's Ready execution view through one native build request.
+fn ready_view(
+    source: &Path,
+    options: BuildOptions,
+    tools: &Toolchain,
+) -> Result<std::sync::Arc<NativeReady>, Box<dyn std::error::Error>> {
+    let compiler = hirsel_driver::COMPILER.clone();
+    let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration())
+        .with_toolchain(std::sync::Arc::new(tools.clone()));
+    let output = requests.execute(
+        source,
+        CompileOperation::NativeBuild(NativeRequest {
+            definition: None,
+            test_entries: vec![],
+            supplemental_sources: vec![],
+            output: NativeOutput::Ready,
+            options,
+            run: None,
+            fuel: false,
+            evidence: None,
+        }),
+    )?;
+    match &output.result {
+        CompileResult::NativeReady(view) => Ok(view.clone()),
+        CompileResult::NativeError(error) => Err(error.to_string().into()),
+        _ => Err("the Ready request returned another operation".into()),
+    }
+}
+
 fn profile() -> Result<(), Box<dyn std::error::Error>> {
     let Arguments {
         program,
@@ -111,30 +143,7 @@ fn profile() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         program.clone()
     };
-    let mut loaded = hirsel_driver::load_program(&source)?;
-    loaded.check_for_execution()?;
-    let snapshot = loaded
-        .engine
-        .export_native_input()
-        .map_err(|e| format!("{e:?}"))?;
-    let mut sources = native::profile_sources(&snapshot);
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()?;
-    for source in sources.values_mut() {
-        if let Ok(relative) = source.path.strip_prefix(&repo) {
-            source.path = relative.to_path_buf();
-        }
-    }
-    let validated = loaded
-        .engine
-        .import_native_input(snapshot)
-        .map_err(|e| format!("{e:?}"))?;
     let target = TargetSpec::x86_64_unknown_linux_gnu();
-    let mut options = Options::new(target.clone());
-    // Profile heap ownership, including snapshot duplication, rather than hide it in regions.
-    options.regions = false;
-    let ready = native::build(&validated, &options)?;
     let tools = Toolchain::in_tree_with_runtime(
         &output.join("runtime"),
         &[&target],
@@ -143,11 +152,38 @@ fn profile() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         },
     )?;
+    // The profiler's policy: scoped specialization, heap ownership including
+    // snapshot duplication rather than regions, speed optimization, one
+    // whole-program object and source tables.
+    let mut passes = Options::new(target.clone());
+    passes.regions = false;
+    let ready = ready_view(
+        &source,
+        BuildOptions {
+            partition: Partition::Whole,
+            debug_tables: true,
+            ..BuildOptions::new(passes, native::Backend::Llvm, OptLevel::Speed)
+        },
+        &tools,
+    )?;
+    let mut sources = ready
+        .profiles
+        .as_deref()
+        .ok_or("the Ready view has no source tables")?
+        .clone();
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()?;
+    for source in sources.values_mut() {
+        if let Ok(relative) = source.path.strip_prefix(&repo) {
+            source.path = relative.to_path_buf();
+        }
+    }
     let measured = output.join("measurement-objects");
     std::fs::create_dir_all(&measured)?;
     let executable = native::link_profile(
-        &ready,
-        &loaded.entry,
+        &ready.program,
+        &ready.entry,
         OptLevel::Speed,
         Partition::Whole,
         &tools,
@@ -183,8 +219,8 @@ fn profile() -> Result<(), Box<dyn std::error::Error>> {
             let timing = output.join("cycles-objects");
             std::fs::create_dir_all(&timing)?;
             let executable = native::link_profile(
-                &ready,
-                &loaded.entry,
+                &ready.program,
+                &ready.entry,
                 OptLevel::Speed,
                 Partition::Whole,
                 &tools,

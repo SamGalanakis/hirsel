@@ -779,6 +779,121 @@ fn an_index_failure_site_is_the_index_expression_in_every_engine() {
     }
 }
 
+/// A native request's owned Ready execution view runs like the reference in
+/// every smoke configuration: the heap executor and both backends execute the
+/// request's settled Ready products and report failures through the view's
+/// own site tables.
+#[test]
+fn requested_ready_views_agree_with_the_reference_under_the_smoke_matrix() {
+    use hirsel_driver::native::{BuildOptions, NativeError, Options};
+    use hirsel_driver::requests::{
+        CompileOperation, CompileResult, CompilerRequests, NativeOutput, NativeReady, NativeRequest,
+    };
+    const PRINT: &str = "pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
+  let _ = out.print(io.stdout(rt)?, \"hi\\n\")
+  Ok(())
+}
+";
+    const LIST: &str = "pub fn main(rt: Io, args: Args) -> Result[(), ()] {
+  let xs: List[u8] = [7u8]
+  let i: u64 = 1
+  let x = xs[i]
+  Ok(())
+}
+";
+    // A std-free standalone package, as the in-memory reference checks it.
+    const SIDECAR: &str = r#"{"schema":1,"package":{"name":"standalone","version":"0"},"entry":{"module":[],"name":"main"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[]}"#;
+    with_compiler_stack(|| {
+        let matrix = smoke_matrix();
+        let tools = toolchain(&matrix);
+        for (name, source) in [("ready-print", PRINT), ("ready-list", LIST)] {
+            let dir = scratch(name);
+            let path = dir.join("main.hir");
+            std::fs::write(&path, source).unwrap();
+            std::fs::write(path.with_extension("hir.json"), SIDECAR).unwrap();
+            let mut loaded = hirsel_driver::load_program_source(&path, None).unwrap();
+            loaded.check_for_execution().unwrap();
+            let entry = loaded.entry.clone();
+            let execution = run_observed_snapshot(
+                &mut loaded.engine,
+                &RunConfiguration {
+                    entry: entry.clone(),
+                    hash_seed: 0,
+                    inputs: vec![],
+                },
+                SimulationConfig::default(),
+            )
+            .unwrap();
+            let reference = Observation::of_reference(execution.observation.as_ref().unwrap());
+            let compiler = hirsel_driver::COMPILER;
+            let mut requests =
+                CompilerRequests::for_host(compiler.clone(), compiler.configuration())
+                    .with_toolchain(std::sync::Arc::new(tools.clone()));
+            let mut ready =
+                |options: &Options| -> Result<std::sync::Arc<NativeReady>, NativeError> {
+                    let failed = |message: String| NativeError {
+                        stage: StageName::Ready,
+                        definition: None,
+                        validator: false,
+                        message,
+                    };
+                    let output = requests
+                        .execute(
+                            &path,
+                            CompileOperation::NativeBuild(NativeRequest {
+                                definition: None,
+                                test_entries: vec![],
+                                supplemental_sources: vec![],
+                                output: NativeOutput::Ready,
+                                options: BuildOptions::new(
+                                    options.clone(),
+                                    hirsel_driver::native::Backend::Llvm,
+                                    hirsel_driver::native::OptLevel::Default,
+                                ),
+                                run: None,
+                                fuel: false,
+                                evidence: None,
+                            }),
+                        )
+                        .map_err(|error| failed(error.to_string()))?;
+                    match &output.result {
+                        CompileResult::NativeReady(view) => Ok(view.clone()),
+                        CompileResult::NativeError(error) => Err(error.clone()),
+                        _ => Err(failed("another operation".into())),
+                    }
+                };
+            let outcomes = hirsel_driver::native::differential_ready(
+                &mut ready,
+                &entry,
+                &reference,
+                &matrix,
+                &tools,
+                &dir,
+                &Default::default(),
+            );
+            assert_eq!(outcomes.len(), matrix.len(), "{name}");
+            for (configuration, outcome) in outcomes {
+                assert!(
+                    matches!(outcome, Outcome::Agree),
+                    "{name} under {configuration}: {outcome:?}"
+                );
+            }
+            // Hand-derived: the list index `xs[i]` on line 4, column 11.
+            if name == "ready-list" {
+                let [failure] = reference.failures.as_slice() else {
+                    panic!("{reference:?}")
+                };
+                assert_eq!(
+                    (failure.rule.as_str(), failure.line, failure.column),
+                    ("MEM-14", 4, 11)
+                );
+            } else {
+                assert_eq!(reference.output, b"hi\n");
+            }
+        }
+    });
+}
+
 #[test]
 #[ignore = "native: run by tools/check-native.sh"]
 fn descriptor_indices_are_assigned_before_all_twenty_two_link_partitions() {

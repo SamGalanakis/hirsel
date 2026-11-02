@@ -95,14 +95,15 @@ impl Executable {
                     .map(|test| (test.entry.clone(), test.seed))
                     .collect(),
                 supplemental_sources: discovery.sources.clone(),
-                backend,
-                profile: super::BuildProfile::Default,
-                optimization: Some(optimization),
-                regions: None,
+                options: super::BuildOptions {
+                    opt: optimization,
+                    ..super::BuildProfile::Default.options(
+                        backend,
+                        target,
+                        super::Validation::EveryStage,
+                    )?
+                },
                 output: crate::requests::NativeOutput::Executable,
-                target,
-                validation: super::Validation::EveryStage,
-                launch: Default::default(),
                 run: None,
                 fuel: false,
                 evidence: None,
@@ -178,7 +179,7 @@ impl Executable {
         }
         let output = super::link::run_bounded(
             &self.runnable,
-            &self.execution.request.target,
+            &self.execution.request.options.passes.target,
             &self.execution.toolchain,
             &self.scratch.0.join("tooling"),
             &command,

@@ -26,6 +26,7 @@ pub(super) struct NativeBuildReadiness {
     platform: Option<Arc<super::native_link::FrozenPlatform>>,
     completed: Mutex<Option<Arc<NativeExecution>>>,
     objects: Mutex<Option<Arc<super::NativeObjectOutput>>>,
+    ready: Mutex<Option<Arc<super::NativeReady>>>,
 }
 impl NativeBuildReadiness {
     pub fn new(
@@ -43,6 +44,7 @@ impl NativeBuildReadiness {
             platform,
             completed: Mutex::new(None),
             objects: Mutex::new(None),
+            ready: Mutex::new(None),
         })
     }
     pub fn objects(
@@ -89,6 +91,58 @@ impl NativeBuildReadiness {
             instances,
             store: self.store.clone(),
             _owner: Arc::new((allowance, self.bootstrap.clone(), compilation, source)),
+        });
+        *completed = Some(output.clone());
+        Ok(output)
+    }
+    pub fn ready(&self, selected: ProductRef) -> Result<Arc<super::NativeReady>, NativeError> {
+        let failed = |message| NativeError::new(StageName::Ready, message);
+        if !matches!(self.request.output, super::NativeOutput::Ready) {
+            return Err(failed("native request did not select a Ready view".into()));
+        }
+        let mut completed = self.ready.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(view) = completed.as_ref() {
+            return Ok(view.clone());
+        }
+        let (compilation, product, source) = self.bootstrap.outcome(selected).map_err(failed)?;
+        let view = compilation.ready_view(product).map_err(failed)?;
+        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        // Envelope plus copied identity, table and source metadata; Ready
+        // bodies are charged to their producers' materialization scope.
+        weight.add(std::mem::size_of::<super::NativeReady>() + 4 * std::mem::size_of::<usize>());
+        weight.flat_vec(&view.ready);
+        weight.path(&source.run.entry);
+        weight.source_snapshot(&source.roots.sources);
+        weight.callees(&source.run.callees);
+        weight.vec(&view.observation.failure_rules, |w, rule| {
+            w.add(rule.capacity())
+        });
+        weight.tree::<u64, (DefId, hirsel_lir::ir::SiteRange)>(view.observation.sites.len());
+        weight.map(&view.observation.anchors, |w, path, anchors| {
+            w.path(path);
+            w.flat_vec(anchors);
+        });
+        request_metadata(&mut weight, &self.request);
+        let allowance = self
+            .bootstrap
+            .reserve_output(weight.bytes())
+            .map_err(failed)?;
+        let owner: Arc<dyn Send + Sync> = Arc::new((
+            allowance,
+            self.bootstrap.clone(),
+            compilation,
+            source.clone(),
+        ));
+        let output = Arc::new(super::NativeReady {
+            root: view.root,
+            ready: view.ready,
+            program: view.program,
+            entry: source.run.entry.clone(),
+            observation: view.observation,
+            sources: source.roots.sources.clone().retain_owner(owner.clone()),
+            profiles: view.profiles,
+            callees: source.run.callees.clone(),
+            _owner: owner,
         });
         *completed = Some(output.clone());
         Ok(output)
@@ -275,15 +329,15 @@ pub(super) fn request_metadata(
         // Text is shared caller input. Parsed source storage is charged with
         // the front source inventory before any native factory is installed.
     });
-    let target = &request.target;
+    let target = &request.options.passes.target;
     weight.add(target.triple.capacity());
     weight.add(target.cpu.capacity());
     weight.vec(&target.features, |w, feature| w.add(feature.capacity()));
     weight.add(target.llvm_data_layout.capacity());
-    if let Some(scheduler) = &request.launch.scheduler {
+    if let Some(scheduler) = &request.options.passes.launch.scheduler {
         weight.add(scheduler.algorithm.capacity());
     }
-    if let Some(scripts) = &request.launch.fixture_file_faults {
+    if let Some(scripts) = &request.options.passes.launch.fixture_file_faults {
         weight.map(scripts, |w, _, queue| {
             w.add(
                 queue

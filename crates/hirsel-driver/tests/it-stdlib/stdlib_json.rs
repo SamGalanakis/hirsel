@@ -88,17 +88,22 @@ fn native_measurement(source: &str, label: &str) -> String {
         .execute(
             &path,
             CompileOperation::NativeBuild(NativeRequest {
+                options: {
+                    let mut options = native::BuildProfile::Default
+                        .options(
+                            native::Backend::Llvm,
+                            target,
+                            native::Validation::EveryStage,
+                        )
+                        .unwrap();
+                    options.opt = OptLevel::Speed;
+                    options.passes.regions = false;
+                    options
+                },
                 definition: None,
                 test_entries: vec![],
                 supplemental_sources: vec![],
                 output: NativeOutput::Executable,
-                optimization: Some(OptLevel::Speed),
-                regions: Some(false),
-                backend: native::Backend::Llvm,
-                profile: native::BuildProfile::Default,
-                target,
-                validation: native::Validation::EveryStage,
-                launch: Default::default(),
                 run: None,
                 fuel: false,
                 evidence: None,

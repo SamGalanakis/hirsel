@@ -120,7 +120,7 @@ impl NativeSelection {
             super::NativeOutput::Executable => {
                 Some(NativePlatformPolicy::capture().map_err(native_error)?)
             }
-            super::NativeOutput::Objects { .. } => None,
+            super::NativeOutput::Objects { .. } | super::NativeOutput::Ready => None,
         };
         let entry = source.entry.clone();
         let links = program.engine.foreign_links.clone();
@@ -263,20 +263,28 @@ impl NativeSelection {
 fn native_error(error: NativeError) -> ToolError {
     ToolError::Runtime(error.to_string())
 }
-fn request_key(request: &NativeRequest, purpose: NativePurpose) -> Result<ContentHash, ToolError> {
+fn request_key(request: &NativeRequest, _: NativePurpose) -> Result<ContentHash, ToolError> {
+    let passes = &request.options.passes;
     let bytes = serde_json::to_vec(&(
         &request.definition,
         &request.test_entries,
         &request.supplemental_sources,
         &request.output,
-        request.backend.name(),
-        super::native_platform::profile_options(request, purpose).map_err(native_error)?,
-        request.target.digest(),
-        match request.validation {
+        super::native_platform::profile_options(request).map_err(native_error)?,
+        passes.target.digest(),
+        match passes.validation {
             native::Validation::Ready => 0u8,
             native::Validation::EveryStage => 1,
         },
-        &request.launch,
+        &passes.launch,
+        (
+            passes.regions,
+            passes.elide,
+            passes.reuse,
+            passes.flat_walk,
+            passes.scoped_specialization,
+            super::native_bootstrap::discharge_rows(&passes.discharge),
+        ),
         request.run.as_ref().map(|run| run.identity()),
         request.fuel,
         request
@@ -286,7 +294,7 @@ fn request_key(request: &NativeRequest, purpose: NativePurpose) -> Result<Conten
     ))
     .map_err(|error| ToolError::Runtime(error.to_string()))?;
     Ok(ContentHash::of_parts(
-        "hirsel.host.native-request.v1",
+        "hirsel.host.native-request.v2",
         [bytes.as_slice()],
     ))
 }
@@ -349,7 +357,7 @@ pub(super) fn artifacts(
                 fuel: false,
                 requested_run: None,
                 test_entries: vec![],
-                emit_only: true,
+                output: native::queries::compilation_tasks::CompilationOutput::Objects,
                 backends,
             },
             output: super::NativeOutput::Objects { roots },

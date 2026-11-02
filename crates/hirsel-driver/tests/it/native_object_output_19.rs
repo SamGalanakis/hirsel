@@ -51,6 +51,11 @@ fn object_requests_emit_generic_helpers_without_link_or_launch() {
             let request = CompileRequest {
                 path: manifest.clone(), inputs: inputs.into(),
                 operation: CompileOperation::NativeBuild(NativeRequest {
+                    options: {
+                        let mut options = native::BuildProfile::Default.options(backend, target.clone(), native::Validation::EveryStage).unwrap();
+                        options.opt = native::OptLevel::None;
+                        options
+                    },
                     definition: Some(first.clone()),
                     test_entries: vec![],
                     supplemental_sources: vec![NativeSourceText {
@@ -58,11 +63,9 @@ fn object_requests_emit_generic_helpers_without_link_or_launch() {
                         text: "fn native_coverage_keep(name take value:u64)->u64 {keep(name: take value)}\nfn native_coverage_empty()->List[u64]{empty()}\n".into(),
                     }],
                     output: NativeOutput::Objects { roots: vec![first, second] },
-                    optimization: Some(native::OptLevel::None),
-                    regions: None,
-                    backend, profile: native::BuildProfile::Default,
-                    target: target.clone(), validation: native::Validation::EveryStage,
-                    launch: Default::default(), run: None, fuel: false, evidence: None,
+                    run: None,
+                    fuel: false,
+                    evidence: None,
                 }),
             };
             let mut selected = selector.select(&request).unwrap();

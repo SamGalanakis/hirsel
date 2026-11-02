@@ -160,6 +160,7 @@ pub enum CompileResult {
     Native(Arc<NativeExecution>),
     Ownership(Arc<super::OwnershipExecution>),
     NativeObjects(Arc<NativeObjectOutput>),
+    NativeReady(Arc<NativeReady>),
     NativeSources(Arc<hirsel_engine::FrontNativeProducts>),
 }
 /// Read completed library source products without an entry, runtime metadata
@@ -427,6 +428,36 @@ impl hirsel_engine::requests::OutputReadiness for CompilerReadiness {
             }
         }
         Ok(output)
+    }
+}
+
+/// An owned, validated Ready execution view: the settled root and Ready
+/// product identities of one native request and the Ready program assembled
+/// from exactly those products, which the heap executor and native emission
+/// execute. The retained owner holds the admitted producers, never an engine.
+pub struct NativeReady {
+    pub root: hirsel_engine::runtime::ProductRef,
+    pub ready: Vec<hirsel_engine::runtime::ProductRef>,
+    pub program: crate::native::ReadyProgram,
+    pub entry: DefPath,
+    pub observation: NativeObservation,
+    pub sources: SourceMap,
+    /// Source profiles, present when the request selected source/debug tables.
+    pub profiles: Option<Arc<crate::native::ProfileSources>>,
+    pub callees: std::collections::BTreeMap<String, hirsel_run_schema::CalleeFacts>,
+    pub(super) _owner: Arc<dyn Send + Sync>,
+}
+impl NativeReady {
+    /// Failure sites over the selected source anchors.
+    pub fn sites(&self) -> crate::native::Sites<'_> {
+        crate::native::Sites::from_anchors(
+            &self.sources,
+            self.observation
+                .anchors
+                .iter()
+                .map(|(path, anchors)| (path, anchors.clone()))
+                .collect(),
+        )
     }
 }
 

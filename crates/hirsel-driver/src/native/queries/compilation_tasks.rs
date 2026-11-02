@@ -22,6 +22,22 @@ use hirsel_engine::store::{Action, Address, Domain};
 use std::{collections::BTreeMap, sync::OnceLock, task::Poll};
 
 pub const COMPILATION_KIND: u32 = 0x4e00_0023;
+/// Settled identities and the Ready program assembled over exactly them.
+pub struct ReadyView {
+    pub root: ProductRef,
+    pub ready: Vec<ProductRef>,
+    pub program: crate::native::ReadyProgram,
+    pub observation: crate::requests::NativeObservation,
+    pub profiles: Option<Arc<crate::native::ProfileSources>>,
+}
+/// What one compilation settles: a linked executable, Codegen fragments, or
+/// only the root and its Ready products (no Codegen or Link is demanded).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+pub enum CompilationOutput {
+    Executable,
+    Objects,
+    Ready,
+}
 /// Frozen platform/byte/codegen identities. The discovered instance closure is
 /// applied during the compilation poll; no mutable engine or callback builds
 /// hidden native dependencies here. Executor is invoked solely by actual Link.
@@ -56,7 +72,7 @@ pub struct CompilationTasks {
     backends: Vec<CompilationBackend>,
     query: QueryId,
     verify_store: hirsel_engine::store::VerifyStore,
-    emit_only: bool,
+    output: CompilationOutput,
     weight: MemoryWeight,
     allowance: Arc<MemoryReservation>,
     dispatch: OnceLock<Dispatch>,
@@ -154,7 +170,7 @@ impl CompilationTasks {
             backends,
             query,
             verify_store,
-            emit_only: false,
+            output: CompilationOutput::Executable,
             weight,
             allowance: Arc::new(allowance),
             dispatch: OnceLock::new(),
@@ -162,22 +178,34 @@ impl CompilationTasks {
             fallback,
         }))
     }
-    /// Select object emission before installing any factory. This uses the
-    /// same discovery, arena, independent C and Ready/Codegen dependencies;
-    /// no Link task is demanded and no executable is manufactured.
-    pub fn with_codegen_output(mut self: Arc<Self>) -> Result<Arc<Self>, String> {
+    /// Select the settled output before installing any factory. Objects and
+    /// Ready use the same discovery, arena, independent C and Ready
+    /// dependencies; neither demands Link nor manufactures an executable, and
+    /// Ready demands no Codegen either.
+    pub fn with_output(
+        mut self: Arc<Self>,
+        output: CompilationOutput,
+    ) -> Result<Arc<Self>, String> {
+        if output == self.output {
+            return Ok(self);
+        }
         let this =
-            Arc::get_mut(&mut self).ok_or("Codegen output requires an unshared compilation")?;
+            Arc::get_mut(&mut self).ok_or("compilation output requires an unshared compilation")?;
         if this.dispatch.get().is_some() || this.completed.get().is_some() {
-            return Err("Codegen output must be selected before dispatch".into());
+            return Err("compilation output must be selected before dispatch".into());
         }
-        if !this.emit_only {
-            this.query.address = Address(ContentHash::of_parts(
-                "hirsel.native.compilation-codegen-address.v1",
-                [this.query.address.0.0.as_slice()],
-            ));
-            this.emit_only = true;
-        }
+        let domain = match output {
+            CompilationOutput::Executable => {
+                return Err("an executable is the default output".into());
+            }
+            CompilationOutput::Objects => "hirsel.native.compilation-codegen-address.v1",
+            CompilationOutput::Ready => "hirsel.native.compilation-ready-address.v1",
+        };
+        this.query.address = Address(ContentHash::of_parts(
+            domain,
+            [this.query.address.0.0.as_slice()],
+        ));
+        this.output = output;
         Ok(self)
     }
     /// The diagnostic produced by an actual native dependency, including a
@@ -306,7 +334,15 @@ impl CompilationTasks {
         let mut whole_codegen = Vec::new();
         let mut plans = Vec::new();
         let mut links = Vec::new();
-        for backend in &self.backends {
+        if self.output == CompilationOutput::Ready {
+            links.push(roots.query_id());
+            links.extend(owners.iter().map(InstanceAddress::ready_query_id));
+        }
+        for backend in self
+            .backends
+            .iter()
+            .filter(|_| self.output != CompilationOutput::Ready)
+        {
             let fragments = owners
                 .iter()
                 .map(|owner| CodegenKey {
@@ -320,21 +356,21 @@ impl CompilationTasks {
                 .collect::<Vec<_>>();
             match backend.executor.codegen_partition() {
                 super::link_tasks::CodegenPartition::PerInstance => {
-                    if self.emit_only {
+                    if self.output == CompilationOutput::Objects {
                         links.extend(fragments.iter().map(CodegenKey::query_id));
                     }
                     codegen.extend(fragments.iter().cloned());
                 }
                 partition => {
                     for key in partition.modules(&fragments)? {
-                        if self.emit_only {
+                        if self.output == CompilationOutput::Objects {
                             links.push(key.query_id());
                         }
                         whole_codegen.push(key);
                     }
                 }
             }
-            if self.emit_only {
+            if self.output == CompilationOutput::Objects {
                 continue;
             }
             let key = LinkKey {
@@ -355,7 +391,7 @@ impl CompilationTasks {
         let execution_keys = self
             .backends
             .iter()
-            .filter(|_| needs_execution)
+            .filter(|_| needs_execution && self.output != CompilationOutput::Ready)
             .map(|backend| CodegenKey {
                 owner: owners[0].clone(),
                 backend: backend.backend.clone(),
@@ -472,8 +508,8 @@ impl CompilationTasks {
     /// Number of independently admitted instances emitted by this completion.
     pub fn emitted_instances(&self, compilation: ProductRef) -> Result<usize, String> {
         let dispatch = self.selected(compilation)?;
-        if !self.emit_only {
-            return Err("compilation selected an executable, not object emission".into());
+        if self.output != CompilationOutput::Objects {
+            return Err("compilation did not select object emission".into());
         }
         Ok(self
             .instances
@@ -505,8 +541,41 @@ impl CompilationTasks {
         self.selected(compilation)?.link.observation()
     }
 
+    /// The owned Ready execution view of this exact completed Ready
+    /// compilation: its settled root and Ready reads, the Ready program over
+    /// them, body-free observation tables and, with source/debug tables, the
+    /// root's source profiles. Reopening runs no dependency query.
+    pub fn ready_view(&self, compilation: ProductRef) -> Result<ReadyView, String> {
+        let dispatch = self.selected(compilation)?;
+        if self.output != CompilationOutput::Ready {
+            return Err("compilation did not select a Ready execution view".into());
+        }
+        let (root, ready) = self
+            .completed
+            .get()
+            .unwrap()
+            .1
+            .split_first()
+            .ok_or("Ready compilation has no settled root")?;
+        let (mut products, selected) = dispatch.roots.products(root.clone(), ready)?;
+        let program = products.ready_program(&selected, ready)?;
+        let observation = products.observation_metadata(&selected)?;
+        let profiles = self
+            .emission
+            .debug
+            .then(|| products.profile_sources(&selected))
+            .transpose()?;
+        Ok(ReadyView {
+            root: root.clone(),
+            ready: ready.to_vec(),
+            program,
+            observation,
+            profiles,
+        })
+    }
+
     fn publish(&self, outputs: Vec<ProductRef>) -> Result<ProductRef, String> {
-        if !self.emit_only {
+        if self.output == CompilationOutput::Executable {
             hirsel_intern::memory::checkpoint("link complete");
         }
         let action = Action(ContentHash::of_parts(

@@ -151,19 +151,21 @@ pub fn run_path_native_backend_with_trace_events(
         let selected = session.request_applied(crate::requests::CompileOperation::NativeRun(
             crate::requests::NativeRequest {
                 definition,
-                backend,
-                profile: super::BuildProfile::Default,
-                target: super::TargetSpec::x86_64_unknown_linux_gnu(),
-                validation,
-                launch: run.record().inputs.clone(),
+                options: {
+                    let mut options = super::BuildProfile::run_options(
+                        backend,
+                        super::TargetSpec::x86_64_unknown_linux_gnu(),
+                        validation,
+                    );
+                    options.passes.launch = run.record().inputs.clone();
+                    options
+                },
                 run: Some(std::sync::Arc::new(run.clone())),
                 fuel: run.budgets().is_some_and(|budgets| budgets.fuel.is_some()),
                 evidence: evidence.cloned().map(std::sync::Arc::new),
                 test_entries: vec![],
                 supplemental_sources: vec![],
                 output: crate::requests::NativeOutput::Executable,
-                optimization: None,
-                regions: None,
             },
         ))?;
         match &selected.result {

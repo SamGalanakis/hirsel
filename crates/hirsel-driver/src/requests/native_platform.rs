@@ -7,12 +7,13 @@ use super::{
     native_link::{FrozenPlatform, LinkInputs},
 };
 use crate::native::{
-    self, Backend, BuildProfile, NativeError, StageName, Toolchain,
+    self, NativeError, StageName, Toolchain,
     object_queries::{
         capture::{CaptureLimits, FrozenLinkKit, FrozenLinker},
         platform::{CapturedPlatform, PlatformCaptureInputs, RuntimeSelection},
         runtime::RuntimeLimits,
     },
+    queries::compilation_tasks::CompilationOutput,
 };
 use hirsel_engine::{LinkInput, runtime::MemoryReservation, store::ResultStore};
 use hirsel_syntax::{ContentHash, DefPath};
@@ -40,47 +41,50 @@ impl NativePlatformPolicy {
         })
     }
 }
-/// The operation supplies emission intent independently of launch records.
-/// A bound executable build can also carry a validated run.
+/// The operation: a build or a launch. Emission policy is the request's
+/// complete `BuildOptions`; a bound executable build can also carry a run.
 #[derive(Clone, Copy)]
 pub(super) enum NativePurpose {
     Build,
     Run,
 }
-impl NativePurpose {
-    pub fn opt(self, request: &NativeRequest) -> native::OptLevel {
-        if let Some(optimization) = request.optimization {
-            return optimization;
-        }
-        match (self, request.profile, request.backend) {
-            // Preserve tool::run's interactive Cranelift policy. Executable
-            // builds retain their explicit profile policy on both backends.
-            (Self::Run, BuildProfile::Default, Backend::Cranelift) => native::OptLevel::None,
-            _ => request.profile.opt(),
-        }
-    }
-}
-pub(super) fn profile_options(
-    request: &NativeRequest,
-    purpose: NativePurpose,
-) -> Result<ContentHash, NativeError> {
-    let profile = match request.profile {
-        BuildProfile::Default => 0u8,
-        BuildProfile::Debug => 1,
-        BuildProfile::Release => 2,
-        BuildProfile::ReleaseLto => 3,
-    };
-    let opt = match purpose.opt(request) {
+/// Codegen identity of the request's complete backend selection. Ready pass
+/// choices enter the separate native policy identity.
+pub(super) fn profile_options(request: &NativeRequest) -> Result<ContentHash, NativeError> {
+    let options = &request.options;
+    let opt = match options.opt {
         native::OptLevel::None => 0u8,
         native::OptLevel::Default => 1,
         native::OptLevel::Speed => 2,
     };
-    let bytes = serde_json::to_vec(&(profile, request.fuel, opt, request.regions))
-        .map_err(|error| NativeError::new(StageName::Emission, error.to_string()))?;
+    let partition = match options.partition {
+        native::Partition::Whole => (0u8, 0u64),
+        native::Partition::Singleton => (1, 0),
+        native::Partition::Random(seed) => (2, seed),
+    };
+    let bytes = serde_json::to_vec(&(
+        options.backend.name(),
+        opt,
+        partition,
+        options.debug_tables,
+        request.fuel,
+    ))
+    .map_err(|error| NativeError::new(StageName::Emission, error.to_string()))?;
     Ok(ContentHash::of_parts(
-        "hirsel.host.native-profile.v3",
+        "hirsel.host.native-profile.v4",
         [bytes.as_slice()],
     ))
+}
+/// The request's object partition as its ordinary Codegen grouping.
+pub(super) fn codegen_partition(
+    partition: native::Partition,
+) -> native::queries::link_tasks::CodegenPartition {
+    use native::queries::link_tasks::CodegenPartition;
+    match partition {
+        native::Partition::Whole => CodegenPartition::WholeModule,
+        native::Partition::Singleton => CodegenPartition::PerInstance,
+        native::Partition::Random(seed) => CodegenPartition::Seeded(seed),
+    }
 }
 pub(super) struct NativePlatformInputs<'a> {
     pub purpose: NativePurpose,
@@ -104,64 +108,68 @@ impl NativePlatformSelection {
         allowance: impl Into<Arc<MemoryReservation>>,
     ) -> Result<Self, NativeError> {
         let request = inputs.request;
+        let options = &request.options;
         let failed = |message| NativeError::new(StageName::Link, message);
-        if matches!(
-            request.profile,
-            BuildProfile::Release | BuildProfile::ReleaseLto
-        ) && request.backend == Backend::Cranelift
-        {
-            return Err(NativeError::new(
-                StageName::Emission,
-                "release builds use LLVM; select LLVM or a non-release profile",
-            ));
-        }
         if request
             .run
             .as_ref()
-            .is_some_and(|run| run.record().inputs != request.launch)
+            .is_some_and(|run| run.record().inputs != options.passes.launch)
         {
             return Err(NativeError::new(
                 StageName::Manifest,
                 "selected native launch inputs differ from the validated run",
             ));
         }
-        let target = &request.target;
-        if let super::NativeOutput::Objects { roots } = &request.output {
-            if roots.is_empty()
-                || !request.test_entries.is_empty()
-                || request.run.is_some()
-                || matches!(inputs.purpose, NativePurpose::Run)
-            {
-                return Err(failed(
-                    "object emission needs explicit roots and no launch selection".into(),
-                ));
+        let target = &options.passes.target;
+        let unlinked = match &request.output {
+            super::NativeOutput::Objects { roots } => {
+                if roots.is_empty()
+                    || !request.test_entries.is_empty()
+                    || request.run.is_some()
+                    || matches!(inputs.purpose, NativePurpose::Run)
+                {
+                    return Err(failed(
+                        "object emission needs explicit roots and no launch selection".into(),
+                    ));
+                }
+                Some(CompilationOutput::Objects)
             }
-            let profile_options = profile_options(request, inputs.purpose)?;
-            let mut options = request.profile.options(target.clone());
-            if let Some(regions) = request.regions {
-                options.regions = regions;
+            super::NativeOutput::Ready => {
+                if request.run.is_some() || matches!(inputs.purpose, NativePurpose::Run) {
+                    return Err(failed(
+                        "a Ready execution view has no launch selection".into(),
+                    ));
+                }
+                Some(CompilationOutput::Ready)
             }
-            options.validation = request.validation;
+            super::NativeOutput::Executable => None,
+        };
+        if let Some(output) = unlinked {
+            let profile_options = profile_options(request)?;
             return Ok(Self {
                 plan: NativePlan {
-                    options,
+                    options: options.passes.clone(),
                     policy: profile_options,
-                    verify_store: if request.validation == native::Validation::EveryStage {
+                    verify_store: if options.passes.validation == native::Validation::EveryStage {
                         hirsel_engine::store::VerifyStore::Recompute
                     } else {
                         inputs.verify_store
                     },
-                    opt: inputs.purpose.opt(request),
-                    debug: request.profile == BuildProfile::Debug,
+                    opt: options.opt,
+                    debug: options.debug_tables,
                     verify_backend: true,
                     measurement: inputs.tools.runtime_build.measurement,
                     fuel: request.fuel,
                     requested_run: None,
-                    test_entries: Vec::new(),
-                    emit_only: true,
+                    test_entries: if matches!(output, CompilationOutput::Ready) {
+                        request.test_entries.clone()
+                    } else {
+                        Vec::new()
+                    },
+                    output,
                     backends: vec![
                         crate::native::queries::compilation_tasks::CompilationBackend {
-                            backend: request.backend.name().into(),
+                            backend: options.backend.name().into(),
                             backend_version: native::backend_version(),
                             target_features: target.digest(),
                             profile_options,
@@ -173,7 +181,7 @@ impl NativePlatformSelection {
                             ),
                             runtime_archives: vec![],
                             foreign_inputs: vec![],
-                            executor: Arc::new(ObjectOutput(request.backend)),
+                            executor: Arc::new(ObjectOutput(options.partition)),
                         },
                     ],
                 },
@@ -216,12 +224,8 @@ impl NativePlatformSelection {
             .tools
             .archive(&target.triple)
             .ok_or_else(|| failed(format!("no runtime archive for {}", target.triple)))?;
-        let archive = native::runtime_archive(
-            inputs.tools,
-            &target.triple,
-            stripped,
-            request.profile == BuildProfile::Debug,
-        )?;
+        let archive =
+            native::runtime_archive(inputs.tools, &target.triple, stripped, options.debug_tables)?;
         let foreign = native::selected_foreign_inputs(inputs.tools, target, inputs.links)?;
         let linker = FrozenLinker::snapshot(store.as_ref(), &policy.linker).map_err(failed)?;
         let kit =
@@ -258,36 +262,31 @@ impl NativePlatformSelection {
                 limits,
             },
             inputs.entry.clone(),
-            request.backend,
+            options.backend,
+            options.partition,
             target.clone(),
             request.run.clone(),
             allowance,
         )
         .map_err(failed)?;
-        let profile_options = profile_options(request, inputs.purpose)?;
-        let mut options = request.profile.options(target.clone());
-        if let Some(regions) = request.regions {
-            options.regions = regions;
-        }
-        options.validation = request.validation;
-        options.launch = request.launch.clone();
+        let profile_options = profile_options(request)?;
         Ok(Self {
             plan: NativePlan {
-                options,
+                options: options.passes.clone(),
                 policy: profile_options,
-                verify_store: if request.validation == native::Validation::EveryStage {
+                verify_store: if options.passes.validation == native::Validation::EveryStage {
                     hirsel_engine::store::VerifyStore::Recompute
                 } else {
                     inputs.verify_store
                 },
-                opt: inputs.purpose.opt(request),
-                debug: request.profile == BuildProfile::Debug,
+                opt: options.opt,
+                debug: options.debug_tables,
                 verify_backend: true,
                 measurement: inputs.tools.runtime_build.measurement,
                 fuel: request.fuel,
                 requested_run: request.run.clone(),
                 test_entries: request.test_entries.clone(),
-                emit_only: matches!(request.output, super::NativeOutput::Objects { .. }),
+                output: CompilationOutput::Executable,
                 backends: vec![platform.backend(
                     native::backend_version(),
                     target.digest(),
@@ -303,80 +302,59 @@ impl NativePlatformSelection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::Backend;
 
+    /// Every codegen choice reaches the Codegen identity, so no compilation
+    /// product is reused across another backend selection.
     #[test]
-    fn interactive_backend_optimization_is_explicit_in_codegen_profile_identity() {
-        for backend in [Backend::Cranelift, Backend::Llvm] {
-            let mut request = NativeRequest {
-                definition: None,
-                test_entries: Vec::new(),
-                supplemental_sources: Vec::new(),
-                output: super::super::NativeOutput::Executable,
-                optimization: None,
-                regions: None,
-                backend,
-                profile: BuildProfile::Default,
-                target: native::TargetSpec::x86_64_unknown_linux_gnu(),
-                validation: native::Validation::EveryStage,
-                launch: Default::default(),
-                run: None,
-                fuel: false,
-                evidence: None,
-            };
-            assert_eq!(
-                NativePurpose::Build.opt(&request),
-                native::OptLevel::Default
-            );
-            let run = profile_options(&request, NativePurpose::Run).unwrap();
-            let build = profile_options(&request, NativePurpose::Build).unwrap();
-            match backend {
-                Backend::Cranelift => {
-                    assert_eq!(NativePurpose::Run.opt(&request), native::OptLevel::None);
-                    assert_ne!(
-                        run, build,
-                        "interactive None cannot reuse a Default Codegen action"
-                    );
-                }
-                Backend::Llvm => {
-                    assert_eq!(NativePurpose::Run.opt(&request), native::OptLevel::Default);
-                    assert_eq!(
-                        run, build,
-                        "equal effective policy shares compilation products"
-                    );
-                }
-            }
-            request.profile = BuildProfile::Debug;
-            assert_eq!(NativePurpose::Build.opt(&request), native::OptLevel::None);
+    fn every_codegen_choice_is_explicit_in_codegen_profile_identity() {
+        let request = |options: native::BuildOptions, fuel| NativeRequest {
+            definition: None,
+            test_entries: Vec::new(),
+            supplemental_sources: Vec::new(),
+            output: super::super::NativeOutput::Executable,
+            options,
+            run: None,
+            fuel,
+            evidence: None,
+        };
+        let base = native::BuildProfile::Default
+            .options(
+                Backend::Llvm,
+                native::TargetSpec::x86_64_unknown_linux_gnu(),
+                native::Validation::EveryStage,
+            )
+            .unwrap();
+        let identity = |options, fuel| profile_options(&request(options, fuel)).unwrap();
+        let plain = identity(base.clone(), false);
+        assert_eq!(plain, identity(base.clone(), false));
+        let mut variants = vec![identity(base.clone(), true)];
+        for change in [
+            |o: &mut native::BuildOptions| o.backend = Backend::Cranelift,
+            |o: &mut native::BuildOptions| o.opt = native::OptLevel::None,
+            |o: &mut native::BuildOptions| o.partition = native::Partition::Singleton,
+            |o: &mut native::BuildOptions| o.partition = native::Partition::Random(7),
+            |o: &mut native::BuildOptions| o.debug_tables = true,
+        ] {
+            let mut options = base.clone();
+            change(&mut options);
+            variants.push(identity(options, false));
+        }
+        for (index, variant) in variants.iter().enumerate() {
             assert_ne!(
-                run,
-                profile_options(&request, NativePurpose::Build).unwrap()
-            );
-            let unfueled = profile_options(&request, NativePurpose::Run).unwrap();
-            request.regions = Some(false);
-            assert_ne!(
-                unfueled,
-                profile_options(&request, NativePurpose::Run).unwrap(),
-                "placement overrides cannot reuse another Codegen policy"
-            );
-            request.regions = None;
-            request.fuel = true;
-            assert_ne!(
-                unfueled,
-                profile_options(&request, NativePurpose::Run).unwrap()
+                plain, *variant,
+                "codegen choice {index} reuses another identity"
             );
         }
     }
 }
 
-/// Only chooses the ordinary backend partition. Compilation's emit-only mode
-/// never creates a Link plan, so calling this method is a protocol error.
-struct ObjectOutput(Backend);
+/// Only chooses the request's backend partition. Compilation's emit-only and
+/// Ready modes never create a Link plan, so calling `link` is a protocol error.
+struct ObjectOutput(native::Partition);
 impl native::queries::link_tasks::NativeLinkExecutor for ObjectOutput {
     fn codegen_partition(&self) -> native::queries::link_tasks::CodegenPartition {
-        match self.0 {
-            Backend::Llvm => native::queries::link_tasks::CodegenPartition::WholeModule,
-            Backend::Cranelift => native::queries::link_tasks::CodegenPartition::PerInstance,
-        }
+        codegen_partition(self.0)
     }
     fn link(
         &self,

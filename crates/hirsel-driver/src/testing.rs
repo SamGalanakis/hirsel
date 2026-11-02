@@ -487,6 +487,24 @@ pub(crate) fn discover_with_selector(
     ))
 }
 
+/// The selected tests of `path`'s package with the observed inputs and the
+/// generated wrapper sources a native request checks together with them.
+pub fn native_test_sources(
+    path: &Path,
+    selection: Selection,
+) -> Result<
+    (
+        hirsel_engine::loader_inputs::FrozenInputs,
+        Vec<Test>,
+        Vec<crate::requests::NativeSourceText>,
+    ),
+    ToolError,
+> {
+    let (discovery, _) =
+        discover_with_selector(path, &[], None, selection, hirsel_engine::Verify::default())?;
+    Ok((discovery.inputs, discovery.tests, discovery.sources))
+}
+
 fn plan_entries(
     program: &mut LoadedProgram,
     filters: &[String],

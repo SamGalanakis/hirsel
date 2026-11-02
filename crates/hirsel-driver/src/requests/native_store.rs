@@ -5,15 +5,14 @@ use std::{path::Path, sync::Arc};
 pub(super) fn capture(
     source: Arc<dyn ResultStore>,
     request: &super::NativeRequest,
-    purpose: super::native_platform::NativePurpose,
     allowance: MemoryReservation,
     scratch: &Path,
     disk: u64,
 ) -> Result<Arc<dyn ResultStore>, ToolError> {
     let partition = hirsel_lir::objects::partition(
-        &request.target.triple,
-        request.backend.name(),
-        &format!("{:?}", purpose.opt(request)).to_lowercase(),
+        &request.options.passes.target.triple,
+        request.options.backend.name(),
+        &format!("{:?}", request.options.opt).to_lowercase(),
     );
     let directory = hirsel_lir::objects::DirObjects::default_location(&partition)
         .map(|store| store.root().to_owned());

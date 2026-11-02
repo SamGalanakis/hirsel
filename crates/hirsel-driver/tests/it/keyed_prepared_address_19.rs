@@ -41,17 +41,17 @@ fn native_upsert_initializer_preserves_prepared_map_entry_addresses() {
                 path: manifest.clone(),
                 inputs: inputs.into(),
                 operation: CompileOperation::NativeBuild(NativeRequest {
+                    options: {
+                        let mut options = native::BuildProfile::Default
+                            .options(backend, target.clone(), native::Validation::EveryStage)
+                            .unwrap();
+                        options.opt = native::OptLevel::None;
+                        options
+                    },
                     definition: Some(entry.clone()),
                     test_entries: vec![],
                     supplemental_sources: vec![],
                     output: NativeOutput::Objects { roots: vec![entry] },
-                    optimization: Some(native::OptLevel::None),
-                    regions: None,
-                    backend,
-                    profile: native::BuildProfile::Default,
-                    target: target.clone(),
-                    validation: native::Validation::EveryStage,
-                    launch: Default::default(),
                     run: None,
                     fuel: false,
                     evidence: None,

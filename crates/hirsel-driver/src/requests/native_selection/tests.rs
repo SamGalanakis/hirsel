@@ -65,17 +65,13 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
             .unwrap();
             loaded.unwrap();
             let mut native = NativeRequest {
+                options: native::BuildProfile::Default
+                    .options(backend, target.clone(), native::Validation::EveryStage)
+                    .unwrap(),
                 definition: None,
                 test_entries: Vec::new(),
                 supplemental_sources: Vec::new(),
                 output: crate::requests::NativeOutput::Executable,
-                optimization: None,
-                regions: None,
-                backend,
-                profile: native::BuildProfile::Default,
-                target: target.clone(),
-                validation: native::Validation::EveryStage,
-                launch: Default::default(),
                 run: None,
                 fuel: false,
                 evidence: None,
@@ -127,7 +123,7 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
                     panic!("selected native readiness did not produce executable");
                 };
                 assert_eq!(execution.entry, output.entry);
-                assert_eq!(execution.request.backend, backend);
+                assert_eq!(execution.request.options.backend, backend);
                 let destination = directory.path().join("delivered");
                 native::request_output::materialize_output(execution, &destination).unwrap();
                 assert_eq!(&std::fs::read(&destination).unwrap()[..4], b"\x7fELF");
@@ -166,7 +162,8 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
                         crate::BoundHostRun::Live(bound) => bound.run().clone(),
                         crate::BoundHostRun::Replay { run, .. } => run.clone(),
                     }));
-                    native.launch = native.run.as_ref().unwrap().record().inputs.clone();
+                    native.options.passes.launch =
+                        native.run.as_ref().unwrap().record().inputs.clone();
                     bound = Some(selected);
                     let runnable = execution.platform.executable(destination.clone()).unwrap();
                     let child = native::launch_runnable(
@@ -203,17 +200,17 @@ fn native_test_table_order_seed_and_definition_are_request_inputs() {
     let mut other = path.clone();
     other.0.name = "other".into();
     let mut request = NativeRequest {
+        options: native::BuildProfile::Default
+            .options(
+                native::Backend::Cranelift,
+                native::TargetSpec::x86_64_unknown_linux_gnu(),
+                native::Validation::Ready,
+            )
+            .unwrap(),
         definition: Some(path.clone()),
         test_entries: vec![],
         supplemental_sources: Vec::new(),
         output: crate::requests::NativeOutput::Executable,
-        optimization: None,
-        regions: None,
-        backend: native::Backend::Cranelift,
-        profile: native::BuildProfile::Default,
-        target: native::TargetSpec::x86_64_unknown_linux_gnu(),
-        validation: native::Validation::Ready,
-        launch: Default::default(),
         run: None,
         fuel: false,
         evidence: None,
@@ -243,17 +240,17 @@ fn native_test_table_order_seed_and_definition_are_request_inputs() {
 fn native_source_text_context_and_name_are_request_inputs() {
     let path = hirsel_engine::entry_path(&hirsel_engine::default_context());
     let mut request = NativeRequest {
+        options: native::BuildProfile::Default
+            .options(
+                native::Backend::Cranelift,
+                native::TargetSpec::x86_64_unknown_linux_gnu(),
+                native::Validation::Ready,
+            )
+            .unwrap(),
         definition: Some(path.clone()),
         test_entries: vec![],
         supplemental_sources: vec![],
         output: crate::requests::NativeOutput::Executable,
-        optimization: None,
-        regions: None,
-        backend: native::Backend::Cranelift,
-        profile: native::BuildProfile::Default,
-        target: native::TargetSpec::x86_64_unknown_linux_gnu(),
-        validation: native::Validation::Ready,
-        launch: Default::default(),
         run: None,
         fuel: false,
         evidence: None,
@@ -299,17 +296,17 @@ fn native_object_roots_and_emission_level_are_request_inputs() {
     let mut other = path.clone();
     other.0.name = "another".into();
     let mut request = NativeRequest {
+        options: native::BuildProfile::Default
+            .options(
+                native::Backend::Cranelift,
+                native::TargetSpec::x86_64_unknown_linux_gnu(),
+                native::Validation::Ready,
+            )
+            .unwrap(),
         definition: Some(path.clone()),
         test_entries: vec![],
         supplemental_sources: vec![],
         output: crate::requests::NativeOutput::Executable,
-        optimization: None,
-        regions: None,
-        backend: native::Backend::Cranelift,
-        profile: native::BuildProfile::Default,
-        target: native::TargetSpec::x86_64_unknown_linux_gnu(),
-        validation: native::Validation::Ready,
-        launch: Default::default(),
         run: None,
         fuel: false,
         evidence: None,
@@ -331,7 +328,7 @@ fn native_object_roots_and_emission_level_are_request_inputs() {
         request_key(&request, NativePurpose::Build).unwrap()
     );
     request.output = crate::requests::NativeOutput::Objects { roots: vec![path] };
-    request.optimization = Some(native::OptLevel::None);
+    request.options.opt = native::OptLevel::None;
     assert_ne!(
         objects,
         request_key(&request, NativePurpose::Build).unwrap()

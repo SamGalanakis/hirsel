@@ -142,7 +142,7 @@ pub(crate) fn run_bound_output(
             .map_err(|message| NativeError::new(StageName::Launch, message))?;
         let launched = link::launch_live(
             &runnable,
-            &input.request.target,
+            &input.request.options.passes.target,
             &input.toolchain,
             &scratch.0,
             tape,

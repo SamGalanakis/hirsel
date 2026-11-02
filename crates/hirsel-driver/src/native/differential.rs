@@ -19,6 +19,45 @@ use std::path::Path;
 /// and mismatch artifacts name the matrix they ran.
 pub const MATRIX_VERSION: u32 = 4;
 
+/// A Ready program the matrix executes and the failure sites it reports
+/// against: a request's owned Ready execution view, or a harness program
+/// built over a snapshot.
+pub trait ReadyExecution {
+    fn program(&self) -> &ReadyProgram;
+    fn sites(&self) -> Sites<'_>;
+}
+impl ReadyExecution for std::sync::Arc<crate::requests::NativeReady> {
+    fn program(&self) -> &ReadyProgram {
+        &self.program
+    }
+    fn sites(&self) -> Sites<'_> {
+        crate::requests::NativeReady::sites(self)
+    }
+}
+/// A harness program built over a validated snapshot.
+pub struct SnapshotReady<'a> {
+    program: ReadyProgram,
+    input: &'a ValidatedNativeInput,
+}
+impl ReadyExecution for SnapshotReady<'_> {
+    fn program(&self) -> &ReadyProgram {
+        &self.program
+    }
+    fn sites(&self) -> Sites<'_> {
+        Sites::new(self.input.snapshot())
+    }
+}
+impl<'a> SnapshotReady<'a> {
+    fn build(input: &'a ValidatedNativeInput, options: &Options) -> Result<Self, NativeError> {
+        Ok(Self {
+            program: build(input, options)?,
+            input,
+        })
+    }
+}
+/// Supplies the Ready program of each distinct pass `Options`.
+pub type ReadySupplier<'a, P> = dyn FnMut(&Options) -> Result<P, NativeError> + 'a;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Engine {
     /// The checked heap executor; with `campaign`, also one audited run per
@@ -349,7 +388,8 @@ pub enum Outcome {
     Unavailable(NativeError),
 }
 
-fn same_options(a: &Options, b: &Options) -> bool {
+/// Whether two pass selections build the same Ready program.
+pub fn same_options(a: &Options, b: &Options) -> bool {
     a.launch == b.launch
         && a.target == b.target
         && a.regions == b.regions
@@ -496,6 +536,27 @@ pub fn differential_in(
     dir: &Path,
     fixture: &Fixture,
 ) -> Vec<(String, Outcome)> {
+    differential_ready(
+        &mut |options: &Options| SnapshotReady::build(validated, options),
+        entry,
+        reference,
+        configurations,
+        toolchain,
+        dir,
+        fixture,
+    )
+}
+
+/// The matrix over supplied Ready programs, one per distinct pass options.
+pub fn differential_ready<P: ReadyExecution>(
+    ready: &mut ReadySupplier<'_, P>,
+    entry: &DefPath,
+    reference: &Observation,
+    configurations: &[Configuration],
+    toolchain: &Toolchain,
+    dir: &Path,
+    fixture: &Fixture,
+) -> Vec<(String, Outcome)> {
     let world = super::HeapWorld {
         cpu: fixture.cpu.clone(),
         tasks_free: fixture.tasks_free,
@@ -513,8 +574,7 @@ pub fn differential_in(
         env: fixture.env.clone(),
         steps: fixture.steps,
     };
-    let sites = Sites::new(validated.snapshot());
-    let mut built: Vec<(&Options, Result<ReadyProgram, NativeError>)> = Vec::new();
+    let mut built: Vec<(&Options, Result<P, NativeError>)> = Vec::new();
     type Objects = Result<Vec<hirsel_lir::stage::ObjectArtifact>, NativeError>;
     let mut emitted: Vec<((usize, Backend, OptLevel, Partition), Objects)> = Vec::new();
     let mut out = Vec::with_capacity(configurations.len());
@@ -524,7 +584,8 @@ pub fn differential_in(
                       partition: Partition,
                       runtime: Runtime,
                       index: usize,
-                      program: &ReadyProgram| {
+                      program: &ReadyProgram,
+                      sites: &Sites<'_>| {
         let toolchain = &toolchain.with_runtime(runtime.build());
         let key = (index, backend, opt, partition);
         let at = match emitted.iter().position(|(k, _)| *k == key) {
@@ -553,7 +614,7 @@ pub fn differential_in(
             },
             fixture,
         )?;
-        let mut observation = observe(&launched, program, &sites)?;
+        let mut observation = observe(&launched, program, sites)?;
         if fixture.trace_roots {
             observation.roots = std::fs::read_to_string(dir.join(super::link::ROOT_TRACE))
                 .unwrap_or_default()
@@ -570,10 +631,7 @@ pub fn differential_in(
         {
             Some(index) => index,
             None => {
-                built.push((
-                    &configuration.options,
-                    build(validated, &configuration.options),
-                ));
+                built.push((&configuration.options, ready(&configuration.options)));
                 built.len() - 1
             }
         };
@@ -581,27 +639,39 @@ pub fn differential_in(
             .1
             .as_ref()
             .map_err(Clone::clone)
-            .and_then(|program| match configuration.engine {
-                Engine::Heap { campaign: true } => {
-                    super::heap_campaign_in(program, entry, &sites, &world)
-                        .map(|run| run.observation)
+            .and_then(|ready| {
+                let (program, sites) = (ready.program(), &ready.sites());
+                match configuration.engine {
+                    Engine::Heap { campaign: true } => {
+                        super::heap_campaign_in(program, entry, sites, &world)
+                            .map(|run| run.observation)
+                    }
+                    Engine::Heap { campaign: false } => {
+                        super::run_heap_in(program, entry, sites, &world).map(|run| run.observation)
+                    }
+                    Engine::Native {
+                        opt,
+                        partition,
+                        runtime,
+                    } => native(
+                        Backend::Llvm,
+                        opt,
+                        partition,
+                        runtime,
+                        index,
+                        program,
+                        sites,
+                    ),
+                    Engine::Cranelift { partition, runtime } => native(
+                        Backend::Cranelift,
+                        OptLevel::None,
+                        partition,
+                        runtime,
+                        index,
+                        program,
+                        sites,
+                    ),
                 }
-                Engine::Heap { campaign: false } => {
-                    super::run_heap_in(program, entry, &sites, &world).map(|run| run.observation)
-                }
-                Engine::Native {
-                    opt,
-                    partition,
-                    runtime,
-                } => native(Backend::Llvm, opt, partition, runtime, index, program),
-                Engine::Cranelift { partition, runtime } => native(
-                    Backend::Cranelift,
-                    OptLevel::None,
-                    partition,
-                    runtime,
-                    index,
-                    program,
-                ),
             });
         let outcome = match observed {
             Ok(observation) if observation == *reference => Outcome::Agree,
@@ -628,7 +698,27 @@ pub fn runner_oracle_in(
     fixture: &Fixture,
     tapes: bool,
 ) -> Vec<(String, Outcome)> {
-    let sites = Sites::new(validated.snapshot());
+    runner_oracle_ready(
+        &mut |options: &Options| SnapshotReady::build(validated, options),
+        entry,
+        configurations,
+        toolchain,
+        dir,
+        fixture,
+        tapes,
+    )
+}
+
+/// `runner_oracle_in` over supplied Ready programs.
+pub fn runner_oracle_ready<P: ReadyExecution>(
+    ready: &mut ReadySupplier<'_, P>,
+    entry: &DefPath,
+    configurations: &[Configuration],
+    toolchain: &Toolchain,
+    dir: &Path,
+    fixture: &Fixture,
+    tapes: bool,
+) -> Vec<(String, Outcome)> {
     let mut out = Vec::new();
     for configuration in configurations {
         let (backend, opt, partition, runtime) = match configuration.engine {
@@ -644,11 +734,12 @@ pub fn runner_oracle_in(
         };
         let toolchain = toolchain.with_runtime(runtime.build());
         let diagnostic = runtime == Runtime::Diagnostic;
-        let run = || -> Result<(), NativeError> {
-            let program = build(validated, &configuration.options)?;
+        let mut run = || -> Result<(), NativeError> {
+            let ready = ready(&configuration.options)?;
+            let (program, sites) = (ready.program(), ready.sites());
             let target = &program.target;
             let objects = emit_backend_objects(
-                &program,
+                program,
                 backend,
                 opt,
                 partition,
@@ -660,8 +751,8 @@ pub fn runner_oracle_in(
                 ..toolchain.clone()
             };
             let paths = [
-                link_fixture_runnable(&program, entry, &objects, &executable, dir, fixture)?,
-                link_fixture_runnable(&program, entry, &objects, &toolchain, dir, fixture)?,
+                link_fixture_runnable(program, entry, &objects, &executable, dir, fixture)?,
+                link_fixture_runnable(program, entry, &objects, &toolchain, dir, fixture)?,
             ];
             let launch = |runnable: &super::link::Runnable, tape: super::link::Tape<'_>| {
                 super::link::launch_fixture(
@@ -718,13 +809,13 @@ pub fn runner_oracle_in(
                         revocations: None,
                     },
                 )?;
-                let mut recorded = observe(&recorded, &program, &sites)?;
+                let mut recorded = observe(&recorded, program, &sites)?;
                 // A run with runners replays without its callees, printing only its own.
                 if !fixture.runners.is_empty() {
                     recorded.output = recorded_prints(&tape_events(&tape)?);
                 }
                 let replayed = launch(&paths[replayer], super::link::Tape::Replay(&tape))?;
-                let replayed = observe(&replayed, &program, &sites)?;
+                let replayed = observe(&replayed, program, &sites)?;
                 if replayed != recorded {
                     return Err(NativeError::new(
                         StageName::Launch,
@@ -837,23 +928,50 @@ pub fn real_io_replay_in(
     launch_config: super::LaunchInputs,
     fixture: &Fixture,
 ) -> Outcome {
+    real_io_replay_ready(
+        &mut |options: &Options| SnapshotReady::build(validated, options),
+        entry,
+        reference,
+        toolchain,
+        dir,
+        launch_config,
+        fixture,
+    )
+}
+
+/// The Ready pass options real Io replay builds under `launch`.
+pub fn real_io_replay_options(launch: super::LaunchInputs) -> Options {
+    let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+    options.launch = launch;
+    options
+}
+
+/// `real_io_replay_in` over a supplied Ready program.
+pub fn real_io_replay_ready<P: ReadyExecution>(
+    ready: &mut ReadySupplier<'_, P>,
+    entry: &DefPath,
+    reference: &Observation,
+    toolchain: &Toolchain,
+    dir: &Path,
+    launch_config: super::LaunchInputs,
+    fixture: &Fixture,
+) -> Outcome {
     // Replay checks the tape against the diagnostic archive's audited run.
     let toolchain = &toolchain.with_runtime(Runtime::Diagnostic.build());
-    let run = || {
-        let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let mut options = Options::new(target.clone());
-        options.launch = launch_config;
-        let program = build(validated, &options)?;
-        let sites = Sites::new(validated.snapshot());
+    let mut run = || {
+        let options = real_io_replay_options(launch_config.clone());
+        let target = options.target.clone();
+        let ready = ready(&options)?;
+        let (program, sites) = (ready.program(), &ready.sites());
         let objects = emit_backend_objects(
-            &program,
+            program,
             Backend::Llvm,
             OptLevel::Speed,
             Partition::Whole,
             toolchain.runtime_build.measurement,
             None,
         )?;
-        let runnable = link_fixture_runnable(&program, entry, &objects, toolchain, dir, fixture)?;
+        let runnable = link_fixture_runnable(program, entry, &objects, toolchain, dir, fixture)?;
         let tape = dir.join("io-tape");
         let _ = std::fs::remove_file(&tape);
         let recorded = super::link::launch_fixture(
@@ -868,7 +986,7 @@ pub fn real_io_replay_in(
             },
             fixture,
         )?;
-        let real = observe(&recorded, &program, &sites)?;
+        let real = observe(&recorded, program, sites)?;
         if real != *reference {
             return Ok(real);
         }
@@ -919,7 +1037,7 @@ pub fn real_io_replay_in(
             super::link::Tape::Replay(&tape),
             fixture,
         )?;
-        let replayed = observe(&replayed, &program, &sites)?;
+        let replayed = observe(&replayed, program, sites)?;
         if alone {
             let expected = Observation {
                 output: printed,

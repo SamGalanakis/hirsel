@@ -6,7 +6,7 @@ use crate::native::{
     queries::{
         NativeRootKey,
         arena_tasks::ArenaTasks,
-        compilation_tasks::{CompilationBackend, CompilationTasks},
+        compilation_tasks::{CompilationBackend, CompilationOutput, CompilationTasks},
         declarations::NativeDeclarations,
         instance_tasks::InstanceTasks,
         products::EmissionOptions,
@@ -48,7 +48,7 @@ pub(super) struct NativePlan {
     pub backends: Vec<CompilationBackend>,
     pub requested_run: Option<Arc<hirsel_run_config::ValidatedRun>>,
     pub test_entries: Vec<(DefPath, u64)>,
-    pub emit_only: bool,
+    pub output: CompilationOutput,
 }
 /// Selected evidence and the PS9 export captured over this bootstrap's native
 /// source root. Assessment reads only that root's completed product.
@@ -143,7 +143,7 @@ impl NativeBootstrap {
             },
             plan.requested_run.as_ref().map(|run| run.identity()),
             &plan.test_entries,
-            plan.emit_only,
+            plan.output,
             plan.debug,
             plan.verify_backend,
             plan.measurement,
@@ -472,11 +472,7 @@ impl NativeBootstrap {
             admission.compilation,
             plan.verify_store,
         )?;
-        let compilation = if plan.emit_only {
-            compilation.with_codegen_output()?
-        } else {
-            compilation
-        };
+        let compilation = compilation.with_output(plan.output)?;
         self.routing
             .bind(compilation.factories())
             .map_err(str::to_owned)?;
@@ -523,7 +519,7 @@ impl NativeBootstrap {
         Ok(product)
     }
 }
-fn discharge_rows(
+pub(super) fn discharge_rows(
     discharge: &hirsel_lir::discharge::Discharge,
 ) -> Vec<(&DefPath, Vec<(u32, u32, u32, (u8, &str, u32))>)> {
     use hirsel_lir::discharge::Form;

@@ -382,6 +382,45 @@ impl RootProducts {
         }
     }
 
+    /// The owned Ready execution program over this admitted root's settled
+    /// Ready scope: the link assembly plus the independently validated Ready
+    /// units, in root instance order. Runs no producer and restores no Value.
+    pub fn ready_program(
+        &mut self,
+        root: &Arc<NativeRootProduct>,
+        reads: &[ProductRef],
+    ) -> Result<crate::native::ReadyProgram, String> {
+        self.admitted_root(root)?;
+        let store = self.inner.snapshot.store.clone();
+        let mut products = reads
+            .iter()
+            .map(|read| super::ready_product(store.as_ref(), read.clone()).map(Arc::new))
+            .collect::<Result<Vec<_>, _>>()?;
+        let order = root
+            .instances
+            .iter()
+            .enumerate()
+            .map(|(index, owner)| (owner.address(READY_KIND).0, index))
+            .collect::<BTreeMap<_, _>>();
+        products.sort_by_key(|product| order.get(&product.product.address.0).copied());
+        let (units, table) = self.inner.with_ready(&products, |units, emit| {
+            Ok((
+                units.iter().map(|unit| (*unit).clone()).collect::<Vec<_>>(),
+                emit.layouts.clone(),
+            ))
+        })?;
+        let inline = self.inner.snapshot.emission.inline_instances.clone();
+        self.with_link_context(root, &products, |program| {
+            if program.table != table || program.summaries.len() != units.len() {
+                return Err("Ready units differ from the root's link assembly".into());
+            }
+            let mut program = program.clone();
+            program.units = units;
+            program.inline_instances = inline;
+            Ok(program)
+        })
+    }
+
     /// A new task-local linker view of already selected outputs. Cloning this
     /// bounded descriptor scope executes no dependencies or transformations.
     pub fn link_view(&self) -> Result<Self, String> {

@@ -4,7 +4,6 @@
 use crate::native::{
     self, Backend,
     object_queries::{
-        self,
         capture::CaptureLimits,
         platform::CapturedPlatform,
         runtime::{RuntimeFiles, RuntimeLimits},
@@ -38,6 +37,7 @@ pub(crate) struct FrozenPlatform {
     inputs: LinkInputs,
     entry: DefPath,
     backend: Backend,
+    partition: native::Partition,
     target: native::TargetSpec,
     requested: Option<Arc<hirsel_run_config::ValidatedRun>>,
     linker_options: ContentHash,
@@ -49,6 +49,7 @@ impl FrozenPlatform {
         inputs: LinkInputs,
         entry: DefPath,
         backend: Backend,
+        partition: native::Partition,
         target: native::TargetSpec,
         requested: Option<Arc<hirsel_run_config::ValidatedRun>>,
         allowance: impl Into<Arc<MemoryReservation>>,
@@ -91,6 +92,7 @@ impl FrozenPlatform {
             inputs,
             entry,
             backend,
+            partition,
             target,
             requested,
             linker_options,
@@ -155,10 +157,7 @@ impl FrozenPlatform {
 }
 impl NativeLinkExecutor for FrozenPlatform {
     fn codegen_partition(&self) -> CodegenPartition {
-        match self.backend {
-            Backend::Llvm => CodegenPartition::WholeModule,
-            Backend::Cranelift => CodegenPartition::PerInstance,
-        }
+        super::native_platform::codegen_partition(self.partition)
     }
     fn link(&self, native: &mut RootProducts, input: LinkExecution<'_>) -> Result<Vec<u8>, String> {
         if input.key.linker_options != self.linker_options

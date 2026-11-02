@@ -215,7 +215,11 @@ fn bootstrap_link_refusal(test_table: bool, emit_only: bool) {
                     measurement: false,
                     fuel: false,
                     requested_run: None,
-                    emit_only,
+                    output: if emit_only {
+                        CompilationOutput::Objects
+                    } else {
+                        CompilationOutput::Executable
+                    },
                     test_entries: if test_table {
                         vec![(program.entry.clone(), 731)]
                     } else {
@@ -593,6 +597,10 @@ fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop()
                 },
                 entry.clone(),
                 backend,
+                match backend {
+                    native::Backend::Llvm => native::Partition::Whole,
+                    native::Backend::Cranelift => native::Partition::Singleton,
+                },
                 target.clone(),
                 None,
                 budget.reserve(16 << 10).unwrap(),
@@ -625,7 +633,7 @@ fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop()
                     fuel: false,
                     requested_run: None,
                     test_entries: Vec::new(),
-                    emit_only: false,
+                    output: CompilationOutput::Executable,
                     backends: vec![selected_backend],
                 },
                 NativeAdmission {
@@ -974,20 +982,28 @@ fn native_bootstrap_policy_case(bind_run: bool) {
             );
             let policy = NativePlatformPolicy::capture().unwrap();
             let request = NativeRequest {
+                options: {
+                    let mut options = if bind_run {
+                        native::BuildProfile::run_options(
+                            backend,
+                            target.clone(),
+                            native::Validation::EveryStage,
+                        )
+                    } else {
+                        native::BuildProfile::Default
+                            .options(backend, target.clone(), native::Validation::EveryStage)
+                            .unwrap()
+                    };
+                    options.passes.launch = validated_run
+                        .as_ref()
+                        .map(|run| run.record().inputs.clone())
+                        .unwrap_or_default();
+                    options
+                },
                 definition: Some(entry.clone()),
                 test_entries: Vec::new(),
                 supplemental_sources: Vec::new(),
                 output: crate::requests::NativeOutput::Executable,
-                optimization: None,
-                regions: None,
-                backend,
-                profile: native::BuildProfile::Default,
-                target: target.clone(),
-                validation: native::Validation::EveryStage,
-                launch: validated_run
-                    .as_ref()
-                    .map(|run| run.record().inputs.clone())
-                    .unwrap_or_default(),
                 run: validated_run,
                 fuel: false,
                 evidence: None,
@@ -1485,7 +1501,7 @@ fn native_bootstrap_assesses_evidence_against_its_settled_source_root_before_ins
             fuel: false,
             requested_run: None,
             test_entries: Vec::new(),
-            emit_only: false,
+            output: CompilationOutput::Executable,
             backends: vec![CompilationBackend {
                 backend: "cranelift".into(),
                 backend_version: ContentHash::of_bytes(&crate::COMPILER_IDENTITY),
@@ -1781,7 +1797,7 @@ fn original_plan_inputs_bind_source_edits_membership_options_and_foreign_bytes()
                 fuel: case == 3,
                 requested_run: None,
                 test_entries: vec![],
-                emit_only: false,
+                output: CompilationOutput::Executable,
                 backends: vec![CompilationBackend {
                     backend: "cranelift".into(),
                     backend_version: ContentHash::of_bytes(&crate::COMPILER_IDENTITY),

@@ -29,27 +29,37 @@ pub fn bounded_package(entry: &Path) -> Result<(), String> {
     std::fs::write(sidecar, manifest.to_string()).map_err(|e| e.to_string())
 }
 
-/// Produce ordinary Comptime check artifacts through the disk loader, without
-/// any FrozenInputs adapter or eligible result reuse. The caller independently
-/// materializes this tree (Scenario::write), not from a candidate input map.
+/// Produce ordinary Comptime check artifacts through fresh compiler requests
+/// over the disk loader, without any FrozenInputs adapter or eligible result
+/// reuse. The caller independently materializes this tree (Scenario::write),
+/// not from a candidate input map.
 pub fn cold(path: &Path, config: &Config) -> Result<Artifacts, String> {
+    use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
     let compiler = compiler(config);
     hirsel_engine::with_compiler_stack(|| {
-        let mut program = compiler
-            .load_program_source(path, None)
-            .map_err(|e| format!("load: {e}"))?;
-        let scope: Vec<_> = program
+        // The loader alone selects the package scope; it checks nothing.
+        let scope: Vec<_> = compiler
+            .load_check_package(path)
+            .map_err(|e| format!("load: {e}"))?
             .files
             .iter()
             .map(|(_, context)| context.package.clone())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
-        let output = program
-            .check(LoweringPolicy::Comptime)
-            .map_err(|e| format!("check: {}", program.error(e)))?;
-        let incomplete = output.completion != CheckCompletion::Complete
-            || program.engine.last_comptime_limit.is_some();
+        let mut requests = CompilerRequests::for_host(compiler.clone(), compile_config(config));
+        let checked = requests
+            .execute(
+                path,
+                CompileOperation::Check {
+                    lowering: LoweringPolicy::Comptime,
+                },
+            )
+            .map_err(|e| format!("check: {e}"))?;
+        let CompileResult::Check(output) = &checked.result else {
+            return Err("check: source Check returned another operation".into());
+        };
+        let incomplete = output.completion != CheckCompletion::Complete;
         let rejecting = output
             .diagnostics
             .iter()
@@ -57,15 +67,22 @@ pub fn cold(path: &Path, config: &Config) -> Result<Artifacts, String> {
         let products = if incomplete {
             None
         } else {
-            Some(
-                program
-                    .engine
-                    .checked_products(&program.entry)
-                    .map_err(|e| format!("products: {}", program.error(e)))?,
-            )
+            let selected = requests
+                .execute(
+                    path,
+                    CompileOperation::CheckedProducts {
+                        lowering: LoweringPolicy::Comptime,
+                        canonical: true,
+                    },
+                )
+                .map_err(|e| format!("products: {e}"))?;
+            let CompileResult::CheckedProducts { products, .. } = &selected.result else {
+                return Err("products: checked-products request returned another operation".into());
+            };
+            Some(products.clone())
         };
         Ok(artifacts(
-            &output,
+            output,
             if incomplete {
                 "incomplete"
             } else if rejecting {
@@ -73,7 +90,7 @@ pub fn cold(path: &Path, config: &Config) -> Result<Artifacts, String> {
             } else {
                 "pass"
             },
-            products.as_ref(),
+            products.as_deref(),
             path,
             &scope,
         ))

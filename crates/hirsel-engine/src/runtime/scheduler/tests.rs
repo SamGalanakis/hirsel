@@ -121,6 +121,117 @@ fn install(rt: &mut AdmittedRuntime, specs: &[(u64, Spec)]) -> Arc<AtomicUsize> 
     .unwrap();
     claims
 }
+struct AdmissionGate {
+    started: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+struct LowerAdmission {
+    pool: Arc<MemoryReservationPool>,
+    gate: Option<Arc<AdmissionGate>>,
+}
+impl LocalQueryFactory for LowerAdmission {
+    fn weight(&self, _: QueryId) -> Result<MemoryWeight, Reference> {
+        Ok(MemoryWeight {
+            retained: 16 << 10,
+            scratch: 32,
+            stack: 0,
+        })
+    }
+    fn create(&self, id: QueryId) -> Result<Box<dyn LocalQueryTask>, Reference> {
+        let pool = self.pool.clone();
+        let gate = self.gate.clone();
+        Ok(Box::new(LocalFutureTask::new(
+            id,
+            self.weight(id)?,
+            0,
+            errors(),
+            move |reads| async move {
+                let held = if id == query(0) {
+                    Some(pool.take(6).ok_or(errors().resource)?)
+                } else {
+                    None
+                };
+                if let Some(gate) = gate.filter(|_| held.is_some()) {
+                    gate.started.send(()).unwrap();
+                    gate.release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap();
+                } else {
+                    let admitted = loop {
+                        if let Some(admitted) = pool.take(6) {
+                            break admitted;
+                        }
+                        if !reads.evict_body().await {
+                            return Err(errors().resource);
+                        }
+                    };
+                    assert_eq!(admitted.bytes(), 6);
+                }
+                drop(held);
+                Ok(product(id))
+            },
+        )?))
+    }
+}
+#[test]
+fn lower_admission_waits_for_another_body_to_release_its_partition() {
+    struct ReleaseHolder(mpsc::Sender<()>);
+    impl RuntimeObserver for ReleaseHolder {
+        fn record(&self, event: RuntimeEvent) {
+            if matches!(event, RuntimeEvent::Waiting(id) | RuntimeEvent::Settled { query: id, .. } if id == query(1))
+            {
+                let _ = self.0.send(());
+            }
+        }
+    }
+    let total = MemoryReservationPool::metadata_bytes() + 10;
+    let budget = ProcessBudget::new(total);
+    let pool = Arc::new(
+        MemoryReservationPool::new(budget.reserve(total).unwrap())
+            .ok()
+            .unwrap(),
+    );
+    let (started, starting) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let mut rt = runtime(2, 8 << 20);
+    rt.observe(Arc::new(ReleaseHolder(release))).unwrap();
+    rt.register_local(
+        1,
+        Arc::new(LowerAdmission {
+            pool,
+            gate: Some(Arc::new(AdmissionGate {
+                started,
+                release: Mutex::new(released),
+            })),
+        }),
+    )
+    .unwrap();
+    let first = rt.request(&[query(0)]);
+    starting
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let second = rt.request(&[query(1)]);
+    let result = rt.wait(second);
+    assert_eq!(rt.wait(first), Ok(vec![product(query(0))]));
+    assert_eq!(result, Ok(vec![product(query(1))]));
+}
+#[test]
+fn lower_admission_refuses_when_its_own_body_is_the_only_holder() {
+    let total = MemoryReservationPool::metadata_bytes() + 10;
+    let budget = ProcessBudget::new(total);
+    let pool = Arc::new(
+        MemoryReservationPool::new(budget.reserve(total).unwrap())
+            .ok()
+            .unwrap(),
+    );
+    let mut rt = runtime(1, 4 << 20);
+    rt.register_local(1, Arc::new(LowerAdmission { pool, gate: None }))
+        .unwrap();
+    let request = rt.request(&[query(0)]);
+    assert_eq!(rt.wait(request), Err(errors().resource));
+}
 #[test]
 fn single_worker_dependency_chain_releases_all_execution_slots() {
     let mut rt = runtime(1, 4 << 20);

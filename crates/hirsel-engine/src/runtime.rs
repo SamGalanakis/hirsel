@@ -93,6 +93,9 @@ pub trait QueryContext {
     fn evict_body(&mut self) -> bool {
         false
     }
+    fn poll_evict_body(&mut self) -> Poll<bool> {
+        Poll::Ready(self.evict_body())
+    }
     /// Records an actual dependency. Pending never blocks a worker thread.
     fn read(&mut self, key: QueryId) -> Poll<Result<ProductRef, Reference>>;
 }

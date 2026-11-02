@@ -197,7 +197,10 @@ impl LocalFutureTask {
     fn advance(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
         loop {
             if matches!(self.reads.0.borrow().eviction, Eviction::Requested) {
-                let evicted = cx.evict_body();
+                let evicted = match cx.poll_evict_body() {
+                    Poll::Ready(evicted) => evicted,
+                    Poll::Pending => return QueryPoll::Waiting(Vec::new()),
+                };
                 self.reads.0.borrow_mut().eviction = Eviction::Completed(evicted);
             }
             let requested = self

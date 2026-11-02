@@ -160,6 +160,10 @@ struct State {
     budget: u64,
     metadata: u64,
     edges: usize,
+    progress_revision: u64,
+    // Nodes parked inside producer admission, keyed to the progress revision
+    // they observed. A bump wakes them once; the entry dies with its node.
+    admission_waiters: BTreeMap<Key, u64>,
     max_entries: usize,
     errors: RuntimeErrors,
     stopped: bool,
@@ -332,6 +336,8 @@ impl AdmittedRuntime {
                 budget,
                 metadata,
                 edges: 0,
+                progress_revision: 1,
+                admission_waiters: BTreeMap::new(),
                 max_entries: (metadata / ENTRY_BYTES).min(usize::MAX as u64) as usize,
                 errors,
                 stopped: false,
@@ -661,6 +667,33 @@ impl State {
         self.stats.peak_bytes = self.stats.peak_bytes.max(bytes);
         debug_assert!(bytes <= self.budget);
     }
+    fn advance_progress(&mut self) {
+        self.progress_revision = self
+            .progress_revision
+            .checked_add(1)
+            .expect("scheduler progress revision exhausted");
+        if self.admission_waiters.is_empty() {
+            return;
+        }
+        let waiters = self.admission_waiters.keys().copied().collect::<Vec<_>>();
+        for query in waiters {
+            let Some(node) = self.nodes.get(&query) else {
+                self.admission_waiters.remove(&query);
+                continue;
+            };
+            if node.unsatisfied == 0 && matches!(node.status, Status::Waiting) {
+                self.nodes.get_mut(&query).unwrap().status = Status::Ready;
+                self.queue(query);
+                self.stats.wakes += 1;
+                self.event(RuntimeEvent::Wake(id(query)));
+            } else if !matches!(
+                node.status,
+                Status::Ready | Status::Running | Status::Waiting
+            ) {
+                self.admission_waiters.remove(&query);
+            }
+        }
+    }
     fn result(&self, key: Key) -> Option<Outcome> {
         match &self.nodes.get(&key)?.status {
             Status::Settled(result) => Some((**result).clone()),
@@ -787,6 +820,7 @@ impl State {
     }
     fn remove(&mut self, query: Key) {
         self.unqueue(query);
+        self.admission_waiters.remove(&query);
         if let Some(execution) = self.nodes.remove(&query) {
             let retained = execution.weight.retained;
             drop(execution);
@@ -808,6 +842,7 @@ impl State {
     fn prune(&mut self) {
         self.mark_live();
         let mut remove = Vec::new();
+        let mut progress = false;
         for key in self.nodes.iter().map(|(k, _)| *k).collect::<Vec<_>>() {
             let node = self.nodes.get_mut(&key).unwrap();
             if !node.live {
@@ -820,18 +855,27 @@ impl State {
                                 self.cleanup[*home].insert(key, None);
                                 node.status = Status::Cancelling;
                                 node.discard = true;
+                                progress = true;
                             }
                             _ => remove.push(key),
                         }
                     }
                     Status::Cancelling => (),
-                    Status::Running => node.discard = true,
+                    Status::Running if !node.discard => {
+                        node.discard = true;
+                        progress = true;
+                    }
+                    Status::Running => (),
                     Status::Settled(_) | Status::Dormant => (),
                 }
             }
         }
         for key in remove {
             self.remove(key);
+            progress = true;
+        }
+        if progress {
+            self.advance_progress();
         }
         self.account();
     }
@@ -860,6 +904,7 @@ impl State {
         node.status = Status::Settled(Box::new(result.clone()));
         node.settled_at = self.stats.settled;
         self.stats.settled += 1;
+        self.admission_waiters.remove(&query);
         self.event(RuntimeEvent::Settled {
             query: id(query),
             result,
@@ -882,6 +927,7 @@ struct Context<'a> {
     query: Key,
     generation: NodeId,
     pending: BTreeSet<u32>,
+    admission_wait: bool,
 }
 impl QueryContext for Context<'_> {
     fn scratch_bytes(&self) -> u64 {
@@ -976,6 +1022,40 @@ impl QueryContext for Context<'_> {
         state.account();
         self.shared.changed.notify_all();
         true
+    }
+
+    fn poll_evict_body(&mut self) -> Poll<bool> {
+        if self.evict_body() {
+            self.shared.lock().admission_waiters.remove(&self.query);
+            self.admission_wait = false;
+            return Poll::Ready(true);
+        }
+        let mut state = self.shared.lock();
+        let parked = state.admission_waiters.get(&self.query).copied();
+        if parked.is_some_and(|revision| revision < state.progress_revision) {
+            // Woken by admitted progress: retry the reservation once. A still
+            // failing retry re-parks or refuses on the next call.
+            state.admission_waiters.remove(&self.query);
+            self.admission_wait = false;
+            return Poll::Ready(true);
+        }
+        let can_progress = state.nodes.iter().any(|(&query, node)| {
+            query != self.query
+                && !state.admission_waiters.contains_key(&query)
+                && matches!(node.status, Status::Ready | Status::Running)
+        }) || state.cleanup.iter().any(|queue| !queue.is_empty());
+        if can_progress {
+            let progress_revision = state.progress_revision;
+            state
+                .admission_waiters
+                .insert(self.query, progress_revision);
+            self.admission_wait = true;
+            Poll::Pending
+        } else {
+            state.admission_waiters.remove(&self.query);
+            self.admission_wait = false;
+            Poll::Ready(false)
+        }
     }
 
     fn read(&mut self, dependency: QueryId) -> Poll<Outcome> {
@@ -1085,6 +1165,7 @@ fn run_worker(shared: Arc<Shared>, worker: usize, stack: u64, caller: bool) {
                 }
             }
             state.account();
+            state.advance_progress();
             shared.changed.notify_all();
             continue;
         }
@@ -1199,6 +1280,7 @@ fn run_worker(shared: Arc<Shared>, worker: usize, stack: u64, caller: bool) {
             query,
             generation: shared.lock().nodes.node_id(query).expect("running query"),
             pending: BTreeSet::new(),
+            admission_wait: false,
         };
         let mut send_task = None;
         let mut outcome = catch_unwind(AssertUnwindSafe(|| match work {
@@ -1262,6 +1344,9 @@ fn run_worker(shared: Arc<Shared>, worker: usize, stack: u64, caller: bool) {
             cpu_ns,
             charged,
         });
+        if !cx.admission_wait {
+            state.advance_progress();
+        }
         let discard = state.nodes[&query].discard;
         if discard || state.stopped {
             // Drop without holding the shared graph lock.
@@ -1280,6 +1365,7 @@ fn run_worker(shared: Arc<Shared>, worker: usize, stack: u64, caller: bool) {
             } else {
                 state.remove(query);
             }
+            state.advance_progress();
         } else {
             match outcome {
                 Ok(QueryPoll::Complete(product))
@@ -1289,16 +1375,24 @@ fn run_worker(shared: Arc<Shared>, worker: usize, stack: u64, caller: bool) {
                 }
                 Ok(QueryPoll::Failed(error)) => state.settle(query, Err(error)),
                 Ok(QueryPoll::Waiting(waits))
-                    if !cx.pending.is_empty()
+                    if (!cx.pending.is_empty()
                         && waits.iter().all(|q| state.nodes.node_id(key(*q)).is_some())
                         && waits
                             .iter()
                             .filter_map(|q| state.nodes.node_id(key(*q)).map(|id| id.slot))
                             .collect::<BTreeSet<_>>()
-                            == cx.pending =>
+                            == cx.pending)
+                        || (waits.is_empty()
+                            && cx.admission_wait
+                            && cx.pending.is_empty()
+                            && state.admission_waiters.contains_key(&query)) =>
                 {
+                    let progress_revision = state.progress_revision;
+                    let parked = state.admission_waiters.get(&query).copied();
                     let node = state.nodes.get_mut(&query).unwrap();
-                    let ready = node.unsatisfied == 0;
+                    let ready = node.unsatisfied == 0
+                        && (!cx.admission_wait
+                            || parked.is_some_and(|revision| progress_revision > revision));
                     if let Some(task) = send_task {
                         node.execution.as_mut().expect("active execution").task =
                             Task::Send(Some(task));

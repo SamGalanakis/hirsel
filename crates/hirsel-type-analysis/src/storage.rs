@@ -29,25 +29,35 @@ pub enum StorageSolveError {
 
 /// The SCC coordinator also carries finite callable-target facts that are
 /// proof observations rather than fields of a semantic storage profile.
+/// A transfer may grow the graph itself by discovering a callee context: each
+/// pass converges its snapshot, and any growth re-enters until a full pass
+/// leaves both the values and the graph still.
 pub fn fixed_point<T, E>(
-    calls: &[Vec<usize>],
+    graph: impl Fn() -> Vec<Vec<usize>>,
     mut values: Vec<T>,
+    mut fill: impl FnMut() -> T,
     mut transfer: impl FnMut(usize, &[T]) -> Result<T, E>,
     mut join: impl FnMut(usize, &mut T, T) -> bool,
 ) -> Result<Vec<T>, E> {
-    for component in hirsel_graph::components(calls) {
-        loop {
-            let mut changed = false;
-            for &body in &component {
-                let next = transfer(body, &values)?;
-                changed |= join(body, &mut values[body], next);
-            }
-            if !changed {
-                break;
+    loop {
+        let calls = graph();
+        values.resize_with(calls.len(), &mut fill);
+        for component in hirsel_graph::components(&calls) {
+            loop {
+                let mut changed = false;
+                for &body in &component {
+                    let next = transfer(body, &values)?;
+                    changed |= join(body, &mut values[body], next);
+                }
+                if !changed {
+                    break;
+                }
             }
         }
+        if graph() == calls {
+            return Ok(values);
+        }
     }
-    Ok(values)
 }
 
 impl StorageDomain {
@@ -245,9 +255,43 @@ pub fn solve(
         return Err(StorageSolveError::InvalidCallee(*callee));
     }
     fixed_point(
-        calls,
+        || calls.to_vec(),
         vec![StorageBehavior::empty(); calls.len()],
+        StorageBehavior::empty,
         |body, summaries| domains[body].normalize(transfer(body, summaries)),
         |_, current, next| current.join(&next),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    /// Context discovery interns a node and its edge mid-pass; one solve must
+    /// evaluate the discovery rather than stop at the snapshot's fixpoint.
+    #[test]
+    fn a_context_interned_mid_pass_is_evaluated() {
+        let graph = RefCell::new(vec![vec![1], vec![]]);
+        let interned = Cell::new(false);
+        let values = fixed_point(
+            || graph.borrow().clone(),
+            vec![0, 0],
+            || 0,
+            |body, _values| {
+                if body == 0 && !interned.replace(true) {
+                    graph.borrow_mut().push(vec![]);
+                    graph.borrow_mut()[0].push(2);
+                }
+                Ok::<_, ()>(1)
+            },
+            |_, current, next| {
+                let changed = *current != next;
+                *current = next;
+                changed
+            },
+        )
+        .unwrap();
+        assert_eq!(values, vec![1, 1, 1]);
+    }
 }

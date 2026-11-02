@@ -606,19 +606,13 @@ pub fn analyze(
     }
     let mut summaries = vec![Summary::default(); bodies.len()];
     for strict in [false, true] {
-        loop {
-            let graph = program.contexts.borrow().graph();
-            summaries.resize_with(graph.len(), Summary::default);
-            summaries = fixed_point(
-                &graph,
-                summaries,
-                |context, summaries| program.evaluate(context, summaries, strict, None),
-                |_, current, next| current.join(&next),
-            )?;
-            if program.contexts.borrow().graph() == graph {
-                break;
-            }
-        }
+        summaries = fixed_point(
+            || program.contexts.borrow().graph(),
+            summaries,
+            Summary::default,
+            |context, summaries| program.evaluate(context, summaries, strict, None),
+            |_, current, next| current.join(&next),
+        )?;
     }
     // Discovery records edges from intermediate approximations. Reconstruct
     // direct calls and sealed-read demands from settled executable states;

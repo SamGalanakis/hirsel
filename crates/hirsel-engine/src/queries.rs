@@ -2829,7 +2829,7 @@ pub(crate) fn runtime_type_catalog<V: Into<hirsel_interp::aggregate::SerializedV
     for (view, _) in &views {
         nominals.extend(hirsel_interp::aggregate::Nominal::of(
             &types,
-            &view.signature()?,
+            &*view.signature()?,
             &mut finalizer,
         )?);
     }

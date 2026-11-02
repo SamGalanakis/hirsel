@@ -207,7 +207,10 @@ impl UniverseTask {
             .precompute
             .as_ref()
             .ok_or_else(|| operational("universe summary requires precomputation"))?;
-        let universe = queries.front.signatures().installed_universe(&self.package);
+        let universe = queries
+            .front
+            .signatures()
+            .installed_universe(&self.package)?;
         let bytes = universe.encode().ok_or_else(|| {
             operational("a package universe with signature errors is not published")
         })?;

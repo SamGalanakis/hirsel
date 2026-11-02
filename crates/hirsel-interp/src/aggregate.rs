@@ -120,7 +120,7 @@ impl Views {
         let Some((view, digest)) = rows.view(path)? else {
             return Ok(None);
         };
-        let nominal = Nominal::of(types, &view.signature()?, |drop| rows.finalizer(drop))?;
+        let nominal = Nominal::of(types, &*view.signature()?, |drop| rows.finalizer(drop))?;
         Ok(Some(Arc::new(Row {
             view,
             digest,

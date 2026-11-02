@@ -610,13 +610,16 @@ impl SignatureSnapshot {
                 .iter()
                 .filter_map(|(package, universe)| {
                     let visible = self.visible(package)?;
+                    Some((package, universe, visible))
+                })
+                .map(|(package, universe, visible)| {
                     let members: Vec<DefId> = self
                         .definitions()
                         .into_iter()
                         .filter(|d| visible.contains(&d.path().0.package))
                         .collect();
                     let rows = self.installed_rows(&members, Some(package));
-                    Some((
+                    Ok((
                         package.clone(),
                         Arc::new(ViewTable::with_installed(
                             t,
@@ -624,10 +627,10 @@ impl SignatureSnapshot {
                             hirsel_validate::Installed::new(rows, [universe.own.clone()]),
                             &mut validated,
                             old,
-                        )),
+                        )?),
                     ))
                 })
-                .collect();
+                .collect::<Result<_, hirsel_validate::ViewRefusal>>()?;
             let mut owned: BTreeMap<PackageId, Vec<View>> = BTreeMap::new();
             for d in self.definitions() {
                 let package = &d.path().0.package;
@@ -979,20 +982,22 @@ impl SignatureSnapshot {
     pub(crate) fn exported_universe(
         &self,
         package: &PackageId,
-    ) -> hirsel_validate::PackageUniverse {
-        self.validation_state().exported(package)
+    ) -> Result<hirsel_validate::PackageUniverse, hirsel_validate::ViewRefusal> {
+        Ok(self.validation_state()?.exported(package))
     }
     /// `package`'s published summaries when it is installed here, else its
     /// summaries as this snapshot's full tables compute them.
-    pub(crate) fn installed_universe(&self, package: &PackageId) -> InstalledUniverse {
-        self.lookup
-            .installed
-            .get(package)
-            .cloned()
-            .unwrap_or_else(|| InstalledUniverse {
-                own: self.package_universe(package),
-                exported: self.exported_universe(package),
-            })
+    pub(crate) fn installed_universe(
+        &self,
+        package: &PackageId,
+    ) -> Result<InstalledUniverse, hirsel_validate::ViewRefusal> {
+        if let Some(installed) = self.lookup.installed.get(package) {
+            return Ok(installed.clone());
+        }
+        Ok(InstalledUniverse {
+            own: self.package_universe(package)?,
+            exported: self.exported_universe(package)?,
+        })
     }
     /// The exact source identity `package`'s summary is published under.
     pub(crate) fn package_sources(&self, package: &PackageId) -> Option<ContentHash> {
@@ -1026,7 +1031,7 @@ impl SignatureSnapshot {
                     }),
                 &mut store,
                 Some(&state.validated),
-            );
+            )?;
             return PackageViews::new(
                 t,
                 Arc::new(full),

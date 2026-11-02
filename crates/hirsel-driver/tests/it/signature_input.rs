@@ -791,15 +791,15 @@ fn hello_on_installed_std_answers_v_universe_questions_without_reading_std_rows(
         // hello and about installed std read neither of these rows.
         let (unused, named) = (std_row("seal"), std_row("open"));
         assert!(snapshot.definitions().contains(&unused));
-        let hello_heap = snapshot.validation(&hello).first_heap();
-        let hello_errors = snapshot.validation(&hello).universe_errors().0;
-        let std_heap = snapshot.validation(&std).first_heap();
-        let std_errors = snapshot.validation(&std).universe_errors().0;
-        let std_input = snapshot.validation_input_digest(&std);
+        let hello_heap = snapshot.validation(&hello).unwrap().first_heap();
+        let hello_errors = snapshot.validation(&hello).unwrap().universe_errors().0;
+        let std_heap = snapshot.validation(&std).unwrap().first_heap();
+        let std_errors = snapshot.validation(&std).unwrap().universe_errors().0;
+        let std_input = snapshot.validation_input_digest(&std).unwrap();
         assert!(!snapshot.header_ready(unused), "V read an unused std row");
         assert!(!snapshot.header_ready(named), "V read an unused std row");
         // A view read demands that row, and not its unused sibling.
-        assert!(snapshot.validation(&hello).view(named).is_some());
+        assert!(snapshot.validation(&hello).unwrap().view(named).is_some());
         assert!(snapshot.header_ready(named));
         assert!(!snapshot.header_ready(unused));
         // Oracle: V over each full table, every view identified afresh.
@@ -819,6 +819,7 @@ fn hello_on_installed_std_answers_v_universe_questions_without_reading_std_rows(
                 &mut ValidatedSignatures::default(),
                 None,
             )
+            .unwrap()
         };
         let everything = full(&hello, &|_| true);
         assert_eq!(hello_heap, everything.first_heap());

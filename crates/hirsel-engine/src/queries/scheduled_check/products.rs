@@ -142,6 +142,13 @@ impl FrontCheckScope {
             }));
         }
         let mut input = self.checked_product_input(&headers, entry)?;
+        // Capture refuses lazy rows; the producer loads the selected closure.
+        hirsel_proof_export::materialize_types(&input).ok_or_else(|| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "checked product input".into(),
+                message: "a selected type row did not load".into(),
+            })
+        })?;
         // Live Lower shares its bodies. This input's pre-admitted clone grant
         // owns the copy that the consuming export builder subsequently moves.
         for definition in input.definitions.values_mut() {

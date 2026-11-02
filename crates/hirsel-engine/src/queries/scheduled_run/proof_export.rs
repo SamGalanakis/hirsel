@@ -418,6 +418,9 @@ impl FrontProofExport {
             ));
         }
         let mut input = self.input(product)?;
+        // Capture refuses lazy rows; the producer loads the selected closure.
+        hirsel_proof_export::materialize_types(&input)
+            .ok_or_else(|| operational("PS9 input type row did not load"))?;
         // Live Lower shares its bodies. This input's pre-admitted clone grant
         // owns the copy that the consuming export builder subsequently moves.
         for definition in input.definitions.values_mut() {

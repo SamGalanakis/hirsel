@@ -315,14 +315,8 @@ pub fn capture_types_bytes(input: &ExportInput) -> Option<u64> {
     )?;
     weight.0.try_into().ok()
 }
-/// Capture under an admitted workspace before any Vec/hash table is allocated.
-/// A lazy row on the selected closure refuses; unrelated lazy rows are ignored.
-/// No provider I/O or compiler work runs even during capture.
-pub fn capture_types(input: &ExportInput, limit: u64) -> Option<CapturedTypes> {
-    if capture_types_bytes(input)? > limit {
-        return None;
-    }
-    let count = input.types.len();
+/// The type ids the canonical input fields name directly.
+fn closure_roots(input: &ExportInput) -> Option<Vec<TypeId>> {
     let mut cx = Cx::new(input.locator.clone(), input.types.clone());
     cx.capture_roots = Some(Vec::new());
     let mut writer = Writer::discarding(cx);
@@ -337,7 +331,35 @@ pub fn capture_types(input: &ExportInput, limit: u64) -> Option<CapturedTypes> {
     for constant in input.constants.values() {
         constant.write(&mut writer);
     }
-    let mut pending = writer.finish().1.capture_roots?;
+    writer.finish().1.capture_roots
+}
+/// Load every lazy base row on the type closure the input fields select, so
+/// capture and construction inspect only loaded rows. This is the source
+/// producer's obligation: header inventories name dependency signatures (for
+/// example core's) whose rows no checked body ever demanded. Rows load through
+/// the interner's own provider, exactly as an ordinary checker demand would.
+/// None for an id the interner never assigned or a row its provider refuses.
+pub fn materialize_types(input: &ExportInput) -> Option<()> {
+    let mut pending = closure_roots(input)?;
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = pending.pop() {
+        if id == TypeId::DANGLING || !seen.insert(id) {
+            continue;
+        }
+        let row = input.types.get(id)?;
+        pending.extend(row.kind.graph_edges().into_iter().map(|edge| edge.ty));
+    }
+    Some(())
+}
+/// Capture under an admitted workspace before any Vec/hash table is allocated.
+/// A lazy row on the selected closure refuses; unrelated lazy rows are ignored.
+/// No provider I/O or compiler work runs even during capture.
+pub fn capture_types(input: &ExportInput, limit: u64) -> Option<CapturedTypes> {
+    if capture_types_bytes(input)? > limit {
+        return None;
+    }
+    let count = input.types.len();
+    let mut pending = closure_roots(input)?;
     let mut seen = std::collections::HashSet::new();
     while let Some(id) = pending.pop() {
         if id == TypeId::DANGLING || !seen.insert(id) {

@@ -13,6 +13,7 @@ mod annotations;
 pub use admission::{
     BuildTablesLayout, CapturedTypes, build_captured_tables_bytes, build_owned_tables_bytes,
     build_owned_tables_layout, build_tables_bytes, capture_types, capture_types_bytes,
+    materialize_types,
 };
 mod constants;
 mod content;

@@ -57,7 +57,7 @@ See docs/native-verification.md#record-remove-host-access-replay for the recipe.
         "run" => "usage: hirsel run [--native [--backend llvm|cranelift] [--proofs <sidecar> [--trust <tool@version>]...] | --simulation <json>] [--verify-cache] [--validate-stages] [--no-verify] [--json] <source|manifest.json> [(--run <json> | --grants <json>) [--record <tape>] [--revocations <json>] | --replay <tape>] [--max-steps <n|unbounded>] [--cores <n>] [--trace-events <jsonl>] [--trace-ownership <json>] [-- args...]
 
 Run a source entry; the default engine is the interpreter.
-  --native            Compile and run natively (LLVM by default)
+  --native            Compile and run natively (Cranelift by default)
   --backend           Select llvm or cranelift; requires --native
   --proofs <sidecar>   Native proof certificates; --trust adds trusted tool@version
   --simulation <json> Interpret a simulation; excludes native/live/replay launches

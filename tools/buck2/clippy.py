@@ -27,12 +27,8 @@ CONFIG = os.environ.get('HIRSEL_BUCK2_CONFIG', '').split() + ['-c', 'hirsel.clip
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--scope', help='Buck2 target query proven sufficient by tools/land')
-    args = parser.parse_args()
+    argparse.ArgumentParser(description=__doc__).parse_args()
     query = 'attrregexfilter(name, "-clippy$", kind("^rust_(library|binary)$", root//:))'
-    if args.scope:
-        query = f'({query}) intersect ({args.scope})'
     targets = subprocess.run(
         [str(BUCK2), 'uquery', *CONFIG, query],
         cwd=ROOT, check=True, capture_output=True, text=True).stdout.split()

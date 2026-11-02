@@ -9,16 +9,14 @@ onto origin/main (the files many lanes add to merge with the
 `hirsel` merge driver, tools/buck2/merging.py), regenerate the build files
 (`sync.py --if-stale`), build the workspace, run Clippy and check formatting
 through Buck2, then push. The queue head lands a batch: its own commits, then
-those of up to 15 waiting tickets in ticket order, checked once together and
-pushed in one push; a conflicting ticket leaves the batch, and a red batch
-bisects until its culprits are found, checking up to three trees at once in
-land slots and pushing each green group at once (docs/landing.md). A waiting ticket
-landed in a batch exits with its own landed commits. A push rejected because
-main moved goes back to the rebase with full jitter and no attempt limit.
-Row-only main moves reuse a batch's passed checks after a clean rebase.
-Other proposed trees are checked; a proven unchanged graph can narrow a retry to
-incoming crates and their reverse dependencies. A red check refuses the push
-and prints its first error.
+those of up to 15 waiting tickets in ticket order, checked once together in
+this worktree and pushed in one push; a conflicting ticket leaves the batch,
+and a red batch bisects until its culprits are found, pushing each green group
+at once (docs/landing.md). A waiting ticket landed in a batch exits with its
+own landed commits. A push rejected because main moved goes back to the rebase
+with full jitter and no attempt limit. Row-only main moves reuse a batch's
+passed checks after a clean rebase; every other proposed tree is checked in
+full. A red check refuses the push and prints its first error.
 
 Land runs no tests: the lane runs the tests its change can break, and
 tools/main-runs runs the full suite on main every hour. Each push is appended
@@ -28,20 +26,17 @@ names the lane of a commit.
 
 from contextlib import contextmanager
 import fcntl
-import hashlib
 import itertools
 import json
 import os
 from pathlib import Path
 import re
 import random
-import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 ROOT = Path(subprocess.run(['git', 'rev-parse', '--show-toplevel'], capture_output=True, text=True,
                            check=True).stdout.strip())
@@ -68,10 +63,6 @@ REJECTED = ('[rejected]', 'fetch first', 'non-fast-forward', 'failed to update r
 LANDINGS = 'hirsel-landings.jsonl'
 # Tickets per batch, the head's own included (bors-ng's max_batch_size).
 BATCH = 16
-# Trees checked at once, each in its own land slot.
-SLOTS = 3
-# Batches one head drives: its own, then speculative ones while a red batch bisects.
-TRAIN = 4
 # This process's own code, read before any rebase rewrites the file it was started from.
 SELF = Path(__file__).read_bytes()
 
@@ -375,164 +366,73 @@ def first_error(text, count=40):
     return '\n'.join(lines[start:start + count])
 
 
-class Slot:
-    """A detached worktree beside the repository where checks run, each with its own Buck2 daemon.
-
-    A head checks up to SLOTS trees at once, one per slot, while its own
-    worktree only replays commits. Slots live in `<repository>-land-slots/`,
-    stay checked out on the last tree they checked, and keep their Buck2
-    daemons warm on main for the next head. A slot's lock is held by the
-    head and inherited by every check process it starts, so a check orphaned
-    by a dead head keeps its slot until it exits. When no slot is free (an
-    expired head that is still alive holds them), the head checks one tree at
-    a time in its own worktree, as a single land always did.
-    """
-
-    def __init__(self, index, path, lock=None):
-        # Without a lock, the slot is the head's own worktree: never forced or cleaned.
-        self.index, self.root, self.lock = index, path, lock
-        self.failure = []
-        self.running = set()
-        self.cancelled = threading.Event()
-
-    @classmethod
-    def acquire(cls, index, base):
-        common = Path(git('rev-parse', '--path-format=absolute', '--git-common-dir').stdout.strip())
-        directory = common.parent.parent / f'{common.parent.name}-land-slots'
-        directory.mkdir(exist_ok=True)
-        lock = os.open(directory / f'{index}.lock', os.O_RDWR | os.O_CREAT, 0o644)
+def run(command):
+    """Run a check in this worktree, in its own session so a withdrawal takes its Buck2 client with it."""
+    process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                               env=rust_environment.environment(ROOT) | ENV, start_new_session=True)
+    try:
+        stdout, stderr = process.communicate()
+    except BaseException:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            os.close(lock)
-            return None
-        path = directory / str(index)
-        top = subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=path, capture_output=True, text=True,
-                             env=rust_environment.environment(ROOT) | ENV) \
-            if path.is_dir() else None
-        if top is None or top.returncode or Path(top.stdout.strip()) != path:
-            if path.exists():
-                shutil.rmtree(path)
-            added = git('worktree', 'add', '-f', '-q', '--detach', str(path), base)
-            if added.returncode:
-                os.close(lock)
-                raise Refusal(f'cannot create land slot {path}: {added.stderr.strip()}')
-        return cls(index, path, lock)
-
-    def release(self):
-        if self.lock is not None:
-            os.close(self.lock)
-
-    def say(self, message):
-        say(f'slot {self.index}: {message}')
-
-    def git(self, *arguments):
-        return subprocess.run(['git', *arguments], cwd=self.root, capture_output=True, text=True,
-                              env=rust_environment.environment(self.root) | ENV)
-
-    def run(self, command):
-        if self.cancelled.is_set():
-            raise Refusal('checks cancelled')
-        # Its own session, so a cancelled check takes its Buck2 client with it.
-        process = subprocess.Popen(command, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   text=True, env=rust_environment.environment(self.root) | ENV, start_new_session=True,
-                                   pass_fds=() if self.lock is None else (self.lock,))
-        self.running.add(process)
-        try:
-            stdout, stderr = process.communicate()
-        finally:
-            self.running.discard(process)
-        if self.cancelled.is_set():
-            raise Refusal('checks cancelled')
-        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-
-    def cancel(self):
-        self.cancelled.set()
-        for process in list(self.running):
-            try:
-                os.killpg(process.pid, 15)
-            except OSError:
-                pass
-
-    def move(self, tree):
-        """Check out a tree, dropping whatever a previous check left that Git tracks or would track."""
-        forced = [] if self.lock is None else ['-f']
-        if (self.git('checkout', '-q', *forced, '--detach', tree).returncode
-                or (self.lock is not None and self.git('clean', '-fdq').returncode)):
-            raise Refusal(f'cannot check out {tree[:12]} in land slot {self.index}; refusing to push')
-        if not self.unchanged(tree):
-            raise Refusal('the worktree changed before checks; refusing to push')
-
-    def unchanged(self, tree):
-        current = self.git('rev-parse', 'HEAD')
-        status = self.git('status', '--porcelain')
-        return (current.returncode == status.returncode == 0 and current.stdout.strip() == tree
-                and not status.stdout.strip())
-
-    def check(self, name, command):
-        started = time.monotonic()
-        done = self.run(command)
-        self.say(f'{"pass" if done.returncode == 0 else "FAIL"}  {name} ({time.monotonic() - started:.3f} s)')
-        if done.returncode:
-            error = first_error(done.stderr + done.stdout)
-            print(error, flush=True)
-            # The red check's report, which a batch hands to the ticket it blames.
-            self.failure = [f'FAIL  {name}', *error.splitlines()]
-        return done.returncode == 0
-
-    def inventory(self):
-        """Byte identity of the generated graph, including compile-time inputs."""
-        try:
-            return tuple(hashlib.sha256((self.root / path).read_bytes()).digest()
-                         for path in generated.BUILD_INPUTS)
+            os.killpg(process.pid, signal.SIGTERM)
         except OSError:
-            return None
+            pass
+        raise
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
-    def fast(self, tree):
-        """The checks that take seconds (build files, line lists, fmt) on one tree."""
-        self.move(tree)
-        self.failure = []
-        self.say(f'screening {tree[:12]} with the fast checks')
-        passed = (self.check('screen: prepare.py', [PY, 'tools/buck2/prepare.py'])
-                  and self.check('screen: sync.py --if-stale', [PY, 'tools/buck2/sync.py', '--if-stale'])
-                  and self.check('screen: independent line lists', [PY, 'tools/check-hot-files'])
-                  and self.check('screen: formatting', [PY, 'tools/buck2/fmt.py', '--check']))
-        if not self.unchanged(tree):
-            raise Refusal('the worktree changed during checks; refusing to push')
-        return passed
 
-    def checks(self, scope=None, previous_inventory=None):
-        """Check this tree, using only a proven unaffected complement on retries."""
-        buck2 = str(self.root / '.buck2/bin/buck2')
-        # Cheap when nothing changed; it reinstalls a changed toolchain pin and restarts the daemon.
-        if not self.check('prepare.py', [PY, 'tools/buck2/prepare.py']):
-            return False
-        if not self.check('sync.py --if-stale', [PY, 'tools/buck2/sync.py', '--if-stale']):
-            return False
-        if scope is not None and (previous_inventory is None or self.inventory() != previous_inventory):
-            self.say('generated graph changed or unavailable; checking the full workspace')
-            scope = None
-        if scope is not None:
-            resolved = self.run([buck2, 'uquery', *CONFIG, scope])
-            if resolved.returncode or not resolved.stdout.strip():
-                self.say('uncertain retry graph; checking the full workspace')
-                scope = None
-        query = self.run([buck2, 'uquery', *CONFIG,
-                          BUILD_SET if scope is None else f'({BUILD_SET}) intersect ({scope})'])
-        if scope is not None and (query.returncode or not query.stdout.strip()):
-            self.say('uncertain retry build selection; checking the full workspace')
-            scope = None
-            query = self.run([buck2, 'uquery', *CONFIG, BUILD_SET])
+def check(name, command):
+    """One check: None when it passes, else its report (which a batch hands to the ticket it blames)."""
+    started = time.monotonic()
+    done = run(command)
+    say(f'{"pass" if done.returncode == 0 else "FAIL"}  {name} ({time.monotonic() - started:.3f} s)')
+    if done.returncode == 0:
+        return None
+    error = first_error(done.stderr + done.stdout)
+    print(error, flush=True)
+    return [f'FAIL  {name}', *error.splitlines()]
+
+
+def move(tree):
+    """Check out a tree detached in this worktree, which must stay clean."""
+    if git('checkout', '-q', '--detach', tree).returncode or not unchanged(tree):
+        raise Refusal(f'cannot check out {tree[:12]} cleanly; refusing to push')
+
+
+def fast(tree):
+    """The checks that take seconds (build files, line lists, fmt) on one tree: None or the first report."""
+    move(tree)
+    say(f'screening {tree[:12]} with the fast checks')
+    report = (check('screen: prepare.py', [PY, 'tools/buck2/prepare.py'])
+              or check('screen: sync.py --if-stale', [PY, 'tools/buck2/sync.py', '--if-stale'])
+              or check('screen: independent line lists', [PY, 'tools/check-hot-files'])
+              or check('screen: formatting', [PY, 'tools/buck2/fmt.py', '--check']))
+    if not unchanged(tree):
+        raise Refusal('the worktree changed during checks; refusing to push')
+    return report
+
+
+def full(tree):
+    """The gate on the checked-out tree: None or the first red check's report."""
+    if not unchanged(tree):
+        raise Refusal('the worktree changed before checks; refusing to push')
+    # prepare.py is cheap when nothing changed; it reinstalls a changed toolchain pin and restarts the daemon.
+    report = (check('independent line lists', [PY, 'tools/check-hot-files'])
+              or check('prepare.py', [PY, 'tools/buck2/prepare.py'])
+              or check('sync.py --if-stale', [PY, 'tools/buck2/sync.py', '--if-stale']))
+    if report is None:
+        query = run([BUCK2, 'uquery', *CONFIG, BUILD_SET])
         if query.returncode or not query.stdout.strip():
-            self.say('FAIL  the build set query\n' + first_error(query.stderr))
-            self.failure = ['FAIL  the build set query', *first_error(query.stderr).splitlines()]
-            return False
-        return (self.check('workspace build', [PY, 'tools/buck2/event_logs.py', 'build', *CONFIG,
-                                               '--materializations', 'none', *query.stdout.split()])
-                and self.check('Clippy', [PY, 'tools/buck2/clippy.py',
-                                          *([] if scope is None else ['--scope', scope])])
-                and self.check('formatting', [PY, 'tools/buck2/fmt.py', '--check',
-                                              *([] if scope is None else ['--scope', scope])]))
+            report = ['FAIL  the build set query', *first_error(query.stderr).splitlines()]
+            say('\n'.join(report))
+        else:
+            report = (check('workspace build', [PY, 'tools/buck2/event_logs.py', 'build', *CONFIG,
+                                                '--materializations', 'none', *query.stdout.split()])
+                      or check('Clippy', [PY, 'tools/buck2/clippy.py'])
+                      or check('formatting', [PY, 'tools/buck2/fmt.py', '--check']))
+    if not unchanged(tree):
+        raise Refusal('the worktree changed during checks; refusing to push')
+    return report
 
 
 def changed_paths(before, after):
@@ -552,50 +452,6 @@ def row_only_move(before, after):
         return False
     paths = git('log', '--format=', '--name-only', '-z', '-m', '--no-renames', f'{before}..{after}')
     return paths.returncode == 0 and set(paths.stdout.rstrip('\0').split('\0')) == {'tools/known-failures.tsv'}
-
-
-def retry_scope(previous, base, head, root=ROOT):
-    """Narrow only disjoint edits to existing crate src/*.rs with an unchanged lane.
-
-    Git supplies ancestry and exact blob comparisons; Buck2's rdeps supplies
-    the dependency closure, including compile-time inputs. Everything else
-    (manifest, generated input, deletion, rename, build.rs, new source, tool,
-    non-Rust file, changed lane blob or graph uncertainty) checks everything.
-    This proof lives only in this process, never in an environment/green file.
-    """
-    if previous is None:
-        return None
-    old_base, old_head = previous
-    try:
-        if git('merge-base', '--is-ancestor', old_base, base).returncode:
-            return None
-        incoming = changed_paths(old_base, base)
-        lane = changed_paths(old_base, old_head)
-        if not incoming or incoming & lane or changed_paths(old_head, head) != incoming:
-            return None
-        crates = set()
-        for path in incoming:
-            match = re.fullmatch(r'crates/([a-zA-Z0-9_-]+)/src/([a-zA-Z0-9_./-]+\.rs)', path)
-            if not match or not (root / 'crates' / match[1] / 'Cargo.toml').is_file():
-                return None
-            # Only existing regular files. No new module, deletion or symlink.
-            for revision in (old_base, base):
-                entry = git('ls-tree', revision, '--', path)
-                if entry.returncode or not entry.stdout.startswith('100644 blob '):
-                    return None
-            if git('diff', '--quiet', base, head, '--', path).returncode:
-                return None
-            crates.add(match[1])
-        # Every lane path has the identical checked mode and blob after rebase.
-        if lane and git('diff', '--quiet', old_head, head, '--', *sorted(lane)).returncode:
-            return None
-        names = '|'.join(sorted(crates))
-        owners = ' + '.join(f'owner({json.dumps(path)})' for path in sorted(incoming))
-        scope = (f'rdeps(root//:, attrregexfilter(crate_root, "^crates/({names})/", root//:) '
-                 f'+ {owners})')
-        return scope
-    except (OSError, ValueError):
-        return None
 
 
 def unchanged(head):
@@ -668,12 +524,10 @@ class Batch:
     dependent pipeline tests each change on the changes ahead of it, and a
     change that does not merge leaves the queue while the rest move onto the
     nearest non-failing item (zuul/manager/__init__.py:1955-1972; zuul
-    3daef6c4); it runs the items of a window at once, each on the tree of
-    the items ahead (zuul/manager/dependent.py:36-45). GitHub's merge queue
-    groups up to a maximum number of pull requests per merge group and builds
-    several groups at once ("Managing a merge queue", merge limits and build
-    concurrency), removing only a failing one. LUCI CV, the Chromium CQ, gives every verdict to one
-    change and retries failed tryjobs before blaming it
+    3daef6c4). GitHub's merge queue groups up to a maximum number of pull
+    requests per merge group and removes only a failing one ("Managing a
+    merge queue", merge limits). LUCI CV, the Chromium CQ, gives every
+    verdict to one change and retries failed tryjobs before blaming it
     (cv/internal/tryjob/execute/retry.go:43-60; luci-go f46b764f). Here a
     ticket is blamed only by a red check of its own change on a green tree,
     never by elimination, so a red that does not repeat blames no one and the
@@ -681,11 +535,9 @@ class Batch:
     exactly the tip it is pushed onto.
     """
 
-    def __init__(self, queue, main_sha, members, attempt, slots):
-        self.queue, self.main, self.attempt, self.slots = queue, main_sha, attempt, slots
+    def __init__(self, queue, main_sha, members, attempt):
+        self.queue, self.main, self.attempt = queue, main_sha, attempt
         self.own = members[0]
-        self.claimed = {member.ticket for member in members}
-        self.batches = 1
         # The head's own failure, printed when the batch is done.
         self.verdict = None
         self.checked = 0
@@ -696,10 +548,8 @@ class Batch:
         # The tickets pushed so far in this attempt, in push order, with their commits.
         self.landed = []
         self.pushed = main_sha
-        # The last green check whose tip moved before its push: (base, tree, inventory, submitted heads).
+        # The last green check, kept if its push loses a race: (base, tree, submitted heads).
         self.proof = None
-        # The tickets of the newest speculative batch.
-        self.speculative = set()
 
     def fail(self, member, code, message, report=()):
         if member is self.own:
@@ -755,7 +605,7 @@ class Batch:
             f' (checked by itself on origin/main {self.main[:12]} and the green changes batched'
             f' ahead of it, in the batch led by {self.own.lane})'), report)
 
-    def screen(self, base, members, slot):
+    def screen(self, base, members):
         """Drop each ticket whose own change fails the fast checks, before any build.
 
         The combined tree runs them first. When it is red, a binary search
@@ -767,10 +617,9 @@ class Batch:
         while True:
             tip, applied = self.apply(base, members)
             members = [member for member, _ in applied]
-            if len(applied) < 2 or slot.fast(tip):
+            if len(applied) < 2 or not (report := fast(tip)):
                 return members
-            report = list(slot.failure)
-            if not slot.fast(base):
+            if fast(base):
                 say('the base fails the fast checks itself; the screen blames no ticket')
                 return members
             # trees[i] holds the first i tickets: trees[low] passes, trees[high] fails.
@@ -778,10 +627,10 @@ class Batch:
             low, high = 0, len(applied)
             while high - low > 1:
                 middle = (low + high) // 2
-                if slot.fast(trees[middle]):
-                    low = middle
+                if found := fast(trees[middle]):
+                    high, report = middle, found
                 else:
-                    high, report = middle, list(slot.failure)
+                    low = middle
             culprit = members[high - 1]
             self.red(culprit, report)
             members.remove(culprit)
@@ -823,45 +672,31 @@ class Batch:
         if len(fresh) > 1 or self.checked > 1:
             say(f'pushed {tip[:12]} with {len(fresh)} tickets: ' + ', '.join(str(m) for m, _ in fresh))
 
-    def green(self, slot, tree, applied, base, proof):
-        """One full check of a tree in a slot: whether it passed, and its graph inventory."""
-        slot.move(tree)
-        scope = retry_scope(proof and proof[:2], base, tree, slot.root)
+    def green(self, tree, applied, base):
+        """One full check of the checked-out tree: None when it passed, else its report."""
         if len(applied) == 1:
             tickets = '' if applied[0][0] is self.own else f' with {applied[0][0]}'
         else:
             tickets = f' with {len(applied)} tickets: ' + ', '.join(str(member) for member, _ in applied)
-        slot.say(f'attempt {self.attempt}: checking {tree[:12]} on origin/main {base[:12]}' + tickets
-                 + (' (incoming crates and reverse dependencies)' if scope else ' (full workspace)'))
-        slot.failure = []
-        passed = (slot.check('independent line lists', [PY, 'tools/check-hot-files'])
-                  and slot.checks(scope, proof and proof[2]))
-        if not slot.unchanged(tree):
-            raise Refusal('the worktree changed during checks; refusing to push')
-        return passed, slot.inventory()
+        say(f'attempt {self.attempt}: checking {tree[:12]} on origin/main {base[:12]}' + tickets)
+        return full(tree)
 
     def resolve(self, members, previous=None):
-        """Check groups of tickets in up to SLOTS slots at once and push each green one at once.
+        """Check groups of tickets one at a time and push each green one at once.
 
-        A group is checked on the tip pushed so far. A green group still on
-        that tip is pushed at once; one whose tip moved meanwhile is checked
-        again on the new tip, narrowed by its proof when that holds. A red
-        group splits in halves, checked at once; a red ticket alone is a
-        culprit. While a red batch bisects, a free slot checks the next
-        waiting batch on the pushed tip, at most TRAIN batches in all.
-        Returns the pushed tip.
+        A group is checked on the tip pushed so far; a green group is pushed
+        at once. A red group splits in halves, checked in ticket order; a red
+        ticket alone is a culprit. Returns the pushed tip.
         """
-        for slot in self.slots:
-            slot.cancelled.clear()
         if previous and row_only_move(previous[0], self.main):
             # Finish the checked cohort. New arrivals get their own batch;
             # they must neither invalidate this pass nor inherit it.
             left = [member for member in members if member is not self.own]
             live = set(self.queue.live(left)) | {self.own}
             members = [member for member in members if member in live
-                       and previous[3].get(member.ticket) == member.head]
+                       and previous[2].get(member.ticket) == member.head]
             submitted = {member.ticket: member.head for member in members}
-            if submitted and list(submitted.items()) == list(previous[3].items())[:len(submitted)]:
+            if submitted and list(submitted.items()) == list(previous[2].items())[:len(submitted)]:
                 tree, applied = self.apply(self.main, members)
                 members = [member for member, _ in applied]
                 left = [member for member in members if member is not self.own]
@@ -871,79 +706,38 @@ class Batch:
                     if not unchanged(tree):
                         raise Refusal('the worktree changed after rebase; refusing to push')
                     say('main moved only by known-failures rows; clean rebase reuses all passed checks')
-                    self.proof = (self.main, tree, previous[2], submitted)
+                    self.proof = (self.main, tree, submitted)
                     self.publish(tree, applied)
                     return self.pushed
-        members = self.screen(self.main, members, self.slots[0])
-        pending = [(members, previous)] if members else []
-        free, running, bisecting = list(self.slots), {}, False
-        with ThreadPoolExecutor(len(self.slots)) as pool:
-            try:
-                while pending or running:
-                    pending.sort(key=lambda entry: int(entry[0][0].ticket))
-                    while pending and free:
-                        group, proof = pending.pop(0)
-                        base = self.pushed
-                        tree, applied = self.apply(base, group)
-                        if not applied:
-                            continue
-                        self.checked += 1
-                        slot = free.pop(0)
-                        running[pool.submit(self.green, slot, tree, applied, base, proof)] = (
-                            slot, tree, applied, base)
-                    unresolved = [m for group, _ in pending for m in group] + [
-                        m for _, _, applied, _ in running.values() for m, _ in applied]
-                    open_speculation = any(m.ticket in self.speculative for m in unresolved)
-                    if free and bisecting and self.batches < TRAIN and running and not open_speculation:
-                        if more := self.speculate(free[0]):
-                            pending.append((more, None))
-                            continue
-                    finished, _ = wait(running, return_when=FIRST_COMPLETED)
-                    for future in finished:
-                        slot, tree, applied, base = running.pop(future)
-                        free.append(slot)
-                        passed, inventory = future.result()
-                        group = [member for member, _ in applied]
-                        if passed:
-                            left = [m for m in group if m is not self.own]
-                            gone = set(left) - set(self.queue.live(left))
-                            if gone:
-                                say('a batched ticket left the queue during the checks; checking again'
-                                    ' without ' + ', '.join(map(str, gone)))
-                                if rest := [m for m in group if m not in gone]:
-                                    pending.append((rest, None))
-                            elif base == self.pushed:
-                                self.proof = (base, tree, inventory,
-                                              {member.ticket: member.head for member in group})
-                                self.publish(tree, applied)
-                            else:
-                                slot.say(f'main moved to {self.pushed[:12]} during the check; checking again')
-                                pending.append((group, (base, tree, inventory)))
-                        elif len(group) == 1:
-                            self.red(group[0], slot.failure)
-                        else:
-                            bisecting = True
-                            half = len(group) // 2
-                            say(f'red batch; bisecting at once into {", ".join(map(str, group[:half]))} and '
-                                f'{", ".join(map(str, group[half:]))}')
-                            pending += [(group[:half], None), (group[half:], None)]
-            except BaseException:
-                for slot in self.slots:
-                    slot.cancel()
-                raise
+        members = self.screen(self.main, members)
+        pending = [members] if members else []
+        while pending:
+            group = pending.pop(0)
+            base = self.pushed
+            tree, applied = self.apply(base, group)
+            if not applied:
+                continue
+            self.checked += 1
+            report = self.green(tree, applied, base)
+            group = [member for member, _ in applied]
+            if not report:
+                left = [m for m in group if m is not self.own]
+                if gone := set(left) - set(self.queue.live(left)):
+                    say('a batched ticket left the queue during the checks; checking again'
+                        ' without ' + ', '.join(map(str, gone)))
+                    if rest := [m for m in group if m not in gone]:
+                        pending.insert(0, rest)
+                else:
+                    self.proof = (base, tree, {member.ticket: member.head for member in group})
+                    self.publish(tree, applied)
+            elif len(group) == 1:
+                self.red(group[0], report)
+            else:
+                half = len(group) // 2
+                say(f'red batch; bisecting into {", ".join(map(str, group[:half]))} and '
+                    f'{", ".join(map(str, group[half:]))}')
+                pending[:0] = [group[:half], group[half:]]
         return self.pushed
-
-    def speculate(self, slot):
-        """The next waiting batch, screened on the pushed tip, while a red batch bisects."""
-        waiting = [member for member in self.queue.claim(BATCH, branches(), self.claimed)
-                   if git('cat-file', '-e', member.head + '^{commit}').returncode == 0]
-        if not waiting:
-            return []
-        self.batches += 1
-        self.claimed |= {member.ticket for member in waiting}
-        self.speculative = {member.ticket for member in waiting}
-        say(f'speculative batch of {len(waiting)} tickets on {self.pushed[:12]}: ' + ', '.join(map(str, waiting)))
-        return self.screen(self.pushed, waiting, slot)
 
 
 def delivered(queue, branch):
@@ -1010,26 +804,20 @@ def main():
 
 
 def land(queue, branch):
-    slots = []
     head = revision('HEAD')
     try:
-        return train(queue, branch, slots)
+        return train(queue, branch)
     except BaseException:
-        for slot in slots:
-            slot.cancel()
         git('rebase', '--abort')
         git('checkout', '-q', *([branch] if branch else ['--detach', head]))
         raise
-    finally:
-        for slot in slots:
-            slot.release()
 
 
-def train(queue, branch, slots):
+def train(queue, branch):
     started = time.monotonic()
     # Kept across the re-exec into a rebased tree's own tools/land.
     first = int(os.environ.get('HIRSEL_LAND_ATTEMPT', '1'))
-    # The proof of the last green check that main moved under, for a narrower retry.
+    # The last green check whose push lost a race, which a row-only main move can reuse.
     previous = None
     for attempt in itertools.count(first):
         if not queue.owns_head():
@@ -1041,7 +829,7 @@ def train(queue, branch, slots):
         main_sha = revision('origin/main')
         # An edited lane needs checks. Only our own successful rebase may
         # advance its submitted head while carrying a previous batch pass.
-        if previous and previous[3].get(queue.ticket.name) != revision('HEAD'):
+        if previous and previous[2].get(queue.ticket.name) != revision('HEAD'):
             previous = None
         if rebase(main_sha).returncode:
             conflicts = git('diff', '--name-only', '--diff-filter=U').stdout.split()
@@ -1059,7 +847,7 @@ def train(queue, branch, slots):
             return 1
         head = revision('HEAD')
         if previous:
-            previous[3][queue.ticket.name] = head
+            previous[2][queue.ticket.name] = head
         if head == main_sha:
             say('nothing to land; HEAD is on origin/main')
             return 0
@@ -1076,11 +864,7 @@ def train(queue, branch, slots):
         members = [Member(queue.ticket.name, queue.lane, head), *waiting]
         if waiting:
             say(f'batch of {len(members)} tickets: ' + ', '.join(map(str, members)))
-        if not slots:
-            # The free land slots, or this worktree alone when an expired head still holds them.
-            slots[:] = [slot for index in range(SLOTS) if (slot := Slot.acquire(index, main_sha))] or [
-                Slot('own', ROOT)]
-        batch = Batch(queue, main_sha, members, attempt, slots)
+        batch = Batch(queue, main_sha, members, attempt)
 
         def restore():
             # Back to the lane's own rebased branch; the batch was built detached.

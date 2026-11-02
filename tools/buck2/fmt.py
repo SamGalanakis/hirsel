@@ -21,12 +21,8 @@ RUSTFMT = ROOT / 'tools/buck2/toolchains/rust-files/bin/rustfmt'
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--scope', help='Buck2 target query proven sufficient by tools/land')
-    args, rustfmt_flags = parser.parse_known_args()
+    _, rustfmt_flags = argparse.ArgumentParser(description=__doc__).parse_known_args()
     query = 'kind("^rust_(library|binary)$", root//:)'
-    if args.scope:
-        query = f'({query}) intersect ({args.scope})'
     attributes = json.loads(subprocess.run(
         [str(BUCK2), 'uquery', *CONFIG, query,
          '--output-attribute', 'crate_root', '--output-attribute', 'edition'],

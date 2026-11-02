@@ -39,13 +39,7 @@ if os.environ.get('FAKE_RED_AFTER_RACE') and STAGE == os.environ['FAKE_RED_AFTER
 
 FAKES = {
     '.buck2/bin/buck2': '#!/bin/sh\necho root//:a\n',
-    # Land slots are fresh worktrees: prepare installs the fake Buck2 there.
-    'tools/buck2/prepare.py': '''import os, pathlib
-buck2 = pathlib.Path('.buck2/bin/buck2')
-buck2.parent.mkdir(parents=True, exist_ok=True)
-buck2.write_text('#!/bin/sh\\necho root//:a\\n')
-buck2.chmod(0o755)
-''',
+    'tools/buck2/prepare.py': '',
     'tools/buck2/sync.py': '',
     'tools/check-hot-files': '',
     'tools/buck2/event_logs.py': "PASS, SKIP, OMITTED = 'PASS', 'SKIP', 'OMITTED'\n",
@@ -235,7 +229,7 @@ class Land(unittest.TestCase):
                 self.assertIn(malformed, (self.lane / 'tools/known-failures.tsv').read_text())
                 self.assertEqual(self.main_log(), ['base'])
 
-    def test_slot_preparation_finds_cargo_without_it_on_the_leaders_path(self):
+    def test_check_preparation_finds_cargo_without_it_on_the_leaders_path(self):
         cargo_bin = self.top / 'cargo-home/bin'
         cargo_bin.mkdir(parents=True)
         cargo = cargo_bin / 'cargo'
@@ -243,7 +237,7 @@ class Land(unittest.TestCase):
         cargo.chmod(0o755)
         (cargo_bin / 'rustc').symlink_to(cargo)
         # The same nested process boundary as prepare -> bootstrap -> sync.
-        (self.lane / 'tools/buck2/prepare.py').write_text(FAKES['tools/buck2/prepare.py'] + '''import subprocess, sys
+        (self.lane / 'tools/buck2/prepare.py').write_text('''import subprocess, sys
 subprocess.run([sys.executable, 'tools/buck2/sync.py'], check=True)
 ''')
         (self.lane / 'tools/buck2/sync.py').write_text('''import subprocess
@@ -259,8 +253,7 @@ Path('.buck2/prepared').write_text(found)
         landed = self.land(**stripped)
         self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
         self.assertIn('pass  prepare.py', landed.stdout)
-        slots = self.top / 'lane-land-slots'
-        self.assertTrue(any(path.read_text() == 'cargo-found' for path in slots.glob('*/.buck2/prepared')))
+        self.assertEqual((self.lane / '.buck2/prepared').read_text(), 'cargo-found')
 
     def test_missing_toolchain_is_refused_before_a_ticket_is_published(self):
         for installed in (False, True):
@@ -400,12 +393,6 @@ if pathlib.Path('lane-0.txt').exists() and not pathlib.Path('lane-1.txt').exists
             with (self.lane / f'tools/buck2/{fake}.py').open('a') as out:
                 out.write("if pathlib.Path('red.txt').is_file() and pathlib.Path('red.txt').read_text() == 'red\\n':\n"
                           f"    print({error!r})\n    sys.exit(1)\n")
-            if red == 'build':
-                # Each build records when it ran, to show that slots build at once.
-                with (self.lane / 'tools/buck2/event_logs.py').open('a') as out:
-                    out.write("import time\nstarted = time.time()\ntime.sleep(.4)\n"
-                              "with (root / 'builds').open('a') as log:\n"
-                              "    log.write(f'{started} {time.time()}\\n')\n")
             self.git(self.lane, 'commit', '-qam', f'red {red}')
         if hold_build:
             with (self.lane / 'tools/buck2/event_logs.py').open('a') as out:
@@ -505,33 +492,12 @@ if not (root / 'release-build').exists():
         outputs = [self.finish_land(land, 1 if i == 2 else 0) for i, land in enumerate(lands)]
         self.assertIn('error[E0425]: red.txt is red', outputs[2])
         self.assertIn('refusing to push a red tree', outputs[2])
-        # All four red; lanes 0-1 and 2-3 at once; lanes 0-1 green and pushed; lanes 2 and 3 at once,
-        # lane 2 red, lane 3 green (checked again if it finished before lanes 0-1 were pushed).
-        self.assertIn(outputs[0].count('workspace build'), (5, 6), outputs[0])
+        # All four red; lanes 0-1 green and pushed; lanes 2-3 red on that tip; lane 2 red; lane 3 green.
+        self.assertEqual(outputs[0].count('workspace build'), 5, outputs[0])
         received = (checks / 'received').read_text().splitlines()
         self.assertEqual(self.subjects(received), ['lane 1', 'lane 3'])
-        builds = sorted(tuple(map(float, line.split())) for line in (checks / 'builds').read_text().splitlines())
-        self.assertTrue(any(later[0] < earlier[1] for earlier, later in zip(builds, builds[1:])), builds)
         self.assertEqual(self.subjects(self.landed(outputs[1])), ['lane 1'])
         self.assertEqual(self.main_log()[:4], ['lane 3', 'lane 1', 'lane 0', 'red build'])
-        self.assertEqual(self.queued(), [])
-
-    def test_while_a_red_batch_bisects_the_next_batch_is_checked_speculatively(self):
-        self.env['FAKE_BATCH'] = '2'
-        checks, lanes, lands, holder = self.batch_lanes(4, edits={1: ('red.txt', 'red\n')}, red='build')
-        holder.unlink()
-        outputs = [self.finish_land(land, 1 if i == 1 else 0) for i, land in enumerate(lands)]
-        head = outputs[0]
-        self.assertIn('batch of 2 tickets', head)
-        # Lanes 0 and 1 bisect in two slots while the third checks lanes 2 and 3.
-        self.assertLess(head.index('speculative batch of 2 tickets'), head.index('ticket 3 for lane1: refusing'))
-        self.assertIn('error[E0425]: red.txt is red', outputs[1])
-        for i in (2, 3):
-            self.assertEqual(self.subjects(self.landed(outputs[i])), [f'lane {i}'])
-        self.assertEqual(self.main_log()[:4], ['lane 3', 'lane 2', 'lane 0', 'red build'])
-        builds = sorted(tuple(map(float, line.split())) for line in (checks / 'builds').read_text().splitlines())
-        self.assertLessEqual(max(sum(start < end and stop > begin for start, stop in builds)
-                                 for begin, end in builds), 3)
         self.assertEqual(self.queued(), [])
 
     def test_a_conflict_in_the_middle_ticket_leaves_only_that_ticket(self):
@@ -650,6 +616,8 @@ if not (root / 'release-retry').exists():
             lane = self.top / 'newcomer'
             self.git(self.lane, 'worktree', 'add', '-qb', 'newcomer', str(lane),
                      self.git(lanes[1], 'rev-parse', 'HEAD^').strip())
+            (lane / '.buck2/bin').mkdir(parents=True)
+            shutil.copy(self.lane / '.buck2/bin/buck2', lane / '.buck2/bin/buck2')
             (lane / 'newcomer.txt').write_text('newcomer\n')
             self.git(lane, 'add', 'newcomer.txt')
             self.git(lane, 'commit', '-qm', 'newcomer')
@@ -987,55 +955,6 @@ if not marker.exists():
                 self.assertIn('worktree changed during checks', refused.stdout)
                 self.assertEqual(self.main_log(), ['base'])
 
-    def test_retry_scope_requires_exact_disjoint_existing_rust_changes(self):
-        files = {'crates/a/Cargo.toml': '[package]\nname = "a"\n',
-                 'crates/a/src/lib.rs': 'pub fn a() {}\n',
-                 'crates/b/Cargo.toml': '[package]\nname = "b"\n',
-                 'crates/b/src/lib.rs': 'pub fn b() {}\n'}
-        for name, text in files.items():
-            path = self.lane / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text)
-        self.git(self.lane, 'add', '-A')
-        self.git(self.lane, 'commit', '-qm', 'proof base')
-        old_base = self.git(self.lane, 'rev-parse', 'HEAD').strip()
-        (self.lane / 'crates/b/src/lib.rs').write_text('pub fn b() { /* lane */ }\n')
-        self.git(self.lane, 'commit', '-qam', 'own Rust change')
-        old_head = self.git(self.lane, 'rev-parse', 'HEAD').strip()
-        cases = [
-            ('crates/a/src/lib.rs', 'pub fn a() { /* incoming */ }\n', True),
-            ('crates/a/Cargo.toml', '[package]\nname = "a"\nversion = "1"\n', False),
-            ('crates/a/src/new.rs', 'pub fn new() {}\n', False),
-            ('crates/a/src/lib.rs', None, False),
-            ('crates/a/build.rs', 'fn main() {}\n', False),
-            ('docs/notes.md', 'docs\n', False),
-            ('crates/b/src/lib.rs', 'pub fn b() { /* lane */ }\n', False),
-        ]
-        for name, text, narrow in cases:
-            with self.subTest(path=name, text=text):
-                self.git(self.lane, 'checkout', '-q', '--detach', old_base)
-                path = self.lane / name
-                if text is None:
-                    path.unlink()
-                else:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(text)
-                self.git(self.lane, 'add', '-A')
-                self.git(self.lane, 'commit', '-qm', 'incoming')
-                base = self.git(self.lane, 'rev-parse', 'HEAD').strip()
-                self.git(self.lane, 'checkout', '-q', '--detach', old_head)
-                self.git(self.lane, 'rebase', base)
-                head = self.git(self.lane, 'rev-parse', 'HEAD').strip()
-                code = ("import runpy, json; m=runpy.run_path('tools/land'); "
-                        f"print(json.dumps(m['retry_scope'](({old_base!r}, {old_head!r}), {base!r}, {head!r})))")
-                result = subprocess.run([sys.executable, '-c', code], cwd=self.lane,
-                                        env=self.env, check=True, capture_output=True, text=True)
-                scope = json.loads(result.stdout)
-                self.assertEqual(scope is not None, narrow, scope)
-                if narrow:
-                    self.assertIn('rdeps(', scope)
-                    self.assertIn('owner("crates/a/src/lib.rs")', scope)
-
     def test_legacy_linted_environment_cannot_bypass_checks(self):
         refused = self.land(HIRSEL_LAND_LINTED='1', HIRSEL_LAND_ATTEMPT='30', FAKE_FMT_RED='1')
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
@@ -1096,8 +1015,7 @@ if not marker.exists():
         self.git(self.lane, 'commit', '-qm', 'generator')
         landed = self.land()
         self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
-        # The checked tree lives in a land slot, which regenerated its inventory.
-        self.assertEqual((self.top / 'lane-land-slots/0/BUCK').read_text(), 'fresh inventory\n')
+        self.assertEqual((self.lane / 'BUCK').read_text(), 'fresh inventory\n')
         self.assertEqual(self.git(self.lane, 'ls-files', 'BUCK'), '')
 
     def test_source_conflicts_still_refuse_the_push_and_abort_the_rebase(self):
@@ -1117,7 +1035,7 @@ if not marker.exists():
         self.assertEqual(self.main_log(), ['base'])
 
 
-class RetryChecks(unittest.TestCase):
+class Units(unittest.TestCase):
     def test_a_live_ticket_must_still_name_the_checked_head(self):
         module = runpy.run_path(str(ROOT / 'tools/land'))
         queue_type = module['LandQueue']
@@ -1144,29 +1062,6 @@ class RetryChecks(unittest.TestCase):
         record['process_start'] = queue.process(os.getpid())
         self.assertIsNone(queue.stale(queue, record))
 
-    def slot(self):
-        module = runpy.run_path(str(ROOT / 'tools/land'))
-        return module['Slot'](0, ROOT, -1)
-
-    def test_uncertain_graph_or_inventory_runs_full_aggregates(self):
-        for before, after, graph in ((None, ('a',), 'root//:a'),
-                                     (('a',), ('b',), 'root//:a'),
-                                     (('a',), ('a',), ''),
-                                     (('a',), ('a',), 'root//:a')):
-            with self.subTest(before=before, after=after, graph=graph):
-                slot, commands = self.slot(), []
-                def check(name, command):
-                    commands.append(command)
-                    return True
-                def run(command):
-                    return SimpleNamespace(returncode=0, stdout=graph if command[-1] == 'scope' else 'root//:a',
-                                           stderr='')
-                slot.check, slot.run, slot.inventory = check, run, lambda: after
-                self.assertTrue(slot.checks('scope', before))
-                scoped = [command for command in commands if '--scope' in command]
-                self.assertEqual(len(scoped), 2 if before == after and graph else 0)
-                self.assertEqual(len(commands), 5)  # prepare, sync, build, Clippy, fmt
-
     def test_missing_or_malformed_commit_cannot_become_a_push_refspec(self):
         module = runpy.run_path(str(ROOT / 'tools/land'))
         resolve = module['revision']
@@ -1178,29 +1073,28 @@ class RetryChecks(unittest.TestCase):
                         resolve('HEAD')
 
     def test_empty_build_query_refuses_the_aggregate(self):
-        slot = self.slot()
-        slot.check = lambda *args: True
-        slot.run = lambda command: SimpleNamespace(returncode=0, stdout='', stderr='')
-        self.assertFalse(slot.checks())
+        full = runpy.run_path(str(ROOT / 'tools/land'))['full']
+        with patch.dict(full.__globals__, check=lambda *args: None, unchanged=lambda tree: True,
+                        run=lambda command: SimpleNamespace(returncode=0, stdout='', stderr='')):
+            self.assertEqual(full('tree')[0], 'FAIL  the build set query')
 
-    def test_scoped_clippy_still_rejects_error_diagnostics(self):
+    def test_clippy_rejects_error_diagnostics(self):
         module = runpy.run_path(str(ROOT / 'tools/buck2/clippy.py'))
         main = module['main']
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / 'clippy.txt'
             report.write_text('error[E0063]: missing field\n')
             built = SimpleNamespace(returncode=0, stdout=json.dumps({'root//:a-clippy[clippy.txt]': str(report)}), stderr='')
-            with patch.object(sys, 'argv', ['clippy.py', '--scope', 'scope']), patch('subprocess.run') as query, \
+            with patch.object(sys, 'argv', ['clippy.py']), patch('subprocess.run') as query, \
                     patch.object(main.__globals__['event_logs'], 'run', return_value=built):
                 query.return_value = SimpleNamespace(returncode=0, stdout='root//:a-clippy')
                 self.assertEqual(main(), 1)
-                self.assertIn('intersect (scope)', query.call_args.args[0][-1])
 
-    def test_empty_clippy_or_formatting_scope_is_never_green(self):
+    def test_empty_clippy_or_formatting_query_is_never_green(self):
         for helper, output in (('clippy', ''), ('fmt', '{}')):
             with self.subTest(helper=helper):
                 module = runpy.run_path(str(ROOT / f'tools/buck2/{helper}.py'))
-                with patch.object(sys, 'argv', [helper, '--scope', 'scope']), patch('subprocess.run') as query:
+                with patch.object(sys, 'argv', [helper]), patch('subprocess.run') as query:
                     query.return_value = SimpleNamespace(returncode=0, stdout=output)
                     with self.assertRaises(SystemExit):
                         module['main']()

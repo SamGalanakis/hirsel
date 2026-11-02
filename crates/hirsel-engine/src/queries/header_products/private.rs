@@ -7,6 +7,7 @@ pub(crate) struct AdoptedPrivate {
     owner: std::sync::Weak<HeaderProducts>,
     revision: u64,
     inputs: u64,
+    graph: crate::memo::Revision,
 }
 pub(super) struct ModuleProduct {
     facts: Facts,
@@ -493,6 +494,7 @@ impl HeaderProducts {
             adopted.owner.ptr_eq(&Arc::downgrade(self))
                 && adopted.revision == revision
                 && adopted.inputs == engine.snapshot_inputs_revision
+                && adopted.graph == engine.graph.revision()
         }) {
             return Ok(());
         }
@@ -569,6 +571,7 @@ impl HeaderProducts {
             owner: Arc::downgrade(self),
             revision,
             inputs: engine.snapshot_inputs_revision,
+            graph: engine.graph.revision(),
         });
         Ok(())
     }
@@ -789,5 +792,20 @@ mod adoption_tests {
         assert!(!engine.private_summaries.contains_key(&id));
         headers.adopt_private_products(&mut engine).unwrap();
         assert!(engine.private_summaries.contains_key(&id));
+    }
+    #[test]
+    fn a_changed_graph_revision_refreshes_private_completion() {
+        let (headers, mut engine, _) = fixture();
+        headers.adopt_private_products(&mut engine).unwrap();
+        let previous = engine.private_summary_revision;
+        let mut changes = crate::memo::ChangeSet::default();
+        changes.read(ReadKey::Environment, crate::memo::Durability::High);
+        engine.apply_changes(&changes);
+        assert_ne!(previous, Some(engine.graph.revision()));
+        headers.adopt_private_products(&mut engine).unwrap();
+        assert_eq!(
+            engine.private_summary_revision,
+            Some(engine.graph.revision())
+        );
     }
 }

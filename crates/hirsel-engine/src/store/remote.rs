@@ -164,6 +164,9 @@ impl ResultStore for RemoteStore {
             self.put_record(&product_association_key(address), &bytes, [reference]);
         }
     }
+    fn associate_written_product(&self, address: Address, action: Action, reference: Reference) {
+        self.associate_product(address, action, reference);
+    }
     fn get_content(&self, reference: Reference) -> Option<Bytes> {
         self.read(self.name(reference)?)
     }

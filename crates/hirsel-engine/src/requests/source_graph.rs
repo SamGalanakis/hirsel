@@ -1614,6 +1614,17 @@ pub fn selected_definitions(engine: &mut QueryEngine) -> Vec<DefPath> {
     indexed
         .into_iter()
         .chain(engine.front_source_roots())
+        .chain(
+            engine
+                .instance_bodies
+                .instances
+                .values()
+                .flat_map(|instances| {
+                    instances
+                        .values()
+                        .map(|instance| instance.definition.path().clone())
+                }),
+        )
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect()

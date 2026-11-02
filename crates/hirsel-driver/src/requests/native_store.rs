@@ -81,6 +81,10 @@ impl ResultStore for NativeStore {
     fn associate_product(&self, address: Address, action: Action, reference: Reference) {
         self.cache.associate_product(address, action, reference);
     }
+    fn associate_written_product(&self, address: Address, action: Action, reference: Reference) {
+        self.cache
+            .associate_written_product(address, action, reference);
+    }
     fn get_content(&self, reference: Reference) -> Option<Bytes> {
         if let Some(bytes) = self.cache.get_content(reference) {
             return Some(bytes);

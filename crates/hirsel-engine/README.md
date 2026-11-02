@@ -687,8 +687,10 @@ over signatures, failed signatures, lookups (provider, manifest index and
 module heads, negative ones included), private representations, executed
 bodies and signatures, cited text, the definition's own declaration candidates
 and the environment (design §1b). A memo's own content is its text: the item's
-text hash (headers' hashes for a signature) with its package's closure
-manifest.
+text hash (headers' hashes for a signature). Product addresses bind that content,
+the logical declaration and compiler policy. Manifest discovery order and
+unrelated source membership do not change the address; complete namespace,
+signature and execution reads validate the selected dependencies before reuse.
 
 Private inference owns its module's body, membership and declaration reads.
 A normalized private signature reads the settled `PrivateSummary` output,

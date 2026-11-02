@@ -2,7 +2,7 @@
 //! The variant index follows the front producer's exact-read lookup. V still
 //! validates every restored body and owns execution-reuse authority.
 use super::*;
-use crate::store::{Entry, VariantRef};
+use crate::store::Entry;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Record {
@@ -57,14 +57,12 @@ impl FrontLowerQueries {
             return;
         };
         let key = stored_key(key);
-        let Some(variant) = VariantRef::publish(&*self.store, &key, outcome.reads.clone(), &bytes)
+        let Some(reads) =
+            persistent::persisted_execution_reads(&outcome.reads, outcome.execution.as_ref())
         else {
             return;
         };
-        let mut entry = Entry::load(&*self.store, &key);
-        entry.insert(variant);
-        self.store
-            .put_query(key.2, &key, entry.action(&key), &entry.encode_for(&key));
+        self.store.cache_query(&key, reads, &bytes);
         debug_assert!(matches!(id.kind, FRONT_LOWER_KIND | FRONT_EVALUATE_KIND));
     }
 
@@ -231,23 +229,26 @@ impl FrontLowerQueries {
                 selections,
             )
         };
-        if reads != variant.reads
-            || depth.first.len() != dependency_limit(self.limits.call_depth) as usize + 1
-        {
+        if depth.first.len() != dependency_limit(self.limits.call_depth) as usize + 1 {
             return None;
         }
         let execution_subject = persistent::evaluation_subject(key, &descriptor);
         let execution = if self.verify == Verify::On && executed {
-            Some(
-                self.store
-                    .verifier()?
-                    .execution(execution_subject, |package| {
-                        self.snapshot.validation_input_digest(package).ok()
-                    })?,
-            )
+            Some(self.store.verifier()?.execution_revalidated(
+                execution_subject,
+                self.snapshot.types().clone(),
+                |path, occurrence| {
+                    crate::NativeRecordSource::record_source_anchor(&self.anchors, path, occurrence)
+                },
+                &*self.snapshot,
+            )?)
         } else {
             None
         };
+        let reads = evidence::current_reads(reads, execution.as_ref())?;
+        if persistent::persisted_execution_reads(&reads, execution.as_ref())? != variant.reads {
+            return None;
+        }
         let outcome = Outcome {
             result: Ok(value),
             reads,

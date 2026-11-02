@@ -1384,10 +1384,6 @@ impl QueryEngine {
             [
                 self.environment_value().0.as_slice(),
                 self.store_identity.0.as_slice(),
-                self.package_environment(&path.0.package)
-                    .package_manifest_hash
-                    .0
-                    .as_slice(),
             ],
         );
         EntryKey::new(env, path, text, kind, LoweringPolicy::Reachable)

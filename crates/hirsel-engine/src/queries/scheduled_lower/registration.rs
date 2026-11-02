@@ -151,7 +151,11 @@ impl FrontRegistrationQueries {
             let text = if source.depth.borrow().limit() == 0 {
                 Err(source.overflow(input.site))
             } else {
-                self.compute(input, &mut source, &mut dependencies).await
+                self.compute(input, &mut source, &mut dependencies)
+                    .await
+                    .map_err(|error| {
+                        lower_input_error(input.definition.path(), "executing a generator", error)
+                    })
             };
             if let Some(reference) = source.refusal.get() {
                 return Err(reference);
@@ -336,7 +340,6 @@ impl FrontRegistrationQueries {
         })
     }
     fn remember(&self, input: &Input, output: Reference, data: &Data, decode_bytes: u64) {
-        use crate::store::{Entry, VariantRef};
         if !self.lower.store.persistence().retains() || data.acceptance.is_none() {
             return;
         }
@@ -359,14 +362,7 @@ impl FrontRegistrationQueries {
         {
             cache.publish_execution(persistent::evaluation_subject(&key, &payload), receipt);
         }
-        let Some(variant) = VariantRef::publish(&*self.lower.store, &key, reads, &payload) else {
-            return;
-        };
-        let mut entry = Entry::load(&*self.lower.store, &key);
-        entry.insert(variant);
-        self.lower
-            .store
-            .put_query(key.2, &key, entry.action(&key), &entry.encode_for(&key));
+        self.lower.store.cache_query(&key, reads, &payload);
     }
     async fn compute(
         &self,

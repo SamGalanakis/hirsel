@@ -68,6 +68,7 @@ impl Constants {
         records: &crate::NativeRecords,
         anchors: &crate::NativeRecordContext,
         reads: &Reads,
+        descriptor_reads: &Reads,
         depth: &DepthEvidence<Span>,
         executed: bool,
         selections: &staged::Selections,
@@ -77,7 +78,14 @@ impl Constants {
         };
         let (bytes, record_working) = records.encode_with_decode_bytes(
             anchors,
-            &(value, substitutions, reads, depth, executed, selections),
+            &(
+                value,
+                substitutions,
+                descriptor_reads,
+                depth,
+                executed,
+                selections,
+            ),
         )?;
         let metadata = reads
             .allocations()
@@ -151,6 +159,7 @@ mod tests {
             .encode(
                 &records,
                 &anchors,
+                &Reads::default(),
                 &Reads::default(),
                 &DepthEvidence::leaf(32),
                 false,

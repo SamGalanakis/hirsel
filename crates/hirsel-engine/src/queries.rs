@@ -937,15 +937,9 @@ impl QueryEngine {
             self.materialize(definition)?;
             self.snapshot(definition)?.text_hash
         };
-        let manifest = self
-            .package_manifests
-            .get(&definition.0.package)
-            .copied()
-            .unwrap_or(self.environment.package_manifest_hash);
-        Ok(ContentHash::of_parts(
-            "hirsel.query.text.v1",
-            [text.0.as_slice(), manifest.0.as_slice()],
-        ))
+        // Discovery order and unrelated source membership are not product
+        // inputs. Namespace and signature reads bind selected dependencies.
+        Ok(text)
     }
     /// The header digest a signature keys on: as indexed here, or as the
     /// header capture recorded it, so a captured definition's syntax is never

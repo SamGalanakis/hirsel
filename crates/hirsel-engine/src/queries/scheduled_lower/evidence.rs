@@ -2,6 +2,44 @@
 //! composition. Missing evidence disables reuse; it never disables actual V.
 use crate::{ReadKey, Reads, Verify};
 use hirsel_validate::{AcceptedArtifact, ExecutionReceipt};
+
+/// Ordinary descriptors omit broad context stamps. Only V's current opaque
+/// receipt restores them for live dependency tracking.
+pub(super) fn current_reads(reads: Reads, receipt: Option<&ExecutionReceipt>) -> Option<Reads> {
+    let Some(receipt) = receipt else {
+        return Some(reads);
+    };
+    let current = |key: &ReadKey, digest| match key {
+        ReadKey::ValidationUniverse(package) => receipt
+            .contexts()
+            .iter()
+            .find(|(id, _)| *id == package.id())
+            .map(|(_, value)| *value),
+        _ => Some(digest),
+    };
+    if receipt.contexts().iter().all(|(package, digest)| {
+        reads.iter().any(|(key, value)| {
+            *key == ReadKey::ValidationUniverse(crate::memo::PackageKey::of(package))
+                && value == digest
+        })
+    }) && reads
+        .iter()
+        .all(|(key, digest)| current(key, *digest) == Some(*digest))
+    {
+        return Some(reads);
+    }
+    let mut values = reads
+        .iter()
+        .map(|(key, digest)| Some((*key, current(key, *digest)?)))
+        .collect::<Option<Vec<_>>>()?;
+    for (package, digest) in receipt.contexts() {
+        let key = ReadKey::ValidationUniverse(crate::memo::PackageKey::of(package));
+        if !values.iter().any(|(selected, _)| *selected == key) {
+            values.push((key, *digest));
+        }
+    }
+    Reads::from_vec(values).ok()
+}
 pub(super) struct Evidence {
     pub(super) executed: bool,
     proofs: Option<Vec<AcceptedArtifact>>,

@@ -407,6 +407,9 @@ impl ResultStore for RequestStore {
         if self.get_content(reference).is_none() {
             return;
         }
+        self.associate_written_product(address, action, reference);
+    }
+    fn associate_written_product(&self, address: Address, action: Action, reference: Reference) {
         let association = Association { action, reference };
         // A Complete request publishes no association before its root.
         let deferred = self.persistence() == Persistence::Complete;
@@ -423,12 +426,18 @@ impl ResultStore for RequestStore {
         let growth =
             association_bytes(next).saturating_sub(association_bytes(state.associations.len()));
         if exists || self.charge(&mut state, growth) {
+            let local = state.contents.contains_key(&reference.output.0);
             state
                 .associations
                 .insert(address.0, (association, deferred));
             drop(state);
             if !deferred {
-                self.backend.associate_product(address, action, reference);
+                if local {
+                    self.backend.associate_product(address, action, reference);
+                } else {
+                    self.backend
+                        .associate_written_product(address, action, reference);
+                }
             }
         }
     }

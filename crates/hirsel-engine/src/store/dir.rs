@@ -305,13 +305,18 @@ impl ResultStore for DirStore {
         &self,
         identity: hirsel_syntax::ContentHash,
     ) -> Option<std::sync::Arc<dyn ResultStore>> {
-        if self.verifier_identity == Some(identity) || self.read_only.is_empty() {
+        if self.verifier_identity == Some(identity) {
             return None;
         }
         let state = hirsel_validate::Installation::default_state()?;
         let mut selected = self.clone();
         selected.verifier_identity = Some(identity);
-        for root in &self.read_only {
+        for root in self
+            .physical
+            .iter()
+            .filter(|_| self.installation.is_none())
+            .chain(&self.read_only)
+        {
             if let Some(verifier) = hirsel_validate::Installation::registered(
                 root.root(),
                 &state,
@@ -354,16 +359,24 @@ impl ResultStore for DirStore {
         action: super::Action,
         reference: super::Reference,
     ) {
-        let Some(store) = self.publication_store() else {
-            return;
-        };
         // Shared immutable roots may supply ordinary content, but local writes
         // and GC remain in the writable root. A missing reference is a miss.
         if self.get_content(reference).is_some() {
-            let address = super::Address(super::product_association_key(address).0);
-            let _ = store.associate(address, action, reference);
-            self.record_row(address, action, reference);
+            self.associate_written_product(address, action, reference);
         }
+    }
+    fn associate_written_product(
+        &self,
+        address: super::Address,
+        action: super::Action,
+        reference: super::Reference,
+    ) {
+        let Some(store) = self.publication_store() else {
+            return;
+        };
+        let address = super::Address(super::product_association_key(address).0);
+        let _ = store.associate(address, action, reference);
+        self.record_row(address, action, reference);
     }
     fn verifier(&self) -> Option<std::sync::Arc<hirsel_validate::VerifierCache>> {
         Some(self.verifier.clone())

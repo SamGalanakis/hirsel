@@ -185,6 +185,21 @@ impl ResultStore for ScratchStore {
     fn associate_product(&self, address: Address, action: Action, reference: Reference) {
         self.selected.associate_product(address, action, reference);
     }
+    fn associate_written_product(&self, address: Address, action: Action, reference: Reference) {
+        let durable = self
+            .files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .get(&reference.output.0)
+            .is_some_and(|entry| entry.matches(reference) && entry.durable);
+        if durable {
+            self.selected
+                .associate_written_product(address, action, reference);
+        } else {
+            self.selected.associate_product(address, action, reference);
+        }
+    }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
         let expected = domain.reference(bytes)?;
         let mut files = self.files.lock().unwrap_or_else(|e| e.into_inner());

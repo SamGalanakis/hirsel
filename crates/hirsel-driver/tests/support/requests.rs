@@ -176,37 +176,29 @@ impl Graph {
             .collect()
     }
     pub fn lower(&mut self, path: &DefPath) -> Result<FrontLowerOutput, QueryError> {
-        let query = self
-            .installed
-            .lower
-            .query(path)
-            .ok_or(QueryError::NotImplemented)?;
+        let query = self.installed.lower.query(path).ok_or_else(|| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "Lower request selection".into(),
+                message: format!("no Lower producer for {path}"),
+            })
+        })?;
         let request = self.runtime.request(&[query]);
         match self.runtime.wait(request) {
             Ok(mut products) => self
                 .installed
                 .lower
                 .outcome(products.remove(0))
-                .ok_or(QueryError::NotImplemented),
-            Err(failure) => Err(self
-                .installed
-                .lower
-                .failure(failure)
-                .or_else(|| {
-                    self.installed
-                        .front
-                        .outcome(Err(failure))
-                        .and_then(|outcome| outcome.outcome.result.err())
-                })
-                .unwrap_or(QueryError::NotImplemented)),
+                .ok_or_else(|| self.runtime_failure(self.installed.errors.protocol)),
+            Err(failure) => Err(self.failure(failure)),
         }
     }
     pub fn constant(&mut self, path: &DefPath) -> Result<hirsel_tir::Materialized, QueryError> {
-        let query = self
-            .installed
-            .lower
-            .evaluate_query(path)
-            .ok_or(QueryError::NotImplemented)?;
+        let query = self.installed.lower.evaluate_query(path).ok_or_else(|| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "constant request selection".into(),
+                message: format!("no Evaluate producer for {path}"),
+            })
+        })?;
         let request = self.runtime.request(&[query]);
         match self.runtime.wait(request) {
             Ok(_) => self
@@ -214,18 +206,38 @@ impl Graph {
                 .lower
                 .settled_constant(path, &[])
                 .map(|value| (*value).clone()),
-            Err(failure) => Err(self
-                .installed
-                .lower
-                .failure(failure)
-                .or_else(|| {
-                    self.installed
-                        .front
-                        .outcome(Err(failure))
-                        .and_then(|outcome| outcome.outcome.result.err())
-                })
-                .unwrap_or(QueryError::NotImplemented)),
+            Err(failure) => Err(self.failure(failure)),
         }
+    }
+    fn failure(&self, reference: Reference) -> QueryError {
+        self.installed
+            .lower
+            .failure(reference)
+            .or_else(|| {
+                self.installed
+                    .front
+                    .outcome(Err(reference))
+                    .and_then(|outcome| outcome.outcome.result.err())
+            })
+            .unwrap_or_else(|| self.runtime_failure(reference))
+    }
+    fn runtime_failure(&self, reference: Reference) -> QueryError {
+        let errors = self.installed.errors;
+        let message = if reference == errors.resource {
+            "compiler query allowance exhausted"
+        } else if reference == errors.cycle {
+            "compiler dependency cycle"
+        } else if reference == errors.cancelled {
+            "compiler query cancelled"
+        } else if reference == errors.panicked {
+            "compiler query producer panicked"
+        } else {
+            "compiler query protocol failure"
+        };
+        QueryError::Operational(hirsel_types::OperationalFailure {
+            operation: "request completion".into(),
+            message: message.into(),
+        })
     }
 }
 impl Drop for Graph {

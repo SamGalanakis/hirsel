@@ -163,7 +163,7 @@ pub trait ResultStore: Send + Sync {
         if self.persistence().retains()
             && let Some(reference) = self.put_content(domain, bytes)
         {
-            self.associate_product(address, action, reference);
+            self.associate_written_product(address, action, reference);
         }
     }
     /// Best-effort query variants use the ordinary bounded index without
@@ -206,6 +206,15 @@ pub trait ResultStore: Send + Sync {
     /// write leaves a miss; read-only roots never receive an association.
     fn associate_product(&self, address: Address, action: Action, reference: Reference) {
         if !self.transports() || self.get_content(reference).is_none() {
+            return;
+        }
+        self.associate_written_product(address, action, reference);
+    }
+    /// Associate a reference just returned by this provider's `put_content`,
+    /// or whose bytes this caller has already read and checked. This publishes
+    /// only index metadata; it does not reread the completed payload.
+    fn associate_written_product(&self, address: Address, action: Action, reference: Reference) {
+        if !self.transports() {
             return;
         }
         let bytes = serde_json::to_vec(&(address.0, action.0, reference))

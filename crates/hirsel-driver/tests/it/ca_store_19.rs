@@ -535,11 +535,152 @@ fn request_lower(
     result
 }
 
+fn request_instance(
+    engine: &mut QueryEngine,
+    path: &DefPath,
+    arguments: &[hirsel_types::GenericArgument],
+) -> Result<Option<DefPath>, hirsel_types::QueryError> {
+    let site = engine
+        .parse_definition(path)
+        .map_err(|error| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "test instance source".into(),
+                message: format!("{path}: {error:?}"),
+            })
+        })?
+        .value
+        .item
+        .name_span;
+    let (budget, _) = hirsel_engine::requests::source_graph::host_budget();
+    let allowance = budget.reserve(16 << 20).map_err(|error| {
+        QueryError::Operational(hirsel_types::OperationalFailure {
+            operation: "test instance registration".into(),
+            message: error.to_string(),
+        })
+    })?;
+    let instance = engine
+        .register_front_instance(
+            &FrontInstanceRequest {
+                declaration: path.clone(),
+                actuals: hirsel_types::Actuals {
+                    arguments: arguments.to_vec(),
+                },
+                site,
+            },
+            allowance,
+        )
+        .map_err(|failure| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "test instance syntax".into(),
+                message: format!("{path}: {:?}", failure.error),
+            })
+        })?;
+    let selected = instance.definition().clone();
+    request_lower(engine, &selected, 1)?;
+    Ok(Some(selected))
+}
+
+fn request_semantic_node(
+    engine: &mut QueryEngine,
+    path: &DefPath,
+) -> Result<hirsel_run_schema::ProgramNode, QueryError> {
+    use hirsel_engine::runtime::{MemoryWeight, QueryRuntime};
+    let mut graph = crate::request_graph::Graph::try_new(engine, hirsel_intern::jobs::Jobs::new(1))
+        .map_err(|error| match error {
+            ToolError::Query { error, .. } => error,
+            error => QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "test semantic request".into(),
+                message: error.to_string(),
+            }),
+        })?;
+    let (budget, _) = hirsel_engine::requests::source_graph::host_budget();
+    let run = engine.front_semantic_queries(
+        graph.installed.front.clone(),
+        graph.installed.lower.clone(),
+        MemoryWeight {
+            retained: 8 << 20,
+            scratch: 8 << 20,
+            stack: 0,
+        },
+        budget.reserve(16 << 20).unwrap(),
+        graph.installed.errors,
+    )?;
+    graph
+        .runtime
+        .register(FRONT_RUN_KIND, run.factory())
+        .unwrap();
+    let request = graph.runtime.request(&[run.semantic_query(path).unwrap()]);
+    let result = match graph.runtime.wait(request) {
+        Ok(products) => run.semantic_node(products[0].clone()),
+        Err(reference) => Err(run
+            .failure(reference)
+            .or_else(|| graph.installed.lower.failure(reference))
+            .or_else(|| {
+                graph
+                    .installed
+                    .front
+                    .outcome(Err(reference))
+                    .and_then(|output| output.outcome.result.err())
+            })
+            .unwrap_or_else(|| {
+                QueryError::Operational(hirsel_types::OperationalFailure {
+                    operation: "test semantic request".into(),
+                    message: format!("producer failed with {reference:?}"),
+                })
+            })),
+    };
+    graph.finish();
+    result
+}
+
+fn request_constant(
+    engine: &mut QueryEngine,
+    path: &DefPath,
+) -> Result<hirsel_tir::Materialized, QueryError> {
+    let mut graph = crate::request_graph::Graph::try_new(engine, hirsel_intern::jobs::Jobs::new(1))
+        .map_err(|error| match error {
+            ToolError::Query { error, .. } => error,
+            error => QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "test constant request".into(),
+                message: error.to_string(),
+            }),
+        })?;
+    let result = graph.constant(path);
+    graph.finish();
+    result
+}
+
 fn definition(name: &str) -> DefPath {
     let mut path = entry_path(&default_context());
     path.0.name = name.into();
     path
 }
+
+#[test]
+fn lower_descriptors_keep_canonical_identity_across_unrelated_headers() {
+    with_compiler_stack(|| {
+        let source = "fn helper()->u32{7u32}\nconst A:u32=comptime helper()\n";
+        let path = definition("A");
+        let store = Arc::new(store::MemStore::default());
+        let mut seed = signature_session(store.clone(), source, true);
+        let original = request_lower(&mut seed, &path, 1).unwrap();
+        assert!(original.execution.is_some());
+        let extended = format!("{source}fn unrelated(){{}}\n");
+        let mut reader = signature_session(store.clone(), &extended, true);
+        let mut graph =
+            crate::request_graph::Graph::new(&mut reader, hirsel_intern::jobs::Jobs::new(1));
+        let reused = graph.lower(&path).unwrap();
+        assert_eq!(graph.installed.lower.work(&path).lowerings, 0);
+        assert_eq!(reused.execution_subject, original.execution_subject);
+        graph.finish();
+        drop(graph);
+        let mut oracle = signature_session(store, &extended, true)
+            .with_verify_store(store::VerifyStore::Recompute);
+        let recomputed = request_lower(&mut oracle, &path, 1).unwrap();
+        assert_eq!(reused.execution_subject, recomputed.execution_subject);
+    });
+}
+
 #[test]
 fn signature_store_reuses_headers_and_preserves_owned_views_and_resolver_syntax() {
     with_compiler_stack(|| {
@@ -1702,8 +1843,12 @@ fn worker_staged_products_publish_only_prefix_selected_instances() {
                     verify_store,
                     ..CompileConfig::for_memory_cap(None)
                 };
-                let mut reopened =
-                    CompilerRequests::for_host(COMPILER.with_config(config.clone()), config);
+                let mut reopened = CompilerRequests::for_host(
+                    COMPILER
+                        .with_phase_adapters(compiler_adapters, [0; 32])
+                        .with_config(config.clone()),
+                    config,
+                );
                 let output = reopened
                     .execute(&manifest, CompileOperation::Precompute)
                     .unwrap();
@@ -1986,7 +2131,6 @@ fn worker_generated_text_persists_only_admitted_roots_and_matches_scalar_records
 #[test]
 fn selected_generic_generators_reuse_ordinary_text_under_canonical_actuals() {
     with_compiler_stack(|| {
-        use hirsel_tir::TirProvider;
         let source = "type Point{x:u32}\ntype Other{x:u64}\nfn gen[T](s:TypeShape[T])->Result[Body[fn(T)->u64 uses {}],String]{let _=s;Ok(codegen.body(\"fn(v:standalone@0/Point)->u64 uses {}{let _=v;12u64}\"))}\nfn width[T](v:T)->u64 uses {}=comptime gen(shape(T))\n";
         let path = definition("width");
         let arguments = |engine: &QueryEngine, name: &str| {
@@ -1999,17 +2143,21 @@ fn selected_generic_generators_reuse_ordinary_text_under_canonical_actuals() {
         };
         let store = Arc::new(store::MemStore::default());
         let mut seed = signature_session(store.clone(), source, true);
-        let selected = seed
-            .instance_body(&path, &arguments(&seed, "Point"))
-            .unwrap()
-            .unwrap();
+        let selected = {
+            let actuals = arguments(&seed, "Point");
+            request_instance(&mut seed, &path, &actuals)
+        }
+        .unwrap()
+        .unwrap();
         let expected = seed.generated_source(&selected).unwrap().text.clone();
         let mut fresh = signature_session(store.clone(), source, true);
         fresh.adapters.lowering = None;
-        let adopted = fresh
-            .instance_body(&path, &arguments(&fresh, "Point"))
-            .unwrap()
-            .unwrap();
+        let adopted = {
+            let actuals = arguments(&fresh, "Point");
+            request_instance(&mut fresh, &path, &actuals)
+        }
+        .unwrap()
+        .unwrap();
         assert_eq!(adopted, selected);
         assert_eq!(fresh.generated_source(&adopted).unwrap().text, expected);
         assert_eq!(
@@ -2018,9 +2166,11 @@ fn selected_generic_generators_reuse_ordinary_text_under_canonical_actuals() {
             "no generic generator execution"
         );
         assert!(
-            fresh
-                .instance_body(&path, &arguments(&fresh, "Other"))
-                .is_err(),
+            {
+                let actuals = arguments(&fresh, "Other");
+                request_instance(&mut fresh, &path, &actuals)
+            }
+            .is_err(),
             "an unselected type has no cached generator result"
         );
         let copied = Arc::new(store::MemStore::default());
@@ -2031,17 +2181,21 @@ fn selected_generic_generators_reuse_ordinary_text_under_canonical_actuals() {
         let mut remote = signature_session(copied, source, true);
         remote.adapters.lowering = None;
         assert!(
-            remote
-                .instance_body(&path, &arguments(&remote, "Point"))
-                .is_err(),
+            {
+                let actuals = arguments(&remote, "Point");
+                request_instance(&mut remote, &path, &actuals)
+            }
+            .is_err(),
             "instance text cannot transfer private completion"
         );
         let mut oracle =
             signature_session(store, source, true).with_verify_store(store::VerifyStore::Recompute);
         assert_eq!(
-            oracle
-                .instance_body(&path, &arguments(&oracle, "Point"))
-                .unwrap(),
+            {
+                let actuals = arguments(&oracle, "Point");
+                request_instance(&mut oracle, &path, &actuals)
+            }
+            .unwrap(),
             Some(selected)
         );
     });
@@ -3003,19 +3157,23 @@ fn package_precomputation_publishes_only_ordinary_products_and_keeps_verifier_au
                 .definition_summary(hirsel_syntax::DefId::intern(&value))
                 .is_ok()
         );
-        assert!(reader.engine.semantic_program_revision(&value).is_ok());
+        let semantic = request_semantic_node(&mut reader.engine, &value).unwrap();
+        assert_eq!(semantic.identity, value.to_string());
         let mut constant = value.clone();
         constant.0.name = "VALUE".into();
         assert!(
-            reader.engine.materialize_constant(&constant).is_err(),
+            request_constant(&mut reader.engine, &constant).is_err(),
             "packaged producer products confer no private execution authority"
         );
         assert_eq!(reader.engine.work_stats().parsed_bytes, 0);
         assert!(!local.join("hirsel-std.image").exists());
         let mut fresh = compiler.load_check_package(&manifest).unwrap();
         assert_eq!(
-            fresh.engine.materialize_constant(&constant).unwrap(),
-            hirsel_tir::Constant::Integer(7)
+            request_constant(&mut fresh.engine, &constant)
+                .unwrap()
+                .root
+                .kind,
+            hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(7))
         );
         // After first local V, reopening the same writable authority reuses it.
         let mut warm = compiler.load_check_package(&manifest).unwrap();
@@ -3025,10 +3183,21 @@ fn package_precomputation_publishes_only_ordinary_products_and_keeps_verifier_au
         warm.engine.adapters.modes = None;
         warm.engine.adapters.lowering = None;
         assert_eq!(
-            warm.engine.materialize_constant(&constant).unwrap(),
-            hirsel_tir::Constant::Integer(7)
+            request_constant(&mut warm.engine, &constant)
+                .unwrap()
+                .root
+                .kind,
+            hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(7))
         );
         assert_eq!(warm.engine.work_stats().parsed_bytes, 0);
+        let mut oracle = compiler
+            .with_verify_store(store::VerifyStore::Recompute)
+            .load_check_package(&manifest)
+            .unwrap();
+        let canonical = request_semantic_node(&mut oracle.engine, &value).unwrap();
+        assert_eq!(semantic.identity, canonical.identity);
+        assert_eq!(semantic.content, canonical.content);
+        assert_eq!(semantic.dependencies, canonical.dependencies);
     });
 }
 
@@ -3061,32 +3230,53 @@ fn ordinary_precomputed_dependency_products_do_not_recheck_bodies_during_native_
             jobs: hirsel_intern::jobs::Jobs::new(1),
             ..CompileConfig::for_memory_cap(None)
         });
-        let mut cached = shared.load_program_source(&manifest, None).unwrap();
+        let cached = shared.load_program_source(&manifest, None).unwrap();
         let paths: Vec<_> = cached
             .engine
             .indexed_definitions()
             .into_iter()
             .filter(|path| path.0.package.name == "library")
             .collect();
-        cached.check_for_execution().unwrap();
-        for path in &paths {
-            cached.engine.semantic_program_revision(path).unwrap();
-            if cached.engine.lower_to_tir(path).is_ok() {
-                cached.engine.source_audit(path).unwrap();
+        let entry = cached.entry.clone();
+        drop(cached);
+        let config = shared.configuration();
+        let mut requests = hirsel_driver::requests::CompilerRequests::for_host(shared, config);
+        use hirsel_driver::requests::{CompileOperation, CompileResult};
+        for operation in [
+            CompileOperation::Check {
+                lowering: LoweringPolicy::Reachable,
+            },
+            CompileOperation::Precompute,
+            CompileOperation::NativeSources { roots: vec![entry] },
+        ] {
+            let output = requests.execute(&manifest, operation).unwrap();
+            match &output.result {
+                CompileResult::Check(checked) => {
+                    assert_eq!(checked.completion, CheckCompletion::Complete);
+                    assert!(
+                        checked
+                            .diagnostics
+                            .iter()
+                            .all(|diagnostic| diagnostic.severity != hirsel_diag::Severity::Error)
+                    );
+                }
+                CompileResult::Precomputed { .. } | CompileResult::NativeSources(_) => {}
+                _ => panic!("expected checked, precomputed or native source products"),
             }
-        }
-        cached.engine.export_native_input().unwrap();
-        for path in &paths {
-            assert_eq!(
-                cached.engine.recompute_count(path, QueryKind::Check),
-                0,
-                "{path}"
-            );
-            assert_eq!(
-                cached.engine.recompute_count(path, QueryKind::Modes),
-                0,
-                "{path}"
-            );
+            for phase in [QueryKind::Check, QueryKind::Modes] {
+                let counts = requests
+                    .recompute_counts(
+                        &paths
+                            .iter()
+                            .cloned()
+                            .map(|path| (path, phase))
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap();
+                for (path, _, count) in counts {
+                    assert_eq!(count, 0, "{path}: {phase:?}");
+                }
+            }
         }
     });
 }

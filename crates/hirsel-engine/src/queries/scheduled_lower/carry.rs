@@ -403,6 +403,7 @@ impl FrontLowerQueries {
             )
         };
         let (value, reads, depth, executed, selections) = result;
+        let reads = evidence::current_reads(reads, row.execution.as_ref())?;
         if reads.len() != row.reads.len() {
             return None;
         }

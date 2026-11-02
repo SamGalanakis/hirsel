@@ -1834,7 +1834,7 @@ impl BodyTask {
         if let Some(reference) = reference {
             queries
                 .store
-                .associate_product(self.query.address, action, reference);
+                .associate_written_product(self.query.address, action, reference);
         }
         Ok(product)
     }
@@ -1971,7 +1971,7 @@ impl BodyTask {
                 self.remember_carry();
                 queries
                     .store
-                    .associate_product(self.query.address, action, variant.output);
+                    .associate_written_product(self.query.address, action, variant.output);
                 Some(Ok(publication))
             }
         }
@@ -2301,7 +2301,7 @@ impl BodyTask {
                 if let Some(record) = record {
                     queries
                         .store
-                        .associate_product(self.query.address, action, record);
+                        .associate_written_product(self.query.address, action, record);
                 }
                 Ok(publication)
             }

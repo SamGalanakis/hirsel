@@ -109,7 +109,6 @@ pub struct FrontCheckOutput {
 pub struct FrontCheckQueries {
     query: QueryId,
     files: Vec<FileInput>,
-    unavailable: Option<QueryKind>,
     plan: FrontCheckPlan,
     storage: Option<Arc<FrontStorageGraphQueries>>,
     lint: Option<DeadArmLint>,
@@ -864,8 +863,7 @@ impl Task {
             .iter()
             .filter(|file| file.error == Some(QueryError::NotImplemented))
             .filter_map(|file| file.phase)
-            .last()
-            .or(queries.unavailable);
+            .last();
         let completion = incomplete.map_or(CheckCompletion::Complete, |phase| {
             CheckCompletion::Incomplete { phase }
         });
@@ -1169,18 +1167,6 @@ impl QueryEngine {
         let store = self.result_store.clone().ok_or_else(refusal)?;
         Ok(Arc::new(FrontCheckQueries {
             query,
-            unavailable: (!files.is_empty())
-                .then(|| {
-                    [
-                        (QueryKind::Resolve, self.adapters.resolver.is_some()),
-                        (QueryKind::Signature, self.adapters.signature.is_some()),
-                        (QueryKind::Check, self.adapters.checker.is_some()),
-                        (QueryKind::Modes, self.adapters.modes.is_some()),
-                    ]
-                    .into_iter()
-                    .find_map(|(phase, available)| (!available).then_some(phase))
-                })
-                .flatten(),
             files,
             plan,
             storage: None,

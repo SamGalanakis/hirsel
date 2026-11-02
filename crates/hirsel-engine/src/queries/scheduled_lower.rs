@@ -219,8 +219,16 @@ impl Outcome {
         {
             return live.reads().len();
         }
-        self.archive()
-            .map_or_else(|| self.reads.len(), |archive| archive.len)
+        self.archive().map_or_else(
+            || self.reads.len(),
+            |archive| {
+                archive.len
+                    + self
+                        .execution
+                        .as_ref()
+                        .map_or(0, |receipt| receipt.contexts().len())
+            },
+        )
     }
     fn reads(&self, owner: &FrontLowerQueries) -> Option<Reads> {
         if let Ok(Value::Lower(lower)) = &self.result
@@ -230,15 +238,26 @@ impl Outcome {
         }
         match self.archive() {
             None => Some(self.reads.clone()),
-            Some(archive) => archive.load(
-                &owner.records,
-                &owner.anchors,
-                &*owner.store,
-                owner.weight.scratch,
+            Some(archive) => evidence::current_reads(
+                archive.load(
+                    &owner.records,
+                    &owner.anchors,
+                    &*owner.store,
+                    owner.weight.scratch,
+                )?,
+                self.execution.as_ref(),
             ),
         }
     }
     fn archive_reads(&mut self, reference: Reference) {
+        let descriptor_reads = if self.execution.is_some() {
+            self.reads
+                .iter()
+                .filter(|(key, _)| !matches!(key, ReadKey::ValidationUniverse(_)))
+                .count()
+        } else {
+            self.reads.len()
+        };
         let read_bytes = self
             .reads
             .allocations()
@@ -253,7 +272,7 @@ impl Outcome {
                     lower.archived_metadata = Some(Box::new(reads::Archive {
                         reference,
                         decode_bytes: self.reads_decode_bytes,
-                        len: self.reads.len(),
+                        len: descriptor_reads,
                         dependencies: lower.dependencies.len(),
                     }));
                     self.reads = Reads::empty();
@@ -264,7 +283,7 @@ impl Outcome {
                 value.archived_reads = Some(Box::new(reads::Archive {
                     reference,
                     decode_bytes: value.working_bytes(),
-                    len: self.reads.len(),
+                    len: descriptor_reads,
                     dependencies: 0,
                 }));
                 self.reads = Reads::empty();
@@ -1199,7 +1218,19 @@ impl FrontLowerQueries {
         };
         let (mut result, verification, raw) = match computed {
             Ok(computed) => (Ok(computed.value), computed.verification, computed.raw),
-            Err(error) => (Err(error), None, None),
+            Err(error) => (
+                Err(lower_input_error(
+                    &path,
+                    if id.kind == FRONT_EVALUATE_KIND {
+                        "evaluating a constant"
+                    } else {
+                        "lowering a body"
+                    },
+                    error,
+                )),
+                None,
+                None,
+            ),
         };
         // A missing dependency outcome is a scheduler/transport refusal, not
         // a typed body error. Preserve its exact identity through all clones
@@ -1219,6 +1250,12 @@ impl FrontLowerQueries {
             .as_ref()
             .ok()
             .and_then(|_| source.evidence.borrow().finish(&observed));
+        let descriptor_reads =
+            match persistent::persisted_execution_reads(&observed, execution.as_ref()) {
+                Some(reads) => reads,
+                None if execution.is_none() => observed.clone(),
+                None => return Err(self.errors.protocol),
+            };
         let selections = std::mem::take(&mut *source.selections.borrow_mut());
         let mut reads_decode_bytes = 0;
         let bytes = match &mut result {
@@ -1256,7 +1293,7 @@ impl FrontLowerQueries {
                             &lower.diagnostics,
                             lower.dependencies.packed(),
                             &lower.materialized,
-                            &observed,
+                            &descriptor_reads,
                             &depth,
                             executed,
                             &selections,
@@ -1274,6 +1311,7 @@ impl FrontLowerQueries {
                 &self.records,
                 &self.anchors,
                 &observed,
+                &descriptor_reads,
                 &depth,
                 executed,
                 &selections,

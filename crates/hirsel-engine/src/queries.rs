@@ -284,6 +284,7 @@ pub struct QueryEngine {
     signatures: Table<hirsel_types::SignatureRef>,
     /// Cleared whenever `signatures` changes outside header adoption.
     adopted_headers: Option<header_products::AdoptedHeaders>,
+    adopted_private: Option<header_products::AdoptedPrivate>,
     header_products: Option<Arc<header_products::HeaderProducts>>,
     /// A header or module proof read refused while this engine produces a row.
     header_refusal: std::sync::Mutex<Option<QueryError>>,
@@ -435,6 +436,7 @@ impl Drop for QueryEngine {
         );
         released("engine: signatures", take(&mut self.signatures));
         self.adopted_headers = None;
+        self.adopted_private = None;
         released("engine: memo graph", take(&mut self.graph));
         released(
             "engine: pending front changes",
@@ -692,6 +694,7 @@ impl QueryEngine {
             syntax_keys: BTreeMap::new(),
             signatures: Default::default(),
             adopted_headers: None,
+            adopted_private: None,
             header_products: None,
             header_refusal: Default::default(),
             resolutions: Default::default(),

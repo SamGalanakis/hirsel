@@ -539,6 +539,7 @@ impl QueryEngine {
         let mut inferred = hirsel_syntax::DefMap::default();
         let mut record_context = None;
         let mut pending = Vec::new();
+        self.adopted_private = None;
         self.private_summary_reads.clear();
         for ((package, module), paths) in self.inference_groups() {
             if selected.is_some_and(|selected| selected != (package, module)) {

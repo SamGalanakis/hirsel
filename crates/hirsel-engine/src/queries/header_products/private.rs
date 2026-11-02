@@ -2,6 +2,12 @@ use super::*;
 use crate::queries::private_unique::scheduled::Facts;
 use std::sync::{Mutex, atomic::AtomicU64};
 type Module = (crate::memo::PackageKey, crate::memo::ModuleKey);
+/// The immutable proof owner and loader inputs whose facts are already adopted.
+pub(crate) struct AdoptedPrivate {
+    owner: std::sync::Weak<HeaderProducts>,
+    revision: u64,
+    inputs: u64,
+}
 pub(super) struct ModuleProduct {
     facts: Facts,
     complete: bool,
@@ -83,12 +89,18 @@ struct Candidate {
     publication: bool,
 }
 pub(super) struct PrivateProducts {
+    revision: AtomicU64,
     candidates: hirsel_syntax::DefMap<Candidate>,
     modules: BTreeMap<Module, ModuleSlot>,
     working: AtomicU64,
     registrations: OnceLock<Vec<Arc<AcceptedFrontRegistration>>>,
 }
 impl PrivateProducts {
+    fn publish(&self, slot: &ModuleSlot, next: ProofState) {
+        let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
+        *state = next;
+        self.revision.fetch_add(1, Ordering::Release);
+    }
     pub(super) fn index_bytes(engine: &QueryEngine) -> u64 {
         let paths = Self::candidate_paths(engine);
         let modules = paths.iter().map(module_of).collect::<BTreeSet<_>>().len();
@@ -154,6 +166,7 @@ impl PrivateProducts {
             modules,
             working: AtomicU64::new(0),
             registrations: OnceLock::new(),
+            revision: AtomicU64::new(0),
         })
     }
     pub(super) fn requires_proof(&self, id: DefId) -> bool {
@@ -179,7 +192,9 @@ impl PrivateProducts {
                     ProofState::Settled(product)
                         if Arc::strong_count(product) == 1 && product.charge.evictable() =>
                     {
-                        std::mem::replace(&mut *state, ProofState::Evicted)
+                        let evicted = std::mem::replace(&mut *state, ProofState::Evicted);
+                        self.revision.fetch_add(1, Ordering::Release);
+                        evicted
                     }
                     _ => continue,
                 }
@@ -308,8 +323,7 @@ impl HeaderProducts {
             Ok(result) => result,
             Err(error @ QueryError::Operational(_)) => return Err(error),
             Err(error) => {
-                *slot.state.lock().unwrap_or_else(|e| e.into_inner()) =
-                    ProofState::Failed(error.clone());
+                private.publish(slot, ProofState::Failed(error.clone()));
                 return Err(error);
             }
         };
@@ -393,8 +407,7 @@ impl HeaderProducts {
             accounted: AtomicBool::new(false),
             charge,
         });
-        *slot.state.lock().unwrap_or_else(|e| e.into_inner()) =
-            ProofState::Settled(product.clone());
+        private.publish(slot, ProofState::Settled(product.clone()));
         drop(producing);
         self.generation.fetch_add(1, Ordering::Relaxed);
         // Offer the payloads to the admitted header rows outside the proof's
@@ -415,12 +428,16 @@ impl HeaderProducts {
     }
     /// Replace a proof whose identity disagrees with its recomputed payload.
     pub(super) fn invalidate_private(&self, id: DefId, stale: &Arc<ModuleProduct>) {
-        let Some((_, slot)) = self.private.as_ref().and_then(|private| private.module(id)) else {
+        let Some(private) = &self.private else {
+            return;
+        };
+        let Some((_, slot)) = private.module(id) else {
             return;
         };
         let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
         if matches!(&*state, ProofState::Settled(product) if Arc::ptr_eq(product, stale)) {
             *state = ProofState::Evicted;
+            private.revision.fetch_add(1, Ordering::Release);
         }
     }
     /// A proof reader. An evicted proof is demanded again. A failed proof is
@@ -465,12 +482,20 @@ impl HeaderProducts {
             .and_then(|proof| proof.1.failures.iter().find(|f| f.claim == claim).cloned()))
     }
     pub(crate) fn adopt_private_products(
-        &self,
+        self: &Arc<Self>,
         engine: &mut QueryEngine,
     ) -> Result<(), QueryError> {
         let Some(private) = &self.private else {
             return Ok(());
         };
+        let revision = private.revision.load(Ordering::Acquire);
+        if engine.adopted_private.as_ref().is_some_and(|adopted| {
+            adopted.owner.ptr_eq(&Arc::downgrade(self))
+                && adopted.revision == revision
+                && adopted.inputs == engine.snapshot_inputs_revision
+        }) {
+            return Ok(());
+        }
         let mut inferred = engine
             .private_summaries
             .iter()
@@ -540,6 +565,11 @@ impl HeaderProducts {
                 engine.private_summary_revision = Some(engine.graph.revision());
             }
         }
+        engine.adopted_private = Some(AdoptedPrivate {
+            owner: Arc::downgrade(self),
+            revision,
+            inputs: engine.snapshot_inputs_revision,
+        });
         Ok(())
     }
     pub(in crate::queries) fn private_work(&self, work: &mut Vec<(DefPath, QueryKind, u64)>) {
@@ -647,4 +677,117 @@ fn private_refusal() -> QueryError {
         operation: "private inference admission".into(),
         message: "demanded module proof exceeds its existing front partition".into(),
     })
+}
+
+#[cfg(test)]
+mod adoption_tests {
+    use super::*;
+    fn fixture() -> (Arc<HeaderProducts>, QueryEngine, DefId) {
+        let engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
+        let mut headers = HeaderProducts::capture(&engine);
+        let id = DefId::intern(&crate::tools::entry_path(&crate::tools::default_context()));
+        let module = module_of(id.path());
+        let slot = ModuleSlot::default();
+        *slot.state.lock().unwrap() = ProofState::Settled(Arc::new(ModuleProduct {
+            facts: Facts {
+                proofs: vec![(
+                    id,
+                    hirsel_types::UniqueInference {
+                        summary: Default::default(),
+                        failures: vec![],
+                    },
+                )],
+                reads: Default::default(),
+            },
+            complete: true,
+            work: Default::default(),
+            identities: Default::default(),
+            accounted: AtomicBool::new(false),
+            charge: Charge::engine(),
+        }));
+        Arc::get_mut(&mut headers).unwrap().private = Some(PrivateProducts {
+            candidates: [(
+                id,
+                Candidate {
+                    module,
+                    declared: None,
+                    publication: false,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            modules: [(module, slot)].into(),
+            working: AtomicU64::new(0),
+            registrations: OnceLock::new(),
+            revision: AtomicU64::new(0),
+        });
+        (headers, engine, id)
+    }
+    #[test]
+    fn unchanged_private_adoption_keeps_its_accepted_read_owner() {
+        let (headers, mut engine, id) = fixture();
+        headers.adopt_private_products(&mut engine).unwrap();
+        let accepted = engine.private_summary_reads[&id].clone();
+        for _ in 0..32 {
+            headers.adopt_private_products(&mut engine).unwrap();
+        }
+        assert!(
+            Arc::ptr_eq(&accepted, &engine.private_summary_reads[&id]),
+            "unchanged proof reads must be shared, not rebuilt on every header lookup"
+        );
+        assert!(engine.private_summaries.contains_key(&id));
+    }
+    #[test]
+    fn a_new_proof_revision_refreshes_the_same_engines_reads() {
+        let (headers, mut engine, id) = fixture();
+        headers.adopt_private_products(&mut engine).unwrap();
+        let accepted = engine.private_summary_reads[&id].clone();
+        let private = headers.private.as_ref().unwrap();
+        let (_, slot) = private.module(id).unwrap();
+        let previous = slot.current().unwrap().unwrap();
+        let mut facts = previous.facts.clone();
+        let mut reads = ReadsBuilder::new();
+        let value = ContentHash::of_bytes(b"changed private inputs");
+        reads.record(ReadKey::Environment, value);
+        facts.reads = reads.finish().unwrap();
+        private.publish(
+            slot,
+            ProofState::Settled(Arc::new(ModuleProduct {
+                facts,
+                complete: true,
+                work: Default::default(),
+                identities: Default::default(),
+                accounted: AtomicBool::new(false),
+                charge: Charge::engine(),
+            })),
+        );
+        headers.adopt_private_products(&mut engine).unwrap();
+        assert!(!Arc::ptr_eq(&accepted, &engine.private_summary_reads[&id]));
+        assert!(
+            engine.private_summary_reads[&id]
+                .iter()
+                .any(|&(key, observed)| key == ReadKey::Environment && observed == value)
+        );
+    }
+    #[test]
+    fn another_header_owner_never_reuses_a_private_adoption_stamp() {
+        let (first, mut engine, id) = fixture();
+        first.adopt_private_products(&mut engine).unwrap();
+        let accepted = engine.private_summary_reads[&id].clone();
+        let (second, _, _) = fixture();
+        second.adopt_private_products(&mut engine).unwrap();
+        assert!(!Arc::ptr_eq(&accepted, &engine.private_summary_reads[&id]));
+        assert!(engine.private_summaries.contains_key(&id));
+    }
+    #[test]
+    fn replacing_engine_facts_requires_adopting_the_proof_again() {
+        let (headers, mut engine, id) = fixture();
+        headers.adopt_private_products(&mut engine).unwrap();
+        engine
+            .publish_private_summaries(Default::default())
+            .unwrap();
+        assert!(!engine.private_summaries.contains_key(&id));
+        headers.adopt_private_products(&mut engine).unwrap();
+        assert!(engine.private_summaries.contains_key(&id));
+    }
 }

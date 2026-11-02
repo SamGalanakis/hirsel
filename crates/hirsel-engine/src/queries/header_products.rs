@@ -8,6 +8,7 @@ use std::sync::{
 };
 mod private;
 mod sources;
+pub(crate) use private::AdoptedPrivate;
 pub use private::ModuleProof;
 pub(crate) use sources::CapturedText;
 use sources::HeaderSources;

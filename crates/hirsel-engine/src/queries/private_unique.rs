@@ -169,6 +169,7 @@ impl QueryEngine {
         &mut self,
         inferred: hirsel_syntax::DefMap<UniqueInference>,
     ) -> Result<(), QueryError> {
+        self.adopted_private = None;
         // A failed source still gets its ordinary per-definition diagnostics.
         // No failed computation publishes optimistic candidate bits.
         {

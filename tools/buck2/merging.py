@@ -11,7 +11,7 @@ resolves a conflict in one with `resolve` where the driver is not installed.
 - a package manifest (`hirsel.json`) merges structurally: keys, sources and
   dependencies either side added or removed, so two lanes adding std modules
   both keep theirs;
-- independent line ledgers and module declarations use a three-way set merge:
+- module declarations use a three-way set merge:
   either side's removal wins and both sides' additions survive;
 - corpus path lists merge as sets, accepting unsorted appends and standalone
   comments while preserving removals and conflicting expectation changes;
@@ -55,7 +55,8 @@ SORTED_LISTS = (
 PATH_LISTS = tuple(path for path in SORTED_LISTS if path.endswith(('passing.txt', 'pending.txt')))
 # Whole-line identities, without key or ordering semantics. Keep this in sync
 # with the independent-line patterns in .gitattributes.
-LINE_SETS = ('crates/*/tests/*/modules.rs', 'tools/known-failures.tsv')
+LINE_SETS = ('crates/*/tests/*/modules.rs',)
+LEDGER = 'tools/known-failures.tsv'
 DRIVER = 'hirsel'
 
 
@@ -72,7 +73,8 @@ def line_set(path: str) -> bool:
 
 
 def resolvable(path: str) -> bool:
-    return line_set(path) or path in APPEND_ONLY or path.rpartition('/')[2] == MANIFEST or sorted_list(path)
+    return (line_set(path) or path == LEDGER or path in APPEND_ONLY or
+            path.rpartition('/')[2] == MANIFEST or sorted_list(path))
 
 
 def resolve(path: str, base: str | None, ours: str | None, theirs: str | None) -> str | None:
@@ -82,6 +84,8 @@ def resolve(path: str, base: str | None, ours: str | None, theirs: str | None) -
     if ours is None or theirs is None or not resolvable(path):
         return None
     try:
+        if path == LEDGER:
+            return merge_ledger(base or '', ours, theirs)
         if line_set(path):
             return merge_line_set(base or '', ours, theirs)
         if path in APPEND_ONLY:
@@ -106,6 +110,41 @@ def merge_line_set(base: str, ours: str, theirs: str) -> str:
     removed = (set(ancestor) - set(left)) | (set(ancestor) - set(right))
     lines = dict.fromkeys(line for line in left + right if line not in removed)
     return ''.join(line + '\n' for line in lines)
+
+
+def merge_ledger(base: str, ours: str, theirs: str) -> str:
+    """Merge known-failure rows by their exact first tab-separated field."""
+    def rows(text):
+        entries = {}
+        for line in text.splitlines():
+            if not line.strip() or line.startswith('#'):
+                continue
+            identity = line.split('\t', 1)[0]
+            if identity in entries:
+                raise Conflict('duplicate ledger identity')
+            entries[identity] = line
+        return entries
+
+    ancestor, left, right = (rows(text) for text in (base, ours, theirs))
+    comments = [line for line in ours.splitlines() if line.startswith('#')]
+    merged = []
+    for identity in sorted(ancestor.keys() | left.keys() | right.keys()):
+        old, a, b = (entries.get(identity) for entries in (ancestor, left, right))
+        if a == b:
+            value = a
+        elif a == old:
+            value = b
+        elif b == old:
+            value = a
+        elif a is None:
+            value = b
+        elif b is None:
+            value = a
+        else:
+            value = b
+        if value is not None:
+            merged.append(value)
+    return ''.join(line + '\n' for line in comments + merged)
 
 
 def path_list(base: str, ours: str, theirs: str) -> str:

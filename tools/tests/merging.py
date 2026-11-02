@@ -52,13 +52,74 @@ class LineSets(unittest.TestCase):
                  for side in range(3)]
         expected = {f'row{i}' for i, (base, ours, theirs) in enumerate(combinations)
                     if (base and ours and theirs) or (ours and not base) or (theirs and not base)}
-        for path in ['tools/known-failures.tsv', 'crates/example/tests/it/modules.rs']:
-            with self.subTest(path=path):
-                self.assertEqual(set(merging.resolve(path, *texts).splitlines()), expected)
+        self.assertEqual(set(merging.resolve('crates/example/tests/it/modules.rs', *texts).splitlines()), expected)
 
     def test_unsorted_lines_keep_order_and_normalize_missing_final_newline(self):
-        self.assertEqual(merging.resolve('tools/known-failures.tsv', 'R\nkeep',
+        self.assertEqual(merging.resolve('crates/example/tests/it/modules.rs', 'R\nkeep',
                                          'keep\nzed', 'R\nkeep\nalpha'), 'keep\nzed\nalpha\n')
+
+
+class Ledgers(unittest.TestCase):
+    def test_unchanged_side_uses_the_other_sides_row_or_deletion(self):
+        cases = [
+            ('id\told\n', 'id\told\n', 'id\ttheirs\n', 'id\ttheirs\n'),
+            ('id\told\n', 'id\tours\n', 'id\told\n', 'id\tours\n'),
+            ('id\told\n', 'id\told\n', '', ''),
+            ('id\told\n', '', 'id\told\n', ''),
+            ('', 'id\tours\n', '', 'id\tours\n'),
+            ('', '', 'id\ttheirs\n', 'id\ttheirs\n'),
+        ]
+        for base, ours, theirs, expected in cases:
+            with self.subTest(base=base, ours=ours, theirs=theirs):
+                self.assertEqual(merging.resolve('tools/known-failures.tsv', base, ours, theirs), expected)
+
+    def test_both_added_rows_choose_theirs_even_when_older(self):
+        self.assertEqual(
+            merging.resolve(
+                'tools/known-failures.tsv',
+                '',
+                'same\tnewer\tmain\t2026-11-01\n',
+                'same\tolder\tticket\t2026-10-30\n',
+            ),
+            'same\tolder\tticket\t2026-10-30\n',
+        )
+
+    def test_diverging_edits_choose_theirs_even_when_older(self):
+        base = 'same\tbase\towner\t2026-10-31\n'
+        ours = 'same\tnewer\tmain\t2026-11-01\n'
+        theirs = 'same\tolder\tticket\t2026-10-30\n'
+        self.assertEqual(
+            merging.resolve('tools/known-failures.tsv', base, ours, theirs),
+            'same\tolder\tticket\t2026-10-30\n',
+        )
+
+    def test_concurrent_edit_and_delete_keep_the_edit_in_either_direction(self):
+        base = 'id\tbase\towner\t2026-10-30\n'
+        edited = 'id\tchanged\towner\t2026-11-01\n'
+        for ours, theirs in [('', edited), (edited, '')]:
+            with self.subTest(ours=ours, theirs=theirs):
+                self.assertEqual(merging.resolve('tools/known-failures.tsv', base, ours, theirs), edited)
+
+    def test_ours_comments_and_sorted_rows_are_normalized(self):
+        base = '# base header\nz\tbase\towner\t2026-10-30\n'
+        ours = '# ours first\n\n# ours second\nz\tbase\towner\t2026-10-30\nq\tours\towner\t2026-10-30'
+        theirs = '# theirs header\nz\tbase\towner\t2026-10-30\na\ttheirs\towner\t2026-10-30'
+        self.assertEqual(
+            merging.resolve('tools/known-failures.tsv', base, ours, theirs),
+            '# ours first\n# ours second\na\ttheirs\towner\t2026-10-30\n'
+            'q\tours\towner\t2026-10-30\nz\tbase\towner\t2026-10-30\n',
+        )
+
+    def test_duplicate_ids_in_any_input_stay_conflicts(self):
+        duplicate = 'id\tfirst\towner\t2026-10-30\nid\tsecond\towner\t2026-11-01\n'
+        cases = [
+            (duplicate, '', ''),
+            ('', duplicate, ''),
+            ('', '', duplicate),
+        ]
+        for base, ours, theirs in cases:
+            with self.subTest(base=base, ours=ours, theirs=theirs):
+                self.assertIsNone(merging.resolve('tools/known-failures.tsv', base, ours, theirs))
 
 
 if __name__ == '__main__':

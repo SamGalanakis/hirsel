@@ -85,7 +85,7 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
             for run in [false, true] {
                 let request = CompileRequest {
                     path: manifest.clone(),
-                    inputs: inputs.clone(),
+                    inputs: inputs.clone().into(),
                     operation: if run {
                         CompileOperation::NativeRun(native.clone())
                     } else {

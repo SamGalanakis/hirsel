@@ -1,12 +1,10 @@
 //! Host selection over admitted immutable producer graphs. This module owns
 //! admission and output lifetimes, never a mutable program or a check cache.
 use super::{
-    CompileOperation, CompileOutput, CompileRequest, CompileResult, CompilerReadiness,
-    RequestLimits,
+    CompileInputs, CompileOperation, CompileOutput, CompileRequest, CompileResult,
+    CompilerReadiness, RequestLimits,
 };
-use hirsel_engine::{
-    CheckCompletion, CheckOutput, ToolError, loader_inputs::FrozenInputs, runtime::*,
-};
+use hirsel_engine::{CheckCompletion, CheckOutput, ToolError, runtime::*};
 use hirsel_span::SourceMap;
 use std::{
     collections::BTreeMap,
@@ -189,13 +187,13 @@ pub(super) trait GraphProducts: Send + Sync {
 }
 pub(super) struct InstalledGraph {
     pub path: PathBuf,
-    pub inputs: FrozenInputs,
+    pub inputs: CompileInputs,
     pub runtime: Arc<Mutex<AdmittedRuntime>>,
     pub products: Arc<dyn GraphProducts>,
 }
 pub(super) struct InstalledMetadata {
     pub path: PathBuf,
-    pub inputs: FrozenInputs,
+    pub inputs: CompileInputs,
     pub products: Arc<dyn GraphProducts>,
     pub errors: RuntimeErrors,
 }
@@ -694,7 +692,7 @@ mod tests {
                             assert!(products.is_empty());
                             Ok(Arc::new(CompileOutput::new(
                                 hirsel_engine::entry_path(&hirsel_engine::default_context()),
-                                inputs.clone(),
+                                inputs.clone().into(),
                                 Default::default(),
                                 CompileResult::RecomputeCounts(vec![]),
                             )))
@@ -717,7 +715,7 @@ mod tests {
         .unwrap();
         let request = CompileRequest {
             path: "metadata.hir".into(),
-            inputs: inputs.clone(),
+            inputs: inputs.clone().into(),
             operation: CompileOperation::RecomputeCounts { queries: vec![] },
         };
         let error = hirsel_engine::store::Domain {
@@ -730,7 +728,7 @@ mod tests {
         let mut selector = GraphSelections::new(&budget, false);
         let metadata = Arc::new(InstalledMetadata {
             path: request.path.clone(),
-            inputs,
+            inputs: inputs.into(),
             products: Arc::new(Metadata(budget.reserve(1).unwrap())),
             errors: RuntimeErrors {
                 resource: error,
@@ -951,7 +949,7 @@ mod tests {
                         materialize: Arc::new(move |_| {
                             Ok(Arc::new(CompileOutput::new(
                                 hirsel_engine::entry_path(&hirsel_engine::default_context()),
-                                inputs.clone(),
+                                inputs.clone().into(),
                                 Default::default(),
                                 CompileResult::Check(CheckOutput::default()),
                             )))
@@ -972,7 +970,7 @@ mod tests {
         .unwrap();
         let request = CompileRequest {
             path: "first.hir".into(),
-            inputs,
+            inputs: inputs.into(),
             operation: CompileOperation::Check {
                 lowering: hirsel_engine::LoweringPolicy::Comptime,
             },

@@ -2,8 +2,8 @@
 //! The temporary S0 loader is dropped before the graph becomes visible. No
 //! mutable engine, synchronous phase controller or second check cache survives.
 use super::{
-    CompileOperation, CompileOutput, CompileRequest, CompileResult, CompilerReadiness,
-    RequestLimits, RequestWork,
+    CompileInputs, CompileOperation, CompileOutput, CompileRequest, CompileResult,
+    CompilerReadiness, RequestLimits, RequestWork,
     host_selector::{
         GraphAdmission, GraphBudget, GraphProducts, InstalledGraph, InstalledMetadata, SnapshotPlan,
     },
@@ -15,7 +15,6 @@ use hirsel_engine::{
     FrontInstanceBootstrapAdmission, FrontInstanceBootstrapError, FrontLowerQueries,
     FrontRegistrationBootstrapError, FrontRunQueries, LoadedProgram, LoweringPolicy, QueryError,
     QueryKind, ToolError,
-    loader_inputs::FrozenInputs,
     runtime::*,
     store::{Domain, RequestStore, ResultStore},
 };
@@ -177,7 +176,7 @@ struct SourceProducts {
     native_sources: Option<(Vec<DefPath>, Arc<hirsel_engine::FrontNativeQueries>)>,
     expansion: Option<Arc<Expansion>>,
     entry: DefPath,
-    inputs: FrozenInputs,
+    inputs: CompileInputs,
     lowering: LoweringPolicy,
     launch_entry: Option<DefPath>,
     run: Option<Arc<FrontRunQueries>>,
@@ -206,7 +205,7 @@ struct SourceProducts {
 
 struct SourceMetadata {
     entry: DefPath,
-    inputs: FrozenInputs,
+    inputs: CompileInputs,
     meter: Arc<GraphMeter>,
     // Runtime diagnostic references remain owned by their admitted transport.
     _store: Arc<RequestStore>,
@@ -907,7 +906,7 @@ impl Plan {
     fn new(
         limits: RequestLimits,
         config: &CompileConfig,
-        inputs: &FrozenInputs,
+        inputs: &CompileInputs,
         definitions: &[DefPath],
         check_inventory: u64,
         needs_run: bool,

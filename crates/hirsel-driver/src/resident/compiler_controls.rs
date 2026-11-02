@@ -56,7 +56,7 @@ fn request(entry: &std::path::Path) -> CompileRequest {
     discovery.unwrap();
     CompileRequest {
         path: entry.to_owned(),
-        inputs,
+        inputs: inputs.into(),
         operation: CompileOperation::Check {
             lowering: LoweringPolicy::Comptime,
         },
@@ -168,13 +168,16 @@ fn real_compiler_requests_coalesce_cancel_independently_and_keep_frozen_revision
         std::fs::write(&source, "pub fn main()->u8{missing}\n").unwrap();
         let delivered: Arc<[u8]> = b"pub fn main()->u8{true}\n".as_slice().into();
         let mut changed = initial.clone();
-        changed.inputs = initial
-            .inputs
+        let crate::requests::CompileInputs::Frozen(inputs) = &initial.inputs else {
+            unreachable!()
+        };
+        changed.inputs = inputs
             .replace_sources(
                 &BTreeMap::from([(source.clone(), delivered.clone())]),
                 1 << 20,
             )
-            .unwrap();
+            .unwrap()
+            .into();
         let new = host.request(&changed).unwrap();
         assert!(!Arc::ptr_eq(
             &old.subscription.runtime,
@@ -242,10 +245,13 @@ fn physical_inspection_counts_survive_revisions_eviction_and_detached_snapshot_o
                 .into_bytes()
                 .into();
             let mut selected = original.clone();
-            selected.inputs = original
-                .inputs
+            let crate::requests::CompileInputs::Frozen(inputs) = &original.inputs else {
+                unreachable!()
+            };
+            selected.inputs = inputs
                 .replace_sources(&BTreeMap::from([(source.clone(), text)]), 1 << 20)
-                .unwrap();
+                .unwrap()
+                .into();
             let completed = host.request(&selected).unwrap().wait().unwrap();
             assert!(checked(&completed).diagnostics.is_empty());
             let definition = completed.entry.clone();
@@ -535,8 +541,10 @@ fn selected_private_layout_cache_matches_cold_and_preserves_unread_reader_work()
             };
             let before = before.clone();
             let mut edited = selected.clone();
-            edited.inputs = selected
-                .inputs
+            let crate::requests::CompileInputs::Frozen(inputs) = &selected.inputs else {
+                unreachable!()
+            };
+            edited.inputs = inputs
                 .replace_sources(
                     &BTreeMap::from([(
                         source.clone(),
@@ -547,7 +555,8 @@ fn selected_private_layout_cache_matches_cold_and_preserves_unread_reader_work()
                     )]),
                     1 << 20,
                 )
-                .unwrap();
+                .unwrap()
+                .into();
             let actual = host.request(&edited).unwrap().wait().unwrap();
             counter_request.inputs = edited.inputs.clone();
             let after = host.request(&counter_request).unwrap().wait().unwrap();
@@ -626,13 +635,16 @@ fn unread_representation_edit_adopts_reader_bodies_and_matches_the_cold_receipt(
         assert!(before.iter().all(|(_, _, count)| *count == 1), "{before:?}");
         let edited = initial.replace("level:u64", "level:u32");
         std::fs::write(&source, &edited).unwrap();
-        let inputs = selected
-            .inputs
+        let crate::requests::CompileInputs::Frozen(inputs) = &selected.inputs else {
+            unreachable!()
+        };
+        let inputs: crate::requests::CompileInputs = inputs
             .replace_sources(
                 &BTreeMap::from([(source.clone(), edited.into_bytes().into())]),
                 1 << 20,
             )
-            .unwrap();
+            .unwrap()
+            .into();
         for request in [&mut receipt, &mut counter] {
             request.inputs = inputs.clone();
         }

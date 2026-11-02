@@ -92,7 +92,7 @@ impl Executions {
         };
         let mut selected = self.selector.select(&CompileRequest {
             path: self.path.clone(),
-            inputs: self.inputs.clone(),
+            inputs: self.inputs.clone().into(),
             operation,
         })?;
         let completed = {

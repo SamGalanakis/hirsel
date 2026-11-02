@@ -49,7 +49,7 @@ fn object_requests_emit_generic_helpers_without_link_or_launch() {
             second.0.name = "native_coverage_empty".into();
             drop(loaded);
             let request = CompileRequest {
-                path: manifest.clone(), inputs,
+                path: manifest.clone(), inputs: inputs.into(),
                 operation: CompileOperation::NativeBuild(NativeRequest {
                     definition: Some(first.clone()),
                     test_entries: vec![],

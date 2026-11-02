@@ -79,7 +79,7 @@ fn pressure(reclaim_idle: bool) {
         drop(loaded.unwrap());
         let request = CompileRequest {
             path: manifest,
-            inputs,
+            inputs: inputs.into(),
             operation: CompileOperation::ExportTir,
         };
         let mut selected = selector.select(&request).unwrap();

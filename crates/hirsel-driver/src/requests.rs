@@ -2,8 +2,14 @@
 //! The engine installs factories; these descriptors select operations and never
 //! accept caller-supplied tasks, caches, verifier receipts or mutable programs.
 use crate::native::{Backend, BuildProfile, LaunchInputs, TargetSpec, Validation};
-use hirsel_engine::{LoweringPolicy, loader_inputs::FrozenInputs};
+use hirsel_engine::{
+    LoweringPolicy,
+    loader_inputs::{
+        DirectoryEntry, FrozenInputs, InputKind, LoaderInputs, namespace::NamespaceLease,
+    },
+};
 use hirsel_syntax::DefPath;
+use std::io;
 use std::path::PathBuf;
 mod host_selector;
 mod inspection;
@@ -40,10 +46,86 @@ pub use selector::{CompilerRequests, RequestLimits};
 /// directory membership. Selection must use these bytes verbatim; observing
 /// newer disk state is a separate request. Compiler policy is captured by the
 /// request engine's Compiler, including explicit jobs, V and selected stores.
+#[derive(Clone, Debug)]
+pub enum CompileInputs {
+    Frozen(FrozenInputs),
+    Namespace(NamespaceLease),
+}
+impl CompileInputs {
+    pub fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Frozen(inputs) => inputs.retained_bytes(),
+            Self::Namespace(inputs) => inputs.usage().charged_bytes,
+        }
+    }
+
+    pub fn read_work(&self) -> (u64, u64) {
+        match self {
+            Self::Frozen(inputs) => inputs.read_work(),
+            Self::Namespace(inputs) => inputs.read_work(),
+        }
+    }
+}
+impl From<FrozenInputs> for CompileInputs {
+    fn from(inputs: FrozenInputs) -> Self {
+        Self::Frozen(inputs)
+    }
+}
+impl From<NamespaceLease> for CompileInputs {
+    fn from(inputs: NamespaceLease) -> Self {
+        Self::Namespace(inputs)
+    }
+}
+impl PartialEq for CompileInputs {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Frozen(a), Self::Frozen(b)) => a == b,
+            (Self::Namespace(a), Self::Namespace(b)) => a.same_namespace(b),
+            _ => false,
+        }
+    }
+}
+impl Eq for CompileInputs {}
+impl LoaderInputs for CompileInputs {
+    fn read(&self, path: &std::path::Path) -> io::Result<std::sync::Arc<[u8]>> {
+        match self {
+            Self::Frozen(inputs) => inputs.read(path),
+            Self::Namespace(inputs) => inputs.read(path),
+        }
+    }
+
+    fn canonicalize(&self, path: &std::path::Path) -> io::Result<PathBuf> {
+        match self {
+            Self::Frozen(inputs) => inputs.canonicalize(path),
+            Self::Namespace(inputs) => inputs.canonicalize(path),
+        }
+    }
+
+    fn metadata(&self, path: &std::path::Path) -> io::Result<InputKind> {
+        match self {
+            Self::Frozen(inputs) => inputs.metadata(path),
+            Self::Namespace(inputs) => inputs.metadata(path),
+        }
+    }
+
+    fn directory(&self, path: &std::path::Path) -> io::Result<Vec<DirectoryEntry>> {
+        match self {
+            Self::Frozen(inputs) => inputs.directory(path),
+            Self::Namespace(inputs) => inputs.directory(path),
+        }
+    }
+
+    fn toolchain_std_manifest(&self) -> Option<io::Result<PathBuf>> {
+        match self {
+            Self::Frozen(inputs) => inputs.toolchain_std_manifest(),
+            Self::Namespace(inputs) => inputs.toolchain_std_manifest(),
+        }
+    }
+}
 #[derive(Clone)]
 pub struct CompileRequest {
     pub path: PathBuf,
-    pub inputs: FrozenInputs,
+    pub inputs: CompileInputs,
     pub operation: CompileOperation,
 }
 #[derive(Clone)]

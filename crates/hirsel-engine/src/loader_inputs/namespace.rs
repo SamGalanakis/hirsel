@@ -407,6 +407,23 @@ impl NamespaceLease {
     pub fn usage(&self) -> Usage {
         self.0.usage
     }
+    pub fn read_work(&self) -> (u64, u64) {
+        let failed = self
+            .0
+            .state
+            .failures
+            .keys()
+            .filter(|operation| matches!(operation, Operation::Read(_)))
+            .count() as u64;
+        self.0
+            .state
+            .nodes
+            .values()
+            .fold((failed, 0), |(reads, bytes), node| match node {
+                Node::File { bytes: payload, .. } => (reads + 1, bytes + payload.len() as u64),
+                _ => (reads, bytes),
+            })
+    }
     pub fn entry(&self) -> &Path {
         &self.0.state.entry
     }

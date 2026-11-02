@@ -86,7 +86,7 @@ impl std::fmt::Debug for CompileInspection {
 /// snapshot as its result and does not ask the disk for newer observations.
 pub struct CompileOutput {
     pub entry: DefPath,
-    pub inputs: FrozenInputs,
+    pub inputs: CompileInputs,
     pub work: RequestWork,
     pub result: CompileResult,
     owner: Arc<dyn Send + Sync>,
@@ -94,7 +94,7 @@ pub struct CompileOutput {
 impl CompileOutput {
     pub fn new(
         entry: DefPath,
-        inputs: FrozenInputs,
+        inputs: CompileInputs,
         work: RequestWork,
         result: CompileResult,
     ) -> Self {

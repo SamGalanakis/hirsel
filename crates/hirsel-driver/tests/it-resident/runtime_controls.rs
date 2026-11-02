@@ -315,7 +315,10 @@ impl RequestEngine for FrozenEngine {
             .inputs
             .read(&request.path)
             .map_err(|e| e.to_string())?;
-        let parts = request.inputs.identity_parts();
+        let parts = match &request.inputs {
+            hirsel_driver::requests::CompileInputs::Frozen(inputs) => inputs.identity_parts(),
+            hirsel_driver::requests::CompileInputs::Namespace(_) => unreachable!(),
+        };
         let product = crate::fixture_product(
             &*self.store,
             root().address,

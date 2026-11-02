@@ -86,7 +86,7 @@ fn selected_request_keeps_one_read_epoch_and_releases_it_before_retained_outputs
         );
         let request = CompileRequest {
             path: manifest,
-            inputs,
+            inputs: inputs.into(),
             operation: CompileOperation::Check {
                 lowering: LoweringPolicy::Reachable,
             },
@@ -238,7 +238,7 @@ fn unfinished_equal_requests_have_independent_abort_owners_and_completed_graphs_
         );
         let request = CompileRequest {
             path: manifest,
-            inputs,
+            inputs: inputs.into(),
             operation: CompileOperation::Check {
                 lowering: LoweringPolicy::Reachable,
             },

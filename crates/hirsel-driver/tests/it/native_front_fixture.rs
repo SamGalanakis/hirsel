@@ -161,7 +161,7 @@ pub(super) fn products(
         let mut selected = selector
             .select(&CompileRequest {
                 path: manifest,
-                inputs,
+                inputs: inputs.into(),
                 operation: CompileOperation::NativeSources {
                     roots: requested.to_vec(),
                 },

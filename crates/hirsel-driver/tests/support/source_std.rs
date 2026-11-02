@@ -142,7 +142,7 @@ fn compiler_for(
         let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
         let result = requests.execute_request(&CompileRequest {
             path: path.to_owned(),
-            inputs: key.inputs.clone(),
+            inputs: key.inputs.clone().into(),
             operation: CompileOperation::Check { lowering },
         });
         let output = match result {
@@ -284,7 +284,7 @@ impl TirFixture {
         };
         self.requests.execute_request(&CompileRequest {
             path: self.path.clone(),
-            inputs,
+            inputs: inputs.into(),
             operation,
         })
     }

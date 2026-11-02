@@ -412,7 +412,7 @@ pub(crate) fn check_empty_selection(
     };
     let mut selected = selector.select(&CompileRequest {
         path: path.to_owned(),
-        inputs: discovery.inputs.clone(),
+        inputs: discovery.inputs.clone().into(),
         operation: CompileOperation::Check {
             lowering: hirsel_engine::LoweringPolicy::Reachable,
         },

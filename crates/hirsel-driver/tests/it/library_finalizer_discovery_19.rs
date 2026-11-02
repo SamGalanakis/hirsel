@@ -60,7 +60,7 @@ fn compile_objects(source: &str) {
             drop(loaded);
             let request = CompileRequest {
                 path: manifest.clone(),
-                inputs,
+                inputs: inputs.into(),
                 operation: CompileOperation::NativeBuild(NativeRequest {
                     definition: Some(first.clone()),
                     test_entries: vec![],

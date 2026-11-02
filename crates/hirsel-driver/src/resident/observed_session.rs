@@ -356,7 +356,7 @@ where
         }
         let request = CompileRequest {
             path: self.entry.clone(),
-            inputs: self.observer.current().unwrap().clone(),
+            inputs: self.observer.current().unwrap().clone().into(),
             operation,
         };
         let output = self

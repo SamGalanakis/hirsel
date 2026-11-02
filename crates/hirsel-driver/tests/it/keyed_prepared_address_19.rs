@@ -39,7 +39,7 @@ fn native_upsert_initializer_preserves_prepared_map_entry_addresses() {
             drop(loaded);
             let request = CompileRequest {
                 path: manifest.clone(),
-                inputs,
+                inputs: inputs.into(),
                 operation: CompileOperation::NativeBuild(NativeRequest {
                     definition: Some(entry.clone()),
                     test_entries: vec![],

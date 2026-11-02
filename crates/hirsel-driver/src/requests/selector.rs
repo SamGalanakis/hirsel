@@ -98,7 +98,7 @@ impl CompilerRequests {
             drop(loaded?);
             self.execute_request(&CompileRequest {
                 path: path.to_path_buf(),
-                inputs,
+                inputs: inputs.into(),
                 operation,
             })
         })();

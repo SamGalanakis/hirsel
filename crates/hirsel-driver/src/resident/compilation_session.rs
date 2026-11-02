@@ -90,7 +90,7 @@ where
     ) -> Result<RequestLease<AdmittedRuntime, E::Readiness>, E::Error> {
         self.host.request(&CompileRequest {
             path: self.path.clone(),
-            inputs: self.inputs.clone(),
+            inputs: self.inputs.clone().into(),
             operation,
         })
     }

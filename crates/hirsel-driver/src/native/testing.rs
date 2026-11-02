@@ -81,7 +81,7 @@ impl Executable {
         let target = TargetSpec::x86_64_unknown_linux_gnu();
         let request = CompileRequest {
             path: path.to_owned(),
-            inputs: discovery.inputs.clone(),
+            inputs: discovery.inputs.clone().into(),
             operation: CompileOperation::NativeBuild(NativeRequest {
                 definition: Some(
                     tests

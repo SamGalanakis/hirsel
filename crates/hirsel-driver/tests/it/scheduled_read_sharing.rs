@@ -44,7 +44,7 @@ fn front_complete_reads_share_equal_phase_allocations_without_merging_phase_keys
         let request = runtime.request(&[front.query(&program.entry).unwrap()]);
         let product = runtime.wait(request).unwrap()[0].clone();
         let output = product.summary_value().unwrap();
-        let rows = front.memo_snapshot().unwrap();
+        let rows = front.memo_snapshot();
         let find = |phase| {
             rows.iter()
                 .find(|(key, _)| key.kind == phase)

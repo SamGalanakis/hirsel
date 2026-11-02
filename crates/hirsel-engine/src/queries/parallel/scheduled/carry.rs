@@ -154,7 +154,7 @@ pub(super) struct FactsRef<'a> {
     pub(super) dead_arms: &'a Option<crate::tools::DeadArmUse>,
     pub(super) diagnostics: &'a Vec<Diagnostic>,
     pub(super) diagnostic_phases: &'a Vec<(Diagnostic, String)>,
-    pub(super) lowering: &'a Option<lowering::LoweringUse>,
+    pub(super) lowering: Option<&'a lowering::LoweringUse>,
     pub(super) table_keys: Option<&'a Arc<crate::table_keys::TableKeyUse>>,
 }
 #[derive(serde::Deserialize)]
@@ -208,7 +208,7 @@ struct PackedFactsRef<'a> {
     dead_arms: &'a Option<crate::tools::DeadArmUse>,
     diagnostics: &'a Vec<Diagnostic>,
     diagnostic_phases: &'a Vec<(Diagnostic, String)>,
-    lowering: &'a Option<lowering::LoweringUse>,
+    lowering: Option<&'a lowering::LoweringUse>,
     table_keys: Option<&'a Arc<crate::table_keys::TableKeyUse>>,
 }
 #[derive(serde::Deserialize)]
@@ -225,7 +225,7 @@ impl serde::Serialize for FactsRef<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         PackedFactsRef {
             summary: self.summary.as_ref().map(|summary| {
-                if FrontSummary::shareable(summary, self.checked, &summary.reads) {
+                if retained::summary_shared(summary, self.checked, &summary.reads) {
                     PackedSummaryRef::Checked {
                         definition: summary.definition,
                         text: summary.text,
@@ -260,7 +260,7 @@ impl serde::Serialize for Facts {
             dead_arms: &self.dead_arms,
             diagnostics: &self.diagnostics,
             diagnostic_phases: &self.diagnostic_phases,
-            lowering: &self.lowering,
+            lowering: self.lowering.as_ref(),
             table_keys: self.table_keys.as_ref(),
         }
         .serialize(serializer)
@@ -329,7 +329,7 @@ impl FactsRef<'_> {
             w.reads(reads);
         }
         if let Some(summary) = &self.summary
-            && !compact.is_some_and(|reads| FrontSummary::shareable(summary, self.checked, reads))
+            && !compact.is_some_and(|reads| retained::summary_shared(summary, self.checked, reads))
         {
             w.arc(summary, |w, summary| {
                 retained::definition(w, &summary.summary);
@@ -400,7 +400,7 @@ impl FrontBodyQueries {
             dead_arms: &facts.dead_arms,
             diagnostics: &facts.diagnostics,
             diagnostic_phases: &facts.diagnostic_phases,
-            lowering: &facts.lowering,
+            lowering: facts.lowering.as_ref(),
             table_keys: facts.table_keys.as_ref(),
         };
         let summary = facts.summary.clone()?;
@@ -415,25 +415,19 @@ impl FrontBodyQueries {
             )?;
         let (allowance, backing) = self.owner_grant(cx, charge, "cached compact facts")?;
         backing.add(allowance)?;
-        let owner = Arc::new(FrontFacts {
-            definition: self.inputs.get(&key)?.definition,
-            status: Ok(()),
-            phase: None,
-            summary: Some(FrontSummary::capture(
-                summary.clone(),
-                &facts.checked,
-                &reads,
-            )),
+        let lowering = facts.lowering?;
+        let diagnostics = facts.diagnostics;
+        let owner = FrontFacts::capture(
+            self.inputs.get(&key)?.definition.path(),
+            None,
             reads,
-            diagnostic_phases: facts.diagnostic_phases,
-            checked: facts.checked,
-            dead_arms: facts.dead_arms.map(LintFacts::capture),
-            diagnostics: facts.diagnostics,
-            lowering: facts.lowering,
-            table_keys: facts.table_keys,
-            memos: memos.into_boxed_slice(),
-            _backing: Some(backing),
-        });
+            facts.diagnostic_phases,
+            facts.checked,
+            facts.dead_arms,
+            facts.table_keys,
+            memos,
+            backing,
+        );
         let publication = self.admit_summary(
             cx,
             hirsel_artifact_store::Address(key),
@@ -441,13 +435,13 @@ impl FrontBodyQueries {
             summary,
             owner.clone(),
         )?;
-        Some(FrontOutcome {
+        Some(FrontOutcome::settled(
             reference,
-            publication: Some(publication),
-            body_publication: None,
-            body: Weak::new(),
-            facts: owner,
-        })
+            publication,
+            diagnostics,
+            lowering,
+            owner,
+        ))
     }
     /// Install before submitting tasks. The caller keeps the same carry for
     /// later fresh graphs; it holds neither this producer nor its sources.
@@ -455,7 +449,7 @@ impl FrontBodyQueries {
         let mut slot = self.carry.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_some()
             || !self
-                .outcomes
+                .slots
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .is_empty()
@@ -515,7 +509,7 @@ impl FrontBodyQueries {
     }
 }
 impl BodyTask {
-    pub(super) fn remember_carry(&self, reference: Option<Reference>) {
+    pub(super) fn remember_carry(&self) {
         let queries = &self.queries;
         let Some(carry) = queries
             .carry
@@ -525,24 +519,37 @@ impl BodyTask {
         else {
             return;
         };
-        let outcomes = queries.outcomes.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(outcome) = outcomes.get(&self.input) else {
+        let slots = queries.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(slot) = slots.get(&self.input) else {
             return;
         };
-        if outcome.status.is_err() {
-            return;
-        }
+        let outcome = match slot {
+            FrontSlot::Archived(_) => return,
+            FrontSlot::Live { outcome, .. } => outcome,
+        };
+        let (reference, summary, diagnostics, lowering) = match &outcome.state {
+            FrontState::Failed { .. } => return,
+            FrontState::Settled {
+                archive,
+                publication,
+                diagnostics,
+                lowering,
+                ..
+            } => {
+                let Some(summary) = publication.summary_value() else {
+                    return;
+                };
+                (*archive, summary.value_arc(), diagnostics, lowering)
+            }
+        };
         let dead_arms = outcome.dead_arms.as_ref().map(LintFacts::materialize);
         let facts = FactsRef {
-            summary: outcome
-                .summary
-                .as_ref()
-                .map(|s| s.materialize(&outcome.checked, &outcome.reads)),
+            summary: Some(summary),
             checked: &outcome.checked,
             dead_arms: &dead_arms,
-            diagnostics: &outcome.diagnostics,
+            diagnostics,
             diagnostic_phases: &outcome.diagnostic_phases,
-            lowering: &outcome.lowering,
+            lowering: Some(lowering),
             table_keys: outcome.table_keys.as_ref(),
         };
         if facts.summary.as_ref().is_some_and(|s| s.storage.is_some()) {
@@ -634,7 +641,7 @@ impl BodyTask {
         let facts = self.decode_facts(&row.bytes, &row.reads)?;
         let reference = row.reference;
         let reads = row.reads.clone();
-        // Completion takes the outcomes lock, while capture takes it before carry.
+        // Completion takes the slots lock, while capture takes it before carry.
         drop(rows);
         self.install_facts(cx, reference, reads, facts, clean)
     }
@@ -667,7 +674,7 @@ impl BodyTask {
             dead_arms: &facts.dead_arms,
             diagnostics: &facts.diagnostics,
             diagnostic_phases: &facts.diagnostic_phases,
-            lowering: &facts.lowering,
+            lowering: facts.lowering.as_ref(),
             table_keys: facts.table_keys.as_ref(),
         };
         (view.bytes(true) <= self.weight.scratch).then_some(facts)
@@ -740,7 +747,10 @@ impl BodyTask {
         let action = crate::store::query_action(&input.key, input.key.1, &reads);
         let outcome = queries
             .publish_compact_facts(cx, self.input, reference, action, reads, facts, memo_rows)?;
-        let publication = outcome.publication.clone()?;
+        let publication = match &outcome.state {
+            FrontState::Failed { record, .. } => return Some(Err(*record)),
+            FrontState::Settled { publication, .. } => publication.clone(),
+        };
         if clean {
             queries
                 .clean_memos
@@ -748,11 +758,7 @@ impl BodyTask {
                 .unwrap_or_else(|e| e.into_inner())
                 .extend(outcome.memos.iter().map(|(key, _)| *key));
         }
-        queries
-            .outcomes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(self.input, outcome);
+        queries.install_outcome(self.input, outcome);
         queries.store_adoptions.fetch_add(1, Relaxed);
         // Compact facts complete this query independently of body
         // storage. Publishing a body association would fetch its archive just
@@ -932,7 +938,7 @@ mod tests {
             dead_arms: &None,
             diagnostics: &vec![],
             diagnostic_phases: &vec![],
-            lowering: &None,
+            lowering: None,
             table_keys: None,
         };
         let bytes = bincode::serialize(&missing).unwrap();
@@ -1037,7 +1043,7 @@ mod tests {
                     dead_arms: &facts.dead_arms,
                     diagnostics: &facts.diagnostics,
                     diagnostic_phases: &facts.diagnostic_phases,
-                    lowering: &facts.lowering,
+                    lowering: facts.lowering.as_ref(),
                     table_keys: facts.table_keys.as_ref(),
                 };
                 let store = Arc::new(persistent::Contents(Arc::new(

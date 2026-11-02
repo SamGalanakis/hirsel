@@ -389,7 +389,7 @@ impl GraphMeter {
     pub fn inspect(&self, definitions: &[DefPath]) -> Result<Arc<CompileInspection>, ToolError> {
         let (stats, definitions) = self.ledger.definitions(definitions)?;
         let mut memos: BTreeMap<_, _> = self.memos.iter().cloned().collect();
-        memos.extend(self.front.memo_snapshot().ok_or_else(unavailable)?);
+        memos.extend(self.front.memo_snapshot());
         memos.extend(self.lower.memo_snapshot().ok_or_else(unavailable)?);
         Ok(Arc::new(
             CompileInspection::new(stats, memos.into_iter().collect(), definitions)

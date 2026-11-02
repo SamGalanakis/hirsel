@@ -270,7 +270,7 @@ fn admitted_lower_saved_work_and_native_metadata_survive_dependency_suspension()
                     assert_eq!(front.recompute_count(path, kind), 1);
                 }
             }
-            let phase_rows = front.memo_snapshot().unwrap();
+            let phase_rows = front.memo_snapshot();
             for path in &definitions {
                 for kind in [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes] {
                     assert!(
@@ -1058,313 +1058,321 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         };
         let mut limit = 8 << 20;
         // First measure the complete metadata and one body through the same harness.
-        for mode in 0..9 {
-            // std is a source dependency: as in production, V gives its
-            // importers std's once-computed universe summary, warmed here by
-            // another program before the body fills the partition.
-            let store = Arc::new(MemStore::default());
-            COMPILER
-                .with_config(CompileConfig {
-                    store: store.clone(),
-                    ..Default::default()
-                })
-                .with_owned_engines()
-                .load_program(&warm.path().join("main.hir"))
-                .unwrap()
-                .engine
-                .signature_snapshot();
-            let mut program = COMPILER
-                .with_config(CompileConfig {
-                    store: Arc::new(Transport(store, mode != 8)),
-                    hold_bytes: 0,
-                    ..Default::default()
-                })
-                .with_owned_engines()
-                .load_program(&path)
-                .unwrap();
-            let definitions = ["a", "b"].map(|name| {
-                let mut definition = program.entry.clone();
-                definition.0.name = name.into();
-                definition
-            });
-            let mut runtime = AdmittedRuntime::with_query_capacity(
-                hirsel_intern::jobs::Jobs::ONE,
-                budget
-                    .reserve(hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + 2 * weight.scratch)
-                    .unwrap(),
-                errors(),
-                6,
-            )
-            .unwrap();
-            let front = program
-                .engine
-                .front_body_queries(
-                    &definitions,
-                    weight,
-                    budget.reserve(limit).unwrap(),
-                    errors(),
-                )
-                .unwrap();
-            runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
-            let mut header_pins = definitions
-                .iter()
-                .map(|definition| {
-                    front
-                        .signatures()
-                        .signature(hirsel_syntax::DefId::intern(definition))
-                        .unwrap()
-                        .unwrap()
-                        .clone()
-                })
-                .collect::<Vec<_>>();
-            let bodies = definitions
-                .each_ref()
-                .map(|definition| front.body_query(definition).unwrap());
-            let root = QueryId {
-                kind: 0x255,
-                address: bodies[0].address,
-            };
-            let middle = QueryId {
-                kind: 0x256,
-                address: bodies[0].address,
-            };
-            runtime
-                .register(
-                    middle.kind,
-                    Arc::new(DependencyFactory(vec![bodies[0]], middle)),
-                )
-                .unwrap();
-            let dependencies = if mode == 5 {
-                vec![middle, bodies[1]]
-            } else {
-                bodies.to_vec()
-            };
-            runtime
-                .register(root.kind, Arc::new(DependencyFactory(dependencies, root)))
-                .unwrap();
-            let summaries = definitions
-                .each_ref()
-                .map(|definition| front.query(definition).unwrap());
-            let request = runtime.request(&summaries);
-            let publications = runtime.wait(request).unwrap();
-            let metadata = front.retained_bytes();
-            // V builds its universe once the program's headers are checked,
-            // before any body fills the partition. std is a dependency: its
-            // rows come from its warmed summary, never its full table.
-            let universe = (mode == 7 || mode == 8).then(|| {
-                let signatures = front.signatures();
-                let package = &definitions[0].0.package;
-                let before: std::collections::BTreeMap<_, _> =
-                    front.module_inferences().into_iter().collect();
-                let started = std::time::Instant::now();
-                let built = signatures.validation(package).map(|universe| {
-                    universe
-                        .view(hirsel_syntax::DefId::intern(&definitions[0]))
-                        .unwrap()
-                        .digest()
-                });
-                // One universe build reads every row: each module's private
-                // proof is inferred at most once per build, whether it
-                // settles or is refused.
-                let inferred: Vec<_> = front
-                    .module_inferences()
-                    .into_iter()
-                    .map(|(module, count)| {
-                        (count - before.get(&module).copied().unwrap_or(0), module)
+        let mut body_modes = || {
+            for mode in 0..9 {
+                // std is a source dependency: as in production, V gives its
+                // importers std's once-computed universe summary, warmed here by
+                // another program before the body fills the partition.
+                let store = Arc::new(MemStore::default());
+                COMPILER
+                    .with_config(CompileConfig {
+                        store: store.clone(),
+                        ..Default::default()
                     })
-                    .filter(|(count, _)| *count != 0)
-                    .collect();
-                let repeated: Vec<_> = inferred.iter().filter(|(count, _)| *count > 1).collect();
-                assert!(
-                    repeated.is_empty(),
-                    "proofs inferred more than once in one build: {repeated:?}"
-                );
-                if mode == 8 {
-                    assert!(started.elapsed() < std::time::Duration::from_secs(60));
-                }
-                (signatures, built)
-            });
-            if mode == 8 {
-                let (_, built) = universe.unwrap();
-                assert!(
-                    matches!(built, Err(hirsel_validate::ViewRefusal::Unreadable { .. })),
-                    "unreadable std proof refuses the universe: {built:?}"
-                );
-                continue;
-            }
-            let universe = universe.map(|(signatures, built)| (signatures, built.unwrap()));
-            let request = runtime.request(&[bodies[0]]);
-            let a = runtime.wait(request).unwrap().pop().unwrap();
-            let mut scratch = budget.reserve(2 << 20).unwrap();
-            let canonical = a
-                .analyzed_value()
-                .unwrap()
-                .archive(&mut scratch, 1 << 20)
-                .unwrap();
-            let action = a.action;
-            let reads = a.analyzed_value().unwrap().reads().as_ref().clone();
-            if mode == 0 {
-                limit = front.retained_bytes();
-                assert!(limit > metadata);
-                continue;
-            }
-            assert_eq!(
-                front.retained_bytes(),
-                limit,
-                "partition fits exactly one body"
-            );
-            let pin = (mode == 2 || mode == 6).then(|| front.outcome(Ok(a.clone())).unwrap());
-            // The settled module proof is an entry of the same admitted cache.
-            assert!(front.module_proof_resident(&definitions[0]));
-            let proof = front
-                .module_proof(&definitions[0])
-                .unwrap()
-                .unwrap()
-                .settled();
-            let proof_pin =
-                (mode == 6).then(|| front.module_proof(&definitions[0]).unwrap().unwrap());
-            drop(a);
-            struct DependencyFactory(Vec<QueryId>, QueryId);
-            struct DependencyTask(Vec<QueryId>, QueryId);
-            impl QueryFactory for DependencyFactory {
-                fn create(
-                    &self,
-                    _: QueryId,
-                ) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference> {
-                    Ok(Box::new(DependencyTask(self.0.clone(), self.1)))
-                }
-            }
-            impl QueryTask for DependencyTask {
-                fn id(&self) -> QueryId {
-                    self.1
-                }
-                fn weight(&self) -> MemoryWeight {
-                    MemoryWeight::default()
-                }
-                fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
-                    for dependency in self.0.iter().copied() {
-                        match cx.read(dependency) {
-                            std::task::Poll::Pending => {
-                                return QueryPoll::Waiting(vec![dependency]);
-                            }
-                            std::task::Poll::Ready(Err(error)) => return QueryPoll::Failed(error),
-                            std::task::Poll::Ready(Ok(_)) => {}
-                        }
-                    }
-                    QueryPoll::Complete(synthetic_fixture(
-                        self.1.address,
-                        hirsel_engine::store::Action(hirsel_syntax::ContentHash::of_bytes(
-                            b"settled-consumer",
-                        )),
-                        Domain {
-                            kind: 0x255,
-                            schema: 1,
-                        },
-                        b"settled",
-                    ))
-                }
-            }
-            // V's universe holds header rows by identity: `a`'s row is held
-            // only by it, `b`'s also by a live view.
-            let universe = universe.map(|(signatures, digest)| {
-                header_pins.remove(0);
-                (signatures, digest)
-            });
-            let request = if mode == 3 || mode == 5 || mode == 7 {
-                runtime.request(&[root])
-            } else if mode == 4 {
-                runtime.request(&bodies)
-            } else {
-                runtime.request(&[bodies[1]])
-            };
-            let b = runtime.wait(request);
-            // Pressure evicts a header row whose identity alone is held. V
-            // reads the evicted row back through the ordinary producer as the
-            // same view, or the read is refused as an error: never a panic,
-            // and never a different signature under the same identity.
-            if let Some((signatures, digest)) = universe {
-                assert!(
-                    b.is_ok() || b == Err(errors().resource),
-                    "pressure completes or refuses: {b:?}"
-                );
-                let d = hirsel_syntax::DefId::intern(&definitions[0]);
-                let view = signatures
-                    .validation(&definitions[0].0.package)
+                    .with_owned_engines()
+                    .load_program(&warm.path().join("main.hir"))
                     .unwrap()
-                    .view(d)
+                    .engine
+                    .signature_snapshot();
+                let mut program = COMPILER
+                    .with_config(CompileConfig {
+                        store: Arc::new(Transport(store, mode != 8)),
+                        hold_bytes: 0,
+                        ..Default::default()
+                    })
+                    .with_owned_engines()
+                    .load_program(&path)
                     .unwrap();
-                assert_eq!(view.digest(), digest);
-                match view.signature() {
-                    Ok(signature) => {
-                        assert_eq!(
-                            hirsel_validate::digest(signatures.types(), &signature),
-                            digest
-                        );
-                        assert!(front.header_resident(&definitions[0]));
-                    }
-                    Err(refusal) => assert!(
-                        matches!(refusal, hirsel_validate::ViewRefusal::Unreadable { definition, .. } if definition == d),
-                        "{refusal}"
-                    ),
-                }
-                continue;
-            }
-            if mode == 3 || mode == 4 {
-                assert_eq!(b, Err(errors().resource));
-                assert_eq!(runtime.stats().body_evictions, 0);
-                assert_eq!(front.live_body_count(), 1);
-                continue;
-            }
-            if let Some(pin) = pin {
-                assert_eq!(b, Err(errors().resource));
-                assert_eq!(runtime.stats().body_evictions, 0);
-                assert!(pin.outcome.result.is_ok());
-                assert_eq!(front.live_body_count(), 1);
-                // Pressure evicts an unpinned settled proof and never a pinned
-                // one; an evicted proof recomputes equal on its next demand.
-                if let Some(held) = &proof_pin {
-                    assert!(front.module_proof_resident(&definitions[0]));
-                    assert_eq!(held.settled(), proof);
+                let definitions = ["a", "b"].map(|name| {
+                    let mut definition = program.entry.clone();
+                    definition.0.name = name.into();
+                    definition
+                });
+                let mut runtime = AdmittedRuntime::with_query_capacity(
+                    hirsel_intern::jobs::Jobs::ONE,
+                    budget
+                        .reserve(
+                            hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + 2 * weight.scratch,
+                        )
+                        .unwrap(),
+                    errors(),
+                    6,
+                )
+                .unwrap();
+                let front = program
+                    .engine
+                    .front_body_queries(
+                        &definitions,
+                        weight,
+                        budget.reserve(limit).unwrap(),
+                        errors(),
+                    )
+                    .unwrap();
+                runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
+                let mut header_pins = definitions
+                    .iter()
+                    .map(|definition| {
+                        front
+                            .signatures()
+                            .signature(hirsel_syntax::DefId::intern(definition))
+                            .unwrap()
+                            .unwrap()
+                            .clone()
+                    })
+                    .collect::<Vec<_>>();
+                let bodies = definitions
+                    .each_ref()
+                    .map(|definition| front.body_query(definition).unwrap());
+                let root = QueryId {
+                    kind: 0x255,
+                    address: bodies[0].address,
+                };
+                let middle = QueryId {
+                    kind: 0x256,
+                    address: bodies[0].address,
+                };
+                runtime
+                    .register(
+                        middle.kind,
+                        Arc::new(DependencyFactory(vec![bodies[0]], middle)),
+                    )
+                    .unwrap();
+                let dependencies = if mode == 5 {
+                    vec![middle, bodies[1]]
                 } else {
-                    assert!(!front.module_proof_resident(&definitions[0]));
-                    // Equal facts. Rows the first proof settled stay settled, so
-                    // the recomputed proof names only identities it re-derives,
-                    // and each agrees with what the first proof recorded.
-                    let (facts, identities) = front
-                        .module_proof(&definitions[0])
-                        .unwrap()
-                        .unwrap()
-                        .settled();
-                    assert_eq!(facts, proof.0);
-                    assert!(identities.iter().all(|row| proof.1.contains(row)));
-                    assert!(front.module_proof_resident(&definitions[0]));
+                    bodies.to_vec()
+                };
+                runtime
+                    .register(root.kind, Arc::new(DependencyFactory(dependencies, root)))
+                    .unwrap();
+                let summaries = definitions
+                    .each_ref()
+                    .map(|definition| front.query(definition).unwrap());
+                let request = runtime.request(&summaries);
+                let publications = runtime.wait(request).unwrap();
+                let metadata = front.retained_bytes();
+                // V builds its universe once the program's headers are checked,
+                // before any body fills the partition. std is a dependency: its
+                // rows come from its warmed summary, never its full table.
+                let universe = (mode == 7 || mode == 8).then(|| {
+                    let signatures = front.signatures();
+                    let package = &definitions[0].0.package;
+                    let before: std::collections::BTreeMap<_, _> =
+                        front.module_inferences().into_iter().collect();
+                    let started = std::time::Instant::now();
+                    let built = signatures.validation(package).map(|universe| {
+                        universe
+                            .view(hirsel_syntax::DefId::intern(&definitions[0]))
+                            .unwrap()
+                            .digest()
+                    });
+                    // One universe build reads every row: each module's private
+                    // proof is inferred at most once per build, whether it
+                    // settles or is refused.
+                    let inferred: Vec<_> = front
+                        .module_inferences()
+                        .into_iter()
+                        .map(|(module, count)| {
+                            (count - before.get(&module).copied().unwrap_or(0), module)
+                        })
+                        .filter(|(count, _)| *count != 0)
+                        .collect();
+                    let repeated: Vec<_> =
+                        inferred.iter().filter(|(count, _)| *count > 1).collect();
+                    assert!(
+                        repeated.is_empty(),
+                        "proofs inferred more than once in one build: {repeated:?}"
+                    );
+                    if mode == 8 {
+                        assert!(started.elapsed() < std::time::Duration::from_secs(60));
+                    }
+                    (signatures, built)
+                });
+                if mode == 8 {
+                    let (_, built) = universe.unwrap();
+                    assert!(
+                        matches!(built, Err(hirsel_validate::ViewRefusal::Unreadable { .. })),
+                        "unreadable std proof refuses the universe: {built:?}"
+                    );
+                    continue;
                 }
-            } else {
-                drop(b.unwrap());
-                assert_eq!(runtime.stats().body_evictions, 1);
-                assert_eq!(front.live_body_count(), 1);
+                let universe = universe.map(|(signatures, built)| (signatures, built.unwrap()));
                 let request = runtime.request(&[bodies[0]]);
                 let a = runtime.wait(request).unwrap().pop().unwrap();
-                assert_eq!(runtime.stats().body_evictions, 2);
-                assert_eq!(a.action, action);
-                let recomputed = a
+                let mut scratch = budget.reserve(2 << 20).unwrap();
+                let canonical = a
                     .analyzed_value()
                     .unwrap()
                     .archive(&mut scratch, 1 << 20)
                     .unwrap();
-                assert_eq!(canonical.reference(), recomputed.reference());
-                assert_eq!(canonical.bytes(), recomputed.bytes());
-                assert_eq!(a.analyzed_value().unwrap().reads().as_ref(), &reads);
-                assert_eq!(front.recompute_count(&definitions[0], QueryKind::Modes), 3);
-                let request = runtime.request(&[summaries[0]]);
+                let action = a.action;
+                let reads = a.analyzed_value().unwrap().reads().as_ref().clone();
+                if mode == 0 {
+                    limit = front.retained_bytes();
+                    assert!(limit > metadata);
+                    continue;
+                }
                 assert_eq!(
-                    runtime.wait(request).unwrap()[0],
-                    publications[0],
-                    "body recomputation preserves the original settled Summary owner"
+                    front.retained_bytes(),
+                    limit,
+                    "partition fits exactly one body"
                 );
-                assert_eq!(front.retained_bytes(), limit);
+                let pin = (mode == 2 || mode == 6).then(|| front.outcome(Ok(a.clone())).unwrap());
+                // The settled module proof is an entry of the same admitted cache.
+                assert!(front.module_proof_resident(&definitions[0]));
+                let proof = front
+                    .module_proof(&definitions[0])
+                    .unwrap()
+                    .unwrap()
+                    .settled();
+                let proof_pin =
+                    (mode == 6).then(|| front.module_proof(&definitions[0]).unwrap().unwrap());
+                drop(a);
+                struct DependencyFactory(Vec<QueryId>, QueryId);
+                struct DependencyTask(Vec<QueryId>, QueryId);
+                impl QueryFactory for DependencyFactory {
+                    fn create(
+                        &self,
+                        _: QueryId,
+                    ) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference>
+                    {
+                        Ok(Box::new(DependencyTask(self.0.clone(), self.1)))
+                    }
+                }
+                impl QueryTask for DependencyTask {
+                    fn id(&self) -> QueryId {
+                        self.1
+                    }
+                    fn weight(&self) -> MemoryWeight {
+                        MemoryWeight::default()
+                    }
+                    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+                        for dependency in self.0.iter().copied() {
+                            match cx.read(dependency) {
+                                std::task::Poll::Pending => {
+                                    return QueryPoll::Waiting(vec![dependency]);
+                                }
+                                std::task::Poll::Ready(Err(error)) => {
+                                    return QueryPoll::Failed(error);
+                                }
+                                std::task::Poll::Ready(Ok(_)) => {}
+                            }
+                        }
+                        QueryPoll::Complete(synthetic_fixture(
+                            self.1.address,
+                            hirsel_engine::store::Action(hirsel_syntax::ContentHash::of_bytes(
+                                b"settled-consumer",
+                            )),
+                            Domain {
+                                kind: 0x255,
+                                schema: 1,
+                            },
+                            b"settled",
+                        ))
+                    }
+                }
+                // V's universe holds header rows by identity: `a`'s row is held
+                // only by it, `b`'s also by a live view.
+                let universe = universe.map(|(signatures, digest)| {
+                    header_pins.remove(0);
+                    (signatures, digest)
+                });
+                let request = if mode == 3 || mode == 5 || mode == 7 {
+                    runtime.request(&[root])
+                } else if mode == 4 {
+                    runtime.request(&bodies)
+                } else {
+                    runtime.request(&[bodies[1]])
+                };
+                let b = runtime.wait(request);
+                // Pressure evicts a header row whose identity alone is held. V
+                // reads the evicted row back through the ordinary producer as the
+                // same view, or the read is refused as an error: never a panic,
+                // and never a different signature under the same identity.
+                if let Some((signatures, digest)) = universe {
+                    assert!(
+                        b.is_ok() || b == Err(errors().resource),
+                        "pressure completes or refuses: {b:?}"
+                    );
+                    let d = hirsel_syntax::DefId::intern(&definitions[0]);
+                    let view = signatures
+                        .validation(&definitions[0].0.package)
+                        .unwrap()
+                        .view(d)
+                        .unwrap();
+                    assert_eq!(view.digest(), digest);
+                    match view.signature() {
+                        Ok(signature) => {
+                            assert_eq!(
+                                hirsel_validate::digest(signatures.types(), &signature),
+                                digest
+                            );
+                            assert!(front.header_resident(&definitions[0]));
+                        }
+                        Err(refusal) => assert!(
+                            matches!(refusal, hirsel_validate::ViewRefusal::Unreadable { definition, .. } if definition == d),
+                            "{refusal}"
+                        ),
+                    }
+                    continue;
+                }
+                if mode == 3 || mode == 4 {
+                    assert_eq!(b, Err(errors().resource));
+                    assert_eq!(runtime.stats().body_evictions, 0);
+                    assert_eq!(front.live_body_count(), 1);
+                    continue;
+                }
+                if let Some(pin) = pin {
+                    assert_eq!(b, Err(errors().resource));
+                    assert_eq!(runtime.stats().body_evictions, 0);
+                    assert!(pin.outcome.result.is_ok());
+                    assert_eq!(front.live_body_count(), 1);
+                    // Pressure evicts an unpinned settled proof and never a pinned
+                    // one; an evicted proof recomputes equal on its next demand.
+                    if let Some(held) = &proof_pin {
+                        assert!(front.module_proof_resident(&definitions[0]));
+                        assert_eq!(held.settled(), proof);
+                    } else {
+                        assert!(!front.module_proof_resident(&definitions[0]));
+                        // Equal facts. Rows the first proof settled stay settled, so
+                        // the recomputed proof names only identities it re-derives,
+                        // and each agrees with what the first proof recorded.
+                        let (facts, identities) = front
+                            .module_proof(&definitions[0])
+                            .unwrap()
+                            .unwrap()
+                            .settled();
+                        assert_eq!(facts, proof.0);
+                        assert!(identities.iter().all(|row| proof.1.contains(row)));
+                        assert!(front.module_proof_resident(&definitions[0]));
+                    }
+                } else {
+                    drop(b.unwrap());
+                    assert_eq!(runtime.stats().body_evictions, 1);
+                    assert_eq!(front.live_body_count(), 1);
+                    let request = runtime.request(&[bodies[0]]);
+                    let a = runtime.wait(request).unwrap().pop().unwrap();
+                    assert_eq!(runtime.stats().body_evictions, 2);
+                    assert_eq!(a.action, action);
+                    let recomputed = a
+                        .analyzed_value()
+                        .unwrap()
+                        .archive(&mut scratch, 1 << 20)
+                        .unwrap();
+                    assert_eq!(canonical.reference(), recomputed.reference());
+                    assert_eq!(canonical.bytes(), recomputed.bytes());
+                    assert_eq!(a.analyzed_value().unwrap().reads().as_ref(), &reads);
+                    assert_eq!(front.recompute_count(&definitions[0], QueryKind::Modes), 3);
+                    let request = runtime.request(&[summaries[0]]);
+                    assert_eq!(
+                        runtime.wait(request).unwrap()[0],
+                        publications[0],
+                        "body recomputation preserves the original settled Summary owner"
+                    );
+                    assert_eq!(front.retained_bytes(), limit);
+                }
             }
-        }
+        };
         // The same pressure law applies to compact P owners, including a
         // detached checked-only consumer that does not hold a ProductRef.
         struct EvictCompact(QueryId, MemoryWeight);
@@ -1554,8 +1562,16 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                     2,
                     "a disabled cache recomputes through the ordinary producer"
                 );
+                if mode == 1 {
+                    let body = front.body_query(&definitions[0]).unwrap();
+                    let request = runtime.request(&[body]);
+                    assert_eq!(runtime.wait(request), Err(errors().resource));
+                    let refusal = front.memory_refusal().unwrap();
+                    assert_eq!(refusal.settled + refusal.archived, definitions.len());
+                }
             }
         }
+        body_modes();
         // A header demand refused under pressure is a resource failure, not a
         // settled row: once eviction frees room the same demand succeeds with
         // the unpressured signature. A Front that ends while its partition

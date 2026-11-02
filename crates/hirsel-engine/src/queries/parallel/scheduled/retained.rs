@@ -9,6 +9,23 @@ pub(super) fn definition(weight: &mut Weight, summary: &DefinitionSummary) {
 pub(super) fn checked(weight: &mut Weight, summary: &CheckedSummary) {
     weight.checked_summary(summary);
 }
+pub(super) fn summary_shared(
+    summary: &PublishedSummary,
+    checked: &CheckedProduct,
+    reads: &Reads,
+) -> bool {
+    checked.as_ref().is_some_and(|(value, _, _)| {
+        summary.storage.is_none()
+            && summary
+                .checked
+                .as_ref()
+                .is_some_and(|c| Arc::ptr_eq(c, value))
+            && summary.summary == value.summary
+            && summary.growth == value.growth
+            && summary.reads.as_ref() == reads
+            && summary.reads.observed().eq(reads.observed())
+    })
+}
 #[cfg(test)]
 pub(super) fn metadata(
     outcome: &ModeResult,
@@ -73,7 +90,7 @@ fn metadata_inner(
         w.add(phase.capacity());
     });
     if let Some(summary) = &outcome.summary
-        && !(compact && FrontSummary::shareable(summary, checked_product, &outcome.reads))
+        && !(compact && summary_shared(summary, checked_product, &outcome.reads))
     {
         weight.arc(summary, |w, summary| {
             definition(w, &summary.summary);
@@ -145,89 +162,6 @@ mod tests {
         assert_eq!(
             FrontBodyQueries::input_bytes(&[short.definition.clone()]),
             FrontBodyQueries::input_bytes(&[long.definition])
-        );
-        let row = FrontOutcome::capture(
-            Some(
-                crate::store::Domain { kind: 1, schema: 1 }
-                    .reference(b"row")
-                    .unwrap(),
-            ),
-            None,
-            short.clone(),
-            selected,
-            None,
-            None,
-            vec![],
-            None,
-        );
-        assert_eq!(row.definition.path(), &short.definition);
-    }
-    #[test]
-    fn compact_summary_reuses_only_identical_checked_facts_and_restores_every_field() {
-        let definition = DefId::intern(&DefPath::core("metadata"));
-        let checked = Arc::new(CheckedSummary {
-            summary: DefinitionSummary {
-                owner: definition,
-                frames: [].into(),
-                calls: [].into(),
-                staged: [].into(),
-            },
-            growth: Default::default(),
-        });
-        let reads = Arc::new(Reads::empty());
-        let output = outcome(reads.clone(), checked.clone());
-        let selected = Some((
-            checked.clone(),
-            reads.clone(),
-            Arc::new(OrderedSignatureReads::new(&[])),
-        ));
-        let original = output.summary.as_ref().unwrap().clone();
-        let compact = FrontSummary::capture(original.clone(), &selected, &reads);
-        assert!(matches!(compact, FrontSummary::Checked { .. }));
-        assert!(
-            compact_metadata(&output, &selected, None, &[]).unwrap()
-                < metadata(&output, &selected, None, &[]).unwrap()
-        );
-        let restored = compact.materialize(&selected, &reads);
-        assert_eq!(restored.definition, original.definition);
-        assert_eq!(restored.text, original.text);
-        assert_eq!(restored.summary, original.summary);
-        assert_eq!(restored.growth, original.growth);
-        assert_eq!(restored.reads, original.reads);
-        assert!(Arc::ptr_eq(restored.checked.as_ref().unwrap(), &checked));
-        let mut different = (*original).clone();
-        different.summary.calls = vec![].into();
-        different.summary.owner = DefId::intern(&DefPath::core("different"));
-        let different = Arc::new(different);
-        let captured = FrontSummary::capture(different.clone(), &selected, &reads);
-        assert!(matches!(captured, FrontSummary::Owned(_)));
-        assert!(Arc::ptr_eq(
-            &captured.materialize(&selected, &reads),
-            &different
-        ));
-        let signature = ReadKey::Signature(DefId::intern(&DefPath::core("metadata_order")));
-        let environment = ReadKey::Environment;
-        let environment_hash = ContentHash::of_bytes(b"environment");
-        let signature_hash = ContentHash::of_bytes(b"signature");
-        let summary_order = vec![(environment, environment_hash), (signature, signature_hash)];
-        let checked_order = vec![(signature, signature_hash), (environment, environment_hash)];
-        let summary_reads = Arc::new(Reads::from_vec(summary_order.clone()).unwrap());
-        let checked_reads = Arc::new(Reads::from_vec(checked_order).unwrap());
-        assert_eq!(summary_reads, checked_reads);
-        let ordered_output = outcome(summary_reads, checked.clone());
-        let ordered_selected = Some((
-            checked,
-            checked_reads.clone(),
-            Arc::new(OrderedSignatureReads::new(&[])),
-        ));
-        let ordered_summary = ordered_output.summary.as_ref().unwrap().clone();
-        let ordered_capture =
-            FrontSummary::capture(ordered_summary, &ordered_selected, &checked_reads);
-        assert!(matches!(ordered_capture, FrontSummary::Owned(_)));
-        let restored = ordered_capture.materialize(&ordered_selected, &checked_reads);
-        assert_eq!(
-            restored.reads.observed().copied().collect::<Vec<_>>(),
-            summary_order
         );
     }
     #[test]

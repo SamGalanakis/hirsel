@@ -14,8 +14,7 @@ const FAILURE: Domain = Domain {
     schema: 1,
 };
 struct Outcome {
-    product: Result<ProductRef, Reference>,
-    result: Result<Arc<QueryOutput<StorageDefinition>>, QueryError>,
+    result: Result<(ProductRef, Arc<QueryOutput<StorageDefinition>>), (Reference, QueryError)>,
     reads: Arc<Reads>,
 }
 pub struct FrontStorageQueries {
@@ -86,11 +85,12 @@ impl FrontStorageQueries {
     pub fn outcome(self: &Arc<Self>, product: ProductRef) -> Option<FrontStorageOutput> {
         let completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
         let selected = completed.get(&product.address.0)?;
-        if selected.product != Ok(product) {
-            return None;
-        }
+        let output = match &selected.result {
+            Ok((selected, output)) if selected == &product => output,
+            Ok((_, _)) | Err((_, _)) => return None,
+        };
         Some(FrontStorageOutput {
-            output: selected.result.as_ref().ok()?.clone(),
+            output: output.clone(),
             reads: selected.reads.clone(),
             _owner: self.clone(),
         })
@@ -100,8 +100,11 @@ impl FrontStorageQueries {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .values()
-            .find(|outcome| outcome.product == Err(reference))
-            .and_then(|outcome| outcome.result.as_ref().err().cloned())
+            .find_map(|outcome| match &outcome.result {
+                Ok((_, _)) => None,
+                Err((record, error)) if *record == reference => Some(error.clone()),
+                Err((_, _)) => None,
+            })
     }
     pub fn executions(&self) -> u64 {
         self.executions.load(std::sync::atomic::Ordering::Relaxed)
@@ -117,7 +120,10 @@ impl QueryFactory for StorageFactory {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&id.address.0)
-            .map(|outcome| outcome.product.clone());
+            .map(|outcome| match &outcome.result {
+                Ok((product, _)) => Ok(product.clone()),
+                Err((reference, _)) => Err(*reference),
+            });
         Ok(Box::new(StorageTask {
             owner: self.0.clone(),
             id,
@@ -289,54 +295,58 @@ impl StorageTask {
         if bytes.len() as u64 > owner.weight.retained {
             return Err(owner.errors.resource);
         }
-        let failed = result.is_err();
-        let record = owner
-            .front
-            .store
-            .put_content(if failed { FAILURE } else { OUTPUT }, &bytes)
-            .ok_or(owner.errors.resource)?;
-        let action = hirsel_artifact_store::Action(ContentHash::of_parts(
-            "hirsel.front.storage.action.v1",
-            [
-                product.action.0.0.as_slice(),
-                crate::store::payload_reads_hash(&reads).0.as_slice(),
-                record.output.0.0.as_slice(),
-            ],
-        ));
-        let selected = if failed {
-            Err(record)
-        } else {
-            Ok(ProductRef::import_archive(
-                self.id.address,
-                action,
-                ProductArchive::from_retained_bytes(
-                    record,
-                    bytes.into(),
-                    owner._allowance.clone(),
-                    owner.retention.clone(),
-                )
-                .map_err(|_| owner.errors.resource)?,
-            ))
+        let mut associated = None;
+        let result = match result {
+            Err(error) => {
+                let record = owner
+                    .front
+                    .store
+                    .put_content(FAILURE, &bytes)
+                    .ok_or(owner.errors.resource)?;
+                Err((record, error))
+            }
+            Ok(output) => {
+                let record = owner
+                    .front
+                    .store
+                    .put_content(OUTPUT, &bytes)
+                    .ok_or(owner.errors.resource)?;
+                let action = hirsel_artifact_store::Action(ContentHash::of_parts(
+                    "hirsel.front.storage.action.v1",
+                    [
+                        product.action.0.0.as_slice(),
+                        crate::store::payload_reads_hash(&reads).0.as_slice(),
+                        record.output.0.0.as_slice(),
+                    ],
+                ));
+                let product = ProductRef::import_archive(
+                    self.id.address,
+                    action,
+                    ProductArchive::from_retained_bytes(
+                        record,
+                        bytes.into(),
+                        owner._allowance.clone(),
+                        owner.retention.clone(),
+                    )
+                    .map_err(|_| owner.errors.resource)?,
+                );
+                associated = Some((product.address, product.action, record));
+                Ok((product, output))
+            }
+        };
+        let terminal = match &result {
+            Ok((product, _)) => Ok(product.clone()),
+            Err((reference, _)) => Err(*reference),
         };
         owner
             .completed
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                self.id.address.0,
-                Outcome {
-                    product: selected.clone(),
-                    result,
-                    reads,
-                },
-            );
-        if let Ok(product) = &selected {
-            owner
-                .front
-                .store
-                .associate_product(product.address, product.action, record);
+            .insert(self.id.address.0, Outcome { result, reads });
+        if let Some((address, action, record)) = associated {
+            owner.front.store.associate_product(address, action, record);
         }
-        selected
+        terminal
     }
 }
 impl QueryEngine {

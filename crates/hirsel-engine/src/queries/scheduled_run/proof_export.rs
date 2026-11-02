@@ -472,12 +472,7 @@ impl FrontProofExport {
             .ok_or(QueryError::NotImplemented)?;
         let closure = output.semantic.definitions();
         let mut reads: BTreeMap<DefPath, Arc<Reads>> = BTreeMap::new();
-        for (key, observed) in self
-            .run
-            .front
-            .memo_snapshot()
-            .ok_or(QueryError::NotImplemented)?
-        {
+        for (key, observed) in self.run.front.memo_snapshot() {
             let path = key.def.path();
             if closure.contains(path) {
                 let previous = reads.entry(path.clone()).or_default();

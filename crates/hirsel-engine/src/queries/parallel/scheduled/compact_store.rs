@@ -109,15 +109,11 @@ impl FrontBodyQueries {
         &self,
         key: Key,
         outcome: &FrontOutcome,
+        existing: Option<Arc<FrontObservations>>,
         scratch: u64,
     ) -> Option<ArchivedFront> {
-        let observations = if let Some(previous) = self
-            .archived
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-        {
-            previous.observations.clone()
+        let observations = if let Some(existing) = existing {
+            existing
         } else {
             let mut weight = crate::memo::retained::Weight::default();
             for (_, reads) in &outcome.memos {
@@ -133,7 +129,7 @@ impl FrontBodyQueries {
                     LiveSourceBacking,
                 >::uninit(
                 )))?;
-            let backing = outcome._backing.as_ref()?.split(charge)?;
+            let backing = outcome._backing.split(charge)?;
             Arc::new(FrontObservations {
                 memos: outcome.memos.clone(),
                 _backing: backing,
@@ -167,16 +163,28 @@ impl FrontBodyQueries {
             return None;
         }
         let dead_arms = outcome.dead_arms.as_ref().map(LintFacts::materialize);
+        let (summary, diagnostics, lowering, archive) = match &outcome.state {
+            FrontState::Failed { .. } => return None,
+            FrontState::Settled {
+                archive,
+                publication,
+                diagnostics,
+                lowering,
+                ..
+            } => (
+                Some(publication.summary_value()?.value_arc()),
+                diagnostics,
+                Some(lowering),
+                *archive,
+            ),
+        };
         let facts = carry::FactsRef {
-            summary: outcome
-                .summary
-                .as_ref()
-                .map(|s| s.materialize(&outcome.checked, &outcome.reads)),
+            summary,
             checked: &outcome.checked,
             dead_arms: &dead_arms,
-            diagnostics: &outcome.diagnostics,
+            diagnostics,
             diagnostic_phases: &outcome.diagnostic_phases,
-            lowering: &outcome.lowering,
+            lowering,
             table_keys: outcome.table_keys.as_ref(),
         };
         drop(self.records.prepare_record_encoding(
@@ -193,7 +201,7 @@ impl FrontBodyQueries {
         let decode_bytes = outer.checked_add(facts.bytes(true))?;
         let record = RecordRef {
             key,
-            body: outcome.reference,
+            body: archive,
             reads: &outcome.reads,
             decode_bytes,
             facts: &facts_bytes,
@@ -221,13 +229,16 @@ impl BodyTask {
         &self,
         cx: &mut dyn QueryContext,
     ) -> Option<Result<ProductRef, Reference>> {
-        let reference = self
+        let reference = match self
             .queries
-            .archived
+            .slots
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&self.input)?
-            .facts?;
+        {
+            FrontSlot::Live { .. } => return None,
+            FrontSlot::Archived(archived) => archived.facts?,
+        };
         self.load_compact_reference(cx, reference)
     }
     fn load_compact_reference(
@@ -437,7 +448,7 @@ mod tests {
                     dead_arms: &None,
                     diagnostics: &vec![],
                     diagnostic_phases: &vec![],
-                    lowering: &None,
+                    lowering: None,
                     table_keys: None,
                 };
                 let mut record = Record {

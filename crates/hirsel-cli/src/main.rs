@@ -1104,11 +1104,6 @@ fn execute(mut args: Vec<OsString>, start: std::time::Instant) -> u8 {
         eprintln!("--verify-cache applies only to check, build and run");
         return usage_for(command);
     }
-    hirsel_engine::verify_cached_results(if verify_cache {
-        hirsel_engine::store::VerifyStore::Recompute
-    } else {
-        hirsel_engine::store::VerifyStore::Off
-    });
     if args.first().is_some_and(|a| a == "serve") && !args.iter().any(|a| a == "--host") {
         return serve::serve(&args[1..]);
     }
@@ -1148,7 +1143,12 @@ fn execute(mut args: Vec<OsString>, start: std::time::Instant) -> u8 {
         .and_then(|a| a.to_str())
         .unwrap_or_default()
         .to_owned();
-    let code = execute_command(args, verify);
+    let verify_store = if verify_cache {
+        hirsel_engine::store::VerifyStore::Recompute
+    } else {
+        hirsel_engine::store::VerifyStore::Off
+    };
+    let code = execute_command(args, verify, verify_store);
     measure.finish(&command, start.elapsed());
     code
 }
@@ -1162,10 +1162,14 @@ fn execute_resident(mut args: Vec<OsString>) -> u8 {
     } else {
         Verify::On
     };
-    execute_command(args, verify)
+    execute_command(args, verify, hirsel_engine::store::VerifyStore::Off)
 }
 
-fn execute_command(args: Vec<OsString>, verify: Verify) -> u8 {
+fn execute_command(
+    args: Vec<OsString>,
+    verify: Verify,
+    verify_store: hirsel_engine::store::VerifyStore,
+) -> u8 {
     // Keep the selected command before the parser consumes its operands.
     let topic = args.first().cloned();
     let command = match parse_command(args) {
@@ -1200,7 +1204,11 @@ fn execute_command(args: Vec<OsString>, verify: Verify) -> u8 {
         } => hirsel_engine::Results::Host,
         _ => hirsel_engine::Results::Off,
     };
-    let policy = hirsel_driver::session::Policy { verify, results };
+    let policy = hirsel_driver::session::Policy {
+        verify,
+        results,
+        verify_store,
+    };
     let (command, flag, file) = match command {
         Command::Ctl { path, cores } => {
             use std::io::{Read, Write};

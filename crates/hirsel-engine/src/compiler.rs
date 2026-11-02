@@ -64,6 +64,11 @@ impl Compiler {
         self.results = results;
         self
     }
+    /// Whether this compiler's store hits are recomputed (`--verify-cache`).
+    pub const fn with_verify_store(mut self, verify_store: crate::store::VerifyStore) -> Self {
+        self.verify_store = verify_store;
+        self
+    }
     /// Retain intermediate front bodies only for an explicit resident host.
     pub const fn with_retention(mut self, retention: crate::memo::Retention) -> Self {
         self.retention = retention;
@@ -107,15 +112,14 @@ impl Compiler {
         }
         config
     }
-    /// The default provider (`Results`) and whether its hits are recomputed
-    /// (`--verify-cache` or `HIRSEL_VERIFY_CACHE`).
+    /// The default provider (`Results`) and whether `HIRSEL_VERIFY_CACHE`
+    /// recomputes its hits.
     fn default_store(&self) -> (Option<Arc<dyn crate::store::ResultStore>>, bool) {
         match self.results {
             Results::Off => (crate::store::store_by_name("none@1", None).ok(), false),
             Results::Host => {
                 let name = std::env::var("HIRSEL_RESULTS").unwrap_or_else(|_| "dir@1".into());
-                let recompute = crate::policy::verifies_cached_results()
-                    || std::env::var_os("HIRSEL_VERIFY_CACHE").is_some_and(|v| v != "0");
+                let recompute = std::env::var_os("HIRSEL_VERIFY_CACHE").is_some_and(|v| v != "0");
                 let directory = std::env::var_os("HIRSEL_RESULTS_DIR")
                     .filter(|v| !v.is_empty())
                     .map(Into::into);

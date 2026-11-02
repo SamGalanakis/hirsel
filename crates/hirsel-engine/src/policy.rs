@@ -53,16 +53,3 @@ pub enum Results {
     /// The host's store: `HIRSEL_RESULTS` (default dir@1) under `HIRSEL_RESULTS_DIR`.
     Host,
 }
-
-static VERIFY_RESULTS: AtomicBool = AtomicBool::new(false);
-/// Select independent recomputation for sessions using the CLI's default
-/// result provider. An explicit CompileConfig retains its own store policy.
-pub fn verify_cached_results(verify: crate::store::VerifyStore) {
-    VERIFY_RESULTS.store(
-        verify == crate::store::VerifyStore::Recompute,
-        Ordering::Relaxed,
-    );
-}
-pub(crate) fn verifies_cached_results() -> bool {
-    VERIFY_RESULTS.load(Ordering::Relaxed)
-}

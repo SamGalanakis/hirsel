@@ -41,13 +41,15 @@ pub struct SessionInputWork {
 /// The ordinary host facade over the engine-owned compiler request selector.
 pub type Session = crate::resident::ObservedSession<crate::requests::CompilerRequests>;
 
-/// The per-command choices a path entry point compiles under: V, and the
-/// result store the CLI selects for the command. Sessions are kept by policy,
-/// so a session opened under one policy is never reused under another.
+/// The per-command choices a path entry point compiles under: V, the result
+/// store the CLI selects for the command, and whether that store's hits are
+/// recomputed (`--verify-cache`). Sessions are kept by policy, so a session
+/// opened under one policy is never reused under another.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Policy {
     pub verify: Verify,
     pub results: Results,
+    pub verify_store: hirsel_engine::store::VerifyStore,
 }
 impl Policy {
     /// The library default (no result store) with V `verify`.
@@ -62,6 +64,7 @@ impl Policy {
         crate::COMPILER
             .with_verify(self.verify)
             .with_results(self.results)
+            .with_verify_store(self.verify_store)
     }
 }
 

@@ -890,12 +890,12 @@ def first_party(meta: dict) -> str:
         runtime_archives = RUNTIME_ARCHIVES if name in NATIVE_TESTS else None
 
         def test_attrs(binary: str, src: pathlib.Path) -> dict:
-            # Request-lifecycle fixtures use small query tasks and temporary
-            # files, without compiler corpus, std products or native runtime.
-            lifecycle_only = binary == "hirsel-driver-test-it-resident"
-            return dict(data=[relative(package_dir / "Cargo.toml")] if lifecycle_only else test_data(binary, name, package_dir, src),
-                        runtime_archives=None if lifecycle_only or binary == "hirsel-rt-unittest" else runtime_archives,
-                        products=PRODUCTS if name in PRODUCT_TESTS and not lifecycle_only else None,
+            # Request-lifecycle fixtures and the request-mode law compile
+            # temporary files against std products, without corpus or native runtime.
+            requests_only = binary == "hirsel-driver-test-it-resident"
+            return dict(data=[relative(package_dir / "Cargo.toml")] if requests_only else test_data(binary, name, package_dir, src),
+                        runtime_archives=None if requests_only or binary == "hirsel-rt-unittest" else runtime_archives,
+                        products=PRODUCTS if name in PRODUCT_TESTS else None,
                         seeded=seeded(target_dir(package_dir, src), src) or None, skips=FULL_GATE_SKIPS.get(binary),
                         consumer_cases=CONSUMER_CASES.get(binary))
 

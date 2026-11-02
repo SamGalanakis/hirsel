@@ -94,6 +94,18 @@ fn evaluate_on_compiler_thread(
             requests.capture_attempts(),
             |inputs| compiler.load_program_inputs(path, inputs, false),
         ) {
+            // A request Check selects std as source rather than its products
+            // (no product-backed std dependency yet) and exceeds the inner
+            // deadline, so a graph with std keeps the loaded-program path.
+            Ok((Ok(loaded), _))
+                if loaded
+                    .files
+                    .iter()
+                    .any(|(_, context)| context.package.name_is("std")) =>
+            {
+                drop(loaded);
+                compiler.load_program(path)
+            }
             Ok((loaded, inputs)) => {
                 requested = Some(RequestedProgram {
                     path: path.to_owned(),

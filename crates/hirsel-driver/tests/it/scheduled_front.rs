@@ -1014,8 +1014,14 @@ fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_ci
 #[test]
 fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_equal() {
     with_compiler_stack(|| {
-        struct Transport(MemStore);
+        // This machine's store, carrying its verifier, under a provider
+        // that retains nothing the request publishes: evicted bodies
+        // recompute instead of being read back.
+        struct Transport(Arc<MemStore>);
         impl ResultStore for Transport {
+            fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
+                self.0.verifier()
+            }
             fn persistence(&self) -> hirsel_engine::store::Persistence {
                 hirsel_engine::store::Persistence::Disabled
             }
@@ -1042,6 +1048,8 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
             "fn a()->u8{1u8}\nfn b()->u8{1u8}\npub fn main()->u8{0u8}\n",
         )
         .unwrap();
+        let warm = tempfile::tempdir().unwrap();
+        std::fs::write(warm.path().join("main.hir"), "pub fn main()->u8{0u8}\n").unwrap();
         let budget = ProcessBudget::new(1 << 30);
         let weight = MemoryWeight {
             retained: 1 << 20,
@@ -1051,9 +1059,23 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         let mut limit = 8 << 20;
         // First measure the complete metadata and one body through the same harness.
         for mode in 0..8 {
+            // std is a source dependency: as in production, V gives its
+            // importers std's once-computed universe summary, warmed here by
+            // another program before the body fills the partition.
+            let store = Arc::new(MemStore::default());
+            COMPILER
+                .with_config(CompileConfig {
+                    store: store.clone(),
+                    ..Default::default()
+                })
+                .with_owned_engines()
+                .load_program(&warm.path().join("main.hir"))
+                .unwrap()
+                .engine
+                .signature_snapshot();
             let mut program = COMPILER
                 .with_config(CompileConfig {
-                    store: Arc::new(Transport(MemStore::default())),
+                    store: Arc::new(Transport(store)),
                     hold_bytes: 0,
                     ..Default::default()
                 })

@@ -4,7 +4,7 @@
     tools/main-runs --tick [--tier fast|full] [--dry-run]
 
 The fast tier (the default) is the build, Clippy, fmt, the workspace and tool
-tests (the Loom models among them), the GenMC models and a fresh std compiler
+tests (the Loom models among them; hirsel-cli-test-free only in the full tier), the GenMC models and a fresh std compiler
 instruction budget; hirsel-main-runs.timer (a systemd user unit, host config) ticks it
 every 2 h at pool priority 40 (Nice 10). The full tier is every stage below:
 the release gate, run only by hand before milestones. A fast tick skips while
@@ -191,6 +191,10 @@ def stages(stage, tier, *, planning=False):
                               text=True, check=True).stdout.split()
     tests = query('(kind("_rust_test", //...) + attrfilter(labels, doctest, //...)) - attrfilter(labels, gate, //...) - attrfilter(labels, fixture, //...)')
     libtests = query('kind("_rust_test", //...) - attrfilter(labels, gate, //...) - attrfilter(labels, fixture, //...)')
+    # hirsel-cli-test-free reserves 8 CPUs per shard, uses about 1, and found no new red in 12 fast runs
+    # (kiln-usage-355: 376 of 1,280 reserved CPU-h a day). It runs in the full tier and in lanes' impact gates.
+    free = [target for target in tests if target.endswith(':hirsel-cli-test-free')]
+    tests = [target for target in tests if target not in free]
 
     def full_crate_tests(*arguments):
         return [PY, 'tools/buck2/full_gate_counts.py', '--run', *buck2, 'test', *config, *arguments,
@@ -211,6 +215,7 @@ def stages(stage, tier, *, planning=False):
     stage('fresh std instruction budget', [PY, 'tools/perf-counts', '--fresh-std'])
     if tier == 'fast':
         return
+    stage('free-mode CLI tests', test(*free), target_inventory=free)
     stage('full gate crate tests', full_crate_tests(*libtests))
     stage('conformance validation and ratchet', [PY, 'tools/buck2/conformance.py'])
     stage('source and IR checker agreement (unrestricted)', [PY, 'tools/buck2/agree.py', '--full'])

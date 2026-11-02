@@ -1324,8 +1324,8 @@ impl QueryEngine {
     /// Capture before partitioning the existing host snapshot allowance. Both
     /// the planner and producer consume this one catalog's exact byte count.
     pub fn front_run_inputs(&mut self, limit: u64) -> Result<FrontRunInputs, QueryError> {
-        // Run and Precompute consume the complete semantic catalogue. Check
-        // does not call this producer.
+        // Preparation captures the semantic catalogue once. A source Check
+        // does not demand its Run or Precompute producers.
         self.prepare_private_summaries();
         let signatures = self.signature_inputs();
         let store = self

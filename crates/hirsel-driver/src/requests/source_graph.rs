@@ -178,6 +178,8 @@ struct SourceProducts {
     lowering: LoweringPolicy,
     launch_entry: Option<DefPath>,
     run: Option<Arc<FrontRunQueries>>,
+    run_error: Option<QueryError>,
+    export_error: Option<QueryError>,
     native: Option<Arc<super::native_selection::NativeSelection>>,
     native_artifacts: Option<Arc<super::native_artifacts::NativeArtifacts>>,
     ownership: Option<Arc<super::ownership_selection::OwnershipSelection>>,
@@ -305,21 +307,27 @@ impl GraphProducts for SourceProducts {
                 *lowering == self.lowering && self.receipt.is_some()
             }
             CompileOperation::Inspect { .. } | CompileOperation::RecomputeCounts { .. } => true,
-            CompileOperation::Tir { .. } => self
-                .run
-                .as_ref()
-                .is_some_and(|run| run.precompute_query().is_none() && run.batch_query().is_none()),
+            CompileOperation::Tir { .. } => {
+                self.run_error.is_some()
+                    || self.run.as_ref().is_some_and(|run| {
+                        run.precompute_query().is_none() && run.batch_query().is_none()
+                    })
+            }
             CompileOperation::TirBatch { definitions } => self
                 .run
                 .as_ref()
                 .is_some_and(|run| run.batch_roots() == Some(definitions.as_slice())),
-            CompileOperation::SafeCheck => self.safe.is_some() && self.export.is_none(),
+            CompileOperation::SafeCheck => {
+                self.comptime_check.is_none() && self.safe.is_some() && self.export.is_none()
+            }
             CompileOperation::Artifacts { native: true } => {
                 self.native_artifacts.is_some()
                     && self.export.as_ref().is_some_and(|export| export.reusable())
             }
             CompileOperation::Artifacts { native: false } | CompileOperation::ExportTir => {
-                self.export.as_ref().is_some_and(|export| export.reusable())
+                (self.run_error.is_some()
+                    || self.export_error.is_some()
+                    || self.export.as_ref().is_some_and(|export| export.reusable()))
                     && self.native_artifacts.is_none()
             }
             CompileOperation::NativeOwnership(request) => self
@@ -344,6 +352,20 @@ impl GraphProducts for SourceProducts {
             CompileOperation::Inspect { .. } | CompileOperation::RecomputeCounts { .. }
         ) {
             return self.metadata.select(operation);
+        }
+        let preparation_error = match operation {
+            CompileOperation::Tir { .. } => self.run_error.as_ref(),
+            CompileOperation::Artifacts { .. } | CompileOperation::ExportTir => {
+                self.run_error.as_ref().or(self.export_error.as_ref())
+            }
+            _ => None,
+        };
+        if let Some(error) = preparation_error {
+            return Err(ToolError::Query {
+                error: error.clone(),
+                phase: None,
+                sources: self.sources.clone(),
+            });
         }
         let store_operation = self
             .initial_operation
@@ -980,6 +1002,8 @@ pub(super) fn install(
             "package precomputation requires V".into(),
         ));
     }
+    // Prepare the ordinary operations together. Selecting a Check never
+    // demands the Run/export roots, including their preparation failures.
     let shared_source = matches!(
         request.operation,
         CompileOperation::Check { .. }
@@ -1010,7 +1034,12 @@ pub(super) fn install(
             request.operation,
             CompileOperation::Artifacts { .. } | CompileOperation::ExportTir
         );
-    let completes = artifacts || matches!(request.operation, CompileOperation::Precompute);
+    let completes = matches!(
+        request.operation,
+        CompileOperation::Artifacts { .. }
+            | CompileOperation::ExportTir
+            | CompileOperation::Precompute
+    );
     // The loader reads exactly the supplied immutable observations. Declaration
     // indexing/signature metadata is S0; no P body or Lower task runs here.
     // Reserve both transports while admission may wait without holding a graph.
@@ -1201,6 +1230,12 @@ pub(super) fn install(
         .split(installed.source_index.bytes())
         .ok_or_else(|| uninstalled())?;
     let mut run_inputs = installed.run_inputs.take();
+    let run_error = installed.run_error.take();
+    let available_run = needs_run && run_inputs.is_some();
+    let available_export =
+        artifacts && available_run && (!shared_source || definitions.contains(&program.entry));
+    let export_error = (shared_source && run_error.is_none() && !available_export)
+        .then_some(QueryError::NotImplemented);
     let mut native_catalogue = installed.catalogue.take();
     let query_error = |error| ToolError::Query {
         error,
@@ -1335,13 +1370,14 @@ pub(super) fn install(
     };
     let check = installed.check(&mut program.engine, &selection)?;
     let plan = &installed.plan;
-    let safe_allowance = if shared_source
-        || matches!(
-            request.operation,
-            CompileOperation::SafeCheck
-                | CompileOperation::Artifacts { .. }
-                | CompileOperation::ExportTir
-        ) {
+    let safe_allowance = if available_run
+        && (shared_source
+            || matches!(
+                request.operation,
+                CompileOperation::SafeCheck
+                    | CompileOperation::Artifacts { .. }
+                    | CompileOperation::ExportTir
+            )) {
         Some(
             run.split(super::safe_check::BYTES)
                 .ok_or_else(|| uninstalled())?,
@@ -1359,7 +1395,7 @@ pub(super) fn install(
                 .ok_or_else(|| uninstalled())
         })
         .transpose()?;
-    let export_allowance = if artifacts {
+    let export_allowance = if available_export {
         let headers = program
             .engine
             .front_checked_signatures_bytes(&front)
@@ -1380,7 +1416,7 @@ pub(super) fn install(
                 .ok_or_else(|| uninstalled())
         })
         .transpose()?;
-    let mut run = if needs_run {
+    let mut run = if available_run {
         let inputs = run_inputs.take().ok_or_else(|| uninstalled())?;
         let selected = if matches!(request.operation, CompileOperation::Precompute) {
             program
@@ -1907,6 +1943,8 @@ pub(super) fn install(
         lowering,
         launch_entry,
         run,
+        run_error,
+        export_error,
         native,
         native_artifacts,
         ownership,

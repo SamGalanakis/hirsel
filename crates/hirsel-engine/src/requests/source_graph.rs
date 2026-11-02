@@ -656,6 +656,8 @@ pub struct InstalledSource {
     pub run: MemoryReservation,
     pub native_transport: MemoryReservation,
     pub run_inputs: Option<FrontRunInputs>,
+    /// A Run-only preparation failure does not reject an ordinary source Check.
+    pub run_error: Option<QueryError>,
     pub catalogue: Option<FrontNativeDefinitionInputs>,
     /// The admitted source owner every product source view retains.
     pub source: Arc<MemoryReservation>,
@@ -684,6 +686,7 @@ pub fn install(
     // Capturing the footprint and the Run and native inputs can still name a
     // specialization (GEN-6); select again until no new root appears.
     let mut definitions = selected_definitions(engine);
+    let mut run_error = None;
     let (mut footprint, mut run_inputs, mut catalogue) = loop {
         let footprint = match engine.front_input_footprint(&definitions) {
             Ok(footprint) => footprint,
@@ -691,7 +694,14 @@ pub fn install(
         };
         let run_inputs = if shape.run {
             match engine.front_run_inputs(limits.snapshot_bytes) {
-                Ok(inputs) => Some(inputs),
+                Ok(inputs) => {
+                    run_error = None;
+                    Some(inputs)
+                }
+                Err(error) if shape.check_variants => {
+                    run_error = Some(error);
+                    None
+                }
                 Err(error) => return Err(loading.failed(engine_error(engine, error))),
             }
         } else {
@@ -905,10 +915,17 @@ pub fn install(
             Err(error) => return Err(loading.failed(engine_error(engine, error))),
         };
         if shape.run {
-            run_inputs = Some(match engine.front_run_inputs(final_limits.snapshot_bytes) {
-                Ok(inputs) => inputs,
+            run_inputs = match engine.front_run_inputs(final_limits.snapshot_bytes) {
+                Ok(inputs) => {
+                    run_error = None;
+                    Some(inputs)
+                }
+                Err(error) if shape.check_variants => {
+                    run_error = Some(error);
+                    None
+                }
                 Err(error) => return Err(loading.failed(engine_error(engine, error))),
-            });
+            };
         }
         if shape.ownership {
             catalogue = Some(
@@ -1080,6 +1097,7 @@ pub fn install(
         run,
         native_transport,
         run_inputs,
+        run_error,
         catalogue,
         source,
         source_index,

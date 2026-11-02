@@ -40,7 +40,6 @@ fn ordered_check_gates_lowering_and_preserves_file_failure_prefixes() {
     });
 }
 
-
 fn check_case(
     path: &std::path::Path,
     reject_growth: bool,
@@ -230,7 +229,6 @@ fn check_case(
     }
     runtime.shutdown();
 }
-
 
 #[test]
 fn settled_front_check_does_not_decode_an_evicted_modes_body() {

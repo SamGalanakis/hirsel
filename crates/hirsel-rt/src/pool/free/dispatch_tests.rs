@@ -120,7 +120,6 @@ fn publication_before_the_park_lock_is_retained_by_the_epoch() {
     );
 }
 
-
 #[test]
 fn addressed_work_hands_an_outstanding_search_to_another_worker() {
     let execs = topology(4);
@@ -601,7 +600,6 @@ fn runtime50_notify_save_shrink_batch() {
         assert_eq!(dispatch.count.live.load(Ordering::Acquire), 0, "{order:?}");
     }
 }
-
 
 #[test]
 fn a_late_token_wake_routes_a_saved_compact_frame_off_its_last_worker() {

@@ -547,7 +547,6 @@ fn markdown_parse_budget_39_mdman_consumer() {
     scripted(selected)
 }
 
-
 #[test]
 fn markdown_source_map_41_mdman_consumer() {
     let mut row = cases()

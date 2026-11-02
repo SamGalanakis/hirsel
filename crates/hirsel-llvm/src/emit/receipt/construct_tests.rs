@@ -190,7 +190,6 @@ fn receipt_construct_96_emits_original_heap_recipe_on_both_targets() {
     }
 }
 
-
 const INVENTORY_HARNESS: &str = r#"
 #include <stdint.h>
 #include <assert.h>

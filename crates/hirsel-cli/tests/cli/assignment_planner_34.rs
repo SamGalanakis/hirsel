@@ -1158,4 +1158,3 @@ fn assignment_planner_34_ordered_capacity() {
         }
     }
 }
-

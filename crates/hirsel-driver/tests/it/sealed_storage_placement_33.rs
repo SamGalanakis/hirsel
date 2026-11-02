@@ -121,7 +121,6 @@ fn sealed_storage_provenance_33_known_callable_capture() {
     ));
 }
 
-
 #[test]
 fn sealed_storage_root_allocation_33_captured_payload() {
     rejected(
@@ -129,7 +128,6 @@ fn sealed_storage_root_allocation_33_captured_payload() {
         "unique payload",
     );
 }
-
 
 #[test]
 fn sealed_storage_nested_producer_33_known_read_capture() {
@@ -245,7 +243,6 @@ fn sealed_storage_map_producer_33_borrowed_read_root_refused() {
         "arena.seal(take a,take root)",
     );
 }
-
 
 #[test]
 fn sealed_storage_retained_33_copied_map_local_branch_refused_at_source() {

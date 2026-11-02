@@ -1642,7 +1642,6 @@ fn original_callable_owners_track_caller_run() {
     );
 }
 
-
 #[test]
 fn original_callable_owners_std_container() {
     original_callable_values_retain_their_thunk_owners_on_both_backends(

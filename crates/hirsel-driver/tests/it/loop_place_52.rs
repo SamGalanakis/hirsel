@@ -106,7 +106,6 @@ fn loop_place_52_index_field_four_engines() {
     with_compiler_stack(|| runtime(&vector("index-field-run")));
 }
 
-
 #[test]
 fn loop_place_52_paths_four_engines() {
     with_compiler_stack(|| runtime(&vector("paths-run")));

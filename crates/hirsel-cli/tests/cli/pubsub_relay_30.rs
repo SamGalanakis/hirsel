@@ -701,5 +701,3 @@ fn pubsub_relay_30_registration_completion_contract() {
         assert!(std::panic::catch_unwind(|| native_cell(invalid)).is_err());
     }
 }
-
-

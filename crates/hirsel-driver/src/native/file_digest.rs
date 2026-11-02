@@ -237,7 +237,6 @@ mod tests {
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
-
     #[test]
     fn hard_link_publication_during_hashing_retries_without_changing_identity() {
         let (path, _, _) = fixture("hard-link");

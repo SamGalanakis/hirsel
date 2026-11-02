@@ -582,9 +582,7 @@ fn reduce(interesting: fn(&[u32]) -> bool, options: Options, limit: Limit) -> (V
     (output, reduced)
 }
 
-
 /// A seed's transcript, its choices and their replay agree exactly.
-
 
 fn report(name: &str, original: &[u64], shrunk: &Shrunk) {
     eprintln!(
@@ -623,7 +621,6 @@ fn replays_exactly(target: &Target, shrunk: &Shrunk) {
     assert_eq!(a.stranded, b.stranded);
 }
 
-
 fn save_ack(seed: u64) -> Target {
     Target {
         config: Config {
@@ -634,4 +631,3 @@ fn save_ack(seed: u64) -> Target {
         mutation: None,
     }
 }
-

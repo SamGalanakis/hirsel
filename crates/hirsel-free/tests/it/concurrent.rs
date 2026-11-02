@@ -287,7 +287,6 @@ fn a_durable_watermark_never_admits_an_unpublished_prepare_or_a_failed_barrier()
     assert!(recorder.durable_through(&[], root.progress()).is_err());
 }
 
-
 #[test]
 fn retiring_workers_with_one_preferred_slot_keep_exclusive_tokens_and_closed_cuts() {
     const WORKERS: usize = 8;
@@ -593,4 +592,3 @@ fn terminal_cuts_encode_multi_segment_logs_in_place_observed_or_not() {
         assert_eq!(tape.cut, flushed);
     }
 }
-

@@ -193,7 +193,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_structural_hash(
 mod tests {
     use super::*;
 
-
     #[test]
     fn fixed_storage_preserves_both_allowances_tokens_and_sites_at_the_bound() {
         use hirsel_core_contract::depth::{CLEANUP_LIMIT, FOREGROUND_LIMIT};

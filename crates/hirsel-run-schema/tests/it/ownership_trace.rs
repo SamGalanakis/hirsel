@@ -76,7 +76,6 @@ fn inventory(events: &[Event]) -> Inventory {
     inventory
 }
 
-
 #[test]
 fn ownership_trace_leak_at_scope_exit_retains_its_creation_and_move() {
     let forgotten = Owner {
@@ -282,7 +281,6 @@ fn ownership_trace_missing_suffix_wrong_count_and_overflow_never_pass() {
         Problem::EventBudget
     );
 }
-
 
 fn context(operation: u64) -> Context {
     Context {

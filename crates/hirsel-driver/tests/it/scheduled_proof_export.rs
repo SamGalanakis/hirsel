@@ -437,7 +437,6 @@ fn source_export_shares_exact_native_selected_run_and_completed_originals() {
     );
 }
 
-
 #[test]
 fn full_ps9_build_and_text_admission_preserve_scalar_and_detached_ownership() {
     export_case(

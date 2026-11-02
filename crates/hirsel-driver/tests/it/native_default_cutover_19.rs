@@ -2,7 +2,6 @@
 use hirsel_driver::native::{self, Backend, BuildProfile, TargetSpec};
 use hirsel_engine::with_compiler_stack;
 
-
 fn public_record_replay(backend: Backend) {
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();

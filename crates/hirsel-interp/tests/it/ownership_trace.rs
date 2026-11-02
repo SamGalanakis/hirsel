@@ -128,7 +128,6 @@ fn call(builder: &mut Builder, name: &str, value: Operand, result: TypeKind) -> 
     destination
 }
 
-
 #[test]
 fn ownership_reference_borrowed_call_keeps_custody_with_the_caller() {
     let mut inspect = Builder::new();
@@ -229,7 +228,6 @@ fn ownership_reference_failed_callee_cleans_its_actual_taken_resource() {
     );
 }
 
-
 #[test]
 fn ownership_reference_resource_without_user_finalizer_still_ends_its_lifetime() {
     let mut runtime = runtime_types();
@@ -269,7 +267,6 @@ fn ownership_reference_callee_can_create_a_resource_and_return_it_to_its_actual_
     assert_eq!(trace.events.len(), 4);
 }
 
-
 #[test]
 fn ownership_reference_equal_pointer_free_resources_are_created_and_dropped_individually() {
     let mut builder = Builder::new();
@@ -296,7 +293,6 @@ fn ownership_reference_equal_pointer_free_resources_are_created_and_dropped_indi
         .collect();
     assert_ne!(creates[0], creates[1]);
 }
-
 
 #[test]
 fn ownership_reference_forgotten_resource_is_live_at_scope_exit() {
@@ -350,7 +346,6 @@ fn ownership_reference_failed_finalizer_still_finishes_that_resource_lifetime() 
     let analysis = traced.trace.unwrap().analyze([9; 32], 100).unwrap();
     assert_eq!((analysis.created, analysis.dropped), (1, 1));
 }
-
 
 #[test]
 fn ownership_reference_replacement_preserves_both_resource_lifetimes() {

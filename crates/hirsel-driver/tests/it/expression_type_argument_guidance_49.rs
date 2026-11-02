@@ -124,7 +124,6 @@ fn rejected_with_context(text: &str, primary: &str, other_errors: &[(&str, &str)
     );
 }
 
-
 #[test]
 fn expression_type_argument_guidance_49_nested_type() {
     with_compiler_stack(|| {

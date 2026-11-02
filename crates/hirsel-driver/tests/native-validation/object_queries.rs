@@ -410,7 +410,6 @@ fn static_foreign_launch_runtime_and_linker_changes_invalidate() {
     }
 }
 
-
 #[test]
 fn chunk_boundaries_domains_and_complete_lengths_are_checked() {
     let dir = tempfile::tempdir().unwrap();

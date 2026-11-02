@@ -163,7 +163,6 @@ fn an_unleased_saved_row_is_reused_immediately_with_its_next_generation() {
     assert_eq!(s.task_key(child).unwrap().generation, old.generation + 1);
 }
 
-
 #[test]
 fn scope_and_set_generations_are_per_slot_and_validated_by_key() {
     let (mut s, scope, _) = tree(0);

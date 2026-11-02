@@ -490,7 +490,6 @@ fn owning_capture_136_transports_copy_take_once_and_failure_cleanup_on_both_targ
     }
 }
 
-
 const FINALIZE: &str = r#"
 typedef struct { uint32_t kind, field, variant, span; uint64_t offset, stride, count, count_offset; void *layout; } Step;
 typedef struct { uint32_t magic, version; uint64_t size, align; void *finalizer; const Step *steps; uint64_t step_count; uint32_t field_count, flags; uint64_t logical; void *logical_count, *scan; uint64_t scan_words; } Layout;

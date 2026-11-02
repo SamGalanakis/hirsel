@@ -210,4 +210,3 @@ fn replay51_an_earlier_record_stays_decoded_until_consumed() {
     // A second finish of the same cursors sees every record consumed.
     assert_eq!(shared.finish([(&cursor, done(8))]).unwrap(), None);
 }
-

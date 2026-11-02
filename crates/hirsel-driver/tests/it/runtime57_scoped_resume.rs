@@ -31,7 +31,6 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 }
 "#;
 
-
 #[test]
 fn runtime57_owned_scope_result_agrees_with_reference_heap_and_both_native_backends() {
     with_compiler_stack(|| {

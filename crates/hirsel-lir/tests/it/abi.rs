@@ -797,7 +797,6 @@ fn receipt_abi_fixture() -> (TargetSpec, LayoutTable, FnAbiId, FnAbiId) {
     (target, checked(b), ordinary, aware)
 }
 
-
 #[test]
 fn receipt_complete_content_survives_portable_layout_rebinding() {
     let (_, table, ordinary, aware) = receipt_abi_fixture();

@@ -498,18 +498,15 @@ fn every_f0_trace_replays_to_its_live_projection_at_every_cut_mutex_cycle_interp
     every_f0_trace("mutex_cycle", ENGINES[0], &[false]);
 }
 
-
 #[test]
 fn every_f0_trace_replays_to_its_live_projection_at_every_cut_mutex_cycle_llvm_plain() {
     every_f0_trace("mutex_cycle", ENGINES[1], &[false]);
 }
 
-
 #[test]
 fn every_f0_trace_replays_to_its_live_projection_at_every_cut_mutex_cycle_cranelift_plain() {
     every_f0_trace("mutex_cycle", ENGINES[2], &[false]);
 }
-
 
 #[test]
 fn every_f0_trace_replays_to_its_live_projection_at_every_cut_parked_receive_interpreter_plain() {
@@ -556,12 +553,10 @@ fn every_f0_trace_replays_to_its_live_projection_at_every_cut_acquire_reply_llvm
     every_f0_trace("acquire_reply", ENGINES[1], &[false]);
 }
 
-
 #[test]
 fn every_f0_trace_replays_to_its_live_projection_at_every_cut_acquire_reply_cranelift_plain() {
     every_f0_trace("acquire_reply", ENGINES[2], &[false]);
 }
-
 
 #[test]
 fn every_f0_trace_replays_to_its_live_projection_at_every_cut_coalesced_root_interpreter() {
@@ -582,7 +577,6 @@ fn every_f0_trace_replays_to_its_live_projection_at_every_cut_coalesced_root_cra
 fn every_f0_trace_replays_to_its_live_projection_at_every_cut_thaw_race_interpreter_plain() {
     every_f0_trace("thaw_race", ENGINES[0], &[false]);
 }
-
 
 #[test]
 fn every_f0_trace_replays_to_its_live_projection_at_every_cut_thaw_race_llvm() {
@@ -1826,7 +1820,6 @@ fn f1_blocked_terminal_outcome_matrix(cells: Cells) {
         cells,
     );
 }
-
 
 fn f1_terminal_restoration_matrix(
     level: &str,
@@ -3785,7 +3778,6 @@ fn f1_returned_error_resource_matrix(
     }
 }
 
-
 const F1_EXIT_CODE_FIXTURES: [&str; 3] = ["direct", "wrapped", "error"];
 
 fn f1_explicit_exit_codes_matrix(
@@ -3884,7 +3876,6 @@ fn f1_explicit_exit_codes_matrix(
         }
     }
 }
-
 
 fn f1_ordered_cleanup_causes_matrix(
     record_width: &str,
@@ -4001,7 +3992,6 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
         }
     }
 }
-
 
 fn f1_terminal_metadata_matrix(
     record_width: &str,
@@ -6258,30 +6248,25 @@ fn runtime50_end_to_end_engine_replay_matrix_channel_gap_refusals() {
     runtime50_matrix("gap", source("gap"), Runtime50::Refusals);
 }
 
-
 #[test]
 fn runtime50_end_to_end_engine_replay_matrix_mutex_cranelift() {
     runtime50_matrix("mutex", &corpus(MUTEX), Runtime50::Cranelift);
 }
-
 
 const MUTEX: &str = "../../conformance/CLO/CLO-3-child-mutex-capture-run.hir";
 
 const ATOMIC: &str = "../../conformance/CLO/CLO-3-child-atomic-capture-run.hir";
 const TASK_SET: &str = "../../conformance/CONC/CONC-2-task-set-first-completed-run.hir";
 
-
 #[test]
 fn runtime50_end_to_end_engine_replay_matrix_atomic_cranelift() {
     runtime50_matrix("atomic", &corpus(ATOMIC), Runtime50::Cranelift);
 }
 
-
 #[test]
 fn runtime50_end_to_end_engine_replay_matrix_task_set_cranelift() {
     runtime50_matrix("task-set", &corpus(TASK_SET), Runtime50::Cranelift);
 }
-
 
 /// The single production route (runtime-cutover-50). Source and build checks:
 /// no qualification feature, configuration, admission constant or probe
@@ -6290,7 +6275,6 @@ fn runtime50_end_to_end_engine_replay_matrix_task_set_cranelift() {
 /// with production host-request evidence and a projected stdout output, and
 /// the interpreter replays it without a live host.
 /// The `outputs` map of a reported projection: each sink and its bytes, in sink order.
-
 
 #[test]
 fn tir_live_free_durable_host_wait_and_scope_expiry_cross_replay() {

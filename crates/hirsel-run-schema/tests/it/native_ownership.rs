@@ -225,7 +225,6 @@ fn native_ownership_unsupported_tasks_and_other_programs_never_pass() {
     );
 }
 
-
 #[test]
 fn native_ownership_empty_nested_units_preserve_parent_lifetimes_and_stack_checks() {
     let (original, mut units) = fixture();

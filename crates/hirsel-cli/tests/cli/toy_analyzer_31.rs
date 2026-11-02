@@ -1158,4 +1158,3 @@ fn toy_analyzer_31_exact_refusal_controls() {
         assert_eq!(fs::read(&tape).unwrap(), bytes);
     });
 }
-

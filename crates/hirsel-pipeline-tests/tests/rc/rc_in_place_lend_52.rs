@@ -29,7 +29,6 @@ pub fn main() -> Result[(), u64] uses {} {
 /// Each storage primitive call in `name` follows a writability test.
 /// An ordinary wrapper detaches at its own primitive call, checked separately.
 
-
 #[test]
 fn direct_and_wrapper_calls_preserve_arena_and_shared_owners() {
     use hirsel_driver::{compiler_adapters, native};

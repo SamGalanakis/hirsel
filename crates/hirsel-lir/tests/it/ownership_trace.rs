@@ -119,7 +119,6 @@ fn recipe(input: &Plan, output: &Plan) -> Recipe {
     }
 }
 
-
 #[test]
 fn ownership_trace_sidecar_roundtrip_is_raw_and_must_be_checked() {
     let (unit, plan) = fixture();
@@ -544,7 +543,6 @@ fn ownership_trace_same_address_number_cannot_hide_a_changed_owner() {
     );
 }
 
-
 #[test]
 fn ownership_trace_elide_uses_the_actual_editor_block_compaction() {
     let (mut unit, mut input, table) = fixture_with_table();
@@ -697,7 +695,6 @@ fn ownership_trace_elide_refuses_to_silently_delete_an_observed_copy() {
     assert!(error.contains("observed marker MarkerId(0)"), "{error}");
     assert!(error.contains("explicit semantic transport"), "{error}");
 }
-
 
 fn scalar_legalization_fixture(
     observe_call: bool,
@@ -943,7 +940,6 @@ fn ownership_trace_placement_checks_incoming_sites_instead_of_rebuilding_markers
     assert!(error.contains("InvalidSite(MarkerId(0))"), "{error}");
 }
 
-
 fn ssa_copy_fixture(
     observe_copy: bool,
 ) -> (
@@ -1101,7 +1097,6 @@ fn ownership_trace_rc_insertion_refuses_to_turn_an_observed_create_into_a_move()
     assert!(error.contains("observed SSA copy MarkerId(3)"), "{error}");
     assert!(error.contains("explicit semantic transport"), "{error}");
 }
-
 
 #[test]
 fn ownership_trace_reuse_keeps_distinct_lifetimes_when_storage_is_recycled() {
@@ -1315,7 +1310,6 @@ fn drop_transport_fixture_with_table() -> (
     );
     (before, input, after, output, table)
 }
-
 
 #[test]
 fn ownership_trace_drop_transport_refuses_a_different_released_value() {
@@ -1547,7 +1541,6 @@ fn ownership_trace_pipeline_preserves_resource_identity_and_every_pass_recipe() 
         }
     }
 }
-
 
 fn finalizer_transport_fixture() -> (
     LirUnit<Rc>,

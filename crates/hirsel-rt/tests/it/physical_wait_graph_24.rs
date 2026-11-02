@@ -198,4 +198,3 @@ fn explore(n: usize, capacity: u32, mutation: Mutation) -> (usize, usize) {
     }
     (graph.len(), bad)
 }
-

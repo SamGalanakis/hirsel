@@ -93,7 +93,6 @@ fn root(front: &Front<'_>, path: &DefPath) -> NamedInput {
     }
 }
 
-
 #[test]
 fn source_factory_resolves_a_recursive_original_graph_without_clone_limits() {
     with_compiler_stack(|| {
@@ -482,7 +481,6 @@ pub fn main()->u64 {
             .unwrap();
     });
 }
-
 
 #[test]
 fn source_factory_expands_reviewed_arena_callbacks_and_keeps_scope_journal_demand() {
@@ -1015,5 +1013,3 @@ pub fn main(tasks: Tasks)->u64 {
         }
     });
 }
-
-

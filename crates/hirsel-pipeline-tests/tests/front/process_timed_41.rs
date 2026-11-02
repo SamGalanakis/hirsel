@@ -699,7 +699,6 @@ fn timed_e04_delayed_close_is_lang9() {
     );
 }
 
-
 fn oracle_fixture(id: &str) -> Fixture {
     let v = oracle(id);
     let program = v

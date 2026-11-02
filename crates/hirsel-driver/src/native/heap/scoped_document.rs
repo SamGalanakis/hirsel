@@ -308,7 +308,6 @@ fn private_malformed_spans_links_and_tags_have_checked_twins() {
     });
 }
 
-
 // Exercise promotion, map growth, decoded growth, close and extraction on the
 // actual parser. Streaming campaigns retain only a failing perturbation.
 #[test]

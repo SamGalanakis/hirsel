@@ -321,7 +321,6 @@ mod tests {
         )
     }
 
-
     #[test]
     fn cyclic_proofs_recheck_changed_observed_summaries_until_settled() {
         with_compiler_stack(|| {

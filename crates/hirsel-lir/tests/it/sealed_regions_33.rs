@@ -410,7 +410,6 @@ fn ready_sealed_bits_33_root_view_keeps_exclusive_owner_correspondence() {
     }
 }
 
-
 #[test]
 fn source_correspondence_survives_candidate_event_deletion() {
     let (_, d, _, _) = transition_fixture();
@@ -748,7 +747,6 @@ fn payload_fixture() -> (support::Lir<TestStage>, Declarations, ValueId) {
     });
     (t, declarations, root)
 }
-
 
 #[test]
 fn semantic_payload_33_forged_recipe_is_permanently_refused_by_public_c() {

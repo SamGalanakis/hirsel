@@ -76,9 +76,7 @@ fn sealed_storage_profile_v_33_executable_control() {
     assert!(!validation.reads.bodies.is_empty());
     assert!(!validation.reads.profiles.is_empty());
     let mut engine = fixture.engine.lock().unwrap();
-    let validated = engine
-        .import_native_input(fixture.input.clone())
-        .unwrap();
+    let validated = engine.import_native_input(fixture.input.clone()).unwrap();
     assert!(!validated.storage_proof_reads().bodies.is_empty());
 }
 #[test]
@@ -149,7 +147,6 @@ fn sealed_storage_context_v_33_selected_callable_argument() {
     );
 }
 
-
 fn captured_copy_fixture() -> &'static NativeInput {
     &captured_copy_fixture_state().input
 }
@@ -174,12 +171,9 @@ fn sealed_storage_root_v_33_explicit_heap_capture_copy_control() {
     assert!(validation.violations.is_empty(), "{validation:?}");
     assert_eq!(validation.profiles, fixture.input.storage_profiles);
     let mut engine = fixture.engine.lock().unwrap();
-    let validated = engine
-        .import_native_input(fixture.input.clone())
-        .unwrap();
+    let validated = engine.import_native_input(fixture.input.clone()).unwrap();
     assert!(!validated.storage_proof_reads().bodies.is_empty());
 }
-
 
 #[test]
 fn sealed_storage_root_v_33_forged_capture_allocation() {
@@ -1496,7 +1490,6 @@ fn sealed_storage_task_scope_v_33_allocation_with_fresh_claims() {
             origin:Some(origin),..
         }) if origin.callable.definition.path().0.name == "clone_heap")),"{validation:?}");
 }
-
 
 #[test]
 fn sealed_storage_task_scope_v_33_forged_callback_contract() {

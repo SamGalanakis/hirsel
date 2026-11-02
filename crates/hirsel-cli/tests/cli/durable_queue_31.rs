@@ -837,4 +837,3 @@ fn durable_queue_31_retained_event_audit() {
         "DURABLE_QUEUE_31_EVENT_AUDIT_PASS {audited} original tapes; final bytes and sync-before-reply"
     );
 }
-

@@ -1459,7 +1459,6 @@ mod tests {
         drop(reservation);
         assert_eq!(permits.available(), 4);
     }
-
 }
 
 #[cfg(test)]

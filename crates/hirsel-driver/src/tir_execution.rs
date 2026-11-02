@@ -652,7 +652,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn immutable_tir_refuses_foreign_use_and_missing_settled_bodies_without_compiler_fallback() {
         hirsel_engine::with_compiler_stack(|| {

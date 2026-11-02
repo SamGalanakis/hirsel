@@ -70,7 +70,6 @@ fn ordinary_call() -> CallSite {
     }
 }
 
-
 #[test]
 fn receipt_call_refuses_changed_hash_mode_order_selector_and_result() {
     let (contract, good) = receipt_call();
@@ -133,7 +132,6 @@ fn receipt_call_rejects_duplicate_taken_holders_and_exclusive_slot_addresses() {
         assert!(call.check_contract(&contract).is_err());
     }
 }
-
 
 #[test]
 fn receipt_call_data_cannot_enter_an_ordinary_callee() {

@@ -226,7 +226,6 @@ fn sealed_root_read_instruction_uses_h_owned_bits_under_the_active_owner_loan() 
     }
 }
 
-
 #[test]
 fn sealed_read_instruction_checks_actual_owner_pointer_and_generation() {
     for mutation in 0..7 {

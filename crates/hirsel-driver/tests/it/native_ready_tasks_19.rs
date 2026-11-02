@@ -133,7 +133,6 @@ fn ownership_ready_query_keeps_value_identities_and_refuses_stale_dependencies()
     );
 }
 
-
 #[test]
 fn ownership_compilation_root_discovers_source_and_arena_before_diagnostics() {
     ready_case_inner(

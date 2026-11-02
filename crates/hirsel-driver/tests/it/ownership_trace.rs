@@ -1451,7 +1451,6 @@ pub fn main() -> Result[(), ()] {
     );
 }
 
-
 #[test]
 #[ignore = "native: observes actual nested capture child failure and cleanup on both backends"]
 fn ownership_native_failed_nested_capture_cleanup_retires_actual_children_on_four_engines() {
@@ -1481,4 +1480,3 @@ pub fn main() -> Result[(), ()] {
         hirsel_run_schema::exit::FAILED,
     );
 }
-

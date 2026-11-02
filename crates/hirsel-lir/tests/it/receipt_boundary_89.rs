@@ -1166,7 +1166,6 @@ fn result_fixture() -> (LirUnit<Rc>, LayoutTable, Manifest, Declarations) {
     (unit, table, manifest, declarations)
 }
 
-
 #[test]
 fn receipt_results_refuse_failure_reads_missing_output_and_crossed_return_snapshots() {
     let (unit, table, manifest, declarations) = result_fixture();

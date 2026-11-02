@@ -76,7 +76,6 @@ fn accepted(source: &str) {
     engine.import_native_input(input).unwrap();
 }
 
-
 #[test]
 fn helper_unique_promise_19_share_installing_promise_rejected() {
     with_compiler_stack(|| {

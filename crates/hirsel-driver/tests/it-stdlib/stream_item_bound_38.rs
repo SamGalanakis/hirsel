@@ -752,4 +752,3 @@ fn unique_receipt_shared_intermediate_and_unqualified_payload_refused() {
         }
     });
 }
-

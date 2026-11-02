@@ -399,5 +399,3 @@ fn isolate_admission_dup_fanout_checked_heap() {
         }
     });
 }
-
-

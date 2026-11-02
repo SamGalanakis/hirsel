@@ -1,7 +1,6 @@
 //! Sequential scenario assertions and full offline replay on H, LLVM, Cranelift.
 use std::{path::Path, process::Command};
 
-
 // Each exact engine/scenario case owns its package, listener, grants and
 // tapes. Cost-balanced shards execute the complete 57-by-three matrix.
 macro_rules! engine_cases {
@@ -202,7 +201,6 @@ mod selected_llvm {
 mod selected_cranelift {
     engine_cases!("cranelift");
 }
-
 
 fn run(case: Option<&str>) {
     // Retain failures, including setup/timeout cells, outside the source tree.

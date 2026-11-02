@@ -3040,7 +3040,6 @@ fn check_safe_reports_the_path_to_the_first_escape() {
     }
 }
 
-
 #[test]
 fn runtime_failure_reports_a_complete_site_in_human_and_json() {
     let path = file(

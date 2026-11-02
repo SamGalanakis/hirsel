@@ -956,7 +956,6 @@ fn front_changes_survive_early_query_recomputation_and_selective_acknowledgment(
     });
 }
 
-
 #[test]
 fn compact_front_results_preserve_diagnostics_after_batch_body_release() {
     with_compiler_stack(|| {

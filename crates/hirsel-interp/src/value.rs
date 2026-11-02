@@ -1362,7 +1362,6 @@ mod sealed_value_tests {
         }
     }
 
-
     #[test]
     fn sealed_regions_33_arena_box_snapshot_acquires_no_shared_credit() {
         let root = SharedRoot::freeze(7, Value::Unit);

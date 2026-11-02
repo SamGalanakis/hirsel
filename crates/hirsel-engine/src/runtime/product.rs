@@ -1397,7 +1397,6 @@ mod tests {
         assert_eq!(budget.reserved(), 0);
     }
 
-
     #[test]
     fn summary_archive_pins_its_codec_and_refuses_foreign_source_binding() {
         let (value, source) = fixture();

@@ -2,7 +2,6 @@ use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::MemStore, *};
 use std::sync::Arc;
 
-
 #[test]
 fn admitted_private_facts_reuse_unchanged_inputs_and_refuse_body_and_membership_edits() {
     with_compiler_stack(|| {

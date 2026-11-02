@@ -679,5 +679,4 @@ mod tests {
         drop(retained_body);
         assert_eq!(budget.reserved(), 0);
     }
-
 }

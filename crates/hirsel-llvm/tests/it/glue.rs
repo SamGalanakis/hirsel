@@ -46,7 +46,6 @@ fn emit(corpus: &Corpus, opt: OptLevel) -> hirsel_lir::stage::ObjectArtifact {
         .unwrap_or_else(|e| panic!("{}: {e}", program.table.target.triple))
 }
 
-
 /// The trace sections the harness prints, by scenario name and failing period.
 fn sections(output: &str) -> BTreeMap<&str, Vec<&str>> {
     let mut sections: BTreeMap<&str, Vec<&str>> = BTreeMap::new();

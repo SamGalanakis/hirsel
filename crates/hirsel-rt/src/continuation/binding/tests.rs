@@ -92,7 +92,6 @@ fn bad_duplicate_bind_cannot_begin_the_same_site_twice() {
     bindings.bind(input);
 }
 
-
 #[test]
 fn ancestor_reentry_retains_pending_descendants_and_consumes_only_its_own_arm() {
     let mut bindings = Bindings::default();

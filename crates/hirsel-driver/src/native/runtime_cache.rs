@@ -860,7 +860,6 @@ mod tests {
         .unwrap()
     }
 
-
     #[test]
     fn truncated_or_changed_archives_and_receipts_are_rebuilt() {
         let store = MemStore::default();

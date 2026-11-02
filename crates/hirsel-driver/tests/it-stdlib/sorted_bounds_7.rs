@@ -287,4 +287,3 @@ fn first_comparator_failure_and_upper_phase_failure_clean_up() {
         }
     });
 }
-

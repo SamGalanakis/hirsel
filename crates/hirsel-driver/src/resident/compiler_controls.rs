@@ -674,7 +674,6 @@ fn unread_representation_edit_adopts_reader_bodies_and_matches_the_cold_receipt(
     });
 }
 
-
 #[test]
 fn selected_footprint_planner_admits_many_small_definitions_under_the_same_snapshot_bound() {
     hirsel_engine::with_compiler_stack(|| {

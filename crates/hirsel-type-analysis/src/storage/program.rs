@@ -2420,7 +2420,6 @@ mod tests {
         ));
     }
 
-
     #[test]
     fn storage_detached_heap_copy_and_plain_boundary_are_independent() {
         let detached = body(

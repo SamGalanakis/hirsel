@@ -115,7 +115,6 @@ fn mode2_recipes_52_r2_generic_wrapper() {
     });
 }
 
-
 #[test]
 fn mode2_recipes_52_r3_await_literal() {
     with_compiler_stack(|| {

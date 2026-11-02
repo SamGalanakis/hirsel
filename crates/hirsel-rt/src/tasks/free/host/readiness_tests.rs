@@ -319,4 +319,3 @@ fn native_home_readiness_retries_on_saved_owner_and_replays_without_adapter() {
         }
     }
 }
-

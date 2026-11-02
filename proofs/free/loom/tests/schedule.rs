@@ -7,7 +7,6 @@ use hirsel_free_loom::{queue, schedule::TaskState};
 use loom::sync::Arc;
 use loom::sync::atomic::{AtomicUsize, Ordering};
 
-
 #[test]
 fn discarded_queue_and_running_owners_drop_images_once_and_ignore_late_wakes() {
     use hirsel_free_loom::frame;

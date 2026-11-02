@@ -2375,7 +2375,6 @@ fn runtime50_checked_transcript_boundaries() {
     }
 }
 
-
 const SEEDS: u64 = 96;
 
 #[test]

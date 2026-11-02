@@ -542,7 +542,6 @@ mod tests {
         serde_json::from_str(&View::parse("fixture", bytes).unwrap().normalized()).unwrap()
     }
 
-
     #[test]
     fn complete_fixtures_and_golden_views_are_stable() {
         for (name, bytes, normalized, perfetto) in [

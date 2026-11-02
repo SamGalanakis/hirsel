@@ -1976,10 +1976,7 @@ impl BodyTask {
             signature_reads: queries
                 .signature_reads(input)
                 .map_err(|_| queries.errors.protocol)?,
-            checked_prefix: input
-                .registration
-                .as_ref()
-                .map(|registration| registration.checked_prefix().to_vec()),
+            registration: input.registration.clone(),
             text: input.text,
             resolution: None,
             checked: None,

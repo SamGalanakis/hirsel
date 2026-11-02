@@ -52,7 +52,10 @@ pub(crate) struct Task {
     pub(crate) syntax: Arc<ItemSyntax>,
     pub(crate) signature: Result<Arc<QueryOutput<SignatureRef>>, QueryError>,
     pub(crate) signature_reads: Arc<Reads>,
-    pub(crate) checked_prefix: Option<Vec<SignatureDependency>>,
+    /// A generated definition's accepted view: its generator's signature
+    /// prefix and complete execution reads join this body's Check receipt,
+    /// as the scalar Check of generated text inherits its generation.
+    pub(crate) registration: Option<Arc<AcceptedFrontRegistration>>,
     pub(crate) resolution: Option<Arc<Entry<Resolution>>>,
     pub(crate) checked: Option<Arc<Entry<TypedBody>>>,
     pub(crate) text: ContentHash,
@@ -290,7 +293,7 @@ impl Worker<'_> {
                     None => Err(QueryError::NotImplemented),
                 };
                 resolution_provider_reads = task
-                    .checked_prefix
+                    .registration
                     .as_ref()
                     .map(|_| stage.detail.signatures.clone());
                 stage.complete(result, products);
@@ -335,7 +338,17 @@ impl Worker<'_> {
             let mut stage = Stage {
                 result: Err(QueryError::NotImplemented),
                 detail: initial,
-                observed: Observed::default(),
+                observed: {
+                    // The generator's verifier receipt is acceptance evidence,
+                    // checked when the view installs, not a Check input.
+                    let mut observed = Observed::default();
+                    for &(key, value) in task.registration.iter().flat_map(|r| r.reads.iter()) {
+                        if private_unique::inherited_registration_read(&key) {
+                            observed.merged.record(key, value);
+                        }
+                    }
+                    observed
+                },
                 unavailable: None,
                 refused: None,
             };
@@ -364,8 +377,11 @@ impl Worker<'_> {
             }
             let exact = resolution_provider_reads.map(|mut signatures| {
                 let mut prefix = task
-                    .checked_prefix
-                    .expect("captured accepted generator prefix");
+                    .registration
+                    .as_ref()
+                    .expect("captured accepted generator prefix")
+                    .checked_prefix()
+                    .to_vec();
                 signatures.extend_from_slice(&stage.detail.signatures[initial_signatures..]);
                 if let Ok(output) = &result {
                     signatures.extend_from_slice(&output.dependencies);
@@ -974,7 +990,7 @@ impl QueryEngine {
                 syntax,
                 signature: Err(QueryError::NotImplemented),
                 signature_reads: Arc::new(Reads::empty()),
-                checked_prefix: None,
+                registration: None,
                 resolution,
                 checked,
                 text,
@@ -1412,7 +1428,7 @@ mod frozen_task_tests {
                     syntax: engine.items[&path][0].clone(),
                     signature: engine.signatures[&id].result(),
                     signature_reads: engine.signatures[&id].memo.reads.clone(),
-                    checked_prefix: None,
+                    registration: None,
                     resolution: partial.then(|| engine.resolutions[&id].clone()),
                     checked: None,
                     text: ContentHash::default(),
@@ -1480,7 +1496,7 @@ mod frozen_task_tests {
                 syntax: engine.items[&path][0].clone(),
                 signature: Err(QueryError::NotImplemented),
                 signature_reads: Arc::new(Reads::from_vec(vec![(key, receipt)]).unwrap()),
-                checked_prefix: None,
+                registration: None,
                 resolution: None,
                 checked: None,
                 text: ContentHash::default(),

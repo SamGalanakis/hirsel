@@ -407,8 +407,10 @@ impl FrontRegistrationQueries {
         } = prepared.result?;
         let checked = checked?;
         dependencies.extend_from_slice(&input.checked_prefix);
+        // The generator's checked headers are Signature reads through these
+        // dependencies, as on the scalar path. Only bodies the evaluation
+        // runs record ExecutedSignature.
         dependencies.extend_from_slice(&detail.signatures);
-        source.execution_signatures(detail.signatures.iter());
         let mut observed = ReadsBuilder::new();
         let staged = crate::comptime::prepare_staged_types(
             self.lower.snapshot.types(),

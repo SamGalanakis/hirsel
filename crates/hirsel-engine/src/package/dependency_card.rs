@@ -347,19 +347,7 @@ impl LoadedProgram {
         if let Some(entry) = &graph.packages[&root].entry {
             program.entry = entry.clone();
         }
-        let checked = program
-            .check(LoweringPolicy::Reachable)
-            .map_err(|e| program.error(e))?;
-        if checked
-            .diagnostics
-            .iter()
-            .any(|d| d.severity == hirsel_diag::Severity::Error)
-        {
-            return Err(program.error(QueryError::Diagnostics(checked.diagnostics)));
-        }
-        if checked.completion != CheckCompletion::Complete {
-            return Err(program.error(QueryError::NotImplemented));
-        }
+        program.check_scheduled(LoweringPolicy::Reachable)?;
         let mut declarations = BTreeMap::new();
         let mut explicit_exposures: BTreeMap<DefPath, BTreeSet<String>> = BTreeMap::new();
         for (file, context) in program.files.clone() {

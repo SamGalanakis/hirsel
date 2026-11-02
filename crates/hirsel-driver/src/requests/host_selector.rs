@@ -12,161 +12,9 @@ use std::{
     sync::{Arc, Mutex, OnceLock, Weak},
 };
 
-/// Bounds supplied by the actual source/producer footprint planner. These are
-/// parts of the existing snapshot cap, not extra per-producer process caps.
-#[derive(Clone, Copy)]
-pub(super) struct SnapshotPlan {
-    pub source: u64,
-    pub front: u64,
-    pub lower: u64,
-    pub check: u64,
-    pub growth: u64,
-    pub run: u64,
-}
-pub(super) struct GraphAdmission {
-    pub runtime: MemoryReservation,
-    pub source: MemoryReservation,
-    pub front: MemoryReservation,
-    pub lower: MemoryReservation,
-    pub check: MemoryReservation,
-    pub growth: MemoryReservation,
-    pub run: MemoryReservation,
-    pub transport: MemoryReservation,
-    pub native_transport: MemoryReservation,
-}
-impl GraphAdmission {
-    pub fn reserve(
-        budget: &Arc<ProcessBudget>,
-        limits: RequestLimits,
-        plan: SnapshotPlan,
-    ) -> Result<Self, ToolError> {
-        let snapshot = plan
-            .source
-            .checked_add(plan.front)
-            .and_then(|bytes| bytes.checked_add(plan.lower))
-            .and_then(|bytes| bytes.checked_add(plan.check))
-            .and_then(|bytes| bytes.checked_add(plan.growth))
-            .and_then(|bytes| bytes.checked_add(plan.run));
-        if snapshot.is_none_or(|bytes| bytes > limits.snapshot_bytes) {
-            return Err(ToolError::Io(std::io::Error::other(
-                "compiler snapshot footprint exceeds admission",
-            )));
-        }
-        // A failed later reservation drops every earlier temporary. Nothing
-        // becomes visible to request clients before this whole value exists.
-        Ok(Self {
-            runtime: budget
-                .reserve(limits.runtime_bytes)
-                .map_err(ToolError::Io)?,
-            source: budget.reserve(plan.source).map_err(ToolError::Io)?,
-            front: budget.reserve(plan.front).map_err(ToolError::Io)?,
-            lower: budget.reserve(plan.lower).map_err(ToolError::Io)?,
-            check: budget.reserve(plan.check).map_err(ToolError::Io)?,
-            growth: budget.reserve(plan.growth).map_err(ToolError::Io)?,
-            run: budget.reserve(plan.run).map_err(ToolError::Io)?,
-            transport: budget
-                .reserve(limits.transport_bytes)
-                .map_err(ToolError::Io)?,
-            native_transport: budget.reserve(0).map_err(ToolError::Io)?,
-        })
-    }
-}
-
-/// Charge the whole selected snapshot partition before S0 allocates a loader
-/// view. Partitioning transfers that existing charge to immutable producers;
-/// source maps returned on a loader failure keep their own charge as well.
-pub(super) struct LoadingAdmission {
-    runtime: MemoryReservation,
-    snapshot: MemoryReservation,
-    transport: MemoryReservation,
-    native_transport: MemoryReservation,
-}
-impl LoadingAdmission {
-    fn reserve(
-        budget: &Arc<ProcessBudget>,
-        limits: RequestLimits,
-        native_transport: u64,
-    ) -> Result<Self, ToolError> {
-        Ok(Self {
-            runtime: budget
-                .reserve(limits.runtime_bytes)
-                .map_err(ToolError::Io)?,
-            snapshot: budget
-                .reserve(limits.snapshot_bytes)
-                .map_err(ToolError::Io)?,
-            transport: budget
-                .reserve(limits.transport_bytes)
-                .map_err(ToolError::Io)?,
-            native_transport: budget.reserve(native_transport).map_err(ToolError::Io)?,
-        })
-    }
-    /// Transfer the already admitted transport before S0 uses the provider.
-    /// The remaining zero-sized reservation keeps finish's ownership shape.
-    pub fn take_transport(&mut self) -> MemoryReservation {
-        self.transport.split(self.transport.bytes()).unwrap()
-    }
-    pub fn lend_runtime(&mut self) -> MemoryReservation {
-        self.runtime.split(self.runtime.bytes()).unwrap()
-    }
-    pub fn return_runtime(&mut self, reservation: MemoryReservation) {
-        self.runtime
-            .join(reservation)
-            .ok()
-            .expect("same runtime partition");
-    }
-    /// Lend the whole runtime and snapshot charge to work that finishes and
-    /// releases it before any final producer takes a partition.
-    pub fn lend(&mut self) -> (MemoryReservation, MemoryReservation) {
-        (
-            self.runtime.split(self.runtime.bytes()).unwrap(),
-            self.snapshot.split(self.snapshot.bytes()).unwrap(),
-        )
-    }
-    pub fn finish(mut self, plan: SnapshotPlan) -> Result<GraphAdmission, ToolError> {
-        let bytes = [
-            plan.source,
-            plan.front,
-            plan.lower,
-            plan.growth,
-            plan.check,
-            plan.run,
-        ]
-        .into_iter()
-        .try_fold(0u64, u64::checked_add);
-        if bytes.is_none_or(|bytes| bytes > self.snapshot.bytes()) {
-            return Err(ToolError::Runtime(
-                "compiler snapshot footprint exceeds admission".into(),
-            ));
-        }
-        // The checked total proves each split fits. No reservation is released
-        // while ownership transfers, even when another host is admitting work.
-        let source = self.snapshot.split(plan.source).unwrap();
-        let front = self.snapshot.split(plan.front).unwrap();
-        let lower = self.snapshot.split(plan.lower).unwrap();
-        let growth = self.snapshot.split(plan.growth).unwrap();
-        let check = self.snapshot.split(plan.check).unwrap();
-        let run = self.snapshot.split(plan.run).unwrap();
-        Ok(GraphAdmission {
-            runtime: self.runtime,
-            source,
-            front,
-            lower,
-            growth,
-            check,
-            run,
-            transport: self.transport,
-            native_transport: self.native_transport,
-        })
-    }
-    pub fn failed(mut self, error: ToolError) -> ToolError {
-        let unused = self
-            .native_transport
-            .split(self.native_transport.bytes())
-            .unwrap();
-        drop(unused);
-        retain_error(error, Arc::new(self.snapshot))
-    }
-}
+pub(super) use hirsel_engine::requests::source_graph::{
+    GraphAdmission, LoadingAdmission, SnapshotPlan, retain_error, retain_sources,
+};
 
 /// Implemented only by installed compiler producer views. Public requests
 /// carry no tasks, materializer callbacks or compiler/verifier capabilities.
@@ -366,8 +214,7 @@ impl GraphBudget {
             }
         };
         // Both come from this budget, as the loading charge does.
-        let _ = loading.runtime.join(runtime);
-        let _ = loading.snapshot.join(snapshot);
+        loading.join(runtime, snapshot);
         Ok(())
     }
     fn release_idle(&self) {
@@ -587,25 +434,6 @@ impl GraphSelections {
         })
     }
 }
-pub(super) fn retain_error(error: ToolError, owner: Arc<dyn Send + Sync>) -> ToolError {
-    match error {
-        ToolError::Query {
-            error,
-            phase,
-            sources,
-        } => ToolError::Query {
-            error,
-            phase,
-            sources: retain_sources(sources, owner),
-        },
-        other => other,
-    }
-}
-
-pub(super) fn retain_sources(sources: SourceMap, owner: Arc<dyn Send + Sync>) -> SourceMap {
-    sources.clone().replace_owner(Arc::new((sources, owner)))
-}
-
 /// Already completed export outputs. Native receipt/object bytes come from
 /// their ordinary selected producers; formatting opens no compiler bodies.
 pub(super) struct NativeArtifacts {

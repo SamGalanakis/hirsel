@@ -160,6 +160,42 @@ impl LoadedProgram {
     pub fn check_configured(&mut self) -> Result<CheckOutput, QueryError> {
         self.check(self.engine.configured_lowering)
     }
+    /// Check every package through the shared scheduled source graph: the
+    /// root package lowers under `lowering`, each dependency only what
+    /// compile-time evaluation executes. Errors and incomplete checks refuse.
+    pub(crate) fn check_scheduled(&mut self, lowering: LoweringPolicy) -> Result<(), ToolError> {
+        let root = self.entry.0.package.clone();
+        let files = self
+            .files
+            .iter()
+            .map(|(file, context)| {
+                (
+                    *file,
+                    context.clone(),
+                    if context.package == root {
+                        lowering
+                    } else {
+                        LoweringPolicy::Comptime
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let selection = crate::requests::source_graph::SourceSelection {
+            input_bytes: crate::requests::source_graph::source_bytes(&self.engine.sources, &files),
+            files,
+            entry: self.entry.clone(),
+            lint_package: Some(root),
+            unsafe_ffi: self.unsafe_ffi.clone(),
+        };
+        let output = self.engine.check_scheduled(&selection)?;
+        if crate::queries::has_errors(&output.diagnostics) {
+            Err(self.error(QueryError::Diagnostics(output.diagnostics)))
+        } else if output.completion != CheckCompletion::Complete {
+            Err(self.error(QueryError::NotImplemented))
+        } else {
+            Ok(())
+        }
+    }
     /// Check every package of the program, lowering what `lowering` selects:
     /// the diagnostics do not depend on it. The root package lowers under
     /// `lowering`, each dependency only what compile-time evaluation executes,
@@ -287,16 +323,7 @@ impl LoadedProgram {
         if !self.has_launch_entry {
             return Err(invalid("launch manifest requires entry"));
         }
-        let result = self.check(LoweringPolicy::Reachable).and_then(|output| {
-            if crate::queries::has_errors(&output.diagnostics) {
-                Err(QueryError::Diagnostics(output.diagnostics))
-            } else if output.completion != CheckCompletion::Complete {
-                Err(QueryError::NotImplemented)
-            } else {
-                Ok(())
-            }
-        });
-        result.map_err(|error| self.error(error))?;
+        self.check_scheduled(LoweringPolicy::Reachable)?;
         if !self.unsafe_ffi.is_empty() {
             let entry = self.entry.clone();
             let foreign = self.engine.foreign_use(&entry).map_err(|e| self.error(e))?;

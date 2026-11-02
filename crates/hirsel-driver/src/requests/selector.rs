@@ -2,17 +2,11 @@
 use super::*;
 use hirsel_engine::loader_inputs::InputLimits;
 use hirsel_engine::{CompileConfig, Compiler, runtime::ProcessBudget};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-/// Partition bounds for one admitted graph. These do not raise the process
-/// allowance: every partition is reserved from the supplied shared budget.
-/// A host chooses them under its existing cap, including its own fixed overhead.
-#[derive(Clone, Copy, Debug)]
-pub struct RequestLimits {
-    pub runtime_bytes: u64,
-    pub snapshot_bytes: u64,
-    pub transport_bytes: u64,
-}
+pub use hirsel_engine::requests::source_graph::RequestLimits;
+pub(crate) use hirsel_engine::requests::source_graph::host_budget;
+use hirsel_engine::requests::source_graph::host_limits;
 /// Concrete selector policy shared by fresh and resident hosts. It retains
 /// no LoadedProgram or checked-output cache. Selected immutable graphs own
 /// their products and reservations independently of this constructor's lifetime.
@@ -30,21 +24,6 @@ pub struct CompilerRequests {
     scratch_parent: std::path::PathBuf,
     toolchain: Option<Arc<crate::native::Toolchain>>,
     host_toolchain: bool,
-}
-// Host constructors share one process allowance, including different Sessions.
-// Capturing the guard policy once prevents each source revision from creating
-// a new full-cap budget. Explicit constructors retain their caller's budget.
-static HOST: OnceLock<(Arc<ProcessBudget>, u64)> = OnceLock::new();
-pub(crate) fn host_budget() -> (&'static Arc<ProcessBudget>, u64) {
-    let (budget, cap) = HOST.get_or_init(|| {
-        let cap = std::env::var("HIRSEL_MEMORY_LIMIT")
-            .ok()
-            .and_then(|text| hirsel_guard::parse_limit(text.as_bytes()))
-            .unwrap_or(hirsel_guard::DEFAULT_LIMIT);
-        // Keep a quarter for the host, source loader and native libraries.
-        (ProcessBudget::new(cap.saturating_sub(cap / 4)), cap)
-    });
-    (budget, *cap)
 }
 impl CompilerRequests {
     /// Capture the existing host guard cap. Construction is lazy/infallible;
@@ -239,15 +218,6 @@ impl CompilerRequests {
     }
 }
 
-fn host_limits(cap: u64, jobs: usize) -> RequestLimits {
-    RequestLimits {
-        runtime_bytes: (jobs as u64)
-            .saturating_mul(hirsel_intern::jobs::COMPILER_STACK_BYTES as u64)
-            .saturating_add(cap / 16),
-        snapshot_bytes: cap / 8,
-        transport_bytes: cap / 32,
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;

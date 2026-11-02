@@ -5,6 +5,7 @@ use crate::runtime::{ProductRef, QueryId, QueryRuntime};
 use std::sync::{Arc, Mutex};
 
 mod observation;
+pub mod source_graph;
 pub use observation::{InputObservation, InputObserver, ObservationWork};
 
 /// Observe a complete input discovery before installing its query factories.

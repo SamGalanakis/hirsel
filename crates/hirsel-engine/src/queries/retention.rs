@@ -112,12 +112,37 @@ impl QueryEngine {
     }
 
     pub(crate) fn record_worker_lower_recompute(&mut self, path: &DefPath) {
-        *self
-            .recomputes
-            .entry((path.clone(), QueryKind::Lower))
-            .or_default() += 1;
-        timings::count(Count::Recomputes);
-        self.graph.record_recompute(QueryKind::Lower);
+        self.record_worker_recomputes(path, QueryKind::Lower, 1);
+    }
+
+    pub(crate) fn record_worker_recomputes(&mut self, path: &DefPath, kind: QueryKind, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let count = usize::try_from(count).unwrap_or(usize::MAX);
+        let total = self.recomputes.entry((path.clone(), kind)).or_default();
+        *total = total.saturating_add(count);
+        for _ in 0..count {
+            timings::count(Count::Recomputes);
+            self.graph.record_recompute(kind);
+        }
+    }
+
+    /// Count scheduled Lower/Evaluate attempts in this engine's S1 work rows.
+    pub(crate) fn record_worker_lower_work(
+        &mut self,
+        path: &DefPath,
+        lowerings: u64,
+        initializers: u64,
+        validation_runs: u64,
+    ) {
+        let work = self.s1_lower_work.entry(DefId::intern(path)).or_default();
+        work.query_attempts = work
+            .query_attempts
+            .saturating_add(lowerings)
+            .saturating_add(initializers);
+        work.adapter_calls = work.adapter_calls.saturating_add(lowerings);
+        work.validation_runs = work.validation_runs.saturating_add(validation_runs);
     }
 
     /// Semantic traversal consumes facts, not TIR. A completed lower receipt

@@ -440,11 +440,25 @@ fn checks(
     let Some(edited) = trial.sources.add_snapshot(file, text) else {
         return false;
     };
-    crate::tools::check_files_impl(&mut trial, &[(edited, context, lowering)], false).is_ok_and(
-        |outputs| {
-            outputs.iter().all(|(_, out)| {
-                out.completion == CheckCompletion::Complete && !has_errors(&out.diagnostics)
-            })
-        },
-    )
+    // The edited twin replaces its file's declarations before the source
+    // graph selects its inventory, as any loaded source is indexed.
+    if trial.index_source(edited, context).is_err() {
+        return false;
+    }
+    let entry = DefPath(hirsel_syntax::ItemPath {
+        package: context.package.clone(),
+        modules: context.modules.clone(),
+        name: "recipe_check".into(),
+    });
+    let files = vec![(edited, context.clone(), lowering)];
+    let selection = crate::requests::source_graph::SourceSelection {
+        input_bytes: crate::requests::source_graph::source_bytes(&trial.sources, &files),
+        files,
+        entry,
+        lint_package: None,
+        unsafe_ffi: Vec::new(),
+    };
+    trial.check_scheduled(&selection).is_ok_and(|out| {
+        out.completion == CheckCompletion::Complete && !has_errors(&out.diagnostics)
+    })
 }

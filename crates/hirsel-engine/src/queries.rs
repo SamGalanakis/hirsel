@@ -381,6 +381,9 @@ pub struct QueryEngine {
     s1_lower_work: hirsel_syntax::DefMap<S1LowerWork>,
     catalog: catalog::Catalog,
     pub unavailable: Option<QueryKind>,
+    /// Accepted front facts and Lower outcomes this engine's scheduled
+    /// Checks carry from one fresh source graph to the next.
+    pub(crate) source_carry: Option<crate::requests::source_graph::SourceCarry>,
     pub last_phase: Option<QueryKind>,
     /// Interpretation refuses to enter a definition outside its entry's
     /// semantic closure (`run_snapshot`, `run_observed_*`). On in builds with
@@ -749,6 +752,7 @@ impl QueryEngine {
             catalog: catalog::Catalog::with_ownership(source_ownership.clone()),
             source_ownership,
             unavailable: None,
+            source_carry: None,
             last_phase: None,
             closure_assertions: cfg!(debug_assertions),
         }

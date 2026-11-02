@@ -240,6 +240,106 @@ fn check_lower_reuse(carry_across_stores: bool) {
 }
 
 #[test]
+fn persisted_entry_stops_at_first_observed_changed_read() {
+    struct CountReads {
+        inner: MemStore,
+        signature_key: store::EntryKey,
+        signature_gets: std::sync::atomic::AtomicUsize,
+    }
+    impl ResultStore for CountReads {
+        fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
+            if key == &self.signature_key {
+                self.signature_gets
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.inner.get(key)
+        }
+        fn put(&self, key: &store::EntryKey, bytes: &[u8]) {
+            self.inner.put(key, bytes);
+        }
+        fn name(&self) -> &'static str {
+            "reads-order-counted"
+        }
+    }
+
+    let context = FileContext {
+        package: hirsel_syntax::PackageId {
+            name: "reads_order".into(),
+            version: "1".into(),
+        },
+        modules: vec![],
+    };
+    let missing_lookup = ReadKey::Lookup(hirsel_engine::memo::LookupKey::of(
+        hirsel_engine::memo::LookupSource::Manifest,
+        &context,
+        None,
+        &["missing".into()],
+    ));
+    let obsolete_signature = ReadKey::Signature(DefId::intern(&DefPath(hirsel_syntax::ItemPath {
+        package: context.package.clone(),
+        modules: vec![],
+        name: "obsolete".into(),
+    })));
+    assert!(obsolete_signature < missing_lookup);
+
+    let missing_hash =
+        hirsel_syntax::ContentHash::of_parts("reads-order.missing.v1", [b"absent".as_slice()]);
+    let present_hash =
+        hirsel_syntax::ContentHash::of_parts("reads-order.missing.v1", [b"present".as_slice()]);
+    let signature_hash =
+        hirsel_syntax::ContentHash::of_parts("reads-order.signature.v1", [b"obsolete".as_slice()]);
+    let signature_key = store::EntryKey(
+        hirsel_syntax::ContentHash::of_parts("reads-order.entry.v1", [b"signature".as_slice()]),
+        hirsel_syntax::ContentHash::default(),
+        QueryKind::Signature,
+    );
+    let entry_key = store::EntryKey(
+        hirsel_syntax::ContentHash::of_parts("reads-order.entry.v1", [b"result".as_slice()]),
+        hirsel_syntax::ContentHash::default(),
+        QueryKind::Check,
+    );
+    let counted = CountReads {
+        inner: MemStore::default(),
+        signature_key,
+        signature_gets: std::sync::atomic::AtomicUsize::new(0),
+    };
+    counted.put(&signature_key, &signature_hash.0);
+
+    let mut builder = ReadsBuilder::new();
+    builder.record(missing_lookup, missing_hash);
+    builder.record(obsolete_signature, signature_hash);
+    let variant =
+        store::VariantRef::publish(&counted, &entry_key, builder.finish().unwrap(), b"result")
+            .unwrap();
+    let mut written = store::Entry::default();
+    written.insert(variant);
+    counted.put(&entry_key, &written.encode_for(&entry_key));
+    let persisted = store::Entry::load(&counted, &entry_key);
+
+    let mut visits = Vec::new();
+    let hit = persisted.hit(|key| {
+        visits.push(*key);
+        match *key {
+            ReadKey::Lookup(_) => Some(present_hash),
+            ReadKey::Signature(_) => {
+                let bytes = counted.get(&signature_key)?;
+                Some(hirsel_syntax::ContentHash(bytes.as_ref().try_into().ok()?))
+            }
+            _ => None,
+        }
+    });
+
+    assert!(hit.is_none());
+    assert_eq!(
+        counted
+            .signature_gets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    assert_eq!(visits, vec![missing_lookup]);
+}
+
+#[test]
 fn live_lower_retains_complete_observations_under_exact_admission() {
     check_live_lower_observations(false);
 }

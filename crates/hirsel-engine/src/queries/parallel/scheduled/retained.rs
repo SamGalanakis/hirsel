@@ -205,6 +205,30 @@ mod tests {
             &captured.materialize(&selected, &reads),
             &different
         ));
+        let signature = ReadKey::Signature(DefId::intern(&DefPath::core("metadata_order")));
+        let environment = ReadKey::Environment;
+        let environment_hash = ContentHash::of_bytes(b"environment");
+        let signature_hash = ContentHash::of_bytes(b"signature");
+        let summary_order = vec![(environment, environment_hash), (signature, signature_hash)];
+        let checked_order = vec![(signature, signature_hash), (environment, environment_hash)];
+        let summary_reads = Arc::new(Reads::from_vec(summary_order.clone()).unwrap());
+        let checked_reads = Arc::new(Reads::from_vec(checked_order).unwrap());
+        assert_eq!(summary_reads, checked_reads);
+        let ordered_output = outcome(summary_reads, checked.clone());
+        let ordered_selected = Some((
+            checked,
+            checked_reads.clone(),
+            Arc::new(OrderedSignatureReads::new(&[])),
+        ));
+        let ordered_summary = ordered_output.summary.as_ref().unwrap().clone();
+        let ordered_capture =
+            FrontSummary::capture(ordered_summary, &ordered_selected, &checked_reads);
+        assert!(matches!(ordered_capture, FrontSummary::Owned(_)));
+        let restored = ordered_capture.materialize(&ordered_selected, &checked_reads);
+        assert_eq!(
+            restored.reads.observed().copied().collect::<Vec<_>>(),
+            summary_order
+        );
     }
     #[test]
     fn p_metadata_counts_shared_summary_and_reads_once_using_compact_read_layout() {

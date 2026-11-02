@@ -92,7 +92,7 @@ impl CompactStage {
         // Canonical equality permits retaining the predecessor allocation.
         // Phase identity and complete read coverage remain separate rows.
         let reads = reads.map(|reads| {
-            if reads.as_ref() == inherited.as_ref() {
+            if reads.as_ref() == inherited.as_ref() && reads.observed().eq(inherited.observed()) {
                 inherited.clone()
             } else {
                 reads

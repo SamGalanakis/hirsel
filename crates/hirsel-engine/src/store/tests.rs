@@ -111,6 +111,29 @@ fn read_binding_digest_keeps_canonical_rows_with_bounded_scratch_allocations() {
             allocations.allocations
         );
     }
+    let signature = ReadKey::Signature(DefId::intern(&path("identity_signature")));
+    let environment = ReadKey::Environment;
+    let observed_first = Reads::from_vec(vec![
+        (environment, h("environment")),
+        (signature, h("signature")),
+    ])
+    .unwrap();
+    let canonical_first = Reads::from_vec(vec![
+        (signature, h("signature")),
+        (environment, h("environment")),
+    ])
+    .unwrap();
+    assert_eq!(observed_first, canonical_first);
+    assert_eq!(observed_first.digest(), canonical_first.digest());
+    assert_eq!(
+        payload_reads_hash(&observed_first),
+        payload_reads_hash(&canonical_first)
+    );
+    let action_key = key("reads_order_identity");
+    assert_eq!(
+        query_action(&action_key, h("inputs"), &observed_first),
+        query_action(&action_key, h("inputs"), &canonical_first)
+    );
 }
 
 #[test]

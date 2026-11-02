@@ -78,6 +78,10 @@ impl ReadPool {
             .size()
             .checked_add(reads.len().checked_mul(size_of::<Arc<ChargedRow>>())?)?
             as u64;
+        let shared_bytes =
+            shared_bytes.checked_add(reads.observation.as_ref().map_or(0, |order| {
+                super::super::retained::retained_arc_bytes(&**order)
+            }))?;
         let loaned = (missing as u64)
             .checked_mul(row_bytes)?
             .checked_add(shared_bytes)?;
@@ -162,6 +166,7 @@ impl ReadPool {
         Some(Reads {
             rows: Rows::Shared(shared),
             indices: None,
+            observation: reads.observation.clone(),
         })
     }
 }
@@ -269,25 +274,29 @@ mod tests {
 
     #[test]
     fn pooled_observations_keep_exact_hashes_and_charge_physical_storage_until_last_owner() {
+        let definitions = (0..127)
+            .map(|index| DefId::intern(&DefPath::core(&format!("pool_{index}"))))
+            .collect::<Vec<_>>();
         let originals = (0..8)
             .map(|set| {
-                Reads::from_vec(
-                    (0..128)
-                        .map(|index| {
-                            (
-                                ReadKey::Signature(DefId::intern(&DefPath::core(&format!(
-                                    "pool_{index}"
-                                )))),
-                                ContentHash::of_bytes(if index == set {
-                                    b"changed"
-                                } else {
-                                    b"observed"
-                                }),
-                            )
-                        })
-                        .collect(),
-                )
-                .unwrap()
+                let observations = std::iter::once((
+                    ReadKey::Environment,
+                    ContentHash::of_bytes(b"pool-environment"),
+                ))
+                .chain((0..127).rev().map(|index| {
+                    (
+                        ReadKey::Signature(definitions[index]),
+                        ContentHash::of_bytes(if index == set {
+                            b"changed"
+                        } else {
+                            b"observed"
+                        }),
+                    )
+                }))
+                .collect::<Vec<_>>();
+                let reads = Reads::from_vec(observations.clone()).unwrap();
+                assert_eq!(reads.observed().copied().collect::<Vec<_>>(), observations);
+                reads
             })
             .collect::<Vec<_>>();
         let budget = ProcessBudget::new(1 << 20);
@@ -325,6 +334,10 @@ mod tests {
         );
         for (original, pooled) in originals.iter().zip(&pooled) {
             assert_eq!(original, pooled);
+            assert_eq!(
+                pooled.observed().copied().collect::<Vec<_>>(),
+                original.observed().copied().collect::<Vec<_>>()
+            );
             assert_eq!(original.digest(), pooled.digest());
             let mut expected = vec![];
             original.encode(&mut expected);
@@ -422,14 +435,35 @@ mod tests {
     }
     #[test]
     fn tracked_receipts_refuse_n_minus_one_and_refund_only_the_last_array_owner() {
-        let reads = Reads::from_vec(vec![(
+        let environment = (
             ReadKey::Environment,
-            ContentHash::of_bytes(b"tracked"),
-        )])
-        .unwrap();
+            ContentHash::of_bytes(b"tracked-environment"),
+        );
+        let signature = (
+            ReadKey::Signature(DefId::intern(&DefPath::core("tracked"))),
+            ContentHash::of_bytes(b"tracked-signature"),
+        );
+        let reads = Reads::from_vec(vec![environment, signature]).unwrap();
+        let canonical = Reads::from_vec(vec![signature, environment]).unwrap();
         let budget = ProcessBudget::new(1 << 20);
         let mut allowance = budget.reserve(1 << 20).unwrap();
         let mut pool = ReadPool::default();
+        let ordered_required = pool.required_bytes(&reads).unwrap();
+        let canonical_required = pool.required_bytes(&canonical).unwrap();
+        let order_bytes = std::alloc::Layout::new::<[usize; 2]>()
+            .extend(std::alloc::Layout::array::<u32>(2).unwrap())
+            .unwrap()
+            .0
+            .pad_to_align()
+            .size() as u64;
+        assert_eq!(
+            ordered_required.checked_sub(canonical_required),
+            Some(order_bytes)
+        );
+        assert_eq!(
+            reads.observed().copied().collect::<Vec<_>>(),
+            vec![environment, signature]
+        );
         let required = pool.required_tracked_bytes(&reads).unwrap();
         let remaining = Arc::new(std::sync::Mutex::new(required - 1));
         let before = allowance.bytes();

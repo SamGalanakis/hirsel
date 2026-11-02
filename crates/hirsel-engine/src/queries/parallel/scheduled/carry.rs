@@ -174,7 +174,9 @@ impl Facts {
             if summary.reads.as_ref() != reads.as_ref() {
                 return None;
             }
-            Arc::make_mut(summary).reads = reads.clone();
+            if summary.reads.observed().eq(reads.observed()) {
+                Arc::make_mut(summary).reads = reads.clone();
+            }
         }
         Some(())
     }
@@ -227,11 +229,10 @@ impl serde::Serialize for FactsRef<'_> {
                     PackedSummaryRef::Checked {
                         definition: summary.definition,
                         text: summary.text,
-                        reads: if self
-                            .checked
-                            .as_ref()
-                            .is_some_and(|(_, reads, _)| reads.as_ref() == summary.reads.as_ref())
-                        {
+                        reads: if self.checked.as_ref().is_some_and(|(_, reads, _)| {
+                            reads.as_ref() == summary.reads.as_ref()
+                                && reads.observed().eq(summary.reads.observed())
+                        }) {
                             None
                         } else {
                             Some(&summary.reads)
@@ -692,7 +693,9 @@ impl BodyTask {
         // equal checked facts before selecting the compact retained shape;
         // the complete decoded peak was admitted before this normalization.
         if let Some((checked, checked_reads, _)) = &mut facts.checked {
-            if checked_reads.as_ref() == reads.as_ref() {
+            if checked_reads.as_ref() == reads.as_ref()
+                && checked_reads.observed().eq(reads.observed())
+            {
                 *checked_reads = reads.clone();
             }
             if let Some(summary) = &mut facts.summary
@@ -881,6 +884,30 @@ mod tests {
         after.reads(&reads);
         assert!(after.bytes < before.bytes);
         assert_eq!(bincode::serialize(&facts).unwrap(), original);
+        let reversed = Arc::new(
+            Reads::from_vec(vec![
+                (
+                    ReadKey::Signature(owner),
+                    ContentHash::of_bytes(b"signature"),
+                ),
+                (ReadKey::Environment, ContentHash::of_bytes(b"environment")),
+            ])
+            .unwrap(),
+        );
+        facts.share_summary_reads(&reversed).unwrap();
+        let preserved = &facts.summary.as_ref().unwrap().reads;
+        assert!(Arc::ptr_eq(preserved, &reads));
+        assert_eq!(
+            preserved.observed().copied().collect::<Vec<_>>(),
+            vec![
+                (ReadKey::Environment, ContentHash::of_bytes(b"environment"),),
+                (
+                    ReadKey::Signature(owner),
+                    ContentHash::of_bytes(b"signature"),
+                ),
+            ]
+        );
+        assert_eq!(bincode::serialize(&facts).unwrap(), original);
         let changed = Arc::new(
             Reads::from_vec(vec![(
                 ReadKey::Environment,
@@ -920,21 +947,38 @@ mod tests {
                 let relocated = Anchor::fresh();
                 let owner = DefPath::core("portable");
                 let definition = DefId::intern(&owner);
-                let reads = Arc::new(
-                    Reads::from_vec(
-                        (0..if full { width } else { 0 })
-                            .map(|i| {
-                                (
-                                    ReadKey::Signature(DefId::intern(&DefPath::core(&format!(
-                                        "carry_read_{i}"
-                                    )))),
-                                    ContentHash::of_bytes(&[i as u8]),
-                                )
-                            })
-                            .collect(),
+                let carry_read = |index: usize| {
+                    (
+                        ReadKey::Signature(DefId::intern(&DefPath::core(&format!(
+                            "carry_read_{index}"
+                        )))),
+                        ContentHash::of_bytes(&[index as u8]),
                     )
-                    .unwrap(),
+                };
+                let separate_summary_order = full && width == 4;
+                let environment = (
+                    ReadKey::Environment,
+                    ContentHash::of_bytes(b"carry-environment"),
                 );
+                let observations = if separate_summary_order {
+                    vec![environment, carry_read(0), carry_read(1), carry_read(2)]
+                } else {
+                    (0..if full { width } else { 0 }).map(carry_read).collect()
+                };
+                let reads = Arc::new(Reads::from_vec(observations).unwrap());
+                let checked_reads = if separate_summary_order {
+                    Arc::new(
+                        Reads::from_vec(vec![
+                            carry_read(0),
+                            environment,
+                            carry_read(1),
+                            carry_read(2),
+                        ])
+                        .unwrap(),
+                    )
+                } else {
+                    reads.clone()
+                };
                 let checked = Arc::new(CheckedSummary {
                     summary: DefinitionSummary {
                         owner: definition,
@@ -962,8 +1006,13 @@ mod tests {
                         reads: reads.clone(),
                         text: Default::default(),
                     })),
-                    checked: full
-                        .then(|| (checked, reads, Arc::new(OrderedSignatureReads::new(&[])))),
+                    checked: full.then(|| {
+                        (
+                            checked,
+                            checked_reads,
+                            Arc::new(OrderedSignatureReads::new(&[])),
+                        )
+                    }),
                     dead_arms: None,
                     diagnostics: if full {
                         vec![Diagnostic::error(
@@ -1020,6 +1069,30 @@ mod tests {
                     assert_eq!(
                         decoded.checked.as_ref().unwrap().1,
                         facts.checked.as_ref().unwrap().1
+                    );
+                }
+                if separate_summary_order {
+                    assert_eq!(
+                        decoded
+                            .summary
+                            .as_ref()
+                            .unwrap()
+                            .reads
+                            .observed()
+                            .copied()
+                            .collect::<Vec<_>>(),
+                        vec![environment, carry_read(0), carry_read(1), carry_read(2),]
+                    );
+                    assert_eq!(
+                        decoded
+                            .checked
+                            .as_ref()
+                            .unwrap()
+                            .1
+                            .observed()
+                            .copied()
+                            .collect::<Vec<_>>(),
+                        vec![carry_read(0), environment, carry_read(1), carry_read(2),]
                     );
                 }
                 assert_eq!(

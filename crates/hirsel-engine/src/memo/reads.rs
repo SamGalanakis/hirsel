@@ -362,6 +362,7 @@ pub struct Reads {
     // A sorted view into the same canonical rows. Normal receipts stay flat;
     // completed predecessor phases can share the final phase's allocation.
     indices: Option<std::sync::Arc<[u32]>>,
+    observation: Option<std::sync::Arc<[u32]>>,
 }
 impl PartialEq for Reads {
     fn eq(&self, other: &Self) -> bool {
@@ -390,21 +391,22 @@ impl Reads {
         Self::default()
     }
     /// Sorts and de-duplicates; conflicting observations of one key are an error.
-    pub fn from_vec(mut reads: Vec<(ReadKey, ContentHash)>) -> Result<Self, Inconsistent> {
+    pub fn from_vec(reads: Vec<(ReadKey, ContentHash)>) -> Result<Self, Inconsistent> {
         // Rust ea137335 std/collections/hash/map.rs:1002-1014: Entry
         // deduplicates by identity. Canonical spelling order is needed only
         // for the final unique set, not every inherited observation.
+        let mut unique: Vec<(ReadKey, ContentHash, usize)>;
         if reads.len() >= 32 {
             use std::collections::{HashMap, hash_map::Entry};
-            let mut unique = HashMap::with_hasher(hirsel_intern::IdHasher::default());
+            let mut by_key = HashMap::with_hasher(hirsel_intern::IdHasher::default());
             let mut conflict: Option<ReadKey> = None;
-            for (key, value) in reads {
-                match unique.entry(key) {
+            for (ordinal, (key, value)) in reads.into_iter().enumerate() {
+                match by_key.entry(key) {
                     Entry::Vacant(entry) => {
-                        entry.insert(value);
+                        entry.insert((value, ordinal));
                     }
                     Entry::Occupied(entry) => {
-                        if *entry.get() != value && conflict.is_none_or(|old| key < old) {
+                        if entry.get().0 != value && conflict.is_none_or(|old| key < old) {
                             conflict = Some(key);
                         }
                     }
@@ -415,25 +417,65 @@ impl Reads {
             if let Some(key) = conflict {
                 return Err(Inconsistent(key));
             }
-            reads = unique.into_iter().collect();
+            unique = by_key
+                .into_iter()
+                .map(|(key, (value, ordinal))| (key, value, ordinal))
+                .collect();
+        } else {
+            let mut conflict: Option<ReadKey> = None;
+            unique = Vec::with_capacity(reads.len());
+            for (ordinal, (key, value)) in reads.into_iter().enumerate() {
+                if let Some((_, previous, _)) =
+                    unique.iter().find(|(candidate, _, _)| *candidate == key)
+                {
+                    if *previous != value && conflict.is_none_or(|old| key < old) {
+                        conflict = Some(key);
+                    }
+                } else {
+                    unique.push((key, value, ordinal));
+                }
+            }
+            if let Some(key) = conflict {
+                return Err(Inconsistent(key));
+            }
         }
-        reads.sort_unstable_by(|a, b| {
+        unique.sort_unstable_by(|a, b| {
             #[cfg(test)]
             SORT_COMPARISONS.with(|n| n.set(n.get() + 1));
-            a.0.cmp(&b.0).then(a.1.0.cmp(&b.1.0))
+            a.0.cmp(&b.0)
         });
-        reads.dedup();
-        if let Some(w) = reads.windows(2).find(|w| w[0].0 == w[1].0) {
-            return Err(Inconsistent(w[0].0));
-        }
+        let observation = if unique.windows(2).all(|pair| pair[0].2 < pair[1].2) {
+            None
+        } else {
+            let mut order = (0..unique.len()).map(|at| at as u32).collect::<Vec<_>>();
+            order.sort_unstable_by_key(|&at| unique[at as usize].2);
+            Some(order.into())
+        };
+        let rows = unique
+            .into_iter()
+            .map(|(key, value, _)| (key, value))
+            .collect::<Vec<_>>();
         Ok(Self {
-            rows: reads.into(),
+            rows: rows.into(),
             indices: None,
+            observation,
         })
     }
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &(ReadKey, ContentHash)> {
         (0..self.len())
             .map(|at| &self.rows[self.indices.as_ref().map_or(at, |rows| rows[at] as usize)])
+    }
+    pub fn observed(&self) -> impl ExactSizeIterator<Item = &(ReadKey, ContentHash)> {
+        (0..self.len()).map(|at| {
+            let logical = self
+                .observation
+                .as_ref()
+                .map_or(at, |order| order[at] as usize);
+            &self.rows[self
+                .indices
+                .as_ref()
+                .map_or(logical, |rows| rows[logical] as usize)]
+        })
     }
     pub fn len(&self) -> usize {
         self.indices
@@ -472,6 +514,7 @@ impl Reads {
         Some(Self {
             rows: complete.rows.clone(),
             indices: (indices.len() != complete.len()).then(|| indices.into()),
+            observation: self.observation.clone(),
         })
     }
     /// Detach a selected phase from the complete body's backing rows. Exact
@@ -483,12 +526,17 @@ impl Reads {
         Self {
             rows: self.iter().copied().collect::<Vec<_>>().into(),
             indices: None,
+            observation: self.observation.clone(),
         }
     }
     pub(crate) fn flat_backing_bytes(&self) -> Option<usize> {
-        self.indices
-            .as_ref()
-            .map(|_| 2 * size_of::<usize>() + self.len() * size_of::<(ReadKey, ContentHash)>())
+        self.indices.as_ref().map(|_| {
+            let rows = 2 * size_of::<usize>() + self.len() * size_of::<(ReadKey, ContentHash)>();
+            let observation = self.observation.as_ref().map_or(0, |order| {
+                super::retained::retained_arc_bytes(&**order) as usize
+            });
+            rows + observation
+        })
     }
     /// Actual distinct Arc backing allocations; the containing Reads value is
     /// accounted separately by its owner. This exposes no semantic identity.
@@ -500,7 +548,13 @@ impl Reads {
                 super::retained::arc_bytes(&**indices),
             )
         });
-        [rows, indices].into_iter().flatten()
+        let observation = self.observation.as_ref().map(|order| {
+            (
+                order.as_ptr() as usize,
+                super::retained::arc_bytes(&**order),
+            )
+        });
+        [rows, indices, observation].into_iter().flatten()
     }
     /// The union of two read sets (execution closure, design §1b).
     pub fn union(&self, other: &Reads) -> Result<Reads, Inconsistent> {
@@ -524,9 +578,25 @@ impl Reads {
                 (None, None) => break,
             }
         }
+        let mut seen = vec![false; out.len()];
+        let mut order = Vec::with_capacity(out.len());
+        for (key, _) in self.observed().chain(other.observed()) {
+            let logical = out
+                .binary_search_by(|(candidate, _)| candidate.cmp(key))
+                .expect("union row exists in canonical output");
+            if !std::mem::replace(&mut seen[logical], true) {
+                order.push(logical as u32);
+            }
+        }
+        let observation = order
+            .iter()
+            .enumerate()
+            .any(|(at, &logical)| at as u32 != logical)
+            .then(|| order.into());
         Ok(Self {
             rows: out.into(),
             indices: None,
+            observation,
         })
     }
     /// The minimum durability over every read, given each read's durability.
@@ -541,7 +611,7 @@ impl Reads {
         &self,
         mut current: impl FnMut(&ReadKey) -> Option<ContentHash>,
     ) -> Option<ReadKey> {
-        self.iter()
+        self.observed()
             .find(|(k, v)| current(k) != Some(*v))
             .map(|(k, _)| *k)
     }
@@ -549,11 +619,18 @@ impl Reads {
     pub fn encode(&self, out: &mut Vec<u8>) {
         // Version 2 separates lookup identity from diagnostic spelling repairs.
         // Reject pre-separation receipts even when they contain no new tags.
-        out.extend(b"HRD2");
+        out.extend(b"HRD3");
         out.extend((self.len() as u32).to_le_bytes());
         for (key, value) in self.iter() {
             key.encode(out);
             out.extend(value.0);
+        }
+        for at in 0..self.len() {
+            let logical = self
+                .observation
+                .as_ref()
+                .map_or(at as u32, |order| order[at]);
+            out.extend(logical.to_le_bytes());
         }
     }
     pub(crate) fn encoding_working_bytes(&self) -> Option<u64> {
@@ -563,27 +640,57 @@ impl Reads {
                 .checked_add(value.0.len() as u64)
         })?;
         bytes
+            .checked_add((self.len() as u64).checked_mul(4)?)?
             .max(8)
             .checked_mul(4)?
             .checked_add(size_of::<Vec<u8>>() as u64)
     }
     pub fn decode(input: &mut &[u8]) -> Option<Reads> {
-        if take(input, 4)? != b"HRD2" {
+        if take(input, 4)? != b"HRD3" {
             return None;
         }
         let count = take_u32(input)? as usize;
+        if count > input.len() / (1 + size_of::<ContentHash>() + size_of::<u32>()) {
+            return None;
+        }
         let mut reads = Vec::with_capacity(count.min(1 << 16));
         for _ in 0..count {
             let key = decode_key(input)?;
+            if reads.last().is_some_and(|(previous, _)| previous >= &key) {
+                return None;
+            }
             let value = ContentHash(take(input, 32)?.try_into().ok()?);
             reads.push((key, value));
         }
-        Reads::from_vec(reads).ok()
+        let mut seen = vec![false; count];
+        let mut order = Vec::with_capacity(count.min(1 << 16));
+        for _ in 0..count {
+            let logical = take_u32(input)? as usize;
+            if logical >= count || std::mem::replace(&mut seen[logical], true) {
+                return None;
+            }
+            order.push(logical as u32);
+        }
+        let observation = order
+            .iter()
+            .enumerate()
+            .any(|(at, &logical)| at as u32 != logical)
+            .then(|| order.into());
+        Some(Reads {
+            rows: reads.into(),
+            indices: None,
+            observation,
+        })
     }
     /// The content hash of the canonical encoding.
     pub fn digest(&self) -> ContentHash {
         let mut bytes = vec![];
-        self.encode(&mut bytes);
+        bytes.extend(b"HRD2");
+        bytes.extend((self.len() as u32).to_le_bytes());
+        for (key, value) in self.iter() {
+            key.encode(&mut bytes);
+            bytes.extend(value.0);
+        }
         ContentHash::of_parts("hirsel.reads.v2", [bytes.as_slice()])
     }
 }
@@ -601,7 +708,7 @@ impl ReadsBuilder {
     }
     /// Merges another memo's complete reads (execution closure by union).
     pub fn merge(&mut self, reads: &Reads) {
-        self.0.extend(reads.iter().copied());
+        self.0.extend(reads.observed().copied());
     }
     /// Merges another evaluation's recorded reads.
     pub fn extend(&mut self, other: ReadsBuilder) {
@@ -762,6 +869,7 @@ mod tests {
 
     #[test]
     fn reads_sort_by_spelling_union_and_reject_conflicts() {
+        use std::hash::{Hash, Hasher};
         let (a, b) = (def("a"), def("b"));
         let one = Reads::from_vec(vec![
             (ReadKey::Signature(b), h("b")),
@@ -771,10 +879,95 @@ mod tests {
         .unwrap();
         assert_eq!(one.len(), 2);
         assert_eq!(one.iter().next().unwrap().0, ReadKey::Signature(a));
-        let two = Reads::from_vec(vec![(ReadKey::ExecutedBody(a), h("body"))]).unwrap();
+        assert_eq!(
+            one.observed().copied().collect::<Vec<_>>(),
+            vec![
+                (ReadKey::Signature(b), h("b")),
+                (ReadKey::Signature(a), h("a"))
+            ]
+        );
+        let same_set = Reads::from_vec(vec![
+            (ReadKey::Signature(a), h("a")),
+            (ReadKey::Signature(b), h("b")),
+        ])
+        .unwrap();
+        assert_eq!(one, same_set);
+        let hash = |reads: &Reads| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            reads.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash(&one), hash(&same_set));
+        assert_eq!(one.digest(), same_set.digest());
+        let mut canonical_encoding = b"HRD2".to_vec();
+        canonical_encoding.extend((one.len() as u32).to_le_bytes());
+        for (key, value) in one.iter() {
+            key.encode(&mut canonical_encoding);
+            canonical_encoding.extend(value.0);
+        }
+        assert_eq!(
+            one.digest(),
+            ContentHash::of_parts("hirsel.reads.v2", [canonical_encoding.as_slice()])
+        );
+        assert_eq!(
+            same_set.observed().copied().collect::<Vec<_>>(),
+            vec![
+                (ReadKey::Signature(a), h("a")),
+                (ReadKey::Signature(b), h("b"))
+            ]
+        );
+        let mut visited = Vec::new();
+        assert_eq!(
+            one.first_changed(|key| {
+                visited.push(*key);
+                if *key == ReadKey::Signature(b) {
+                    None
+                } else {
+                    one.get(key)
+                }
+            }),
+            Some(ReadKey::Signature(b))
+        );
+        assert_eq!(visited, vec![ReadKey::Signature(b)]);
+        let two = Reads::from_vec(vec![
+            (ReadKey::Signature(a), h("a")),
+            (ReadKey::ExecutedBody(a), h("body")),
+        ])
+        .unwrap();
         let both = one.union(&two).unwrap();
         assert_eq!(both.len(), 3);
+        assert_eq!(
+            both.observed().copied().collect::<Vec<_>>(),
+            vec![
+                (ReadKey::Signature(b), h("b")),
+                (ReadKey::Signature(a), h("a")),
+                (ReadKey::ExecutedBody(a), h("body"))
+            ]
+        );
         assert_eq!(both, two.union(&one).unwrap());
+        assert_eq!(
+            two.union(&one)
+                .unwrap()
+                .observed()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![
+                (ReadKey::Signature(a), h("a")),
+                (ReadKey::ExecutedBody(a), h("body")),
+                (ReadKey::Signature(b), h("b"))
+            ]
+        );
+        let mut builder = ReadsBuilder::new();
+        builder.merge(&one);
+        assert_eq!(
+            builder
+                .finish()
+                .unwrap()
+                .observed()
+                .copied()
+                .collect::<Vec<_>>(),
+            one.observed().copied().collect::<Vec<_>>()
+        );
         let conflict = Reads::from_vec(vec![(ReadKey::Signature(a), h("other"))]).unwrap();
         assert_eq!(
             one.union(&conflict),
@@ -791,15 +984,41 @@ mod tests {
 
     #[test]
     fn duplicate_read_observations_preserve_canonical_results_with_unique_sort_work() {
-        fn original(mut rows: Vec<(ReadKey, ContentHash)>) -> Result<Reads, Inconsistent> {
-            rows.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.0.cmp(&b.1.0)));
-            rows.dedup();
-            if let Some(w) = rows.windows(2).find(|w| w[0].0 == w[1].0) {
-                return Err(Inconsistent(w[0].0));
+        fn original(rows: Vec<(ReadKey, ContentHash)>) -> Result<Reads, Inconsistent> {
+            let mut unique = Vec::new();
+            let mut conflict = None;
+            for (key, value) in rows {
+                if let Some((_, previous)) = unique.iter().find(|(candidate, _)| *candidate == key)
+                {
+                    if *previous != value && conflict.is_none_or(|old| key < old) {
+                        conflict = Some(key);
+                    }
+                } else {
+                    unique.push((key, value));
+                }
             }
+            if let Some(key) = conflict {
+                return Err(Inconsistent(key));
+            }
+            let observed = unique.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+            unique.sort_unstable_by_key(|(key, _)| *key);
+            let order = observed
+                .iter()
+                .map(|key| {
+                    unique
+                        .binary_search_by_key(key, |(candidate, _)| *candidate)
+                        .unwrap() as u32
+                })
+                .collect::<Vec<_>>();
+            let observation = order
+                .iter()
+                .enumerate()
+                .any(|(at, &logical)| at as u32 != logical)
+                .then(|| order.into());
             Ok(Reads {
-                rows: rows.into(),
+                rows: unique.into(),
                 indices: None,
+                observation,
             })
         }
         let (a, b) = (def("read_z"), def("read_a"));
@@ -867,6 +1086,11 @@ mod tests {
             let got = Reads::from_vec(rows.clone());
             assert_eq!(got, expected, "seed {seed}");
             if let (Ok(got), Ok(expected)) = (got, expected) {
+                assert_eq!(
+                    got.observed().copied().collect::<Vec<_>>(),
+                    expected.observed().copied().collect::<Vec<_>>(),
+                    "seed {seed}"
+                );
                 let mut bytes = vec![];
                 got.encode(&mut bytes);
                 let mut reference = vec![];
@@ -900,10 +1124,17 @@ mod tests {
             .map(|index| def(&format!("allocation{index}")))
             .collect::<Vec<_>>();
         for count in [0, 1, 2, 3, 32] {
-            let rows = definitions[..count]
-                .iter()
-                .map(|&id| (ReadKey::Signature(id), ContentHash::default()))
-                .collect::<Vec<_>>();
+            let rows = if count == 2 {
+                vec![
+                    (ReadKey::Environment, ContentHash::default()),
+                    (ReadKey::Signature(definitions[0]), ContentHash::default()),
+                ]
+            } else {
+                definitions[..count]
+                    .iter()
+                    .map(|&id| (ReadKey::Signature(id), ContentHash::default()))
+                    .collect::<Vec<_>>()
+            };
             let (reads, allocated) =
                 crate::test_alloc::measured(|| Reads::from_vec(rows.clone()).unwrap());
             let charged = reads.allocations().map(|(_, bytes)| bytes).sum::<usize>();
@@ -955,13 +1186,44 @@ mod tests {
             assert_eq!(shared.digest(), original.digest());
             let mut bytes = vec![];
             shared.encode(&mut bytes);
-            assert_eq!(Reads::decode(&mut bytes.as_slice()), Some(original.clone()));
+            let decoded = Reads::decode(&mut bytes.as_slice()).unwrap();
+            assert_eq!(decoded, original);
+            assert_eq!(
+                decoded.observed().copied().collect::<Vec<_>>(),
+                original.observed().copied().collect::<Vec<_>>()
+            );
             for key in [a, b, c] {
                 assert_eq!(shared.get(&key), original.get(&key));
             }
             assert_eq!(shared.union(&complete), original.union(&complete));
             assert_eq!(shared.rows.as_ptr(), complete.rows.as_ptr());
         }
+        let reversed = Reads::from_vec(vec![(b, h("b")), (a, h("a"))]).unwrap();
+        let shared = reversed.share_rows(&complete).unwrap();
+        let expected = vec![(b, h("b")), (a, h("a"))];
+        assert_eq!(shared.observed().copied().collect::<Vec<_>>(), expected);
+        let row_bytes = std::alloc::Layout::new::<[usize; 2]>()
+            .extend(std::alloc::Layout::array::<(ReadKey, ContentHash)>(2).unwrap())
+            .unwrap()
+            .0
+            .pad_to_align()
+            .size();
+        let observation_bytes = std::alloc::Layout::new::<[usize; 2]>()
+            .extend(std::alloc::Layout::array::<u32>(2).unwrap())
+            .unwrap()
+            .0
+            .pad_to_align()
+            .size();
+        assert_eq!(
+            shared.flat_backing_bytes(),
+            Some(row_bytes + observation_bytes)
+        );
+        let flat = shared.flat_copy();
+        assert_eq!(flat.observed().copied().collect::<Vec<_>>(), expected);
+        assert_eq!(
+            flat.allocations().map(|(_, bytes)| bytes).sum::<usize>(),
+            row_bytes + observation_bytes
+        );
         let inconsistent = Reads::from_vec(vec![(a, h("other"))]).unwrap();
         assert!(inconsistent.share_rows(&complete).is_none());
         let missing = Reads::from_vec(vec![(ReadKey::Environment, h("e"))]).unwrap();
@@ -976,7 +1238,7 @@ mod tests {
             },
             modules: vec!["m".into(), "n".into()],
         };
-        let reads = Reads::from_vec(vec![
+        let observations = vec![
             (ReadKey::Signature(def("a")), h("1")),
             (ReadKey::DeclarationCandidates(def("a")), h("2")),
             (
@@ -998,12 +1260,18 @@ mod tests {
                 ReadKey::ValidationUniverse(PackageKey::of(&context.package)),
                 h("7"),
             ),
-        ])
-        .unwrap();
+        ];
+        let reads = Reads::from_vec(observations.clone()).unwrap();
+        assert_eq!(reads.observed().copied().collect::<Vec<_>>(), observations);
         let mut bytes = vec![];
         reads.encode(&mut bytes);
         let mut input = bytes.as_slice();
-        assert_eq!(Reads::decode(&mut input), Some(reads.clone()));
+        let decoded = Reads::decode(&mut input).unwrap();
+        assert_eq!(decoded, reads);
+        assert_eq!(
+            decoded.observed().copied().collect::<Vec<_>>(),
+            observations
+        );
         assert!(input.is_empty());
         let ReadKey::Lookup(lookup) = reads
             .iter()
@@ -1042,8 +1310,35 @@ mod tests {
         assert_eq!(reads.len(), 2);
         let mut bytes = vec![];
         reads.encode(&mut bytes);
-        assert_eq!(&bytes[..4], b"HRD2");
-        assert_eq!(Reads::decode(&mut bytes.as_slice()), Some(reads));
+        assert_eq!(&bytes[..4], b"HRD3");
+        assert_eq!(Reads::decode(&mut bytes.as_slice()), Some(reads.clone()));
+        let mut old = bytes.clone();
+        old[..4].copy_from_slice(b"HRD2");
+        assert!(Reads::decode(&mut old.as_slice()).is_none());
+        let order_start = bytes.len() - reads.len() * size_of::<u32>();
+        let mut missing_order = bytes.clone();
+        missing_order.truncate(order_start);
+        assert!(Reads::decode(&mut missing_order.as_slice()).is_none());
+        let mut duplicate_order = bytes.clone();
+        let first = duplicate_order[order_start..order_start + 4].to_vec();
+        duplicate_order[order_start + 4..order_start + 8].copy_from_slice(&first);
+        assert!(Reads::decode(&mut duplicate_order.as_slice()).is_none());
+        let mut out_of_range = bytes.clone();
+        out_of_range[order_start..order_start + 4]
+            .copy_from_slice(&(reads.len() as u32).to_le_bytes());
+        assert!(Reads::decode(&mut out_of_range.as_slice()).is_none());
+        let mut noncanonical = b"HRD3".to_vec();
+        noncanonical.extend(2u32.to_le_bytes());
+        for (key, value) in [
+            (ReadKey::Environment, h("environment")),
+            (ReadKey::UniverseErrors, h("errors")),
+        ] {
+            key.encode(&mut noncanonical);
+            noncanonical.extend(value.0);
+        }
+        noncanonical.extend(0u32.to_le_bytes());
+        noncanonical.extend(1u32.to_le_bytes());
+        assert!(Reads::decode(&mut noncanonical.as_slice()).is_none());
         // The old encoding began directly with the row count.
         assert!(Reads::decode(&mut &bytes[4..]).is_none());
         assert!(Reads::decode(&mut &[0u8; 4][..]).is_none());

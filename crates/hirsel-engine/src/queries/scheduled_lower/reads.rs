@@ -290,7 +290,15 @@ mod tests {
         );
         let depth = DepthEvidence::leaf(32);
         let bytes = constants
-            .encode(&records, &anchors, &reads, &depth, false, &Vec::new())
+            .encode(
+                &records,
+                &anchors,
+                &reads,
+                &reads,
+                &depth,
+                false,
+                &Vec::new(),
+            )
             .unwrap();
         let reference = store.put_content(CONSTANT_DESCRIPTOR, &bytes).unwrap();
         let bound = constants.working_bytes();

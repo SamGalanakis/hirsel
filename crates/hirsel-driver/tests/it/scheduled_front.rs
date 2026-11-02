@@ -1148,6 +1148,38 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
             let request = runtime.request(&summaries);
             let publications = runtime.wait(request).unwrap();
             let metadata = front.retained_bytes();
+            // V builds its universe once the program's headers are checked,
+            // before any body fills the partition. std is a dependency: its
+            // rows come from its warmed summary, never its full table.
+            let universe = (mode == 7).then(|| {
+                let signatures = front.signatures();
+                let package = &definitions[0].0.package;
+                let before: std::collections::BTreeMap<_, _> =
+                    front.module_inferences().into_iter().collect();
+                let built = signatures.validation(package).map(|universe| {
+                    universe
+                        .view(hirsel_syntax::DefId::intern(&definitions[0]))
+                        .unwrap()
+                        .digest()
+                });
+                // One universe build reads every row: each module's private
+                // proof is inferred at most once per build, whether it
+                // settles or is refused.
+                let inferred: Vec<_> = front
+                    .module_inferences()
+                    .into_iter()
+                    .map(|(module, count)| {
+                        (count - before.get(&module).copied().unwrap_or(0), module)
+                    })
+                    .filter(|(count, _)| *count != 0)
+                    .collect();
+                let repeated: Vec<_> = inferred.iter().filter(|(count, _)| *count > 1).collect();
+                assert!(
+                    repeated.is_empty(),
+                    "proofs inferred more than once in one build: {repeated:?}"
+                );
+                (signatures, built.unwrap())
+            });
             let request = runtime.request(&[bodies[0]]);
             let a = runtime.wait(request).unwrap().pop().unwrap();
             let mut scratch = budget.reserve(2 << 20).unwrap();
@@ -1221,34 +1253,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
             }
             // V's universe holds header rows by identity: `a`'s row is held
             // only by it, `b`'s also by a live view.
-            let universe = (mode == 7).then(|| {
-                let signatures = front.signatures();
-                let package = &definitions[0].0.package;
-                let before: std::collections::BTreeMap<_, _> =
-                    front.module_inferences().into_iter().collect();
-                let built = signatures.validation(package).map(|universe| {
-                    universe
-                        .view(hirsel_syntax::DefId::intern(&definitions[0]))
-                        .unwrap()
-                        .digest()
-                });
-                // One universe build reads every row, and the partition
-                // holds one body: each module's private proof is inferred at
-                // most once per build, whether it settles or is refused.
-                let inferred: Vec<_> = front
-                    .module_inferences()
-                    .into_iter()
-                    .map(|(module, count)| {
-                        (count - before.get(&module).copied().unwrap_or(0), module)
-                    })
-                    .filter(|(count, _)| *count != 0)
-                    .collect();
-                let repeated: Vec<_> = inferred.iter().filter(|(count, _)| *count > 1).collect();
-                assert!(
-                    repeated.is_empty(),
-                    "proofs inferred more than once in one build: {repeated:?}"
-                );
-                let digest = built.unwrap();
+            let universe = universe.map(|(signatures, digest)| {
                 header_pins.remove(0);
                 (signatures, digest)
             });

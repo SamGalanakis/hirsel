@@ -617,7 +617,10 @@ fn shrink[T](
 // its case index, so `hirsel test --seed S` replays the run. The first case that fails the
 // law is shrunk; its simplest counterexample is reported through test.log, rendered by
 // show, and the test fails through test.check_case with the failing case's index. A
-// language failure in gen or law is not shrunk: it fails the test where it happens.
+// language failure in gen or law is not shrunk: it fails the test where it happens. A case
+// the Source marks overrun is discarded before the law runs; a run that evaluated zero
+// cases (every case overran, or none was requested) reports evaluated=0 and fails: a
+// property run that checked nothing never reports a pass.
 @track_caller
 pub fn property_cases[T](
   t: Test,
@@ -628,6 +631,7 @@ pub fn property_cases[T](
 ) -> () {
   let seed = core@1/test.seed(t)
   let mut case: u64 = 0
+  let mut evaluated: u64 = 0
   while case < cases {
     let case_seed = core@1/int.wrapping_add(
       seed,
@@ -643,6 +647,9 @@ pub fn property_cases[T](
     let held = {
       let value = gen(mut s)
       s.overrun || law(value)
+    }
+    if !s.overrun {
+      evaluated += 1
     }
     if !held {
       let simplest = shrink(unique s.choices, gen, law)
@@ -662,6 +669,10 @@ pub fn property_cases[T](
       core@1/test.check_case(t, false, case)
     }
     case += 1
+  }
+  if evaluated == 0 {
+    core@1/test.log(t, "evaluated=0: no case evaluated the law")
+    core@1/test.fail(t)
   }
 }
 

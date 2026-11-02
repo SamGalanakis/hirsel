@@ -10,7 +10,7 @@
   },
   "sources": [
     {
-      "path": "LANG-9-testhelpers-property-boundary-run.hir",
+      "path": "LANG-9-testhelpers-property-overrun-fail.hir",
       "module": []
     }
   ],

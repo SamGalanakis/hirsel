@@ -13,6 +13,7 @@
 # Usage: check.sh [--prebuilt] [name-filter]   (a grep -E pattern over run names)
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
+. "$here/../loom.sh"
 prebuilt=""
 if [[ "${1:-}" == --prebuilt ]]; then prebuilt=1; shift; fi
 filter="${1:-.}"
@@ -86,51 +87,21 @@ done
 # Keep the historical bound-1 run distinct from the explicit bound-2 row. Other
 # model families retain their own bound-2 runs. Pin the original branch budget;
 # an exhausted budget or setup failure is never an acceptable mutation result.
+# name | features | preemptions | test-args | bound | panic | expected (proofs/loom.sh)
 loom_runs=(
-  "loom||1|pass"
-  "loom-section-bound2|--test models|2|pass"
-  "loom-schedule-bound2|--test schedule|2|pass"
-  "loom-cancel-bound2|--test cancel|2|pass"
-  "loom-atomic-bound2|--test atomic|2|pass"
-  "loom-mutex-bound2|--test mutex|2|pass"
-  "loom-channel-bound2|--test channel|2|pass"
-  "loom-executors-bound2|--test executors|2|pass"
-  "loom-wakes-bound2|--test wakes|2|pass"
-  "loom-frames-bound2|--test frames|2|pass"
-  "mutation-loom-weak-handshake|--test models --features weak|2|causality"
+  "loom||1||||pass"
+  "loom-section-bound2|--test models|2||6||pass"
+  "loom-schedule-bound2|--test schedule|2||||pass"
+  "loom-cancel-bound2|--test cancel|2||||pass"
+  "loom-atomic-bound2|--test atomic|2||||pass"
+  "loom-mutex-bound2|--test mutex|2||||pass"
+  "loom-channel-bound2|--test channel|2||||pass"
+  "loom-executors-bound2|--test executors|2||||pass"
+  "loom-wakes-bound2|--test wakes|2||||pass"
+  "loom-frames-bound2|--test frames|2||||pass"
+  "mutation-loom-weak-handshake|--test models --features weak|2|-- --exact every_cut_is_causally_closed||Causality violation: Concurrent write accesses to \`UnsafeCell\`.|causality"
 )
-for row in "${loom_runs[@]}"; do
-  IFS='|' read -r name features preemptions expected <<<"$row"
-  [[ "$name" =~ $filter ]] || continue
-  total=$((total + 1))
-  test_args=()
-  if [[ "$expected" == causality ]]; then
-    test_args=(-- --exact every_cut_is_causally_closed)
-  fi
-  set +e
-  # shellcheck disable=SC2086
-  out="$(cd "$here/loom" && LOOM_MAX_PREEMPTIONS="$preemptions" LOOM_MAX_BRANCHES=1000 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$here/loom/target}" \
-    cargo test --release --locked --offline $features "${test_args[@]}" 2>&1)"
-  code=$?
-  set -e
-  passed="$(grep -oE '[0-9]+ passed' <<<"$out" | awk '{n += $1} END {print n + 0}' || true)"
-  if [[ $code -eq 0 && "$passed" -gt 0 ]] &&
-     [[ "$name" != loom-section-bound2 || "$passed" -eq 6 ]]; then
-    verdict=pass
-  elif [[ $code -eq 101 ]] &&
-       grep -Fq 'Causality violation: Concurrent write accesses to `UnsafeCell`.' <<<"$out" &&
-       grep -Fq 'test result: FAILED. 0 passed; 1 failed;' <<<"$out"; then
-    verdict=causality
-  else
-    verdict=unknown
-  fi
-  if [[ "$verdict" == "$expected" ]]; then result="ok ($verdict, $passed models passed)"; else result="FAILED ($verdict)"; fi
-  printf '%-44s %-8s %s\n' "$name" "$expected" "$result"
-  if [[ "$result" != ok* ]]; then
-    failed=$((failed + 1))
-    printf '%s\n' "$out" | tail -40 | sed 's/^/    /'
-  fi
-done
+loom_run_rows "$here/loom" "$filter"
 
 if (( total == 0 )); then
   echo "check.sh: no run matches '$filter'" >&2

@@ -288,6 +288,14 @@ conformance/CAP/CAP-2-testhelpers-property-accept.hir
 conformance/CAP/CAP-2-testhelpers-property-reject.hir
 conformance/CAP/CAP-2-typed-heap-inert-bad.hir
 conformance/CAP/CAP-2-typed-heap-inert-ok.hir
+conformance/CAP/CAP-3-cpu-authority-capture-bad.hir
+conformance/CAP/CAP-3-cpu-closed-callback-ok.hir
+conformance/CAP/CAP-3-cpu-external-helper-bad.hir
+conformance/CAP/CAP-3-cpu-helper-value-bad.hir
+conformance/CAP/CAP-3-cpu-indirect-operation-bad.hir
+conformance/CAP/CAP-3-cpu-local-resource-bad.hir
+conformance/CAP/CAP-3-cpu-opaque-function-bad.hir
+conformance/CAP/CAP-3-cpu-shared-thaw-ok.hir
 conformance/CAP/CAP-3-dir-capture-under-dir-ok.hir
 conformance/CAP/CAP-3-dir-capture-under-empty-bad.hir
 conformance/CAP/CAP-3-dir-read-only-run.hir
@@ -2370,10 +2378,11 @@ conformance/LANG/LANG-9-testhelpers-expect-error-ok-fail.hir
 conformance/LANG/LANG-9-testhelpers-expect-error-run.hir
 conformance/LANG/LANG-9-testhelpers-expect-error-take-accept.hir
 conformance/LANG/LANG-9-testhelpers-expect-error-take-reject.hir
-conformance/LANG/LANG-9-testhelpers-property-boundary-run.hir
+conformance/LANG/LANG-9-testhelpers-property-boundary-fail.hir
 conformance/LANG/LANG-9-testhelpers-property-case-fail.hir
 conformance/LANG/LANG-9-testhelpers-property-generator-fail.hir
 conformance/LANG/LANG-9-testhelpers-property-law-fail.hir
+conformance/LANG/LANG-9-testhelpers-property-overrun-fail.hir
 conformance/LANG/LANG-9-testhelpers-property-run.hir
 conformance/LANG/LANG-9-testhelpers-property-shrink-hypothesis-1-fail.hir
 conformance/LANG/LANG-9-testhelpers-property-shrink-hypothesis-2-fail.hir
@@ -4350,6 +4359,7 @@ conformance/OWN/OWN-3-call-marker-bad.hir
 conformance/OWN/OWN-3-call-marker-ok.hir
 conformance/OWN/OWN-3-closure-capture-bad.hir
 conformance/OWN/OWN-3-closure-capture-ok.hir
+conformance/OWN/OWN-3-conditional-return-loop-borrow-run.hir
 conformance/OWN/OWN-3-constructor-mut-operand-bad.hir
 conformance/OWN/OWN-3-constructor-mut-operand-ok.hir
 conformance/OWN/OWN-3-element-same-field-block-argument-bad.hir
@@ -6712,7 +6722,7 @@ conformance/SEM/SEM-3-tar-write-run.hir
 conformance/SEM/SEM-3-tar-write-ustar-run.hir
 conformance/SEM/SEM-3-telemetry-context-run.hir
 conformance/SEM/SEM-3-telemetry-run.hir
-conformance/SEM/SEM-3-test-extra-run.hir
+conformance/SEM/SEM-3-test-extra-fail.hir
 conformance/SEM/SEM-3-text-perf-append-push-run.hir
 conformance/SEM/SEM-3-text-perf-arena-run.hir
 conformance/SEM/SEM-3-text-perf-bytes-run.hir
@@ -7416,12 +7426,3 @@ conformance/STORE/STORE-6-set-key-bad.hir
 conformance/STORE/STORE-6-set-key-ok.hir
 conformance/STORE/STORE-6-simd-key-bad.hir
 conformance/STORE/STORE-6-simd-key-ok.hir
-conformance/CAP/CAP-3-cpu-authority-capture-bad.hir
-conformance/CAP/CAP-3-cpu-closed-callback-ok.hir
-conformance/CAP/CAP-3-cpu-external-helper-bad.hir
-conformance/CAP/CAP-3-cpu-opaque-function-bad.hir
-conformance/CAP/CAP-3-cpu-shared-thaw-ok.hir
-conformance/CAP/CAP-3-cpu-local-resource-bad.hir
-conformance/CAP/CAP-3-cpu-helper-value-bad.hir
-conformance/CAP/CAP-3-cpu-indirect-operation-bad.hir
-conformance/OWN/OWN-3-conditional-return-loop-borrow-run.hir

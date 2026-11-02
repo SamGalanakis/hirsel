@@ -1567,7 +1567,10 @@ and destroys an unexpected `Ok` value before failing the test with `test.fail`.
 `test.property(t, gen, law, show)` runs 100 cases and `test.property_cases` an explicit
 count (zero calls neither callback). A generator `fn(mut test.Source) -> T` draws all of
 its randomness from the opaque `Source`, which records every choice; `law` must hold for
-every generated value. Case `c` draws fresh choices from a `prng` generator seeded with
+every generated value. A case whose generation overran is discarded before the law runs,
+and a run that evaluated zero cases — every case overran, or none was requested — reports
+`evaluated=0` through `test.log` and fails: a property run that checked nothing never
+reports a pass. Case `c` draws fresh choices from a `prng` generator seeded with
 `test.seed(t) + c * 0x9e3779b97f4a7c15` (wrapping), so `hirsel test --seed S` replays a
 reported run exactly. The first case whose law returns false is shrunk, then its value is
 regenerated, reported as `counterexample: V` through `test.log` (rendered by `show`) and
@@ -2834,7 +2837,7 @@ Ok payload. An unexpected Error payload is destroyed before test.fail, matching
 expect_error's cleanup rule. A failing payload finalizer therefore precedes the
 assertion failure. These are ordinary source operations using the existing Test
 capability. The resource-valued conformance example is
-`conformance/SEM/SEM-3-test-extra-run.hir`.
+`conformance/SEM/SEM-3-test-extra-fail.hir`.
 
 ## SHA-256
 

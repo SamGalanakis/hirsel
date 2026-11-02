@@ -1,5 +1,6 @@
 // rule: SEM-3
-// expect: run
+// expect: fail LANG-9 at line 47
+// stdout: test log: evaluated=0: no case evaluated the law
 // entry: trial
 resource type Watch {
   n: u8,

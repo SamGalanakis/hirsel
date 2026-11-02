@@ -10,7 +10,7 @@
   },
   "sources": [
     {
-      "path": "SEM-3-test-extra-run.hir",
+      "path": "SEM-3-test-extra-fail.hir",
       "module": []
     }
   ],

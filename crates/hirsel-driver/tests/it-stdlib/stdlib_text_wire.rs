@@ -495,9 +495,19 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 fn owned_results_and_requested_property_cases_finalize_once_before_reporting() {
     with_compiler_stack(|| {
         use hirsel_interp::observation::Effect;
-        for (relative, finalizers, passes) in [
-            ("SEM/SEM-3-test-extra-run.hir", 5, true),
-            ("DROP/DROP-2-expect-ok-error-fail.hir", 1, false),
+        for (relative, finalizers, passes, output) in [
+            (
+                "SEM/SEM-3-test-extra-fail.hir",
+                5,
+                false,
+                b"test log: evaluated=0: no case evaluated the law\n".as_slice(),
+            ),
+            (
+                "DROP/DROP-2-expect-ok-error-fail.hir",
+                1,
+                false,
+                b"".as_slice(),
+            ),
         ] {
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../conformance")
@@ -528,7 +538,7 @@ fn owned_results_and_requested_property_cases_finalize_once_before_reporting() {
             let drops: Vec<_> = observation.effects.iter().enumerate().filter_map(|(index, effect)| matches!(&effect.effect, Effect::Finalizer { definition } if definition.0.name == "Watch").then_some(index)).collect();
             // Passing property cases report nothing; each value is released in order.
             assert_eq!(drops.len(), finalizers);
-            assert!(observation.output.is_empty());
+            assert_eq!(observation.output, output);
             if !passes {
                 let failure = observation.effects.iter().position(|effect| matches!(&effect.effect, Effect::CapabilityConsumed(event) if event.operation == "test.fail")).unwrap();
                 assert!(drops[0] < failure);

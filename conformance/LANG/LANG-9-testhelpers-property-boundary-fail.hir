@@ -1,5 +1,6 @@
 // rule: LANG-9
-// expect: run
+// expect: fail LANG-9 at line 28
+// stdout: test log: evaluated=0: no case evaluated the law
 // entry: trial
 pub fn trial(t: Test) -> Result[(), ()] {
   test.property(

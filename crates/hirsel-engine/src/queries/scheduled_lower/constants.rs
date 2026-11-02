@@ -50,13 +50,14 @@ impl Constants {
                     return None;
                 }
                 let bytes = store.get_content(*record)?;
-                let (value, substitutions, _, _, _, _): (
+                let (value, substitutions, _, _, _, _, _): (
                     Materialized,
                     Vec<(hirsel_syntax::ExprId, Materialized)>,
                     Reads,
                     DepthEvidence<Span>,
                     bool,
                     staged::Selections,
+                    Reference,
                 ) = records.decode(anchors, &bytes)?;
                 Some((value, substitutions))
             }
@@ -72,6 +73,7 @@ impl Constants {
         depth: &DepthEvidence<Span>,
         executed: bool,
         selections: &staged::Selections,
+        manifest: Reference,
     ) -> Option<Vec<u8>> {
         let Data::Decoded(value, substitutions) = &self.data else {
             return None;
@@ -85,6 +87,7 @@ impl Constants {
                 depth,
                 executed,
                 selections,
+                manifest,
             ),
         )?;
         let metadata = reads
@@ -164,6 +167,7 @@ mod tests {
                 &DepthEvidence::leaf(32),
                 false,
                 &Vec::new(),
+                CONSTANT_DESCRIPTOR.reference(b"manifest fixture").unwrap(),
             )
             .unwrap();
         let record = store.put_content(CONSTANT_DESCRIPTOR, &bytes).unwrap();

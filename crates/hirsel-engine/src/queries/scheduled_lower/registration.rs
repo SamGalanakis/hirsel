@@ -27,6 +27,7 @@ struct Input {
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Stored {
+    manifest: Reference,
     output: Reference,
     decode_bytes: u64,
 }
@@ -134,7 +135,7 @@ impl FrontRegistrationQueries {
                 selections: Rc::new(RefCell::new(Vec::new())),
                 refusal: Rc::new(Cell::new(None)),
                 depth: Rc::new(RefCell::new(DepthEvidence::leaf(dependency_limit(
-                    self.lower.limits.call_depth,
+                    self.lower.namespace.limits.call_depth,
                 )))),
                 framed: true,
                 evidence: Rc::new(RefCell::new(Evidence::new(
@@ -182,7 +183,7 @@ impl FrontRegistrationQueries {
             .lower
             .records
             .encode_with_decode_bytes(
-                &self.lower.anchors,
+                &*self.lower.namespace.anchors,
                 &(
                     input.definition,
                     &data.text,
@@ -236,6 +237,7 @@ impl FrontRegistrationQueries {
             "hirsel.front.registration.action.v1",
             [
                 id.address.0.0.as_slice(),
+                self.lower.namespace.manifest.output.0.0.as_slice(),
                 data.reads.digest().0.as_slice(),
                 record.output.0.0.as_slice(),
             ],
@@ -289,7 +291,11 @@ impl FrontRegistrationQueries {
             |read| self.observe(input, read),
         )?;
         let stored: Stored = bincode::deserialize(&variant.payload).ok()?;
-        if stored.output.domain != OUTPUT
+        if !self
+            .lower
+            .namespace
+            .manifest_holds(stored.manifest, self.weight.scratch)
+            || stored.output.domain != OUTPUT
             || stored.output.len > self.weight.scratch
             || stored.decode_bytes > self.weight.scratch
         {
@@ -298,7 +304,13 @@ impl FrontRegistrationQueries {
         let acceptance = if self.lower.verify == Verify::On {
             Some(self.lower.store.verifier()?.execution(
                 persistent::evaluation_subject(&key, &variant.payload),
-                |package| self.lower.snapshot.validation_input_digest(package).ok(),
+                |package| {
+                    self.lower
+                        .namespace
+                        .snapshot
+                        .validation_input_digest(package)
+                        .ok()
+                },
             )?)
         } else {
             None
@@ -310,19 +322,23 @@ impl FrontRegistrationQueries {
             Reads,
             DepthEvidence<Span>,
             Vec<SignatureDependency>,
-        ) = self.lower.records.decode(&self.lower.anchors, &bytes)?;
+        ) = self
+            .lower
+            .records
+            .decode(&*self.lower.namespace.anchors, &bytes)?;
         if definition != input.definition
             || text.is_err()
             || reads
                 .first_changed(|read| self.observe(input, read))
                 .is_some()
             || depth.bounded
-            || depth.first.len() != dependency_limit(self.lower.limits.call_depth) as usize + 1
+            || depth.first.len()
+                != dependency_limit(self.lower.namespace.limits.call_depth) as usize + 1
             || depth
                 .first
                 .iter()
                 .flatten()
-                .any(|site| self.lower.sources.slice(*site).is_none())
+                .any(|site| self.lower.namespace.sources.slice(*site).is_none())
         {
             return None;
         }
@@ -350,6 +366,7 @@ impl FrontRegistrationQueries {
         };
         let key = Self::storage_key(input);
         let Ok(payload) = bincode::serialize(&Stored {
+            manifest: self.lower.namespace.manifest,
             output,
             decode_bytes,
         }) else {
@@ -378,12 +395,12 @@ impl FrontRegistrationQueries {
         let (mut syntax, occurrence): (ItemSyntax, u32) = self
             .lower
             .records
-            .decode(&self.lower.anchors, &bytes)
+            .decode(&*self.lower.namespace.anchors, &bytes)
             .ok_or(QueryError::NotImplemented)?;
         syntax.occurrence = occurrence;
         if syntax.item.definition != *input.definition.path()
             || syntax.text_hash != input.implementation
-            || !syntax.structurally_valid(|span| self.lower.sources.slice(span).is_some())
+            || !syntax.structurally_valid(|span| self.lower.namespace.sources.slice(span).is_some())
         {
             return Err(QueryError::NotImplemented);
         }
@@ -410,10 +427,10 @@ impl FrontRegistrationQueries {
         dependencies.extend_from_slice(&detail.signatures);
         let mut observed = ReadsBuilder::new();
         let staged = crate::comptime::prepare_staged_types(
-            self.lower.snapshot.types(),
+            self.lower.namespace.snapshot.types(),
             &checked.analyzed,
             &mut FrozenProvider::new(
-                &self.lower.snapshot,
+                &self.lower.namespace.snapshot,
                 input.definition.path().0.package.clone(),
                 &mut observed,
             ),
@@ -428,7 +445,7 @@ impl FrontRegistrationQueries {
         let constants = poll_fn(|_| {
             preparation
                 .poll(
-                    self.lower.snapshot.types(),
+                    self.lower.namespace.snapshot.types(),
                     &checked.analyzed,
                     &staged,
                     &checked.signature,
@@ -452,7 +469,7 @@ impl FrontRegistrationQueries {
             sizes: &[],
         }
         .lower(
-            self.lower.snapshot.types(),
+            self.lower.namespace.snapshot.types(),
             &self.lower.memo,
             self.lower
                 .lowering
@@ -461,7 +478,7 @@ impl FrontRegistrationQueries {
         )?;
         let admission = s1::ValidatedEvaluation::recorded(
             lowered,
-            &self.lower.snapshot,
+            &self.lower.namespace.snapshot,
             self.lower.verify,
             site,
         );
@@ -470,7 +487,12 @@ impl FrontRegistrationQueries {
         let runtime = self.lower.runtime_types()?;
         let result = admission
             .result?
-            .run_async(&self.lower.sources, self.lower.limits, &runtime, source)
+            .run_async(
+                &self.lower.namespace.sources,
+                self.lower.namespace.limits,
+                &runtime,
+                source,
+            )
             .await;
         source.merge(&result.value.reads);
         source.evidence.borrow_mut().accepted(result.acceptance);
@@ -513,7 +535,9 @@ impl QueryEngine {
         })
         };
         let mut required = FrontRegistrationQueries::input_bytes(definitions);
-        if required > allowance.bytes() || !Arc::ptr_eq(&self.types, lower.snapshot.types()) {
+        if required > allowance.bytes()
+            || !Arc::ptr_eq(&self.types, lower.namespace.snapshot.types())
+        {
             return Err(refused());
         }
         let signer = self.adapters.signature.clone().ok_or_else(refused)?;
@@ -529,7 +553,7 @@ impl QueryEngine {
                 .ok_or_else(refused)?;
             let bytes = lower
                 .records
-                .encode(&lower.anchors, &(&syntax, syntax.occurrence))
+                .encode(&*lower.namespace.anchors, &(&syntax, syntax.occurrence))
                 .ok_or_else(refused)?;
             let archived = lower.store.put_content(INPUT, &bytes).ok_or_else(refused)?;
             // Generator declarations are absent from the ordinary-body front.

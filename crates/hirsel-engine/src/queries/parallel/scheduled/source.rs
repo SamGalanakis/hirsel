@@ -203,7 +203,18 @@ impl QueryEngine {
         let siblings = siblings.checked_add(lazy_siblings).ok_or_else(refused)?;
         let mut index = crate::NativeMetadataWeight::default();
         index.tree::<FileId, SiblingFile>(files);
+        let mut instance_weight = crate::NativeMetadataWeight::default();
+        instance_weight
+            .instance_bodies(&mut self.instance_bodies(&definitions.iter().cloned().collect()));
+        let source_rows = self
+            .source_paths()
+            .len()
+            .checked_mul(3)
+            .and_then(|count| count.checked_mul(size_of::<DefId>()))
+            .ok_or_else(refused)?;
         let front_inputs = FrontBodyQueries::input_bytes(definitions)
+            .and_then(|bytes| bytes.checked_add(instance_weight.bytes()))
+            .and_then(|bytes| bytes.checked_add(source_rows as u64))
             .and_then(|bytes| bytes.checked_add(index.bytes()))
             .and_then(|bytes| {
                 bytes.checked_add(

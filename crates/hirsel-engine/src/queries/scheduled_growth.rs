@@ -363,7 +363,12 @@ impl QueryEngine {
                 message: "required source roots are missing or exceed admission".into(),
             })
         };
-        let definitions = self.front_source_roots();
+        let definitions = front
+            .namespace()
+            .roots
+            .iter()
+            .map(|id| id.path().clone())
+            .collect::<Vec<_>>();
         if FrontGrowthQueries::input_bytes(&definitions, weight)
             .is_none_or(|n| n > allowance.bytes())
         {
@@ -409,12 +414,12 @@ impl QueryEngine {
         Ok(Arc::new(FrontGrowthQueries {
             query,
             roots,
-            front,
+            front: front.clone(),
             // The front owner remains held here, including its original
             // source/context reservation. No copied anchor/path tables.
             items: source.anchors,
             records: source.records,
-            sources: self.sources.clone(),
+            sources: front.namespace().sources.clone(),
             snapshot: source.snapshot,
             package,
             store,

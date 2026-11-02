@@ -72,7 +72,7 @@ struct Input {
 /// catalog moves into the producer once, so sizing never repeats encoding or
 /// rereads a newer source snapshot. This carries no V or native C authority.
 pub struct FrontRunInputs {
-    signatures: Arc<crate::snapshot::SignatureSnapshot>,
+    namespace: Arc<NamespaceCapture>,
     source_paths: Vec<DefPath>,
     inputs: BTreeMap<DefPath, Input>,
     store: Arc<dyn ResultStore>,
@@ -1312,38 +1312,57 @@ impl QueryEngine {
         allowance: MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontRunQueries>, QueryError> {
-        if !Arc::ptr_eq(&lower.signatures(), &self.signature_inputs()) {
-            return Err(operational(
-                "Run and Lower require the same signature snapshot",
-            ));
-        }
-        let inputs = self.front_run_inputs(allowance.bytes())?;
+        front.namespace().require_consistent(lower.namespace())?;
+        let inputs = self.front_run_inputs_in(front.namespace().clone(), allowance.bytes())?;
         self.front_run_queries_with_inputs(check, front, lower, inputs, weight, allowance, errors)
     }
 
     /// Capture before partitioning the existing host snapshot allowance. Both
     /// the planner and producer consume this one catalog's exact byte count.
     pub fn front_run_inputs(&mut self, limit: u64) -> Result<FrontRunInputs, QueryError> {
+        self.prepare_private_summaries();
+        let definitions = self.front_source_roots();
+        let namespace = self.capture_namespace(&definitions, &[], limit)?;
+        self.front_run_inputs_in(namespace, limit)
+    }
+    pub fn front_run_inputs_in(
+        &mut self,
+        namespace: Arc<NamespaceCapture>,
+        limit: u64,
+    ) -> Result<FrontRunInputs, QueryError> {
+        namespace.require_environment(self)?;
         // Preparation captures the semantic catalogue once. A source Check
         // does not demand its Run or Precompute producers.
-        self.prepare_private_summaries();
-        let signatures = self.signature_inputs();
+        let signatures = namespace.snapshot.clone();
         let store = self
             .result_store
             .clone()
             .ok_or(QueryError::NotImplemented)?;
-        let declarations = self.frozen_declarations();
-        let source_paths = self.source_paths();
+        let declarations = namespace.declarations.clone();
+        let source_paths = namespace
+            .source_paths
+            .iter()
+            .map(|id| id.path().clone())
+            .collect::<Vec<_>>();
         let mut paths: BTreeSet<_> = source_paths.iter().cloned().collect();
-        paths.extend(self.native_builtin_signatures().into_keys());
-        paths.extend(self.staged_constants.keys().cloned());
+        paths.extend(
+            namespace
+                .snapshot
+                .definitions()
+                .iter()
+                .map(|id| id.path().clone()),
+        );
         let mut inputs = BTreeMap::new();
         let required = FrontRunQueries::input_bytes(&paths.iter().cloned().collect::<Vec<_>>())
             .ok_or_else(|| operational("Run input inventory overflow"))?;
         for path in paths {
             let source = source_paths.binary_search(&path).is_ok();
-            let output = self.item_signature(&path)?;
-            let signature = output.value;
+            let namespace::HeaderInput {
+                output,
+                reads: signature_reads,
+                semantic,
+            } = namespace.header(&path)?;
+            let signature = output.value.clone();
             let owner_signature = signatures
                 .body_view(&path.0.package, DefId::intern(&path))
                 .ok_or(QueryError::NotImplemented)??
@@ -1364,28 +1383,24 @@ impl QueryEngine {
             // Scalar semantic_body_node follows the complete Signature
             // observations too: normalized coverage can omit aliases and
             // primitive lookups whose spelling still belongs to PS9 closure.
-            if let Some(reads) = self.shared_memo_reads(&path, QueryKind::Signature) {
+            if let Some(reads) = signature_reads {
                 extend_reads(&mut dependencies, &reads, |key| {
                     FrontBodyQueries::lookup_in(&signatures, &declarations, key)
                 });
             }
-            if let Some(reads) = self.dependency_reads(&path, QueryKind::Signature) {
-                dependencies.extend(
-                    reads
-                        .semantic_definitions()
-                        .map(|definition| definition.path().clone()),
-                );
-            }
+            dependencies.extend(semantic.into_iter().map(|id| id.path().clone()));
             let mut executable = false;
             let mut generated = false;
             let mut implementation = ContentHash::default();
             if source {
-                self.materialize(&path)?;
-                let syntax = self.snapshot(&path)?;
+                let syntax = namespace.syntax(&path)?;
                 executable = generation::executable(&syntax);
                 generated = generation::generator(&syntax).is_some();
                 implementation = syntax.text_hash;
-                content.extend(self.semantic_tokens(&syntax)?);
+                content.extend(
+                    hirsel_fmt::semantic_item(&syntax)
+                        .ok_or_else(|| operational("invalid semantic source item"))?,
+                );
             }
             if let SignatureKind::Type(declaration) = &signature.kind {
                 dependencies.extend(declaration.drop.iter().cloned());
@@ -1420,7 +1435,7 @@ impl QueryEngine {
             );
         }
         Ok(FrontRunInputs {
-            signatures,
+            namespace,
             source_paths,
             inputs,
             store,
@@ -1459,7 +1474,7 @@ impl QueryEngine {
         allowance: MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontRunQueries>, QueryError> {
-        let inputs = self.front_run_inputs(allowance.bytes())?;
+        let inputs = self.front_run_inputs_in(front.namespace().clone(), allowance.bytes())?;
         self.front_semantic_queries_with_inputs(front, lower, inputs, weight, allowance, errors)
     }
     pub fn front_semantic_queries_with_inputs(
@@ -1484,23 +1499,19 @@ impl QueryEngine {
         allowance: MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontRunQueries>, QueryError> {
-        if !Arc::ptr_eq(&inputs.signatures, &self.signature_inputs())
-            || !Arc::ptr_eq(&inputs.signatures, &lower.signatures())
-        {
-            return Err(operational(
-                "Run inputs and Lower require the same signature snapshot",
-            ));
-        }
+        inputs.namespace.require_consistent(front.namespace())?;
+        inputs.namespace.require_consistent(lower.namespace())?;
         if inputs.required > allowance.bytes() {
             return Err(operational("Run inputs exceed admission"));
         }
         let FrontRunInputs {
-            signatures,
+            namespace,
             source_paths,
             inputs,
             store,
             required,
         } = inputs;
+        let signatures = namespace.snapshot.clone();
         // Rows are demanded per type the run names, so it holds only rows its
         // closure reaches. Each type's drop is one of its Input dependencies,
         // so the closure walk reaches every finalizer before the run starts.
@@ -1574,7 +1585,7 @@ impl QueryEngine {
             foreign_threads: self.foreign_threads.clone(),
             foreign_links: self.foreign_links.clone(),
             records: crate::NativeRecords::new(self.types.clone(), store.clone()),
-            anchors: crate::NativeRecordContext::capture(self),
+            anchors: (*namespace.anchors).clone(),
             store,
             completed: Mutex::new(BTreeMap::new()),
             failures: Mutex::new(BTreeMap::new()),

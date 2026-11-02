@@ -577,12 +577,13 @@ impl QueryEngine {
                 "storage recipe exceeds its parent execution admission",
             ));
         }
-        if !Arc::ptr_eq(&lower.signatures(), &self.signature_inputs()) {
-            return Err(invalid(
-                "storage and Lower require the same signature snapshot",
-            ));
-        }
-        let definitions = self.front_source_roots();
+        front.namespace().require_consistent(lower.namespace())?;
+        let definitions = front
+            .namespace()
+            .roots
+            .iter()
+            .map(|id| id.path().clone())
+            .collect::<Vec<_>>();
         let inventory = FrontStorageGraphQueries::input_bytes(&definitions)
             .ok_or(QueryError::NotImplemented)?;
         let output_budget = allowance
@@ -591,7 +592,13 @@ impl QueryEngine {
             .ok_or_else(|| invalid("source storage inventory exceeds admission"))?;
         let instances = definitions
             .iter()
-            .filter(|p| self.source_facts(p).is_some_and(|f| f.instance_bodied))
+            .filter(|p| {
+                front
+                    .namespace()
+                    .instances
+                    .declarations
+                    .contains(&DefId::intern(p))
+            })
             .map(DefId::intern)
             .collect::<Vec<_>>()
             .into_boxed_slice();

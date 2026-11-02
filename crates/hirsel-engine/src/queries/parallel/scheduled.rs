@@ -240,7 +240,7 @@ pub struct FrontBodyQueries {
     body_demands: Box<[(Key, Key)]>,
     types: Arc<hirsel_types::TypeInterner>,
     memo: Arc<hirsel_types::TypeMemo>,
-    snapshot: Arc<SignatureSnapshot>,
+    namespace: Arc<NamespaceCapture>,
     declarations: Arc<Declarations>,
     citations: OwnedSourceContext,
     resolver: Option<Arc<dyn ResolverPhase>>,
@@ -250,7 +250,6 @@ pub struct FrontBodyQueries {
     candidates: BTreeMap<DefId, ContentHash>,
     records: Arc<persistent::TypeRecords>,
     input_records: crate::NativeRecords,
-    anchors: Arc<crate::NativeRecordContext>,
     store: Arc<dyn ResultStore>,
     work: Mutex<BTreeMap<(DefId, QueryKind), u64>>,
     store_adoptions: AtomicU64,
@@ -338,8 +337,11 @@ impl FrontBodyQueries {
                 })
             })
     }
+    pub fn namespace(&self) -> &Arc<NamespaceCapture> {
+        &self.namespace
+    }
     pub(crate) fn snapshot(&self) -> &Arc<SignatureSnapshot> {
-        &self.snapshot
+        &self.namespace.snapshot
     }
     /// Retain a typed settled Summary under its own grant. Its producer keeps
     /// the existing complete source/type reservation alive through the view.
@@ -368,7 +370,7 @@ impl FrontBodyQueries {
             (product.address, product.action),
             value,
             ProductSource::prepare(
-                self.anchors.as_ref().clone(),
+                self.namespace.anchors.as_ref().clone(),
                 self.input_records.clone(),
                 self._allowance.clone(),
             )?,
@@ -409,7 +411,7 @@ impl FrontBodyQueries {
             syntax,
             &self.types,
             &self.memo,
-            &self.snapshot,
+            &self.namespace.snapshot,
             &declarations,
             &self.citations,
             self.environment,
@@ -423,26 +425,27 @@ impl FrontBodyQueries {
     }
     pub(crate) fn stage_source(&self) -> crate::queries::scheduled_stage::StageSource {
         crate::queries::scheduled_stage::StageSource {
-            snapshot: self.snapshot.clone(),
+            snapshot: self.namespace.snapshot.clone(),
             memo: self.memo.clone(),
             records: self.input_records.clone(),
-            anchors: self.anchors.clone(),
+            anchors: self.namespace.anchors.clone(),
             store: self.store.clone(),
         }
     }
     /// The exact immutable signature universe selected with these P inputs.
     pub fn signatures(&self) -> Arc<SignatureSnapshot> {
-        self.snapshot.clone()
+        self.namespace.snapshot.clone()
     }
     fn signature(&self, input: &Input) -> Result<Arc<QueryOutput<SignatureRef>>, QueryError> {
         if let Some(product) = self
+            .namespace
             .snapshot
             .header_products()
             .and_then(|headers| headers.product(input.definition))
         {
             return product?.result.clone();
         }
-        match self.snapshot.signature(input.definition) {
+        match self.namespace.snapshot.signature(input.definition) {
             Some(Ok(signature)) => Ok(Arc::new(output(signature.clone()))),
             Some(Err(error)) => Err(error.clone()),
             None => Err(QueryError::NotImplemented),
@@ -451,6 +454,7 @@ impl FrontBodyQueries {
     fn signature_reads(&self, input: &Input) -> Result<Arc<Reads>, QueryError> {
         let mut reads = ReadsBuilder::new();
         if let Some(product) = self
+            .namespace
             .snapshot
             .header_products()
             .and_then(|headers| headers.product(input.definition))
@@ -483,8 +487,9 @@ impl FrontBodyQueries {
                 .then(|| syntax.clone());
         }
         let bytes = self.store.get_content(input.syntax)?;
-        let (mut syntax, occurrence): (ItemSyntax, u32) =
-            self.input_records.decode(&*self.anchors, &bytes)?;
+        let (mut syntax, occurrence): (ItemSyntax, u32) = self
+            .input_records
+            .decode(&*self.namespace.anchors, &bytes)?;
         if syntax.item.definition != *input.definition.path()
             || syntax.text_hash != input.implementation
             || !syntax.structurally_valid(|span| self.citations.sources.slice(span).is_some())
@@ -509,6 +514,7 @@ impl FrontBodyQueries {
                     + std::mem::size_of::<(DefId, Key)>()
                     + std::mem::size_of::<(Key, Key)>()) as u64,
             )?
+            .checked_add(NamespaceCapture::input_bytes(definitions)?)?
             .checked_add(
                 (std::mem::size_of::<Self>()
                     + std::mem::size_of::<FrontSourceBacking>()
@@ -704,6 +710,7 @@ impl FrontBodyQueries {
             if !cx.evict_body()
                 && !self.evict_idle(cx.scratch_bytes())
                 && !self
+                    .namespace
                     .snapshot
                     .header_products()
                     .is_some_and(|headers| headers.evict())
@@ -928,14 +935,16 @@ impl FrontBodyQueries {
         &self,
         definition: &DefPath,
     ) -> Option<Result<header_products::ModuleProof, QueryError>> {
-        self.snapshot
+        self.namespace
+            .snapshot
             .header_products()?
             .module_proof(DefId::intern(definition))
             .transpose()
     }
     /// Whether that proof is currently retained in the admitted cache.
     pub fn module_proof_resident(&self, definition: &DefPath) -> bool {
-        self.snapshot
+        self.namespace
+            .snapshot
             .header_products()
             .is_some_and(|headers| headers.module_proof_resident(DefId::intern(definition)))
     }
@@ -943,13 +952,15 @@ impl FrontBodyQueries {
     /// How many times each private module's proof was inferred in this
     /// front, evictions included, by a representative definition.
     pub fn module_inferences(&self) -> Vec<(DefPath, u64)> {
-        self.snapshot
+        self.namespace
+            .snapshot
             .header_products()
             .map_or_else(Vec::new, |headers| headers.module_inferences())
     }
     /// Whether `definition`'s settled header row is retained in the admitted cache.
     pub fn header_resident(&self, definition: &DefPath) -> bool {
-        self.snapshot
+        self.namespace
+            .snapshot
             .header_products()
             .is_some_and(|headers| headers.ready(DefId::intern(definition)).is_some())
     }
@@ -975,7 +986,7 @@ impl FrontBodyQueries {
     /// Successful lookup targets are semantic closure edges even when a
     /// primitive/alias adds no normalized signature fingerprint dependency.
     pub(crate) fn lookup_definition(&self, key: crate::memo::LookupKey) -> Option<DefPath> {
-        Self::lookup_in(&self.snapshot, &self.declarations, key)
+        Self::lookup_in(&self.namespace.snapshot, &self.declarations, key)
     }
     pub(crate) fn lookup_in(
         snapshot: &SignatureSnapshot,
@@ -1013,6 +1024,7 @@ impl FrontBodyQueries {
         Some(match *read {
             ReadKey::PrivateSummary(id) => memos::private_summary_value(
                 &self
+                    .namespace
                     .snapshot
                     .signature(id)
                     .and_then(Result::ok)?
@@ -1020,24 +1032,26 @@ impl FrontBodyQueries {
                     .inferred_unique,
             ),
             ReadKey::DeclaredSignature(id) => {
-                let signature = self.snapshot.signature(id).and_then(Result::ok)?;
+                let signature = self.namespace.snapshot.signature(id).and_then(Result::ok)?;
                 memos::declared_signature_value(&self.types, &signature)?
             }
             ReadKey::Signature(id) | ReadKey::ExecutedSignature(id) => memos::signature_value(
-                self.snapshot
+                self.namespace
+                    .snapshot
                     .signature(id)
                     .and_then(Result::ok)
                     .map(|signature| signature.fingerprint),
             ),
             ReadKey::FailedSignature(id) => {
                 if self
+                    .namespace
                     .snapshot
                     .signature(id)
                     .is_some_and(|result| result.is_ok())
                 {
                     ContentHash::of_parts("hirsel.read.signature-ok", std::iter::empty::<&[u8]>())
                 } else {
-                    self.snapshot.failed_signature_receipt(id)
+                    self.namespace.snapshot.failed_signature_receipt(id)
                 }
             }
             ReadKey::Lookup(key) => {
@@ -1050,9 +1064,9 @@ impl FrontBodyQueries {
                 };
                 let index = self.declarations.index(context.package.clone());
                 match key.source {
-                    LookupSource::Provider => {
-                        memos::provider_value(&self.snapshot.lookup(&context, &path).result)
-                    }
+                    LookupSource::Provider => memos::provider_value(
+                        &self.namespace.snapshot.lookup(&context, &path).result,
+                    ),
                     LookupSource::Manifest => {
                         // As the resolver recorded it: a name the manifest index
                         // misses (a prelude name) is the provider's, if visible.
@@ -1062,7 +1076,7 @@ impl FrontBodyQueries {
                             | hirsel_resolve::LookupError::MissingMember(_),
                         ) = &result
                         {
-                            match self.snapshot.lookup(&context, &path).result {
+                            match self.namespace.snapshot.lookup(&context, &path).result {
                                 Ok(found) => {
                                     if !matches!(&result, Err(hirsel_resolve::LookupError::MissingMember(candidates)) if !candidates.contains(&found))
                                     {
@@ -1092,12 +1106,14 @@ impl FrontBodyQueries {
                 }
             }
             ReadKey::Representation(id) => self
+                .namespace
                 .snapshot
                 .representation(id)
                 .and_then(Result::ok)
                 .map_or_else(ContentHash::default, |(_, digest)| digest.0),
             ReadKey::CitedText(id) => self.citations.cited_text(id),
             ReadKey::DeclarationCandidates(id) => self
+                .namespace
                 .snapshot
                 .declaration_candidates(id)
                 .or_else(|| self.candidates.get(&id).copied())
@@ -1105,16 +1121,27 @@ impl FrontBodyQueries {
             ReadKey::Environment => self.environment,
             // A refused V universe observes nothing: the read does not hold.
             ReadKey::ValidationView(id) => self
+                .namespace
                 .snapshot
                 .validation(package)
                 .ok()?
                 .view(id)
                 .map_or_else(ContentHash::default, |input| input.digest().0),
-            ReadKey::ValidationUniverse(package) => {
-                self.snapshot.validation_input_digest(&package.id()).ok()?
+            ReadKey::ValidationUniverse(package) => self
+                .namespace
+                .snapshot
+                .validation_input_digest(&package.id())
+                .ok()?,
+            ReadKey::UniverseErrors => {
+                self.namespace
+                    .snapshot
+                    .validation(package)
+                    .ok()?
+                    .universe_errors()
+                    .0
             }
-            ReadKey::UniverseErrors => self.snapshot.validation(package).ok()?.universe_errors().0,
             ReadKey::FirstHeap => self
+                .namespace
                 .snapshot
                 .validation(package)
                 .ok()?
@@ -1194,7 +1221,7 @@ impl FrontBodyQueries {
             .iter()
             .map(|((path, kind), count)| (path.path().clone(), *kind, *count))
             .collect::<Vec<_>>();
-        if let Some(headers) = self.snapshot.header_products() {
+        if let Some(headers) = self.namespace.snapshot.header_products() {
             work.extend(headers.work_snapshot());
             headers.private_work(&mut work);
         }
@@ -1635,7 +1662,7 @@ impl FrontBodyQueries {
             owners: (*self.citations.owners).clone(),
             types: &self.types,
             memo: &self.memo,
-            snapshot: &self.snapshot,
+            snapshot: &self.namespace.snapshot,
             declarations: &self.declarations,
             citations: &self.citations,
             sources: &self.citations.sources,
@@ -1886,6 +1913,7 @@ impl BodyTask {
             return None;
         }
         let signature = queries
+            .namespace
             .snapshot
             .signature(input.definition)
             .and_then(Result::ok);
@@ -1930,6 +1958,7 @@ impl BodyTask {
         }
         let bytes = queries.store.get_content(variant.output)?;
         let signature = queries
+            .namespace
             .snapshot
             .signature(input.definition)
             .and_then(Result::ok);
@@ -2433,6 +2462,24 @@ impl QueryEngine {
         allowance: MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
+        let capture = self.capture_namespace(definitions, registrations, allowance.bytes())?;
+        self.front_body_queries_in(definitions, capture, weight, allowance, errors)
+    }
+    pub fn front_body_queries_in(
+        &mut self,
+        definitions: &[DefPath],
+        namespace: Arc<NamespaceCapture>,
+        weight: MemoryWeight,
+        allowance: MemoryReservation,
+        errors: RuntimeErrors,
+    ) -> Result<Arc<FrontBodyQueries>, QueryError> {
+        namespace.require_environment(self)?;
+        let registrations = namespace
+            .registrations
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let registrations = registrations.as_slice();
         let refusal = |reason: &str| {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "front query admission".into(),
@@ -2467,9 +2514,25 @@ impl QueryEngine {
         // their stable source/anchor archive inputs.
         for definition in definitions {
             self.materialize(definition)?;
+            if namespace
+                .bodies
+                .get(&DefId::intern(definition))
+                .map(|input| input.implementation)
+                != Some(self.snapshot(definition)?.text_hash)
+            {
+                return Err(refusal("written source differs from namespace capture"));
+            }
         }
         self.register_specializations(definitions);
-        let anchors = Arc::new(crate::NativeRecordContext::capture(self));
+        let anchors = namespace.anchors.clone();
+        required = required
+            .checked_add(
+                namespace.retained_bytes().saturating_sub(
+                    NamespaceCapture::input_bytes(definitions)
+                        .ok_or_else(|| refusal("capture size overflow"))?,
+                ),
+            )
+            .ok_or_else(|| refusal("capture size overflow"))?;
         required = required
             .checked_add(
                 anchors
@@ -2553,11 +2616,8 @@ impl QueryEngine {
             let registration = registrations
                 .iter()
                 .find(|accepted| accepted.definition() == definition);
-            if let Some(accepted) = registration {
-                accepted.validate(self)?;
-            }
             self.materialize(definition)?;
-            let original = self.snapshot(definition)?;
+            let original = namespace.syntax(definition)?;
             let declaration = generation::instance_bodied(&original);
             let syntax = if declaration {
                 if registration.is_some() {
@@ -2584,15 +2644,13 @@ impl QueryEngine {
             };
             let implementation = syntax.text_hash;
             let text = self.key_text(definition, QueryKind::Modes)?;
-            let key = match registration {
-                Some(accepted) => self.accepted_front_store_key(accepted, QueryKind::Modes)?,
-                None if declaration => {
-                    self.front_declaration_store_key(definition, QueryKind::Modes)?
-                }
-                None => self
-                    .store_key(definition, QueryKind::Modes)
-                    .ok_or_else(|| refusal("store key"))?,
-            };
+            let key = namespace
+                .bodies
+                .get(&DefId::intern(definition))
+                .and_then(|input| input.queries.as_ref())
+                .ok_or_else(|| refusal("definition outside accepted capture"))?
+                .modes
+                .clone();
             // Immutable S0 variants provide body reuse. The construction
             // inventory itself must never pin a mutable engine's checked body
             // after a request settles, including the explicit zero hold policy.
@@ -2619,12 +2677,7 @@ impl QueryEngine {
                 registration.cloned(),
             ));
         }
-        if !private_unique::registrations_covered(&self.private_summary_inputs, registrations) {
-            self.private_summary_inputs = private_unique::registration_inputs(registrations);
-            self.private_summary_revision = None;
-            self.retire_snapshot();
-        }
-        let snapshot = self.signature_inputs();
+        let snapshot = namespace.snapshot.clone();
         let retention = Arc::new(Mutex::new(allowance.bytes() - required));
         if let Some(headers) = snapshot.header_products() {
             headers.configure_private(weight.scratch, registrations);
@@ -2679,6 +2732,7 @@ impl QueryEngine {
         body_demands.sort_unstable_by_key(|&(demand, _)| demand);
         let admitted = allowance.bytes();
         let mut allowance = allowance;
+        namespace.admit(&mut allowance, self.sources.clone())?;
         let products = ProductSource::admit_shared(
             anchors.as_ref().clone(),
             input_records.clone(),
@@ -2711,17 +2765,18 @@ impl QueryEngine {
         let header_allowance = snapshot
             .header_products()
             .map(|headers| headers.configure_source_backing(backing.clone(), retention.clone()));
+        let namespace_sources = namespace.sources.clone();
         Ok(Arc::new(FrontBodyQueries {
             inputs,
             by_definition: by_definition.into_boxed_slice(),
             body_demands: body_demands.into_boxed_slice(),
             types: self.types.clone(),
             memo: self.memo.clone(),
-            snapshot,
+            namespace,
             declarations: declarations.with_archived_siblings(sibling_archives),
             citations: OwnedSourceContext {
                 unique_failures: self.private_unique_failures.clone(),
-                sources: self.sources.clone(),
+                sources: namespace_sources,
                 items,
                 declarations: self.declarations.observations(),
                 catalog: self.catalog.clone(),
@@ -2736,7 +2791,6 @@ impl QueryEngine {
             candidates,
             records: self.type_records().ok_or_else(|| refusal("type records"))?,
             input_records,
-            anchors,
             store,
             slots: Mutex::new(BTreeMap::new()),
             handoff: Mutex::new(None),

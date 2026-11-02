@@ -45,7 +45,7 @@ const FAILURE: Domain = Domain {
 };
 const LOWER_DESCRIPTOR: Domain = Domain {
     kind: 0x4600_0006,
-    schema: 8,
+    schema: 9,
 };
 // Ordinary immutable substitution bytes, owned by the selected provider like
 // the original body archive. Inspectors decode under their working allowance.
@@ -55,7 +55,7 @@ const LOWER_MATERIALIZED: Domain = Domain {
 };
 const CONSTANT_DESCRIPTOR: Domain = Domain {
     kind: 0x4600_0007,
-    schema: 4,
+    schema: 5,
 };
 const LOWER_VERIFICATION: Domain = Domain {
     kind: 0x4600_0033,
@@ -86,10 +86,7 @@ impl DefinitionDecodeLayout {
     }
 }
 struct Input {
-    lower: EntryKey,
-    evaluate: EntryKey,
-    implementation: ContentHash,
-    site: Span,
+    captured: Arc<namespace::BodyKeys>,
     waiting: [Mutex<Option<Span>>; 2],
 }
 #[derive(Clone)]
@@ -146,8 +143,9 @@ impl LowerProduct {
             .authority
             .load(
                 &cache,
-                owner.snapshot.types(),
+                owner.namespace.snapshot.types(),
                 owner
+                    .namespace
                     .snapshot
                     .validation(&self.definition.path().0.package)
                     .ok()?,
@@ -164,7 +162,7 @@ impl LowerProduct {
             None => Some(self.dependencies.to_vec()),
             Some(archive) => archive.dependencies(
                 &owner.records,
-                &owner.anchors,
+                &*owner.namespace.anchors,
                 &*owner.store,
                 owner.weight.scratch,
             ),
@@ -186,7 +184,7 @@ impl LowerProduct {
     }
 }
 fn decode_definition(owner: &FrontLowerQueries, body: Reference) -> Option<DefinitionRef> {
-    let source = Arc::new(owner.anchors.clone());
+    let source = owner.namespace.anchors.clone();
     Some(Arc::new(
         owner
             .records
@@ -241,7 +239,7 @@ impl Outcome {
             Some(archive) => evidence::current_reads(
                 archive.load(
                     &owner.records,
-                    &owner.anchors,
+                    &*owner.namespace.anchors,
                     &*owner.store,
                     owner.weight.scratch,
                 )?,
@@ -425,6 +423,7 @@ impl FrontLowerOutput {
     }
 }
 pub struct FrontLowerQueries {
+    namespace: Arc<NamespaceCapture>,
     inputs: Inputs,
     generator: Option<(DefId, Span)>,
     staged: staged::Staged,
@@ -433,18 +432,13 @@ pub struct FrontLowerQueries {
     /// private representation of: its LayoutBody inputs.
     layouts: BTreeMap<DefId, ContentHash>,
     front: Arc<FrontBodyQueries>,
-    snapshot: Arc<SignatureSnapshot>,
     memo: Arc<hirsel_types::TypeMemo>,
     lowering: Option<Arc<dyn LoweringPhase>>,
     runtime: std::sync::OnceLock<Result<Arc<hirsel_interp::aggregate::RuntimeTypes>, QueryError>>,
-    instances: Arc<hirsel_tir::InstanceBodies>,
-    sources: SourceMap,
-    limits: crate::ComptimeLimits,
     verify: Verify,
     /// A recompute-verifying request rebuilds every product through its
     /// producer instead of reopening carried or stored descriptors.
     verify_store: crate::store::VerifyStore,
-    anchors: crate::NativeRecordContext,
     records: crate::NativeRecords,
     store: Arc<dyn ResultStore>,
     outcomes: Mutex<BTreeMap<(u32, ContentHash), (Reference, Box<Outcome>, u64)>>,
@@ -511,8 +505,12 @@ impl FrontLowerQueries {
         let mut keys = Vec::new();
         for (path, input) in &self.inputs {
             for (kind, phase, address) in [
-                (FRONT_LOWER_KIND, QueryKind::Lower, input.lower.0),
-                (FRONT_EVALUATE_KIND, QueryKind::Evaluate, input.evaluate.0),
+                (FRONT_LOWER_KIND, QueryKind::Lower, input.captured.lower.0),
+                (
+                    FRONT_EVALUATE_KIND,
+                    QueryKind::Evaluate,
+                    input.captured.evaluate.0,
+                ),
             ] {
                 if outcomes.contains_key(&(kind, address)) {
                     keys.push(crate::memo::MemoKey::new(phase, DefId::intern(path)));
@@ -527,8 +525,12 @@ impl FrontLowerQueries {
         let mut rows = Vec::new();
         for (path, input) in &self.inputs {
             for (kind, phase, address) in [
-                (FRONT_LOWER_KIND, QueryKind::Lower, input.lower.0),
-                (FRONT_EVALUATE_KIND, QueryKind::Evaluate, input.evaluate.0),
+                (FRONT_LOWER_KIND, QueryKind::Lower, input.captured.lower.0),
+                (
+                    FRONT_EVALUATE_KIND,
+                    QueryKind::Evaluate,
+                    input.captured.evaluate.0,
+                ),
             ] {
                 if let Some((_, outcome, _)) = outcomes.get(&(kind, address)) {
                     rows.push((
@@ -577,24 +579,29 @@ impl FrontLowerQueries {
             .collect()
     }
     pub fn sources(&self) -> &SourceMap {
-        &self.sources
+        &self.namespace.sources
     }
     pub fn runtime_types(&self) -> Result<Arc<hirsel_interp::aggregate::RuntimeTypes>, QueryError> {
         self.runtime
             .get_or_init(|| {
                 let lowering = self.lowering.as_deref().ok_or(QueryError::NotImplemented)?;
                 Ok(Arc::new(
-                    self.snapshot
+                    self.namespace
+                        .snapshot
                         .comptime_runtime_types(Some(lowering.entry_body())),
                 ))
             })
             .clone()
     }
+    pub fn namespace(&self) -> &Arc<NamespaceCapture> {
+        &self.namespace
+    }
     pub fn signatures(&self) -> Arc<SignatureSnapshot> {
-        self.snapshot.clone()
+        self.namespace.snapshot.clone()
     }
     pub fn signature(&self, path: &DefPath) -> Result<hirsel_types::SignatureRef, QueryError> {
-        self.snapshot
+        self.namespace
+            .snapshot
             .signature(DefId::intern(path))
             .ok_or(QueryError::NotImplemented)?
     }
@@ -740,7 +747,10 @@ impl FrontLowerQueries {
     ) -> Result<MaterializedRef, QueryError> {
         if arguments.is_empty()
             && self.front.query(path).is_none()
-            && let Some(value) = self.snapshot.builtin_dictionary_value(&self.memo, path)?
+            && let Some(value) = self
+                .namespace
+                .snapshot
+                .builtin_dictionary_value(&self.memo, path)?
         {
             return Ok(Arc::new(value));
         }
@@ -760,7 +770,7 @@ impl FrontLowerQueries {
             Ok(Value::Constant(value)) => value
                 .decoded(
                     &self.records,
-                    &self.anchors,
+                    &*self.namespace.anchors,
                     &*self.store,
                     self.weight.scratch,
                 )
@@ -792,13 +802,19 @@ impl FrontLowerQueries {
         path: &DefPath,
         arguments: &[hirsel_types::GenericArgument],
     ) -> Result<Option<DefPath>, QueryError> {
-        self.instances
-            .resolve(DefId::intern(path), self.snapshot.types(), arguments)
+        self.namespace
+            .instances
+            .resolve(
+                DefId::intern(path),
+                self.namespace.snapshot.types(),
+                arguments,
+            )
             .map(|selected| selected.map(|id| id.path().clone()))
     }
 
     pub(crate) fn instance_definitions(&self) -> impl Iterator<Item = &DefPath> {
-        self.instances
+        self.namespace
+            .instances
             .instances
             .values()
             .flat_map(|instances| instances.values())
@@ -813,7 +829,7 @@ impl FrontLowerQueries {
         roots: impl IntoIterator<Item = DefPath>,
         limit: u64,
     ) -> Result<BTreeSet<DefPath>, QueryError> {
-        if self.instances.declarations.is_empty() {
+        if self.namespace.instances.declarations.is_empty() {
             return Ok(BTreeSet::new());
         }
         let refused = || {
@@ -839,7 +855,7 @@ impl FrontLowerQueries {
                         (
                             *site,
                             hirsel_tir::InstanceBodies::key(
-                                self.snapshot.types(),
+                                self.namespace.snapshot.types(),
                                 &actuals.arguments,
                             ),
                         )
@@ -862,7 +878,8 @@ impl FrontLowerQueries {
             if seen.len() > 65536 || work.bytes() > limit {
                 return Err(refused());
             }
-            if !self.inputs.contains_key(path.path()) || self.instances.declarations.contains(&path)
+            if !self.inputs.contains_key(path.path())
+                || self.namespace.instances.declarations.contains(&path)
             {
                 continue;
             }
@@ -884,22 +901,29 @@ impl FrontLowerQueries {
                     continue;
                 }
                 let actuals = hirsel_types::close_arguments(
-                    self.snapshot.types(),
+                    self.namespace.snapshot.types(),
                     &self.memo,
                     &call.arguments,
                     &bindings,
                 )
                 .map_err(|_| refused())?;
-                let closed =
-                    hirsel_tir::InstanceBodies::key(self.snapshot.types(), &actuals.arguments)
-                        .is_some();
-                let next = if self.instances.declarations.contains(&call.callee) {
+                let closed = hirsel_tir::InstanceBodies::key(
+                    self.namespace.snapshot.types(),
+                    &actuals.arguments,
+                )
+                .is_some();
+                let next = if self.namespace.instances.declarations.contains(&call.callee) {
                     if !closed {
                         continue;
                     }
                     let instance = self
+                        .namespace
                         .instances
-                        .resolve(call.callee, self.snapshot.types(), &actuals.arguments)?
+                        .resolve(
+                            call.callee,
+                            self.namespace.snapshot.types(),
+                            &actuals.arguments,
+                        )?
                         .ok_or_else(refused)?;
                     if !selected.contains(instance.path()) {
                         work.tree::<DefPath, ()>(0);
@@ -963,9 +987,9 @@ impl FrontLowerQueries {
                 .flatten();
         };
         let key = if kind == FRONT_LOWER_KIND {
-            &input.lower
+            &input.captured.lower
         } else {
-            &input.evaluate
+            &input.captured.evaluate
         };
         Some(QueryId {
             kind,
@@ -1018,11 +1042,13 @@ impl FrontLowerQueries {
         let selections = outcome.selections.clone();
         drop(outcomes);
         let output = lower.decode(self)?;
-        let materialized = self
-            .records
-            .decode(&self.anchors, &self.store.get_content(lower.materialized)?)?;
+        let materialized = self.records.decode(
+            &*self.namespace.anchors,
+            &self.store.get_content(lower.materialized)?,
+        )?;
         let input = self.inputs.get(lower.definition.path())?;
         let signature = self
+            .namespace
             .snapshot
             .signature(output.value.path)?
             .as_ref()
@@ -1037,7 +1063,7 @@ impl FrontLowerQueries {
             executed,
             selections,
             acceptance: lower.acceptance.clone(),
-            implementation_revision: input.implementation,
+            implementation_revision: input.captured.implementation,
             signature,
             verified: lower.verified(self)?,
             materialized,
@@ -1064,7 +1090,7 @@ impl FrontLowerQueries {
         let body = crate::NativeOriginalHandle::bound(
             &live,
             lower.body,
-            Arc::new(self.anchors.clone()),
+            self.namespace.anchors.clone(),
             self.records.clone(),
             self.source.clone(),
             lower
@@ -1141,15 +1167,16 @@ impl FrontLowerQueries {
         let key = if let Some(selection) = &selection {
             &selection.key
         } else if id.kind == FRONT_LOWER_KIND {
-            &input.lower
+            &input.captured.lower
         } else {
-            &input.evaluate
+            &input.captured.evaluate
         };
         // A constant's checked Lower body does not replace its value product.
         // Restore Evaluate first even when the Lower descriptor itself hits;
         // receipt readers and other settled consumers cannot request it later.
         let can_restore = if id.kind == FRONT_LOWER_KIND
             && self
+                .namespace
                 .snapshot
                 .signature(DefId::intern(&path))
                 .is_some_and(|signature| {
@@ -1189,7 +1216,7 @@ impl FrontLowerQueries {
             selections: Rc::new(RefCell::new(Vec::new())),
             refusal: Rc::new(Cell::new(None)),
             depth: Rc::new(RefCell::new(DepthEvidence::leaf(dependency_limit(
-                self.limits.call_depth,
+                self.namespace.limits.call_depth,
             )))),
             framed: id.kind == FRONT_EVALUATE_KIND,
             evidence: Rc::new(RefCell::new(Evidence::new(
@@ -1201,17 +1228,21 @@ impl FrontLowerQueries {
         // that preparation fails. Nested callers keep the same root receipt.
         source.record(
             ReadKey::ExecutedBody(DefId::intern(&path)),
-            memos::optional(Some(self.inputs[&path].implementation)),
+            memos::optional(Some(self.inputs[&path].captured.implementation)),
         );
         let computed = if source.framed && source.depth.borrow().limit() == 0 {
             if self.verify == Verify::On {
                 let mut observed = ReadsBuilder::new();
-                FrozenProvider::new(&self.snapshot, path.0.package.clone(), &mut observed)
-                    .validation_universe()
-                    .map_err(|_| self.errors.resource)?;
+                FrozenProvider::new(
+                    &self.namespace.snapshot,
+                    path.0.package.clone(),
+                    &mut observed,
+                )
+                .validation_universe()
+                .map_err(|_| self.errors.resource)?;
                 source.merge(&observed.finish().map_err(|_| self.errors.protocol)?);
             }
-            Err(source.overflow(self.inputs[&path].site))
+            Err(source.overflow(self.inputs[&path].captured.site))
         } else {
             self.compute(id.kind, &path, selection.as_ref(), &mut source)
                 .await
@@ -1282,7 +1313,7 @@ impl FrontLowerQueries {
                 let (bytes, working) = self
                     .records
                     .encode_with_decode_bytes(
-                        &self.anchors,
+                        &*self.namespace.anchors,
                         &(
                             lower.definition,
                             lower.body,
@@ -1293,6 +1324,7 @@ impl FrontLowerQueries {
                             &depth,
                             executed,
                             &selections,
+                            self.namespace.manifest,
                         ),
                     )
                     .ok_or(self.errors.resource)?;
@@ -1305,16 +1337,18 @@ impl FrontLowerQueries {
             }
             Ok(Value::Constant(value)) => value.encode(
                 &self.records,
-                &self.anchors,
+                &*self.namespace.anchors,
                 &observed,
                 &descriptor_reads,
                 &depth,
                 executed,
                 &selections,
+                self.namespace.manifest,
             ),
-            Err(error) => self
-                .records
-                .encode(&self.anchors, &(&path, error, &observed, &depth, executed)),
+            Err(error) => self.records.encode(
+                &*self.namespace.anchors,
+                &(&path, error, &observed, &depth, executed),
+            ),
         }
         .ok_or(self.errors.resource)?;
         // The archive is an active encoding buffer. Settled descriptor/value
@@ -1357,6 +1391,7 @@ impl FrontLowerQueries {
             }
             // A refused universe publishes no output; the body stays local.
             lower.verified = self
+                .namespace
                 .snapshot
                 .validation(&path.0.package)
                 .ok()
@@ -1364,8 +1399,8 @@ impl FrontLowerQueries {
                     cache.publish_definition(
                         execution_subject,
                         &definition,
-                        self.snapshot.types().clone(),
-                        self.snapshot.source_verification_policy(),
+                        self.namespace.snapshot.types().clone(),
+                        self.namespace.snapshot.source_verification_policy(),
                         views,
                         &evidence,
                         &[],
@@ -1433,6 +1468,7 @@ impl FrontLowerQueries {
             [
                 key.0.0.as_slice(),
                 key.1.0.as_slice(),
+                self.namespace.manifest.output.0.0.as_slice(),
                 crate::store::payload_reads_hash(&outcome.reads)
                     .0
                     .as_slice(),
@@ -1458,7 +1494,7 @@ impl FrontLowerQueries {
                 lower.decode(self).ok_or(self.errors.protocol)?,
                 self.records
                     .decode(
-                        &self.anchors,
+                        &*self.namespace.anchors,
                         &self
                             .store
                             .get_content(lower.materialized)
@@ -1489,8 +1525,10 @@ impl FrontLowerQueries {
                         .inputs
                         .get(path.path())
                         .ok_or(self.errors.protocol)?
+                        .captured
                         .implementation,
                     signature: self
+                        .namespace
                         .snapshot
                         .signature(path)
                         .ok_or(self.errors.protocol)?
@@ -1560,7 +1598,7 @@ impl FrontLowerQueries {
                 Some(output) => match LiveLowerProduct::from_retained(
                     (id.address, action),
                     output,
-                    self.anchors.clone(),
+                    (*self.namespace.anchors).clone(),
                     self.records.clone(),
                     self.source.clone(),
                     self._allowance.clone(),
@@ -1658,9 +1696,13 @@ impl FrontLowerQueries {
         source.merge(&body.outcome.reads);
         if self.verify == Verify::On {
             let mut observed = ReadsBuilder::new();
-            FrozenProvider::new(&self.snapshot, path.0.package.clone(), &mut observed)
-                .validation_universe()
-                .map_err(|_| source.refused(self.errors.resource))?;
+            FrozenProvider::new(
+                &self.namespace.snapshot,
+                path.0.package.clone(),
+                &mut observed,
+            )
+            .validation_universe()
+            .map_err(|_| source.refused(self.errors.resource))?;
             source.merge(
                 &observed
                     .finish()
@@ -1691,9 +1733,13 @@ impl FrontLowerQueries {
         let signature = source.signature(path)?;
         let mut observed = ReadsBuilder::new();
         let staged = crate::comptime::prepare_staged_types(
-            self.snapshot.types(),
+            self.namespace.snapshot.types(),
             &analyzed.value,
-            &mut FrozenProvider::new(&self.snapshot, path.0.package.clone(), &mut observed),
+            &mut FrozenProvider::new(
+                &self.namespace.snapshot,
+                path.0.package.clone(),
+                &mut observed,
+            ),
         );
         source.merge(&observed.finish().map_err(|_| QueryError::NotImplemented)?);
         let staged = staged
@@ -1712,7 +1758,7 @@ impl FrontLowerQueries {
             poll_fn(|_| {
                 preparation
                     .poll(
-                        self.snapshot.types(),
+                        self.namespace.snapshot.types(),
                         &analyzed.value,
                         &staged,
                         &signature,
@@ -1777,7 +1823,7 @@ impl FrontLowerQueries {
                 return Err(QueryError::NotImplemented);
             };
             let dictionary = crate::dictionaries::declaration_async(
-                self.snapshot.types(),
+                self.namespace.snapshot.types(),
                 &self.memo,
                 &analyzed.value,
                 &signature,
@@ -1827,7 +1873,7 @@ impl FrontLowerQueries {
         self.count(path, |work| work.lowerings += 1);
         let output = lowering
             .lower(
-                self.snapshot.types(),
+                self.namespace.snapshot.types(),
                 &self.memo,
                 &analyzed.value,
                 &Comptime {
@@ -1849,13 +1895,20 @@ impl FrontLowerQueries {
         if self.verify == Verify::On {
             let mut observed = ReadsBuilder::new();
             // A refused V read refuses this producer: nothing it computed is kept.
-            FrozenProvider::new(&self.snapshot, path.0.package.clone(), &mut observed)
-                .validation_universe()
-                .map_err(|_| source.refused(self.errors.resource))?;
+            FrozenProvider::new(
+                &self.namespace.snapshot,
+                path.0.package.clone(),
+                &mut observed,
+            )
+            .validation_universe()
+            .map_err(|_| source.refused(self.errors.resource))?;
             source.merge(&observed.finish().map_err(|_| QueryError::NotImplemented)?);
             let (report, ran, accepted, evidence) = self
+                .namespace
                 .snapshot
-                .validate_source_artifact(&definition, |anchor| self.anchors.record_owner(anchor))
+                .validate_source_artifact(&definition, |anchor| {
+                    self.namespace.anchors.record_owner(anchor)
+                })
                 .map_err(|_| source.refused(self.errors.resource))?;
             acceptance = accepted;
             source.evidence.borrow_mut().accepted(acceptance.clone());
@@ -1879,7 +1932,7 @@ impl FrontLowerQueries {
         }
         let (bytes, record_decode_bytes) = self
             .records
-            .encode_tir_with_decode_bytes(&self.anchors, &definition)
+            .encode_tir_with_decode_bytes(&*self.namespace.anchors, &definition)
             .ok_or(QueryError::NotImplemented)?;
         // Arc/slice decoding can temporarily overlap its construction buffers.
         // Count serialized shared rows independently; source sharing is not a
@@ -1906,7 +1959,7 @@ impl FrontLowerQueries {
         drop(bytes);
         let materialized = self
             .records
-            .encode(&self.anchors, &constants)
+            .encode(&*self.namespace.anchors, &constants)
             .filter(|bytes| bytes.len() as u64 <= self.weight.scratch)
             .and_then(|bytes| self.store.put_content(LOWER_MATERIALIZED, &bytes))
             .ok_or(QueryError::NotImplemented)?;
@@ -2057,7 +2110,7 @@ impl Source {
     fn overflow(&self, site: Span) -> QueryError {
         let limit = hirsel_tir::ToolingLimit {
             kind: hirsel_tir::ToolingLimitKind::CallDepth,
-            limit: dependency_limit(self.owner.limits.call_depth) as u64,
+            limit: dependency_limit(self.owner.namespace.limits.call_depth) as u64,
             site: Some(site),
         };
         QueryError::Operational(hirsel_types::OperationalFailure {
@@ -2076,7 +2129,12 @@ impl Source {
         dependencies: impl IntoIterator<Item = &'a SignatureDependency>,
     ) {
         for dependency in dependencies {
-            if let Some(signature) = self.owner.snapshot.signature(dependency.definition) {
+            if let Some(signature) = self
+                .owner
+                .namespace
+                .snapshot
+                .signature(dependency.definition)
+            {
                 self.record(
                     ReadKey::ExecutedSignature(dependency.definition),
                     memos::signature_value(signature.ok().map(|s| s.fingerprint)),
@@ -2087,7 +2145,11 @@ impl Source {
     fn signature(&self, path: &DefPath) -> Result<hirsel_types::SignatureRef, QueryError> {
         let mut observed = ReadsBuilder::new();
         let result = SignatureProvider::signature(
-            &mut FrozenProvider::new(&self.owner.snapshot, path.0.package.clone(), &mut observed),
+            &mut FrozenProvider::new(
+                &self.owner.namespace.snapshot,
+                path.0.package.clone(),
+                &mut observed,
+            ),
             DefId::intern(path),
         );
         self.merge(&observed.finish().map_err(|_| QueryError::NotImplemented)?);
@@ -2138,7 +2200,7 @@ impl Source {
         if selected == Err(self.owner.errors.cycle) {
             self.record(
                 ReadKey::ExecutedBody(DefId::intern(path)),
-                memos::optional(Some(self.owner.inputs[path].implementation)),
+                memos::optional(Some(self.owner.inputs[path].captured.implementation)),
             );
             let members = self.reads.take_cycle();
             if members.is_empty() {
@@ -2158,7 +2220,8 @@ impl Source {
                     )
                 })
                 .collect();
-            diagnostics = crate::select_diagnostics(diagnostics, Some(&self.owner.sources));
+            diagnostics =
+                crate::select_diagnostics(diagnostics, Some(&self.owner.namespace.sources));
             if diagnostics.is_empty() {
                 return Err(self.refused(self.owner.errors.protocol));
             }
@@ -2196,7 +2259,7 @@ impl Source {
         }
         self.record(
             ReadKey::ExecutedBody(DefId::intern(path)),
-            memos::optional(Some(self.owner.inputs[path].implementation)),
+            memos::optional(Some(self.owner.inputs[path].captured.implementation)),
         );
         outcome.result
     }
@@ -2209,7 +2272,7 @@ impl Source {
             self.owner
                 .inputs
                 .get(path)
-                .map_or(Span::default(), |input| input.site),
+                .map_or(Span::default(), |input| input.captured.site),
         )
         .await
     }
@@ -2221,6 +2284,7 @@ impl Source {
         if self.owner.front.query(path).is_none() {
             if let Some(value) = self
                 .owner
+                .namespace
                 .snapshot
                 .builtin_dictionary_value(&self.owner.memo, path)?
             {
@@ -2232,7 +2296,7 @@ impl Source {
             Value::Constant(value) => value
                 .decoded(
                     &self.owner.records,
-                    &self.owner.anchors,
+                    &*self.owner.namespace.anchors,
                     &*self.owner.store,
                     self.owner.weight.scratch,
                 )
@@ -2284,7 +2348,7 @@ impl s1::AsyncDependencySource for Source {
                 .get(&DefId::intern(path))
                 .ok_or(QueryError::NotImplemented)?;
             let owner = declaration.owner.clone();
-            let site = self.owner.inputs[&owner].site;
+            let site = self.owner.inputs[&owner].captured.site;
             let Value::Constant(value) = self
                 .selected_value(id, &owner, FRONT_EVALUATE_KIND, site)
                 .await?
@@ -2294,7 +2358,7 @@ impl s1::AsyncDependencySource for Source {
             value
                 .decoded(
                     &self.owner.records,
-                    &self.owner.anchors,
+                    &*self.owner.namespace.anchors,
                     &*self.owner.store,
                     self.owner.weight.scratch,
                 )
@@ -2314,8 +2378,13 @@ impl s1::AsyncDependencySource for Source {
     ) -> s1::DependencyProduct<Option<DefPath>> {
         let result = self
             .owner
+            .namespace
             .instances
-            .resolve(DefId::intern(path), self.owner.snapshot.types(), arguments)
+            .resolve(
+                DefId::intern(path),
+                self.owner.namespace.snapshot.types(),
+                arguments,
+            )
             .map(|selected| selected.map(|id| id.path().clone()));
         s1::DependencyProduct {
             result,
@@ -2446,25 +2515,30 @@ async fn evaluate(
         constants: &constants,
         sizes: &sizes,
     }
-    .lower(owner.snapshot.types(), &owner.memo, lowering)?;
+    .lower(owner.namespace.snapshot.types(), &owner.memo, lowering)?;
     let admission =
-        s1::ValidatedEvaluation::recorded(prepared, &owner.snapshot, owner.verify, site);
+        s1::ValidatedEvaluation::recorded(prepared, &owner.namespace.snapshot, owner.verify, site);
     source.merge(&admission.reads);
     let runtime = owner.runtime_types()?;
     let product = admission
         .result?
-        .run_async(&owner.sources, owner.limits, &runtime, &mut source)
+        .run_async(
+            &owner.namespace.sources,
+            owner.namespace.limits,
+            &runtime,
+            &mut source,
+        )
         .await;
     source.merge(&product.value.reads);
     source.evidence.borrow_mut().accepted(product.acceptance);
     let result = product.value.result.and_then(|(value, ty)| {
         let mut observed = ReadsBuilder::new();
         let result = crate::materialized::reify_value(
-            owner.snapshot.types(),
+            owner.namespace.snapshot.types(),
             &owner.memo,
             &mut Materializer {
                 provider: FrozenProvider::new(
-                    &owner.snapshot,
+                    &owner.namespace.snapshot,
                     signature.definition.path().0.package.clone(),
                     &mut observed,
                 ),
@@ -2498,7 +2572,7 @@ impl crate::materialized::MaterializationSource for Materializer<'_> {
         {
             self.source.record(
                 ReadKey::ExecutedBody(id),
-                memos::optional(Some(input.implementation)),
+                memos::optional(Some(input.captured.implementation)),
             );
         }
         Ok(private)
@@ -2537,6 +2611,7 @@ impl QueryEngine {
         errors: RuntimeErrors,
         generator: Option<(DefId, Span)>,
     ) -> Result<Arc<FrontLowerQueries>, QueryError> {
+        front.namespace().require_environment(self)?;
         let refusal = || {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "front Lower admission".into(),
@@ -2556,32 +2631,19 @@ impl QueryEngine {
             if front.query(path).is_none() {
                 return Err(refusal());
             }
-            let syntax = self.snapshot(path)?;
+            if let Some(accepted) = front.registration(path) {
+                accepted.validate(self)?;
+            }
+            let captured = front
+                .namespace()
+                .bodies
+                .get(&DefId::intern(path))
+                .and_then(|input| input.queries.as_ref())
+                .ok_or_else(refusal)?;
             inputs.push((
                 DefId::intern(path),
                 Input {
-                    lower: match front.registration(path) {
-                        Some(accepted) => {
-                            self.accepted_front_store_key(accepted, QueryKind::Lower)?
-                        }
-                        None if generation::instance_bodied(&syntax) => {
-                            self.front_declaration_store_key(path, QueryKind::Lower)?
-                        }
-                        None => self.store_key(path, QueryKind::Lower).ok_or_else(refusal)?,
-                    },
-                    evaluate: match front.registration(path) {
-                        Some(accepted) => {
-                            self.accepted_front_store_key(accepted, QueryKind::Evaluate)?
-                        }
-                        None if generation::instance_bodied(&syntax) => {
-                            self.front_declaration_store_key(path, QueryKind::Evaluate)?
-                        }
-                        None => self
-                            .store_key(path, QueryKind::Evaluate)
-                            .ok_or_else(refusal)?,
-                    },
-                    implementation: syntax.text_hash,
-                    site: syntax.item.name_span,
+                    captured: captured.clone(),
                     waiting: [Mutex::new(None), Mutex::new(None)],
                 },
             ));
@@ -2593,16 +2655,7 @@ impl QueryEngine {
         {
             return Err(refusal());
         }
-        let snapshot = self.signature_inputs();
-        // Front's own publication can move the snapshot stamp, so Lower may
-        // read a header, or a private proof, that Front never demanded.
-        if let (Some(headers), Some(previous)) = (
-            snapshot.header_products(),
-            front.snapshot().header_products(),
-        ) && !Arc::ptr_eq(headers, previous)
-        {
-            headers.inherit_front(previous);
-        }
+        let namespace = front.namespace().clone();
         let packages: std::collections::BTreeSet<_> =
             definitions.iter().map(|path| &path.0.package).collect();
         let opaque = self
@@ -2637,13 +2690,13 @@ impl QueryEngine {
             .flat_map(|(path, input)| {
                 let path = DefId::intern(path);
                 [
-                    ((FRONT_LOWER_KIND, input.lower.0), path),
-                    ((FRONT_EVALUATE_KIND, input.evaluate.0), path),
+                    ((FRONT_LOWER_KIND, input.captured.lower.0), path),
+                    ((FRONT_EVALUATE_KIND, input.captured.evaluate.0), path),
                 ]
             })
             .collect();
         let allowance = Arc::new(allowance);
-        let anchors = crate::NativeRecordContext::capture(self);
+        let anchors = (*namespace.anchors).clone();
         let records = crate::NativeRecords::new(self.types.clone(), store.clone());
         let source = Arc::new(LowerSource {
             anchors: anchors.clone(),
@@ -2660,16 +2713,12 @@ impl QueryEngine {
             paths,
             layouts,
             front,
-            snapshot,
+            namespace,
             memo: self.memo.clone(),
             lowering,
             runtime: std::sync::OnceLock::new(),
-            instances: Arc::new(self.instance_bodies(&definitions.iter().cloned().collect())),
-            sources: self.sources.clone(),
-            limits: self.comptime_limits,
             verify: self.verify,
             verify_store: self.verify_store,
-            anchors,
             records,
             store,
             outcomes: Mutex::new(BTreeMap::new()),

@@ -4,7 +4,7 @@ use crate::{
     DefinitionQueries, NativeRecordContext, NativeRecordSource, QueryEngine, QueryError,
     SignatureSnapshot, Verify,
 };
-use hirsel_syntax::{ContentHash, DefPath};
+use hirsel_syntax::{ContentHash, DefId, DefPath};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
@@ -358,6 +358,38 @@ impl NativeOriginalContext {
     }
 }
 impl QueryEngine {
+    pub(crate) fn native_original_context_in(
+        &self,
+        paths: &[DefPath],
+        namespace: &crate::NamespaceCapture,
+    ) -> Result<NativeOriginalContext, QueryError> {
+        let mut expected = BTreeMap::new();
+        for path in paths {
+            let input = namespace
+                .bodies
+                .get(&DefId::intern(path))
+                .ok_or_else(|| source_transport("native definition outside namespace capture"))?;
+            let signature = namespace
+                .snapshot
+                .signature(DefId::intern(path))
+                .ok_or(QueryError::NotImplemented)??;
+            if input.executable {
+                expected.insert(path.clone(), (input.implementation, signature.fingerprint));
+            }
+        }
+        Ok(NativeOriginalContext {
+            owner: None,
+            admission: None,
+            anchors: namespace.anchors.clone(),
+            signatures: namespace.snapshot.clone(),
+            cache: self.product_store().and_then(|store| store.verifier()),
+            policy: self.source_verification_policy(),
+            instances: namespace.instances.clone(),
+            expected,
+            verify: self.verify,
+            reuse: self.native_query_policy().reuse,
+        })
+    }
     /// Freeze current source/private observations without demanding Lower.
     pub fn native_original_context(
         &mut self,

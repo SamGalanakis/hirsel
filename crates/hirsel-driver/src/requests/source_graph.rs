@@ -1209,7 +1209,6 @@ pub(super) fn install(
         carry,
     )?;
     let definitions = std::mem::take(&mut installed.definitions);
-    let registrations = installed.registrations.clone();
     let front = installed.front.clone();
     let lower = installed.lower.clone();
     let growth = installed.growth.clone();
@@ -1498,7 +1497,6 @@ pub(super) fn install(
                 lower: lower.clone(),
                 run: run.take().ok_or_else(|| uninstalled())?,
                 store: store.clone(),
-                registrations: registrations.clone(),
             },
             native_footprint.as_ref().ok_or_else(|| uninstalled())?,
             &mut native_allowance.take().ok_or_else(|| uninstalled())?,
@@ -1610,7 +1608,6 @@ pub(super) fn install(
                     } else {
                         store.clone()
                     },
-                    registrations: registrations.clone(),
                 },
                 native_request.clone(),
                 purpose,

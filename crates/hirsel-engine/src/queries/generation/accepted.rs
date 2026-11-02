@@ -112,6 +112,13 @@ impl AcceptedFrontRegistration {
     pub(crate) fn checked_prefix(&self) -> &[SignatureDependency] {
         &self.checked_prefix
     }
+    pub(crate) fn source(&self) -> GeneratedSource {
+        GeneratedSource {
+            file: self.generated.0,
+            text: self.text().to_owned(),
+            site: self.generated.1,
+        }
+    }
     pub(crate) fn text(&self) -> &str {
         self.output
             .text()

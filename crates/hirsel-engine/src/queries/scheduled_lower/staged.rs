@@ -91,7 +91,7 @@ impl FrontLowerQueries {
             return Err(QueryError::NotImplemented);
         }
         let owner = DefId::intern(&declaration.owner);
-        let original = &self.inputs[owner.path()].evaluate;
+        let original = &self.inputs[owner.path()].captured.evaluate;
         let bytes =
             bincode::serialize(&(path, arguments)).map_err(|_| QueryError::NotImplemented)?;
         let hash = ContentHash::of_parts(
@@ -271,7 +271,12 @@ impl FrontLowerQueries {
         let mut constants = BTreeMap::new();
         for (path, value) in values() {
             let (value, _) = value
-                .decoded(&self.records, &self.anchors, &*self.store, allowance)
+                .decoded(
+                    &self.records,
+                    &*self.namespace.anchors,
+                    &*self.store,
+                    allowance,
+                )
                 .ok_or_else(refused)?;
             constants.insert(path.clone(), value);
         }

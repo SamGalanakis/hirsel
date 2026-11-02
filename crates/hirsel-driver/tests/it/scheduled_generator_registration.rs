@@ -1332,9 +1332,9 @@ fn accepted_generated_native_inputs_bind_current_views_and_exact_metadata_grants
                 );
                 let inputs = program
                     .engine
-                    .front_native_definition_inputs_with_registrations(
+                    .front_native_definition_inputs_in(
                         &definitions,
-                        &[accepted.clone()],
+                        front.namespace().clone(),
                         16 << 20,
                     )
                     .unwrap();
@@ -1343,9 +1343,9 @@ fn accepted_generated_native_inputs_bind_current_views_and_exact_metadata_grants
                 assert!(
                     program
                         .engine
-                        .front_native_definition_inputs_with_registrations(
+                        .front_native_definition_inputs_in(
                             &definitions,
-                            &[accepted.clone()],
+                            front.namespace().clone(),
                             required - 1
                         )
                         .is_err()
@@ -1365,9 +1365,9 @@ fn accepted_generated_native_inputs_bind_current_views_and_exact_metadata_grants
                 );
                 let inputs = program
                     .engine
-                    .front_native_definition_inputs_with_registrations(
+                    .front_native_definition_inputs_in(
                         &definitions,
-                        &[accepted.clone()],
+                        front.namespace().clone(),
                         required,
                     )
                     .unwrap();
@@ -1394,13 +1394,13 @@ fn accepted_generated_native_inputs_bind_current_views_and_exact_metadata_grants
                     .accept_front_registration(output, budget.reserve(16 << 20).unwrap())
                     .unwrap();
                 let before = program.engine.work_stats();
+                let other_namespace = program
+                    .engine
+                    .capture_namespace(&definitions, &[other], 16 << 20)
+                    .unwrap();
                 let mismatch = program
                     .engine
-                    .front_native_definition_inputs_with_registrations(
-                        &definitions,
-                        &[other],
-                        16 << 20,
-                    )
+                    .front_native_definition_inputs_in(&definitions, other_namespace, 16 << 20)
                     .unwrap();
                 let error = program
                     .engine
@@ -1441,11 +1441,7 @@ fn accepted_generated_native_inputs_bind_current_views_and_exact_metadata_grants
                 program.parse_sources().unwrap();
                 let error = program
                     .engine
-                    .front_native_definition_inputs_with_registrations(
-                        &definitions,
-                        &[accepted],
-                        16 << 20,
-                    )
+                    .capture_namespace(&definitions, &[accepted], 16 << 20)
                     .err()
                     .expect("stale generator helper reads must refuse before native capture");
                 let QueryError::Operational(error) = error else {
@@ -1489,5 +1485,138 @@ fn detached_generator_text_releases_completed_front_and_lower_input_grants() {
             drop(output);
             assert_eq!(budget.reserved(), 0);
         }
+    });
+}
+
+#[test]
+fn namespace_capture_keeps_its_admitted_memory_after_front_release() {
+    use hirsel_engine::{runtime::*, *};
+    with_compiler_stack(|| {
+        accepted_output_control(1, |program, budget, output| {
+            let accepted = program
+                .engine
+                .accept_front_registration(output, budget.reserve(16 << 20).unwrap())
+                .unwrap();
+            let definitions = program.engine.front_source_roots();
+            let front = program
+                .engine
+                .front_body_queries_with_registrations(
+                    &definitions,
+                    &[accepted],
+                    MemoryWeight {
+                        retained: 2 << 20,
+                        scratch: 8 << 20,
+                        stack: 0,
+                    },
+                    budget.reserve(16 << 20).unwrap(),
+                    crate::scheduled_front::errors(),
+                )
+                .unwrap();
+            let capture = front.namespace().clone();
+            let identity = capture.identity();
+            let manifest = capture.generation_manifest();
+            let before = budget.reserved();
+            drop(front);
+            let held = budget.reserved();
+            assert!(held < before, "Front's unretained partition must release");
+            assert_eq!(capture.identity(), identity);
+            assert_eq!(capture.generation_manifest(), manifest);
+            drop(capture);
+            assert!(
+                budget.reserved() < held,
+                "the capture must retain its own input reservation"
+            );
+        });
+    });
+}
+
+#[test]
+fn captured_check_refuses_an_edited_written_file_before_publication() {
+    use hirsel_engine::{runtime::*, *};
+    with_compiler_stack(|| {
+        accepted_output_control(1, |program, budget, output| {
+            let accepted = program
+                .engine
+                .accept_front_registration(output, budget.reserve(16 << 20).unwrap())
+                .unwrap();
+            let definitions = program.engine.front_source_roots();
+            let weight = MemoryWeight {
+                retained: 2 << 20,
+                scratch: 8 << 20,
+                stack: 0,
+            };
+            let errors = crate::scheduled_front::errors();
+            let front = program
+                .engine
+                .front_body_queries_with_registrations(
+                    &definitions,
+                    &[accepted],
+                    weight,
+                    budget.reserve(16 << 20).unwrap(),
+                    errors,
+                )
+                .unwrap();
+            let lower = program
+                .engine
+                .front_lower_queries(
+                    &definitions,
+                    front.clone(),
+                    weight,
+                    64,
+                    budget.reserve(16 << 20).unwrap(),
+                    errors,
+                )
+                .unwrap();
+            let growth = program
+                .engine
+                .front_growth_queries(
+                    &program.entry,
+                    front.clone(),
+                    weight,
+                    budget.reserve(16 << 20).unwrap(),
+                    errors,
+                )
+                .unwrap();
+            let primary = program
+                .engine
+                .sources
+                .file(program.primary)
+                .unwrap()
+                .path
+                .clone();
+            assert!(
+                program
+                    .replace_source(&primary, ACCEPTED_SOURCE.replace("{7u8}", "{8u8}"))
+                    .unwrap()
+            );
+            program.parse_sources().unwrap();
+            let error = program
+                .engine
+                .front_check_queries(
+                    FrontCheckPlan {
+                        files: program
+                            .files
+                            .iter()
+                            .map(|(file, context)| {
+                                (*file, context.clone(), LoweringPolicy::Comptime)
+                            })
+                            .collect(),
+                        front,
+                        lower,
+                        growth,
+                        unsafe_ffi: vec![],
+                        lint_package: None,
+                    },
+                    weight,
+                    budget.reserve(16 << 20).unwrap(),
+                    errors,
+                )
+                .err()
+                .expect("a Check cannot mix an older capture with edited written inputs");
+            let QueryError::Operational(error) = error else {
+                panic!("{error:?}");
+            };
+            assert_eq!(error.operation, "namespace capture");
+        });
     });
 }

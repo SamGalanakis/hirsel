@@ -11,6 +11,7 @@ pub(super) type Descriptor = (
     DepthEvidence<Span>,
     bool,
     staged::Selections,
+    Reference,
 );
 #[derive(Clone)]
 pub(super) struct Archive {
@@ -32,13 +33,14 @@ impl Archive {
                 return None;
             }
             let bytes = store.get_content(self.reference)?;
-            let (_, _, reads, _, _, _): (
+            let (_, _, reads, _, _, _, _): (
                 Materialized,
                 Vec<(hirsel_syntax::ExprId, Materialized)>,
                 Reads,
                 DepthEvidence<Span>,
                 bool,
                 staged::Selections,
+                Reference,
             ) = records.decode(anchors, &bytes)?;
             return (reads.len() == self.len && self.dependencies == 0).then_some(reads);
         }
@@ -140,6 +142,7 @@ mod tests {
             depth,
             false,
             Vec::new(),
+            body,
         );
         let (bytes, working) = records
             .encode_with_decode_bytes(&anchors, &descriptor)
@@ -298,6 +301,7 @@ mod tests {
                 &depth,
                 false,
                 &Vec::new(),
+                CONSTANT_DESCRIPTOR.reference(b"manifest fixture").unwrap(),
             )
             .unwrap();
         let reference = store.put_content(CONSTANT_DESCRIPTOR, &bytes).unwrap();

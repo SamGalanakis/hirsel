@@ -212,7 +212,7 @@ impl FrontBodyQueries {
         };
         drop(self.records.prepare_record_encoding(
             &facts,
-            |anchor| self.anchors.record_owner_ref(anchor),
+            |anchor| self.namespace.anchors.record_owner_ref(anchor),
             scratch,
             temporary,
         )?);

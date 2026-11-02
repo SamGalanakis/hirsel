@@ -248,7 +248,7 @@ impl StorageTask {
         let mut reads = ReadsBuilder::new();
         reads.merge(&body.outcome.reads);
         let mut provider = FrozenProvider::for_definition(
-            &owner.front.snapshot,
+            &owner.front.namespace.snapshot,
             DefId::intern(path),
             &owner.front.citations,
             &mut reads,

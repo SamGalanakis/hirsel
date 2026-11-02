@@ -646,7 +646,6 @@ impl Plan {
 pub struct InstalledSource {
     pub definitions: Vec<DefPath>,
     pub plan: Plan,
-    pub registrations: Vec<Arc<AcceptedFrontRegistration>>,
     pub front: Arc<FrontBodyQueries>,
     pub lower: Arc<FrontLowerQueries>,
     pub growth: Arc<FrontGrowthQueries>,
@@ -907,31 +906,43 @@ pub fn install(
         .as_ref()
         .map_or_else(Vec::new, |b| b.registrations().to_vec());
     engine.admit_private_inference(loading.lend_runtime());
+    if shape.run || shape.ownership {
+        if let Err(error) = engine.prepare_namespace_registrations(&registrations) {
+            return Err(loading.failed(engine_error(engine, error)));
+        }
+        engine.prepare_private_summaries();
+    }
+    let namespace =
+        match engine.capture_namespace(&definitions, &registrations, final_limits.snapshot_bytes) {
+            Ok(capture) => capture,
+            Err(error) => return Err(loading.failed(engine_error(engine, error))),
+        };
     // Registration changes the source namespace. Capture every final consumer
     // against the same accepted views, including Run and ownership catalogues.
-    if bootstrap.is_some() || staged {
+    {
         footprint = match engine.front_input_footprint(&definitions) {
             Ok(footprint) => footprint,
             Err(error) => return Err(loading.failed(engine_error(engine, error))),
         };
         if shape.run {
-            run_inputs = match engine.front_run_inputs(final_limits.snapshot_bytes) {
-                Ok(inputs) => {
-                    run_error = None;
-                    Some(inputs)
-                }
-                Err(error) if shape.check_variants => {
-                    run_error = Some(error);
-                    None
-                }
-                Err(error) => return Err(loading.failed(engine_error(engine, error))),
-            };
+            run_inputs =
+                match engine.front_run_inputs_in(namespace.clone(), final_limits.snapshot_bytes) {
+                    Ok(inputs) => {
+                        run_error = None;
+                        Some(inputs)
+                    }
+                    Err(error) if shape.check_variants => {
+                        run_error = Some(error);
+                        None
+                    }
+                    Err(error) => return Err(loading.failed(engine_error(engine, error))),
+                };
         }
         if shape.ownership {
             catalogue = Some(
-                match engine.front_native_definition_inputs_with_registrations(
+                match engine.front_native_definition_inputs_in(
                     &definitions,
-                    &registrations,
+                    namespace.clone(),
                     final_limits.snapshot_bytes,
                 ) {
                     Ok(inputs) => inputs,
@@ -993,13 +1004,7 @@ pub fn install(
     drop(transport);
     let errors = runtime_errors(store)?;
     let front = engine
-        .front_body_queries_with_registrations(
-            &definitions,
-            &registrations,
-            plan.body,
-            front,
-            errors,
-        )
+        .front_body_queries_in(&definitions, namespace, plan.body, front, errors)
         .map_err(query_error)?;
     if shape.compact_reads {
         front.compact_retained_reads();
@@ -1088,7 +1093,6 @@ pub fn install(
     Ok(InstalledSource {
         definitions,
         plan,
-        registrations,
         front,
         lower,
         growth,

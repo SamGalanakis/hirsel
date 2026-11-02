@@ -1040,6 +1040,9 @@ impl QueryEngine {
         allowance: MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontCheckQueries>, QueryError> {
+        let capture = plan.front.namespace().clone();
+        capture.require_environment(self)?;
+        capture.require_consistent(plan.lower.namespace())?;
         let refusal = || {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "ordered check admission".into(),
@@ -1053,6 +1056,13 @@ impl QueryEngine {
             bodies: Vec::new(),
         };
         for (file, context, lowering) in &plan.files {
+            if !capture.file_holds(&self.sources, *file) {
+                return Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                    operation: "namespace capture".into(),
+                    message: "Check file differs from namespace capture".into(),
+                }));
+            }
+
             let mut input = FileInput {
                 paths: Vec::new(),
                 lowering: *lowering,
@@ -1178,10 +1188,10 @@ impl QueryEngine {
             lint,
             constants,
             instances,
-            sources: self.sources.clone(),
-            declarations: self.declarations.frozen(),
+            sources: capture.sources.clone(),
+            declarations: capture.declarations.clone(),
             records: crate::NativeRecords::new(self.types.clone(), store.clone()),
-            anchors: crate::NativeRecordContext::capture(self),
+            anchors: (*capture.anchors).clone(),
             store,
             completed: Mutex::new(None),
             failures: Mutex::new(BTreeMap::new()),

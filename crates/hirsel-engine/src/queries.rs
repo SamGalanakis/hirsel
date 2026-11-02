@@ -38,6 +38,8 @@ mod scheduled_storage;
 pub use scheduled_storage::{
     FRONT_STORAGE_GRAPH_KIND, FrontStorageGraphOutput, FrontStorageGraphQueries,
 };
+mod namespace;
+pub use namespace::NamespaceCapture;
 mod scheduled_lower;
 mod scheduled_stage;
 pub use scheduled_check::{

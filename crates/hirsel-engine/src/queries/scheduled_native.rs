@@ -34,7 +34,7 @@ struct AcceptedNativeSource {
 /// same private data; the caller cannot supply source V or native authority.
 pub struct FrontNativeDefinitionInputs {
     definitions: Vec<DefPath>,
-    snapshot: Arc<SignatureSnapshot>,
+    namespace: Arc<NamespaceCapture>,
     original_context: crate::NativeOriginalContext,
     inputs: BTreeMap<DefPath, Input>,
     ids: BTreeMap<DefPath, QueryId>,
@@ -621,9 +621,9 @@ impl QueryEngine {
         allowance: MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontNativeDefinitionQueries>, QueryError> {
-        let inputs = self.front_native_definition_inputs_from(
+        let inputs = self.front_native_definition_inputs_in(
             definitions,
-            |path| front.registration_handle(path).cloned(),
+            front.namespace().clone(),
             allowance.bytes(),
         )?;
         self.front_native_definition_queries_with_inputs(
@@ -636,35 +636,19 @@ impl QueryEngine {
         definitions: &[DefPath],
         limit: u64,
     ) -> Result<FrontNativeDefinitionInputs, QueryError> {
-        self.front_native_definition_inputs_with_registrations(definitions, &[], limit)
+        self.prepare_private_summaries();
+        let namespace = self.capture_namespace(definitions, &[], limit)?;
+        self.front_native_definition_inputs_in(definitions, namespace, limit)
     }
-
-    /// Generated inputs require the exact opaque source registrations accepted
-    /// in this engine. Syntax/text are observations, never native V authority.
-    pub fn front_native_definition_inputs_with_registrations(
+    pub fn front_native_definition_inputs_in(
         &mut self,
         definitions: &[DefPath],
-        registrations: &[Arc<AcceptedFrontRegistration>],
+        namespace: Arc<NamespaceCapture>,
         limit: u64,
     ) -> Result<FrontNativeDefinitionInputs, QueryError> {
-        self.front_native_definition_inputs_from(
-            definitions,
-            |path| {
-                registrations
-                    .iter()
-                    .find(|accepted| accepted.definition() == path)
-                    .cloned()
-            },
-            limit,
-        )
-    }
-
-    fn front_native_definition_inputs_from(
-        &mut self,
-        definitions: &[DefPath],
-        registration: impl Fn(&DefPath) -> Option<Arc<AcceptedFrontRegistration>>,
-        limit: u64,
-    ) -> Result<FrontNativeDefinitionInputs, QueryError> {
+        namespace.require_environment(self)?;
+        let registration =
+            |path: &DefPath| namespace.registrations.get(&DefId::intern(path)).cloned();
         let refuse = || {
             QueryError::Operational(hirsel_types::OperationalFailure{operation:"native source admission".into(),message:"native source inputs exceed admission or differ from the pinned source namespace".into()})
         };
@@ -678,15 +662,14 @@ impl QueryEngine {
                 accepted.validate(self)?;
             }
         }
-        self.prepare_private_summaries();
-        let snapshot = self.signature_inputs();
-        let original_context = self.native_original_context(definitions)?;
+        let snapshot = namespace.snapshot.clone();
+        let original_context = self.native_original_context_in(definitions, &namespace)?;
         let store = self.result_store.clone().ok_or_else(refuse)?;
         let records = crate::NativeRecords::new(self.types.clone(), store.clone());
-        let anchors = crate::NativeRecordContext::capture(self);
+        let anchors = (*namespace.anchors).clone();
         let mut inputs = BTreeMap::new();
         let mut ids = BTreeMap::new();
-        let namespace = ContentHash::of_parts(
+        let selection_identity = ContentHash::of_parts(
             "hirsel.front.native-definition-selection.v1",
             [serde_json::to_vec(definitions)
                 .map_err(|_| refuse())?
@@ -694,15 +677,16 @@ impl QueryEngine {
         );
         let environment = self.environment_value();
         for path in definitions {
-            let generated = if self.generated.contains_key(path) {
+            let generated = if namespace
+                .bodies
+                .get(&DefId::intern(path))
+                .is_some_and(|input| input.generated)
+            {
                 let accepted = registration(path).ok_or_else(|| {
                     native_selection_error(format!("generated native catalogue input: {path}"))
                 })?;
-                let syntax = self.snapshot(path)?;
-                let source = self.generated_source(path).ok_or_else(refuse)?;
-                if source.text != accepted.text() {
-                    return Err(refuse());
-                }
+                let syntax = namespace.syntax(path)?;
+                let source = accepted.source();
                 let mut weight = crate::NativeMetadataWeight::default();
                 weight.add(
                     crate::memo::retained::retained_syntax_bytes(&syntax)
@@ -716,7 +700,6 @@ impl QueryEngine {
                 if required > limit {
                     return Err(refuse());
                 }
-                let source = source.clone();
                 Some(AcceptedNativeSource {
                     source: crate::NativeSource {
                         implementation_revision: syntax.text_hash,
@@ -735,7 +718,7 @@ impl QueryEngine {
                 .signature(DefId::intern(path))
                 .ok_or_else(refuse)??
                 .clone();
-            let representation = self.owner_record(path);
+            let representation = namespace.representation(path);
             if let Some(record) = &representation {
                 let bytes = records
                     .encode(
@@ -750,7 +733,12 @@ impl QueryEngine {
                 required = required
                     .checked_add(bytes.len() as u64)
                     .ok_or_else(refuse)?;
-                if self.implementation_hash(path) != Some(record.text_hash) {
+                if namespace
+                    .bodies
+                    .get(&DefId::intern(path))
+                    .map(|input| input.implementation)
+                    != Some(record.text_hash)
+                {
                     return Err(native_selection_error(format!(
                         "native representation revision differs from source: {path}"
                     )));
@@ -763,7 +751,7 @@ impl QueryEngine {
                     "hirsel.front.native-definition-address.v2",
                     [
                         environment.0.as_slice(),
-                        namespace.0.as_slice(),
+                        selection_identity.0.as_slice(),
                         bytes.as_slice(),
                     ],
                 )),
@@ -786,7 +774,7 @@ impl QueryEngine {
         }
         Ok(FrontNativeDefinitionInputs {
             definitions: definitions.to_vec(),
-            snapshot,
+            namespace,
             original_context,
             inputs,
             ids,
@@ -806,13 +794,15 @@ impl QueryEngine {
         allowance: MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontNativeDefinitionQueries>, QueryError> {
-        if !Arc::ptr_eq(&inputs.snapshot, &self.signature_inputs())
-            || !Arc::ptr_eq(&inputs.snapshot, &lower.signatures())
-        {
-            return Err(native_selection_error(
-                "native catalogue and Lower signature snapshots differ",
-            ));
-        }
+        inputs.namespace.require_consistent(front.namespace()).map_err(|_| native_selection_error("native catalogue and front use different accepted registrations or namespace captures"))?;
+        inputs
+            .namespace
+            .require_consistent(lower.namespace())
+            .map_err(|_| {
+                native_selection_error(
+                    "native catalogue and Lower use different namespace captures",
+                )
+            })?;
         if inputs
             .definitions
             .iter()
@@ -846,7 +836,7 @@ impl QueryEngine {
         }
         let FrontNativeDefinitionInputs {
             definitions: _,
-            snapshot: _,
+            namespace: _,
             original_context,
             inputs,
             ids,

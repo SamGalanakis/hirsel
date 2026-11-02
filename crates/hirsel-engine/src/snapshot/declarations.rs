@@ -206,6 +206,14 @@ impl Declarations {
         }
         ContentHash::of_parts("hirsel.read.module-names.v2", parts)
     }
+    pub(crate) fn headers_only(&self) -> Arc<Self> {
+        Arc::new(Self {
+            rows: self.rows.clone(),
+            files: Arc::default(),
+            anchors: Arc::default(),
+            archived_siblings: None,
+        })
+    }
     pub(crate) fn with_archived_siblings(&self, source: Arc<dyn DeclarationSiblings>) -> Arc<Self> {
         Arc::new(Self {
             rows: self.rows.clone(),

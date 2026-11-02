@@ -188,7 +188,9 @@ impl FrontLowerQueries {
     pub(super) fn observe(&self, owner: &DefPath, read: &ReadKey) -> Option<ContentHash> {
         match *read {
             ReadKey::ExecutedBody(id) => Some(memos::optional(
-                self.inputs.get_id(id).map(|input| input.implementation),
+                self.inputs
+                    .get_id(id)
+                    .map(|input| input.captured.implementation),
             )),
             ReadKey::LayoutBody(id) => Some(memos::optional(self.layouts.get(&id).copied())),
             _ => self.front.observe(owner, read),
@@ -359,7 +361,13 @@ impl FrontLowerQueries {
                 depth,
                 executed,
                 selections,
-            ): reads::Descriptor = self.records.decode(&self.anchors, &row.descriptor)?;
+                manifest,
+            ): reads::Descriptor = self
+                .records
+                .decode(&*self.namespace.anchors, &row.descriptor)?;
+            if !self.namespace.manifest_holds(manifest, self.weight.scratch) {
+                return None;
+            }
             let lower = LowerProduct {
                 live: None,
                 definition,
@@ -384,14 +392,20 @@ impl FrontLowerQueries {
             if row.constant_decode_bytes > self.weight.scratch {
                 return None;
             }
-            let (value, substitutions, reads, depth, executed, selections): (
+            let (value, substitutions, reads, depth, executed, selections, manifest): (
                 Materialized,
                 Vec<(hirsel_syntax::ExprId, Materialized)>,
                 Reads,
                 DepthEvidence<Span>,
                 bool,
                 staged::Selections,
-            ) = self.records.decode(&self.anchors, &row.descriptor)?;
+                Reference,
+            ) = self
+                .records
+                .decode(&*self.namespace.anchors, &row.descriptor)?;
+            if !self.namespace.manifest_holds(manifest, self.weight.scratch) {
+                return None;
+            }
             let mut constants = Constants::new(value, substitutions);
             constants.set_working_bytes(row.constant_decode_bytes);
             (

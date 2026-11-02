@@ -109,8 +109,10 @@ impl FrontLowerQueries {
                 depth,
                 executed,
                 selections,
-            ): reads::Descriptor = self.records.decode(&self.anchors, &descriptor)?;
-            if definition.path() != path
+                manifest,
+            ): reads::Descriptor = self.records.decode(&*self.namespace.anchors, &descriptor)?;
+            if !self.namespace.manifest_holds(manifest, self.weight.scratch)
+                || definition.path() != path
                 || body.domain != crate::NATIVE_ORIGINAL_BODY
                 || body.len > self.weight.scratch
                 || materialized.domain != LOWER_MATERIALIZED
@@ -118,7 +120,7 @@ impl FrontLowerQueries {
             {
                 return None;
             }
-            let source = Arc::new(self.anchors.clone());
+            let source = self.namespace.anchors.clone();
             let decoded = Arc::new(self.records.open_tir(
                 source.clone(),
                 self.store.get_content(body)?,
@@ -133,28 +135,31 @@ impl FrontLowerQueries {
             let mut acceptance = None;
             if self.verify == Verify::On {
                 // A refused universe reads no stored body: it is a miss.
-                let views = self.snapshot.validation(&path.0.package).ok()?;
+                let views = self.namespace.snapshot.validation(&path.0.package).ok()?;
                 if self.lowering.is_none() {
                     let output = self.store.verifier()?.definition_output(
                         persistent::evaluation_subject(key, &descriptor),
                         definition,
-                        self.snapshot.types(),
-                        self.snapshot.source_verification_policy(),
+                        self.namespace.snapshot.types(),
+                        self.namespace.snapshot.source_verification_policy(),
                         views,
                     )?;
                     if !output.matches_archive(
                         &decoded,
-                        self.snapshot.types().clone(),
-                        |anchor| self.anchors.record_owner(anchor),
-                        self.snapshot.source_verification_policy(),
+                        self.namespace.snapshot.types().clone(),
+                        |anchor| self.namespace.anchors.record_owner(anchor),
+                        self.namespace.snapshot.source_verification_policy(),
                         views,
                     ) {
                         return None;
                     }
                 }
                 let (report, ran, accepted, evidence) = self
+                    .namespace
                     .snapshot
-                    .validate_source_artifact(&decoded, |anchor| self.anchors.record_owner(anchor))
+                    .validate_source_artifact(&decoded, |anchor| {
+                        self.namespace.anchors.record_owner(anchor)
+                    })
                     .ok()?;
                 if ran {
                     timings::count(Count::VRuns);
@@ -171,8 +176,8 @@ impl FrontLowerQueries {
                     && let Some(output) = cache.publish_definition(
                         persistent::evaluation_subject(key, &descriptor),
                         &decoded,
-                        self.snapshot.types().clone(),
-                        self.snapshot.source_verification_policy(),
+                        self.namespace.snapshot.types().clone(),
+                        self.namespace.snapshot.source_verification_policy(),
                         views,
                         &evidence,
                         &[],
@@ -210,14 +215,18 @@ impl FrontLowerQueries {
             if record.lower.is_some() {
                 return None;
             }
-            let (value, substitutions, reads, depth, executed, selections): (
+            let (value, substitutions, reads, depth, executed, selections, manifest): (
                 Materialized,
                 Vec<(hirsel_syntax::ExprId, Materialized)>,
                 Reads,
                 DepthEvidence<Span>,
                 bool,
                 staged::Selections,
-            ) = self.records.decode(&self.anchors, &descriptor)?;
+                Reference,
+            ) = self.records.decode(&*self.namespace.anchors, &descriptor)?;
+            if !self.namespace.manifest_holds(manifest, self.weight.scratch) {
+                return None;
+            }
             let mut constants = Constants::new(value, substitutions);
             constants.set_working_bytes(record.constant_decode_bytes);
             (
@@ -228,18 +237,18 @@ impl FrontLowerQueries {
                 selections,
             )
         };
-        if depth.first.len() != dependency_limit(self.limits.call_depth) as usize + 1 {
+        if depth.first.len() != dependency_limit(self.namespace.limits.call_depth) as usize + 1 {
             return None;
         }
         let execution_subject = persistent::evaluation_subject(key, &descriptor);
         let execution = if self.verify == Verify::On && executed {
             Some(self.store.verifier()?.execution_revalidated(
                 execution_subject,
-                self.snapshot.types().clone(),
+                self.namespace.snapshot.types().clone(),
                 |path, occurrence| {
-                    crate::NativeRecordSource::record_source_anchor(&self.anchors, path, occurrence)
+                    crate::NativeRecordSource::record_source_anchor(&*self.namespace.anchors, path, occurrence)
                 },
-                &*self.snapshot,
+                &*self.namespace.snapshot,
             )?)
         } else {
             None

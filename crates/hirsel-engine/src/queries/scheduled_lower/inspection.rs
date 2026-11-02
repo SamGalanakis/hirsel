@@ -70,7 +70,7 @@ impl FrontLowerQueries {
         let archive = self
             .records
             .open_tir(
-                Arc::new(self.anchors.clone()),
+                self.namespace.anchors.clone(),
                 self.store
                     .get_content(reference)
                     .ok_or(QueryError::NotImplemented)?,
@@ -159,7 +159,7 @@ impl FrontLowerQueries {
         let dependencies = archive
             .dependencies(
                 &self.records,
-                &self.anchors,
+                &*self.namespace.anchors,
                 &*self.store,
                 allowance.bytes(),
             )

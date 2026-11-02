@@ -832,6 +832,7 @@ fn frozen_frontier_depth_and_last_limit_match_serial_with_partial_hits() {
 /// times out here instead of accidentally passing the value differential.
 #[test]
 fn frozen_frontier_evaluation_tasks_overlap() {
+    use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
     use std::sync::{Arc, Condvar, Mutex};
     struct Overlap {
         inner: Arc<dyn LoweringPhase>,
@@ -881,30 +882,64 @@ fn frozen_frontier_evaluation_tasks_overlap() {
             self.inner.entry_body()
         }
     }
+    thread_local! {
+        static OVERLAP: std::cell::RefCell<Option<Arc<Overlap>>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+    fn overlap_adapters() -> PhaseAdapters {
+        let mut adapters = compiler_adapters();
+        adapters.lowering = OVERLAP.with(|overlap| {
+            let overlap: Arc<dyn LoweringPhase> = overlap.borrow().as_ref().unwrap().clone();
+            Some(overlap)
+        });
+        adapters
+    }
     with_compiler_stack(|| {
         for jobs in [2, 8] {
-            let mut adapters = compiler_adapters();
             let overlap = Arc::new(Overlap {
-                inner: adapters.lowering.take().unwrap(),
+                inner: compiler_adapters().lowering.unwrap(),
                 workers: Mutex::new(vec![]),
                 ready: Condvar::new(),
             });
-            adapters.lowering = Some(overlap.clone());
-            let mut candidate = QueryEngine::new(default_environment(), adapters);
-            let file = candidate
-                .sources
-                .add(
-                    "overlap.hir",
-                    "const A: u32 = comptime 11\nconst B: u32 = comptime 12\n".into(),
+            OVERLAP.with(|observed| *observed.borrow_mut() = Some(overlap.clone()));
+            let directory = tempfile::tempdir().unwrap();
+            let manifest = directory.path().join("hirsel.json");
+            std::fs::write(
+                directory.path().join("overlap.hir"),
+                "const A: u32 = comptime 11\nconst B: u32 = comptime 12\n",
+            )
+            .unwrap();
+            std::fs::write(
+                &manifest,
+                r#"{"schema":1,"package":{"name":"standalone","version":"0"},"sources":[{"path":"overlap.hir","module":[]}],"dependencies":[]}"#,
+            )
+            .unwrap();
+            let config = CompileConfig {
+                jobs: hirsel_intern::jobs::Jobs::new(jobs),
+                ..CompileConfig::for_memory_cap(None)
+            };
+            let compiler = COMPILER.with_config(config.clone()).with_phase_adapters(
+                overlap_adapters,
+                hirsel_syntax::ContentHash::of_bytes(b"hirsel.overlapping-request-evaluations.v1")
+                    .0,
+            );
+            let mut candidate = CompilerRequests::for_host(compiler, config);
+            let output = candidate
+                .execute(
+                    &manifest,
+                    CompileOperation::Check {
+                        lowering: LoweringPolicy::Comptime,
+                    },
                 )
                 .unwrap();
-            candidate.parse_file(file, &default_context()).unwrap();
-            let values = candidate.materialize_values(
-                vec![path("A"), path("B")],
-                hirsel_intern::jobs::Jobs::new(jobs),
-            );
-            assert!(values.iter().all(Result::is_ok), "{values:?}");
+            let CompileResult::Check(checked) = &output.result else {
+                panic!("expected Check");
+            };
+            assert_eq!(checked.completion, CheckCompletion::Complete);
+            assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
             assert!(overlap.workers.lock().unwrap().len() >= 2);
+            OVERLAP.with(|observed| *observed.borrow_mut() = None);
         }
     });
 }

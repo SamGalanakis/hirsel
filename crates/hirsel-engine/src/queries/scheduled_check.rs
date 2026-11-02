@@ -681,14 +681,33 @@ impl Task {
                             continue;
                         }
                         let path = &paths[self.root];
-                        let id = self
-                            .queries
-                            .plan
-                            .lower
-                            .query(path)
-                            .ok_or(self.queries.errors.protocol)?;
+                        let lower = &self.queries.plan.lower;
+                        let id = lower.query(path).ok_or(self.queries.errors.protocol)?;
                         let selected = match cx.read(id) {
-                            Poll::Pending => return Ok(Some(vec![id])),
+                            Poll::Pending => {
+                                // With a second worker, the next evaluation root
+                                // runs meanwhile; results are still consumed, and
+                                // a failure still stops, in source order. Only the
+                                // current root pins its body. One root ahead, not
+                                // one per worker: Lower admission refuses instead
+                                // of waiting, and a root per worker overran the
+                                // std startup build's Lower allowance.
+                                let ahead = if rest || self.selecting_instances {
+                                    0
+                                } else {
+                                    cx.workers().min(2) - 1
+                                };
+                                let mut pending = vec![id];
+                                for path in paths.iter().skip(self.root + 1).take(ahead) {
+                                    let id =
+                                        lower.query(path).ok_or(self.queries.errors.protocol)?;
+                                    if cx.read(id).is_pending() {
+                                        pending.push(id);
+                                    }
+                                    cx.release_body(id);
+                                }
+                                return Ok(Some(pending));
+                            }
                             Poll::Ready(selected) => selected,
                         };
                         match selected {

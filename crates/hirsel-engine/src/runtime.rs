@@ -81,6 +81,12 @@ pub trait QueryContext {
     /// and released its raw body. Keep the semantic edge and subscriptions;
     /// only its in-flight body pin ends, until the next read.
     fn release_body(&mut self, _query: QueryId) {}
+    /// Workers that can run ready tasks of this graph at once. A producer
+    /// that consumes independent dependencies in order demands at most this
+    /// many ahead, so one worker keeps today's one-at-a-time schedule.
+    fn workers(&self) -> usize {
+        1
+    }
     /// Evict the oldest settled, unpinned Front facts, analyzed or Lower body outside unfinished
     /// roots and active continuations. Producers call this before retrying a
     /// refused admission.

@@ -893,6 +893,9 @@ impl QueryContext for Context<'_> {
             .map_or(0, |execution| execution.weight.scratch)
     }
 
+    fn workers(&self) -> usize {
+        self.shared.lock().stats.workers.max(1)
+    }
     fn release_body(&mut self, dependency: QueryId) {
         self.shared
             .lock()

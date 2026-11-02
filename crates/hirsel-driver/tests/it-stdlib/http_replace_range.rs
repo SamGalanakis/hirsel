@@ -519,7 +519,7 @@ pub fn main(t: Test) -> Result[(), http.HttpError] {{
                     )
                     .unwrap();
                     let runtime = if checked {
-                        program.engine.checked_runtime_types()
+                        program.engine.checked_runtime_types(&program.entry)
                     } else {
                         program.engine.runtime_types()
                     }

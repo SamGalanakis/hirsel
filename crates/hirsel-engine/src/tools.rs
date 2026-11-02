@@ -881,7 +881,7 @@ fn run_observed(
         .map_err(query_error)?
         .value;
     let runtime = if checked {
-        engine.checked_runtime_types()
+        engine.checked_runtime_types(&config.entry)
     } else {
         engine.runtime_types()
     }

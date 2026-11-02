@@ -104,7 +104,7 @@ fn sealed_graph_reference_59_small_charge_vectors_agree_with_direct_h() {
             engine.import_native_input(exported).unwrap();
             for checked in [false, true] {
                 let runtime = if checked {
-                    engine.checked_runtime_types()
+                    engine.checked_runtime_types(&entry_path(&default_context()))
                 } else {
                     engine.runtime_types()
                 }

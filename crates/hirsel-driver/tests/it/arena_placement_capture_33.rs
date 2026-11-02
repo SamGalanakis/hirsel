@@ -153,7 +153,7 @@ fn arena_placement_capture_33_scope_grants_have_no_handle_drop_observation() {
             prepared("pub fn main(){arena.with(fn(a:Arena){let xs:List[u64] in a=[9u64];});}");
         for checked in [false, true] {
             let runtime = if checked {
-                engine.checked_runtime_types()
+                engine.checked_runtime_types(&entry_path(&default_context()))
             } else {
                 engine.runtime_types()
             }

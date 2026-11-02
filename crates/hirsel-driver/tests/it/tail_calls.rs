@@ -430,7 +430,9 @@ fn primitive_completion_matches_scheduled_completion_with_steps_traces_and_budge
                     },
                 ] {
                     let mut runtime = if checked {
-                        engine.checked_runtime_types().unwrap()
+                        engine
+                            .checked_runtime_types(&entry_path(&default_context()))
+                            .unwrap()
                     } else {
                         engine.runtime_types().unwrap()
                     };

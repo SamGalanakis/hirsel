@@ -112,7 +112,7 @@ fn sealed_regions_33_cancel_after_region_is_an_unjoined_task_result() {
         engine.import_native_input(exported).unwrap();
         for checked in [false, true] {
             let runtime = if checked {
-                engine.checked_runtime_types()
+                engine.checked_runtime_types(&entry_path(&default_context()))
             } else {
                 engine.runtime_types()
             }

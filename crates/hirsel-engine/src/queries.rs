@@ -2010,69 +2010,26 @@ impl QueryEngine {
         }
         self.last_phase.map(|p| p.phase_name().into())
     }
-    /// The runtime types a program runs with: every item's view as its own
-    /// package's bodies see it, with each owned drop body lowered.
+    /// The runtime types a lowered program runs with. Rows are demanded per
+    /// type the run names, so they cover only types its closure reaches.
     pub fn runtime_types(&mut self) -> Result<hirsel_interp::aggregate::RuntimeTypes, QueryError> {
-        let mut views: Vec<_> = self
-            .registry
-            .signatures()
-            .map(|s| (s.clone(), ContentHash::default()))
-            .collect();
-        for path in self.source_paths() {
-            let public = self.item_signature(&path)?.value;
-            views.push((
-                self.body_signature(&path.0.package, public)?.0,
-                ContentHash::default(),
-            ));
-        }
-        self.build_runtime_types(views, true)
+        let entry = self.adapters.lowering.as_ref().map(|l| l.entry_body());
+        self.prepare_private_summaries();
+        Ok(self.signature_inputs().runtime_types(entry))
     }
-    /// Runtime metadata plus the declared facts checked execution enforces:
-    /// `@noalloc` definitions, library `in ..` results and `arena.with`.
+    /// Runtime metadata plus the declared facts checked execution enforces
+    /// over `entry`'s semantic closure: `@noalloc` definitions, library `in ..`
+    /// results and `arena.with`.
     pub fn checked_runtime_types(
         &mut self,
+        entry: &DefPath,
     ) -> Result<hirsel_interp::aggregate::RuntimeTypes, QueryError> {
+        let closure = self.semantic_program([entry.clone()])?.definitions;
         let mut runtime = self.runtime_types()?;
-        let mut checked = hirsel_interp::checked::CheckedRuntime {
-            arena_with: Some(hirsel_syntax::DefPath::core("arena.with")),
-            ..Default::default()
-        };
-        let library: Vec<_> = self.registry.signatures().cloned().collect();
-        let mut signatures: Vec<_> = library.iter().cloned().collect();
-        for path in self.source_paths() {
-            signatures.push(self.item_signature(&path)?.value);
-        }
-        for signature in signatures {
-            if let hirsel_types::SignatureKind::Type(t) = &signature.kind {
-                if t.layout.flat {
-                    checked.flat.insert(signature.definition.path().clone());
-                }
-                if t.loop_source.is_some() {
-                    checked
-                        .operations
-                        .insert(signature.definition.path().clone(), signature.clone());
-                }
-                if t.destructor_allocation == hirsel_types::Allocation::NoAlloc {
-                    checked
-                        .noalloc_drop
-                        .insert(signature.definition.path().clone());
-                    checked.noalloc.insert(signature.definition.path().clone());
-                }
-            }
-            let hirsel_types::SignatureKind::Function(function) = &signature.kind else {
-                continue;
-            };
-            if function.allocation == hirsel_types::Allocation::NoAlloc {
-                checked.noalloc.insert(signature.definition.path().clone());
-            }
-            checked
-                .operations
-                .insert(signature.definition.path().clone(), signature);
-        }
-        if let Some(forget) = &runtime.forget {
-            checked.noalloc.insert(forget.clone());
-        }
-        runtime.checked = Some(checked);
+        runtime.checked = Some(
+            self.signature_inputs()
+                .checked_runtime(&closure, runtime.forget.as_ref())?,
+        );
         Ok(runtime)
     }
     /// The runtime types compile-time evaluation runs with, built once per
@@ -2120,33 +2077,6 @@ impl QueryEngine {
     /// Runtime types over `views` (each with the digest a reflection of it
     /// records). A program's run lowers each owned drop body; compile-time
     /// evaluation names the entry body and lowers a finalizer when it runs.
-    fn build_runtime_types<V: Into<hirsel_interp::aggregate::SerializedView>>(
-        &mut self,
-        views: Vec<(V, ContentHash)>,
-        eager: bool,
-    ) -> Result<hirsel_interp::aggregate::RuntimeTypes, QueryError> {
-        runtime_type_catalog(self.types.clone(), views, |drop| {
-            if self.declared(drop) {
-                let entry = if eager {
-                    self.lower_to_tir(drop)?.value.entry
-                } else {
-                    self.adapters
-                        .lowering
-                        .as_ref()
-                        .ok_or(QueryError::NotImplemented)?
-                        .entry_body()
-                };
-                Ok(Some((drop.clone(), entry)))
-            } else if self.registry.get(drop).is_some() {
-                Ok(None)
-            } else {
-                Err(QueryError::Operational(hirsel_types::OperationalFailure {
-                    operation: "runtime types".into(),
-                    message: format!("missing finalizer {drop:?}"),
-                }))
-            }
-        })
-    }
     pub fn manifest_revision(&self) -> ContentHash {
         ContentHash::of_parts(
             "hirsel.manifest.v1",
@@ -2818,30 +2748,6 @@ pub(crate) fn header_span(syntax: &ItemSyntax) -> Span {
     }
 }
 
-pub(crate) fn runtime_type_catalog<V: Into<hirsel_interp::aggregate::SerializedView>>(
-    types: Arc<hirsel_types::TypeInterner>,
-    views: Vec<(V, ContentHash)>,
-    mut finalizer: impl FnMut(&DefPath) -> Result<Option<(DefPath, hirsel_tir::BodyId)>, QueryError>,
-) -> Result<hirsel_interp::aggregate::RuntimeTypes, QueryError> {
-    let views: Vec<(hirsel_interp::aggregate::SerializedView, ContentHash)> = views
-        .into_iter()
-        .map(|(view, digest)| (view.into(), digest))
-        .collect();
-    // Each nominal reads its signature through a scoped view; the catalog
-    // keeps only the identities.
-    let mut nominals = Vec::new();
-    for (view, _) in &views {
-        nominals.extend(hirsel_interp::aggregate::Nominal::of(
-            &types,
-            &*view.signature()?,
-            &mut finalizer,
-        )?);
-    }
-    Ok(hirsel_interp::aggregate::RuntimeTypes {
-        nominals,
-        ..runtime_types_over(types, hirsel_interp::aggregate::Serialization::new(views))
-    })
-}
 /// Runtime facts over `serialization`, with ordinary effect tracing.
 pub(crate) fn runtime_types_over(
     types: Arc<hirsel_types::TypeInterner>,

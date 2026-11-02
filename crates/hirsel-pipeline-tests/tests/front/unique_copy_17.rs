@@ -16,7 +16,7 @@ fn copied_unique_local_survives_mutable_handback() {
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     let entry = hirsel_engine::entry_path(&context);
     engine.lower_to_tir(&entry).unwrap();
-    let runtime = engine.checked_runtime_types().unwrap();
+    let runtime = engine.checked_runtime_types(&entry).unwrap();
     let sources = engine.sources.clone();
     let execution = hirsel_interp::run_with_runtime(
         &mut engine,

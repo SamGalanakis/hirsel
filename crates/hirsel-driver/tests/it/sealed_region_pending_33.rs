@@ -145,7 +145,7 @@ fn pending(fail_after_cancel: bool) {
         engine.import_native_input(exported).unwrap();
         for checked in [false, true] {
             let runtime = if checked {
-                engine.checked_runtime_types()
+                engine.checked_runtime_types(&entry_path(&default_context()))
             } else {
                 engine.runtime_types()
             }

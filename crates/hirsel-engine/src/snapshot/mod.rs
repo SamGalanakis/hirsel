@@ -38,17 +38,32 @@ impl ViewIdentity for Identity {
 }
 use hirsel_interp::aggregate::ViewIdentity;
 
-/// The rows compile-time evaluation demands from one snapshot.
-struct ComptimeRows {
+/// The rows an evaluation demands from one snapshot, one per type it names.
+/// Compile-time rows carry V's digest of each view (reflection records it);
+/// run-time rows carry the zero digest ordinary execution reads.
+struct SnapshotRows {
     snapshot: Arc<SignatureSnapshot>,
     entry: Option<hirsel_tir::BodyId>,
+    validated: bool,
 }
-impl hirsel_interp::aggregate::TypeRows for ComptimeRows {
+impl hirsel_interp::aggregate::TypeRows for SnapshotRows {
     fn view(
         &self,
         path: &DefPath,
     ) -> Result<Option<(hirsel_interp::aggregate::SerializedView, ContentHash)>, QueryError> {
-        match self.snapshot.representation_identity(DefId::intern(path)) {
+        let d = DefId::intern(path);
+        if !self.validated {
+            return match self.snapshot.body_view(&path.0.package, d) {
+                Some(view) => view.map(|view| Some((view.into(), ContentHash::default()))),
+                None => Ok(self
+                    .snapshot
+                    .lookup
+                    .registry
+                    .get(path)
+                    .map(|signature| (signature.clone().into(), ContentHash::default()))),
+            };
+        }
+        match self.snapshot.representation_identity(d) {
             Some(Ok(view)) => {
                 let digest = view.digest().0;
                 Ok(Some((
@@ -881,9 +896,32 @@ impl SignatureSnapshot {
             self.types.clone(),
             hirsel_interp::aggregate::Serialization::demanded(
                 self.types.clone(),
-                Arc::new(ComptimeRows {
+                Arc::new(SnapshotRows {
                     snapshot: self.clone(),
                     entry,
+                    validated: true,
+                }),
+            ),
+        )
+    }
+    /// The runtime types a lowered program runs with. Each row is demanded
+    /// when the run names its type, so a run holds rows only for types its
+    /// closure reaches: `d`'s view in its own package, else the registry's
+    /// declaration, with the zero digest. Finalizers name `entry`, the
+    /// lowering's entry body; their definitions are in the closure because
+    /// each type's drop is one of its dependencies.
+    pub(crate) fn runtime_types(
+        self: &Arc<Self>,
+        entry: Option<hirsel_tir::BodyId>,
+    ) -> hirsel_interp::aggregate::RuntimeTypes {
+        crate::queries::runtime_types_over(
+            self.types.clone(),
+            hirsel_interp::aggregate::Serialization::demanded(
+                self.types.clone(),
+                Arc::new(SnapshotRows {
+                    snapshot: self.clone(),
+                    entry,
+                    validated: false,
                 }),
             ),
         )

@@ -231,6 +231,15 @@ impl Serialization {
         }
         view.map(|(view, _)| view.signature()).transpose()
     }
+    /// Whether `path`'s view is held or its demanded row has settled.
+    fn holds(&self, path: &DefPath) -> bool {
+        match &*self.views {
+            Views::Held(views) => views.contains_key(path),
+            Views::Demanded { settled, .. } => {
+                matches!(settled.lock().unwrap().get(path), Some(Ok(Some(_))))
+            }
+        }
+    }
     /// `path`'s nominal facts from a demanded row; a held table has none.
     fn nominal(&self, path: &DefPath) -> Result<Option<Nominal>, QueryError> {
         Ok(self.views.row(path)?.and_then(|row| row.nominal.clone()))
@@ -281,6 +290,11 @@ impl RuntimeTypes {
             checked: None,
             budgets: Default::default(),
         }
+    }
+    /// Whether `path` has a row: an explicit nominal, a held view or a
+    /// settled demanded row. Asking demands nothing.
+    pub fn has_row(&self, path: &DefPath) -> bool {
+        self.nominals.iter().any(|n| n.definition == *path) || self.serialization.holds(path)
     }
     /// `path`'s nominal facts: an explicit row, else its demanded row.
     pub fn get(&self, path: &DefPath) -> Result<Option<Nominal>, QueryError> {

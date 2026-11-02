@@ -93,7 +93,7 @@ fn lowered(engine: &mut QueryEngine, name: &str) -> Definition {
 /// cannot run it (arenas are M2 outside checked execution).
 fn run(engine: &mut QueryEngine, edits: &[Definition], checked: bool) -> Option<(Outcome, String)> {
     let runtime = if checked {
-        engine.checked_runtime_types()
+        engine.checked_runtime_types(&entry_path(&default_context()))
     } else {
         engine.runtime_types()
     }
@@ -461,7 +461,9 @@ fn a_noalloc_block_that_escapes_its_frame_traps() {
         assert_eq!(printed(run(&mut engine, &[], true)), "one\n");
         // Forge `make` as `@noalloc`: its fresh list can only be region-placed,
         // and that region ends before the caller reads the result.
-        let mut runtime = engine.checked_runtime_types().unwrap();
+        let mut runtime = engine
+            .checked_runtime_types(&entry_path(&default_context()))
+            .unwrap();
         runtime
             .checked
             .as_mut()
@@ -859,7 +861,9 @@ fn a_region_placed_closure_environment_that_escapes_its_frame_traps() {
             "fn make(take text: String) -> fn() -> u64 { fn() { string.byte_len(text) } }\npub fn main(rt: Io, args: Args) -> Result[(), GrantError] {\n  let f = make(take \"abc\")\n  if f() == 3u64 { let _ = out.print(io.stdout(rt)?, \"three\\n\") }\n  Ok(())\n}",
         );
         assert_eq!(printed(run(&mut engine, &[], true)), "three\n");
-        let mut runtime = engine.checked_runtime_types().unwrap();
+        let mut runtime = engine
+            .checked_runtime_types(&entry_path(&default_context()))
+            .unwrap();
         runtime
             .checked
             .as_mut()

@@ -2497,3 +2497,65 @@ fn frozen_lowering_workers_share_only_unoccupied_scalar_hold_bytes() {
         }
     });
 }
+
+/// U3: a run holds runtime type rows only for types its lowered closure
+/// reaches. hello never names std's `bigint.BigInt`, so running hello against
+/// installed std leaves it without a row, while hello's own error type, which
+/// its closure reaches, is answered.
+#[test]
+fn running_hello_builds_runtime_type_rows_only_for_types_its_closure_reaches() {
+    hirsel_engine::with_compiler_stack(|| {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("hello.hir"),
+            "pub type HelloError = Grant(GrantError) | Output(OutputError)\n\
+             pub fn main(rt: Io) -> Result[(), HelloError] {\n  \
+             let output = io.stdout(rt) ? Grant\n  \
+             out.print(output, \"Hello, world\\n\") ? Output\n  Ok(())\n}\n",
+        )
+        .unwrap();
+        let stdlib = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stdlib/std@1/hirsel.json")
+            .canonicalize()
+            .unwrap();
+        let manifest = dir.path().join("hirsel.json");
+        std::fs::write(&manifest, serde_json::json!({"schema":1,"package":{"name":"hello","version":"0"},"sources":[{"path":"hello.hir","module":[]}],"dependencies":[{"manifest":stdlib,"package":{"name":"std","version":"1"},"expose":[]}],"entry":{"module":[],"name":"main"}}).to_string()).unwrap();
+        let prepared =
+            hirsel_driver::request_tir(&manifest, hirsel_driver::session::Policy::default(), None)
+                .unwrap();
+        let config = RunConfiguration {
+            entry: prepared.entry.clone(),
+            hash_seed: 0,
+            inputs: vec![],
+        };
+        for checked in [false, true] {
+            let execution = hirsel_driver::testing::observe_tir(
+                &prepared,
+                &config,
+                SimulationConfig::default(),
+                hirsel_interp::Limits::default(),
+                checked,
+            )
+            .unwrap();
+            let observation = hirsel_driver::native::Observation::of_reference(
+                execution.observation.as_ref().unwrap(),
+            );
+            assert_eq!(observation.exit_code, Some(0), "{observation:?}");
+        }
+        let mut error = prepared.entry.clone();
+        error.0.name = "HelloError".into();
+        assert!(prepared.runtime.get(&error).unwrap().is_some());
+        let big = DefPath(hirsel_syntax::ItemPath {
+            package: hirsel_syntax::PackageId {
+                name: "std".into(),
+                version: "1".into(),
+            },
+            modules: vec!["bigint".into()],
+            name: "BigInt".into(),
+        });
+        assert!(
+            !prepared.runtime.has_row(&big),
+            "hello's run built a row for std BigInt, which its closure never reaches"
+        );
+    });
+}

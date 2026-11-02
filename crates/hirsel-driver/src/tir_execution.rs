@@ -147,7 +147,7 @@ pub(crate) fn run_loaded_on_host_with_checks(
             Some(std::sync::Arc::new(
                 program
                     .engine
-                    .checked_runtime_types()
+                    .checked_runtime_types(&entry)
                     .map_err(|error| program.error(error))?
                     .checked
                     .ok_or_else(|| {
@@ -630,7 +630,11 @@ mod tests {
         hirsel_engine::check_snapshot(&mut engine, file, &context).unwrap();
         let entry = hirsel_engine::entry_path(&context);
         let definition = engine.lower_to_tir(&entry).unwrap().value;
-        let checked_runtime = engine.checked_runtime_types().unwrap().checked.unwrap();
+        let checked_runtime = engine
+            .checked_runtime_types(&entry)
+            .unwrap()
+            .checked
+            .unwrap();
         TirExecution {
             entry: entry.clone(),
             definition: definition.clone(),

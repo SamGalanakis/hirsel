@@ -34,7 +34,9 @@ fn run(
         inputs: vec![],
     };
     let mut runtime = if checked {
-        engine.checked_runtime_types().unwrap()
+        engine
+            .checked_runtime_types(&entry_path(&default_context()))
+            .unwrap()
     } else {
         engine.runtime_types().unwrap()
     };

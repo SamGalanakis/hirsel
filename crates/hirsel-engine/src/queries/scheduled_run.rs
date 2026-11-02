@@ -75,7 +75,6 @@ pub struct FrontRunInputs {
     signatures: Arc<crate::snapshot::SignatureSnapshot>,
     source_paths: Vec<DefPath>,
     inputs: BTreeMap<DefPath, Input>,
-    views: Vec<(SignatureRef, ContentHash)>,
     store: Arc<dyn ResultStore>,
     required: u64,
 }
@@ -502,13 +501,6 @@ impl Task {
                     self.pending.push(DefId::intern(path));
                 }
             }
-            // Runtime type construction historically demands all declared drop
-            // bodies. These are explicit S5 dependencies, never host work.
-            for nominal in &self.queries.runtime.as_ref().expect("Run runtime").nominals {
-                if let Some((path, _)) = &nominal.finalizer {
-                    self.pending.push(DefId::intern(path));
-                }
-            }
         }
         loop {
             while let Some(id) = self.pending.last().copied() {
@@ -911,6 +903,7 @@ impl Task {
         );
         let checked_runtime = Arc::new(
             snapshot.checked_runtime(
+                self.entries.keys().map(|id| id.path()),
                 queries
                     .runtime
                     .as_ref()
@@ -1345,7 +1338,6 @@ impl QueryEngine {
         paths.extend(self.native_builtin_signatures().into_keys());
         paths.extend(self.staged_constants.keys().cloned());
         let mut inputs = BTreeMap::new();
-        let mut views = Vec::new();
         let required = FrontRunQueries::input_bytes(&paths.iter().cloned().collect::<Vec<_>>())
             .ok_or_else(|| operational("Run input inventory overflow"))?;
         for path in paths {
@@ -1356,7 +1348,6 @@ impl QueryEngine {
                 .body_view(&path.0.package, DefId::intern(&path))
                 .ok_or(QueryError::NotImplemented)??
                 .clone();
-            views.push((owner_signature.clone(), ContentHash::default()));
             let mut content = vec![
                 hirsel_types::encoding::canonical_encoding(
                     &self.types,
@@ -1432,7 +1423,6 @@ impl QueryEngine {
             signatures,
             source_paths,
             inputs,
-            views,
             store,
             required,
         })
@@ -1505,20 +1495,20 @@ impl QueryEngine {
             return Err(operational("Run inputs exceed admission"));
         }
         let FrontRunInputs {
-            signatures: _,
+            signatures,
             source_paths,
             inputs,
-            views,
             store,
             required,
         } = inputs;
-        // Zero representation digests match ordinary execution. Compile-time
-        // reflection's digest-bearing runtime remains a different producer.
-        let runtime = if check.is_some() {
-            Some(Arc::new(self.build_runtime_types(views, false)?))
-        } else {
-            None
-        };
+        // Rows are demanded per type the run names, so it holds only rows its
+        // closure reaches. Each type's drop is one of its Input dependencies,
+        // so the closure walk reaches every finalizer before the run starts.
+        let runtime = check.is_some().then(|| {
+            Arc::new(
+                signatures.runtime_types(self.adapters.lowering.as_ref().map(|l| l.entry_body())),
+            )
+        });
         let semantic_ids: BTreeMap<_, _> = inputs
             .keys()
             .map(|path| {

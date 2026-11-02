@@ -1,6 +1,6 @@
 //! Ordinary syntax archives for a demanded file's written sibling headers.
-//! Sibling lookup occurs inside the admitted front poll and performs only
-//! validated transport; no source parser or compiler phase is called here.
+//! Front admission captures validated sibling transport once. Lookup shares
+//! that immutable input; no source parser or compiler phase is called here.
 use super::*;
 use std::sync::OnceLock;
 
@@ -267,7 +267,7 @@ mod tests {
             self.inner.get_content(reference)
         }
     }
-    fn fixture() -> (SiblingArchives, Vec<Arc<ItemSyntax>>, Arc<CountingStore>) {
+    fn parsed() -> (QueryEngine, FileId, Vec<Arc<ItemSyntax>>) {
         let mut engine = QueryEngine::new(
             QueryEnvironment {
                 interface_version: 1,
@@ -303,6 +303,10 @@ mod tests {
             .frozen_declarations()
             .siblings(&engine.items.values().next().unwrap()[0]);
         assert_eq!(written.len(), 3);
+        (engine, file, written.to_vec())
+    }
+    fn fixture() -> (SiblingArchives, Vec<Arc<ItemSyntax>>, Arc<CountingStore>) {
+        let (engine, file, written) = parsed();
         let store = Arc::new(CountingStore::default());
         let owners = Arc::new(crate::NativeRecordContext::capture(&engine));
         let records = crate::NativeRecords::new(engine.types.clone(), store.clone());
@@ -338,9 +342,53 @@ mod tests {
                 backing,
                 retention,
             },
-            written.to_vec(),
+            written,
             store,
         )
+    }
+    #[test]
+    fn admitted_siblings_are_charged_before_compact_output_accounting() {
+        let (engine, _, written) = parsed();
+        let store = Arc::new(CountingStore::default());
+        let mut engine = engine.with_result_store(store.clone());
+        let definitions = written
+            .iter()
+            .map(|syntax| syntax.item.definition.clone())
+            .collect::<Vec<_>>();
+        let budget = ProcessBudget::new(16 << 20);
+        let error = SOURCE_INPUT.reference(b"unused fixture error").unwrap();
+        let front = engine
+            .front_body_queries(
+                &definitions,
+                MemoryWeight {
+                    retained: 1 << 20,
+                    scratch: 8 << 20,
+                    stack: 0,
+                },
+                budget.reserve(8 << 20).unwrap(),
+                RuntimeErrors {
+                    resource: error,
+                    cycle: error,
+                    cancelled: error,
+                    protocol: error,
+                    panicked: error,
+                },
+            )
+            .unwrap();
+        let initial = front.retained_bytes();
+        assert_eq!(store.reads.load(Ordering::Relaxed), written.len());
+        for syntax in &written {
+            assert_eq!(
+                front.declarations.try_siblings(syntax).unwrap().len(),
+                written.len()
+            );
+            assert_eq!(
+                front.retained_bytes(),
+                initial,
+                "sibling input bytes must not become compact observations"
+            );
+        }
+        assert_eq!(store.reads.load(Ordering::Relaxed), written.len());
     }
     #[test]
     fn archived_siblings_decode_once_for_repeated_and_concurrent_lookups() {

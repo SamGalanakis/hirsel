@@ -2391,9 +2391,9 @@ impl QueryEngine {
         required = required
             .checked_add(sibling_index.bytes())
             .ok_or_else(|| refusal("sibling index overflow"))?;
-        for (file, original) in sibling_inputs {
+        for (&file, original) in &sibling_inputs {
             if let std::collections::btree_map::Entry::Vacant(slot) = siblings.entry(file) {
-                let written = declarations.siblings(&original);
+                let written = declarations.siblings(original);
                 required = required
                     .checked_add(
                         (written.len() as u64)
@@ -2596,6 +2596,20 @@ impl QueryEngine {
             _sources: self.sources.clone(),
             headers: snapshot.header_products().map(Arc::downgrade),
         });
+        let sibling_archives = Arc::new(SiblingArchives {
+            files: siblings,
+            backing: backing.clone(),
+            retention: retention.clone(),
+            sources: self.sources.clone(),
+            owners: anchors.clone(),
+            records: crate::NativeRecords::new(self.types.clone(), store.clone()),
+            store: store.clone(),
+        });
+        // Decoded siblings are immutable inputs, not evictable compact outputs.
+        // Capture their charge before readers observe the input baseline.
+        for syntax in sibling_inputs.values() {
+            crate::snapshot::DeclarationSiblings::siblings(sibling_archives.as_ref(), syntax)?;
+        }
         let header_allowance = snapshot
             .header_products()
             .map(|headers| headers.configure_source_backing(backing.clone(), retention.clone()));
@@ -2606,15 +2620,7 @@ impl QueryEngine {
             types: self.types.clone(),
             memo: self.memo.clone(),
             snapshot,
-            declarations: declarations.with_archived_siblings(Arc::new(SiblingArchives {
-                files: siblings,
-                backing: backing.clone(),
-                retention: retention.clone(),
-                sources: self.sources.clone(),
-                owners: anchors.clone(),
-                records: crate::NativeRecords::new(self.types.clone(), store.clone()),
-                store: store.clone(),
-            })),
+            declarations: declarations.with_archived_siblings(sibling_archives),
             citations: OwnedSourceContext {
                 unique_failures: self.private_unique_failures.clone(),
                 sources: self.sources.clone(),

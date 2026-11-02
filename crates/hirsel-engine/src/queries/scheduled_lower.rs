@@ -1251,11 +1251,7 @@ impl FrontLowerQueries {
             .ok()
             .and_then(|_| source.evidence.borrow().finish(&observed));
         let descriptor_reads =
-            match persistent::persisted_execution_reads(&observed, execution.as_ref()) {
-                Some(reads) => reads,
-                None if execution.is_none() => observed.clone(),
-                None => return Err(self.errors.protocol),
-            };
+            evidence::persisted_reads(&observed, execution.as_ref()).ok_or(self.errors.protocol)?;
         let selections = std::mem::take(&mut *source.selections.borrow_mut());
         let mut reads_decode_bytes = 0;
         let bytes = match &mut result {

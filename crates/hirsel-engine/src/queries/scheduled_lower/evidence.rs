@@ -3,6 +3,15 @@
 use crate::{ReadKey, Reads, Verify};
 use hirsel_validate::{AcceptedArtifact, ExecutionReceipt};
 
+/// Unexecuted Lower products retain their validation guards. Only an opaque
+/// execution receipt permits replacing those guards with local V revalidation.
+pub(super) fn persisted_reads(reads: &Reads, receipt: Option<&ExecutionReceipt>) -> Option<Reads> {
+    match receipt {
+        Some(receipt) => super::persistent::persisted_execution_reads(reads, Some(receipt)),
+        None => Some(reads.clone()),
+    }
+}
+
 /// Ordinary descriptors omit broad context stamps. Only V's current opaque
 /// receipt restores them for live dependency tracking.
 pub(super) fn current_reads(reads: Reads, receipt: Option<&ExecutionReceipt>) -> Option<Reads> {

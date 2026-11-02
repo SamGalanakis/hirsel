@@ -57,8 +57,7 @@ impl FrontLowerQueries {
             return;
         };
         let key = stored_key(key);
-        let Some(reads) =
-            persistent::persisted_execution_reads(&outcome.reads, outcome.execution.as_ref())
+        let Some(reads) = evidence::persisted_reads(&outcome.reads, outcome.execution.as_ref())
         else {
             return;
         };
@@ -246,7 +245,7 @@ impl FrontLowerQueries {
             None
         };
         let reads = evidence::current_reads(reads, execution.as_ref())?;
-        if persistent::persisted_execution_reads(&reads, execution.as_ref())? != variant.reads {
+        if evidence::persisted_reads(&reads, execution.as_ref())? != variant.reads {
             return None;
         }
         let outcome = Outcome {

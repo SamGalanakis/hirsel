@@ -65,7 +65,9 @@ fn largest_std_bodies_validate_within_a_fixed_heap_budget() {
         let input = p.engine.export_native_input().unwrap();
         // The signature input V checks std's own bodies against.
         let snapshot = p.engine.signature_snapshot();
-        let signatures = snapshot.validation(&package("std"));
+        let signatures = snapshot
+            .validation(&package("std"))
+            .unwrap_or_else(|refusal| panic!("std's V input was refused: {refusal:?}"));
         for name in ["std@1/markdown/parse_inlines", "std@1/time/parse_with"] {
             let definition = input
                 .definitions
@@ -75,7 +77,8 @@ fn largest_std_bodies_validate_within_a_fixed_heap_budget() {
             let base = LIVE.load(Relaxed);
             PEAK.store(base, Relaxed);
             let validation =
-                hirsel_validate::validate(definition, &input.types, signatures, &mut vec![]);
+                hirsel_validate::validate(definition, &input.types, signatures, &mut vec![])
+                    .unwrap_or_else(|refusal| panic!("{name}: V refused: {refusal:?}"));
             let peak = PEAK.load(Relaxed) - base;
             assert!(
                 validation.violations.is_empty(),

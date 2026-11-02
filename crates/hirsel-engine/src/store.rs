@@ -785,7 +785,8 @@ impl ResultStore for MemStore {
         Some(self.verifier.clone())
     }
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
-        let cached = self.state
+        let cached = self
+            .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .entries

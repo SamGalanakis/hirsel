@@ -65,6 +65,13 @@ struct Record {
     reads: usize,
     payload: usize,
 }
+fn encode_identity(reads: &Reads, out: &mut Vec<u8>) {
+    out.extend((reads.len() as u32).to_le_bytes());
+    for (key, value) in reads.iter() {
+        key.encode(out);
+        out.extend(value.0);
+    }
+}
 impl Expected {
     /// The host chooses scratch placement through std::env::temp_dir (TMPDIR
     /// on Unix). No store hit or enabled verification means no scratch I/O.
@@ -90,7 +97,7 @@ impl Expected {
             }
         };
         let mut reads = Vec::new();
-        variant.reads.encode(&mut reads);
+        encode_identity(&variant.reads, &mut reads);
         let offset = {
             let mut guard = spool.file.lock().unwrap_or_else(|e| e.into_inner());
             let file = guard.as_mut().expect("live spool");
@@ -113,7 +120,7 @@ impl Expected {
             .as_ref()
             .map_err(|error| io::Error::other(error.to_string()))?;
         let mut encoded = Vec::new();
-        reads.encode(&mut encoded);
+        encode_identity(reads, &mut encoded);
         if encoded.len() != record.reads || payload.len() != record.payload {
             return Ok(false);
         }
@@ -207,6 +214,19 @@ mod tests {
             );
             reads.finish().unwrap()
         };
+        let environment_and_errors = |reverse, environment_byte| {
+            let mut reads = crate::memo::ReadsBuilder::new();
+            let environment = hirsel_syntax::ContentHash([environment_byte; 32]);
+            let errors = hirsel_syntax::ContentHash([2; 32]);
+            if reverse {
+                reads.record(crate::ReadKey::UniverseErrors, errors);
+                reads.record(crate::ReadKey::Environment, environment);
+            } else {
+                reads.record(crate::ReadKey::Environment, environment);
+                reads.record(crate::ReadKey::UniverseErrors, errors);
+            }
+            reads.finish().unwrap()
+        };
         let mut backing = Weak::new();
         let expected = Expected::capture(
             Variant {
@@ -218,6 +238,24 @@ mod tests {
         );
         assert!(expected.matches(&reads(1), b"body").unwrap());
         assert!(!expected.matches(&reads(2), b"body").unwrap());
+        let ordered = Expected::capture(
+            Variant {
+                inputs: hirsel_syntax::ContentHash::default(),
+                reads: environment_and_errors(false, 1),
+                payload: b"body".as_slice().into(),
+            },
+            &mut backing,
+        );
+        assert!(
+            ordered
+                .matches(&environment_and_errors(true, 1), b"body")
+                .unwrap()
+        );
+        assert!(
+            !ordered
+                .matches(&environment_and_errors(true, 3), b"body")
+                .unwrap()
+        );
         let failed = Expected(Err(Arc::from("injected scratch write failure")));
         assert!(failed.matches(&reads(1), b"body").is_err());
     }

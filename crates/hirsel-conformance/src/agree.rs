@@ -324,8 +324,9 @@ fn classify_package_native(
     hash_seed: u64,
 ) -> Classification {
     match catch_unwind(AssertUnwindSafe(|| {
-        hirsel_engine::with_compiler_stack(|| {
-            classify_requested(source, execution, native, path, hash_seed)
+        hirsel_engine::with_compiler_stack(|| match path {
+            Some(path) => classify_requested(source, execution, native, path, hash_seed),
+            None => classify_standalone(source, execution, native, hash_seed),
         })
     })) {
         Ok(result) => result,
@@ -357,55 +358,27 @@ fn variant_inputs(
     compiler: &hirsel_engine::Compiler,
     requests: &hirsel_driver::requests::CompilerRequests,
     source: &str,
-    path: Option<&Path>,
-) -> Result<
-    (
-        std::path::PathBuf,
-        hirsel_engine::loader_inputs::FrozenInputs,
-    ),
-    ToolError,
-> {
-    use hirsel_engine::loader_inputs::CaptureInputs;
+    path: &Path,
+) -> Result<hirsel_engine::loader_inputs::FrozenInputs, ToolError> {
     let limits = requests.input_limits();
-    let Some(path) = path else {
-        let path = std::env::current_dir()?.join("agree.hir");
-        for _ in 0..requests.capture_attempts() {
-            let capture = CaptureInputs::with_sources(
-                limits,
-                [(path.clone(), std::sync::Arc::from(source.as_bytes()))].into(),
-            )?;
-            let loaded = compiler.load_check_package_inputs(&path, &capture, true);
-            let inputs = capture.freeze();
-            if inputs.changed_on_disk().is_empty() {
-                drop(loaded?);
-                return Ok((path, inputs));
-            }
-        }
-        return Err(ToolError::Runtime(
-            "variant inputs changed during capture".into(),
-        ));
-    };
     let (loaded, inputs) =
         hirsel_engine::requests::observe_inputs(limits, requests.capture_attempts(), |inputs| {
-            compiler.load_check_package_inputs(path, inputs, true)
+            compiler.load_program_inputs(path, inputs, false)
         })
         .map_err(|_| ToolError::Runtime("variant inputs changed during capture".into()))?;
     drop(loaded?);
     let primary = inputs.known_path(path).unwrap_or_else(|| path.to_owned());
-    Ok((
-        path.to_owned(),
-        inputs.replace_sources(
-            &[(primary, std::sync::Arc::<[u8]>::from(source.as_bytes()))].into(),
-            limits.bytes,
-        )?,
-    ))
+    Ok(inputs.replace_sources(
+        &[(primary, std::sync::Arc::<[u8]>::from(source.as_bytes()))].into(),
+        limits.bytes,
+    )?)
 }
 
 fn classify_requested(
     source: &str,
     execution: Execution,
     native: Option<(&Native, &[hirsel_driver::native::Configuration])>,
-    path: Option<&Path>,
+    path: &Path,
     hash_seed: u64,
 ) -> Classification {
     use hirsel_driver::requests::{
@@ -413,8 +386,7 @@ fn classify_requested(
     };
     let compiler = crate::compiler::verifying_compiler();
     let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
-    let standalone = path.is_none();
-    let (path, inputs) = match variant_inputs(&compiler, &requests, source, path) {
+    let inputs = match variant_inputs(&compiler, &requests, source, path) {
         Ok(inputs) => inputs,
         Err(e) => return tool_error(e),
     };
@@ -447,7 +419,7 @@ fn classify_requested(
     drop(checked);
     let mut program = NativeProgram::Pending {
         compiler: compiler.clone(),
-        path: path.clone(),
+        path: path.to_owned(),
         inputs: inputs.clone(),
     };
     match execution {
@@ -457,11 +429,7 @@ fn classify_requested(
                 (Ok(simulation), Ok(fixture)) => (simulation, fixture),
                 (Err(error), _) | (_, Err(error)) => return violation("fixture", &error),
             };
-            let prepared = match execute(CompileOperation::Tir {
-                definition: standalone.then(|| {
-                    crate::selected_entry(source, &hirsel_engine::default_context())
-                }),
-            }) {
+            let prepared = match execute(CompileOperation::Tir { definition: None }) {
                 Ok(output) => output,
                 Err(e) => return tool_error(e),
             };
@@ -474,7 +442,7 @@ fn classify_requested(
                 inputs: vec![],
             };
             if let Some(outcome) =
-                compare_engines(&config, native, &mut program, &fixture, |checked| {
+                compare_engines(&config, native, &mut program, &fixture, |_, checked| {
                     hirsel_driver::testing::observe_tir(
                         input,
                         &config,
@@ -507,7 +475,7 @@ fn classify_requested(
                 return Classification::Valid;
             }
             let prepared = match requests.execute_request(&CompileRequest {
-                path: path.clone(),
+                path: path.to_owned(),
                 inputs: inputs.clone().into(),
                 operation: CompileOperation::TirBatch {
                     definitions: discovery
@@ -525,7 +493,7 @@ fn classify_requested(
             };
             program = NativeProgram::Pending {
                 compiler,
-                path,
+                path: path.to_owned(),
                 inputs,
             };
             for test in &discovery.tests {
@@ -557,7 +525,7 @@ fn classify_requested(
                     native,
                     &mut program,
                     &Default::default(),
-                    |checked| {
+                    |_, checked| {
                         hirsel_driver::testing::observe_tir(
                             &input,
                             &config,
@@ -573,6 +541,81 @@ fn classify_requested(
         }
     }
     Classification::Valid
+}
+
+/// A source without a path is checked alone in the engine, with core only.
+/// A standalone request would check the whole of std@1 from source for every
+/// variant, so these variants have no request input yet.
+fn classify_standalone(
+    source: &str,
+    execution: Execution,
+    native: Option<(&Native, &[hirsel_driver::native::Configuration])>,
+    hash_seed: u64,
+) -> Classification {
+    let mut engine = engine();
+    let context = hirsel_engine::default_context();
+    let file = engine
+        .sources
+        .add("agree.hir", source.into())
+        .expect("corpus-sized source");
+    match hirsel_engine::check_progress(&mut engine, file, &context) {
+        Err(e) => return query_error(e),
+        Ok(output) => {
+            if output
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == hirsel_diag::Severity::Error)
+            {
+                return Classification::Rejected;
+            }
+            if output.completion != CheckCompletion::Complete {
+                return Classification::Unavailable;
+            }
+        }
+    }
+    match execution {
+        Execution::None => Classification::Valid,
+        Execution::Tests => violation("fixture", "a test program is loaded through its file"),
+        Execution::Entry => {
+            let (simulation, fixture) = match (crate::simulation(source), crate::fixture(source)) {
+                (Ok(simulation), Ok(fixture)) => (simulation, fixture),
+                (Err(error), _) | (_, Err(error)) => return violation("fixture", &error),
+            };
+            let config = hirsel_engine::RunConfiguration {
+                entry: crate::selected_entry(source, &context),
+                hash_seed,
+                inputs: vec![],
+            };
+            let mut program = NativeProgram::Checked(engine);
+            compare_engines(
+                &config,
+                native,
+                &mut program,
+                &fixture,
+                |program, checked| observe_engine(program, &config, &simulation, checked),
+            )
+            .unwrap_or(Classification::Valid)
+        }
+    }
+}
+
+/// Interpret `config` in the checked engine of a variant that has no
+/// request-produced TIR yet.
+fn observe_engine(
+    program: &mut NativeProgram,
+    config: &hirsel_engine::RunConfiguration,
+    simulation: &hirsel_engine::SimulationConfig,
+    checked: bool,
+) -> Result<hirsel_engine::ObservedExecution, ToolError> {
+    let NativeProgram::Checked(engine) = program else {
+        unreachable!("the engine checked the variant before it runs")
+    };
+    let run = if checked {
+        hirsel_engine::run_observed_checked
+    } else {
+        hirsel_engine::run_observed_snapshot
+    };
+    run(engine, config, simulation.clone())
 }
 
 /// The checked engine the native comparison exports its input from. A
@@ -641,9 +684,12 @@ fn compare_engines(
     native: Option<(&Native, &[hirsel_driver::native::Configuration])>,
     program: &mut NativeProgram,
     fixture: &hirsel_driver::native::Fixture,
-    mut observe: impl FnMut(bool) -> Result<hirsel_engine::ObservedExecution, ToolError>,
+    mut observe: impl FnMut(
+        &mut NativeProgram,
+        bool,
+    ) -> Result<hirsel_engine::ObservedExecution, ToolError>,
 ) -> Option<Classification> {
-    let normal = match observe(false) {
+    let normal = match observe(program, false) {
         Ok(observed) => observed,
         Err(e) => return Some(tool_error(e)),
     };
@@ -657,7 +703,7 @@ fn compare_engines(
         }
         Err(e) => return Some(violation("interpretation", &format!("{e:?}"))),
     }
-    let checked = match observe(true) {
+    let checked = match observe(program, true) {
         Ok(observed) => observed,
         Err(e) => return Some(tool_error(e)),
     };

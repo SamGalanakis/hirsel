@@ -1,7 +1,7 @@
 //! Package test discovery and isolated launches over ordinary checked functions.
 //! Substring/OR filters adapt Rust libtest filter_tests (third-party/NOTICES.md).
-use hirsel_engine::{DefinitionQueries, LoadedProgram, RunOutcome, SimulationConfig, ToolError};
 use hirsel_engine::loader_inputs::LoaderInputs;
+use hirsel_engine::{DefinitionQueries, LoadedProgram, RunOutcome, SimulationConfig, ToolError};
 pub use hirsel_interp::library::simulation::SimulationDebug;
 pub use hirsel_run_schema::Scheduler;
 use hirsel_syntax::{DefPath, FileContext};
@@ -388,11 +388,10 @@ impl TestDiscovery {
             added = added
                 .checked_add(source.text.len() + 1)
                 .filter(|&n| n <= limit)
-                .ok_or_else(|| ToolError::Runtime("test wrappers exceed source admission".into()))?;
-            let path = self
-                .inputs
-                .known_path(path)
-                .unwrap_or_else(|| path.clone());
+                .ok_or_else(|| {
+                    ToolError::Runtime("test wrappers exceed source admission".into())
+                })?;
+            let path = self.inputs.known_path(path).unwrap_or_else(|| path.clone());
             if !replacements.contains_key(&path) {
                 replacements.insert(path.clone(), self.inputs.read(&path)?.to_vec());
             }

@@ -381,9 +381,8 @@ impl QueryEngine {
             }
         }
     }
-    /// The session's compiler and explicit build inputs. Loaded package
-    /// manifests describe discovery; their semantic dependencies are reads.
-    /// A standalone caller's opaque manifest revision is an explicit input.
+    /// The session's compiler and explicit build inputs. Package manifests
+    /// describe discovery; their semantic dependencies are reads.
     /// Include the comptime limits and charging version
     /// (CT-4): a budget or charging change re-evaluates every evaluation. One value per session,
     /// so the reads of different packages' memos merge without conflict.
@@ -400,12 +399,6 @@ impl QueryEngine {
                 &self.comptime_limits.budget.to_le_bytes(),
                 &(self.comptime_limits.call_depth as u64).to_le_bytes(),
                 &optional(self.build_inputs_revision()).0,
-                &optional(
-                    self.package_manifests
-                        .is_empty()
-                        .then_some(e.package_manifest_hash),
-                )
-                .0,
             ],
         )
     }
@@ -907,9 +900,22 @@ impl QueryEngine {
             self.build_inputs_revision(),
         );
         if self.environment_seen.as_ref() != Some(&now) {
-            if self.environment_seen.is_some() {
+            if let Some((previous, _, _)) = &self.environment_seen {
                 let mut changes = ChangeSet::default();
                 changes.read(ReadKey::Environment, Durability::High);
+                if previous.package_manifest_hash != now.0.package_manifest_hash {
+                    // An explicit environment edit retires local memos. The
+                    // durable key still follows content and observed reads,
+                    // independently of graph ownership or discovery order.
+                    let definitions = self
+                        .graph
+                        .subscribers(&ReadKey::Environment)
+                        .map(|key| key.def)
+                        .collect::<BTreeSet<_>>();
+                    for definition in definitions {
+                        changes.text(definition, Durability::High);
+                    }
+                }
                 self.apply_changes(&changes);
             }
             self.environment_seen = Some(now);

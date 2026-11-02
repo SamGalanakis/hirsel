@@ -12,6 +12,7 @@ pub use hirsel_artifact_store::{
 };
 use hirsel_syntax::{ContentHash, DefPath};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 mod dir;
@@ -70,7 +71,8 @@ pub trait ResultStore: Send + Sync {
     /// completion and materialization. Drop aborts the unpublished tail.
     fn operation_scope(&self) -> StoreOperation {
         StoreOperation {
-            persistence: self.persistence(),
+            persistence: Arc::new(OperationPersistence::new(self.persistence())),
+            request_store: false,
             requests: [
                 self.local_product_store().map(|store| store.request()),
                 self.verifier()
@@ -282,28 +284,63 @@ impl Persistence {
     }
 }
 
+struct OperationPersistence {
+    base: Persistence,
+    complete: AtomicBool,
+}
+impl OperationPersistence {
+    fn new(base: Persistence) -> Self {
+        Self {
+            base,
+            complete: AtomicBool::new(false),
+        }
+    }
+    fn persistence(&self) -> Persistence {
+        if self.base.retains() && self.complete.load(Ordering::Acquire) {
+            Persistence::Complete
+        } else {
+            self.base
+        }
+    }
+    fn completing(&self) {
+        if self.base.retains() {
+            self.complete.store(true, Ordering::Release);
+        }
+    }
+}
+
 /// The caller joins producers and materializes the result before finishing.
 /// Completed pressure prefixes remain durable on abort, as in Request.
 pub struct StoreOperation {
-    persistence: Persistence,
+    persistence: Arc<OperationPersistence>,
+    request_store: bool,
     requests: Vec<hirsel_artifact_store::Request>,
     reads: Vec<Box<dyn Send + Sync>>,
 }
 impl StoreOperation {
+    /// Promise the complete demanded closure for this request's roots
+    /// (Precompute and export). A backend that persists nothing stays
+    /// `Disabled`: there is nothing for a later request to open.
+    pub fn completing(self) -> Self {
+        self.persistence.completing();
+        self
+    }
     /// Unpublished physical batches need an independent abort owner until
     /// completion. Read guards alone do not prevent graph subscribers sharing
     /// the same immutable products.
     pub fn has_publication(&self) -> bool {
-        !self.requests.is_empty()
+        !self.requests.is_empty() || self.request_store
     }
     /// The policy captured when this operation's scope opened.
     pub fn persistence(&self) -> Persistence {
-        self.persistence
+        self.persistence.persistence()
     }
     /// Joining keeps this operation's captured policy.
     pub fn join(&mut self, mut other: Self) {
         self.requests.append(&mut other.requests);
         self.reads.append(&mut other.reads);
+        self.reads.push(Box::new(other.persistence));
+        self.request_store |= other.request_store;
     }
     pub fn finish(mut self) -> std::io::Result<()> {
         // Cache publication failure leaves live admitted transport intact.

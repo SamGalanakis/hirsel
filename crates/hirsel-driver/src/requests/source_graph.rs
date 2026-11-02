@@ -344,12 +344,22 @@ impl GraphProducts for SourceProducts {
         ) {
             return self.metadata.select(operation);
         }
-        let mut store_operation = self
+        let store_operation = self
             .initial_operation
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take()
             .unwrap_or_else(|| self.store.operation_scope());
+        let mut store_operation = if matches!(
+            operation,
+            CompileOperation::Artifacts { .. }
+                | CompileOperation::ExportTir
+                | CompileOperation::Precompute
+        ) {
+            store_operation.completing()
+        } else {
+            store_operation
+        };
         if let Some(native) = &self.native {
             store_operation.join(native.store_operation());
         }
@@ -1313,12 +1323,16 @@ pub(super) fn install(
         scratch_parent,
         disk_bytes,
     ) {
-        // Precompute and export roots promise their complete closure.
-        Ok(store) if completes => Arc::new(store.completing()),
         Ok(store) => Arc::new(store),
         Err(error) => return Err(loading.failed(ToolError::Io(error))),
     };
+    // Precompute and export roots promise their complete closure.
     let store_operation = store.operation_scope();
+    let store_operation = if completes {
+        store_operation.completing()
+    } else {
+        store_operation
+    };
     // Host requests select tools against this graph's admitted provider before
     // loading source inputs. Explicit selectors never acquire ambient tools.
     let selected_toolchain = match (&request.operation, toolchain, host_toolchain) {

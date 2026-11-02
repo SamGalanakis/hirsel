@@ -4,6 +4,7 @@
 use super::*;
 use crate::runtime::MemoryReservation;
 use std::collections::BTreeMap;
+use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 mod scratch;
 
@@ -53,7 +54,8 @@ impl Admission {
 pub struct RequestStore {
     backend: Arc<dyn ResultStore>,
     /// The backend's policy, chosen once for this request.
-    persistence: Persistence,
+    baseline: Persistence,
+    active_policy: Mutex<Weak<OperationPersistence>>,
     verifier: Option<Arc<hirsel_validate::VerifierCache>>,
     memory: Arc<Admission>,
     state: Mutex<State>,
@@ -128,8 +130,10 @@ impl RequestStore {
     }
     fn admitted(backend: Arc<dyn ResultStore>, memory: Arc<Admission>) -> Self {
         let verifier = backend.verifier();
+        let baseline = backend.persistence();
         Self {
-            persistence: backend.persistence(),
+            baseline,
+            active_policy: Mutex::new(Weak::new()),
             backend,
             verifier,
             memory,
@@ -139,15 +143,6 @@ impl RequestStore {
                 associations: BTreeMap::new(),
             }),
         }
-    }
-    /// Promise the complete demanded closure for this request's roots
-    /// (Precompute and export). A backend that persists nothing stays
-    /// `Disabled`: there is nothing for a later request to open.
-    pub fn completing(mut self) -> Self {
-        if self.persistence.retains() {
-            self.persistence = Persistence::Complete;
-        }
-        self
     }
     /// The native task reports the existing deterministic resource failure
     /// before settling a product when its admitted transport allowance is full.
@@ -223,6 +218,25 @@ impl hirsel_validate::VerifierRows for RequestVerifierRows {
     }
 }
 impl ResultStore for RequestStore {
+    fn operation_scope(&self) -> StoreOperation {
+        let mut operation = self.backend.operation_scope();
+        operation.persistence = Arc::new(OperationPersistence::new(self.baseline));
+        operation.request_store = true;
+        *self
+            .active_policy
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Arc::downgrade(&operation.persistence);
+        for (_, deferred) in self
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .associations
+            .values_mut()
+        {
+            *deferred = false;
+        }
+        operation
+    }
     fn admit_product_memory(&self, bytes: u64) -> Option<Arc<dyn Send + Sync>> {
         let bytes =
             bytes.checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
@@ -240,7 +254,11 @@ impl ResultStore for RequestStore {
         self.backend.cache_product(address, action, domain, bytes);
     }
     fn persistence(&self) -> Persistence {
-        self.persistence
+        self.active_policy
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .upgrade()
+            .map_or(self.baseline, |policy| policy.persistence())
     }
     // Live transport is carried even when the selected backend persists nothing.
     fn transports(&self) -> bool {
@@ -261,18 +279,18 @@ impl ResultStore for RequestStore {
     // A backend that retains nothing is never read or written through the
     // transport; its live bytes are the request's own.
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
-        self.persistence
+        self.persistence()
             .retains()
             .then(|| self.backend.get(key))
             .flatten()
     }
     fn put(&self, key: &EntryKey, value: &[u8]) {
-        if self.persistence.retains() {
+        if self.persistence().retains() {
             self.backend.put(key, value)
         }
     }
     fn demand(&self, keys: &[EntryKey]) {
-        if self.persistence.retains() {
+        if self.persistence().retains() {
             self.backend.demand(keys)
         }
     }
@@ -378,7 +396,7 @@ impl ResultStore for RequestStore {
         }
         let association = Association { action, reference };
         // A Complete request publishes no association before its root.
-        let deferred = self.persistence == Persistence::Complete;
+        let deferred = self.persistence() == Persistence::Complete;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         // Durable associations are a shared latest-result index. Another
         // admitted request can publish a different action at the same address
@@ -420,9 +438,9 @@ impl ResultStore for RequestStore {
     fn publish_root(&self, address: Address, action: Action, reference: Reference) -> bool {
         let selected = Association { action, reference };
         self.associate_product(address, action, reference);
-        if self.persistence != Persistence::Complete {
-            return self.persistence.retains()
-                && self.backend.lookup_product(address) == Some(selected);
+        let persistence = self.persistence();
+        if persistence != Persistence::Complete {
+            return persistence.retains() && self.backend.lookup_product(address) == Some(selected);
         }
         if self.lookup_product(address) != Some(selected) || !self.materialize() {
             return false;
@@ -617,6 +635,111 @@ mod tests {
         drop((first, second));
         assert_eq!(budget.reserved(), 0);
     }
+    #[test]
+    fn request_lifecycle_changes_persistence_without_replacing_its_transport() {
+        let backend = Arc::new(MemStore::default());
+        let budget = ProcessBudget::new(128 << 10);
+        let request = RequestStore::new(backend.clone(), budget.reserve(64 << 10).unwrap());
+
+        let precompute_root = Address(ContentHash::of_bytes(b"precompute root"));
+        let precompute_action = Action(ContentHash::of_bytes(b"precompute action"));
+        let precompute_bytes = b"precompute result";
+        let precompute = request.operation_scope().completing();
+        let precompute_reference = request.put_content(domain(), precompute_bytes).unwrap();
+        assert!(request.publish_root(precompute_root, precompute_action, precompute_reference));
+        precompute.finish().unwrap();
+        assert_eq!(
+            backend.lookup_product(precompute_root),
+            Some(Association {
+                action: precompute_action,
+                reference: precompute_reference,
+            })
+        );
+        assert_eq!(
+            &*backend.get_content(precompute_reference).unwrap(),
+            precompute_bytes
+        );
+
+        let check = request.operation_scope();
+        let check_address = Address(ContentHash::of_bytes(b"check result"));
+        let check_action = Action(ContentHash::of_bytes(b"check action"));
+        let check_bytes = b"check result bytes";
+        let check_reference = request.put_content(domain(), check_bytes).unwrap();
+        request.associate_product(check_address, check_action, check_reference);
+        assert_eq!(&*backend.get_content(check_reference).unwrap(), check_bytes);
+        assert_eq!(
+            backend.lookup_product(check_address),
+            Some(Association {
+                action: check_action,
+                reference: check_reference,
+            })
+        );
+        check.finish().unwrap();
+        assert_eq!(
+            backend.lookup_product(check_address),
+            Some(Association {
+                action: check_action,
+                reference: check_reference,
+            })
+        );
+
+        let complete = request.operation_scope().completing();
+        let complete_address = Address(ContentHash::of_bytes(b"complete component"));
+        let complete_action = Action(ContentHash::of_bytes(b"complete action"));
+        let complete_bytes = b"complete component bytes";
+        let complete_reference = request.put_content(domain(), complete_bytes).unwrap();
+        request.associate_product(complete_address, complete_action, complete_reference);
+        assert_eq!(backend.lookup_product(complete_address), None);
+        let complete_root = Address(ContentHash::of_bytes(b"complete root"));
+        let complete_root_action = Action(ContentHash::of_bytes(b"complete root action"));
+        let complete_root_bytes = b"complete root bytes";
+        let complete_root_reference = request.put_content(domain(), complete_root_bytes).unwrap();
+        assert!(request.publish_root(complete_root, complete_root_action, complete_root_reference));
+        complete.finish().unwrap();
+        assert_eq!(
+            backend.lookup_product(complete_address),
+            Some(Association {
+                action: complete_action,
+                reference: complete_reference,
+            })
+        );
+
+        let abandoned = request.operation_scope().completing();
+        let abandoned_address = Address(ContentHash::of_bytes(b"abandoned component"));
+        let abandoned_action = Action(ContentHash::of_bytes(b"abandoned action"));
+        let abandoned_reference = request.put_content(domain(), b"abandoned bytes").unwrap();
+        request.associate_product(abandoned_address, abandoned_action, abandoned_reference);
+        assert_eq!(backend.lookup_product(abandoned_address), None);
+        drop(abandoned);
+
+        let next_complete = request.operation_scope().completing();
+        let next_component_address = Address(ContentHash::of_bytes(b"next component"));
+        let next_component_action = Action(ContentHash::of_bytes(b"next component action"));
+        let next_component_reference = request
+            .put_content(domain(), b"next component bytes")
+            .unwrap();
+        request.associate_product(
+            next_component_address,
+            next_component_action,
+            next_component_reference,
+        );
+        let next_root = Address(ContentHash::of_bytes(b"next root"));
+        let next_root_action = Action(ContentHash::of_bytes(b"next root action"));
+        let next_root_reference = request.put_content(domain(), b"next root bytes").unwrap();
+        assert!(request.publish_root(next_root, next_root_action, next_root_reference));
+        next_complete.finish().unwrap();
+        assert_eq!(backend.lookup_product(abandoned_address), None);
+        assert_eq!(
+            backend.lookup_product(next_component_address),
+            Some(Association {
+                action: next_component_action,
+                reference: next_component_reference,
+            })
+        );
+
+        drop(request);
+        assert_eq!(budget.reserved(), 0);
+    }
     /// A directory backend whose durable writes of one component domain fail
     /// `refusals` times, as a full or failing disk would.
     struct Refusing {
@@ -700,15 +823,14 @@ mod tests {
                 refusals: refusals.into(),
             });
             let budget = ProcessBudget::new(64 << 10);
-            let request =
-                RequestStore::new(backend, budget.reserve(64 << 10).unwrap()).completing();
-            assert_eq!(request.persistence(), Persistence::Complete);
+            let request = RequestStore::new(backend, budget.reserve(64 << 10).unwrap());
             // Content is durable before any association is attempted.
-            let contents = request.operation_scope();
+            let contents = request.operation_scope().completing();
+            assert_eq!(request.persistence(), Persistence::Complete);
             let part = request.put_content(component(), b"component").unwrap();
             let output = request.put_content(domain(), b"root").unwrap();
             contents.finish().unwrap();
-            let associations = request.operation_scope();
+            let associations = request.operation_scope().completing();
             request.associate_product(cited, Action(cited.0), part);
             // The request itself reads its deferred component immediately.
             assert!(request.lookup_product(cited).is_some());

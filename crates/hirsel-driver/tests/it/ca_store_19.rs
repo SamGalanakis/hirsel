@@ -757,6 +757,279 @@ fn lower_producer_records_cannot_mint_or_transfer_verifier_authority() {
     });
 }
 
+use hirsel_artifact_store::reapi::{
+    ActionCache, ActionDigest, ActionOutput, ActionResult, BlobDigest, Cas, DirCas,
+};
+
+/// A REAPI server stand-in over `DirCas` that logs every upload and closure
+/// and can answer payload reads with damaged bytes or another payload's
+/// closure, while entry records stay intact so hits reach the payloads.
+struct Server {
+    cas: DirCas,
+    blobs: Mutex<Vec<(BlobDigest, Vec<u8>)>>,
+    results: Mutex<Vec<(ActionDigest, ActionResult)>>,
+    damage: AtomicBool,
+    misname: AtomicBool,
+    /// Faulted answers given, so a fault that never fires fails the law.
+    faults: AtomicUsize,
+}
+impl Server {
+    fn open(root: std::path::PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            cas: DirCas::open(root).unwrap(),
+            blobs: Mutex::default(),
+            results: Mutex::default(),
+            damage: AtomicBool::new(false),
+            misname: AtomicBool::new(false),
+            faults: AtomicUsize::new(0),
+        })
+    }
+    fn store(self: &Arc<Self>) -> Arc<store::RemoteStore> {
+        Arc::new(store::RemoteStore::new(self.clone(), self.clone()))
+    }
+    /// A closure of one ordinary payload (`product_domain` kinds are below
+    /// the entry records' 256), not an entry or association record.
+    fn payload(result: &ActionResult) -> bool {
+        matches!(result.outputs.as_slice(), [only] if only.reference.domain.kind < 256)
+    }
+    fn payloads(&self) -> std::collections::BTreeSet<BlobDigest> {
+        let results = self.results.lock().unwrap();
+        results
+            .iter()
+            .filter(|(_, result)| Self::payload(result))
+            .map(|(_, result)| result.outputs[0].blob)
+            .collect()
+    }
+    fn uploads(&self) -> std::collections::BTreeSet<BlobDigest> {
+        self.blobs.lock().unwrap().iter().map(|(d, _)| *d).collect()
+    }
+}
+impl Cas for Server {
+    fn find_missing(&self, digests: &[BlobDigest]) -> std::io::Result<Vec<BlobDigest>> {
+        self.cas.find_missing(digests)
+    }
+    fn batch_update(
+        &self,
+        blobs: &[(BlobDigest, store::Bytes)],
+    ) -> std::io::Result<Vec<std::io::Result<()>>> {
+        self.blobs
+            .lock()
+            .unwrap()
+            .extend(blobs.iter().map(|(d, b)| (*d, b.to_vec())));
+        self.cas.batch_update(blobs)
+    }
+    fn batch_read(
+        &self,
+        digests: &[BlobDigest],
+    ) -> std::io::Result<Vec<std::io::Result<Option<store::Bytes>>>> {
+        let mut read = self.cas.batch_read(digests)?;
+        if self.damage.load(Ordering::Relaxed) {
+            let payloads = self.payloads();
+            for (digest, blob) in digests.iter().zip(&mut read) {
+                let Ok(Some(blob)) = blob else { continue };
+                if !payloads.contains(digest) {
+                    continue;
+                }
+                self.faults.fetch_add(1, Ordering::Relaxed);
+                let mut bytes = blob.to_vec();
+                if let Some(last) = bytes.last_mut() {
+                    *last ^= 1;
+                }
+                *blob = bytes.into();
+            }
+        }
+        Ok(read)
+    }
+}
+impl ActionCache for Server {
+    fn get(&self, action: &ActionDigest) -> std::io::Result<Option<ActionResult>> {
+        if self.misname.load(Ordering::Relaxed) {
+            // Answer a payload's action with another payload's closure.
+            let results = self.results.lock().unwrap();
+            let named: Vec<_> = results
+                .iter()
+                .filter(|(_, result)| Self::payload(result))
+                .collect();
+            let other = |output: &ActionOutput| {
+                let at = named
+                    .iter()
+                    .position(|(_, r)| r.outputs[0] == *output)
+                    .unwrap_or(0);
+                named[(at + 1) % named.len()].1.outputs[0]
+            };
+            if let Some(at) = named.iter().position(|(a, _)| a == action) {
+                self.faults.fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(named[(at + 1) % named.len()].1.clone()));
+            }
+            // An entry keeps its record but names other payloads as members.
+            return Ok(self.cas.get(action)?.map(|mut result| {
+                for member in result.outputs.iter_mut().skip(1) {
+                    self.faults.fetch_add(1, Ordering::Relaxed);
+                    *member = other(member);
+                }
+                result
+            }));
+        }
+        self.cas.get(action)
+    }
+    fn update(&self, action: &ActionDigest, result: &ActionResult) -> std::io::Result<()> {
+        self.cas.update(action, result)?;
+        self.results.lock().unwrap().push((*action, result.clone()));
+        Ok(())
+    }
+}
+/// Local verifier authority beside remote products, as a trusted host has.
+struct Trusted {
+    remote: Arc<store::RemoteStore>,
+    verifier: Arc<hirsel_validate::VerifierCache>,
+}
+impl store::ResultStore for Trusted {
+    fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
+        Some(self.verifier.clone())
+    }
+    fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
+        store::ResultStore::get(&*self.remote, key)
+    }
+    fn put(&self, key: &store::EntryKey, bytes: &[u8]) {
+        store::ResultStore::put(&*self.remote, key, bytes)
+    }
+    fn associate_product(
+        &self,
+        address: store::Address,
+        action: store::Action,
+        reference: store::Reference,
+    ) {
+        self.remote.associate_product(address, action, reference)
+    }
+    fn get_content(&self, reference: store::Reference) -> Option<store::Bytes> {
+        self.remote.get_content(reference)
+    }
+    fn put_content(&self, domain: store::Domain, bytes: &[u8]) -> Option<store::Reference> {
+        self.remote.put_content(domain, bytes)
+    }
+    fn name(&self) -> &'static str {
+        "trusted-remote"
+    }
+}
+
+#[test]
+fn remote_closures_carry_no_verifier_authority_and_foreign_hits_run_local_v() {
+    with_compiler_stack(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let source = "fn callee()->u32{1u32}\nfn caller()->u32{callee()}\n";
+        let path = definition("caller");
+        let verifier = Arc::new(hirsel_validate::VerifierCache::default());
+        let first = Server::open(dir.path().join("first"));
+        let trusted = Arc::new(Trusted {
+            remote: first.store(),
+            verifier: verifier.clone(),
+        });
+        let mut writer = signature_session(trusted.clone(), source, true);
+        let expected = writer.lower_to_tir(&path).unwrap().value.signature_hash;
+        assert_eq!(writer.body_validation_runs(&path), 1);
+        drop(writer);
+        let exported = first.uploads();
+        let closures = first.results.lock().unwrap().clone();
+        assert!(!closures.is_empty());
+
+        // The host that ran V keeps its own receipt.
+        let mut local = signature_session(trusted, source, false);
+        local.adapters.modes = None;
+        local.lower_to_tir(&path).unwrap();
+        assert_eq!(local.body_validation_runs(&path), 0, "local receipt");
+
+        // The same closures read by another host: products are reused, V is not.
+        let mut foreign = signature_session(first.store(), source, false);
+        foreign.adapters.modes = None;
+        let actual = foreign.lower_to_tir(&path).unwrap();
+        assert_eq!(actual.value.signature_hash, expected);
+        assert_eq!(foreign.recompute_count(&path, QueryKind::Modes), 0);
+        assert_eq!(foreign.recompute_count(&path, QueryKind::Lower), 0);
+        assert_eq!(
+            foreign.body_validation_runs(&path),
+            1,
+            "foreign closure requires first V"
+        );
+        foreign.lower_to_tir(&path).unwrap();
+        assert_eq!(foreign.body_validation_runs(&path), 1, "local issuance");
+
+        // Verifier rows and receipts (validate's 0x56 domains) are never
+        // closure members, and every uploaded blob is an action or a member.
+        let members: std::collections::BTreeSet<_> = closures
+            .iter()
+            .flat_map(|(_, result)| &result.outputs)
+            .inspect(|output| assert_ne!(output.reference.domain.kind >> 24, 0x56))
+            .map(|output| output.blob)
+            .collect();
+        for (digest, bytes) in first.blobs.lock().unwrap().iter() {
+            assert!(
+                members.contains(digest) || bytes.starts_with(b"hirsel.remote."),
+                "unnamed export {}",
+                digest.hash()
+            );
+        }
+
+        // A writer whose verifier already holds the receipt skips V and
+        // exports exactly the same blobs: no issuer state is exported.
+        let second = Server::open(dir.path().join("second"));
+        let mut again = signature_session(
+            Arc::new(Trusted {
+                remote: second.store(),
+                verifier,
+            }),
+            source,
+            true,
+        );
+        again.lower_to_tir(&path).unwrap();
+        assert_eq!(again.body_validation_runs(&path), 0);
+        assert_eq!(second.uploads(), exported);
+    });
+}
+
+#[test]
+fn damaged_or_misnamed_remote_closures_recompute_with_cold_parity() {
+    with_compiler_stack(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let source = "fn callee()->u32{1u32}\nfn caller()->u32{callee()}\n";
+        let changed = source.replace("callee()->u32{1u32}", "callee()->u64{1u64}");
+        let path = definition("caller");
+        let render = |engine: &QueryEngine, error| match error {
+            QueryError::Diagnostics(ds) => ds
+                .iter()
+                .map(|d| d.render_human(&engine.sources))
+                .collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+        let mut cold = signature_session(Arc::new(store::NoneStore), source, true);
+        let expected = cold.lower_to_tir(&path).unwrap().value.signature_hash;
+        let modes = cold.recompute_count(&path, QueryKind::Modes);
+        let mut cold_invalid = signature_session(Arc::new(store::NoneStore), &changed, true);
+        let error = cold_invalid.lower_to_tir(&path).unwrap_err();
+        let expected_error = render(&cold_invalid, error);
+
+        let server = Server::open(dir.path().join("cas"));
+        signature_session(server.store(), source, true)
+            .lower_to_tir(&path)
+            .unwrap();
+        signature_session(server.store(), &changed, true)
+            .lower_to_tir(&path)
+            .unwrap_err();
+        for fault in [&server.damage, &server.misname] {
+            fault.store(true, Ordering::Relaxed);
+            let mut valid = signature_session(server.store(), source, true);
+            let actual = valid.lower_to_tir(&path).unwrap();
+            assert_eq!(actual.value.signature_hash, expected);
+            assert_eq!(valid.recompute_count(&path, QueryKind::Modes), modes);
+            assert_eq!(valid.body_validation_runs(&path), 1);
+            let mut invalid = signature_session(server.store(), &changed, true);
+            let error = invalid.lower_to_tir(&path).unwrap_err();
+            assert_eq!(render(&invalid, error), expected_error);
+            fault.store(false, Ordering::Relaxed);
+            assert!(server.faults.swap(0, Ordering::Relaxed) > 0, "fault fired");
+        }
+    });
+}
+
 #[test]
 fn private_evaluation_uses_independent_receipts_in_scalar_and_worker_sessions() {
     let run = || {

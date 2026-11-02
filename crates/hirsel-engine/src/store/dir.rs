@@ -195,19 +195,13 @@ impl DirStore {
         self.cap
     }
     fn publish(&self, key: &EntryKey, action: super::Action, value: &[u8]) {
-        use hirsel_artifact_store::{Address, Domain};
+        use hirsel_artifact_store::Address;
         let Some(store) = self.publication_store() else {
             return;
         };
         let _batch = store.batch();
         let write = || -> std::io::Result<()> {
-            let reference = store.put(
-                Domain {
-                    kind: key.2 as u32 + 256,
-                    schema: FORMAT,
-                },
-                value,
-            )?;
+            let reference = store.put(super::entry_domain(key.2), value)?;
             store.associate(Address(key.0), action, reference)
         };
         let _ = write();
@@ -335,12 +329,7 @@ impl ResultStore for DirStore {
             };
             let previous = opened.association;
             // Query code validates prior input/output identities before decoding.
-            if previous.reference.domain
-                != (hirsel_artifact_store::Domain {
-                    kind: key.2 as u32 + 256,
-                    schema: FORMAT,
-                })
-            {
+            if previous.reference.domain != super::entry_domain(key.2) {
                 continue;
             }
             let Some(bytes) = opened.get() else {

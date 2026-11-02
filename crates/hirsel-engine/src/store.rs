@@ -15,8 +15,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 mod dir;
+mod remote;
 mod request;
 pub use dir::{DirStore, FORMAT, GcReport};
+pub use remote::RemoteStore;
 pub use request::RequestStore;
 
 /// Stable logical address plus explicit source inputs. The address does not
@@ -345,6 +347,14 @@ fn content_key(reference: Reference) -> EntryKey {
         ContentHash::default(),
         QueryKind::Interpret,
     )
+}
+/// The domain of the record a provider holds at an entry key: a query
+/// entry, or a product association under its transport slot.
+fn entry_domain(kind: QueryKind) -> Domain {
+    Domain {
+        kind: kind as u32 + 256,
+        schema: FORMAT,
+    }
 }
 /// Ordinary phase-result domain, shared by producers and retaining providers.
 pub fn product_domain(kind: QueryKind) -> Domain {

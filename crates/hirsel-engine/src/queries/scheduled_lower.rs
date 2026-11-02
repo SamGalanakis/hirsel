@@ -420,6 +420,9 @@ pub struct FrontLowerQueries {
     sources: SourceMap,
     limits: crate::ComptimeLimits,
     verify: Verify,
+    /// A recompute-verifying request rebuilds every product through its
+    /// producer instead of reopening carried or stored descriptors.
+    verify_store: crate::store::VerifyStore,
     anchors: crate::NativeRecordContext,
     records: crate::NativeRecords,
     store: Arc<dyn ResultStore>,
@@ -1132,7 +1135,7 @@ impl FrontLowerQueries {
         } else {
             true
         };
-        if can_restore {
+        if can_restore && self.verify_store == crate::store::VerifyStore::Off {
             if let Some(product) = self.load_carry(id, &path, key, &reads).await {
                 match product {
                     // The compact descriptor can outlive V's independently
@@ -2467,6 +2470,7 @@ impl QueryEngine {
             sources: self.sources.clone(),
             limits: self.comptime_limits,
             verify: self.verify,
+            verify_store: self.verify_store,
             anchors,
             records,
             store,

@@ -1,5 +1,6 @@
 use hirsel_driver::COMPILER;
-use hirsel_engine::{store::DirStore, *};
+use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
+use hirsel_engine::{memo::MemoKey, store::DirStore, *};
 use std::sync::Arc;
 
 #[test]
@@ -132,32 +133,118 @@ fn worker_lower_products_match_scalar_records_without_publishing_a_failed_suffix
             path
         };
         let (good, bad, later) = (named("GOOD"), named("BAD"), named("LATER"));
-        let outcomes = seed.engine.check_lower_definition_prefix(
-            vec![good.clone(), bad, later.clone()],
-            hirsel_intern::jobs::Jobs::new(2),
-        );
-        assert_eq!(outcomes.len(), 2);
-        assert!(outcomes[0].result.is_ok());
-        assert!(outcomes[1].result.is_err());
         drop(seed);
-        let mut warm = compiler.load_program(&manifest).unwrap();
-        warm.engine.adapters.lowering = None;
-        warm.engine.lower_to_tir(&good).unwrap();
-        assert_eq!(warm.engine.lower_adapter_calls(&good), 0);
+        let mut requests =
+            CompilerRequests::for_host(compiler.clone(), compiler.configuration());
+        let checked = requests
+            .execute(
+                &manifest,
+                CompileOperation::Check {
+                    lowering: LoweringPolicy::Comptime,
+                },
+            )
+            .unwrap();
+        let CompileResult::Check(checked_result) = &checked.result else {
+            panic!("expected Check");
+        };
+        assert_eq!(checked_result.completion, CheckCompletion::Complete);
         assert!(
-            warm.engine.lower_to_tir(&later).is_err(),
-            "speculative suffix has no published Lower association"
+            checked_result.diagnostics.iter().any(|diagnostic| {
+                checked_result
+                    .sources
+                    .location(diagnostic.primary)
+                    .is_some_and(|location| location.line == 2)
+            }),
+            "the completed Check reports the BAD source diagnostic"
         );
-        drop(warm);
-        let mut oracle = compiler.load_program(&manifest).unwrap();
-        oracle.engine = oracle
-            .engine
-            .with_verify_store(store::VerifyStore::Recompute);
-        oracle.engine.lower_to_tir(&good).unwrap();
+        let inspected = requests
+            .execute(
+                &manifest,
+                CompileOperation::Inspect {
+                    definitions: vec![good.clone(), bad.clone(), later.clone()],
+                },
+            )
+            .unwrap();
+        {
+            let CompileResult::Inspect(inspection) = &inspected.result else {
+                panic!("expected Inspect");
+            };
+            let has_memo = |definition: &DefPath, kind: QueryKind| {
+                inspection
+                    .memos
+                    .iter()
+                    .any(|(key, _)| *key == MemoKey::new(kind, DefId::intern(definition)))
+            };
+            let bad_work = inspection
+                .definitions
+                .iter()
+                .find(|work| work.definition == bad)
+                .unwrap();
+            assert!(has_memo(&good, QueryKind::Lower));
+            assert!(has_memo(&bad, QueryKind::Lower));
+            assert!(has_memo(&bad, QueryKind::Evaluate));
+            assert!(
+                bad_work
+                    .recomputations
+                    .iter()
+                    .any(|(kind, count)| *kind == QueryKind::Evaluate && *count > 0)
+            );
+            assert!(!has_memo(&later, QueryKind::Lower));
+            assert!(!has_memo(&later, QueryKind::Summary));
+        }
+        let good_lower = [(good.clone(), QueryKind::Lower)];
         assert_eq!(
-            oracle.engine.lower_adapter_calls(&good),
+            requests.recompute_counts(&good_lower).unwrap()[0].2,
             1,
-            "canonical oracle actually recomputes through scalar Lower"
+            "the cold request computes GOOD's Lower product"
+        );
+        drop(inspected);
+        drop(checked);
+        drop(requests);
+        // A fresh request over the same store reopens GOOD without lowering it
+        // again; a canonical oracle request recomputes it through the producer.
+        let reopen = |config: CompileConfig| {
+            let mut requests =
+                CompilerRequests::for_host(compiler.clone().with_config(config.clone()), config);
+            let checked = requests
+                .execute(
+                    &manifest,
+                    CompileOperation::Check {
+                        lowering: LoweringPolicy::Comptime,
+                    },
+                )
+                .unwrap();
+            let CompileResult::Check(checked) = &checked.result else {
+                panic!("expected Check");
+            };
+            assert_eq!(checked.completion, CheckCompletion::Complete);
+            let inspected = requests
+                .execute(
+                    &manifest,
+                    CompileOperation::Inspect {
+                        definitions: vec![later.clone()],
+                    },
+                )
+                .unwrap();
+            let CompileResult::Inspect(inspection) = &inspected.result else {
+                panic!("expected Inspect");
+            };
+            assert!(
+                !inspection.memos.iter().any(|(key, _)| {
+                    *key == MemoKey::new(QueryKind::Lower, DefId::intern(&later))
+                }),
+                "speculative suffix has no published Lower association"
+            );
+            requests.recompute_counts(&good_lower).unwrap()[0].2
+        };
+        assert_eq!(reopen(compiler.configuration()), 0);
+        assert_eq!(
+            reopen(CompileConfig {
+                verify_store: store::VerifyStore::Recompute,
+                ..compiler.configuration()
+            }),
+            1,
+            "canonical oracle actually recomputes through Lower"
         );
     });
 }

@@ -258,14 +258,23 @@ impl ResultStore for RequestStore {
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         self.verifier.clone()
     }
+    // A backend that retains nothing is never read or written through the
+    // transport; its live bytes are the request's own.
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
-        self.backend.get(key)
+        self.persistence
+            .retains()
+            .then(|| self.backend.get(key))
+            .flatten()
     }
     fn put(&self, key: &EntryKey, value: &[u8]) {
-        self.backend.put(key, value)
+        if self.persistence.retains() {
+            self.backend.put(key, value)
+        }
     }
     fn demand(&self, keys: &[EntryKey]) {
-        self.backend.demand(keys)
+        if self.persistence.retains() {
+            self.backend.demand(keys)
+        }
     }
     fn open_product_archive(&self, reference: Reference) -> Option<crate::runtime::ProductArchive> {
         let bytes = self.get_content(reference)?;

@@ -693,8 +693,12 @@ impl QueryEngine {
                     .source_facts(DefId::intern(path))
             })
     }
+    /// Parse heads and parse syntax are cached only where a provider retains
+    /// them; a store-off request neither captures nor encodes them.
     fn catalog_key(&self, file: FileId, context: &FileContext) -> Option<crate::store::EntryKey> {
-        self.result_store.as_ref()?;
+        if !self.result_store.as_ref()?.persistence().retains() {
+            return None;
+        }
         let source = self.sources.file(file)?;
         if source.path.to_string_lossy().starts_with('<') {
             return None;

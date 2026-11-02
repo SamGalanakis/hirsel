@@ -232,6 +232,9 @@ pub trait ResultStore: Send + Sync {
     /// Immutable content and logical action indexes use distinct addresses.
     /// Byte providers share their map; directory providers map content directly.
     fn get_content(&self, reference: Reference) -> Option<Bytes> {
+        if !self.transports() {
+            return None;
+        }
         let bytes = self.get(&content_key(reference))?;
         (reference.domain.reference(&bytes)? == reference).then_some(bytes)
     }

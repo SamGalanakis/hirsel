@@ -718,13 +718,14 @@ fn imaged_helper_lowering_preserves_dependency_depth() {
 #[test]
 fn frozen_s1_products_do_not_export_root_validation_universe_receipts() {
     with_compiler_stack(|| {
+        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
+        use hirsel_engine::memo::MemoKey;
         let f = Fixture::new();
         let library =
             f.library("pub opaque type Hidden: plain uses {} { value: u32 }\npub fn helper()->u32{let h=Hidden(value:7u32);h.value}\npub const VALUE:u32=comptime helper()\n");
         let main = "pub fn main()->Result[(),()]{Ok(())}\n";
         let source = format!("{main}const ROOT:u32=comptime lib.helper()\n");
         let manifest = f.program("imager", &source, &library, "lib");
-        let mut program = load(&manifest, None);
         let path = DefPath(hirsel_syntax::ItemPath {
             package: package("lib"),
             modules: vec!["lib".into()],
@@ -736,23 +737,60 @@ fn frozen_s1_products_do_not_export_root_validation_universe_receipts() {
             name: "ROOT".into(),
         });
         for jobs in [1, 2, 8] {
-            let values = program.engine.materialize_values(
-                vec![path.clone(), root.clone(), path.clone()],
-                hirsel_intern::jobs::Jobs::new(jobs),
+            let config = CompileConfig {
+                jobs: hirsel_intern::jobs::Jobs::new(jobs),
+                retention: memo::Retention::Resident,
+                store: Arc::new(store::NoneStore),
+                ..CompileConfig::for_memory_cap(None)
+            };
+            let mut requests =
+                CompilerRequests::for_host(COMPILER.clone().with_config(config.clone()), config);
+            let selected = requests
+                .execute(
+                    &manifest,
+                    CompileOperation::NativeSources {
+                        roots: vec![path.clone(), root.clone(), path.clone()],
+                    },
+                )
+                .unwrap();
+            let CompileResult::NativeSources(products) = &selected.result else {
+                panic!("expected NativeSources");
+            };
+            assert_eq!(
+                products.statics.constants[&path].root.kind,
+                hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(7))
             );
-            assert!(values.iter().all(Result::is_ok), "{values:?}");
-        }
-        program.engine.lower_to_tir(&root).unwrap();
-        let reads = program.engine.memo_reads(&root, QueryKind::Lower).unwrap();
-        for origin in ["lib", "imager"] {
-            assert!(
-                reads
-                    .get(&memo::ReadKey::ValidationUniverse(memo::PackageKey::of(
-                        &package(origin)
-                    )))
-                    .is_some(),
-                "missing {origin} V input in {reads:?}"
+            assert_eq!(
+                products.statics.constants[&root].root.kind,
+                hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(7))
             );
+            let inspected = requests
+                .execute(
+                    &manifest,
+                    CompileOperation::Inspect {
+                        definitions: vec![root.clone()],
+                    },
+                )
+                .unwrap();
+            let CompileResult::Inspect(inspection) = &inspected.result else {
+                panic!("expected Inspect");
+            };
+            let key = MemoKey::new(QueryKind::Lower, DefId::intern(&root));
+            let reads = inspection
+                .memos
+                .iter()
+                .find_map(|(memo, reads)| (*memo == key).then_some(reads))
+                .expect("Inspect returns the root Lower reads");
+            for origin in ["lib", "imager"] {
+                assert!(
+                    reads
+                        .get(&memo::ReadKey::ValidationUniverse(memo::PackageKey::of(
+                            &package(origin)
+                        )))
+                        .is_some(),
+                    "missing {origin} V input in {reads:?}"
+                );
+            }
         }
         let bytes = products(&f, "lib").unwrap();
         let stored = bytes;
@@ -769,6 +807,8 @@ fn frozen_s1_products_do_not_export_root_validation_universe_receipts() {
 #[test]
 fn image_releases_unrecorded_files_after_parallel_constant_publication() {
     with_compiler_stack(|| {
+        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
+        use hirsel_engine::memo::MemoKey;
         let f = Fixture::new();
         let library = f.library("pub fn first()->u32{1u32}\n");
         std::fs::write(
@@ -790,19 +830,48 @@ fn image_releases_unrecorded_files_after_parallel_constant_publication() {
             modules: vec!["later".into()],
             name: "VALUE".into(),
         });
-        let mut producer = load(&_imager, None);
-        assert!(
-            producer
-                .engine
-                .materialize_values(vec![path.clone()], hirsel_intern::jobs::Jobs::ONE)[0]
-                .is_ok()
+        let config = CompileConfig {
+            jobs: hirsel_intern::jobs::Jobs::ONE,
+            retention: memo::Retention::Resident,
+            store: Arc::new(store::NoneStore),
+            ..CompileConfig::for_memory_cap(None)
+        };
+        let mut requests =
+            CompilerRequests::for_host(COMPILER.clone().with_config(config.clone()), config);
+        let selected = requests
+            .execute(
+                &_imager,
+                CompileOperation::NativeSources {
+                    roots: vec![path.clone()],
+                },
+            )
+            .unwrap();
+        let CompileResult::NativeSources(native) = &selected.result else {
+            panic!("expected NativeSources");
+        };
+        assert_eq!(
+            native.statics.constants[&path].root.kind,
+            hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(42))
         );
-        producer.engine.lower_to_tir(&path).unwrap();
+        let inspected = requests
+            .execute(
+                &_imager,
+                CompileOperation::Inspect {
+                    definitions: vec![path.clone()],
+                },
+            )
+            .unwrap();
+        let CompileResult::Inspect(inspection) = &inspected.result else {
+            panic!("expected Inspect");
+        };
+        let key = MemoKey::new(QueryKind::Lower, DefId::intern(&path));
+        let reads = inspection
+            .memos
+            .iter()
+            .find_map(|(memo, reads)| (*memo == key).then_some(reads))
+            .expect("Inspect returns the constant Lower reads");
         assert!(
-            producer
-                .engine
-                .memo_reads(&path, QueryKind::Lower)
-                .unwrap()
+            reads
                 .iter()
                 .any(|(read, _)| matches!(read, memo::ReadKey::ValidationUniverse(_)))
         );

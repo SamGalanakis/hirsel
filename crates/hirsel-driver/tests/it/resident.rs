@@ -644,30 +644,61 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
         }
     }
     with_compiler_stack(|| {
+        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
         let source = "fn a(x:u8) -> u8 { x + 1u8 }\nfn main() -> u8 { a(2u8) }\n";
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("resident.hir");
+        std::fs::write(&source_path, source).unwrap();
+        let manifest = directory.path().join("hirsel.json");
+        std::fs::write(
+            &manifest,
+            r#"{"schema":1,"package":{"name":"standalone","version":"0"},"sources":[{"path":"resident.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#,
+        )
+        .unwrap();
         let mut scalar = engine(Arc::new(Off));
-        assert!(checked(&mut scalar, source).diagnostics.is_empty());
+        let file = scalar.sources.add(&source_path, source.into()).unwrap();
+        scalar.parse_file(file, &default_context()).unwrap();
+        assert!(
+            check_progress(&mut scalar, file, &default_context())
+                .unwrap()
+                .diagnostics
+                .is_empty()
+        );
         let scalar_tir = scalar.export_tir(&path("main")).unwrap();
         for jobs in [1, 2, 8] {
-            let mut frozen = engine(Arc::new(Off));
-            let file = frozen.sources.add("resident.hir", source.into()).unwrap();
-            frozen.parse_file(file, &default_context()).unwrap();
-            let results = frozen.mode_definitions(
-                vec![path("main"), path("a")],
-                hirsel_intern::jobs::Jobs::new(jobs),
-            );
-            assert!(results.iter().all(|r| r.result.is_ok()));
-            assert_eq!(frozen.export_tir(&path("main")).unwrap(), scalar_tir);
-            let mut compact = engine(Arc::new(Off));
-            let file = compact.sources.add("resident.hir", source.into()).unwrap();
-            compact.parse_file(file, &default_context()).unwrap();
-            let results = compact.publish_definitions(
-                vec![path("main"), path("a")],
-                hirsel_intern::jobs::Jobs::new(jobs),
-                memo::Retention::Batch,
-            );
-            assert!(results.iter().all(|r| r.result.is_ok()));
-            assert_eq!(compact.export_tir(&path("main")).unwrap(), scalar_tir);
+            for retention in [memo::Retention::Resident, memo::Retention::Batch] {
+                let config = CompileConfig {
+                    jobs: hirsel_intern::jobs::Jobs::new(jobs),
+                    verify: Verify::On,
+                    retention,
+                    store: Arc::new(Off),
+                    ..CompileConfig::default()
+                };
+                let mut requests = CompilerRequests::for_host(
+                    COMPILER.clone().with_config(config.clone()),
+                    config,
+                );
+                let checked = requests
+                    .execute(
+                        &manifest,
+                        CompileOperation::Check {
+                            lowering: LoweringPolicy::Comptime,
+                        },
+                    )
+                    .unwrap();
+                let CompileResult::Check(checked) = &checked.result else {
+                    panic!("expected Check");
+                };
+                assert!(checked.diagnostics.is_empty());
+                assert_eq!(checked.completion, CheckCompletion::Complete);
+                let exported = requests
+                    .execute(&manifest, CompileOperation::ExportTir)
+                    .unwrap();
+                let CompileResult::ExportTir(tir) = &exported.result else {
+                    panic!("expected ExportTir");
+                };
+                assert_eq!(tir, &scalar_tir);
+            }
         }
         // A session over the off provider encodes nothing into any byte store
         // (Off panics on every read and write), yet a body edit still reuses

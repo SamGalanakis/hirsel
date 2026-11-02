@@ -881,6 +881,14 @@ pub fn store_by_name(
             None => DirStore::default_location()
                 .ok_or("dir@1: no cache directory (set an absolute XDG_CACHE_HOME or HOME, or select none@1)")?,
         }),
+        "remote@1" => {
+            let root = root.ok_or("remote@1: no CAS directory")?;
+            let cas = Arc::new(
+                hirsel_artifact_store::reapi::DirCas::open(root)
+                    .map_err(|error| format!("remote@1: {error}"))?,
+            );
+            Arc::new(RemoteStore::new(cas.clone(), cas))
+        }
         "sim@1" => Arc::new(SimStore::default()),
         other => return Err(format!("unknown result store `{other}`")),
     })

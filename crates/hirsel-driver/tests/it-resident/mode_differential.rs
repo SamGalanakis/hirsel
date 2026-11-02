@@ -22,6 +22,7 @@ enum Mode {
     Restarted,
     /// One kept session with no result store.
     StoreOff,
+    Remote,
 }
 
 impl Mode {
@@ -34,6 +35,7 @@ impl Mode {
             Mode::Resident => (Retention::Resident, "dir@1"),
             Mode::Restarted => (Retention::Batch, "dir@1"),
             Mode::StoreOff => (Retention::Resident, "none@1"),
+            Mode::Remote => (Retention::Batch, "remote@1"),
         };
         CompileConfig {
             jobs: Jobs::new(jobs),
@@ -133,6 +135,45 @@ impl Cell {
         }
     }
     fn request(&mut self, entry: &Path) -> Outputs {
+        if self.mode == Mode::Remote {
+            let config = self.mode.config(self.jobs, &self.store_root);
+            let written = outputs(
+                self.session
+                    .get_or_insert_with(|| Session::open_configured(entry, config)),
+            );
+            let config = self.mode.config(self.jobs, &self.store_root);
+            let mut reader = Session::open_configured(entry, config);
+            let restored = outputs(&mut reader);
+            assert_eq!(restored, written, "remote reader differs from its writer");
+            if restored
+                .as_ref()
+                .is_ok_and(|artifacts| artifacts.contains_key("tir"))
+            {
+                assert!(
+                    reader.store_adoptions() > 0,
+                    "remote reader adopted no stored results"
+                );
+                let definition = reader.logical_entry().unwrap().clone();
+                let inspection = reader
+                    .request_applied(CompileOperation::Inspect {
+                        definitions: vec![definition],
+                    })
+                    .unwrap();
+                let CompileResult::Inspect(inspection) = &inspection.result else {
+                    panic!("remote reader inspection returned another operation");
+                };
+                assert_eq!(
+                    inspection.definitions.len(),
+                    1,
+                    "remote reader inspection did not return one definition"
+                );
+                assert!(
+                    inspection.definitions[0].body_validations > 0,
+                    "remote reader did not run V"
+                );
+            }
+            return restored;
+        }
         let config = self.mode.config(self.jobs, &self.store_root);
         if !self.mode.kept() {
             return outputs(&mut Session::open_configured(entry, config));
@@ -240,4 +281,16 @@ fn store_off_jobs_2() {
 #[test]
 fn store_off_jobs_8() {
     column(Mode::StoreOff, 8)
+}
+#[test]
+fn remote_jobs_1() {
+    column(Mode::Remote, 1)
+}
+#[test]
+fn remote_jobs_2() {
+    column(Mode::Remote, 2)
+}
+#[test]
+fn remote_jobs_8() {
+    column(Mode::Remote, 8)
 }

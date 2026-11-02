@@ -688,10 +688,10 @@ impl Task {
                                 // With a second worker, the next evaluation root
                                 // runs meanwhile; results are still consumed, and
                                 // a failure still stops, in source order. Only the
-                                // current root pins its body. One root ahead, not
-                                // one per worker: Lower admission refuses instead
-                                // of waiting, and a root per worker overran the
-                                // std startup build's Lower allowance.
+                                // current root pins its body. One root ahead
+                                // bounds the Check to two live Lower bodies;
+                                // admission waits for the other to settle when
+                                // both do not fit.
                                 let ahead = if rest || self.selecting_instances {
                                     0
                                 } else {

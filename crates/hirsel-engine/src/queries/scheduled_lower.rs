@@ -407,6 +407,7 @@ impl FrontLowerOutput {
 }
 pub struct FrontLowerQueries {
     inputs: Inputs,
+    generator: Option<(DefId, Span)>,
     staged: staged::Staged,
     paths: BTreeMap<(u32, ContentHash), DefId>,
     /// Implementation hashes of the opaque types a lowered body can read the
@@ -2059,6 +2060,16 @@ impl Source {
         result
     }
     async fn value(&self, path: &DefPath, kind: u32, site: Span) -> Result<Value, QueryError> {
+        if kind == FRONT_LOWER_KIND
+            && let Some((generator, site)) = self.owner.generator
+            && generator.path() == path
+        {
+            return Err(QueryError::Diagnostics(vec![Diagnostic::error(
+                const { RuleId::of("CT-4") },
+                site,
+                "compile-time dependency cycle: this generator runs its own declaration",
+            )]));
+        }
         let id = self.owner.id(path, kind).ok_or_else(|| {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "Lower dependency".into(),
@@ -2091,6 +2102,10 @@ impl Source {
         let selected = self.reads.read_consuming(id).await;
         drop(pending);
         if selected == Err(self.owner.errors.cycle) {
+            self.record(
+                ReadKey::ExecutedBody(DefId::intern(path)),
+                memos::optional(Some(self.owner.inputs[path].implementation)),
+            );
             let members = self.reads.take_cycle();
             if members.is_empty() {
                 return Err(self.refused(self.owner.errors.resource));
@@ -2467,6 +2482,27 @@ impl QueryEngine {
         allowance: MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontLowerQueries>, QueryError> {
+        self.front_lower_queries_in_generator(
+            definitions,
+            front,
+            weight,
+            max_reads,
+            allowance,
+            errors,
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn front_lower_queries_in_generator(
+        &mut self,
+        definitions: &[DefPath],
+        front: Arc<FrontBodyQueries>,
+        weight: MemoryWeight,
+        max_reads: usize,
+        allowance: MemoryReservation,
+        errors: RuntimeErrors,
+        generator: Option<(DefId, Span)>,
+    ) -> Result<Arc<FrontLowerQueries>, QueryError> {
         let refusal = || {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "front Lower admission".into(),
@@ -2585,6 +2621,7 @@ impl QueryEngine {
         Ok(Arc::new(FrontLowerQueries {
             source,
             inputs,
+            generator,
             staged,
             paths,
             layouts,

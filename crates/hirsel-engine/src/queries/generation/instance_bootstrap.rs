@@ -80,13 +80,14 @@ impl FrontInstanceBootstrap {
     /// Path cursors, query-root vectors and accepted handles. Stage products,
     /// syntax and discovery have separate existing reservation partitions.
     pub fn input_bytes(definitions: &[DefPath], generators: &[DefPath]) -> Option<u64> {
-        metadata_bound(definitions, generators, None)
+        metadata_bound(definitions, generators, None, &BTreeMap::new())
     }
 }
 fn metadata_bound(
     ordinary: &[DefPath],
     generators: &[DefPath],
     extra: Option<&DefPath>,
+    sites: &BTreeMap<DefId, hirsel_diag::Label>,
 ) -> Option<u64> {
     let count = ordinary
         .len()
@@ -119,8 +120,57 @@ fn metadata_bound(
             .checked_add(usize::from(extra.is_some()))?
             .checked_mul(size_of::<Arc<AcceptedFrontRegistration>>())?,
     );
+    weight.tree::<DefId, hirsel_diag::Label>(sites.len());
+    for label in sites.values() {
+        weight.add(label.message.capacity());
+    }
     Some(weight.bytes())
 }
+fn selecting_site(
+    mut failure: Failure,
+    label: Option<&hirsel_diag::Label>,
+    metadata: &mut MemoryReservation,
+) -> Failure {
+    let Some(label) = label else {
+        return failure;
+    };
+    let (error, sources) = match &mut failure {
+        Failure::Bootstrap(FrontRegistrationBootstrapError::Runtime {
+            error: Some(error),
+            sources,
+            ..
+        }) => (error, sources),
+        Failure::Bootstrap(FrontRegistrationBootstrapError::Acceptance(failure)) => {
+            (&mut failure.error, &mut failure.sources)
+        }
+        _ => return failure,
+    };
+    if let QueryError::Diagnostics(diagnostics) = error {
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(size_of::<MemoryReservation>() + 2 * size_of::<usize>());
+        weight.source_snapshot(sources);
+        for diagnostic in diagnostics.iter() {
+            weight.add(
+                diagnostic
+                    .secondary
+                    .len()
+                    .saturating_add(1)
+                    .saturating_mul(size_of::<hirsel_diag::Label>()),
+            );
+            weight.add(label.message.capacity());
+        }
+        let Some(allowance) = metadata.split(weight.bytes()) else {
+            return refused("instance diagnostic labels exceed metadata partition");
+        };
+        for diagnostic in diagnostics {
+            diagnostic.secondary.reserve_exact(1);
+            diagnostic.secondary.push(label.clone());
+        }
+        *sources = sources.clone().retain_owner(Arc::new(allowance));
+    }
+    failure
+}
+
 fn refused(message: impl Into<String>) -> Failure {
     admission_error(QueryError::Operational(hirsel_types::OperationalFailure {
         operation: "generated instance bootstrap admission".into(),
@@ -260,6 +310,7 @@ impl QueryEngine {
         selected.shrink_to_fit();
         let runtime_bytes = runtime.bytes();
         let mut accepted: Vec<Arc<AcceptedFrontRegistration>> = Vec::new();
+        let mut selecting_sites = BTreeMap::new();
         let mut stats = RuntimeStats::default();
         let mut attempts = 0usize;
         // Same finite selection walk bound as discover_front_instances. Every
@@ -280,7 +331,7 @@ impl QueryEngine {
                         {
                             continue 'round;
                         }
-                        let bound = metadata_bound(&ordinary, &selected, None)
+                        let bound = metadata_bound(&ordinary, &selected, None, &selecting_sites)
                             .ok_or_else(|| refused("frontier metadata overflow"))?;
                         if bound > metadata.bytes() {
                             return Err(refused("frontier cursors exceed metadata partition"));
@@ -308,14 +359,19 @@ impl QueryEngine {
                             drop(front);
                             continue 'prefix;
                         }
+                        let syntax = self.snapshot(path).map_err(admission_error)?;
+                        let body = generator(&syntax)
+                            .ok_or_else(|| refused("selected declaration lost its generator"))?;
+                        let site = syntax.tree.expressions[body.0 as usize].origin.span;
                         let lower = self
-                            .front_lower_queries(
+                            .front_lower_queries_in_generator(
                                 &paths,
                                 front.clone(),
                                 weight,
                                 max_reads,
                                 borrow(&lower_pool)?,
                                 errors,
+                                Some((DefId::intern(path), site)),
                             )
                             .map_err(admission_error)?;
                         let registration = self
@@ -351,22 +407,31 @@ impl QueryEngine {
                             refused("selected generator is outside the registration view")
                         })?;
                         let request = executor.request(&[query]);
-                        let complete = executor.wait(request).map_err(|reference| {
-                            Failure::Bootstrap(FrontRegistrationBootstrapError::Runtime {
-                                reference,
-                                error: registration
-                                    .failed(reference)
-                                    .and_then(|o| o.text().err())
-                                    .or_else(|| lower.failure(reference))
-                                    .or_else(|| {
-                                        front
-                                            .outcome(Err(reference))
-                                            .and_then(|o| o.outcome.result.err())
-                                    }),
-                                sources: self.sources.clone(),
-                                owner: registration.clone(),
+                        let complete = executor
+                            .wait(request)
+                            .map_err(|reference| {
+                                Failure::Bootstrap(FrontRegistrationBootstrapError::Runtime {
+                                    reference,
+                                    error: registration
+                                        .failed(reference)
+                                        .and_then(|o| o.text().err())
+                                        .or_else(|| lower.failure(reference))
+                                        .or_else(|| {
+                                            front
+                                                .outcome(Err(reference))
+                                                .and_then(|o| o.outcome.result.err())
+                                        }),
+                                    sources: self.sources.clone(),
+                                    owner: registration.clone(),
+                                })
                             })
-                        })?;
+                            .map_err(|failure| {
+                                selecting_site(
+                                    failure,
+                                    selecting_sites.get(&DefId::intern(path)),
+                                    &mut metadata,
+                                )
+                            })?;
                         let [product] = complete.as_slice() else {
                             return Err(refused("generator completed another root inventory"));
                         };
@@ -376,7 +441,14 @@ impl QueryEngine {
                         self.adopt_completed_headers();
                         accepted.push(
                             self.accept_front_registration(output, borrow(&syntax_pool)?)
-                                .map_err(acceptance)?,
+                                .map_err(acceptance)
+                                .map_err(|failure| {
+                                    selecting_site(
+                                        failure,
+                                        selecting_sites.get(&DefId::intern(path)),
+                                        &mut metadata,
+                                    )
+                                })?,
                         );
                         finish(&mut executor, &mut runtime, &mut stats)?;
                         // Opaque outputs own only Data's measured reservation; all
@@ -390,7 +462,7 @@ impl QueryEngine {
                 }
                 break;
             }
-            let bound = metadata_bound(&ordinary, &selected, None)
+            let bound = metadata_bound(&ordinary, &selected, None, &selecting_sites)
                 .ok_or_else(|| refused("frontier metadata overflow"))?;
             if bound > metadata.bytes() {
                 return Err(refused("frontier cursors exceed metadata partition"));
@@ -479,10 +551,33 @@ impl QueryEngine {
                 if selected.contains(&path) {
                     continue;
                 }
-                let bound = metadata_bound(&ordinary, &selected, Some(&path))
+                let bound = metadata_bound(&ordinary, &selected, Some(&path), &selecting_sites)
                     .ok_or_else(|| refused("registered frontier metadata overflow"))?;
                 if bound > metadata.bytes() {
                     return Err(refused("registered paths exceed metadata partition"));
+                }
+                let label = hirsel_diag::Label {
+                    span: request.site,
+                    message: format!(
+                        "selects instance {}",
+                        key.instance_name(&request.declaration)
+                    ),
+                };
+                let mut sites_weight = crate::NativeMetadataWeight::default();
+                sites_weight.tree::<DefId, hirsel_diag::Label>(selecting_sites.len() + 1);
+                sites_weight.add(label.message.capacity());
+                for previous in selecting_sites.values() {
+                    sites_weight.add(previous.message.capacity());
+                }
+                // The previous site table stays live during admission, so this
+                // conservative bound covers both it and the next insertion.
+                if bound
+                    .checked_add(sites_weight.bytes())
+                    .is_none_or(|bytes| bytes > metadata.bytes())
+                {
+                    return Err(refused(
+                        "instance selecting sites exceed metadata partition",
+                    ));
                 }
                 let registered = self
                     .register_front_instance(request, borrow(&syntax_pool)?)
@@ -490,6 +585,7 @@ impl QueryEngine {
                 if registered.definition() != &path {
                     return Err(refused("canonical instance identity changed"));
                 }
+                selecting_sites.insert(DefId::intern(&path), label);
                 selected.reserve_exact(1);
                 selected.push(path);
                 changed = true;
@@ -506,7 +602,7 @@ impl QueryEngine {
                 if generator(&snapshot).is_some() {
                     return Err(refused("discovery needs an unregistered generator"));
                 }
-                let bound = metadata_bound(&ordinary, &selected, Some(path))
+                let bound = metadata_bound(&ordinary, &selected, Some(path), &selecting_sites)
                     .ok_or_else(|| refused("discovered body metadata overflow"))?;
                 if bound > metadata.bytes() {
                     return Err(refused("discovered bodies exceed metadata partition"));

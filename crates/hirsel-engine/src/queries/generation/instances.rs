@@ -337,11 +337,42 @@ impl QueryEngine {
                 let key = hirsel_tir::InstanceBodies::key(&self.types, &actuals.arguments);
                 if self.instance_bodied(callee) {
                     if let Some(key) = key {
+                        let syntax = match fronts
+                            .iter()
+                            .find_map(|front| front.registration_handle(&path))
+                        {
+                            Some(registration) => registration.syntax.clone(),
+                            None => self.snapshot(&path)?,
+                        };
+                        let site = syntax
+                            .tree
+                            .expressions
+                            .iter()
+                            .find_map(|expression| {
+                                if expression.origin.span != call.site {
+                                    return None;
+                                }
+                                let callee = match expression.kind {
+                                    ExprKind::Call { callee, .. } => callee,
+                                    _ if call.class == CallClass::StaticSelection => {
+                                        return Some(call.site);
+                                    }
+                                    _ => return None,
+                                };
+                                syntax
+                                    .tree
+                                    .expressions
+                                    .get(callee.0 as usize)
+                                    .map(|callee| callee.origin.span)
+                            })
+                            .ok_or_else(|| {
+                                refusal("selected generated call has no callee source site")
+                            })?;
                         requests.entry((callee.clone(), key)).or_insert_with(|| {
                             FrontInstanceRequest {
                                 declaration: callee.clone(),
                                 actuals,
-                                site: call.site,
+                                site,
                             }
                         });
                         let selected: BTreeSet<_> = requests

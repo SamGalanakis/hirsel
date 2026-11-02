@@ -778,11 +778,46 @@ pub fn install(
         Ok(generators) => generators,
         Err(error) => return Err(loading.failed(engine_error(engine, error))),
     };
+    let ordinary = definitions
+        .iter()
+        .filter(|path| !generators.contains(path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let staged = match install_staged(
+        engine,
+        &ordinary,
+        &[],
+        jobs,
+        plan.body,
+        plan.snapshots.front,
+        &mut loading,
+        host,
+        final_limits,
+        store,
+    ) {
+        Ok((installed, limits)) => {
+            final_limits = limits;
+            installed
+        }
+        Err(error) => return Err(loading.failed(error)),
+    };
+    // Staged headers are inputs to V, including a generator's private
+    // execution. Capture the generator universe after installing those inputs.
     let inference = match engine.release_private_inference_admission() {
         Ok(allowance) => allowance,
         Err(error) => return Err(loading.failed(engine_error(engine, error))),
     };
     loading.return_runtime(inference);
+    if staged {
+        plan = plan_within(
+            final_limits,
+            engine,
+            &definitions,
+            footprint,
+            &run_inputs,
+            &catalogue,
+        )?;
+    }
     let bootstrap = if generators.is_empty() {
         None
     } else {
@@ -854,24 +889,6 @@ pub fn install(
         .as_ref()
         .map_or_else(Vec::new, |b| b.registrations().to_vec());
     engine.admit_private_inference(loading.lend_runtime());
-    let staged = match install_staged(
-        engine,
-        &definitions,
-        &registrations,
-        jobs,
-        plan.body,
-        plan.snapshots.front,
-        &mut loading,
-        host,
-        final_limits,
-        store,
-    ) {
-        Ok((installed, limits)) => {
-            final_limits = limits;
-            installed
-        }
-        Err(error) => return Err(loading.failed(error)),
-    };
     // Registration changes the source namespace. Capture every final consumer
     // against the same accepted views, including Run and ownership catalogues.
     if bootstrap.is_some() || staged {

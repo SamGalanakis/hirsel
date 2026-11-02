@@ -1028,7 +1028,10 @@ impl QueryEngine {
             } => error,
             FrontInstanceBootstrapError::Bootstrap(
                 FrontRegistrationBootstrapError::Acceptance(error),
-            ) => error.error,
+            ) => {
+                self.sources = error.sources;
+                error.error
+            }
             FrontInstanceBootstrapError::Bootstrap(FrontRegistrationBootstrapError::Runtime {
                 error: Some(error),
                 ..

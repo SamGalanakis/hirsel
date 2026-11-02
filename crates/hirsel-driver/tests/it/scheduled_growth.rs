@@ -405,3 +405,47 @@ fn changed_source_member_stops_at_equal_settled_component() {
         }
     });
 }
+
+#[test]
+fn rejected_front_root_keeps_its_diagnostic_without_rejecting_growth_or_other_lowers() {
+    with_compiler_stack(|| {
+        for jobs in [1, 2] {
+            let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
+            let file = engine
+                .sources
+                .add(
+                    "growth-local.hir",
+                    "const BAD:u32=comptime missing\nconst GOOD:u32=comptime 7\n".into(),
+                )
+                .unwrap();
+            engine.parse_file(file, &default_context()).unwrap();
+            let mut graph =
+                crate::request_graph::Graph::new(&mut engine, hirsel_intern::jobs::Jobs::new(jobs));
+            let query = graph.installed.growth.query();
+            let request = graph.runtime.request(&[query]);
+            let products = graph.runtime.wait(request).unwrap();
+            let output = graph.installed.growth.outcome(products[0].clone()).unwrap();
+            assert!(output.diagnostics.is_empty());
+            let mut bad = entry_path(&default_context());
+            bad.0.name = "BAD".into();
+            let mut good = bad.clone();
+            good.0.name = "GOOD".into();
+            let rejected = graph.body(&bad);
+            assert!(!rejected.reads.is_empty());
+            for (read, digest) in rejected.reads.iter() {
+                assert_eq!(output.reads.get(read), Some(*digest));
+            }
+            let QueryError::Diagnostics(diagnostics) = rejected.result.unwrap_err() else {
+                panic!("the rejected definition must retain its Front diagnostic")
+            };
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(diagnostics[0].rule.as_str(), "LANG-4");
+            assert_eq!(
+                engine.sources.slice(diagnostics[0].primary),
+                Some("missing")
+            );
+            assert!(graph.lower(&good).is_ok());
+            graph.finish();
+        }
+    });
+}

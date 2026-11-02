@@ -168,6 +168,13 @@ impl Task {
         }
         while let Some(Some(selected)) = self.selected.get(self.cursor).cloned() {
             let Some(checked) = self.queries.front.checked(selected.clone()) else {
+                if let Some(facts) = self.queries.front.check_facts(selected.clone())
+                    && matches!(facts.result, Err(QueryError::Diagnostics(_)))
+                {
+                    self.reads.merge(&facts.reads);
+                    self.cursor += 1;
+                    continue;
+                }
                 return Poll::Ready(Err(selected.err().unwrap_or(self.queries.errors.protocol)));
             };
             for call in &checked.summary.summary.calls {

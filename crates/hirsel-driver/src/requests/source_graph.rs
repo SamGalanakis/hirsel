@@ -1370,14 +1370,17 @@ pub(super) fn install(
     };
     let check = installed.check(&mut program.engine, &selection)?;
     let plan = &installed.plan;
-    let safe_allowance = if available_run
-        && (shared_source
-            || matches!(
-                request.operation,
-                CompileOperation::SafeCheck
-                    | CompileOperation::Artifacts { .. }
-                    | CompileOperation::ExportTir
-            )) {
+    let needs_safe = if shared_source {
+        available_export
+    } else {
+        matches!(
+            request.operation,
+            CompileOperation::SafeCheck
+                | CompileOperation::Artifacts { .. }
+                | CompileOperation::ExportTir
+        )
+    };
+    let safe_allowance = if available_run && needs_safe {
         Some(
             run.split(super::safe_check::BYTES)
                 .ok_or_else(|| uninstalled())?,

@@ -18,9 +18,14 @@ pub struct FrontProofExport {
     modules: BTreeMap<FileId, String>,
     files: BTreeMap<DefPath, Vec<FileId>>,
     sources: SourceMap,
-    signature_edges: BTreeMap<DefId, Vec<DefId>>,
+    signature_edges: std::sync::OnceLock<Result<SignatureEdges, QueryError>>,
     input_metadata_bytes: u64,
+    metadata_bytes: u64,
     _allowance: MemoryReservation,
+}
+struct SignatureEdges {
+    edges: BTreeMap<DefId, Vec<DefId>>,
+    input_metadata_bytes: u64,
 }
 /// A complete input and its decode/clone working admission. Keep this owner
 /// alive while its input is borrowed by an export builder. Final export tables
@@ -353,6 +358,49 @@ impl FrontBuiltProof {
     }
 }
 impl FrontProofExport {
+    fn signature_edges(&self) -> Result<&SignatureEdges, QueryError> {
+        self.signature_edges
+            .get_or_init(|| {
+                let types = self.run.lower.signatures().types().clone();
+                let mut edges = BTreeMap::new();
+                for (path, _) in self.headers.signatures() {
+                    let section = self
+                        .headers
+                        .section(path)
+                        .ok_or(QueryError::NotImplemented)?;
+                    let references = crate::proof_export::signature_references(&types, &section)
+                        .into_iter()
+                        .map(|path| DefId::intern(&path))
+                        .collect::<Vec<_>>();
+                    edges.insert(DefId::intern(path), references);
+                }
+                let mut weight = crate::NativeMetadataWeight::default();
+                weight.map(&edges, |weight, _, edges| weight.flat_vec(edges));
+                if self
+                    .metadata_bytes
+                    .checked_add(weight.bytes())
+                    .is_none_or(|bytes| bytes > self._allowance.bytes())
+                {
+                    return Err(operational("PS9 source metadata exceeds admission"));
+                }
+                let edge_count: usize = edges.values().map(Vec::len).sum();
+                let bytes = edge_count
+                    .saturating_mul(2)
+                    .max(4)
+                    .saturating_mul(size_of::<DefId>()) as u64;
+                let input_metadata_bytes = self
+                    .input_metadata_bytes
+                    .checked_add(bytes)
+                    .ok_or(QueryError::NotImplemented)?;
+                Ok(SignatureEdges {
+                    edges,
+                    input_metadata_bytes,
+                })
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
     /// Captured layout metadata plus exactly this completed Run's typed body
     /// and value decode bounds. Does not open a provider or decode any body.
     pub fn input_bytes(&self, product: ProductRef) -> Result<u64, QueryError> {
@@ -372,7 +420,7 @@ impl FrontProofExport {
         if !self.roots.is_subset(closure) {
             return Err(QueryError::NotImplemented);
         }
-        let mut required = self.input_metadata_bytes;
+        let mut required = self.signature_edges()?.input_metadata_bytes;
         let mut transient = 0u64;
         let mut maps = crate::NativeMetadataWeight::default();
         maps.tree::<DefPath, hirsel_tir::DefinitionRef>(closure.len());
@@ -545,7 +593,8 @@ impl FrontProofExport {
         let mut pending = Vec::new();
         for path in signatures.keys() {
             pending.extend(
-                self.signature_edges
+                self.signature_edges()?
+                    .edges
                     .get(&DefId::intern(path))
                     .ok_or(QueryError::NotImplemented)?
                     .iter()
@@ -562,7 +611,8 @@ impl FrontProofExport {
                 .section(path)
                 .ok_or(QueryError::NotImplemented)?;
             pending.extend(
-                self.signature_edges
+                self.signature_edges()?
+                    .edges
                     .get(&id)
                     .ok_or(QueryError::NotImplemented)?
                     .iter()
@@ -736,19 +786,8 @@ impl QueryEngine {
                 (path, rows)
             })
             .collect();
-        // Freeze signature-only closure edges while S0 owns normalization.
-        // DefIds retain no copied path payload; later input sizing/formatting
-        // never traverses or reconstructs the signature's type graph.
-        let types = run.lower.signatures().types().clone();
-        let mut signature_edges = BTreeMap::new();
-        for (path, _) in headers.signatures() {
-            let section = headers.section(path).ok_or(QueryError::NotImplemented)?;
-            let edges = crate::proof_export::signature_references(&types, &section)
-                .into_iter()
-                .map(|path| DefId::intern(&path))
-                .collect::<Vec<_>>();
-            signature_edges.insert(DefId::intern(path), edges);
-        }
+        // The captured headers and their type snapshot are immutable. Export
+        // derives their closure once, only when its input is requested.
         let mut input_weight = crate::NativeMetadataWeight::default();
         input_weight
             .add(size_of::<FrontProofInput>() + size_of::<SourceMap>() + 8 * size_of::<usize>());
@@ -773,13 +812,6 @@ impl QueryEngine {
                 input_weight.vec(&a.payload, |w, token| w.add(token.capacity()));
             }
         }
-        let edge_count: usize = signature_edges.values().map(Vec::len).sum();
-        input_weight.add(
-            edge_count
-                .saturating_mul(2)
-                .max(4)
-                .saturating_mul(size_of::<DefId>()),
-        );
         let input_metadata_bytes = input_weight
             .bytes()
             .checked_add(
@@ -789,7 +821,6 @@ impl QueryEngine {
             )
             .ok_or(QueryError::NotImplemented)?;
         let mut weight = crate::NativeMetadataWeight::default();
-        weight.map(&signature_edges, |w, _, edges| w.flat_vec(edges));
         weight.add(size_of::<FrontProofExport>() + 2 * size_of::<usize>());
         weight.path(entry);
         weight.source_snapshot(&sources);
@@ -824,8 +855,9 @@ impl QueryEngine {
             modules,
             files,
             sources,
-            signature_edges,
+            signature_edges: std::sync::OnceLock::new(),
             input_metadata_bytes,
+            metadata_bytes: weight.bytes(),
             _allowance: allowance,
         }))
     }

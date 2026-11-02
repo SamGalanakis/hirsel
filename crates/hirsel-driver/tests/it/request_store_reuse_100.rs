@@ -276,22 +276,24 @@ fn check_diagnostics_do_not_require_a_valid_run_or_export_entry() {
         let tree = tempfile::tempdir().unwrap();
         let source = tree.path().join("main.hir");
         let manifest = tree.path().join("hirsel.json");
-        std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"check_only","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[]}"#).unwrap();
-        for (text, valid) in [
-            ("pub fn value()->u8{7u8}\n", true),
-            ("pub fn main()->Missing{missing}\n", false),
-        ] {
-            std::fs::write(&source, text).unwrap();
-            let mut session = Session::open_configured(&manifest, CompileConfig::default());
-            for lowering in [LoweringPolicy::Comptime, LoweringPolicy::Reachable] {
-                let output = session
-                    .request(CompileOperation::Check { lowering })
-                    .unwrap();
-                let CompileResult::Check(checked) = &output.result else {
-                    panic!("expected Check")
-                };
-                assert_eq!(checked.completion, CheckCompletion::Complete);
-                assert_eq!(checked.diagnostics.is_empty(), valid, "{text}");
+        for entry in ["", r#","entry":{"module":[],"name":"main"}"#] {
+            std::fs::write(&manifest, format!(r#"{{"schema":1,"package":{{"name":"check_only","version":"1"}},"sources":[{{"path":"main.hir","module":[]}}],"dependencies":[]{entry}}}"#)).unwrap();
+            for (text, valid) in [
+                ("pub fn value()->u8{7u8}\n", true),
+                ("pub fn main()->Missing{missing}\n", false),
+            ] {
+                std::fs::write(&source, text).unwrap();
+                let mut session = Session::open_configured(&manifest, CompileConfig::default());
+                for lowering in [LoweringPolicy::Comptime, LoweringPolicy::Reachable] {
+                    let output = session
+                        .request(CompileOperation::Check { lowering })
+                        .unwrap();
+                    let CompileResult::Check(checked) = &output.result else {
+                        panic!("expected Check")
+                    };
+                    assert_eq!(checked.completion, CheckCompletion::Complete);
+                    assert_eq!(checked.diagnostics.is_empty(), valid, "{text}");
+                }
             }
         }
     });

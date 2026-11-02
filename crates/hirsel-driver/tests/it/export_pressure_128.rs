@@ -115,3 +115,88 @@ fn pressure(reclaim_idle: bool) {
         }
     });
 }
+/// Law: a retained CheckedProducts result owns what a retained Check result
+/// of the same program owns (its sources) plus its own receipt, never its
+/// graph's producers or admission. Sequential requests whose results stay
+/// held fit a budget with room for one graph, and once they drop the process
+/// allowance is back where it started.
+#[test]
+fn retained_checked_products_results_release_their_graph_admission() {
+    with_compiler_stack(|| {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = directory.path().join("hirsel.json");
+        std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"products_release","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
+        let write = |value: u64| {
+            std::fs::write(
+                directory.path().join("main.hir"),
+                format!("pub fn main()->u64{{{value}}}\n"),
+            )
+            .unwrap()
+        };
+        let limits = RequestLimits {
+            runtime_bytes: 160 << 20,
+            snapshot_bytes: 32 << 20,
+            transport_bytes: 8 << 20,
+        };
+        let config = CompileConfig {
+            store: Arc::new(MemStore::default()),
+            jobs: hirsel_intern::jobs::Jobs::new(1),
+            hold_bytes: 0,
+            ..Default::default()
+        };
+        // What one retained Check result of this program keeps charged.
+        let check_held = {
+            let budget = ProcessBudget::new(1 << 30);
+            let mut selector =
+                CompilerRequests::new(COMPILER, config.clone(), budget.clone(), limits);
+            write(0);
+            let output = selector
+                .execute(
+                    &manifest,
+                    CompileOperation::Check {
+                        lowering: LoweringPolicy::Comptime,
+                    },
+                )
+                .unwrap();
+            let CompileResult::Check(checked) = &output.result else {
+                panic!("check returned another operation")
+            };
+            let checked = checked.clone();
+            drop(output);
+            drop(selector);
+            let held = budget.reserved();
+            drop(checked);
+            assert_eq!(budget.reserved(), 0);
+            held
+        };
+        const RESULTS: u64 = 4;
+        // A digest-only receipt of a one-line program is far below 1 MiB.
+        const RECEIPT_ROOM: u64 = 1 << 20;
+        let graph = limits.runtime_bytes + limits.snapshot_bytes + limits.transport_bytes;
+        // The selector's carry takes half the transport allowance up front.
+        let budget = ProcessBudget::new(
+            limits.transport_bytes / 2 + graph + RESULTS * (check_held + RECEIPT_ROOM),
+        );
+        let mut selector = CompilerRequests::new(COMPILER, config, budget.clone(), limits);
+        let mut held = vec![];
+        for value in 0..RESULTS {
+            write(value);
+            let output = selector
+                .execute(
+                    &manifest,
+                    CompileOperation::CheckedProducts {
+                        lowering: LoweringPolicy::Comptime,
+                        canonical: false,
+                    },
+                )
+                .unwrap_or_else(|error| panic!("request {value}: {error}"));
+            let CompileResult::CheckedProducts { checked, products } = &output.result else {
+                panic!("request {value} returned another operation")
+            };
+            held.push((checked.clone(), products.clone()));
+        }
+        drop(held);
+        drop(selector);
+        assert_eq!(budget.reserved(), 0, "dropped results kept a charge");
+    });
+}

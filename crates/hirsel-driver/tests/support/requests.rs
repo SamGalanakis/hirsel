@@ -13,6 +13,9 @@ pub struct Graph {
 }
 impl Graph {
     pub fn new(engine: &mut QueryEngine, jobs: Jobs) -> Self {
+        Self::try_new(engine, jobs).unwrap()
+    }
+    pub fn try_new(engine: &mut QueryEngine, jobs: Jobs) -> Result<Self, ToolError> {
         let (budget, cap) = host_budget();
         let limits = host_limits(cap, jobs.get());
         let mut loading = LoadingAdmission::reserve(budget, limits, 0).unwrap();
@@ -63,22 +66,36 @@ impl Graph {
             lint_package: None,
             unsafe_ffi: vec![],
         };
-        let mut installed = install(
-            engine,
-            &selection,
-            SourceShape {
-                storage: true,
-                ..Default::default()
-            },
-            jobs,
-            limits,
-            &BudgetHost(budget),
-            loading,
-            &*store,
-            None,
-        )
-        .unwrap();
-        let check = installed.check(engine, &selection).unwrap();
+        let built: Result<_, ToolError> = (|| {
+            let mut installed = install(
+                engine,
+                &selection,
+                SourceShape {
+                    storage: true,
+                    ..Default::default()
+                },
+                jobs,
+                limits,
+                &BudgetHost(budget),
+                loading,
+                &*store,
+                None,
+            )?;
+            let check = installed.check(engine, &selection)?;
+            Ok((installed, check))
+        })();
+        let (installed, check) = match built {
+            Ok(built) => built,
+            Err(error) => {
+                drop(engine.release_private_inference_admission());
+                let owned = std::mem::replace(
+                    engine,
+                    QueryEngine::new(default_environment(), Default::default()),
+                );
+                *engine = owned.with_result_store(previous);
+                return Err(error);
+            }
+        };
         let allowance = engine.release_private_inference_admission().unwrap();
         let mut runtime = AdmittedRuntime::with_query_capacity(
             jobs,
@@ -93,13 +110,13 @@ impl Graph {
             QueryEngine::new(default_environment(), Default::default()),
         );
         *engine = owned.with_result_store(previous);
-        Self {
+        Ok(Self {
             installed,
             runtime,
             check,
             _store: store,
             operation: Some(operation),
-        }
+        })
     }
     pub fn finish(&mut self) {
         self.runtime.shutdown();
@@ -138,6 +155,23 @@ impl Graph {
                     .outcome(result)
                     .expect("body request has an outcome")
                     .outcome
+            })
+            .collect()
+    }
+    pub fn publications(&mut self, paths: &[DefPath]) -> Vec<PublishedResult> {
+        paths
+            .iter()
+            .map(|path| {
+                let query = self.installed.front.query(path).unwrap();
+                let request = self.runtime.request(&[query]);
+                let selected = self
+                    .runtime
+                    .wait(request)
+                    .map(|mut outputs| outputs.remove(0));
+                self.installed
+                    .front
+                    .publication(selected)
+                    .expect("front request has compact publication")
             })
             .collect()
     }
@@ -214,22 +248,7 @@ pub fn publications(
 ) -> Vec<PublishedResult> {
     engine.set_retention(retention);
     let mut graph = Graph::new(engine, jobs);
-    let outputs = paths
-        .iter()
-        .map(|path| {
-            let query = graph.installed.front.query(path).unwrap();
-            let request = graph.runtime.request(&[query]);
-            let selected = graph
-                .runtime
-                .wait(request)
-                .map(|mut outputs| outputs.remove(0));
-            graph
-                .installed
-                .front
-                .publication(selected)
-                .expect("front request has compact publication")
-        })
-        .collect();
+    let outputs = graph.publications(&paths);
     graph.finish();
     outputs
 }

@@ -179,7 +179,11 @@ impl store::ResultStore for Observed {
         store::ResultStore::get_content(&self.inner, reference)
     }
     fn put_content(&self, domain: store::Domain, bytes: &[u8]) -> Option<store::Reference> {
-        self.content_writes.fetch_add(1, Ordering::Relaxed);
+        let reference = domain.reference(bytes)?;
+        // Request installation may republish identical transport buffers.
+        if store::ResultStore::get_content(&self.inner, reference).is_none() {
+            self.content_writes.fetch_add(1, Ordering::Relaxed);
+        }
         store::ResultStore::put_content(&self.inner, domain, bytes)
     }
     fn name(&self) -> &'static str {
@@ -188,24 +192,31 @@ impl store::ResultStore for Observed {
 }
 
 fn publish(store: Arc<Observed>, source: &str, jobs: usize) -> (QueryEngine, Vec<PublishedResult>) {
+    let (engine, outputs, _) = publish_front(store, source, jobs);
+    (engine, outputs)
+}
+fn publish_front(
+    store: Arc<Observed>,
+    source: &str,
+    jobs: usize,
+) -> (QueryEngine, Vec<PublishedResult>, Arc<FrontBodyQueries>) {
     let mut engine =
         QueryEngine::new(default_environment(), compiler_adapters()).with_result_store(store);
     let file = engine.sources.add("completion.hir", source.into()).unwrap();
     let parsed = engine.parse_file(file, &default_context()).unwrap();
     assert!(parsed.diagnostics.is_empty());
-    let definitions = parsed
+    let definitions: Vec<_> = parsed
         .value
         .items
         .iter()
         .map(|s| s.item.definition.clone())
         .collect();
-    let outputs = crate::request_graph::publications(
-        &mut engine,
-        definitions,
-        hirsel_intern::jobs::Jobs::new(jobs),
-        memo::Retention::Batch,
-    );
-    (engine, outputs)
+    engine.set_retention(memo::Retention::Batch);
+    let mut graph =
+        crate::request_graph::Graph::new(&mut engine, hirsel_intern::jobs::Jobs::new(jobs));
+    let outputs = graph.publications(&definitions);
+    graph.finish();
+    (engine, outputs, graph.installed.front.clone())
 }
 
 #[test]
@@ -223,31 +234,49 @@ fn compact_store_hits_do_not_lookup_or_materialize_modes_bodies() {
             store.writes.store(0, Ordering::Relaxed);
             store.content_reads.store(0, Ordering::Relaxed);
             store.content_writes.store(0, Ordering::Relaxed);
-            let (mut fresh, actual) = publish(store.clone(), source, jobs);
+            let (_, actual, front) = publish_front(store.clone(), source, jobs);
             assert!(actual.iter().all(|o| o.result.is_ok()));
             assert_eq!(
                 store.summary_reads.load(Ordering::Relaxed),
                 2,
-                "one compact record per definition; no Modes lookup"
+                "one compact request product per definition"
             );
             assert_eq!(store.writes.load(Ordering::Relaxed), 0);
             assert_eq!(store.content_writes.load(Ordering::Relaxed), 0);
             assert_eq!(store.summary_content_reads.load(Ordering::Relaxed), 2);
             assert_eq!(store.mode_reads.load(Ordering::Relaxed), 0);
             assert_eq!(
-                fresh.store_adoptions(),
-                4,
-                "two signatures and two completions"
+                front.store_adoptions(),
+                2,
+                "two compact request completions"
+            );
+            assert_eq!(
+                front
+                    .work_snapshot()
+                    .iter()
+                    .filter(|(_, kind, _)| matches!(kind, QueryKind::Check | QueryKind::Modes))
+                    .map(|(_, _, count)| count)
+                    .sum::<u64>(),
+                0,
+                "compact request facts skip body checking"
             );
             for output in &actual {
                 for phase in [QueryKind::Check, QueryKind::Modes] {
-                    assert_eq!(fresh.recompute_count(&output.definition, phase), 0);
+                    assert_eq!(front.recompute_count(&output.definition, phase), 0);
                 }
-                let before = fresh.memo_stats().recomputed.clone();
-                fresh
-                    .checked_definition_summary(hirsel_syntax::DefId::intern(&output.definition))
+                let before = front.work_snapshot();
+                let checked = front.checked_definition(&output.definition).unwrap();
+                let expected = output
+                    .result
+                    .as_ref()
+                    .unwrap()
+                    .summary
+                    .checked
+                    .as_ref()
                     .unwrap();
-                assert_eq!(fresh.memo_stats().recomputed, before);
+                assert_eq!(checked.summary.summary, expected.summary);
+                assert_eq!(checked.summary.growth, expected.growth);
+                assert_eq!(front.work_snapshot(), before);
             }
             let changed = source
                 .replace("x:u32", "x:u64")
@@ -417,16 +446,16 @@ fn front_store_retains_prior_actions_at_one_logical_address() {
             let (_, outputs) = publish(store.clone(), source, jobs);
             assert!(outputs.iter().all(|o| o.result.is_ok()));
             let count = store.indexes.lock().unwrap().len();
-            // Two definitions each publish Signature, Modes and Summary.
+            // Each definition publishes Signature, Modes, a request association and compact Front facts.
             // The parsed source (93611be0) and the module's PrivateInference
             // proof (6507acbf) each have one independent logical address.
             assert_eq!(
                 count,
-                2 * 3 + 1 + 1,
-                "six per-definition products, one parse and one module proof"
+                2 * 4 + 1 + 1,
+                "eight per-definition addresses, one parse and one module proof"
             );
             let changed = source.replace("{1u32}", "{2u32}");
-            let (edited, outputs) = publish(store.clone(), &changed, jobs);
+            let (_, outputs, edited) = publish_front(store.clone(), &changed, jobs);
             assert!(outputs.iter().all(|o| o.result.is_ok()));
             assert_eq!(
                 store.indexes.lock().unwrap().len(),
@@ -440,12 +469,17 @@ fn front_store_retains_prior_actions_at_one_logical_address() {
             assert!(edited.recompute_count(&value.definition, QueryKind::Modes) > 0);
             store.writes.store(0, Ordering::Relaxed);
             store.parse_writes.store(0, Ordering::Relaxed);
-            let (reverted, outputs) = publish(store.clone(), source, jobs);
+            let (_, outputs, reverted) = publish_front(store.clone(), source, jobs);
             assert!(outputs.iter().all(|o| o.result.is_ok()));
             assert_eq!(
                 reverted.store_adoptions(),
-                4,
-                "two signatures and two completions"
+                2,
+                "both original request products remain available"
+            );
+            assert_eq!(
+                reverted.recompute_count(&definition("value"), QueryKind::Modes),
+                0,
+                "the original request product remains available"
             );
             assert_eq!(
                 store.writes.load(Ordering::Relaxed),
@@ -482,6 +516,25 @@ fn signature_session(
     );
     engine
 }
+fn request_lower(
+    engine: &mut QueryEngine,
+    path: &DefPath,
+    jobs: usize,
+) -> Result<FrontLowerOutput, hirsel_types::QueryError> {
+    let mut graph =
+        crate::request_graph::Graph::try_new(engine, hirsel_intern::jobs::Jobs::new(jobs))
+            .map_err(|error| match error {
+                ToolError::Query { error, .. } => error,
+                error => hirsel_types::QueryError::Operational(hirsel_types::OperationalFailure {
+                    operation: "test request installation".into(),
+                    message: error.to_string(),
+                }),
+            })?;
+    let result = graph.lower(path);
+    graph.finish();
+    result
+}
+
 fn definition(name: &str) -> DefPath {
     let mut path = entry_path(&default_context());
     path.0.name = name.into();
@@ -1097,7 +1150,8 @@ fn private_evaluation_uses_independent_receipts_in_scalar_and_worker_sessions() 
                     .execute(&manifest, CompileOperation::Precompute)
                     .unwrap();
                 let expected = kinds(&output.result);
-                assert_eq!(runs() - before, 2, "first private V at jobs={jobs}");
+                // Each constant has one checked Lower artifact and one private execution receipt.
+                assert_eq!(runs() - before, 4, "first request V at jobs={jobs}");
                 assert_eq!(
                     expected,
                     vec![
@@ -1725,11 +1779,12 @@ fn enclosing_evaluations_replay_exact_staged_selections_before_body_free_adoptio
             let mut fresh = signature_session(store.clone(), source, false);
             fresh.adapters.modes = None;
             fresh.adapters.lowering = None;
-            let actual = crate::request_graph::constants(
-                &mut fresh,
-                roots.clone(),
-                hirsel_intern::jobs::Jobs::new(jobs),
-            );
+            let mut reopened =
+                crate::request_graph::Graph::new(&mut fresh, hirsel_intern::jobs::Jobs::new(jobs));
+            let actual = roots
+                .iter()
+                .map(|path| reopened.constant(path))
+                .collect::<Vec<_>>();
             assert!(actual.iter().all(Result::is_ok), "jobs={jobs}: {actual:?}");
             assert_eq!(
                 actual
@@ -1742,16 +1797,33 @@ fn enclosing_evaluations_replay_exact_staged_selections_before_body_free_adoptio
                     .collect::<Vec<_>>()
             );
             assert_eq!(
-                fresh.constant_instance(&hidden, &[2]).unwrap().root.kind,
+                reopened
+                    .installed
+                    .lower
+                    .settled_constant(&hidden, &[2])
+                    .unwrap()
+                    .root
+                    .kind,
                 hirsel_tir::ValueKind::Constant(hirsel_tir::Constant::Integer(4))
             );
             assert!(
-                fresh.constant_instance(&hidden, &[3]).is_err(),
+                reopened
+                    .installed
+                    .lower
+                    .settled_constant(&hidden, &[3])
+                    .is_err(),
                 "only selected instances replay"
             );
             for root in &roots {
-                assert_eq!(fresh.recompute_count(root, QueryKind::Modes), 0);
+                assert_eq!(
+                    reopened
+                        .installed
+                        .front
+                        .recompute_count(root, QueryKind::Modes),
+                    0
+                );
             }
+            reopened.finish();
             let copied = Arc::new(store::MemStore::default());
             for (key, bytes) in store.take() {
                 store::ResultStore::put(&*copied, &key, &bytes);
@@ -1798,12 +1870,12 @@ fn generated_source_products_require_local_completion_and_skip_generator_executi
         let path = definition("value");
         let store = Arc::new(store::MemStore::default());
         let mut seed = signature_session(store.clone(), source, true);
-        seed.check_definition(&path).unwrap();
+        request_lower(&mut seed, &path, 1).unwrap();
         let expected = seed.generated_source(&path).unwrap().text.clone();
         let mut fresh = signature_session(store.clone(), source, true);
         fresh.adapters.modes = None;
         fresh.adapters.lowering = None;
-        fresh.check_definition(&path).unwrap();
+        request_lower(&mut fresh, &path, 1).unwrap();
         assert_eq!(fresh.generated_source(&path).unwrap().text, expected);
         assert_eq!(
             fresh.lower_adapter_calls(&definition("text")),
@@ -1820,7 +1892,7 @@ fn generated_source_products_require_local_completion_and_skip_generator_executi
         remote.adapters.modes = None;
         remote.adapters.lowering = None;
         assert!(
-            remote.check_definition(&path).is_err(),
+            request_lower(&mut remote, &path, 1).is_err(),
             "producer text cannot transfer private generator completion"
         );
         let changed = source.replace("7u32", "9u32");
@@ -1828,7 +1900,7 @@ fn generated_source_products_require_local_completion_and_skip_generator_executi
         invalid.adapters.modes = None;
         invalid.adapters.lowering = None;
         assert!(
-            invalid.check_definition(&path).is_err(),
+            request_lower(&mut invalid, &path, 1).is_err(),
             "executed helper changes invalidate text"
         );
         let mut private = signature_session(
@@ -1839,23 +1911,23 @@ fn generated_source_products_require_local_completion_and_skip_generator_executi
         private.adapters.modes = None;
         private.adapters.lowering = None;
         assert!(
-            private.check_definition(&path).is_err(),
+            request_lower(&mut private, &path, 1).is_err(),
             "private V universe changes invalidate text completion"
         );
         let off_store = Arc::new(store::MemStore::default());
         let mut off = signature_session(off_store.clone(), source, true);
         off.verify = Verify::Off;
-        off.check_definition(&path).unwrap();
+        request_lower(&mut off, &path, 1).unwrap();
         let mut on = signature_session(off_store, source, true);
         on.adapters.modes = None;
         on.adapters.lowering = None;
         assert!(
-            on.check_definition(&path).is_err(),
+            request_lower(&mut on, &path, 1).is_err(),
             "VerifyOff generator text cannot mint completion"
         );
         let mut oracle =
             signature_session(store, source, true).with_verify_store(store::VerifyStore::Recompute);
-        oracle.check_definition(&path).unwrap();
+        request_lower(&mut oracle, &path, 1).unwrap();
         assert_eq!(oracle.generated_source(&path).unwrap().text, expected);
     });
 }
@@ -2622,6 +2694,21 @@ fn ordinary_program_check_restores_lint_and_completion_without_syntax() {
             reader.engine.adapters.lexer = None;
             reader.engine.adapters.signature = None;
             let actual = reader.check(LoweringPolicy::Comptime).unwrap();
+            if actual.completion != expected.completion {
+                let signatures = reader
+                    .engine
+                    .indexed_definitions()
+                    .into_iter()
+                    .map(|path| {
+                        let error = reader.engine.item_signature(&path).err();
+                        (path, error)
+                    })
+                    .collect::<Vec<_>>();
+                panic!(
+                    "request completion {:?}, expected {:?}; headers {signatures:?}",
+                    actual.completion, expected.completion
+                );
+            }
             assert_eq!(actual.completion, expected.completion);
             assert_eq!(
                 actual

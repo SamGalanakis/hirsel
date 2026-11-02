@@ -149,6 +149,9 @@ impl ResultStore for ScratchStore {
     fn cache_product(&self, address: Address, action: Action, domain: Domain, bytes: &[u8]) {
         self.selected.cache_product(address, action, domain, bytes);
     }
+    fn cache_query(&self, key: &EntryKey, reads: Reads, bytes: &[u8]) -> Option<Reference> {
+        self.selected.cache_query(key, reads, bytes)
+    }
     fn persistence(&self) -> Persistence {
         self.selected.persistence()
     }

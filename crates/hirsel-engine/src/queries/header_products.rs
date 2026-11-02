@@ -914,7 +914,6 @@ fn project(
         },
         products: Arc::new(PhaseProducts {
             resolution: None,
-            signature_persisted: true,
             ..(*entry.products).clone()
         }),
         covered: entry.covered.clone(),

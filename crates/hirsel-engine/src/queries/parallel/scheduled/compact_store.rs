@@ -3,10 +3,6 @@
 use super::*;
 use bincode::Options;
 
-const OUTPUT: Domain = Domain {
-    kind: 0x4600_0037,
-    schema: 5,
-};
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Record {
     key: Key,
@@ -34,6 +30,39 @@ fn address(key: Key) -> hirsel_artifact_store::Address {
         [key.0.as_slice()],
     ))
 }
+fn storage_key(key: &EntryKey) -> EntryKey {
+    EntryKey(address(key.0).0, key.1, QueryKind::Summary)
+}
+fn remember(
+    store: &dyn ResultStore,
+    key: &EntryKey,
+    reads: &Reads,
+    bytes: &[u8],
+) -> Option<Reference> {
+    store.cache_query(&storage_key(key), reads.clone(), bytes)
+}
+fn load_record(
+    store: &dyn ResultStore,
+    key: &EntryKey,
+    scratch: u64,
+    observe: impl FnMut(&ReadKey) -> Option<ContentHash>,
+) -> Option<(crate::store::Variant, u64)> {
+    let key = storage_key(key);
+    let bytes = store.get(&key)?;
+    let index_bytes = (bytes.len() as u64).checked_mul(8)?;
+    let remaining = scratch.checked_sub(index_bytes)?;
+    let mut entry = crate::store::Entry::decode_for(&key, &bytes)?;
+    entry.variants.retain(|variant| {
+        variant
+            .output
+            .len
+            .checked_mul(8)
+            .is_some_and(|bytes| bytes <= remaining)
+    });
+    entry
+        .resolve_current(store, &key, observe)
+        .map(|variant| (variant, index_bytes))
+}
 /// Scalar Summary demand consumes the same checked compact facts written by
 /// scheduled P. It does not reconstruct or execute the separate body product.
 pub(in crate::queries) fn load_publication(
@@ -48,35 +77,29 @@ pub(in crate::queries) fn load_publication(
         .clone()
         .filter(|s| s.persistence().retains())?;
     let key = engine.store_key(path, QueryKind::Modes)?;
-    let selected = store.lookup_product(address(key.0))?;
-    if selected.reference.domain != OUTPUT
-        || selected.reference.len > crate::store::MAX_RECORD as u64
-    {
-        return None;
-    }
-    let bytes = store.get_content(selected.reference)?;
+    let (variant, index_bytes) = load_record(
+        &*store,
+        &key,
+        (crate::store::MAX_RECORD as u64).checked_mul(8)?,
+        |read| engine.observe(path, read),
+    )?;
     let record: Record = bincode::DefaultOptions::new()
         .with_fixint_encoding()
-        .with_limit(selected.reference.len)
+        .with_limit(variant.payload.len() as u64)
         .reject_trailing_bytes()
-        .deserialize(&bytes)
+        .deserialize(&variant.payload)
         .ok()?;
     if record.key != key.0
         || record.body.is_some_and(|body| {
             body.domain != crate::store::product_domain(QueryKind::Modes)
                 || body.len > crate::store::MAX_RECORD as u64
         })
-        || selected
-            .reference
-            .len
+        || (variant.payload.len() as u64)
             .checked_mul(8)?
             .checked_add(record.decode_bytes)?
+            .checked_add(index_bytes)?
             > (crate::store::MAX_RECORD as u64).checked_mul(8)?
-        || selected.action != crate::store::query_action(&key, key.1, &record.reads)
-        || record
-            .reads
-            .first_changed(|read| engine.observe(path, read))
-            .is_some()
+        || record.reads != variant.reads
     {
         return None;
     }
@@ -216,12 +239,12 @@ impl FrontBodyQueries {
             return None;
         }
         let bytes = bincode::serialize(&record).ok()?;
-        let reference = OUTPUT.reference(&bytes)?;
-        let input = self.inputs.get(&key)?;
-        let action = crate::store::query_action(&input.key, input.key.1, &outcome.reads);
-        self.store
-            .cache_product(address(key), action, OUTPUT, &bytes);
-        Some(reference)
+        remember(
+            &*self.store,
+            &self.inputs.get(&key)?.key,
+            &outcome.reads,
+            &bytes,
+        )
     }
 }
 impl BodyTask {
@@ -246,7 +269,9 @@ impl BodyTask {
         cx: &mut dyn QueryContext,
         reference: Reference,
     ) -> Option<Result<ProductRef, Reference>> {
-        if reference.domain != OUTPUT || reference.len.checked_mul(8)? > self.weight.scratch {
+        if reference.domain != crate::store::product_domain(QueryKind::Summary)
+            || reference.len.checked_mul(8)? > self.weight.scratch
+        {
             return None;
         }
         let bytes = self.queries.store.get_content(reference)?;
@@ -311,11 +336,12 @@ impl BodyTask {
         let Ok(bytes) = bincode::serialize(&record) else {
             return;
         };
-        let input = &queries.inputs[&self.input];
-        let action = crate::store::query_action(&input.key, input.key.1, reads);
-        queries
-            .store
-            .cache_product(address(self.input), action, OUTPUT, &bytes);
+        remember(
+            &*queries.store,
+            &queries.inputs[&self.input].key,
+            reads,
+            &bytes,
+        );
     }
 
     pub(super) fn load_compact(
@@ -326,39 +352,28 @@ impl BodyTask {
         if !queries.store.persistence().retains() {
             return None;
         }
-        let selected = queries.store.lookup_product(address(self.input))?;
-        if selected.reference.domain != OUTPUT
-            || selected.reference.len.checked_mul(8)? > self.weight.scratch
-        {
-            return None;
-        }
-        let bytes = queries.store.get_content(selected.reference)?;
+        let input = &queries.inputs[&self.input];
+        let (variant, index_bytes) =
+            load_record(&*queries.store, &input.key, self.weight.scratch, |read| {
+                queries.observe(input.definition.path(), read)
+            })?;
         let record: Record = bincode::DefaultOptions::new()
             .with_fixint_encoding()
-            .with_limit(selected.reference.len)
+            .with_limit(variant.payload.len() as u64)
             .reject_trailing_bytes()
-            .deserialize(&bytes)
+            .deserialize(&variant.payload)
             .ok()?;
         if record.key != self.input
             || record.body.is_some_and(|body| {
                 body.domain != crate::store::product_domain(QueryKind::Modes)
                     || body.len > self.weight.scratch
             })
-            || selected
-                .reference
-                .len
+            || (variant.payload.len() as u64)
                 .checked_mul(8)?
                 .checked_add(record.decode_bytes)?
+                .checked_add(index_bytes)?
                 > self.weight.scratch
-        {
-            return None;
-        }
-        let input = &queries.inputs[&self.input];
-        if selected.action != crate::store::query_action(&input.key, input.key.1, &record.reads)
-            || record
-                .reads
-                .first_changed(|read| queries.observe(input.definition.path(), read))
-                .is_some()
+            || record.reads != variant.reads
         {
             return None;
         }
@@ -472,19 +487,23 @@ mod tests {
                     record.decode_bytes = u64::MAX;
                 }
                 if fault == 9 {
-                    record.body.as_mut().unwrap().domain = OUTPUT;
+                    record.body.as_mut().unwrap().domain =
+                        crate::store::product_domain(QueryKind::Summary);
                 }
-                let action = if fault == 7 {
-                    hirsel_artifact_store::Action(ContentHash::default())
-                } else {
-                    crate::store::query_action(&key, key.1, &record.reads)
-                };
-                store.cache_product(
-                    address(key.0),
-                    action,
-                    OUTPUT,
+                let storage = storage_key(&key);
+                let mut variant = VariantRef::publish(
+                    &*store,
+                    &storage,
+                    record.reads.clone(),
                     &bincode::serialize(&record).unwrap(),
-                );
+                )
+                .unwrap();
+                if fault == 7 {
+                    variant.inputs = ContentHash::default();
+                }
+                let mut entry = crate::store::Entry::default();
+                entry.insert(variant);
+                store.put(&storage, &entry.encode_for(&storage));
                 assert!(store.get_content(record.body.unwrap()).is_none());
                 engine.verify_store = verify;
                 let hit = engine.load_publication(path);

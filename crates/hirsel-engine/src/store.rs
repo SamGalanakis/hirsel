@@ -166,6 +166,22 @@ pub trait ResultStore: Send + Sync {
             self.associate_product(address, action, reference);
         }
     }
+    /// Best-effort query variants use the ordinary bounded index without
+    /// claiming an active request's required-output transport.
+    fn cache_query(&self, key: &EntryKey, reads: Reads, bytes: &[u8]) -> Option<Reference> {
+        if !self.persistence().retains() {
+            return None;
+        }
+        let output = self.put_content(product_domain(key.2), bytes)?;
+        let variant = VariantRef::for_output(key, reads, output);
+        let mut entry = self
+            .get(key)
+            .and_then(|bytes| Entry::decode_for(key, &bytes))
+            .unwrap_or_default();
+        entry.insert(variant);
+        self.put_query(key.2, key, entry.action(key), &entry.encode_for(key));
+        Some(output)
+    }
     /// Generic product associations share this provider with front queries.
     /// Their registered domains are independent of front QueryKind tags. An
     /// association supplies integrity only, never verifier/native authority.
@@ -502,6 +518,9 @@ impl VariantRef {
         bytes: &[u8],
     ) -> Option<Self> {
         let output = store.put_content(product_domain(key.2), bytes)?;
+        Some(Self::for_output(key, reads, output))
+    }
+    fn for_output(key: &EntryKey, reads: Reads, output: Reference) -> Self {
         let mut variant = Self {
             inputs: key.1,
             reads,
@@ -509,7 +528,7 @@ impl VariantRef {
             witness: ContentHash::default(),
         };
         variant.witness = variant.binding(key);
-        Some(variant)
+        variant
     }
     pub(crate) fn action(&self, key: &EntryKey) -> Action {
         query_action(key, self.inputs, &self.reads)

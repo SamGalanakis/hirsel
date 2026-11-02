@@ -511,14 +511,14 @@ impl FrontBodyQueries {
 impl BodyTask {
     pub(super) fn remember_carry(&self) {
         let queries = &self.queries;
-        let Some(carry) = queries
+        let carry = queries
             .carry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        else {
+            .clone();
+        if carry.is_none() && !queries.store.persistence().retains() {
             return;
-        };
+        }
         let slots = queries.slots.lock().unwrap_or_else(|e| e.into_inner());
         let Some(slot) = slots.get(&self.input) else {
             return;
@@ -570,15 +570,17 @@ impl BodyTask {
             return;
         }
         self.store_compact(reference, &outcome.reads, &bytes, decode_bytes);
-        carry.remember(
-            self.input,
-            queries.inputs[&self.input].definition,
-            queries.inputs[&self.input].key.1,
-            outcome.reads.clone(),
-            reference,
-            bytes,
-            decode_bytes,
-        );
+        if let Some(carry) = carry {
+            carry.remember(
+                self.input,
+                queries.inputs[&self.input].definition,
+                queries.inputs[&self.input].key.1,
+                outcome.reads.clone(),
+                reference,
+                bytes,
+                decode_bytes,
+            );
+        }
     }
     pub(super) fn remember_cached_carry(
         &self,

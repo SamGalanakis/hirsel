@@ -963,10 +963,14 @@ until explicit eviction or Front admission pressure. Pressure selects settled
 values outside unfinished roots and active continuation dependencies, provided
 no external handle pins them. Detached checked and analyzed views retain the
 same fact owner and its source reservation. Completed producers keep semantic
-read edges without pinning consumed values. Body eviction encodes nothing;
-compact Front eviction writes complete checked facts to the optional provider
-cache and retains admitted phase observations. A missing cached record takes
-ordinary recomputation. Check and instance bootstrap consume roots in bounded
+read edges without pinning consumed values. Body eviction encodes nothing.
+Successful Front publication and compact eviction write complete checked facts
+to the optional provider independently of the host's in-memory carry. One
+Summary address retains the ordinary bounded action variants, so edit/revert
+requests reuse earlier facts after validating their exact reads. Optional writes
+bypass required request transport, including its scratch store; a cache refusal
+only loses reuse. Compact eviction retains admitted phase observations. A
+missing cached record takes ordinary recomputation. Check and instance bootstrap consume roots in bounded
 groups. Header slots share the Front allowance and release unpinned signature
 payloads and metadata under pressure. Explicit archives keep their own leases.
 Settled module proofs are entries of the same cache: holding a `ModuleProof`

@@ -260,6 +260,12 @@ impl ResultStore for RequestStore {
     fn cache_product(&self, address: Address, action: Action, domain: Domain, bytes: &[u8]) {
         self.backend.cache_product(address, action, domain, bytes);
     }
+    fn cache_query(&self, key: &EntryKey, reads: Reads, bytes: &[u8]) -> Option<Reference> {
+        if !self.persistence().retains() {
+            return None;
+        }
+        self.backend.cache_query(key, reads, bytes)
+    }
     fn persistence(&self) -> Persistence {
         self.active_policy
             .lock()
@@ -1056,6 +1062,13 @@ mod tests {
             let address = Address(ContentHash::of_bytes(&index.to_le_bytes()));
             request.cache_product(address, action, domain(), b"optional projection");
             assert!(backend.lookup_product(address).is_some());
+            let key = EntryKey(address.0, ContentHash::default(), QueryKind::Summary);
+            assert!(
+                request
+                    .cache_query(&key, Reads::empty(), b"optional compact facts")
+                    .is_some()
+            );
+            assert_eq!(Entry::load(&*backend, &key).variants.len(), 1);
         }
         assert_eq!(request.retained_bytes(), before);
         assert!(!request.exhausted());
@@ -1066,8 +1079,52 @@ mod tests {
         drop(request);
         assert_eq!(budget.reserved(), 0);
 
+        struct RefusedCache;
+        impl ResultStore for RefusedCache {
+            fn get(&self, _: &EntryKey) -> Option<Bytes> {
+                None
+            }
+            fn put(&self, _: &EntryKey, _: &[u8]) {}
+            fn put_content(&self, _: Domain, _: &[u8]) -> Option<Reference> {
+                None
+            }
+            fn name(&self) -> &'static str {
+                "refused-cache"
+            }
+        }
+        let refusing = RequestStore::with_scratch(
+            Arc::new(RefusedCache),
+            budget.reserve(allowance).unwrap(),
+            directory.path(),
+            1 << 20,
+        )
+        .unwrap();
+        let before = refusing.retained_bytes();
+        let key = EntryKey(address().0, ContentHash::default(), QueryKind::Summary);
+        assert!(
+            refusing
+                .cache_query(&key, Reads::empty(), &vec![0; 2 * allowance as usize])
+                .is_none()
+        );
+        assert_eq!(refusing.retained_bytes(), before);
+        assert!(!refusing.exhausted());
+        assert!(
+            refusing
+                .put_content(domain(), b"required output after cache refusal")
+                .is_some()
+        );
+        assert!(!refusing.exhausted());
+        drop(refusing);
+        assert_eq!(budget.reserved(), 0);
+
         let disabled = RequestStore::new(Arc::new(NoneStore), budget.reserve(0).unwrap());
         disabled.cache_product(address(), action, domain(), b"optional projection");
+        let key = EntryKey(address().0, ContentHash::default(), QueryKind::Summary);
+        assert!(
+            disabled
+                .cache_query(&key, Reads::empty(), b"optional compact facts")
+                .is_none()
+        );
         assert!(disabled.lookup_product(address()).is_none());
         assert_eq!(disabled.retained_bytes(), 0);
         assert!(!disabled.exhausted());

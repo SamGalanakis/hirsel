@@ -162,9 +162,6 @@ pub(crate) struct HeaderProducts {
     /// Bumped by every row this table publishes after construction. An engine
     /// adopts the completed rows once per revision, not once per read.
     revision: AtomicU64,
-    /// Some row holds a failed signature. Rows are published once and only
-    /// settled rows are evicted, so this never clears.
-    failed: AtomicBool,
     admission: std::sync::Mutex<Option<HeaderAdmission>>,
     environment: QueryEnvironment,
     adapters: HeaderPhases,
@@ -242,7 +239,6 @@ impl HeaderProducts {
             .map(|(id, summary)| (*id, summary.clone()))
             .collect();
         Arc::new(Self {
-            failed: AtomicBool::new(any_failed(&rows)),
             rows,
             generation: AtomicU64::new(0),
             revision: AtomicU64::new(0),
@@ -332,17 +328,11 @@ impl HeaderProducts {
     pub(crate) fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
     }
-    pub(crate) fn failed(&self) -> bool {
-        self.failed.load(Ordering::Acquire)
-    }
     /// Publish one row; a row already present keeps its product.
     /// Returns the resident row and whether it is this one.
     fn publish(&self, cell: &HeaderSlot, product: HeaderProduct) -> (Arc<HeaderProduct>, bool) {
         let (product, settled) = cell.set(product);
         if settled {
-            if product.result.is_err() {
-                self.failed.store(true, Ordering::Release);
-            }
             self.revision.fetch_add(1, Ordering::AcqRel);
         }
         (product, settled)
@@ -473,8 +463,14 @@ impl HeaderProducts {
         {
             return self.use_product(engine, id, &product);
         }
-        // The held proof pins this module while its header is produced.
-        let mut proof = self.private_product(id)?;
+        // The held proof pins this module while its header is produced. A
+        // failed module proof is a verdict, not a refusal: the header settles
+        // through its ordinary query, which reads that same failure.
+        let mut proof = match self.private_product(id) {
+            Ok(proof) => proof,
+            Err(QueryError::Diagnostics(_)) => None,
+            Err(error) => return Err(error),
+        };
         if engine.header_products.is_none() {
             self.adopt_private_products(engine)?;
         }
@@ -508,7 +504,11 @@ impl HeaderProducts {
             // The recomputed payload disagrees with the proof that named it.
             // Recompute the proof once; a second disagreement is a fault.
             self.invalidate_private(id, &stale);
-            let fresh = self.private_product(id)?;
+            let fresh = match self.private_product(id) {
+                Ok(proof) => proof,
+                Err(QueryError::Diagnostics(_)) => None,
+                Err(error) => return Err(error),
+            };
             if engine.header_products.is_none() {
                 self.adopt_private_products(engine)?;
             }
@@ -803,10 +803,6 @@ pub(crate) struct AdoptedHeaders {
     headers: Weak<HeaderProducts>,
     revision: u64,
     current: bool,
-}
-fn any_failed(rows: &hirsel_syntax::DefMap<HeaderSlot>) -> bool {
-    rows.values()
-        .any(|cell| cell.get().is_some_and(|product| product.result.is_err()))
 }
 impl QueryEngine {
     pub(crate) fn declared_header_inputs(&self) -> Option<Arc<HeaderProducts>> {

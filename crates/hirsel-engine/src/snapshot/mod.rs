@@ -1076,8 +1076,8 @@ impl hirsel_validate::ReplayEnvironment for SignatureSnapshot {
 }
 
 impl QueryEngine {
-    /// This revision's snapshot, built once after its inputs changed. It is
-    /// kept only when every signature normalized, so a failed one is retried.
+    /// This revision's snapshot, built once after its inputs changed. A failed
+    /// signature is a settled verdict in it, so every reader shares it.
     pub fn signature_snapshot(&mut self) -> Arc<SignatureSnapshot> {
         self.prepare_private_summaries();
         let snapshot = self.signature_inputs();
@@ -1093,10 +1093,6 @@ impl QueryEngine {
         let stamp = self.snapshot_stamp();
         if let Some((kept, snapshot)) = &self.snapshot
             && *kept == stamp
-            && !snapshot
-                .headers
-                .as_ref()
-                .is_some_and(|headers| headers.failed())
         {
             return snapshot.clone();
         }
@@ -2006,6 +2002,11 @@ extern "unused" fn unused()"#
         for (key, value) in reads.iter() {
             assert_eq!(engine.observe(&owner, key), Some(*value), "{key:?}");
         }
+        // A failed signature is a settled verdict, not a retry: later reads
+        // (storage, then Lower) share the snapshot that holds it.
+        let storage = engine.signature_inputs();
+        assert!(Arc::ptr_eq(&storage, &engine.signature_inputs()));
+        assert!(Arc::ptr_eq(&snapshot, &storage));
         // A failed header's exact complete query key changes even when the
         // phase returns byte-identical diagnostic prose.
         let old = snapshot.failed_signature_receipt(failed);

@@ -20,6 +20,13 @@ fn ordered_check_gates_lowering_and_preserves_file_failure_prefixes() {
                 false,
                 true,
             ),
+            // A rejected private definition fails its module proof: that is a
+            // Check verdict, never a query protocol failure.
+            (
+                "fn twin()->u64{1}\nfn user()->u64{twin()}\npub fn main()->u64{user()}\nfn twin()->u64{1}\n",
+                false,
+                false,
+            ),
         ] {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("main.hir");

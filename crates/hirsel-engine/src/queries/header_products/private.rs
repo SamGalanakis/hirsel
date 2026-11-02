@@ -588,7 +588,6 @@ impl HeaderProducts {
             })
             .collect();
         Arc::new(Self {
-            failed: AtomicBool::new(super::any_failed(&rows)),
             rows,
             generation: AtomicU64::new(0),
             revision: AtomicU64::new(0),

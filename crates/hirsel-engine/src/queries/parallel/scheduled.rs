@@ -21,7 +21,7 @@ use lint_facts::LintFacts;
 mod source;
 mod storage;
 pub use source::FrontInputFootprint;
-use source::SiblingArchives;
+use source::{SiblingArchives, SiblingFile};
 pub use storage::{FRONT_STORAGE_KIND, FrontStorageOutput, FrontStorageQueries};
 pub const FRONT_BODY_KIND: u32 = 0x4600_0001;
 const FAILURE: Domain = Domain {
@@ -2387,7 +2387,7 @@ impl QueryEngine {
         let mut siblings = BTreeMap::new();
         let sibling_inputs = self.front_sibling_inputs(definitions)?;
         let mut sibling_index = crate::NativeMetadataWeight::default();
-        sibling_index.tree::<FileId, Vec<Reference>>(sibling_inputs.len());
+        sibling_index.tree::<FileId, SiblingFile>(sibling_inputs.len());
         required = required
             .checked_add(sibling_index.bytes())
             .ok_or_else(|| refusal("sibling index overflow"))?;
@@ -2447,7 +2447,7 @@ impl QueryEngine {
                         ))
                     })?);
                 }
-                slot.insert(refs);
+                slot.insert(SiblingFile::from(refs));
             }
         }
         let mut selected = Vec::new();
@@ -2608,6 +2608,8 @@ impl QueryEngine {
             snapshot,
             declarations: declarations.with_archived_siblings(Arc::new(SiblingArchives {
                 files: siblings,
+                backing: backing.clone(),
+                retention: retention.clone(),
                 sources: self.sources.clone(),
                 owners: anchors.clone(),
                 records: crate::NativeRecords::new(self.types.clone(), store.clone()),

@@ -27,9 +27,6 @@ fn failed(
     }
 }
 fn scalar(runtime: &RuntimeTypes, ty: TypeId) -> Result<bool, Error> {
-    let failure = Default::default();
-    let valid = visit(runtime, ty, &mut HashSet::new(), &failure);
-    return failed(valid, failure);
     fn visit(
         runtime: &RuntimeTypes,
         ty: TypeId,
@@ -112,6 +109,9 @@ fn scalar(runtime: &RuntimeTypes, ty: TypeId) -> Result<bool, Error> {
         active.remove(&ty);
         valid
     }
+    let failure = Default::default();
+    let valid = visit(runtime, ty, &mut HashSet::new(), &failure);
+    failed(valid, failure)
 }
 
 fn owned(runtime: &RuntimeTypes, ty: TypeId) -> Result<bool, Error> {

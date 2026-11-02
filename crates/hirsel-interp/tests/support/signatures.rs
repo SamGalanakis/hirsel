@@ -197,7 +197,8 @@ pub fn fixture_signatures(
                         };
                         types.intern(ty(kind))
                     };
-                    let nominal = runtime.get(path);
+                    let nominal = runtime.get(path).unwrap();
+                    let nominal = nominal.as_ref();
                     let resource = nominal.is_some_and(|n| n.resource);
                     let mut bounds = if resource {
                         vec![]

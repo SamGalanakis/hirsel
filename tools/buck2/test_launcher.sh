@@ -389,6 +389,21 @@ for argument in "$@"; do
   esac
 done
 if "$discovery" && ! "$inventory" && [ -z "$shard" ] && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then run_harness "$@"; exit $?; fi
+# Per-case physical widths (EXACT_CASE_CPUS, as `case=N` words). A case that
+# declares more CPUs than this action holds cannot prove its width: refuse it.
+case_cpus="${HIRSEL_TEST_CASE_CPUS:-}"
+cpu_group="${HIRSEL_TEST_CPU_GROUP:-}"
+unset HIRSEL_TEST_CASE_CPUS HIRSEL_TEST_CPU_GROUP
+check_case_cpus() {
+  [ -n "$case_cpus" ] || return 0
+  narrow="$(printf '%s\n' "$1" | awk -v declared="$case_cpus" -v jobs="$jobs" '
+    BEGIN { n = split(declared, rows, " "); for (i = 1; i <= n; i++) { split(rows[i], f, "="); width[f[1]] = f[2] } }
+    ($0 in width) && width[$0] + 0 > jobs + 0 { printf "  %s declares %s CPUs\n", $0, width[$0] }')"
+  if [ -n "$narrow" ]; then
+    printf 'test_launcher.sh: this action holds %s CPUs; run these cases on their <binary>-cpus-N shards:\n%s\n' "$jobs" "$narrow" >&2
+    exit 2
+  fi
+}
 if [ -z "$shard" ] && ! "$inventory" && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then
   if [ -n "$test_binary" ] && { "$filtered" || "$restricted"; }; then
     cases="$(list_cases "$@")"
@@ -396,6 +411,9 @@ if [ -z "$shard" ] && ! "$inventory" && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]
       printf 'test_launcher.sh: selector [%s] matched no test bodies\n' "$*" >&2
       exit 2
     fi
+    check_case_cpus "$cases"
+  elif [ -n "$case_cpus" ]; then
+    check_case_cpus "$(list_cases "$@")"
   fi
   materialize_native_inputs "$@"; run_harness "$@"; exit $?
 fi
@@ -419,6 +437,14 @@ if "$inventory"; then
       printf 'HIRSEL_FULL_GATE_EXPECT %s %s\n' "$test_binary" "$test_case"
     done
   fi
+fi
+# A binary with per-case widths has one shard set per width group, and the
+# measured shards (empty group) for its undeclared cases. An unfiltered shard
+# deals only its own group's cases.
+if [ -n "$case_cpus" ] && [ -n "$shard" ] && ! "$filtered"; then
+  cases="$(printf '%s\n' "$cases" | awk -v declared="$case_cpus" -v group="$cpu_group" '
+    BEGIN { n = split(declared, rows, " "); for (i = 1; i <= n; i++) { split(rows[i], f, "="); width[f[1]] = f[2] } }
+    NF && (($0 in width) ? width[$0] : "") == group')"
 fi
 if [ -n "$shard" ]; then
   index="${shard%/*}"
@@ -448,6 +474,7 @@ if [ -n "${HIRSEL_TEST_ISOLATED_CASES:-}" ] && [ -n "$shard" ] && ! "$filtered";
     !($0 in excluded)')"
 fi
 unset HIRSEL_TEST_ISOLATED_CASES
+"$discovery" || check_case_cpus "$cases"
 # The caller's positive filters already shaped the listing. Replace them with
 # the exact selected names, preserving flags and paired values. In particular,
 # an empty partition must use an empty exact filter: no filters would run all.

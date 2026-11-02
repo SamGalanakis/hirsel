@@ -64,8 +64,9 @@ NATIVE_STAGES = {
 
 
 def binary(target):
-    """A test target's binary: its shards share one row."""
-    return re.sub(r"-shard-\d+$", "", target)
+    """A test target's binary: its shards, including its per-case width groups
+    (`<binary>-cpus-<N>-shard-<i>`, EXACT_CASE_CPUS), share one row."""
+    return re.sub(r"(-cpus-\d+)?-shard-\d+$", "", target)
 
 
 def runs(paths, since=0, until=float("inf")):
@@ -99,12 +100,21 @@ def runs(paths, since=0, until=float("inf")):
                     cpu=int(row["cpu_usec"]) / 1e6 if row.get("cpu_usec", "-").isdigit() else None,
                     requested_cpu=int(row["requested_cpu"]),
                     requested_kb=int(row["requested_kb"]),
+                    # A width group's CPUs are declared, not measured: its runs
+                    # count toward the binary's memory, never its CPU request.
+                    exact=re.search(r"-cpus-\d+-shard-\d+$", test.group(1)) is not None,
+                    op=row.get("op"),
                 ))
     return found, operations
 
 
-def pss_peaks(paths, operations, cpus=None):
-    """Each binary's PSS peaks (KiB) from the scheduler's usage events."""
+def pss_peaks(paths, operations, cpus=None, exact=frozenset()):
+    """Each binary's PSS peaks (KiB) from the scheduler's usage events.
+
+    With `cpus`, only runs within the proposed width count, except the `exact`
+    operations: a width group shares the binary's memory request at its
+    declared CPUs, so its peaks always count.
+    """
     peaks = defaultdict(list)
     fallback = defaultdict(list)
     for path in paths:
@@ -114,7 +124,7 @@ def pss_peaks(paths, operations, cpus=None):
                 name = operations.get(event.get("operation"))
                 if name and event.get("event") == "usage" and event.get("sampled") and event.get("peak_memory_kb"):
                     fallback[name].append(event["peak_memory_kb"])
-                    if cpus is None or event.get("effective_cpu", 1) <= cpus[name]:
+                    if cpus is None or event.get("operation") in exact or event.get("effective_cpu", 1) <= cpus[name]:
                         peaks[name].append(event["peak_memory_kb"])
     return defaultdict(list, {name: peaks[name] or values for name, values in fallback.items()})
 
@@ -220,6 +230,7 @@ def relative_wall(p, cpus):
 
 
 def size(name, samples, peaks, floors):
+    samples = [s for s in samples if not s.get("exact")] or samples
     cores = [s["cpu"] / s["wall"] for s in samples if s["cpu"] is not None and s["wall"] >= MIN_WALL_SECONDS]
     p95 = high(cores, .95) if cores else 0.0
     mean = sum(s["cpu"] for s in samples if s["cpu"] is not None) / sum(s["wall"] for s in samples if s["cpu"] is not None) if cores else 0.0
@@ -284,7 +295,8 @@ def main():
         parser.error('--only and --native-stages are mutually exclusive')
     found, operations = runs(args.usage, args.since, args.until)
     cpus = {name: size(name, samples, [], [])["cpu_count"] for name, samples in found.items()}
-    peaks = pss_peaks(args.pss, operations, cpus)
+    exact = {s["op"] for samples in found.values() for s in samples if s["exact"]}
+    peaks = pss_peaks(args.pss, operations, cpus, exact)
     floors = kills(args.kills, operations)
     # Scheduler events also cover kills whose executor journal has rotated out.
     # Prefer their retry evidence, without counting the same kill twice.

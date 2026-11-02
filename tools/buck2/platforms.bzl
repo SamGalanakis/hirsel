@@ -30,7 +30,7 @@ merge rule above); the batch's own combinations are new digests.
 
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS", "POOL_BUDGETS", "SPECIAL_REQUESTS")
 load(":test_sizes.bzl", "TEST_REQUESTS", "TEST_GUARD_LIMITS")
-load(":test_requirements.bzl", "EXACT_TEST_CPUS")
+load(":test_requirements.bzl", "EXACT_CASE_CPUS", "EXACT_TEST_CPUS", "REPLAY_CELL_CPUS", "REPLAY_TEST_BINARY")
 
 PRIORITY = int(read_root_config("hirsel", "priority", "50"))
 if PRIORITY < 0 or PRIORITY > 99:
@@ -56,29 +56,33 @@ def _test_request(cpu, memory_kb, cpu_class, exact_cpus = 0):
         return "pool_focus_" + pool_budget_name(1, memory_kb, cpu_class).removeprefix("pool_"), [1, memory_kb, cpu_class]
     return "pool_test_" + pool_budget_name(cpu, memory_kb, cpu_class).removeprefix("pool_"), [cpu, memory_kb, cpu_class]
 
-def _binary_test_request(binary):
+def _binary_test_request(binary, exact_cpus = 0):
     cpu, memory_kb, cpu_class = TEST_REQUESTS.get(binary, DEFAULT_TEST_REQUEST)
-    return _test_request(cpu, memory_kb, cpu_class, EXACT_TEST_CPUS.get(binary, 0))
+    return _test_request(cpu, memory_kb, cpu_class, exact_cpus or EXACT_TEST_CPUS.get(binary, 0))
 
-def test_budget_name(binary):
-    return _binary_test_request(binary)[0]
+def test_budget_name(binary, exact_cpus = 0):
+    return _binary_test_request(binary, exact_cpus)[0]
 
-def test_request(binary):
-    """A test binary's effective pool request `[cpu, memory_kb, cpu_class]`."""
-    return _binary_test_request(binary)[1]
+def test_request(binary, exact_cpus = 0):
+    """A test action's effective pool request `[cpu, memory_kb, cpu_class]`.
+
+    `exact_cpus` is the width its selected cases declare (EXACT_CASE_CPUS);
+    without one the binary's declared width or its measured request applies.
+    """
+    return _binary_test_request(binary, exact_cpus)[1]
 
 def test_memory_limit(binary, memory_kb):
     # The data/address-space guard includes unused thread stacks; it is not
     # the process group's enforced PSS, which alone sets the reservation.
     return max(1048576, 2 * memory_kb, TEST_GUARD_LIMITS.get(binary, 0))
 
-def test_executor(cpu, memory_kb, cpu_class, binary = ""):
+def test_executor(cpu, memory_kb, cpu_class, exact_cpus = 0):
     """A pool test run's executor: Buck2 runs a test with its own executor, not its platform's."""
     return CommandExecutorConfig(
         local_enabled = LOCAL,
         remote_enabled = not LOCAL,
         priority = PRIORITY,
-        remote_execution_properties = pool_properties(cpu, memory_kb, cpu_class, exact_cpus = EXACT_TEST_CPUS.get(binary, 0)),
+        remote_execution_properties = pool_properties(cpu, memory_kb, cpu_class, exact_cpus = exact_cpus),
         remote_execution_use_case = "hirsel",
     )
 
@@ -229,7 +233,9 @@ _platforms_rule = rule(
 def declare_platforms(name, constraints):
     native.constraint_setting(name = "budget")
     budgets = {}
-    # Startup training peaks at 1.4 GiB and exercises four physical permits.
+    # Startup training peaks at 1.4 GiB. Valgrind serializes it onto about one
+    # core, but its pool fixture admits four workers (cpu.map_scoped width 4),
+    # which the runtime refuses unless four CPUs are physically permitted.
     requests = [(4, 2097152, "")] + [tuple(b) for b in POOL_BUDGETS] + [tuple(CLIPPY_REQUEST), tuple(PRECHECK_REQUEST), tuple(DIST_LINK_REQUEST)]
     if PROBE_CPUS:
         requests += [tuple(compile_request(profile, target)) for profile, targets in COMPILE_CLASSES.items() for target in targets]
@@ -244,8 +250,15 @@ def declare_platforms(name, constraints):
     for request in [DEFAULT_TEST_REQUEST] + TEST_REQUESTS.values():
         test, effective = _test_request(*request)
         tests[test] = effective
-    for binary, exact_cpus in EXACT_TEST_CPUS.items():
+    for binary in EXACT_TEST_CPUS:
         test, effective = _binary_test_request(binary)
+        tests[test] = effective
+    for binary, cases in EXACT_CASE_CPUS.items():
+        for exact_cpus in cases.values():
+            test, effective = _binary_test_request(binary, exact_cpus)
+            tests[test] = effective
+    for exact_cpus in REPLAY_CELL_CPUS.values():
+        test, effective = _binary_test_request(REPLAY_TEST_BINARY, exact_cpus)
         tests[test] = effective
     for test, (cpu, memory_kb, cpu_class) in sorted(tests.items()):
         native.constraint_value(name = test, constraint_setting = ":budget", visibility = ["PUBLIC"])

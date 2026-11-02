@@ -265,21 +265,46 @@ COSTS = HERE / "test-costs"
 REQUIRED_COSTS = {"hirsel-driver-test-it"}
 
 
-def shards(binary: str) -> tuple[int, str | None]:
-    """A test binary's shard count and cost table (unsharded: 1, None)."""
+def case_cpus() -> dict[str, dict[str, int]]:
+    """EXACT_CASE_CPUS from test_requirements.bzl: binary -> case -> physical width."""
+    def fail(message):
+        raise SystemExit(f"tools/buck2/test_requirements.bzl: {message}")
+    scope = {"fail": fail}
+    exec(READS.text(HERE / "test_requirements.bzl"), scope)
+    return scope["EXACT_CASE_CPUS"]
+
+
+def shards(binary: str) -> tuple[int, str | None, dict[int, int]]:
+    """A test binary's measured shard count, cost table and exact shard count per
+    declared case width (unsharded: 1, None, {}).
+
+    Declared cases (EXACT_CASE_CPUS) leave the measured shards. Each width
+    group gets its own shards at SHARD_SECONDS per exact CPU; a declared case
+    without a cost row counts the mean, as the launcher deals it.
+    """
     if binary in CASE_SHARDED:
         source = READS.text(ROOT / CASE_SHARDED[binary])
         # This harness declares top-level tests and example!(...) test cases;
         # the indented #[test] inside the macro is its template, not a case.
         count = len(re.findall(r"(?m)^#\[test\]$|^example!\(", source))
-        return max(1, count), None
+        return max(1, count), None, {}
     if binary not in SHARDED:
-        return 1, None
+        if binary in case_cpus():
+            raise SystemExit(f"{binary} declares case widths but is not sharded by cost; add it to SHARDED")
+        return 1, None, {}
     table = COSTS / f"{binary}.tsv"
     if not READS.is_file(table):
         raise SystemExit(f"{binary} is sharded but has no {relative(table)}; measure it (tools/buck2/test_costs.py)")
-    rows = READS.text(table).splitlines()
-    total = sum(float(line.split("\t")[1]) for line in rows)
+    costs = {case: float(seconds) for case, seconds in (line.split("\t")[:2] for line in READS.text(table).splitlines())}
+    declared = case_cpus().get(binary, {})
+    mean = sum(costs.values()) / len(costs) if costs else 1.0
+    groups: dict[int, list[float]] = {}
+    for case, width in declared.items():
+        groups.setdefault(width, []).append(costs.get(case, mean))
+    case_shards = {width: max(1, min(len(group), math.ceil(sum(group) / (width * SHARD_SECONDS))))
+                   for width, group in sorted(groups.items())}
+    rows = [seconds for case, seconds in costs.items() if case not in declared]
+    total = sum(rows)
     sizes = json.loads(READS.text(HERE / "test-sizes.json"))
     cpu = sizes[binary]["cpu_count"]
     if type(cpu) is not int or not 1 <= cpu <= 4:
@@ -288,7 +313,7 @@ def shards(binary: str) -> tuple[int, str | None]:
     # more shards cannot reduce its wall time. Refreshed CLI costs can exceed
     # the work budget individually; do not create thousands of empty actions.
     count = max(1, min(len(rows), math.ceil(total / (cpu * SHARD_SECONDS))))
-    return count, f"//tools/buck2:{table.relative_to(HERE)}"
+    return count, f"//tools/buck2:{table.relative_to(HERE)}", case_shards
 
 
 def cost_coverage(inventories: dict[str, set[str]]) -> list[str]:
@@ -318,9 +343,9 @@ def check_cost_coverage() -> list[str]:
     An empty positional filter makes shard 1 list the whole binary. This runs
     no test bodies, and avoids maintaining a second Rust/macro parser here.
     """
-    from test_costs import configured_shards, inventory
+    from test_costs import configured_targets, inventory
 
-    targets = [f"//:{binary}-shard-1" if configured_shards(binary) > 1 else f"//:{binary}" for binary in SHARDED]
+    targets = [f"//:{configured_targets(binary)[0]}" for binary in SHARDED]
     command = [str(ROOT / ".buck2/bin/buck2"), "test", "-c", "hirsel.tests=focus", *targets, "--",
                "--test-arg=--list", "--test-arg=--include-ignored", "--test-arg=--format=terse", "--test-arg="]
     result = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -944,9 +969,9 @@ def first_party(meta: dict) -> str:
                 ))
             if lib.get("test", True):
                 binary = f"{name}-unittest"
-                count, costs = shards(binary)
+                count, costs, case_shards = shards(binary)
                 out.append("\n" + call("hirsel_test", **profile, name=binary, deps=test_deps,
-                                        shards=count if count > 1 else None, costs=costs,
+                                        shards=count if count > 1 or case_shards else None, case_shards=case_shards or None, costs=costs,
                                         **test_attrs(binary, src), **attrs))
         own = [f"//:{name}"] if lib else []
         if lib and lib.get("test", True) and not guarded(pathlib.Path(lib["src_path"])):
@@ -980,9 +1005,9 @@ def first_party(meta: dict) -> str:
                 if name == "hirsel-conformance":
                     # O4 invokes the actual CLI cache-verification switch.
                     binaries["hirsel"] = "//:hirsel-cli-bin-hirsel"
-                count, costs = shards(f"{name}-test-{target['name']}")
+                count, costs, case_shards = shards(f"{name}-test-{target['name']}")
                 out.append("\n" + call("hirsel_test", **profile, name=f"{name}-test-{target['name']}", deps=own + test_deps, bin_exes=binaries,
-                                         shards=count if count > 1 else None, costs=costs,
+                                         shards=count if count > 1 or case_shards else None, case_shards=case_shards or None, costs=costs,
                                          **test_attrs(f"{name}-test-{target['name']}", src), **attrs))
     out.append("\n" + call("hirsel_deadline_replay_matrix", name="deadline-select-replay",
                             data=Raw('glob(["stdlib/**", "crates/hirsel-cli/Cargo.toml"])'),

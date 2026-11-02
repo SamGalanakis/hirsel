@@ -13,7 +13,7 @@ CARGO_TARGET_TMPDIR and CARGO_BIN_EXE_<name>.
 """
 
 load(":platforms.bzl", "CLIPPY_REQUEST", "PRECHECK_REQUEST", "PROBE_CPUS", "budget_constraint", "compile_request", "doctest_properties", "dist_compile_request", "pool_budget_name", "test_budget_name", "test_executor", "test_request", "test_memory_limit")
-load(":test_requirements.bzl", "EXACT_TEST_CPUS", "ISOLATED_TEST_CASES")
+load(":test_requirements.bzl", "EXACT_CASE_CPUS", "EXACT_TEST_CPUS", "ISOLATED_TEST_CASES", "REPLAY_CELL_CPUS", "REPLAY_TEST_BINARY")
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS")
 load(":profile.bzl", "runtime_profile_flags", "workspace_profile_flags")
 load("@prelude//linking:link_info.bzl", "ArchiveLinkable", "LinkStrategy", "ObjectsLinkable")
@@ -39,12 +39,12 @@ TESTS_ON_HOST = read_root_config("hirsel", "tests", "pool") == "host"
 # same seed, and main's hourly run draws a new one each run (tools/main-runs).
 TEST_SEED = read_root_config("hirsel", "test_seed", "1")
 
-def _request(binary):
-    return [str(field) for field in test_request(binary)]
+def _request(binary, exact_cpus = 0):
+    return [str(field) for field in test_request(binary, exact_cpus)]
 
-def _test_platform(binary):
-    """The invoking host, or the pool request measured for `binary` (its shards share it)."""
-    return [budget_constraint("host" if TESTS_ON_HOST else test_budget_name(binary))]
+def _test_platform(binary, exact_cpus = 0):
+    """The invoking host, or the pool request for `binary` (measured, or `exact_cpus` wide)."""
+    return [budget_constraint("host" if TESTS_ON_HOST else test_budget_name(binary, exact_cpus))]
 
 def _from_package(manifest_dir, path):
     """`path`, relative to the repository root, as seen from `manifest_dir`."""
@@ -220,7 +220,7 @@ def native_tool_inputs():
         for name in ["arm", "qemu", "valgrind", "kit", "glibc_floor", "linker", "runtime-auditor"]
     }
 
-def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], runtime_archives = None, products = None, shards = 1, costs = None, opt_level = None, seeded = False, skips = [], consumer_cases = {}):
+def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], runtime_archives = None, products = None, shards = 1, case_shards = {}, costs = None, opt_level = None, seeded = False, skips = [], consumer_cases = {}):
     """A libtest harness (`rustc --test`) and the test that runs it.
 
     `bin_exes` are the package's binaries, as Cargo's CARGO_BIN_EXE_<name>.
@@ -229,6 +229,9 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
     std query products its programs load. `shards` splits
     the cases over that many test targets `<name>-shard-<i>`, run in parallel,
     balanced by the measured seconds per case in the `costs` table.
+    A binary with per-case widths (EXACT_CASE_CPUS) runs its undeclared cases on
+    those measured shards and each width N's cases on `case_shards[N]` exact
+    targets `<name>-cpus-<N>-shard-<i>`.
     `seeded` binaries draw random cases and run under `TEST_SEED`.
     `skips` are exact case names every
     run skips except the full gate's (`-c hirsel.full=true`).
@@ -273,18 +276,29 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
         visibility = ["PUBLIC"],
     )
     isolated = ISOLATED_TEST_CASES.get(name, [])
-    for shard in range(shards):
-        _rust_test(
-            name = name if shards == 1 else "{}-shard-{}".format(name, shard + 1),
-            shard_index = shard,
-            shards = shards if shards > 1 else 0,
-            costs = costs,
-            labels = [],
-            exec_compatible_with = _test_platform(name),
-            pool = not TESTS_ON_HOST,
-            extra_env = {"HIRSEL_TEST_ISOLATED_CASES": " ".join(isolated)} if isolated else {},
-            **common
-        )
+    case_cpus = EXACT_CASE_CPUS.get(name, {})
+    widths = sorted({width: True for width in case_cpus.values()}.keys())
+    if sorted(case_shards.keys()) != widths:
+        fail("{}: case_shards {} do not cover the EXACT_CASE_CPUS widths {}; run tools/buck2/sync.py".format(name, case_shards, widths))
+    sharded = shards > 1 or bool(case_cpus)
+    # Measured shards, then one exact shard set per declared width.
+    groups = [(0, shards, name)] + [(width, case_shards[width], "{}-cpus-{}".format(name, width)) for width in widths]
+    common = {key: value for key, value in common.items() if key != "request"}
+    for exact_cpus, count, prefix in groups:
+        for shard in range(count):
+            _rust_test(
+                name = prefix if not sharded else "{}-shard-{}".format(prefix, shard + 1),
+                shard_index = shard,
+                shards = count if sharded else 0,
+                costs = costs,
+                labels = [],
+                exec_compatible_with = _test_platform(name, exact_cpus),
+                request = _request(name, exact_cpus),
+                exact_cpus = exact_cpus,
+                pool = not TESTS_ON_HOST,
+                extra_env = {"HIRSEL_TEST_ISOLATED_CASES": " ".join(isolated)} if isolated else {},
+                **common
+            )
     isolated_common = {key: value for key, value in common.items() if key != "args"}
     for index, case in enumerate(isolated):
         _rust_test(
@@ -292,7 +306,9 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
             args = common["args"] + ["--exact", case],
             costs = costs,
             labels = [],
-            exec_compatible_with = _test_platform(name),
+            exec_compatible_with = _test_platform(name, case_cpus.get(case, 0)),
+            request = _request(name, case_cpus.get(case, 0)),
+            exact_cpus = case_cpus.get(case, 0),
             pool = not TESTS_ON_HOST,
             extra_env = {"HIRSEL_TEST_DEDICATED_CASE": case},
             **isolated_common
@@ -305,7 +321,9 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
             args = ["--include-ignored", "--exact", case],
             extra_env = {"HIRSEL_TEST_DEDICATED_CASE": case},
             labels = [],
-            exec_compatible_with = _test_platform(name),
+            exec_compatible_with = _test_platform(name, case_cpus.get(case, 0)),
+            request = _request(name, case_cpus.get(case, 0)),
+            exact_cpus = case_cpus.get(case, 0),
             pool = not TESTS_ON_HOST,
             **isolated_common
         )
@@ -337,8 +355,15 @@ def _rust_test_impl(ctx):
         "HIRSEL_MEMORY_LIMIT": "{}K".format(test_memory_limit(ctx.attrs.test_binary, int(ctx.attrs.request[1]))),
     }
     env.update(ctx.attrs.extra_env)
-    if ctx.attrs.test_binary in EXACT_TEST_CPUS:
-        env["HIRSEL_TEST_EXACT_CPUS"] = str(EXACT_TEST_CPUS[ctx.attrs.test_binary])
+    exact_cpus = ctx.attrs.exact_cpus or EXACT_TEST_CPUS.get(ctx.attrs.test_binary, 0)
+    if exact_cpus:
+        env["HIRSEL_TEST_EXACT_CPUS"] = str(exact_cpus)
+    case_cpus = EXACT_CASE_CPUS.get(ctx.attrs.test_binary, {})
+    if case_cpus:
+        # Every action of the binary refuses a case wider than its CPUs; a
+        # sharded one deals only its width group (empty: the measured cases).
+        env["HIRSEL_TEST_CASE_CPUS"] = " ".join(["{}={}".format(case, width) for case, width in sorted(case_cpus.items())])
+        env["HIRSEL_TEST_CPU_GROUP"] = str(ctx.attrs.exact_cpus) if ctx.attrs.exact_cpus else ""
     env.update({name: cmd_args(tree) for name, tree in tools.items()})
     if tools:
         inputs.append(ctx.attrs._private_native_inputs)
@@ -407,7 +432,7 @@ def _rust_test_impl(ctx):
             # environment and inputs), so a rerun on unchanged inputs does not
             # execute; a failure is never cached. The host platform has no cache.
             supports_test_execution_caching = ctx.attrs.pool,
-            default_executor = test_executor(int(ctx.attrs.request[0]), int(ctx.attrs.request[1]), ctx.attrs.request[2], ctx.attrs.test_binary) if ctx.attrs.pool else None,
+            default_executor = test_executor(int(ctx.attrs.request[0]), int(ctx.attrs.request[1]), ctx.attrs.request[2], exact_cpus) if ctx.attrs.pool else None,
         ),
     ]
 
@@ -422,6 +447,7 @@ _rust_test = rule(
         "cwd": attrs.string(),
         # Environment variables naming input files.
         "files_env": attrs.dict(attrs.string(), attrs.source(), default = {}),
+        "exact_cpus": attrs.int(default = 0),
         "extra_env": attrs.dict(attrs.string(), attrs.string(), default = {}),
         "fixture_output": attrs.bool(default = False),
         "data": attrs.list(attrs.source(), default = []),
@@ -986,7 +1012,7 @@ def hirsel_deadline_replay_matrix(name, data, runtime_archives, products):
     Fixture errors are artifacts too: every dependent libtest cell reports the
     first failed phase. No width regenerates a tape or warms reference startup.
     """
-    binary = "hirsel-cli-test-cli"
+    binary = REPLAY_TEST_BINARY
     common = dict(
         harness = ":" + binary + "-harness",
         data = data,
@@ -998,8 +1024,6 @@ def hirsel_deadline_replay_matrix(name, data, runtime_archives, products):
         native_tools = native_tool_inputs(),
         cwd = "crates/hirsel-cli",
         test_binary = binary,
-        request = _request(binary),
-        exec_compatible_with = _test_platform(binary),
         pool = not TESTS_ON_HOST,
         visibility = ["PUBLIC"],
     )
@@ -1011,14 +1035,19 @@ def hirsel_deadline_replay_matrix(name, data, runtime_archives, products):
             labels = ["fixture"],
             extra_env = {"HIRSEL_REPLAY_BACKEND": backend},
             args = ["--ignored", "--exact", "ordered_deadline_liveness_55::fixture", "--nocapture"],
+            request = _request(binary),
+            exec_compatible_with = _test_platform(binary),
             **common
         )
-        for cell in ["reference", "1", "2", "4"]:
+        for cell, exact_cpus in REPLAY_CELL_CPUS.items():
             _rust_test(
                 name = name + "-" + backend + "-" + cell,
                 files_env = {"HIRSEL_REPLAY_FIXTURE": ":" + fixture},
                 extra_env = {"HIRSEL_REPLAY_BACKEND": backend, "HIRSEL_REPLAY_CELL": cell},
                 args = ["--ignored", "--exact", "ordered_deadline_liveness_55::cell", "--nocapture"],
                 labels = [],
+                request = _request(binary, exact_cpus),
+                exec_compatible_with = _test_platform(binary, exact_cpus),
+                exact_cpus = exact_cpus,
                 **common
             )

@@ -16,6 +16,9 @@ import subprocess
 import tempfile
 
 
+TRACE_RECORD = re.compile(r" ?[ILSM] +[0-9a-fA-F]+,[0-9]+$")
+
+
 def run(command, environment, directory, stderr=None):
     result = subprocess.run(
         list(map(str, command)), env=environment, cwd=directory,
@@ -24,7 +27,9 @@ def run(command, environment, directory, stderr=None):
     if result.returncode:
         if stderr:
             stderr.flush()
-            detail = Path(stderr.name).read_text()[-8000:]
+            # The log interleaves Lackey's records with the diagnostics.
+            detail = "".join(line for line in Path(stderr.name).open(errors="replace")
+                             if not TRACE_RECORD.match(line))[-8000:]
         else:
             detail = result.stderr.decode(errors="replace")
         raise RuntimeError(f"{command[0]} exited {result.returncode}: {detail}")

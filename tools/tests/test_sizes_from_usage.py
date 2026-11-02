@@ -132,6 +132,9 @@ class NativeSizes(unittest.TestCase):
         self.assertEqual(row['memory_kb'], 131072)
         parallel = [dict(cpu=3.5, wall=1, requested_cpu=4, requested_kb=524288, end=1)]
         self.assertEqual(sizes.size('gate-agree-full', parallel, [100000], [])['cpu_count'], 2)
+        # A per-case width group's declared CPUs never become the measured request.
+        exact = [dict(cpu=3.5, wall=1, requested_cpu=4, requested_kb=524288, end=30 + i, exact=True) for i in range(30)]
+        self.assertEqual(sizes.size('gate-agree-full', samples[:20] + exact, [100000], [])['cpu_count'], 1)
 
     def test_memory_uses_samples_at_the_new_cpu_count_when_available(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -144,6 +147,8 @@ class NativeSizes(unittest.TestCase):
             self.assertEqual(sizes.pss_peaks([trace], operations, {'binary': 1})['binary'], [100000])
             # With no matching CPU evidence, keep the largest available peak.
             self.assertEqual(sizes.pss_peaks([trace], {'four': 'binary'}, {'binary': 1})['binary'], [1000000])
+            # A width group runs at its declared CPUs under the binary's memory request.
+            self.assertEqual(sizes.pss_peaks([trace], operations, {'binary': 1}, {'four'})['binary'], [100000, 1000000])
 
     def test_an_unfinished_memory_kill_keeps_a_safe_floor(self):
         with tempfile.TemporaryDirectory() as directory:

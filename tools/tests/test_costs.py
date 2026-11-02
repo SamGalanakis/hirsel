@@ -46,9 +46,10 @@ class Costs(unittest.TestCase):
         self.assertEqual(costs.inventory(lines), {binary: {'generated::case_0', 'ignored::slow'}})
         lines = [f'✓ Pass: root//:{binary}-shard-1 (1.0s)',
                  'test native::case ... ok <0.5s>', 'test expected_panic - should panic ... ok <0.2s>']
+        lines += [f'✓ Pass: root//:{binary}-cpus-4-shard-2 (2.0s)', 'test wide::case ... ok <1.5s>']
         walls, rows = costs.parse(lines)
         self.assertEqual(walls[f'{binary}-shard-1'], ('Pass', 1.0))
-        self.assertEqual(rows[binary], {'native::case': 0.5, 'expected_panic': 0.2})
+        self.assertEqual(rows[binary], {'native::case': 0.5, 'expected_panic': 0.2, 'wide::case': 1.5})
 
     def test_complete_measurement_uses_generated_graph_before_resizing(self):
         with tempfile.TemporaryDirectory() as scratch:
@@ -56,10 +57,16 @@ class Costs(unittest.TestCase):
             here = root / 'tools/buck2'
             here.mkdir(parents=True)
             (root / 'BUCK').write_text('hirsel_test(\n    name = "binary",\n    shards = 5,\n)\n'
-                                       'hirsel_test(\n    name = "single",\n)\n')
+                                       'hirsel_test(\n    name = "single",\n)\n'
+                                       'hirsel_test(\n    name = "grouped",\n    shards = 1,\n'
+                                       '    case_shards = {\n        2: 1,\n        4: 2,\n    },\n)\n')
             with patch.object(costs, 'HERE', here):
                 self.assertEqual(costs.configured_shards('binary'), 5)
                 self.assertEqual(costs.configured_shards('single'), 1)
+                # A complete measurement needs every width group's shards too.
+                self.assertEqual(costs.configured_targets('grouped'),
+                                 ['grouped-shard-1', 'grouped-cpus-2-shard-1', 'grouped-cpus-4-shard-1', 'grouped-cpus-4-shard-2'])
+                self.assertEqual(costs.configured_targets('single'), ['single'])
                 with self.assertRaisesRegex(ValueError, 'no generated test target'):
                     costs.configured_shards('missing')
 

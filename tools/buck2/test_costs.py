@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Per-case test costs from Buck2 test output, the input of cost-balanced shards.
 
-Run every shard (or the one target) of the binaries to measure with libtest's timing report:
+Run every shard (or the one target) of the binaries to measure with libtest's timing report,
+including a binary's per-case width shards (`<binary>-cpus-<N>-shard-<i>`):
 
     .buck2/bin/buck2 test //:<binary>-shard-1 ... //:<binary>-shard-<n> -- \\
       --env RUSTC_BOOTSTRAP=1 --test-arg=-Zunstable-options --test-arg=--report-time \\
@@ -35,13 +36,18 @@ TARGET = re.compile(r'^\S+ (Pass|Fail|Timeout|Fatal): root//:(\S+) \(([^)]*)\)')
 CASE = event_logs.CASE_COST
 
 
+def binary_of(target):
+    """A test target's binary: its shards and its per-case width shards."""
+    return re.sub(r'(-cpus-\d+)?-shard-\d+$', '', target)
+
+
 def inventory(lines):
     """Libtest --list output grouped by Buck2's target headers."""
     cases, binary = {}, None
     for line in lines:
         line = TIMESTAMP.sub('', ANSI.sub('', line)).rstrip()
         if match := TARGET.match(line):
-            binary = re.sub(r'-shard-\d+$', '', match[2])
+            binary = binary_of(match[2])
             binary = binary if binary in SHARDED or binary in NATIVE_STAGES else None
         elif binary and (match := re.fullmatch(r'(\S+): test', line)):
             cases.setdefault(binary, set()).add(match[1])
@@ -64,7 +70,7 @@ def parse(lines):
         if match := TARGET.match(line):
             status, target, wall = match.groups()
             walls[target] = (status, seconds(wall))
-            binary = re.sub(r'-shard-\d+$', '', target)
+            binary = binary_of(target)
             binary = binary if binary in SHARDED or binary in NATIVE_STAGES else None
         elif binary in NATIVE_STAGES and (match := re.fullmatch(r'native case\s+(\S+)\s+([0-9.]+)\s+(?:[0-9]+|unknown)', line)):
             costs.setdefault(binary, {})[match[1]] = float(match[2])
@@ -82,14 +88,30 @@ def read_table(path):
     return rows
 
 
-def configured_shards(binary):
-    """The graph that produced the log, before re-sizing from its new costs."""
+def _test_block(binary):
     buck = (HERE.parents[1] / 'BUCK').read_text()
     block = re.search(r'hirsel_test\(\n    name = "' + re.escape(binary) + r'",(.*?)\n\)', buck, re.S)
     if not block:
         raise ValueError(f'no generated test target: {binary}')
-    count = re.search(r'\n    shards = (\d+),', block[1])
+    return block[1]
+
+
+def configured_shards(binary):
+    """The graph that produced the log, before re-sizing from its new costs."""
+    count = re.search(r'\n    shards = (\d+),', _test_block(binary))
     return int(count[1]) if count else 1
+
+
+def configured_targets(binary):
+    """Every target that runs a share of the binary's cases, in that graph."""
+    block = _test_block(binary)
+    groups = re.search(r'\n    case_shards = \{(.*?)\n    \},', block, re.S)
+    widths = {int(w): int(n) for w, n in re.findall(r'(\d+): (\d+),', groups[1])} if groups else {}
+    count = configured_shards(binary)
+    if count == 1 and not widths:
+        return [binary]
+    return ([f'{binary}-shard-{i}' for i in range(1, count + 1)]
+            + [f'{binary}-cpus-{w}-shard-{i}' for w, n in sorted(widths.items()) for i in range(1, n + 1)])
 
 
 def write_table(path, rows):
@@ -117,7 +139,7 @@ def history_costs(path, binary, since):
     """Latest measured cases, including successful cases of incomplete gates."""
     rows, latest = {}, {}
     for row in event_logs.test_history_rows(path):
-        target, date = row['target'], row['date']
+        target, date = re.sub(r'-cpus-\d+$', '', row['target']), row['date']
         if target not in set(SHARDED) | NATIVE_STAGES or (binary != 'all' and target != binary) or date < since:
             continue
         for case, cost in json.loads(row.get('case_costs') or '{}').items():
@@ -177,10 +199,8 @@ def main():
             print(f'{cost:8.1f} s  {case}')
         if not args.report_only:
             path = TABLES / f'{binary}.tsv'
-            count = configured_shards(binary) if binary not in NATIVE_STAGES else 0
-            complete = binary not in NATIVE_STAGES and (
-                all(walls.get(f'{binary}-shard-{i}', ('',))[0] == 'Pass' for i in range(1, count + 1))
-                if count > 1 else walls.get(binary, ('',))[0] == 'Pass')
+            complete = binary not in NATIVE_STAGES and all(
+                walls.get(target, ('',))[0] == 'Pass' for target in configured_targets(binary))
             write_table(path, rows if complete else read_table(path) | rows)
 
 

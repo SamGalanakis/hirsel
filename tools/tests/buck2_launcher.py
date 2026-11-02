@@ -75,11 +75,12 @@ class CpuRequests(unittest.TestCase):
     def test_exact_requirements_override_measurement_and_focus(self):
         for mode in ('pool', 'focus'):
             module = self.platforms(mode)
-            for binary, cpu in [('hirsel-cli-test-free', 8), ('hirsel-cli-test-cli', 4)]:
+            # A whole-binary width, and one width group of a per-case binary.
+            for binary, group, cpu in [('hirsel-cli-test-free', 0, 8), ('hirsel-cli-test-cli', 4, 4)]:
                 measured = module['TEST_REQUESTS'][binary]
-                request = module['test_request'](binary)
+                request = module['test_request'](binary, group)
                 self.assertEqual(request, [cpu, *measured[1:]])
-                props = module['test_executor'](*request, binary=binary)['remote_execution_properties']
+                props = module['test_executor'](*request, exact_cpus=cpu)['remote_execution_properties']
                 self.assertEqual((props['cpu_count'], props['exact_cpus'], props['cpu_affinity']),
                                  (str(cpu), str(cpu), 'exact-v1'))
                 self.assertEqual(props['kiln_executor_runtime'], 'fixture-runtime')
@@ -87,11 +88,12 @@ class CpuRequests(unittest.TestCase):
     def test_ordinary_targets_keep_measured_and_focus_defaults(self):
         for mode in ('pool', 'focus'):
             module = self.platforms(mode)
-            for binary in ('hirsel-rt-test-it', 'unknown-test'):
+            # A per-case binary's undeclared cases keep its measured request.
+            for binary in ('hirsel-rt-test-it', 'unknown-test', 'hirsel-cli-test-cli'):
                 measured = module['TEST_REQUESTS'].get(binary, module['DEFAULT_TEST_REQUEST'])
                 request = module['test_request'](binary)
                 self.assertEqual(request, [1 if mode == 'focus' else measured[0], *measured[1:]])
-                props = module['test_executor'](*request, binary=binary)['remote_execution_properties']
+                props = module['test_executor'](*request)['remote_execution_properties']
                 self.assertNotIn('cpu_affinity', props)
                 self.assertNotIn('exact_cpus', props)
 
@@ -462,6 +464,31 @@ class LauncherSelection(LauncherFixture):
         self.env['HIRSEL_TEST_BINARY'] = 'fixture'
         dedicated, _ = self.run_cases('--exact', 'pool::smoke', 'full_gate_', '--ignored')
         self.assertEqual(dedicated['cases'], [])
+
+    def test_width_groups_partition_cases_and_refuse_a_narrower_action(self):
+        # pool::smoke declares two CPUs. The measured shards deal the other
+        # cases as if it were absent; its group's own shard runs it alone.
+        everything = [case for i in (1, 2) for case in self.run_cases(shard=f'{i}/2')[0]['cases']]
+        self.env['HIRSEL_TEST_CASE_CPUS'] = 'pool::smoke=2 pool::unlisted=8'
+        self.env['HIRSEL_TEST_CPUS'] = '1'
+        measured = [self.run_cases(shard=f'{i}/2')[0]['cases'] for i in (1, 2)]
+        self.assertNotIn('pool::smoke', [case for part in measured for case in part])
+        self.env |= dict(HIRSEL_TEST_CPU_GROUP='2', HIRSEL_TEST_CPUS='2')
+        wide, _ = self.run_cases(shard='1/1')
+        self.assertEqual(wide['cases'], ['pool::smoke'])
+        self.assertCountEqual([case for part in measured for case in part] + wide['cases'], everything)
+        # Any selection on fewer CPUs than a selected case declares is refused,
+        # sharded or not, and names the case; discovery still lists it.
+        self.env |= dict(HIRSEL_TEST_CPU_GROUP='', HIRSEL_TEST_CPUS='1')
+        for args, shard in [(('--exact', 'pool::smoke'), '1/2'), (('pool::smoke',), ''), ((), '')]:
+            self.observed.unlink(missing_ok=True)
+            env = self.env | ({'TEST_SHARD_INDEX': '0', 'TEST_TOTAL_SHARDS': '2'} if shard else {})
+            run = subprocess.run(['sh', str(LAUNCHER), 'harness', *args], cwd=self.root, env=env, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 2, (args, run.stderr))
+            self.assertIn('pool::smoke declares 2 CPUs', run.stderr)
+            self.assertFalse(self.observed.exists())
+        _, listed = self.run_cases('--list')
+        self.assertIn('pool::smoke: test', listed)
 
     def launcher_with_quota(self, quota):
         # Keep the real launcher's quota logic, with deterministic kernel files.

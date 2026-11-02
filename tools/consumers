@@ -55,7 +55,7 @@ def test_graph(root, seeds):
     return json.loads(buck(root, 'uquery', selection,
                            '--output-attribute', '^test_binary$', '--output-attribute', '^shard',
                            '--output-attribute', '^costs$', '--output-attribute', '^extra_env$',
-                           '--output-attribute', '^args$'))
+                           '--output-attribute', '^args$', '--output-attribute', '^exact_cpus$'))
 
 
 def listings(root, graph):
@@ -87,34 +87,38 @@ def listings(root, graph):
     return result
 
 
-def assignments(root, graph, inventories):
-    """Match test_launcher.sh's longest-first greedy assignment, including mean costs."""
+def case_widths(root=ROOT):
+    """EXACT_CASE_CPUS (tools/buck2/test_requirements.bzl): binary -> case -> CPUs."""
+    def fail(message):
+        raise ValueError(f'test_requirements.bzl: {message}')
+    scope = {'fail': fail}
+    exec((root / 'tools/buck2/test_requirements.bzl').read_text(), scope)
+    return scope['EXACT_CASE_CPUS']
+
+
+def assignments(root, graph, inventories, widths=None):
+    """Match test_launcher.sh's longest-first greedy assignment, including mean
+    costs. A binary with per-case widths deals each width group's cases over that
+    group's shards (`exact_cpus`), and its undeclared cases over the measured ones."""
     result = {}
+    widths = case_widths(root) if widths is None else widths
     for binary, cases in inventories.items():
-        targets = {attrs.get('shard_index', 0): (target, attrs)
-                   for target, attrs in graph.items() if attrs.get('test_binary') == binary
-                   and attrs.get('shards', 0) > 0}
-        if not targets:
+        groups = {}
+        for target, attrs in graph.items():
+            if attrs.get('test_binary') == binary and attrs.get('shards', 0) > 0:
+                groups.setdefault(attrs.get('exact_cpus', 0), {})[attrs.get('shard_index', 0)] = (target, attrs)
+        if not groups:
             target = 'root//:' + binary
             if target in graph:
                 result.update({(binary, case): target for case in cases})
             continue
-        _, attrs = targets[0]
-        costs = {}
-        if attrs.get('costs'):
-            table = root / attrs['costs'].removeprefix('root//').replace(':', '/').lstrip('/')
-            costs = {name: float(cost) for name, cost in
-                     (line.split('\t') for line in table.read_text().splitlines())}
-        total = 0.0
-        for cost in costs.values():
-            total += cost
-        mean = total / len(costs) if costs else 1
-        weights = {name: float(f'{costs.get(name, mean):.3f}') for name in cases}
-        loads = [0.0] * attrs['shards']
-        for name in sorted(cases, key=lambda name: (-weights[name], name)):
-            shard = min(range(len(loads)), key=loads.__getitem__)
-            loads[shard] += weights[name]
-            result[binary, name] = targets[shard][0]
+        declared = widths.get(binary, {})
+        for case in cases:
+            if declared.get(case, 0) not in groups:
+                raise ValueError(f'{binary}: {case} declares {declared[case]} CPUs but the graph has no '
+                                 f'{binary}-cpus-{declared[case]} shards; run tools/buck2/sync.py')
+        for width, targets in groups.items():
+            deal(root, binary, [case for case in cases if declared.get(case, 0) == width], targets, result)
     for target, attrs in graph.items():
         case = attrs.get('extra_env', {}).get('HIRSEL_TEST_DEDICATED_CASE')
         if case and attrs.get('test_binary') in inventories:
@@ -122,6 +126,26 @@ def assignments(root, graph, inventories):
                 raise ValueError(f'{target}: dedicated selector {case} is absent from the case listing')
             result[attrs['test_binary'], case] = target
     return result
+
+
+def deal(root, binary, cases, targets, result):
+    """One shard set's longest-first greedy assignment, as test_launcher.sh deals it."""
+    _, attrs = targets[0]
+    costs = {}
+    if attrs.get('costs'):
+        table = root / attrs['costs'].removeprefix('root//').replace(':', '/').lstrip('/')
+        costs = {name: float(cost) for name, cost in
+                 (line.split('\t') for line in table.read_text().splitlines())}
+    total = 0.0
+    for cost in costs.values():
+        total += cost
+    mean = total / len(costs) if costs else 1
+    weights = {name: float(f'{costs.get(name, mean):.3f}') for name in cases}
+    loads = [0.0] * attrs['shards']
+    for name in sorted(cases, key=lambda name: (-weights[name], name)):
+        shard = min(range(len(loads)), key=loads.__getitem__)
+        loads[shard] += weights[name]
+        result[binary, name] = targets[shard][0]
 
 
 # Rust strings and comments may contain braces and fake function declarations.

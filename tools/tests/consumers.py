@@ -138,10 +138,17 @@ for case in ['held_case', 'active_case']:
             binary = 'fixture'
             graph = {f'shard-{index + 1}': dict(test_binary=binary, shard_index=index,
                                               shards=2, costs='root//:costs') for index in range(2)}
-            result = consumers.assignments(root, graph, {binary: {'heap', 'prefix', 'smoke', 'other', 'host'}})
+            result = consumers.assignments(root, graph, {binary: {'heap', 'prefix', 'smoke', 'other', 'host'}}, widths={})
             self.assertEqual({case: target for (_, case), target in result.items()},
                              dict(heap='shard-1', prefix='shard-1', smoke='shard-2',
                                   other='shard-2', host='shard-2'))
+            # A declared width group leaves the measured deal; it has its own shards.
+            graph['wide-shard-1'] = dict(test_binary=binary, shard_index=0, shards=1, exact_cpus=4, costs='root//:costs')
+            result = consumers.assignments(root, graph, {binary: {'heap', 'prefix', 'smoke', 'other', 'host'}},
+                                           widths={binary: {'heap': 4}})
+            self.assertEqual({case: target for (_, case), target in result.items()},
+                             dict(heap='wide-shard-1', host='shard-1', other='shard-2',
+                                  smoke='shard-1', prefix='shard-2'))
 
 
 if __name__ == '__main__':

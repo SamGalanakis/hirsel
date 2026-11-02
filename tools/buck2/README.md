@@ -478,7 +478,8 @@ the unprofiled archives, then ranks code and read-only symbols by first access i
 Lackey instruction/memory traces. It resolves host Rust names against each target
 archive and leaves section garbage collection unchanged. The selected Link
 captures this file with its runtime inputs and hashes its contents into the build
-ID. Profile generation requests four CPUs and 2 GiB; no profile is checked in.
+ID. Profile generation requests four CPUs and 2 GiB: the pool fixture admits four
+workers, though Valgrind serializes them onto about one core; no profile is checked in.
 `test-native-startup-layout` exercises profile identity, both target CRTs and
 link replay after the original profile has been removed.
 
@@ -887,6 +888,18 @@ property exact, and only upgraded Kiln workers advertise it. The launcher checks
 that inherited affinity has N CPUs and the visible quota permits N; it refuses
 a narrower grant rather than silently running fewer workers. Ordinary targets
 continue using measured sizing. No runtime worker/topology override is involved.
+
+A width is declared per binary (`EXACT_TEST_CPUS`) or, where only some cases
+need it, per case (`EXACT_CASE_CPUS`, never both). sync.py groups a binary's
+declared cases by width: each width N gets its own exact shards
+`<binary>-cpus-<N>-shard-<i>`, sized from those cases' costs at 40 seconds per
+CPU, and the binary's measured shards deal only its undeclared cases. Every
+action of such a binary carries the table (`HIRSEL_TEST_CASE_CPUS`), and the
+launcher refuses any selection, sharded, filtered or dedicated, that contains
+a case declaring more CPUs than the action holds. The sizing generator counts
+the width groups' runs toward the binary's memory but not its measured CPUs.
+In `hirsel-cli-test-cli` the declared cases are those that run `tools/capped`
+under `HIRSEL_JOBS=4`, prove a placement or assert an effective width of four.
 
 Native CPU pool TSan qualification uses the same W4/W8 physical pool fixtures,
 with instrumented emitted instructions on both backends and a separately

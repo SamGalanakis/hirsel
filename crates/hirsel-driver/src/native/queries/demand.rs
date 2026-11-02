@@ -501,6 +501,19 @@ impl DemandInstances {
             &self.seal_inventory,
         ))
     }
+    pub(super) fn bind_source_declarations(
+        &self,
+        operations: &mut hirsel_layout::operation::OperationRegistry,
+    ) {
+        operations
+            .receipt_sources
+            .extend(self.receipt_sources.clone());
+        operations.seal_sources.extend(
+            self.seal_inventory
+                .iter()
+                .map(|(key, source)| (key.clone(), source.source())),
+        );
+    }
     pub(super) fn recheck_receipts(
         &mut self,
         source: &impl NativeSourceProvider,
@@ -740,7 +753,8 @@ impl DemandInstances {
         Ok(Request::new(RequestData {
             key: named,
             lexical,
-            receipt_roots: (!instances.roles[id.index()].is_library()
+            receipt_roots: ((!instances.roles[id.index()].is_library()
+                || key.definition().is_core("arena.seal"))
                 && instances.roles[id.index()] != hirsel_rc::instance::InstanceRole::Finalizer)
                 .then_some(receipt_roots)
                 .flatten(),
@@ -809,10 +823,24 @@ impl DemandInstances {
                 .store
                 .get_content(request.plan)
                 .ok_or("missing sealed library instance plan")?;
-            let plan: InstancePlan = self
-                .records
+            let records = if Arc::ptr_eq(&self.record_types, source.record_types()) {
+                self.records.clone()
+            } else {
+                NativeRecords::new(source.record_types().clone(), self.store.clone())
+            };
+            let plan: InstancePlan = records
                 .decode(source, &bytes)
                 .ok_or("sealed library instance plan decoding failed")?;
+            if key.definition().is_core("arena.seal") {
+                let (_, receipts) = super::receipt_requests::current(
+                    source,
+                    &records,
+                    self.store.as_ref(),
+                    &self.target,
+                    request.receipt_roots,
+                )?;
+                self.receipt_sources.extend(receipts);
+            }
             if let Some(expected) = plan.sealed_source(&source.declarations().program, &key)? {
                 self.seal_inventory
                     .insert((key.definition().clone(), key.digest()), expected);
@@ -1144,6 +1172,7 @@ impl DemandInstances {
             .get(key.instance.encoding())
             .cloned()
             .ok_or("native instance was not discovered")?;
+        let mut receipt_roots = request.receipt_roots;
         let receipt_graph = if request.recipe.domain == SOURCE_RECIPE
             && (request.receipt_roots.is_some() || inputs.receipt_required())
         {
@@ -1154,13 +1183,26 @@ impl DemandInstances {
             } else {
                 NativeRecords::new(inputs.record_types().clone(), self.store.clone())
             };
-            Some(super::receipt_requests::current(
+            let current = super::receipt_requests::current(
                 inputs,
                 &records,
                 self.store.as_ref(),
                 &self.target,
                 request.receipt_roots,
-            )?)
+            )?;
+            if receipt_roots.is_none() {
+                let roots = current
+                    .0
+                    .roots
+                    .iter()
+                    .map(|root| current.0.contexts[root.index()].input.clone())
+                    .collect::<Vec<_>>();
+                receipt_roots = Some(self.put(
+                    super::receipt_requests::ROOTS,
+                    &super::receipt_requests::encode(inputs, &records, &roots)?,
+                )?);
+            }
+            Some(current)
         } else {
             None
         };
@@ -1341,7 +1383,12 @@ impl DemandInstances {
             if recipe.key()? != key.instance {
                 return Err("library recipe differs from demanded key".into());
             }
-            let (instances, id) = recipe.restore(&inputs.declarations().program, &mut layouts)?;
+            let receipt = self
+                .receipt_sources
+                .get(&(key.instance.definition().clone(), key.instance.digest()))
+                .cloned();
+            let (instances, id) =
+                recipe.restore(&inputs.declarations().program, &mut layouts, receipt)?;
             let instances = hirsel_rc::instance::discover_library_instance(
                 &inputs.declarations().program,
                 &inputs.declarations().context,
@@ -1540,7 +1587,7 @@ impl DemandInstances {
         let mut requests = instances
             .ids()
             .filter(|&other| other != id)
-            .map(|other| self.request(inputs, &instances, other, &table, request.receipt_roots))
+            .map(|other| self.request(inputs, &instances, other, &table, receipt_roots))
             .collect::<Result<Vec<_>, _>>()?;
         requests.sort_by(|a, b| a.key.encoding.cmp(&b.key.encoding));
         let mut callees = unit

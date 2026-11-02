@@ -315,7 +315,11 @@ fn library_recipe_rebinds_its_environment_without_reconstructing_the_requiring_v
         )
         .over(&declarations.program.owners);
         let mut missing = hirsel_layout::layout::LayoutBuilder::new(&target, &owners);
-        assert!(recipe.restore(&declarations.program, &mut missing).is_err());
+        assert!(
+            recipe
+                .restore(&declarations.program, &mut missing, None)
+                .is_err()
+        );
         assert!(
             hirsel_layout::layout::LayoutBuilder::from_products(
                 &hirsel_lir::TargetSpec::aarch64_unknown_linux_gnu(),
@@ -329,7 +333,9 @@ fn library_recipe_rebinds_its_environment_without_reconstructing_the_requiring_v
                 .unwrap();
         let trace = hirsel_lir::construction::ValueTrace::default();
         let _observe = trace.enter();
-        let (mut instances, id) = recipe.restore(&declarations.program, &mut layouts).unwrap();
+        let (mut instances, id) = recipe
+            .restore(&declarations.program, &mut layouts, None)
+            .unwrap();
         assert_eq!(
             trace.totals(),
             hirsel_lir::construction::ValueCounts::default()
@@ -520,7 +526,7 @@ fn library_recipe_preserves_the_declared_borrowed_result_contract() {
         let recipe = LibraryRecipe::decode(&records, &source, &bytes).unwrap();
         let mut layouts = hirsel_layout::layout::LayoutBuilder::new(&target, &owners);
         layouts.prepare_native_controls();
-        let (mut restored, id) = recipe.restore(program, &mut layouts).unwrap();
+        let (mut restored, id) = recipe.restore(program, &mut layouts, None).unwrap();
         assert_eq!(
             layouts.table().fn_abis[restored.abis[id.index()].0 as usize]
                 .result

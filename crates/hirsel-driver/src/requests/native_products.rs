@@ -111,6 +111,23 @@ impl NativeBuildReadiness {
         // bodies are charged to their producers' materialization scope.
         weight.add(std::mem::size_of::<super::NativeReady>() + 4 * std::mem::size_of::<usize>());
         weight.flat_vec(&view.ready);
+        weight.tree::<hirsel_syntax::ContentHash, Option<hirsel_lir::LayoutId>>(
+            view.program.ahead_environments.len(),
+        );
+        weight.map(
+            &view.program.operations.receipt_sources,
+            |w, (path, _), source| {
+                w.path(path);
+                w.add(hirsel_codec::to_text(source).len());
+            },
+        );
+        weight.map(
+            &view.program.operations.seal_sources,
+            |w, (path, _), source| {
+                w.path(path);
+                w.add(hirsel_codec::to_text(source).len());
+            },
+        );
         weight.path(&source.run.entry);
         weight.source_snapshot(&source.roots.sources);
         weight.callees(&source.run.callees);

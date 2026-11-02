@@ -417,6 +417,13 @@ impl RootProducts {
             let mut program = program.clone();
             program.units = units;
             program.inline_instances = inline;
+            program.ahead_environments = hirsel_lir::ahead::environments(
+                &program
+                    .units
+                    .iter()
+                    .map(|unit| unit.unit().clone())
+                    .collect::<Vec<_>>(),
+            );
             Ok(program)
         })
     }
@@ -892,6 +899,7 @@ impl NativeRoots for RootProducts {
         // Body-free assembly never reconstructs a Value or trusts unit anchors
         // to select source identities; selectors are rebound by full ABI content.
         let mut operations = self.source.operations().clone();
+        snapshot.instances.bind_source_declarations(&mut operations);
         operations.pretransfer_adapters = super::instance_operations::bind_pretransfer(
             environment.operations,
             &binding.table,

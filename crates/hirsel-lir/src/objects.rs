@@ -359,6 +359,7 @@ fn for_each_table_id<S>(unit: &mut LirUnit<S>, f: &mut impl FnMut(TableId<'_>)) 
             | Inst::Hash { layout, .. }
             | Inst::Release { layout, .. }
             | Inst::Reset { layout, .. }
+            | Inst::HoleOpen { open: layout, .. }
             | Inst::RegionReserve { layout, .. } => f(TableId::Layout(layout)),
             _ => {}
         }
@@ -444,6 +445,7 @@ pub fn references<S>(unit: &LirUnit<S>) -> (Vec<LayoutId>, Vec<FnAbiId>) {
             | Inst::Hash { layout, .. }
             | Inst::Release { layout, .. }
             | Inst::Reset { layout, .. }
+            | Inst::HoleOpen { open: layout, .. }
             | Inst::RegionReserve { layout, .. } => {
                 layouts.insert(layout);
             }
@@ -544,6 +546,9 @@ pub fn rebound<S>(
             None => missing = Some(format!("erased FnAbi {}", id.0)),
         },
     });
+    for descriptor in &mut unit.tables.seal_descriptors {
+        descriptor.access.sort_by_key(|access| access.layout);
+    }
     match missing {
         None => Ok(unit),
         Some(message) => Err(format!("{message} has no binding")),

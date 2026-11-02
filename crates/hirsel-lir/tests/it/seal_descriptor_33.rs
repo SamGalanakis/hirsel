@@ -142,3 +142,25 @@ fn seal_descriptor_private_metadata_is_never_an_ordinary_payload_access_program(
         "{error}"
     );
 }
+#[test]
+fn portable_binding_preserves_the_reconstructed_descriptor_access_order() {
+    let (registry, target, mut table, descriptor) = fixture(Fixture::List);
+    assert!(descriptor.access.len() > 1);
+    let mut unit = crate::support::Lir::<hirsel_lir::stage::Value>::new(&[], None)
+        .builder
+        .unit;
+    unit.tables.seal_descriptors.push(descriptor.clone());
+    let (erased, layouts, abis) = hirsel_lir::objects::erased(&unit);
+    let count = table.layouts.len() as u32;
+    let remap = |id: LayoutId| LayoutId(count - 1 - id.0);
+    table.layouts.reverse();
+    for row in &mut table.layouts {
+        row.for_each_reference_mut(&mut |id| *id = remap(*id));
+    }
+    let layouts = layouts.into_iter().map(remap).collect::<Vec<_>>();
+    let rebound = hirsel_lir::objects::rebound(erased, &layouts, &abis).unwrap();
+    let expected = registry
+        .seal_descriptor(&descriptor.root_type, &table, &target)
+        .unwrap();
+    assert_eq!(rebound.tables.seal_descriptors, vec![expected]);
+}

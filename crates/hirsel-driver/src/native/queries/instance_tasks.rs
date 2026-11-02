@@ -652,9 +652,10 @@ impl QueryTask for InstanceTask {
             return finish(result);
         }
         let mut receipt_products = Vec::new();
+        let source_owner = self.entry.request.source_definition();
         if let Some(front) = &self.tasks.front
-            && let Some(owner) = self.entry.request.source_definition()
-            && (self.id.kind == INSTANCE_INPUT_KIND || self.entry.request.has_receipt_roots())
+            && ((source_owner.is_some() && self.id.kind == INSTANCE_INPUT_KIND)
+                || self.entry.request.has_receipt_roots())
         {
             let paths = if self.entry.request.has_receipt_roots() {
                 self.tasks
@@ -665,7 +666,7 @@ impl QueryTask for InstanceTask {
                     .keys()
                     .collect::<Vec<_>>()
             } else {
-                vec![owner]
+                source_owner.into_iter().collect()
             };
             let mut waiting = Vec::new();
             for path in paths {
@@ -701,7 +702,7 @@ impl QueryTask for InstanceTask {
                         if &product.definition != path {
                             return Err("front Lower names another source definition".into());
                         }
-                        if path == owner {
+                        if Some(path) == source_owner {
                             if let Some((previous, previous_original)) = self.entry.source.get() {
                                 if *previous != (selected.address, selected.action)
                                     || !product.same_binding(previous_original)
@@ -771,16 +772,16 @@ impl QueryTask for InstanceTask {
             let mut producer = self.tasks.producer();
             producer.admit(self.entry.request.clone())?;
             let mut source = if let Some(front) = &self.tasks.front
-                && self.entry.request.source_definition().is_some()
+                && (source_owner.is_some() || self.entry.request.has_receipt_roots())
             {
-                let (_, product) = self
-                    .entry
-                    .source
-                    .get()
-                    .ok_or("native input has no settled front Lower")?;
                 let products = if self.entry.request.has_receipt_roots() {
                     receipt_products
                 } else {
+                    let (_, product) = self
+                        .entry
+                        .source
+                        .get()
+                        .ok_or("native input has no settled front Lower")?;
                     vec![product.clone()]
                 };
                 self.tasks

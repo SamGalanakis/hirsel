@@ -1552,6 +1552,38 @@ fn descriptor_constants_rebind_and_participate_in_import_evidence() {
 }
 
 #[test]
+fn constructor_hole_layout_rebinds_and_participates_in_import_evidence() {
+    let table = fixture_table(&TargetSpec::x86_64_unknown_linux_gnu());
+    let mut unit = fixture_unit::<Value>(&table);
+    let open = LayoutId(table.layouts.len() as u32);
+    unit.instructions.push(Inst::HoleOpen {
+        result: ValueId(0),
+        hole: ValueId(1),
+        construct: ConstructId(0),
+        open,
+        failure: FailureId(0),
+    });
+    assert!(hirsel_lir::objects::references(&unit).0.contains(&open));
+    let (erased, mut layouts, abis) = hirsel_lir::objects::erased(&unit);
+    let index = layouts.iter().position(|id| *id == open).unwrap();
+    assert!(
+        matches!(erased.instructions.last(), Some(Inst::HoleOpen { open, .. }) if *open == LayoutId(index as u32))
+    );
+    let replacement = LayoutId(open.0 + 7);
+    layouts[index] = replacement;
+    let Some(Inst::HoleOpen { open, .. }) = unit.instructions.last_mut() else {
+        unreachable!();
+    };
+    *open = replacement;
+    assert_eq!(
+        hirsel_lir::objects::rebound(erased.clone(), &layouts, &abis).unwrap(),
+        unit
+    );
+    layouts.truncate(index);
+    assert!(hirsel_lir::objects::rebound(erased, &layouts, &abis).is_err());
+}
+
+#[test]
 fn foreign_and_stale_identities_are_rejected() {
     let target = TargetSpec::x86_64_unknown_linux_gnu();
     let table = fixture_table(&target);

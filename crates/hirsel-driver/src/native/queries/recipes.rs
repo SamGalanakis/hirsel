@@ -545,6 +545,7 @@ impl LibraryRecipe {
         &self,
         program: &Program,
         layouts: &mut LayoutBuilder<'_>,
+        receipt: Option<hirsel_lir::sealed_payload_source::ReceiptSource>,
     ) -> Result<(Instances, InstanceId), String> {
         if self.declared_callable
             && declared_library_callable(program, &self.definition, &self.actuals)?
@@ -574,18 +575,6 @@ impl LibraryRecipe {
                     .ok_or("library recipe environment is not in its reached layout products")
             })
             .transpose()?;
-        let receipt = if self.definition.is_core("arena.seal") {
-            hirsel_rc::library::Request::operation(
-                program,
-                self.body as usize,
-                &self.definition,
-                self.actuals.arguments.clone(),
-            )
-            .map_err(|e| format!("reviewed library receipt: {e:?}"))?
-            .receipt
-        } else {
-            None
-        };
         let request = hirsel_rc::library::Request {
             receipt,
             body: self.body as usize,

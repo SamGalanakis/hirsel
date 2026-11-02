@@ -152,13 +152,12 @@ fn ratio_equality_accumulated_suffix_and_newest_duplicate_compact() {
             MaintenanceBudget {
                 max_rows: 4,
                 ..budget()
-            }
-        )
+            }, crate::Durability::Rebuildable)
         .unwrap(),
         CompactOutcome::Deferred
     );
     assert!(matches!(
-        compact(root, budget()).unwrap(),
+        compact(root, budget(), crate::Durability::Rebuildable).unwrap(),
         CompactOutcome::Published { layers: 1, .. }
     ));
     let pin = load_pinned(root).unwrap();
@@ -166,7 +165,7 @@ fn ratio_equality_accumulated_suffix_and_newest_duplicate_compact() {
     for e in &old[1..] {
         assert_eq!(find(&pin, e.key), Some(e.location));
     }
-    assert_eq!(compact(root, budget()).unwrap(), CompactOutcome::NotNeeded);
+    assert_eq!(compact(root, budget(), crate::Durability::Rebuildable).unwrap(), CompactOutcome::NotNeeded);
     // Oldest 20 does not fit 4*youngest(1), but fits 4*(1+4).
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -174,7 +173,7 @@ fn ratio_equality_accumulated_suffix_and_newest_duplicate_compact() {
     published(publish(root, &(100..104).map(entry).collect::<Vec<_>>()));
     published(publish(root, &[entry(200)]));
     assert!(matches!(
-        compact(root, budget()).unwrap(),
+        compact(root, budget(), crate::Durability::Rebuildable).unwrap(),
         CompactOutcome::Published { layers: 1, .. }
     ));
 }
@@ -200,13 +199,12 @@ fn eight_layer_admission_budget_and_forced_youngest_pair() {
             MaintenanceBudget {
                 max_scratch_bytes: 0,
                 ..budget()
-            }
-        )
+            }, crate::Durability::Rebuildable)
         .unwrap(),
         CompactOutcome::Deferred
     );
     assert!(matches!(
-        compact(root, budget()).unwrap(),
+        compact(root, budget(), crate::Durability::Rebuildable).unwrap(),
         CompactOutcome::Published { layers: 7, .. }
     ));
     published(publish(root, &[entry(next)]));
@@ -247,7 +245,7 @@ fn lock_contention_is_bounded_and_live_staging_has_owner() {
         publish_delta(root, delta, &epoch).unwrap(),
         PublishOutcome::Skipped(SkipReason::Contended)
     );
-    assert_eq!(compact(root, budget()).unwrap(), CompactOutcome::Deferred);
+    assert_eq!(compact(root, budget(), crate::Durability::Rebuildable).unwrap(), CompactOutcome::Deferred);
     drop(lock);
     assert!(!stage.exists());
 }
@@ -433,7 +431,7 @@ fn bounded_construction_scales_and_reopens_eight_layer_publication() {
             max_scratch_bytes: scratch - 1,
             ..budget()
         };
-        assert_eq!(compact(root, short).unwrap(), CompactOutcome::Deferred);
+        assert_eq!(compact(root, short, crate::Durability::Rebuildable).unwrap(), CompactOutcome::Deferred);
         assert_eq!(fs::read(root.join("index/MANIFEST")).unwrap(), old_root);
         let capacity = rows_per_layer as usize * 8;
         let actual = std::rc::Rc::new(std::cell::Cell::new(0));
@@ -446,7 +444,7 @@ fn bounded_construction_scales_and_reopens_eight_layer_publication() {
             ..budget()
         };
         assert!(matches!(
-            compact(root, exact).unwrap(),
+            compact(root, exact, crate::Durability::Rebuildable).unwrap(),
             CompactOutcome::Published { layers: 1, .. }
         ));
         assert!(actual.get() > 0);
@@ -488,9 +486,55 @@ fn interrupted_plane_construction_preserves_root_pins_and_cleans_workspace() {
     let before = fs::read(root.join("index/MANIFEST")).unwrap();
     let old = load_pinned(root).unwrap();
     CONSTRUCTION_OBSERVER.with(|slot| *slot.borrow_mut() = Some(Box::new(|_| panic!("cancel construction"))));
-    assert!(std::panic::catch_unwind(|| compact(root, budget())).is_err());
+    assert!(std::panic::catch_unwind(|| compact(root, budget(), crate::Durability::Rebuildable)).is_err());
     assert_eq!(fs::read(root.join("index/MANIFEST")).unwrap(), before);
     assert_eq!(fs::read_dir(root.join("index/staging")).unwrap().count(), 0);
     for n in [1, 2] { assert_eq!(find(&old, entry(n).key), Some(entry(n).location)); }
-    assert!(matches!(compact(root, budget()).unwrap(), CompactOutcome::Published { layers: 1, .. }));
+    assert!(matches!(compact(root, budget(), crate::Durability::Rebuildable).unwrap(), CompactOutcome::Published { layers: 1, .. }));
+}
+
+#[test]
+fn strict_manifest_rename_follows_layer_and_manifest_syncs() {
+    const DOMAIN: crate::Domain = crate::Domain { kind: 1, schema: 1 };
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let store = crate::Store::new(root.to_owned());
+    let batch = store.batch();
+    let reference = store.put(DOMAIN, b"payload").unwrap();
+    store
+        .associate(
+            crate::Address(ContentHash::of_bytes(b"address")),
+            crate::Action(ContentHash::of_bytes(b"action")),
+            reference,
+        )
+        .unwrap();
+    crate::io_journal();
+    batch.finish().unwrap();
+    let events = crate::io_journal();
+    let index = root.join("index");
+    let rename = events
+        .iter()
+        .position(|(event, path)| {
+            *event == crate::IoEvent::Rename && *path == index.join("MANIFEST")
+        })
+        .expect("the manifest rename is journaled");
+    // Every layer inode the new manifest names and the manifest bytes are
+    // durable before the rename; the directory entry follows it.
+    assert!(
+        events[..rename].iter().any(|(event, path)| {
+            *event == crate::IoEvent::FileSync
+                && path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("L-"))
+        }),
+        "the layer inode is unsynced at the manifest rename"
+    );
+    assert!(
+        events[..rename].contains(&(crate::IoEvent::FileSync, index.join("MANIFEST"))),
+        "the manifest bytes are unsynced at its rename"
+    );
+    assert!(
+        events[rename..].contains(&(crate::IoEvent::DirectorySync, index)),
+        "the index directory is unsynced after the manifest rename"
+    );
 }

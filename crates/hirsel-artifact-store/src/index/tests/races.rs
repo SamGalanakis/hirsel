@@ -288,7 +288,7 @@ fn multiprocess_append_survives_off_lock_compaction() {
         child(&path, "append", 3).finish();
     });
     assert!(matches!(
-        compact(root, budget()).unwrap(),
+        compact(root, budget(), crate::Durability::Rebuildable).unwrap(),
         CompactOutcome::Published { layers: 2, .. }
     ));
     let pin = load_pinned(root).unwrap();
@@ -306,7 +306,7 @@ fn changed_compaction_inputs_conflict_once_without_overwriting_root() {
     let path = root.to_owned();
     let expected = old.clone();
     observe_compaction(move || fs::write(path.join("index/MANIFEST"), old).unwrap());
-    assert_eq!(compact(root, budget()).unwrap(), CompactOutcome::Conflict);
+    assert_eq!(compact(root, budget(), crate::Durability::Rebuildable).unwrap(), CompactOutcome::Conflict);
     assert_eq!(fs::read(root.join("index/MANIFEST")).unwrap(), expected);
 }
 #[test]
@@ -316,7 +316,7 @@ fn fully_shadowed_inputs_reuse_selected_inode_and_free_a_slot() {
     write(root, &[entry(1)]);
     write(root, &[entry(1), entry(2)]);
     assert!(matches!(
-        compact(root, budget()).unwrap(),
+        compact(root, budget(), crate::Durability::Rebuildable).unwrap(),
         CompactOutcome::Published { layers: 1, .. }
     ));
     let pin = load_pinned(root).unwrap();
@@ -332,7 +332,7 @@ fn concurrently_appended_identical_output_cannot_create_duplicate_descriptors() 
     write(root, &[entry(2)]);
     let path = root.to_owned();
     observe_compaction(move || write(&path, &[entry(1), entry(2)]));
-    assert_eq!(compact(root, budget()).unwrap(), CompactOutcome::Conflict);
+    assert_eq!(compact(root, budget(), crate::Durability::Rebuildable).unwrap(), CompactOutcome::Conflict);
     assert_eq!(current_layer_ids_locked(root).unwrap().len(), 3);
     let pin = load_pinned(root).unwrap();
     for n in [1, 2] {
@@ -355,7 +355,7 @@ fn multiprocess_gc_cannot_enter_reader_open_gap_and_unlinked_pin_survives() {
     let old = load_pinned(root).unwrap();
     write(root, &[entry(2)]);
     assert!(matches!(
-        compact(root, budget()).unwrap(),
+        compact(root, budget(), crate::Durability::Rebuildable).unwrap(),
         CompactOutcome::Published { layers: 1, .. }
     ));
     child(root, "gc-unlisted", 0).finish();
@@ -417,7 +417,7 @@ fn concurrent_writer_during_plane_construction_preserves_newer_locator_and_old_p
     CONSTRUCTION_OBSERVER
         .with(|slot| *slot.borrow_mut() = Some(Box::new(move |_| write(&path, &[newer]))));
     assert!(matches!(
-        compact(root, budget()).unwrap(),
+        compact(root, budget(), crate::Durability::Rebuildable).unwrap(),
         CompactOutcome::Published { layers: 2, .. }
     ));
     assert_eq!(find(&old, newer.key), Some(entry(1).location));

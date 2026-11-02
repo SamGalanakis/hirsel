@@ -67,7 +67,7 @@ fn nonlexical_layers_merge_uniquely_to_canonical_bytes_with_held_epoch_and_pin()
     let expected: Vec<_> = expected.into_values().collect();
     assert_eq!(expected.len(), 480);
     assert!(matches!(
-        compact(root, budget()).unwrap(),
+        compact(root, budget(), crate::Durability::Rebuildable).unwrap(),
         CompactOutcome::Published { layers: 1, .. }
     ));
     let current = load_pinned(root).unwrap();
@@ -114,7 +114,7 @@ fn shadowed_corrupt_layer_is_lazy_on_lookup_but_refuses_compaction() {
         }
         assert_eq!(pin.diagnostics(), IndexDiagnostics::default());
         let before = fs::read(root.join("index/MANIFEST")).unwrap();
-        assert_eq!(compact(root, budget()).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(compact(root, budget(), crate::Durability::Rebuildable).unwrap_err().kind(), io::ErrorKind::InvalidData);
         assert_eq!(fs::read(root.join("index/MANIFEST")).unwrap(), before);
     }
 }
@@ -162,7 +162,7 @@ fn merge_orders_late_digest_bytes_and_kinds_with_newest_tie_precedence() {
     }
     let expected: Vec<_> = expected.into_values().collect();
     assert!(matches!(
-        compact(root, budget()).unwrap(),
+        compact(root, budget(), crate::Durability::Rebuildable).unwrap(),
         CompactOutcome::Published { layers: 1, .. }
     ));
     let output = Manifest::read(root).unwrap().layers[0];

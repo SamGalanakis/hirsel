@@ -96,7 +96,8 @@ fn protocol_epoch_factory_observes_pin_and_compaction_lock_order() {
                 max_input_bytes: 128 << 20,
                 max_rows: 2_000_000,
                 max_scratch_bytes: 256 << 20
-            }
+            },
+            crate::Durability::Rebuildable
         )
         .unwrap(),
         CompactOutcome::Published { layers: 2, .. }

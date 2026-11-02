@@ -89,6 +89,7 @@ impl Drop for Lock {
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 pub(super) struct Stage {
     pub(super) path: PathBuf,
+    durability: Durability,
     _owner: Lock,
 }
 impl Stage {
@@ -115,6 +116,7 @@ impl Stage {
                 Ok(Some(owner)) => {
                     return Ok(Self {
                         path,
+                        durability,
                         _owner: owner,
                     });
                 }
@@ -135,12 +137,20 @@ impl Stage {
             .write_all(bytes)
     }
     pub(super) fn install(&self, root: &Path, descriptor: Descriptor) -> io::Result<bool> {
-        match fs::hard_link(self.path.join("layer"), layer_path(root, descriptor)) {
-            Ok(()) => Ok(true),
+        let path = layer_path(root, descriptor);
+        let installed = match fs::hard_link(self.path.join("layer"), &path) {
+            Ok(()) => true,
             // Never replace an old mapping or compare old bodies under lock.
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
-            Err(e) => Err(e),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
+            Err(e) => return Err(e),
+        };
+        if self.durability == Durability::Strict {
+            // The inode's bytes precede any manifest that can name this link.
+            File::open(&path)?.sync_all()?;
+            #[cfg(test)]
+            crate::journal(crate::IoEvent::FileSync, &path);
         }
+        Ok(installed)
     }
 }
 impl Drop for Stage {

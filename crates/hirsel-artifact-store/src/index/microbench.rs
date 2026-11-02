@@ -140,6 +140,7 @@ fn measured() {
                     max_rows: 2_000_000,
                     max_scratch_bytes: 256 << 20,
                 },
+                crate::Durability::Rebuildable,
             )
             .unwrap();
             assert!(

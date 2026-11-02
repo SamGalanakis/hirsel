@@ -955,6 +955,62 @@ impl Store {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IoEvent {
+    FileSync,
+    Rename,
+    DirectorySync,
+}
+#[cfg(test)]
+thread_local! {
+    static IO_JOURNAL: std::cell::RefCell<Vec<(IoEvent, PathBuf)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+#[cfg(test)]
+fn journal(event: IoEvent, path: &Path) {
+    IO_JOURNAL.with(|journal| journal.borrow_mut().push((event, path.to_path_buf())));
+}
+/// Drains the test-only durable-publication journal recorded on this thread.
+#[cfg(test)]
+pub(crate) fn io_journal() -> Vec<(IoEvent, PathBuf)> {
+    IO_JOURNAL.with(|journal| std::mem::take(&mut *journal.borrow_mut()))
+}
+
+/// The durable commit every Strict publication shares: sync the fully written
+/// `staged` inode, rename it over `path`, then sync the parent directory. Data
+/// before the committed name; the name before any later barrier.
+fn commit_staged(
+    staged: &Path,
+    path: &Path,
+    durability: Durability,
+    statistics: Option<&Statistics>,
+) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(invalid)?;
+    if durability == Durability::Strict {
+        if let Some(statistics) = statistics {
+            statistics.add(Counter::FileSyncs, 1);
+        }
+        File::open(staged)?.sync_all()?;
+        #[cfg(test)]
+        journal(IoEvent::FileSync, path);
+    }
+    fs::rename(staged, path)?;
+    #[cfg(test)]
+    journal(IoEvent::Rename, path);
+    if let Some(statistics) = statistics {
+        statistics.add(Counter::Publications, 1);
+    }
+    if durability == Durability::Strict {
+        if let Some(statistics) = statistics {
+            statistics.add(Counter::DirectorySyncs, 1);
+        }
+        File::open(parent)?.sync_all()?;
+        #[cfg(test)]
+        journal(IoEvent::DirectorySync, parent);
+    }
+    Ok(())
+}
+
 /// Publish through a fresh inode. Concurrent readers keep the prior immutable
 /// inode, and a crash before rename cannot publish a partial root or chunk.
 fn publish(
@@ -979,23 +1035,7 @@ fn publish(
         for part in parts {
             file.write_all(part)?;
         }
-        if durability == Durability::Strict {
-            if let Some(statistics) = statistics {
-                statistics.add(Counter::FileSyncs, 1);
-            }
-            file.sync_all()?;
-        }
-        fs::rename(&temporary, path)?;
-        if let Some(statistics) = statistics {
-            statistics.add(Counter::Publications, 1);
-        }
-        if durability == Durability::Strict {
-            if let Some(statistics) = statistics {
-                statistics.add(Counter::DirectorySyncs, 1);
-            }
-            File::open(parent)?.sync_all()?;
-        }
-        Ok(())
+        commit_staged(&temporary, path, durability, statistics)
     })();
     if result.is_err() {
         let _ = fs::remove_file(temporary);

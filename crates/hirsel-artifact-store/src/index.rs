@@ -317,7 +317,7 @@ pub(crate) fn publish_delta(
     if !stage.install(root, descriptor)? {
         return Ok(PublishOutcome::Empty);
     }
-    let generation = manifest.publish(root, stage)?;
+    let generation = manifest.publish(root, stage, epoch.durability())?;
     Ok(PublishOutcome::Published {
         generation,
         layers: manifest.layers.len() as u8,
@@ -405,7 +405,11 @@ impl Iterator for MergedEntries<'_> {
     }
 }
 
-pub(crate) fn compact(root: &Path, budget: MaintenanceBudget) -> io::Result<CompactOutcome> {
+pub(crate) fn compact(
+    root: &Path,
+    budget: MaintenanceBudget,
+    durability: Durability,
+) -> io::Result<CompactOutcome> {
     if !root.exists() {
         return Ok(CompactOutcome::NotNeeded);
     }
@@ -456,7 +460,7 @@ pub(crate) fn compact(root: &Path, budget: MaintenanceBudget) -> io::Result<Comp
         rows: rows as u64,
         len: bytes.len() as u64,
     };
-    let stage = Stage::new(root, Durability::Rebuildable)?;
+    let stage = Stage::new(root, durability)?;
     stage.write("layer", &bytes)?;
     drop(bytes);
     let Some(_lock) = Lock::publication(root, true)? else {
@@ -492,7 +496,7 @@ pub(crate) fn compact(root: &Path, budget: MaintenanceBudget) -> io::Result<Comp
     if !stage.install(root, descriptor)? && !reusable {
         return Ok(CompactOutcome::Deferred);
     }
-    let generation = latest.publish(root, &stage)?;
+    let generation = latest.publish(root, &stage, durability)?;
     Ok(CompactOutcome::Published {
         generation,
         layers: latest.layers.len() as u8,

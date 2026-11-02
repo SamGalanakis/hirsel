@@ -378,6 +378,7 @@ impl Store {
                 max_rows: index::MAX_ROWS as u32,
                 max_scratch_bytes: index::MAX_SCRATCH as u64,
             },
+            self.durability,
         )?;
         match outcome {
             index::CompactOutcome::Published { .. } => {

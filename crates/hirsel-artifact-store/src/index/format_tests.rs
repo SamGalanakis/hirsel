@@ -1,4 +1,5 @@
 use super::*;
+use std::fs;
 
 fn fixture_entries(n: usize) -> Vec<Entry> {
     (0..n)

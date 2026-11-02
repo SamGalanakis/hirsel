@@ -3,9 +3,10 @@ use super::{
     Entry, Key, KeyKind, Location, MAX_BYTES, MAX_LAYERS, MAX_ROWS, MAX_SCRATCH, admission, input,
     invalid,
 };
+use crate::Durability;
 use hirsel_syntax::ContentHash;
 use std::{
-    fs::{self, File},
+    fs::File,
     io::{self, Read},
     path::Path,
     sync::atomic::{AtomicU8, AtomicU64, Ordering},
@@ -140,12 +141,22 @@ impl Manifest {
             None => (Self::default(), true),
         })
     }
-    pub(super) fn publish(&mut self, root: &Path, stage: &Stage) -> io::Result<ContentHash> {
+    pub(super) fn publish(
+        &mut self,
+        root: &Path,
+        stage: &Stage,
+        durability: Durability,
+    ) -> io::Result<ContentHash> {
         self.number = self.number.checked_add(1).ok_or_else(invalid)?;
         let bytes = self.encode()?;
         let id = ContentHash::of_parts("hirsel.artifact.index-manifest.v36", [&bytes[..]]);
         stage.write("manifest", &bytes)?;
-        fs::rename(stage.path.join("manifest"), root.join("index/MANIFEST"))?;
+        crate::commit_staged(
+            &stage.path.join("manifest"),
+            &root.join("index/MANIFEST"),
+            durability,
+            None,
+        )?;
         Ok(id)
     }
 }

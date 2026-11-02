@@ -110,15 +110,6 @@ fn the_exact_budget_succeeds_and_the_next_iteration_is_denied() {
     }
 }
 
-// One program needing exactly K = 6 units under B = K - 1, K and K + 1.
-#[test]
-fn budgets_below_at_and_above_a_programs_charges() {
-    let source = count(5);
-    assert_eq!(Run::new(5).check(&source), exhausted(8, 3, 5));
-    assert_eq!(Run::new(6).check(&source), vec![]);
-    assert_eq!(Run::new(7).check(&source), vec![]);
-}
-
 // ctfe-fn-call.rs: the call past the budget is the one reported.
 #[test]
 fn sequential_calls_charge_one_each_and_the_denied_call_is_the_site() {

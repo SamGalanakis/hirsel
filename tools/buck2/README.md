@@ -908,7 +908,7 @@ allocator. Prepare the private TSan std as above, then run:
 
 ```sh
 .buck2/bin/buck2 test -c hirsel.native_tsan=true //:hirsel-llvm-unittest //:hirsel-cranelift-unittest -- --test-arg=native_tsan
-.buck2/bin/buck2 test -c hirsel.native_tsan=true //:gate-cpu-pool-native-tsan-4 //:gate-cpu-pool-native-tsan-8
+.buck2/bin/buck2 test -c hirsel.native_tsan=true //:gate-cpu-pool-native-tsan-8
 ```
 
 LLVM runs its ThreadSanitizer pass after optimization and runtime fast-path

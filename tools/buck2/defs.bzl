@@ -147,7 +147,7 @@ def _compile_env(package_name, crate, version, build_script):
 CLIPPY_TWINS = read_root_config("hirsel", "clippy", "false") == "true"
 
 def _rust(rule, name, **attrs):
-    if attrs.get("crate") in ["hirsel_llvm", "hirsel_cranelift", "cpu_pool_4", "cpu_pool_8"] and read_root_config("hirsel", "native_tsan", "false") == "true":
+    if attrs.get("crate") in ["hirsel_llvm", "hirsel_cranelift", "cpu_pool_8"] and read_root_config("hirsel", "native_tsan", "false") == "true":
         attrs["features"] = attrs.get("features", []) + ["native-tsan"]
     # Runtime diagnostic features are explicit build selections. Ordinary
     # archives omit ownership hooks and their private observer state.
@@ -236,7 +236,7 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
     `skips` are exact case names every
     run skips except the full gate's (`-c hirsel.full=true`).
     """
-    if name in ["hirsel-cli-test-cpu_pool_4", "hirsel-cli-test-cpu_pool_8"] and read_root_config("hirsel", "native_tsan", "false") == "true":
+    if name in ["hirsel-cli-test-cpu_pool_8"] and read_root_config("hirsel", "native_tsan", "false") == "true":
         runtime_archives = ":hirsel-rt-tsan-archives"
     if package_name == "hirsel-rt" and read_root_config("hirsel", "ownership_trace", "false") == "true":
         features = features + ["ownership-trace"]

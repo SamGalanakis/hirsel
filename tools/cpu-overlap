@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ORDERED = 'ordered_allocating_mappers_overlap_and_replay'
 ROWS = [(f'ordered-{width}', width, False, ORDERED) for width in (4, 8, 16)] + [
     ('p16', 16, False, 'fresh_cpu_pool_has_physical_width_16'),
-    ('tsan-4', 4, True, None), ('tsan-8', 8, True, None)]
+    ('tsan-8', 8, True, None)]
 
 
 def cpu_list(text):

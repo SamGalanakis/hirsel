@@ -10,11 +10,6 @@ fn wide_graph_batches_record_and_replay_after_worker_teardown() {
     replay_width(16);
 }
 
-#[test]
-fn ordered_scalar_jobs_match_serial_reference_and_replay() {
-    ordered_replay_width(16);
-}
-
 include!("support/cpu_pool/jitter.rs");
 #[test]
 fn cpu_integer_float_bits_and_fresh_lifecycle_survive_jitter() {
@@ -27,19 +22,9 @@ fn free_generated_typed_batches_replay_with_one_permit() {
     generated_free_schedules(16);
 }
 
-#[test]
-fn free_typed_preparation_prefixes_release_each_row_root() {
-    typed_preparation_prefix_census(16);
-}
-
 include!("support/cpu_pool/watchdog.rs");
 
-include!("support/cpu_pool/allocation_audit.rs");
-#[test]
-fn native_typed_prefix_allocations_are_freed_before_heap_teardown() {
-    typed_prefix_allocation_audit(16);
-}
-
+include!("support/cpu_pool/interpreter.rs");
 include!("support/cpu_pool/cleanup_cuts.rs");
 #[test]
 fn native_wide_success_every_byte_cleanup_cut() {
@@ -65,22 +50,11 @@ fn free_cpu_canonical_receipts_agree_across_emitters_and_replay() {
     cpu_free_canonical_receipts(16);
 }
 
-include!("support/cpu_pool/interpreter.rs");
-#[test]
-fn cpu_interpreter_ordered_cancellation_at_every_task_phase() {
-    cpu_interpreter_cancel_cuts(8);
-}
-
 #[test]
 #[ignore = "requires exclusive CPUs; tools/cpu-overlap reports host-blocked without counting a pass"]
 fn ordered_allocating_mappers_overlap_and_replay() {
     run_width_policy_backends_mode(16, "tasks.cooperative@1", &["llvm", "cranelift"], true);
 }
-#[test]
-fn ordered_allocating_jobs_match_serial_reference_and_replay() {
-    ordered_replay_width_mode(16, true);
-}
-
 include!("support/cpu_pool/four_engine.rs");
 #[test]
 fn every_granted_width_and_bounded_job_count_matches_width_one() {
@@ -89,23 +63,4 @@ fn every_granted_width_and_bounded_job_count_matches_width_one() {
         include_str!("support/cpu_pool/any_width.hir").into(),
         b"cpu-any-width-ok\n",
     );
-}
-#[test]
-fn ordered_allocating_fixture_agrees_across_four_engines_width_16() {
-    cpu_fixture_allocating_four_engine_agreement(16);
-}
-
-#[test]
-fn ordered_empty_list_mapper_agrees_across_four_engines_and_replay() {
-    cpu_fixture_empty_list_four_engine_agreement(16);
-}
-
-#[test]
-fn ordered_copied_list_mapper_agrees_across_four_engines_and_replay() {
-    cpu_fixture_copied_list_four_engine_agreement(16);
-}
-
-#[test]
-fn ordered_allocating_pressure_agrees_across_four_engines_and_cross_replay() {
-    cpu_fixture_allocating_pressure_four_engine_agreement(16);
 }

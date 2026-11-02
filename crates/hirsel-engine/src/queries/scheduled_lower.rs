@@ -556,7 +556,10 @@ impl FrontLowerQueries {
         self.runtime
             .get_or_init(|| {
                 let lowering = self.lowering.as_deref().ok_or(QueryError::NotImplemented)?;
-                self.snapshot.comptime_runtime_types(lowering)
+                Ok(Arc::new(
+                    self.snapshot
+                        .comptime_runtime_types(Some(lowering.entry_body())),
+                ))
             })
             .clone()
     }

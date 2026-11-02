@@ -787,7 +787,7 @@ pub(crate) fn call_schemas(
             &runtime.types,
             ty,
             &hirsel_types::GenericDeclarations::default(),
-            &mut |d: hirsel_syntax::DefId| Ok(runtime.serialization.get(d.path())),
+            &mut |d: hirsel_syntax::DefId| runtime.serialization.get(d.path()),
         )
         .ok()
         .flatten()

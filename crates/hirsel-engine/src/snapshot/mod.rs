@@ -38,6 +38,56 @@ impl ViewIdentity for Identity {
 }
 use hirsel_interp::aggregate::ViewIdentity;
 
+/// The rows compile-time evaluation demands from one snapshot.
+struct ComptimeRows {
+    snapshot: Arc<SignatureSnapshot>,
+    entry: Option<hirsel_tir::BodyId>,
+}
+impl hirsel_interp::aggregate::TypeRows for ComptimeRows {
+    fn view(
+        &self,
+        path: &DefPath,
+    ) -> Result<Option<(hirsel_interp::aggregate::SerializedView, ContentHash)>, QueryError> {
+        match self.snapshot.representation_identity(DefId::intern(path)) {
+            Some(Ok(view)) => {
+                let digest = view.digest().0;
+                Ok(Some((
+                    (Arc::new(Identity(view)) as Arc<dyn ViewIdentity>).into(),
+                    digest,
+                )))
+            }
+            Some(Err(error)) => Err(error),
+            None => Ok(self
+                .snapshot
+                .lookup
+                .registry
+                .get(path)
+                .map(|signature| (signature.clone().into(), ContentHash::default()))),
+        }
+    }
+    fn finalizer(
+        &self,
+        drop: &DefPath,
+    ) -> Result<Option<(DefPath, hirsel_tir::BodyId)>, QueryError> {
+        if self
+            .snapshot
+            .lookup
+            .candidates
+            .contains_key(&DefId::intern(drop))
+        {
+            let entry = self.entry.ok_or(QueryError::NotImplemented)?;
+            Ok(Some((drop.clone(), entry)))
+        } else if self.snapshot.lookup.registry.get(drop).is_some() {
+            Ok(None)
+        } else {
+            Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "runtime types".into(),
+                message: format!("missing finalizer {drop:?}"),
+            }))
+        }
+    }
+}
+
 /// One revision's signatures, private views and V verdicts.
 pub struct SignatureSnapshot {
     epoch: Revision,
@@ -720,37 +770,26 @@ impl SignatureSnapshot {
             .into_iter()
             .collect()
     }
-    /// Every public opaque definition read by a body of its defining package.
+    /// The runtime types compile-time evaluation runs with. Each row is
+    /// demanded when an evaluation names its path: `d`'s view in its own
+    /// package with V's digest of it, else the registry's declaration.
+    /// `entry` is the lowering's entry body, which finalizers name.
     pub(crate) fn comptime_runtime_types(
-        &self,
-        lowering: &dyn crate::LoweringPhase,
-    ) -> Result<Arc<hirsel_interp::aggregate::RuntimeTypes>, QueryError> {
+        self: &Arc<Self>,
+        entry: Option<hirsel_tir::BodyId>,
+    ) -> hirsel_interp::aggregate::RuntimeTypes {
+        // Rows name V's identities, so V settles before the first row.
         self.validation_state();
-        let mut views = Vec::new();
-        for id in self.definitions() {
-            match self.representation_identity(id) {
-                Some(Ok(view)) => {
-                    let digest = view.digest().0;
-                    views.push((Arc::new(Identity(view)) as Arc<dyn ViewIdentity>, digest));
-                }
-                Some(Err(error)) => return Err(error.clone()),
-                None => {}
-            }
-        }
-        crate::queries::runtime_type_catalog(self.types.clone(), views, |drop| {
-            let id = DefId::intern(drop);
-            if self.lookup.candidates.contains_key(&id) {
-                Ok(Some((drop.clone(), lowering.entry_body())))
-            } else if self.lookup.registry.get(drop).is_some() {
-                Ok(None)
-            } else {
-                Err(QueryError::Operational(hirsel_types::OperationalFailure {
-                    operation: "runtime types".into(),
-                    message: format!("missing finalizer {drop:?}"),
-                }))
-            }
-        })
-        .map(Arc::new)
+        crate::queries::runtime_types_over(
+            self.types.clone(),
+            hirsel_interp::aggregate::Serialization::demanded(
+                self.types.clone(),
+                Arc::new(ComptimeRows {
+                    snapshot: self.clone(),
+                    entry,
+                }),
+            ),
+        )
     }
     /// `d`'s view in its own package (an opaque type's private view) with
     /// V's digest of it: what compile-time reflection of `d` reads.

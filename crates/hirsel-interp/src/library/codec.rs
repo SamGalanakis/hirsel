@@ -23,7 +23,7 @@ pub(super) fn call(
         call.types,
         *ty,
         &GenericDeclarations::default(),
-        &mut |d: hirsel_syntax::DefId| Ok(call.runtime.serialization.get(d.path())),
+        &mut |d: hirsel_syntax::DefId| call.runtime.serialization.get(d.path()),
     )
     .map_err(Error::Query)?
     .ok_or_else(|| invalid("codec requires a checked concrete serializable schema"))?;
@@ -65,7 +65,7 @@ pub(super) fn schema(call: &OperationCall<'_>, ty: hirsel_types::TypeId) -> R<Se
         call.types,
         ty,
         &GenericDeclarations::default(),
-        &mut |d: hirsel_syntax::DefId| Ok(call.runtime.serialization.get(d.path())),
+        &mut |d: hirsel_syntax::DefId| call.runtime.serialization.get(d.path()),
     )
     .map_err(Error::Query)?
     .ok_or_else(|| invalid("a runner call requires checked concrete serializable schemas"))
@@ -114,6 +114,7 @@ fn check_function(
     let signature = runtime
         .serialization
         .get(path)
+        .map_err(Error::Query)?
         .ok_or_else(|| invalid("codec check without its signature"))?;
     let hirsel_types::SignatureKind::Function(f) = &signature.kind else {
         return Err(invalid("codec check that is not a function"));
@@ -404,7 +405,11 @@ fn from_wire(
                                 return Err(invalid("codec Path text"));
                             };
                             super::dispatch::path(&text)
-                        } else if runtime.get(definition).is_some_and(|n| n.distinct) {
+                        } else if runtime
+                            .get(definition)
+                            .map_err(Error::Query)?
+                            .is_some_and(|n| n.distinct)
+                        {
                             let fields = if matches!(
                                 schema.nodes[representation.0 as usize],
                                 SchemaNode::Record(_)

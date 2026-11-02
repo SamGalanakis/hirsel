@@ -6,8 +6,36 @@ use hirsel_type_analysis::logical::{Logical, LogicalNominal, Resolved, Scope, ty
 use hirsel_types::{BuiltinType, Destination, Primitive, TypeId, TypeKind};
 use std::collections::{BTreeSet, HashSet};
 
-fn scalar(runtime: &RuntimeTypes, ty: TypeId) -> bool {
-    fn visit(runtime: &RuntimeTypes, ty: TypeId, active: &mut HashSet<TypeId>) -> bool {
+/// A nominal row's failure ends the walk as an error, never as `false`.
+fn nominal(
+    runtime: &RuntimeTypes,
+    definition: &hirsel_syntax::DefPath,
+    failure: &std::cell::RefCell<Option<hirsel_types::QueryError>>,
+) -> Option<crate::aggregate::Nominal> {
+    runtime.get(definition).unwrap_or_else(|error| {
+        failure.borrow_mut().get_or_insert(error);
+        None
+    })
+}
+fn failed(
+    valid: bool,
+    failure: std::cell::RefCell<Option<hirsel_types::QueryError>>,
+) -> Result<bool, Error> {
+    match failure.into_inner() {
+        Some(error) => Err(Error::Query(error)),
+        None => Ok(valid),
+    }
+}
+fn scalar(runtime: &RuntimeTypes, ty: TypeId) -> Result<bool, Error> {
+    let failure = Default::default();
+    let valid = visit(runtime, ty, &mut HashSet::new(), &failure);
+    return failed(valid, failure);
+    fn visit(
+        runtime: &RuntimeTypes,
+        ty: TypeId,
+        active: &mut HashSet<TypeId>,
+        failure: &std::cell::RefCell<Option<hirsel_types::QueryError>>,
+    ) -> bool {
         if !active.insert(ty) {
             return false;
         }
@@ -26,19 +54,21 @@ fn scalar(runtime: &RuntimeTypes, ty: TypeId) -> bool {
                     | Primitive::F32
                     | Primitive::F64
             ),
-            TypeKind::Tuple(fields) => fields.iter().all(|ty| visit(runtime, *ty, active)),
-            TypeKind::Record(fields) => fields.iter().all(|field| visit(runtime, field.ty, active)),
+            TypeKind::Tuple(fields) => fields.iter().all(|ty| visit(runtime, *ty, active, failure)),
+            TypeKind::Record(fields) => fields
+                .iter()
+                .all(|field| visit(runtime, field.ty, active, failure)),
             TypeKind::Variant(variants) => variants.iter().all(|variant| {
                 variant
                     .fields
                     .iter()
-                    .all(|(_, ty)| visit(runtime, *ty, active))
+                    .all(|(_, ty)| visit(runtime, *ty, active, failure))
             }),
             TypeKind::Named {
                 definition,
                 arguments,
             } => {
-                let Some(nominal) = runtime.get(definition.path()) else {
+                let Some(nominal) = nominal(runtime, definition.path(), failure) else {
                     return false;
                 };
                 if nominal.resource || nominal.finalizer.is_some() {
@@ -49,7 +79,13 @@ fn scalar(runtime: &RuntimeTypes, ty: TypeId) -> bool {
                 };
                 // Close the checked declaration exactly as retained-value shape
                 // traversal does, without consulting native receipt metadata.
-                let signature = runtime.serialization.get(definition.path());
+                let signature = match runtime.serialization.get(definition.path()) {
+                    Ok(signature) => signature,
+                    Err(error) => {
+                        failure.borrow_mut().get_or_insert(error);
+                        return false;
+                    }
+                };
                 let default_roles = hirsel_types::NominalRoles::default();
                 let roles = signature
                     .as_ref()
@@ -69,19 +105,19 @@ fn scalar(runtime: &RuntimeTypes, ty: TypeId) -> bool {
                         ],
                     },
                 )
-                .is_ok_and(|closed| visit(runtime, closed, active))
+                .is_ok_and(|closed| visit(runtime, closed, active, failure))
             }
             _ => false,
         });
         active.remove(&ty);
         valid
     }
-    visit(runtime, ty, &mut HashSet::new())
 }
 
-fn owned(runtime: &RuntimeTypes, ty: TypeId) -> bool {
+fn owned(runtime: &RuntimeTypes, ty: TypeId) -> Result<bool, Error> {
+    let failure = Default::default();
     let nominal = |definition: hirsel_syntax::DefId| {
-        runtime.get(definition.path()).map(|row| {
+        nominal(runtime, definition.path(), &failure).map(|row| {
             match (row.resource, row.finalizer.is_some(), row.representation) {
                 (false, false, Some(shape)) => LogicalNominal::Representation { shape },
                 _ => LogicalNominal::Opaque,
@@ -127,7 +163,8 @@ fn owned(runtime: &RuntimeTypes, ty: TypeId) -> bool {
             _ => false,
         }
     }
-    visit(&Logical::new(&nominal), ty, &Scope::root(&runtime.types), 0)
+    let valid = visit(&Logical::new(&nominal), ty, &Scope::root(&runtime.types), 0);
+    failed(valid, failure)
 }
 
 fn pure(path: &hirsel_syntax::DefPath) -> bool {
@@ -171,7 +208,7 @@ pub(crate) async fn certified(
             if !environment
                 .capture_types
                 .iter()
-                .all(|ty| scalar(runtime, *ty))
+                .try_fold(true, |all, ty| Ok::<_, Error>(all && scalar(runtime, *ty)?))?
             {
                 return Ok(false);
             }
@@ -218,8 +255,10 @@ pub(crate) async fn certified(
             .sum::<usize>();
         if instructions > 4096
             || body.arena_scope_grant.is_some()
-            || !owned(runtime, body.result)
-            || !body.locals.iter().all(|local| owned(runtime, local.ty))
+            || !owned(runtime, body.result)?
+            || !body.locals.iter().try_fold(true, |all, local| {
+                Ok::<_, Error>(all && owned(runtime, local.ty)?)
+            })?
         {
             return Ok(false);
         }
@@ -446,11 +485,11 @@ mod tests {
             fields: 1,
             representation: Some(list),
         });
-        assert!(owned(&runtime, named));
+        assert!(owned(&runtime, named).unwrap());
         runtime.nominals[0].resource = true;
-        assert!(!owned(&runtime, named));
+        assert!(!owned(&runtime, named).unwrap());
         runtime.nominals[0].resource = false;
         runtime.nominals[0].representation = Some(named);
-        assert!(!owned(&runtime, named));
+        assert!(!owned(&runtime, named).unwrap());
     }
 }

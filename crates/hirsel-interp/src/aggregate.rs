@@ -2,7 +2,7 @@
 use crate::{Error, Value, invalid};
 use hirsel_syntax::{ContentHash, DefPath};
 use hirsel_tir::{BodyId, Constructor};
-use hirsel_types::{BuiltinType, TypeInterner, TypeKind, TypeMemo};
+use hirsel_types::{BuiltinType, QueryError, TypeInterner, TypeKind, TypeMemo};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -59,9 +59,117 @@ impl From<Arc<dyn ViewIdentity>> for SerializedView {
         Self::Identified(identity)
     }
 }
+/// Where a demanded catalog reads its rows: one declared view per path,
+/// produced only when an evaluation names that path.
+pub trait TypeRows: Send + Sync {
+    /// `path`'s declared view with its digest; None when `path` declares
+    /// nothing. Err is the row's own failure (a refusal included).
+    fn view(&self, path: &DefPath) -> Result<Option<(SerializedView, ContentHash)>, QueryError>;
+    /// The body that finalizes a resource whose drop is `drop`.
+    fn finalizer(&self, drop: &DefPath) -> Result<Option<(DefPath, BodyId)>, QueryError>;
+}
+/// One settled row of a demanded catalog.
+struct Row {
+    view: SerializedView,
+    digest: ContentHash,
+    nominal: Option<Nominal>,
+}
+type Demand = Result<Option<Arc<Row>>, QueryError>;
+/// The views a serialization reads: a held table, or rows demanded per path
+/// and kept once settled.
+enum Views {
+    Held(BTreeMap<DefPath, (SerializedView, ContentHash)>),
+    Demanded {
+        rows: Arc<dyn TypeRows>,
+        types: Arc<TypeInterner>,
+        settled: std::sync::Mutex<std::collections::HashMap<DefPath, Demand>>,
+    },
+}
+impl Default for Views {
+    fn default() -> Self {
+        Self::Held(BTreeMap::new())
+    }
+}
+impl Views {
+    fn row(&self, path: &DefPath) -> Result<Option<Arc<Row>>, QueryError> {
+        let Self::Demanded {
+            rows,
+            types,
+            settled,
+        } = self
+        else {
+            return Ok(None);
+        };
+        if let Some(demand) = settled.lock().unwrap().get(path) {
+            return demand.clone();
+        }
+        let demand = Self::demand(&**rows, types, path);
+        match &demand {
+            // A refusal settles nothing: a later read demands again.
+            Err(_) => demand,
+            Ok(_) => settled
+                .lock()
+                .unwrap()
+                .entry(path.clone())
+                .or_insert(demand)
+                .clone(),
+        }
+    }
+    fn demand(rows: &dyn TypeRows, types: &TypeInterner, path: &DefPath) -> Demand {
+        let Some((view, digest)) = rows.view(path)? else {
+            return Ok(None);
+        };
+        let nominal = Nominal::of(types, &view.signature(), |drop| rows.finalizer(drop))?;
+        Ok(Some(Arc::new(Row {
+            view,
+            digest,
+            nominal,
+        })))
+    }
+    /// `path`'s view and digest.
+    fn get(&self, path: &DefPath) -> Result<Option<(SerializedView, ContentHash)>, QueryError> {
+        match self {
+            Self::Held(views) => Ok(views.get(path).cloned()),
+            Self::Demanded { .. } => Ok(self.row(path)?.map(|row| (row.view.clone(), row.digest))),
+        }
+    }
+}
+impl Nominal {
+    /// The runtime facts of `signature` when it declares a type.
+    pub fn of(
+        types: &TypeInterner,
+        signature: &hirsel_types::Signature,
+        mut finalizer: impl FnMut(&DefPath) -> Result<Option<(DefPath, BodyId)>, QueryError>,
+    ) -> Result<Option<Self>, QueryError> {
+        let hirsel_types::SignatureKind::Type(t) = &signature.kind else {
+            return Ok(None);
+        };
+        let fields = t
+            .representation
+            .and_then(|id| types.get(id))
+            .map(|r| match &r.kind {
+                TypeKind::Record(fs) => fs.len(),
+                TypeKind::Variant(vs) => vs.iter().map(|v| v.fields.len()).max().unwrap_or(0),
+                _ => 1,
+            })
+            .unwrap_or(0);
+        let finalizer = match &t.drop {
+            Some(drop) => finalizer(drop)?,
+            None => None,
+        };
+        Ok(Some(Self {
+            definition: signature.definition.path().clone(),
+            resource: t.resource,
+            distinct: t.distinct,
+            finalizer,
+            fields,
+            representation: t.representation,
+        }))
+    }
+}
 #[derive(Default)]
 pub struct Serialization {
-    views: std::sync::Arc<BTreeMap<DefPath, (SerializedView, ContentHash)>>,
+    views: Arc<Views>,
     recordings: std::sync::Mutex<Vec<BTreeMap<DefPath, ContentHash>>>,
 }
 impl Clone for Serialization {
@@ -75,45 +183,55 @@ impl Clone for Serialization {
 }
 impl std::fmt::Debug for Serialization {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_set().entries(self.views.keys()).finish()
+        match &*self.views {
+            Views::Held(views) => f.debug_set().entries(views.keys()).finish(),
+            Views::Demanded { settled, .. } => f
+                .debug_set()
+                .entries(settled.lock().unwrap().keys())
+                .finish(),
+        }
     }
 }
 impl Serialization {
     /// Each path's view with its digest.
     pub fn new(views: impl IntoIterator<Item = (SerializedView, ContentHash)>) -> Self {
         Self {
-            views: std::sync::Arc::new(
+            views: Arc::new(Views::Held(
                 views
                     .into_iter()
                     .map(|(view, digest)| (view.definition().path().clone(), (view, digest)))
                     .collect(),
-            ),
+            )),
             recordings: Default::default(),
         }
     }
-    /// A scoped view of `path`'s signature, recording the read.
-    pub fn get(&self, path: &DefPath) -> Option<hirsel_types::SignatureRef> {
-        let view = self.views.get(path);
+    /// Views read from `rows`, one row per path an evaluation names. Each
+    /// row also answers its nominal's runtime facts.
+    pub fn demanded(types: Arc<TypeInterner>, rows: Arc<dyn TypeRows>) -> Self {
+        Self {
+            views: Arc::new(Views::Demanded {
+                rows,
+                types,
+                settled: Default::default(),
+            }),
+            recordings: Default::default(),
+        }
+    }
+    /// A scoped view of `path`'s signature, recording the read. A row that
+    /// fails records nothing: the evaluation that read it fails with it.
+    pub fn get(&self, path: &DefPath) -> Result<Option<hirsel_types::SignatureRef>, QueryError> {
+        let view = self.views.get(path)?;
         if let Some(recording) = self.recordings.lock().unwrap().last_mut() {
             recording.insert(
                 path.clone(),
-                view.map_or_else(ContentHash::default, |v| v.1),
+                view.as_ref().map_or_else(ContentHash::default, |v| v.1),
             );
         }
-        view.map(|(view, _)| view.signature())
+        Ok(view.map(|(view, _)| view.signature()))
     }
-    /// The digest a read of `path` records: its view's, or the default when
-    /// it has none.
-    pub fn digest(&self, path: &DefPath) -> ContentHash {
-        self.views
-            .get(path)
-            .map_or_else(ContentHash::default, |v| v.1)
-    }
-    pub fn len(&self) -> usize {
-        self.views.len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.views.is_empty()
+    /// `path`'s nominal facts from a demanded row; a held table has none.
+    fn nominal(&self, path: &DefPath) -> Result<Option<Nominal>, QueryError> {
+        Ok(self.views.row(path)?.and_then(|row| row.nominal.clone()))
     }
     /// Open a recording: reads go to it until the matching `finish`.
     pub fn record(&self) {
@@ -162,8 +280,12 @@ impl RuntimeTypes {
             budgets: Default::default(),
         }
     }
-    pub fn get(&self, path: &DefPath) -> Option<&Nominal> {
-        self.nominals.iter().find(|n| n.definition == *path)
+    /// `path`'s nominal facts: an explicit row, else its demanded row.
+    pub fn get(&self, path: &DefPath) -> Result<Option<Nominal>, QueryError> {
+        match self.nominals.iter().find(|n| n.definition == *path) {
+            Some(nominal) => Ok(Some(nominal.clone())),
+            None => self.serialization.nominal(path),
+        }
     }
 }
 pub(crate) fn construct(
@@ -180,12 +302,13 @@ pub(crate) fn construct(
             definition,
             variant,
         } => {
-            if matches!(kind, TypeKind::Named { .. }) && types.get(definition).is_none() {
+            let nominal = types.get(definition).map_err(Error::Query)?;
+            if matches!(kind, TypeKind::Named { .. }) && nominal.is_none() {
                 return Err(Error::Unavailable(
                     "nominal runtime metadata required".into(),
                 ));
             }
-            if types.get(definition).is_some_and(|n| n.resource) {
+            if nominal.is_some_and(|n| n.resource) {
                 Value::ResourceVariant {
                     sizes: sizes.into(),
                     definition: definition.into(),
@@ -200,7 +323,7 @@ pub(crate) fn construct(
             }
         }
         Constructor::Record(definition) => {
-            if let Some(n) = types.get(definition) {
+            if let Some(n) = types.get(definition).map_err(Error::Query)? {
                 if n.fields != values.len() {
                     return Err(invalid("nominal constructor arity"));
                 }

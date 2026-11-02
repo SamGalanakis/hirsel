@@ -98,6 +98,8 @@ fn resolver(runtime: &RuntimeTypes) -> impl Fn(DefId) -> Option<LogicalNominal> 
     move |definition: DefId| {
         runtime
             .get(definition.path())
+            .ok()
+            .flatten()
             .map(|n| match n.representation {
                 Some(shape) => LogicalNominal::Representation { shape },
                 None => LogicalNominal::Opaque,

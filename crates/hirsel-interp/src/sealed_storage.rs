@@ -344,9 +344,13 @@ fn shape(runtime: &RuntimeTypes, mut ty: TypeId) -> Result<TypeKind, Error> {
         else {
             return Ok(kind);
         };
-        let signature = runtime.serialization.get(definition.path());
+        let signature = runtime
+            .serialization
+            .get(definition.path())
+            .map_err(Error::Query)?;
         let nominal = runtime
             .get(definition.path())
+            .map_err(Error::Query)?
             .ok_or_else(|| invalid("missing retained nominal representation"))?;
         let representation = nominal
             .representation

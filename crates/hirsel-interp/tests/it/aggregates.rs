@@ -513,3 +513,80 @@ fn suspended_call_failure_drops_transferred_argument_before_callers_local() {
     assert_eq!(finalizers(&e), ["Argument", "Local"]);
     assert_eq!(e.failures[0].anchor.definition.path(), &path("callee"));
 }
+
+/// A demanded catalog row that is refused settles nothing: the read fails
+/// with the refusal and records no digest, and the next read demands the row
+/// again and records the digest its view carries.
+#[test]
+fn a_refused_demanded_row_is_demanded_again_and_records_only_its_settled_read() {
+    struct Rows {
+        demands: std::sync::atomic::AtomicUsize,
+        view: hirsel_types::SignatureRef,
+    }
+    impl TypeRows for Rows {
+        fn view(
+            &self,
+            path: &hirsel_syntax::DefPath,
+        ) -> Result<Option<(SerializedView, hirsel_syntax::ContentHash)>, hirsel_types::QueryError>
+        {
+            assert_eq!(path, self.view.definition.path());
+            if self
+                .demands
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                == 0
+            {
+                return Err(hirsel_types::QueryError::Operational(
+                    hirsel_types::OperationalFailure {
+                        operation: "header admission".into(),
+                        message: "refused".into(),
+                    },
+                ));
+            }
+            Ok(Some((
+                self.view.clone().into(),
+                hirsel_syntax::ContentHash::of_bytes(b"row"),
+            )))
+        }
+        fn finalizer(
+            &self,
+            _: &hirsel_syntax::DefPath,
+        ) -> Result<Option<(hirsel_syntax::DefPath, BodyId)>, hirsel_types::QueryError> {
+            unreachable!("a constant has no finalizer")
+        }
+    }
+    let types = session();
+    let constant = path("C");
+    let rows = std::sync::Arc::new(Rows {
+        demands: Default::default(),
+        view: std::sync::Arc::new(hirsel_types::Signature {
+            metadata: Default::default(),
+            definition: hirsel_syntax::DefId::intern(&constant),
+            kind: hirsel_types::SignatureKind::Const {
+                ty: types.intern(ty(TypeKind::Primitive(P::U8))),
+                generics: Default::default(),
+            },
+            fingerprint: Default::default(),
+        }),
+    });
+    let serialization = Serialization::demanded(types, rows.clone());
+    serialization.record();
+    assert!(matches!(
+        serialization.get(&constant),
+        Err(hirsel_types::QueryError::Operational(_))
+    ));
+    assert!(serialization.finish().is_empty());
+    serialization.record();
+    assert_eq!(
+        serialization.get(&constant).unwrap().map(|s| s.definition),
+        Some(rows.view.definition)
+    );
+    assert_eq!(
+        serialization.get(&constant).unwrap().map(|s| s.definition),
+        Some(rows.view.definition)
+    );
+    assert_eq!(
+        serialization.finish(),
+        [(constant, hirsel_syntax::ContentHash::of_bytes(b"row"))].into()
+    );
+    assert_eq!(rows.demands.load(std::sync::atomic::Ordering::Relaxed), 2);
+}

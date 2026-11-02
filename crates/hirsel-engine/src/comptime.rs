@@ -1986,7 +1986,7 @@ mod task_tests {
     }
     impl TirProvider for Missing<'_> {
         fn definition(&mut self, _: &DefPath) -> Result<DefinitionRef, QueryError> {
-            self.runtime.serialization.get(&self.path);
+            self.runtime.serialization.get(&self.path).unwrap();
             if let Some(together) = self.together {
                 together.wait();
             }
@@ -2031,7 +2031,7 @@ mod task_tests {
         async fn definition(&mut self, _: &DefPath) -> Result<DefinitionRef, QueryError> {
             self.entered
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.runtime.serialization.get(&self.path);
+            self.runtime.serialization.get(&self.path).unwrap();
             std::future::poll_fn(|_| {
                 if self.ready.get() {
                     std::task::Poll::Ready(())
@@ -2086,7 +2086,7 @@ mod task_tests {
                 entered: entered.clone(),
             };
             runtime.serialization.record();
-            runtime.serialization.get(&outer);
+            runtime.serialization.get(&outer).unwrap();
             let mut evaluation = Box::pin(
                 EvaluationTask {
                     sources: &sources,
@@ -2131,7 +2131,7 @@ mod task_tests {
         let outer = DefPath::core("outer");
         let inner = DefPath::core("inner");
         runtime.serialization.record();
-        runtime.serialization.get(&outer);
+        runtime.serialization.get(&outer).unwrap();
         let product = task(&runtime, None, "inner");
         assert!(matches!(product.result, Err(QueryError::NotImplemented)));
         assert_eq!(

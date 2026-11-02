@@ -1883,7 +1883,8 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                     {
                         if let Some((path, body)) = runtime
                             .get(definition.path())
-                            .and_then(|n| n.finalizer.clone())
+                            .map_err(Error::Query)?
+                            .and_then(|n| n.finalizer)
                         {
                             let Some(activation) = frame.depth.finalizer() else {
                                 record_failure(

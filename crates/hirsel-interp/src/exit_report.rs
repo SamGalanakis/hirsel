@@ -25,6 +25,8 @@ pub fn returned_error(
     let nominal = |definition: hirsel_syntax::DefId| {
         runtime
             .get(definition.path())
+            .ok()
+            .flatten()
             .map(|n| match n.representation {
                 Some(shape) => LogicalNominal::Representation { shape },
                 None => LogicalNominal::Opaque,

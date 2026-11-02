@@ -2083,25 +2083,8 @@ impl QueryEngine {
         {
             return Ok(runtime.clone());
         }
-        let mut views: Vec<_> = self
-            .registry
-            .signatures()
-            .map(|s| {
-                let digest = snapshot
-                    .representation(s.definition)
-                    .and_then(Result::ok)
-                    .map_or_else(ContentHash::default, |(_, digest)| digest.0);
-                (s.clone(), digest)
-            })
-            .collect();
-        for path in self.source_paths() {
-            match snapshot.representation(hirsel_syntax::DefId::intern(&path)) {
-                Some(Ok((view, digest))) => views.push((view.clone(), digest.0)),
-                Some(Err(error)) => return Err(error.clone()),
-                None => {}
-            }
-        }
-        let runtime = Arc::new(self.build_runtime_types(views, false)?);
+        let entry = self.adapters.lowering.as_ref().map(|l| l.entry_body());
+        let runtime = Arc::new(snapshot.comptime_runtime_types(entry));
         self.comptime_runtime = Some((snapshot.epoch(), runtime.clone()));
         Ok(runtime)
     }
@@ -2828,48 +2811,36 @@ pub(crate) fn runtime_type_catalog<V: Into<hirsel_interp::aggregate::SerializedV
     views: Vec<(V, ContentHash)>,
     mut finalizer: impl FnMut(&DefPath) -> Result<Option<(DefPath, hirsel_tir::BodyId)>, QueryError>,
 ) -> Result<hirsel_interp::aggregate::RuntimeTypes, QueryError> {
-    let mut runtime = hirsel_interp::aggregate::RuntimeTypes {
-        trace_mode: hirsel_interp::TraceMode::Effects,
-        forget: Some(hirsel_syntax::DefPath::core(
-            hirsel_interp::library::FORGET_OPERATION,
-        )),
-        ..hirsel_interp::aggregate::RuntimeTypes::new(types.clone())
-    };
     let views: Vec<(hirsel_interp::aggregate::SerializedView, ContentHash)> = views
         .into_iter()
         .map(|(view, digest)| (view.into(), digest))
         .collect();
     // Each nominal reads its signature through a scoped view; the catalog
     // keeps only the identities.
+    let mut nominals = Vec::new();
     for (view, _) in &views {
-        let signature = view.signature();
-        let hirsel_types::SignatureKind::Type(t) = &signature.kind else {
-            continue;
-        };
-        let fields = t
-            .representation
-            .and_then(|id| types.get(id))
-            .map(|r| match &r.kind {
-                hirsel_types::TypeKind::Record(fs) => fs.len(),
-                hirsel_types::TypeKind::Variant(vs) => {
-                    vs.iter().map(|v| v.fields.len()).max().unwrap_or(0)
-                }
-                _ => 1,
-            })
-            .unwrap_or(0);
-        let finalizer = match &t.drop {
-            Some(drop) => finalizer(drop)?,
-            None => None,
-        };
-        runtime.nominals.push(hirsel_interp::aggregate::Nominal {
-            definition: signature.definition.path().clone(),
-            resource: t.resource,
-            distinct: t.distinct,
-            finalizer,
-            fields,
-            representation: t.representation,
-        });
+        nominals.extend(hirsel_interp::aggregate::Nominal::of(
+            &types,
+            &view.signature(),
+            &mut finalizer,
+        )?);
     }
-    runtime.serialization = hirsel_interp::aggregate::Serialization::new(views);
-    Ok(runtime)
+    Ok(hirsel_interp::aggregate::RuntimeTypes {
+        nominals,
+        ..runtime_types_over(types, hirsel_interp::aggregate::Serialization::new(views))
+    })
+}
+/// Runtime facts over `serialization`, with ordinary effect tracing.
+pub(crate) fn runtime_types_over(
+    types: Arc<hirsel_types::TypeInterner>,
+    serialization: hirsel_interp::aggregate::Serialization,
+) -> hirsel_interp::aggregate::RuntimeTypes {
+    hirsel_interp::aggregate::RuntimeTypes {
+        trace_mode: hirsel_interp::TraceMode::Effects,
+        forget: Some(hirsel_syntax::DefPath::core(
+            hirsel_interp::library::FORGET_OPERATION,
+        )),
+        serialization,
+        ..hirsel_interp::aggregate::RuntimeTypes::new(types)
+    }
 }

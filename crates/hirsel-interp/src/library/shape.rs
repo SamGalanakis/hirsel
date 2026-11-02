@@ -22,6 +22,7 @@ pub(super) fn info(call: &OperationCall<'_>) -> Result<Value, Error> {
         .runtime
         .serialization
         .get(definition.path())
+        .map_err(crate::Error::Query)?
         .ok_or_else(|| invalid("type_shape.info declaration is not loaded"))?;
     let SignatureKind::Type(declaration) = &signature.kind else {
         return Err(invalid("type_shape.info actual is not a type"));

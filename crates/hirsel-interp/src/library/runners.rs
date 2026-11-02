@@ -128,7 +128,7 @@ fn core_graph_schema(
         &runtime.types,
         root,
         &hirsel_types::GenericDeclarations::default(),
-        &mut |d: hirsel_syntax::DefId| Ok(runtime.serialization.get(d.path())),
+        &mut |d: hirsel_syntax::DefId| runtime.serialization.get(d.path()),
     )
     .map_err(Error::Query)?
     .ok_or_else(|| invalid("a core type has no codec schema"))
@@ -524,6 +524,8 @@ impl Library {
                                 .filter(|n| n.distinct)
                                 .cloned()
                                 .collect(),
+                            // A demanded catalog answers the rest per row.
+                            serialization: call.runtime.serialization.clone(),
                             ..crate::aggregate::RuntimeTypes::new(call.runtime.types.clone())
                         },
                         place: runner.entry.name.clone(),

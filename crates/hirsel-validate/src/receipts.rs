@@ -1035,6 +1035,20 @@ pub struct ExecutionReceipt {
     artifacts: Arc<[AcceptedArtifact]>,
 }
 impl ExecutionReceipt {
+    /// Content identity for a local execution association. This digest carries
+    /// no authority; restoring the association still requires this verifier.
+    pub fn identity(&self) -> Option<ContentHash> {
+        let artifacts: Vec<_> = self
+            .artifacts
+            .iter()
+            .map(|accepted| (accepted.artifact, accepted.policy))
+            .collect();
+        let bytes = bincode::serialize(&(self.contexts.as_ref(), artifacts)).ok()?;
+        Some(ContentHash::of_parts(
+            "hirsel.validate.execution-receipt.v1",
+            [bytes.as_slice()],
+        ))
+    }
     /// Actual compact context/artifact ownership, without source body bytes.
     pub fn retained_bytes(&self) -> Option<u64> {
         let slots = (std::mem::size_of::<Self>() + 4 * std::mem::size_of::<usize>()) as u64;

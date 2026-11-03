@@ -6,13 +6,15 @@ mod carry;
 mod constants;
 mod dependencies;
 mod depth;
-mod evidence;
+pub(super) mod evidence;
 mod inputs;
 mod inspection;
 mod reads;
 mod registration;
 mod staged;
 pub(super) mod staged_runtime;
+mod successor;
+pub(crate) use successor::SuccessorCapture;
 mod stored;
 use crate::comptime::{EvaluationInput, PreparingSource, ValuePreparation};
 use crate::memo::{DepthEvidence, dependency_limit};
@@ -25,6 +27,7 @@ use evidence::Evidence;
 use hirsel_tir::{DefinitionRef, Materialized, MaterializedRef};
 use inputs::Inputs;
 pub use inspection::FrontLowerDependencies;
+pub(in crate::queries) use registration::Data as GeneratorResult;
 pub use registration::{
     FRONT_REGISTRATION_KIND, FrontRegistrationOutput, FrontRegistrationQueries,
 };
@@ -45,7 +48,7 @@ const FAILURE: Domain = Domain {
 };
 const LOWER_DESCRIPTOR: Domain = Domain {
     kind: 0x4600_0006,
-    schema: 9,
+    schema: 10,
 };
 // Ordinary immutable substitution bytes, owned by the selected provider like
 // the original body archive. Inspectors decode under their working allowance.
@@ -55,7 +58,7 @@ const LOWER_MATERIALIZED: Domain = Domain {
 };
 const CONSTANT_DESCRIPTOR: Domain = Domain {
     kind: 0x4600_0007,
-    schema: 5,
+    schema: 6,
 };
 const LOWER_VERIFICATION: Domain = Domain {
     kind: 0x4600_0033,
@@ -217,16 +220,8 @@ impl Outcome {
         {
             return live.reads().len();
         }
-        self.archive().map_or_else(
-            || self.reads.len(),
-            |archive| {
-                archive.len
-                    + self
-                        .execution
-                        .as_ref()
-                        .map_or(0, |receipt| receipt.contexts().len())
-            },
-        )
+        self.archive()
+            .map_or_else(|| self.reads.len(), |archive| archive.len)
     }
     fn reads(&self, owner: &FrontLowerQueries) -> Option<Reads> {
         if let Ok(Value::Lower(lower)) = &self.result
@@ -248,14 +243,7 @@ impl Outcome {
         }
     }
     fn archive_reads(&mut self, reference: Reference) {
-        let descriptor_reads = if self.execution.is_some() {
-            self.reads
-                .iter()
-                .filter(|(key, _)| !matches!(key, ReadKey::ValidationUniverse(_)))
-                .count()
-        } else {
-            self.reads.len()
-        };
+        let descriptor_reads = self.reads.len();
         let read_bytes = self
             .reads
             .allocations()
@@ -1210,6 +1198,7 @@ impl FrontLowerQueries {
         // provider archives and unused maximum task weights are not ownership.
         let mut source = Source {
             id,
+            root: DefId::intern(&path),
             owner: self.clone(),
             reads,
             observed: Rc::new(RefCell::new(ReadsBuilder::new())),
@@ -1223,6 +1212,7 @@ impl FrontLowerQueries {
                 self.verify,
                 self.weight.retained,
             ))),
+            successor: Rc::default(),
         };
         // A root observes its own body before preparation, including when
         // that preparation fails. Nested callers keep the same root receipt.
@@ -1282,7 +1272,7 @@ impl FrontLowerQueries {
             .ok()
             .and_then(|_| source.evidence.borrow().finish(&observed));
         let descriptor_reads =
-            evidence::persisted_reads(&observed, execution.as_ref()).ok_or(self.errors.protocol)?;
+            evidence::archived_reads(&observed, execution.as_ref()).ok_or(self.errors.protocol)?;
         let selections = std::mem::take(&mut *source.selections.borrow_mut());
         let mut reads_decode_bytes = 0;
         let bytes = match &mut result {
@@ -2038,6 +2028,7 @@ impl LocalQueryFactory for Factory {
 #[derive(Clone)]
 struct Source {
     id: QueryId,
+    root: DefId,
     owner: Arc<FrontLowerQueries>,
     reads: QueryReads,
     observed: Rc<RefCell<ReadsBuilder>>,
@@ -2046,6 +2037,7 @@ struct Source {
     depth: Rc<RefCell<DepthEvidence<Span>>>,
     framed: bool,
     evidence: Rc<RefCell<Evidence>>,
+    successor: Rc<RefCell<Option<SuccessorCapture>>>,
 }
 struct PendingRequest<'a> {
     owner: &'a FrontLowerQueries,
@@ -2075,6 +2067,54 @@ impl FrontLowerQueries {
     }
 }
 impl Source {
+    fn capture(&self) -> Arc<NamespaceCapture> {
+        self.successor.borrow().as_ref().map_or_else(
+            || self.owner.namespace.clone(),
+            |successor| successor.namespace().clone(),
+        )
+    }
+    fn successor_since(
+        &self,
+        previous: &NamespaceCapture,
+    ) -> Result<Option<SuccessorCapture>, QueryError> {
+        let successor = self.successor.borrow();
+        match successor.as_ref() {
+            Some(current) if current.namespace().identity() != previous.identity() => {
+                SuccessorCapture::new(previous, current.owner().clone()).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+    fn join(&self, successor: Option<SuccessorCapture>) -> Result<(), QueryError> {
+        let Some(successor) = successor else {
+            return Ok(());
+        };
+        if !successor.follows(&self.capture()) {
+            return Err(successor::refused(
+                "dependency does not descend from its consumer capture",
+            ));
+        }
+        let reads = self
+            .observed
+            .borrow()
+            .clone()
+            .finish()
+            .map_err(|_| successor::refused("inconsistent reads before joining"))?;
+        let reads = self.evidence.borrow_mut().join(
+            &successor,
+            self.root.path(),
+            &reads,
+            self.owner.verify,
+        )?;
+        let mut observed = ReadsBuilder::new();
+        observed.merge(&reads);
+        *self.observed.borrow_mut() = observed;
+        *self.successor.borrow_mut() = Some(SuccessorCapture::new(
+            &self.owner.namespace,
+            successor.owner().clone(),
+        )?);
+        Ok(())
+    }
     fn select(&self, rows: &[(DefId, Vec<u64>)]) -> Result<(), QueryError> {
         let mut selections = self.selections.borrow_mut();
         let count = selections
@@ -2307,6 +2347,7 @@ impl Source {
 }
 impl s1::AsyncDependencySource for Source {
     async fn definition(&mut self, path: &DefPath) -> s1::DependencyProduct<DefinitionRef> {
+        let previous = self.capture();
         let result = match self.value(path, FRONT_LOWER_KIND, Span::default()).await {
             Ok(Value::Lower(lower)) => match lower.decode(&self.owner) {
                 Some(output) => {
@@ -2318,15 +2359,20 @@ impl s1::AsyncDependencySource for Source {
             Err(e) => Err(e),
             _ => Err(QueryError::NotImplemented),
         };
+        let successor = self.successor_since(&previous);
         s1::DependencyProduct {
-            result,
+            successor: successor.as_ref().ok().and_then(Clone::clone),
+            result: successor.and(result),
             reads: Reads::empty(),
         }
     }
     async fn constant(&mut self, path: &DefPath) -> s1::DependencyProduct<MaterializedRef> {
+        let previous = self.capture();
         let result = self.constant_value(path).await.map(|(v, _)| Arc::new(v));
+        let successor = self.successor_since(&previous);
         s1::DependencyProduct {
-            result,
+            successor: successor.as_ref().ok().and_then(Clone::clone),
+            result: successor.and(result),
             reads: Reads::empty(),
         }
     }
@@ -2338,6 +2384,7 @@ impl s1::AsyncDependencySource for Source {
         if arguments.is_empty() {
             return s1::AsyncDependencySource::constant(self, path).await;
         }
+        let previous = self.capture();
         let result = async {
             let id = self.owner.staged_query(path, arguments)?;
             self.select(&[(DefId::intern(path), arguments.to_vec())])?;
@@ -2366,8 +2413,10 @@ impl s1::AsyncDependencySource for Source {
                 .ok_or(QueryError::NotImplemented)
         }
         .await;
+        let successor = self.successor_since(&previous);
         s1::DependencyProduct {
-            result,
+            successor: successor.as_ref().ok().and_then(Clone::clone),
+            result: successor.and(result),
             reads: Reads::empty(),
         }
     }
@@ -2376,6 +2425,7 @@ impl s1::AsyncDependencySource for Source {
         path: &DefPath,
         arguments: &[hirsel_types::GenericArgument],
     ) -> s1::DependencyProduct<Option<DefPath>> {
+        let previous = self.capture();
         let result = self
             .owner
             .namespace
@@ -2386,8 +2436,10 @@ impl s1::AsyncDependencySource for Source {
                 arguments,
             )
             .map(|selected| selected.map(|id| id.path().clone()));
+        let successor = self.successor_since(&previous);
         s1::DependencyProduct {
-            result,
+            successor: successor.as_ref().ok().and_then(Clone::clone),
+            result: successor.and(result),
             reads: Reads::empty(),
         }
     }
@@ -2435,6 +2487,7 @@ impl PreparingSource for Values {
             let path = path.clone();
             self.pending = Some(Box::pin(async move {
                 Ok(s1::DependencyProduct {
+                    successor: None,
                     result: source.constant_at(&path, site).await.map(|(v, _)| v),
                     reads: Reads::empty(),
                 })
@@ -2476,6 +2529,7 @@ impl Values {
             Poll::Ready(result) => {
                 self.pending = None;
                 Poll::Ready(result.and_then(|p| {
+                    self.source.join(p.successor)?;
                     self.source.merge(&p.reads);
                     p.result
                 }))
@@ -2516,8 +2570,9 @@ async fn evaluate(
         sizes: &sizes,
     }
     .lower(owner.namespace.snapshot.types(), &owner.memo, lowering)?;
+    let previous = source.capture();
     let admission =
-        s1::ValidatedEvaluation::recorded(prepared, &owner.namespace.snapshot, owner.verify, site);
+        s1::ValidatedEvaluation::recorded_in(prepared, previous.clone(), owner.verify, site);
     source.merge(&admission.reads);
     let runtime = owner.runtime_types()?;
     let product = admission
@@ -2529,6 +2584,7 @@ async fn evaluate(
             &mut source,
         )
         .await;
+    source.join(product.value.successor)?;
     source.merge(&product.value.reads);
     source.evidence.borrow_mut().accepted(product.acceptance);
     let result = product.value.result.and_then(|(value, ty)| {
@@ -2552,6 +2608,7 @@ async fn evaluate(
         result
     });
     Ok(s1::DependencyProduct {
+        successor: source.successor_since(&previous)?,
         result,
         reads: Reads::empty(),
     })

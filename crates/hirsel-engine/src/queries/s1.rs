@@ -12,6 +12,7 @@ use hirsel_types::GenericArgument;
 pub(crate) struct DependencyProduct<T> {
     pub(crate) result: Result<T, QueryError>,
     pub(crate) reads: Reads,
+    pub(crate) successor: Option<scheduled_lower::SuccessorCapture>,
 }
 
 /// A worker's request interface. Implementations keep mutable request state
@@ -87,6 +88,8 @@ pub(crate) struct ValidatedEvaluation {
     ty: hirsel_types::TypeId,
     site: Span,
     acceptance: Option<hirsel_validate::AcceptedArtifact>,
+    capture: Option<Arc<NamespaceCapture>>,
+    context: Vec<(hirsel_syntax::PackageId, ContentHash)>,
 }
 
 pub(crate) struct EvaluationOutcome {
@@ -95,6 +98,18 @@ pub(crate) struct EvaluationOutcome {
     pub(crate) limit: Option<hirsel_tir::ToolingLimit>,
 }
 impl ValidatedEvaluation {
+    pub(crate) fn recorded_in(
+        prepared: crate::comptime::PreparedEvaluation,
+        capture: Arc<NamespaceCapture>,
+        verify: Verify,
+        site: Span,
+    ) -> DependencyProduct<Self> {
+        let mut product = Self::recorded(prepared, &capture.snapshot, verify, site);
+        if let Ok(evaluation) = &mut product.result {
+            evaluation.capture = Some(capture);
+        }
+        product
+    }
     /// A worker may publish across later registration epochs. The package's
     /// complete base V universe identifies every input of the private overlay,
     /// including formerly valid declarations whose overlay verdict can change.
@@ -118,9 +133,22 @@ impl ValidatedEvaluation {
         } else {
             Ok(())
         };
+        let reads = reads.finish().expect("one immutable validation universe");
+        let result = universe.and_then(|()| {
+            let mut evaluation = Self::new(prepared, Some(snapshot), verify, site)?;
+            evaluation.context = reads
+                .iter()
+                .filter_map(|(key, hash)| match key {
+                    ReadKey::ValidationUniverse(package) => Some((package.id(), *hash)),
+                    _ => None,
+                })
+                .collect();
+            Ok(evaluation)
+        });
         DependencyProduct {
-            result: universe.and_then(|()| Self::new(prepared, Some(snapshot), verify, site)),
-            reads: reads.finish().expect("one immutable validation universe"),
+            successor: None,
+            result,
+            reads,
         }
     }
     pub(crate) fn new(
@@ -145,6 +173,8 @@ impl ValidatedEvaluation {
             definition: Arc::new(prepared.definition),
             ty: prepared.ty,
             site,
+            capture: None,
+            context: Vec::new(),
         })
     }
     /// The caller clones RuntimeTypes once per worker. Nested evaluations
@@ -183,6 +213,13 @@ impl ValidatedEvaluation {
             inputs: vec![],
         };
         let mut provider = EvaluationProvider::new(self.definition, source);
+        provider.capture = self.capture;
+        provider.execution = self.acceptance.as_ref().and_then(|acceptance| {
+            hirsel_validate::ExecutionReceipt::compose(
+                &self.context,
+                std::slice::from_ref(acceptance),
+            )
+        });
         let product = crate::comptime::EvaluationTask {
             sources,
             configuration,
@@ -194,6 +231,13 @@ impl ValidatedEvaluation {
         .run_async(&mut provider)
         .await;
         let mut reads = ReadsBuilder::new();
+        let successor = provider.successor.clone();
+        let acceptance = provider
+            .execution
+            .as_ref()
+            .and_then(|execution| execution.artifacts().first())
+            .cloned()
+            .or(self.acceptance);
         let recorded = provider.finish();
         if let Ok(recorded) = &recorded {
             reads.merge(recorded);
@@ -207,8 +251,12 @@ impl ValidatedEvaluation {
             _ => (Err(QueryError::NotImplemented), Reads::empty()),
         };
         EvaluationOutcome {
-            acceptance: self.acceptance,
-            value: DependencyProduct { result, reads },
+            acceptance,
+            value: DependencyProduct {
+                successor,
+                result,
+                reads,
+            },
             limit: product.limit,
         }
     }
@@ -221,6 +269,9 @@ pub(crate) struct EvaluationProvider<'a, S> {
     root: DefinitionRef,
     source: &'a mut S,
     reads: ReadsBuilder,
+    capture: Option<Arc<NamespaceCapture>>,
+    successor: Option<scheduled_lower::SuccessorCapture>,
+    execution: Option<hirsel_validate::ExecutionReceipt>,
 }
 impl<'a, S> EvaluationProvider<'a, S> {
     pub(crate) fn new(root: DefinitionRef, source: &'a mut S) -> Self {
@@ -228,11 +279,47 @@ impl<'a, S> EvaluationProvider<'a, S> {
             root,
             source,
             reads: ReadsBuilder::new(),
+            capture: None,
+            successor: None,
+            execution: None,
         }
     }
     fn merge<T>(&mut self, product: DependencyProduct<T>) -> Result<T, QueryError> {
+        if let Some(successor) = product.successor {
+            if !self
+                .capture
+                .as_ref()
+                .is_some_and(|capture| successor.follows(capture))
+            {
+                return Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                    operation: "private evaluation capture join".into(),
+                    message: "dependency successor does not descend from the executing capture"
+                        .into(),
+                }));
+            }
+            let reads = self
+                .reads
+                .clone()
+                .finish()
+                .map_err(|_| QueryError::NotImplemented)?;
+            let (reads, execution) =
+                successor.revalidate(self.root.path.path(), &reads, self.execution.as_ref())?;
+            if self.execution.is_none() && !self.contextless() {
+                return Err(QueryError::NotImplemented);
+            }
+            self.reads = ReadsBuilder::new();
+            self.reads.merge(&reads);
+            self.execution = execution;
+            self.capture = Some(successor.namespace().clone());
+            self.successor = Some(successor);
+        }
         self.reads.merge(&product.reads);
         product.result
+    }
+    fn contextless(&self) -> bool {
+        self.capture
+            .as_ref()
+            .is_some_and(|capture| capture.verification() == Verify::Off)
     }
     pub(crate) fn finish(self) -> Result<Reads, QueryError> {
         self.reads.finish().map_err(|_| QueryError::NotImplemented)
@@ -317,6 +404,7 @@ mod tests {
         fn product<T>(&mut self) -> DependencyProduct<T> {
             self.calls += 1;
             DependencyProduct {
+                successor: None,
                 result: Err(QueryError::NotImplemented),
                 reads: self.reads.clone(),
             }
@@ -454,6 +542,7 @@ mod tests {
     impl AsyncDependencySource for DeferredSource {
         async fn definition(&mut self, _: &DefPath) -> DependencyProduct<DefinitionRef> {
             DependencyProduct {
+                successor: None,
                 result: Err(QueryError::NotImplemented),
                 reads: Reads::empty(),
             }
@@ -474,6 +563,7 @@ mod tests {
                 })
                 .map_err(|_| QueryError::NotImplemented);
             DependencyProduct {
+                successor: None,
                 result,
                 reads: self.reads.clone(),
             }
@@ -491,6 +581,7 @@ mod tests {
             _: &[GenericArgument],
         ) -> DependencyProduct<Option<DefPath>> {
             DependencyProduct {
+                successor: None,
                 result: Ok(None),
                 reads: Reads::empty(),
             }

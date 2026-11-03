@@ -389,6 +389,7 @@ impl FrontBodyQueries {
             self.modes.as_deref(),
         ) else {
             return s1::DependencyProduct {
+                successor: None,
                 result: Err(QueryError::NotImplemented),
                 reads: Reads::empty(),
             };

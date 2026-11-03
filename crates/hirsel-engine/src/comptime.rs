@@ -796,8 +796,13 @@ impl EngineDependencies<'_> {
             .expect("dependency read frame")
             .finish();
         match reads {
-            Ok(reads) => crate::queries::s1::DependencyProduct { result, reads },
+            Ok(reads) => crate::queries::s1::DependencyProduct {
+                successor: None,
+                result,
+                reads,
+            },
             Err(_) => crate::queries::s1::DependencyProduct {
+                successor: None,
                 result: Err(QueryError::NotImplemented),
                 reads: Reads::empty(),
             },

@@ -718,6 +718,16 @@ impl SignatureSnapshot {
             [self.verifier_policy.0.as_slice()],
         )
     }
+    pub(crate) fn revalidate_execution(
+        &self,
+        receipt: &hirsel_validate::ExecutionReceipt,
+        anchor: impl FnMut(&DefPath, u32) -> Option<hirsel_span::Anchor>,
+    ) -> Option<hirsel_validate::ExecutionReceipt> {
+        let verifier = self.verifier.as_ref()?;
+        let subject = receipt.identity()?;
+        verifier.publish_execution(subject, receipt);
+        verifier.execution_revalidated(subject, self.types.clone(), anchor, self)
+    }
     pub(crate) fn validate_source_artifact<'input>(
         &self,
         definition: impl Into<hirsel_validate::DefinitionInput<'input>>,

@@ -21,7 +21,7 @@ impl std::fmt::Debug for FrontRegistrationFailure {
 pub struct AcceptedFrontRegistration {
     pub(crate) syntax: Arc<ItemSyntax>,
     pub(crate) reads: Arc<Reads>,
-    output: FrontRegistrationOutput,
+    output: Arc<scheduled_lower::GeneratorResult>,
     original: (hirsel_span::Anchor, u32, ContentHash),
     generated: (FileId, Span),
     schema_origins: Vec<(std::ops::Range<usize>, hirsel_diag::Label)>,
@@ -74,33 +74,75 @@ impl AcceptedFrontRegistration {
     /// the original source binding in front_body_queries_with_registrations.
     pub fn validate_current(
         &self,
-        verify: Verify,
+        capture: &NamespaceCapture,
         mut observe: impl FnMut(&DefPath, &ReadKey) -> Option<ContentHash>,
-    ) -> Result<(), QueryError> {
-        let invalid = || {
+    ) -> Result<(Reads, Option<hirsel_validate::ExecutionReceipt>), QueryError> {
+        let invalid = |reason: &str| {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "generated syntax validation".into(),
-                message: "generated registration reads or private execution acceptance changed"
-                    .into(),
+                message: reason.into(),
             })
         };
-        if self
-            .reads
-            .first_changed(|key| observe(self.definition(), key))
-            .is_some()
-        {
-            return Err(invalid());
+        let id = DefId::intern(self.definition());
+        let original = if capture.bodies.contains_key(&id) {
+            let syntax = capture.syntax(self.definition())?;
+            Some((syntax.anchor, syntax.occurrence, syntax.text_hash))
+        } else {
+            capture.snapshot.header_products().and_then(|headers| {
+                Some((
+                    crate::NativeRecordSource::record_source_anchor(
+                        &*capture.anchors,
+                        self.definition(),
+                        self.original.1,
+                    )?,
+                    self.original.1,
+                    headers.captured_text(id)?.implementation?,
+                ))
+            })
+        };
+        if original != Some(self.original) {
+            return Err(invalid("original declaration changed"));
         }
-        if verify != Verify::Off {
-            let receipt = self.acceptance().ok_or_else(invalid)?;
-            for (package, digest) in receipt.contexts() {
+        let execution =
+            if capture.verification() == Verify::On {
+                let receipt = self
+                    .acceptance()
+                    .ok_or_else(|| invalid("missing private execution acceptance"))?;
+                Some(capture.revalidate_execution(receipt).ok_or_else(|| {
+                    invalid("V refused the private artifacts in the current capture")
+                })?)
+            } else {
+                None
+            };
+        if let Some(execution) = &execution {
+            for (package, digest) in execution.contexts() {
                 let key = ReadKey::ValidationUniverse(crate::memo::PackageKey::of(package));
                 if observe(self.definition(), &key) != Some(*digest) {
-                    return Err(invalid());
+                    return Err(invalid(
+                        "observer does not identify the current validation universe",
+                    ));
                 }
             }
         }
-        Ok(())
+        if self
+            .reads
+            .first_changed(|key| {
+                if matches!(key, ReadKey::ValidationUniverse(_)) && execution.is_some() {
+                    self.reads.get(key)
+                } else {
+                    observe(self.definition(), key)
+                }
+            })
+            .is_some()
+        {
+            return Err(invalid("semantic generator or normalization input changed"));
+        }
+        let reads =
+            scheduled_lower::evidence::current_reads((*self.reads).clone(), execution.as_ref())
+                .ok_or_else(|| {
+                    invalid("execution does not cover the registration validation reads")
+                })?;
+        Ok((reads, execution))
     }
     /// Engine-backed check, also used when constructing a fresh front view.
     pub fn validate_in_engine(&self, engine: &mut QueryEngine) -> Result<(), QueryError> {
@@ -385,7 +427,7 @@ impl AcceptanceInputs {
             Ok(Arc::new(AcceptedFrontRegistration {
                 syntax,
                 reads,
-                output,
+                output: output.into_data(),
                 original: (original.anchor, original.occurrence, original.text_hash),
                 generated: (file, site),
                 schema_origins: self.schema_origins,

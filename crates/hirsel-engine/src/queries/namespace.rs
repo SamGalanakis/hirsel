@@ -51,6 +51,7 @@ pub struct NamespaceCapture {
     pub(crate) instances: Arc<hirsel_tir::InstanceBodies>,
     pub(crate) bodies: BTreeMap<DefId, Arc<BodyInput>>,
     pub(crate) registrations: BTreeMap<DefId, Arc<AcceptedFrontRegistration>>,
+    private_sources: BTreeMap<(DefId, u32), hirsel_span::Anchor>,
     pub(crate) records: crate::NativeRecords,
     pub(crate) limits: crate::ComptimeLimits,
     environment: ContentHash,
@@ -77,6 +78,51 @@ struct Manifest {
 }
 
 impl NamespaceCapture {
+    pub fn validation_input_digest(
+        &self,
+        package: &hirsel_syntax::PackageId,
+    ) -> Result<ContentHash, hirsel_validate::ViewRefusal> {
+        self.snapshot.validation_input_digest(package)
+    }
+    pub(crate) fn revalidate_execution(
+        &self,
+        receipt: &hirsel_validate::ExecutionReceipt,
+    ) -> Option<hirsel_validate::ExecutionReceipt> {
+        self.snapshot
+            .revalidate_execution(receipt, |path, occurrence| {
+                self.private_sources
+                    .get(&(DefId::intern(path), occurrence))
+                    .copied()
+                    .or_else(|| {
+                        crate::NativeRecordSource::record_source_anchor(
+                            &*self.anchors,
+                            path,
+                            occurrence,
+                        )
+                    })
+            })
+    }
+    pub(crate) fn verification(&self) -> Verify {
+        self.verify
+    }
+    pub(crate) fn admits_successor(&self, successor: &Self) -> bool {
+        successor.admission.get().is_some()
+            && self.environment == successor.environment
+            && self.verify == successor.verify
+            && self.anchors.bindings_hold(&successor.anchors)
+            && self.bodies.iter().all(|(id, previous)| {
+                successor.bodies.get(id).is_some_and(|current| {
+                    previous.syntax == current.syntax
+                        && previous.implementation == current.implementation
+                })
+            })
+            && self.registrations.iter().all(|(id, previous)| {
+                successor
+                    .registrations
+                    .get(id)
+                    .is_some_and(|current| previous.text() == current.text())
+            })
+    }
     pub(crate) fn input_bytes(definitions: &[DefPath]) -> Option<u64> {
         let mut weight = crate::NativeMetadataWeight::default();
         weight.add(
@@ -89,6 +135,7 @@ impl NamespaceCapture {
             size_of::<BodyInput>() + size_of::<BodyKeys>() + 4 * size_of::<usize>(),
         )?);
         weight.tree::<DefId, Arc<AcceptedFrontRegistration>>(definitions.len());
+        weight.tree::<(DefId, u32), hirsel_span::Anchor>(definitions.len());
         Some(weight.bytes())
     }
 
@@ -292,6 +339,7 @@ impl QueryEngine {
             .ok_or_else(|| refused("missing content store"))?;
         let records = NativeRecords::new(self.types.clone(), store.clone());
         let mut bodies = BTreeMap::new();
+        let mut private_sources = BTreeMap::new();
         let mut base = Vec::new();
         // Header/source identities are canonical paths and hashes, never arena
         // indices, source placement or insertion order.
@@ -326,6 +374,15 @@ impl QueryEngine {
                 .ok_or_else(|| refused("written syntax publication"))?;
             let generated =
                 generation::generator(&syntax).is_some() && !generation::instance_bodied(&syntax);
+            if generated {
+                private_sources.insert(
+                    (
+                        DefId::intern(&generation::task::GeneratorInput::private_path(path)),
+                        0,
+                    ),
+                    syntax.anchor,
+                );
+            }
             let queries = if generated && registration.is_none() {
                 None
             } else {
@@ -497,6 +554,7 @@ impl QueryEngine {
             instances: Arc::new(instances),
             bodies,
             registrations,
+            private_sources,
             records,
             limits: self.comptime_limits,
             environment: self.environment_value(),

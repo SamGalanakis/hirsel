@@ -12,9 +12,36 @@ pub(super) fn persisted_reads(reads: &Reads, receipt: Option<&ExecutionReceipt>)
     }
 }
 
-/// Ordinary descriptors omit broad context stamps. Only V's current opaque
-/// receipt restores them for live dependency tracking.
-pub(super) fn current_reads(reads: Reads, receipt: Option<&ExecutionReceipt>) -> Option<Reads> {
+/// Retain observation positions in transport without persisting a validation
+/// stamp as a source input. Only a locally revalidated receipt fills these slots.
+pub(super) fn archived_reads(reads: &Reads, receipt: Option<&ExecutionReceipt>) -> Option<Reads> {
+    let Some(receipt) = receipt else {
+        return Some(reads.clone());
+    };
+    persisted_reads(reads, Some(receipt))?;
+    Reads::from_vec(
+        reads
+            .observed()
+            .map(|(key, hash)| {
+                (
+                    *key,
+                    if matches!(key, ReadKey::ValidationUniverse(_)) {
+                        hirsel_syntax::ContentHash::default()
+                    } else {
+                        *hash
+                    },
+                )
+            })
+            .collect(),
+    )
+    .ok()
+}
+
+/// Only V's current opaque receipt restores archived validation observations.
+pub(in crate::queries) fn current_reads(
+    reads: Reads,
+    receipt: Option<&ExecutionReceipt>,
+) -> Option<Reads> {
     let Some(receipt) = receipt else {
         return Some(reads);
     };
@@ -38,7 +65,7 @@ pub(super) fn current_reads(reads: Reads, receipt: Option<&ExecutionReceipt>) ->
         return Some(reads);
     }
     let mut values = reads
-        .iter()
+        .observed()
         .map(|(key, digest)| Some((*key, current(key, *digest)?)))
         .collect::<Option<Vec<_>>>()?;
     for (package, digest) in receipt.contexts() {
@@ -55,6 +82,25 @@ pub(super) struct Evidence {
     max_proofs: usize,
 }
 impl Evidence {
+    pub(super) fn join(
+        &mut self,
+        successor: &super::SuccessorCapture,
+        owner: &hirsel_syntax::DefPath,
+        reads: &Reads,
+        verify: Verify,
+    ) -> Result<Reads, crate::QueryError> {
+        let execution = self.finish(reads);
+        if verify == Verify::On && self.executed && execution.is_none() {
+            return Err(super::successor::refused(
+                "executed artifacts lack join evidence",
+            ));
+        }
+        let (reads, execution) = successor.revalidate(owner, reads, execution.as_ref())?;
+        if let Some(execution) = execution {
+            self.proofs = Some(execution.artifacts().to_vec());
+        }
+        Ok(reads)
+    }
     pub(super) fn new(verify: Verify, bytes: u64) -> Self {
         Self {
             executed: false,

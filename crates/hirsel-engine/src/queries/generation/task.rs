@@ -38,6 +38,9 @@ pub(crate) struct GeneratorBody {
     pub(crate) ty: hirsel_types::TypeId,
 }
 impl GeneratorInput {
+    pub(crate) fn private_path(definition: &DefPath) -> DefPath {
+        renamed(definition, "generator")
+    }
     pub(crate) fn new(
         definition: &DefPath,
         snapshot: &Arc<ItemSyntax>,
@@ -51,7 +54,7 @@ impl GeneratorInput {
             return Err(QueryError::NotImplemented);
         };
         let site = snapshot.tree.expressions[body.0 as usize].origin;
-        let helper = renamed(definition, "generator");
+        let helper = Self::private_path(definition);
         // The helper reads the declaration's own arenas, at its anchor.
         let mut file = (**snapshot).clone();
         file.occurrence = 0;
@@ -412,8 +415,13 @@ pub(crate) fn prepare(
         },
         &mut source,
     ) {
-        Ok(reads) => s1::DependencyProduct { result, reads },
+        Ok(reads) => s1::DependencyProduct {
+            successor: None,
+            result,
+            reads,
+        },
         Err(_) => s1::DependencyProduct {
+            successor: None,
             result: Err(QueryError::NotImplemented),
             reads: Reads::empty(),
         },

@@ -31,7 +31,9 @@ struct Stored {
     output: Reference,
     decode_bytes: u64,
 }
-struct Data {
+pub(in crate::queries) struct Data {
+    definition: DefId,
+    namespace: Arc<NamespaceCapture>,
     text: Result<String, QueryError>,
     reads: Reads,
     dependencies: Vec<SignatureDependency>,
@@ -40,18 +42,38 @@ struct Data {
     _allowance: Option<MemoryReservation>,
 }
 type Completed = (ProductRef, Arc<Data>);
-/// Opaque text/evidence transport, without namespace or execution authority.
+/// Text and evidence retain their immutable consumption capture. Normalization
+/// and ordered publication still decide whether the syntax becomes visible.
 #[derive(Clone)]
 pub struct FrontRegistrationOutput {
-    definition: DefId,
     data: Arc<Data>,
 }
-impl FrontRegistrationOutput {
-    pub fn definition(&self) -> &DefPath {
+impl Data {
+    pub(in crate::queries) fn definition(&self) -> &DefPath {
         self.definition.path()
     }
+    pub(in crate::queries) fn text(&self) -> Result<&str, QueryError> {
+        self.text.as_deref().map_err(Clone::clone)
+    }
+    pub(in crate::queries) fn depth(&self) -> &DepthEvidence<Span> {
+        &self.depth
+    }
+    pub(in crate::queries) fn acceptance(&self) -> Option<&hirsel_validate::ExecutionReceipt> {
+        self.acceptance.as_ref()
+    }
+}
+impl FrontRegistrationOutput {
+    pub fn namespace(&self) -> &Arc<NamespaceCapture> {
+        &self.data.namespace
+    }
+    pub(in crate::queries) fn into_data(self) -> Arc<Data> {
+        self.data
+    }
+    pub fn definition(&self) -> &DefPath {
+        self.data.definition()
+    }
     pub fn text(&self) -> Result<&str, QueryError> {
-        self.data.text.as_deref().map_err(Clone::clone)
+        self.data.text()
     }
     pub fn reads(&self) -> &Reads {
         &self.data.reads
@@ -60,10 +82,10 @@ impl FrontRegistrationOutput {
         &self.data.dependencies
     }
     pub fn depth(&self) -> &DepthEvidence<Span> {
-        &self.data.depth
+        self.data.depth()
     }
     pub(in crate::queries) fn acceptance(&self) -> Option<&hirsel_validate::ExecutionReceipt> {
-        self.data.acceptance.as_ref()
+        self.data.acceptance()
     }
     pub fn has_execution_acceptance(&self) -> bool {
         self.data.acceptance.is_some()
@@ -106,29 +128,24 @@ impl FrontRegistrationQueries {
     pub fn outcome(self: &Arc<Self>, product: ProductRef) -> Option<FrontRegistrationOutput> {
         let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
         let (selected, data) = outcomes.get(&product.address.0)?;
-        (*selected == product).then(|| FrontRegistrationOutput {
-            definition: self.inputs[&product.address.0].definition,
-            data: data.clone(),
-        })
+        (*selected == product).then(|| FrontRegistrationOutput { data: data.clone() })
     }
     pub fn failed(self: &Arc<Self>, reference: Reference) -> Option<FrontRegistrationOutput> {
         let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
-        let (address, (_, data)) = outcomes.iter().find(|(_, (p, _))| {
+        let (_, (_, data)) = outcomes.iter().find(|(_, (p, _))| {
             p.archive(ArchiveAdmission::Retained)
                 .is_ok_and(|archive| archive.reference() == reference)
         })?;
-        Some(FrontRegistrationOutput {
-            definition: self.inputs[address].definition,
-            data: data.clone(),
-        })
+        Some(FrontRegistrationOutput { data: data.clone() })
     }
     async fn run(self: Arc<Self>, id: QueryId, reads: QueryReads) -> Result<ProductRef, Reference> {
         let input = &self.inputs[&id.address.0];
-        let mut data = if let Some(data) = self.restore(input) {
-            Arc::new(data)
+        let (mut data, namespace) = if let Some(data) = self.restore(input) {
+            (Arc::new(data), self.lower.namespace.clone())
         } else {
             let mut source = Source {
                 id,
+                root: input.definition,
                 owner: self.lower.clone(),
                 reads,
                 observed: Rc::new(RefCell::new(ReadsBuilder::new())),
@@ -142,6 +159,7 @@ impl FrontRegistrationQueries {
                     self.lower.verify,
                     self.weight.retained,
                 ))),
+                successor: Rc::default(),
             };
             source.record(
                 ReadKey::ExecutedBody(input.definition),
@@ -170,20 +188,25 @@ impl FrontRegistrationQueries {
                 .and_then(|_| source.evidence.borrow().finish(&observed));
             let mut depth = source.depth.borrow().clone();
             depth.first[0] = None;
-            Arc::new(Data {
-                text,
-                reads: observed,
-                dependencies,
-                depth,
-                acceptance,
-                _allowance: None,
-            })
+            (
+                Arc::new(Data {
+                    definition: input.definition,
+                    namespace: source.capture(),
+                    text,
+                    reads: observed,
+                    dependencies,
+                    depth,
+                    acceptance,
+                    _allowance: None,
+                }),
+                source.capture(),
+            )
         };
         let (bytes, record_decode_bytes) = self
             .lower
             .records
             .encode_with_decode_bytes(
-                &*self.lower.namespace.anchors,
+                &*namespace.anchors,
                 &(
                     input.definition,
                     &data.text,
@@ -237,7 +260,7 @@ impl FrontRegistrationQueries {
             "hirsel.front.registration.action.v1",
             [
                 id.address.0.0.as_slice(),
-                self.lower.namespace.manifest.output.0.0.as_slice(),
+                namespace.manifest.output.0.0.as_slice(),
                 data.reads.digest().0.as_slice(),
                 record.output.0.0.as_slice(),
             ],
@@ -254,7 +277,7 @@ impl FrontRegistrationQueries {
                 .checked_mul(2)
                 .and_then(|bytes| bytes.checked_add(record_decode_bytes))
         {
-            self.remember(input, record, &data, decode_bytes);
+            self.remember(input, record, &data, decode_bytes, namespace.manifest);
         }
         self.outcomes
             .lock()
@@ -347,6 +370,8 @@ impl FrontRegistrationQueries {
             return None;
         }
         Some(Data {
+            definition: input.definition,
+            namespace: self.lower.namespace.clone(),
             text,
             reads,
             dependencies,
@@ -355,7 +380,14 @@ impl FrontRegistrationQueries {
             _allowance: None,
         })
     }
-    fn remember(&self, input: &Input, output: Reference, data: &Data, decode_bytes: u64) {
+    fn remember(
+        &self,
+        input: &Input,
+        output: Reference,
+        data: &Data,
+        decode_bytes: u64,
+        manifest: Reference,
+    ) {
         if !self.lower.store.persistence().retains() || data.acceptance.is_none() {
             return;
         }
@@ -366,7 +398,7 @@ impl FrontRegistrationQueries {
         };
         let key = Self::storage_key(input);
         let Ok(payload) = bincode::serialize(&Stored {
-            manifest: self.lower.namespace.manifest,
+            manifest,
             output,
             decode_bytes,
         }) else {
@@ -476,9 +508,9 @@ impl FrontRegistrationQueries {
                 .as_deref()
                 .ok_or(QueryError::NotImplemented)?,
         )?;
-        let admission = s1::ValidatedEvaluation::recorded(
+        let admission = s1::ValidatedEvaluation::recorded_in(
             lowered,
-            &self.lower.namespace.snapshot,
+            source.capture(),
             self.lower.verify,
             site,
         );
@@ -494,6 +526,7 @@ impl FrontRegistrationQueries {
                 source,
             )
             .await;
+        source.join(result.value.successor)?;
         source.merge(&result.value.reads);
         source.evidence.borrow_mut().accepted(result.acceptance);
         generator.decode(result.value.result?.0)

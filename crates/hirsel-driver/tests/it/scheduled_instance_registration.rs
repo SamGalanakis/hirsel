@@ -407,6 +407,7 @@ fn closed_instance_views_reject_stale_generator_helper_and_declaring_header_read
                     let paths = register(program, budget, &round);
                     let before = front(program, budget, jobs, &[]);
                     execute(program, budget, jobs, before, &paths, |program, outputs| {
+                        let capture = outputs[0].namespace().clone();
                         let accepted: Vec<_> = outputs
                             .iter()
                             .map(|output| {
@@ -420,12 +421,22 @@ fn closed_instance_views_reject_stale_generator_helper_and_declaring_header_read
                             })
                             .collect();
                         for view in &accepted {
+                            let (reads, execution) = view.validate_current(&capture, |_, key| match key {
+                                ReadKey::ValidationUniverse(package) => capture.validation_input_digest(&package.id()).ok(),
+                                _ => view.reads().get(key),
+                            }).expect("registration revalidates in its independently captured environment");
+                            assert!(execution.is_some());
+                            for (key, value) in view.reads().iter() {
+                                match key {
+                                    ReadKey::ValidationUniverse(package) => assert_eq!(
+                                        reads.get(key),
+                                        capture.validation_input_digest(&package.id()).ok()
+                                    ),
+                                    _ => assert_eq!(reads.get(key), Some(*value)),
+                                }
+                            }
                             assert!(
-                                view.validate_current(Verify::On, |_, key| view.reads().get(key))
-                                    .is_ok()
-                            );
-                            assert!(
-                                view.validate_current(Verify::On, |_, key| {
+                                view.validate_current(&capture, |_, key| {
                                     if matches!(key, ReadKey::ValidationUniverse(_)) {
                                         None
                                     } else {
@@ -435,7 +446,7 @@ fn closed_instance_views_reject_stale_generator_helper_and_declaring_header_read
                                 .is_err()
                             );
                             assert!(
-                                view.validate_current(Verify::On, |_, key| {
+                                view.validate_current(&capture, |_, key| {
                                     if matches!(key, ReadKey::ValidationUniverse(_)) {
                                         Some(hirsel_syntax::ContentHash::default())
                                     } else {

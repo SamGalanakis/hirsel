@@ -94,6 +94,11 @@ impl FrontCheckedSignatures {
     }
 }
 impl QueryEngine {
+    fn retains_signature_inputs(&self, snapshot: &Arc<SignatureSnapshot>) -> bool {
+        self.snapshot.as_ref().is_some_and(|(stamp, current)| {
+            *stamp == self.snapshot_stamp() && Arc::ptr_eq(snapshot, current)
+        })
+    }
     fn captured_signature_coverage(
         &self,
         snapshot: &SignatureSnapshot,
@@ -153,7 +158,7 @@ impl QueryEngine {
         front: &Arc<FrontBodyQueries>,
     ) -> Result<u64, QueryError> {
         let snapshot = front.signatures();
-        if !Arc::ptr_eq(&snapshot, &self.signature_inputs()) {
+        if !self.retains_signature_inputs(&snapshot) {
             return Err(QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "checked signature inputs".into(),
                 message: "captured header snapshot differs from current source inputs".into(),
@@ -188,7 +193,7 @@ impl QueryEngine {
             weight.path(&path);
             weight.flat_vec(&self.captured_signature_coverage(&snapshot, &path)?);
         }
-        if !Arc::ptr_eq(&snapshot, &self.signature_inputs()) {
+        if !self.retains_signature_inputs(&snapshot) {
             return Err(QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "checked signature inputs".into(),
                 message: "captured header snapshot differs from current source inputs".into(),
@@ -218,7 +223,7 @@ impl QueryEngine {
             return Err(invalid());
         }
         let snapshot = front.signatures();
-        if !Arc::ptr_eq(&snapshot, &self.signature_inputs()) {
+        if !self.retains_signature_inputs(&snapshot) {
             return Err(invalid());
         }
         let paths: BTreeSet<_> = self
@@ -280,7 +285,7 @@ impl QueryEngine {
                 },
             );
         }
-        if !Arc::ptr_eq(&snapshot, &self.signature_inputs()) {
+        if !self.retains_signature_inputs(&snapshot) {
             return Err(invalid());
         }
         Ok(Arc::new(FrontCheckedSignatures {

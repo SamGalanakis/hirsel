@@ -199,7 +199,6 @@ impl QueryEngine {
         let owner_bytes = crate::NativeRecordContext::capture(self)
             .input_bytes()
             .ok_or_else(refused)?;
-
         let front_inputs = FrontBodyQueries::input_bytes(definitions)
             .and_then(|bytes| bytes.checked_add(owner_bytes))
             .and_then(|bytes| bytes.checked_add(instance_weight.bytes()))

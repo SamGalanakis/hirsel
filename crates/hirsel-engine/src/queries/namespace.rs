@@ -690,7 +690,6 @@ impl QueryEngine {
         let mut weight = crate::NativeMetadataWeight::default();
         weight.add(size_of_val(&*source_paths) + size_of_val(&*roots));
         weight.instance_bodies(&mut instances);
-
         let retained = NamespaceCapture::input_bytes(definitions)
             .and_then(|bytes| bytes.checked_add(weight.bytes()))
             .and_then(|bytes| {

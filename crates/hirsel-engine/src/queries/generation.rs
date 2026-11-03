@@ -15,16 +15,16 @@ use hirsel_syntax::{
 use hirsel_types::SignatureKind;
 mod accepted;
 mod bootstrap;
-mod instance_bootstrap;
+pub(crate) mod demand;
+mod scope;
+pub use scope::{FrontDemandAdmission, FrontDemandError, FrontDemandScope};
 mod instances;
 mod syntax;
 pub use bootstrap::{
     FrontRegistrationBootstrap, FrontRegistrationBootstrapAdmission,
     FrontRegistrationBootstrapError,
 };
-pub use instance_bootstrap::{
-    FrontInstanceBootstrap, FrontInstanceBootstrapAdmission, FrontInstanceBootstrapError,
-};
+
 pub(crate) mod task;
 pub use accepted::{AcceptedFrontRegistration, FrontRegistrationFailure};
 pub use instances::{FrontInstanceDiscovery, FrontInstanceRequest, FrontInstanceSyntax};

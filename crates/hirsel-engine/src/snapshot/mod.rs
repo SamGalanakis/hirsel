@@ -1170,6 +1170,7 @@ impl QueryEngine {
         let headers = self
             .declared_header_inputs()
             .unwrap_or_else(|| crate::queries::header_products::HeaderProducts::capture(self));
+        self.inherit_demand_header_scope(&headers);
         let row_sources = self
             .source_paths()
             .into_iter()

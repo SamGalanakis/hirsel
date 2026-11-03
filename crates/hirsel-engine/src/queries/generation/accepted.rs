@@ -186,20 +186,42 @@ impl AcceptedFrontRegistration {
         {
             return Err(invalid("original declaration changed".into()));
         }
-        if let Some(key) = self
-            .reads
-            .first_changed(|key| engine.observe(self.definition(), key))
-        {
+        let snapshot = engine.signature_inputs();
+        let execution = if engine.verify == Verify::On {
+            let anchors = crate::NativeRecordContext::capture(engine);
+            let receipt = self
+                .acceptance()
+                .ok_or_else(|| invalid("missing private execution acceptance".into()))?;
+            Some(
+                snapshot
+                    .revalidate_execution(receipt, |path, occurrence| {
+                        crate::NativeRecordSource::record_source_anchor(&anchors, path, occurrence)
+                            .or_else(|| {
+                                engine.items.iter().find_map(|(owner, candidates)| {
+                                    (generation::task::GeneratorInput::private_path(owner) == *path
+                                        && occurrence == 0)
+                                        .then(|| candidates.first().map(|syntax| syntax.anchor))
+                                        .flatten()
+                                })
+                            })
+                    })
+                    .ok_or_else(|| {
+                        invalid("V refused private execution in the current environment".into())
+                    })?,
+            )
+        } else {
+            None
+        };
+        if let Some(key) = self.reads.first_changed(|key| {
+            if matches!(key, ReadKey::ValidationUniverse(_)) && execution.is_some() {
+                self.reads.get(key)
+            } else {
+                engine.observe(self.definition(), key)
+            }
+        }) {
             return Err(invalid(format!(
                 "generator or normalization read changed: {key:?}"
             )));
-        }
-        if (engine.verify != Verify::Off && self.acceptance().is_none())
-            || !engine.lower_acceptance_holds(self.acceptance())
-        {
-            return Err(invalid(
-                "private generator acceptance no longer holds".into(),
-            ));
         }
         Ok(())
     }

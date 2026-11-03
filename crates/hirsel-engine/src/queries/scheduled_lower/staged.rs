@@ -98,16 +98,14 @@ impl FrontLowerQueries {
             "hirsel.front.staged-evaluate.v1",
             [original.0.0.as_slice(), bytes.as_slice()],
         );
-        let query = QueryId {
-            kind: FRONT_EVALUATE_KIND,
-            address: hirsel_artifact_store::Address(hash),
-        };
+        let query = self.namespace.query_id(FRONT_EVALUATE_KIND, hash);
+        let live = query.address.0;
         let mut selections = self
             .staged
             .selections
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if !selections.contains_key(&hash) {
+        if !selections.contains_key(&live) {
             let mut weight = crate::NativeMetadataWeight::default();
             let mut previous = crate::NativeMetadataWeight::default();
             weight.tree::<ContentHash, Selection>(selections.len() + 1);
@@ -127,7 +125,7 @@ impl FrontLowerQueries {
                 .checked_sub(required)
                 .ok_or(QueryError::NotImplemented)?;
             selections.insert(
-                hash,
+                live,
                 Selection {
                     declaration: id,
                     owner,

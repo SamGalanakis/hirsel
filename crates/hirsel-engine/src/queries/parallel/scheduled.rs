@@ -63,6 +63,7 @@ struct FrontFacts {
     dead_arms: Option<LintFacts>,
     table_keys: Option<Arc<crate::table_keys::TableKeyUse>>,
     memos: Box<[(crate::memo::MemoKey, Arc<Reads>)]>,
+    diagnostic_sources: Option<Arc<namespace::DiagnosticSources>>,
     _backing: Arc<LiveSourceBacking>,
 }
 enum FrontSlot {
@@ -131,6 +132,7 @@ impl FrontFacts {
             dead_arms: dead_arms.map(LintFacts::capture),
             table_keys,
             memos: memos.into_boxed_slice(),
+            diagnostic_sources: None,
             _backing: backing,
         })
     }
@@ -168,7 +170,8 @@ struct Input {
 struct FrontSourceBacking {
     products: SharedProductSource,
     admitted: u64,
-    allowance: MemoryReservationPool,
+    allowance: Arc<MemoryReservationPool>,
+    _inputs: MemoryReservation,
     _sources: SourceMap,
     headers: Option<std::sync::Weak<header_products::HeaderProducts>>,
 }
@@ -234,7 +237,16 @@ impl Drop for LiveSourceBacking {
             .charge;
     }
 }
+#[derive(Clone)]
+struct Forwarded {
+    owner: Arc<FrontBodyQueries>,
+    selected: Result<ProductRef, Reference>,
+    alias: Result<ProductRef, Reference>,
+    successor: scheduled_lower::SuccessorCapture,
+}
 pub struct FrontBodyQueries {
+    demand: std::sync::OnceLock<std::sync::Weak<generation::demand::DemandProducer>>,
+    forwarded: Mutex<BTreeMap<Key, Forwarded>>,
     inputs: BTreeMap<Key, Input>,
     by_definition: Box<[(DefId, Key)]>,
     body_demands: Box<[(Key, Key)]>,
@@ -303,6 +315,33 @@ const SOURCE_INPUT: Domain = Domain {
     schema: 1,
 };
 impl FrontBodyQueries {
+    fn delegated(&self, selected: &Result<ProductRef, Reference>) -> Option<Forwarded> {
+        self.forwarded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .find(|row| &row.alias == selected)
+            .cloned()
+    }
+    pub(crate) fn successor_for(
+        &self,
+        path: &DefPath,
+    ) -> Option<scheduled_lower::SuccessorCapture> {
+        let query = self.query(path)?;
+        self.forwarded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&query.address.0)
+            .map(|row| row.successor.clone())
+    }
+    pub(crate) fn bind_demand(&self, demand: &Arc<generation::demand::DemandProducer>) {
+        let _ = self.demand.set(Arc::downgrade(demand));
+    }
+    pub(crate) fn owns_query(&self, query: QueryId) -> bool {
+        query.kind == FRONT_BODY_KIND
+            && (self.inputs.contains_key(&query.address.0)
+                || index_value(&self.body_demands, &query.address.0).is_some())
+    }
     pub(crate) fn diagnostic_phase(&self, diagnostic: &Diagnostic) -> Option<String> {
         let matches = |candidate: &Diagnostic| {
             candidate.rule == diagnostic.rule && candidate.primary == diagnostic.primary
@@ -1378,6 +1417,10 @@ impl FrontBodyQueries {
         self: &Arc<Self>,
         selected: Result<ProductRef, Reference>,
     ) -> Option<FrontCheckedOutput> {
+        if let Some(row) = self.delegated(&selected) {
+            return row.owner.checked(row.selected);
+        }
+
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let key = self.selection_key(&selected, &slots)?;
         let outcome = match slots.get(&key)? {
@@ -1434,6 +1477,10 @@ impl FrontBodyQueries {
         &self,
         selected: Result<ProductRef, Reference>,
     ) -> Option<Arc<Reads>> {
+        if let Some(row) = self.delegated(&selected) {
+            return row.owner.selected_reads(row.selected);
+        }
+
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let key = self.selection_key(&selected, &slots)?;
         match slots.get(&key)? {
@@ -1446,6 +1493,10 @@ impl FrontBodyQueries {
         &self,
         selected: Result<ProductRef, Reference>,
     ) -> Option<FrontCheckFacts> {
+        if let Some(row) = self.delegated(&selected) {
+            return row.owner.check_facts(row.selected);
+        }
+
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let key = self.selection_key(&selected, &slots)?;
         let selected = match slots.get(&key)? {
@@ -1497,6 +1548,20 @@ impl FrontBodyQueries {
         })
     }
     /// Failure of an already settled body, without decoding or demanding it.
+    pub(crate) fn diagnostic_sources(
+        &self,
+        reference: Reference,
+    ) -> Option<Arc<namespace::DiagnosticSources>> {
+        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        slots.values().find_map(|slot| match slot {
+            FrontSlot::Live { outcome, .. } if matches!(&outcome.state, FrontState::Failed { record, .. } if *record == reference) => outcome.diagnostic_sources.clone(),
+            _ => None,
+        })
+    }
+    pub(crate) fn completed_failure(&self, path: &DefPath) -> Option<(Reference, QueryError)> {
+        let reference = self.completed_product(self.query(path)?)?.err()?;
+        Some((reference, self.completed_error(path)?))
+    }
     pub(crate) fn completed_error(&self, path: &DefPath) -> Option<QueryError> {
         let query = self.query(path)?;
         let outcomes = self.slots.lock().unwrap_or_else(|error| error.into_inner());
@@ -1533,6 +1598,10 @@ impl FrontBodyQueries {
     /// An immutable outcome, including exact error-phase and read evidence.
     /// This lookup never adopts a product into a mutable source namespace.
     pub fn publication(&self, selected: Result<ProductRef, Reference>) -> Option<PublishedResult> {
+        if let Some(row) = self.delegated(&selected) {
+            return row.owner.publication(row.selected);
+        }
+
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let key = self.selection_key(&selected, &slots)?;
         let outcome = match slots.get(&key)? {
@@ -1562,6 +1631,10 @@ impl FrontBodyQueries {
         self: &Arc<Self>,
         selected: Result<ProductRef, Reference>,
     ) -> Option<FrontBodyOutput> {
+        if let Some(row) = self.delegated(&selected) {
+            return row.owner.outcome(row.selected);
+        }
+
         let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let key = self.selection_key(&selected, &slots)?;
         let outcome = match slots.get(&key)? {
@@ -1747,6 +1820,16 @@ impl QueryFactory for Factory {
     }
 
     fn create(&self, query: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
+        if !self.0.owns_query(query)
+            && let Some(front) = self
+                .0
+                .demand
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+                .and_then(|demand| demand.front_for(query))
+        {
+            return front.factory().create(query);
+        }
         if query.kind != FRONT_BODY_KIND {
             return Err(self.0.errors.protocol);
         }
@@ -1790,6 +1873,76 @@ impl QueryTask for BodyTask {
         if let Some(result) = self.terminal.clone() {
             return finish(result);
         }
+        let definition = self.queries.inputs[&self.input].definition;
+        let pending = self
+            .queries
+            .namespace
+            .bodies
+            .get(&definition)
+            .is_some_and(|body| body.generated)
+            && self.queries.inputs[&self.input].registration.is_none();
+        if pending {
+            let Some(producer) = self.queries.demand.get().and_then(std::sync::Weak::upgrade)
+            else {
+                return finish(Err(self.queries.errors.protocol));
+            };
+            let demand = match producer.query(
+                self.queries.namespace.clone(),
+                definition.path(),
+                self.queries
+                    .namespace
+                    .syntax(definition.path())
+                    .map_or(Span::default(), |syntax| syntax.item.name_span),
+            ) {
+                Ok(query) => query,
+                Err(_) => return finish(Err(self.queries.errors.resource)),
+            };
+            let selected = match cx.read(demand) {
+                std::task::Poll::Pending => return QueryPoll::Waiting(vec![demand]),
+                std::task::Poll::Ready(selected) => selected,
+            };
+            if let Some(failure) = producer.failed(demand) {
+                cx.release_body(demand);
+                let result = self.publish_demand_failure(cx, failure);
+                self.terminal = Some(result.clone());
+                return finish(result);
+            }
+            let successor = match producer.completed(demand) {
+                Some(Ok(successor)) => successor,
+                _ => return finish(Err(selected.err().unwrap_or(self.queries.errors.protocol))),
+            };
+            let owner = successor.owner().body_front().clone();
+            let Some(query) = (if self.materialize {
+                owner.body_query(definition.path())
+            } else {
+                owner.query(definition.path())
+            }) else {
+                return finish(Err(self.queries.errors.protocol));
+            };
+            let selected = match cx.read(query) {
+                std::task::Poll::Pending => return QueryPoll::Waiting(vec![query]),
+                std::task::Poll::Ready(selected) => selected,
+            };
+            let alias = selected.clone().map(|mut product| {
+                product.address = self.query.address;
+                product
+            });
+            self.queries
+                .forwarded
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(
+                    self.input,
+                    Forwarded {
+                        owner,
+                        selected,
+                        alias: alias.clone(),
+                        successor,
+                    },
+                );
+            self.terminal = Some(alias.clone());
+            return finish(alias);
+        }
         if self.materialize {
             let parent = QueryId {
                 kind: FRONT_BODY_KIND,
@@ -1816,6 +1969,65 @@ fn finish(result: Result<ProductRef, Reference>) -> QueryPoll {
     }
 }
 impl BodyTask {
+    fn publish_demand_failure(
+        &self,
+        cx: &mut dyn QueryContext,
+        failure: generation::demand::DemandFailure,
+    ) -> Result<ProductRef, Reference> {
+        let queries = &self.queries;
+        let input = &queries.inputs[&self.input];
+        let phase = Some(QueryKind::Generate);
+        let outcome = ModeResult {
+            definition: input.definition.path().clone(),
+            result: Err(failure.error.clone()),
+            phase,
+            summary: None,
+            reads: failure.reads.clone(),
+            diagnostic_phases: vec![],
+        };
+        let bytes = queries
+            .records
+            .encode_record(
+                &(
+                    input.definition,
+                    Some(&failure.error),
+                    phase.map(QueryKind::phase_name),
+                    Vec::<(Diagnostic, String)>::new(),
+                    &*failure.reads,
+                ),
+                |anchor| {
+                    crate::NativeRecordSource::record_owner(&*queries.namespace.anchors, anchor)
+                        .or_else(|| failure.sources.owner(anchor))
+                },
+            )
+            .ok_or(queries.errors.resource)?;
+        if bytes.len() as u64 > self.weight.scratch {
+            return Err(queries.errors.resource);
+        }
+        let reference = queries
+            .store
+            .put_content(FAILURE, &bytes)
+            .ok_or(queries.errors.resource)?;
+        let action = crate::store::query_action(&input.key, input.key.1, &failure.reads);
+        let mut cached = queries
+            .publish_facts(
+                cx,
+                self.input,
+                Some(reference),
+                action,
+                outcome,
+                None,
+                None,
+                None,
+                vec![],
+            )
+            .ok_or(queries.errors.resource)?;
+        Arc::get_mut(&mut cached.facts)
+            .ok_or(queries.errors.protocol)?
+            .diagnostic_sources = Some(failure.sources);
+        queries.install_outcome(self.input, cached);
+        Err(reference)
+    }
     fn publish_body(
         &self,
         cx: &mut dyn QueryContext,
@@ -1890,9 +2102,11 @@ impl BodyTask {
         }
         drop(slots);
         if let Some(reference) = reference {
-            queries
-                .store
-                .associate_written_product(self.query.address, action, reference);
+            queries.store.associate_written_product(
+                hirsel_artifact_store::Address(input.key.0),
+                action,
+                reference,
+            );
         }
         Ok(product)
     }
@@ -2029,9 +2243,11 @@ impl BodyTask {
             Err(reference) => Some(Err(reference)),
             Ok(publication) => {
                 self.remember_carry();
-                queries
-                    .store
-                    .associate_written_product(self.query.address, action, variant.output);
+                queries.store.associate_written_product(
+                    hirsel_artifact_store::Address(input.key.0),
+                    action,
+                    variant.output,
+                );
                 Some(Ok(publication))
             }
         }
@@ -2359,9 +2575,11 @@ impl BodyTask {
             Ok(publication) => {
                 self.remember_carry();
                 if let Some(record) = record {
-                    queries
-                        .store
-                        .associate_written_product(self.query.address, action, record);
+                    queries.store.associate_written_product(
+                        hirsel_artifact_store::Address(input.key.0),
+                        action,
+                        record,
+                    );
                 }
                 Ok(publication)
             }
@@ -2478,6 +2696,20 @@ impl QueryEngine {
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
         let capture = self.capture_namespace(definitions, registrations, allowance.bytes())?;
+        for definition in definitions {
+            let syntax = capture.syntax(definition)?;
+            if generation::generator(&syntax).is_some()
+                && !generation::instance_bodied(&syntax)
+                && !capture
+                    .registrations
+                    .contains_key(&DefId::intern(definition))
+            {
+                return Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                    operation: "front query admission".into(),
+                    message: "generated body requires an accepted registration view".into(),
+                }));
+            }
+        }
         self.front_body_queries_in(definitions, capture, weight, allowance, errors)
     }
     pub fn front_body_queries_in(
@@ -2488,6 +2720,18 @@ impl QueryEngine {
         allowance: MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
+        let pool = MemoryReservationPool::new(allowance).map_err(|_| QueryError::NotImplemented)?;
+        self.front_body_queries_in_pool(definitions, namespace, weight, Arc::new(pool), errors)
+    }
+    pub(crate) fn front_body_queries_in_pool(
+        &mut self,
+        definitions: &[DefPath],
+        namespace: Arc<NamespaceCapture>,
+        weight: MemoryWeight,
+        allowance: Arc<MemoryReservationPool>,
+        errors: RuntimeErrors,
+    ) -> Result<Arc<FrontBodyQueries>, QueryError> {
+        let available = allowance.available_bytes();
         namespace.require_environment(self)?;
         let registrations = namespace
             .registrations
@@ -2506,13 +2750,13 @@ impl QueryEngine {
                 operation: "front query admission".into(),
                 message: format!(
                     "immutable front inputs require {required} bytes; available {} bytes",
-                    allowance.bytes()
+                    available
                 ),
             })
         };
         let mut required = FrontBodyQueries::input_bytes(definitions)
             .ok_or_else(|| refusal("input size overflow"))?;
-        if required > allowance.bytes() {
+        if required > available {
             return Err(refused_inputs(required));
         }
         let store = self
@@ -2555,7 +2799,7 @@ impl QueryEngine {
                     .ok_or_else(|| refusal("anchor size overflow"))?,
             )
             .ok_or_else(|| refusal("anchor size overflow"))?;
-        if required > allowance.bytes() {
+        if required > available {
             return Err(refused_inputs(required));
         }
         let input_records = crate::NativeRecords::new(self.types.clone(), store.clone());
@@ -2577,7 +2821,7 @@ impl QueryEngine {
                             .ok_or_else(|| refusal("sibling size overflow"))?,
                     )
                     .ok_or_else(|| refusal("sibling size overflow"))?;
-                if required > allowance.bytes() {
+                if required > available {
                     return Err(refused_inputs(required));
                 }
                 let mut refs = Vec::with_capacity(written.len());
@@ -2647,10 +2891,10 @@ impl QueryEngine {
                 }
                 Arc::new(header)
             } else if generation::generator(&original).is_some() {
-                registration
-                    .ok_or_else(|| refusal("generator without an accepted registration view"))?
-                    .syntax
-                    .clone()
+                registration.map_or_else(
+                    || original.clone(),
+                    |registration| registration.syntax.clone(),
+                )
             } else {
                 if registration.is_some() {
                     return Err(refusal("registration for a non-generator"));
@@ -2677,7 +2921,7 @@ impl QueryEngine {
                         message: format!("cannot archive accepted source for {definition}"),
                     })
                 })?;
-            if required > allowance.bytes() {
+            if required > available {
                 return Err(refused_inputs(required));
             }
             let syntax = store
@@ -2693,7 +2937,7 @@ impl QueryEngine {
             ));
         }
         let snapshot = namespace.snapshot.clone();
-        let retention = Arc::new(Mutex::new(allowance.bytes() - required));
+        let retention = Arc::new(Mutex::new(available - required));
         if let Some(headers) = snapshot.header_products() {
             headers.configure_private(weight.scratch, registrations);
             headers.archive_sources(store.clone())?;
@@ -2702,7 +2946,7 @@ impl QueryEngine {
         for (definition, syntax, text, implementation, key, registration) in selected {
             let id = DefId::intern(&definition);
             inputs.insert(
-                key.0,
+                namespace.query_id(FRONT_BODY_KIND, key.0).address.0,
                 Input {
                     registration,
                     definition: id,
@@ -2745,21 +2989,22 @@ impl QueryEngine {
             })
             .collect::<Vec<_>>();
         body_demands.sort_unstable_by_key(|&(demand, _)| demand);
-        let admitted = allowance.bytes();
-        let mut allowance = allowance;
-        namespace.admit(&mut allowance, self.sources.clone())?;
+        let admitted = available;
+        let mut inputs_allowance = allowance
+            .take(required)
+            .ok_or_else(|| refusal("shared Front input partition"))?;
+        namespace.admit(&mut inputs_allowance, self.sources.clone())?;
         let products = ProductSource::admit_shared(
             anchors.as_ref().clone(),
             input_records.clone(),
-            &mut allowance,
+            &mut inputs_allowance,
         )
         .ok_or_else(|| refusal("shared product admission"))?;
-        let pool =
-            MemoryReservationPool::new(allowance).map_err(|_| refusal("front allowance pool"))?;
         let backing = Arc::new(FrontSourceBacking {
             products,
             admitted,
-            allowance: pool,
+            allowance,
+            _inputs: inputs_allowance,
             _sources: self.sources.clone(),
             headers: snapshot.header_products().map(Arc::downgrade),
         });
@@ -2782,6 +3027,8 @@ impl QueryEngine {
             .map(|headers| headers.configure_source_backing(backing.clone(), retention.clone()));
         let namespace_sources = namespace.sources.clone();
         Ok(Arc::new(FrontBodyQueries {
+            demand: Default::default(),
+            forwarded: Mutex::new(BTreeMap::new()),
             inputs,
             by_definition: by_definition.into_boxed_slice(),
             body_demands: body_demands.into_boxed_slice(),

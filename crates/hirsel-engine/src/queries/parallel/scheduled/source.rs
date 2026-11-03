@@ -339,7 +339,8 @@ mod tests {
         let backing = Arc::new(FrontSourceBacking {
             products,
             admitted: allowance.bytes(),
-            allowance: MemoryReservationPool::new(allowance).ok().unwrap(),
+            _inputs: allowance.split(0).unwrap(),
+            allowance: Arc::new(MemoryReservationPool::new(allowance).ok().unwrap()),
             _sources: engine.sources.clone(),
             headers: None,
         });

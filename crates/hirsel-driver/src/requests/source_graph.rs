@@ -167,6 +167,7 @@ fn complete_source_index(
     }
 }
 struct SourceProducts {
+    scope_roots: Option<Vec<DefPath>>,
     source_index: Arc<Mutex<SourceIndexSlot>>,
     source_generation: Arc<()>,
     declaration_export: bool,
@@ -281,6 +282,21 @@ impl GraphProducts for SourceProducts {
         }
         if self.declaration_export {
             return matches!(operation, CompileOperation::DataAbi) && self.native_sources.is_some();
+        }
+        if let Some(roots) = &self.scope_roots {
+            let same_scope = match operation {
+                CompileOperation::Tir { definition } => {
+                    roots.len() == 1
+                        && definition.as_ref().or(self.launch_entry.as_ref()) == roots.first()
+                }
+                CompileOperation::TirBatch { definitions }
+                | CompileOperation::NativeSources { roots: definitions } => roots == definitions,
+                CompileOperation::Inspect { .. } | CompileOperation::RecomputeCounts { .. } => true,
+                _ => false,
+            };
+            if !same_scope {
+                return false;
+            }
         }
         match operation {
             CompileOperation::Check { lowering } => {
@@ -897,7 +913,9 @@ impl SourceProducts {
                 return ToolError::Query {
                     error,
                     phase,
-                    sources: sources.clone(),
+                    sources: lower
+                        .failure_sources(reference)
+                        .unwrap_or_else(|| sources.clone()),
                 };
             }
             let message = if reference == errors.resource {
@@ -1198,6 +1216,67 @@ pub(super) fn install(
         native: needs_native,
         proofs: needs_proofs,
     };
+    let demand_roots = match &request.operation {
+        CompileOperation::Tir { definition } => {
+            vec![definition.clone().unwrap_or_else(|| program.entry.clone())]
+        }
+        CompileOperation::TirBatch { definitions } => definitions.clone(),
+        CompileOperation::NativeSources { roots } if !roots.is_empty() => roots.clone(),
+        CompileOperation::NativeSources { .. } => program.engine.front_native_source_roots(),
+        CompileOperation::NativeBuild(selected) | CompileOperation::NativeRun(selected) => {
+            let mut roots = vec![
+                selected
+                    .definition
+                    .clone()
+                    .unwrap_or_else(|| program.entry.clone()),
+            ];
+            roots.extend(selected.test_entries.iter().map(|(path, _)| path.clone()));
+            if let super::NativeOutput::Objects { roots: objects } = &selected.output {
+                roots.extend(objects.iter().cloned());
+            }
+            roots
+        }
+        CompileOperation::NativeOwnership(selected) => {
+            vec![
+                selected
+                    .definition
+                    .clone()
+                    .unwrap_or_else(|| program.entry.clone()),
+            ]
+        }
+        CompileOperation::ExportTir => vec![program.entry.clone()],
+        CompileOperation::DataAbi => vec![],
+        _ => program.engine.front_source_roots(),
+    };
+    let demand_policy = match &request.operation {
+        CompileOperation::Check { lowering }
+        | CompileOperation::CheckedProducts { lowering, .. } => *lowering,
+        CompileOperation::Expand => LoweringPolicy::Comptime,
+        _ => LoweringPolicy::Reachable,
+    };
+    let prefix = matches!(
+        request.operation,
+        CompileOperation::Tir { .. }
+            | CompileOperation::TirBatch { .. }
+            | CompileOperation::NativeSources { .. }
+    );
+    let (namespace, limits) = hirsel_engine::requests::source_graph::prepare_source_scope(
+        &mut program.engine,
+        &selection,
+        &demand_roots,
+        demand_policy,
+        prefix,
+        shape,
+        config.jobs,
+        limits,
+        &host,
+        &mut loading,
+        store.as_ref(),
+    )?;
+    let scope_roots = (prefix && namespace.is_some()).then(|| match &request.operation {
+        CompileOperation::NativeSources { roots } => roots.clone(),
+        _ => demand_roots.clone(),
+    });
     let mut installed = hirsel_engine::requests::source_graph::install(
         &mut program.engine,
         &selection,
@@ -1208,6 +1287,7 @@ pub(super) fn install(
         loading,
         store.as_ref(),
         carry,
+        namespace,
     )?;
     let definitions = std::mem::take(&mut installed.definitions);
     let front = installed.front.clone();
@@ -1933,6 +2013,7 @@ pub(super) fn install(
         errors,
     });
     let products = Arc::new(SourceProducts {
+        scope_roots,
         source_index: source_index.clone(),
         source_generation,
         declaration_export: matches!(request.operation, CompileOperation::DataAbi),

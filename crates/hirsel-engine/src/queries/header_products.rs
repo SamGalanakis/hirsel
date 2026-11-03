@@ -173,6 +173,8 @@ pub(crate) struct HeaderProducts {
     failure: Option<QueryError>,
     syntax: Arc<HeaderSources>,
     private: Option<private::PrivateProducts>,
+    private_working: AtomicU64,
+    private_registrations: OnceLock<Vec<Arc<AcceptedFrontRegistration>>>,
     declarations: crate::DeclarationIndex,
     catalog: catalog::Catalog,
     types: Arc<hirsel_types::TypeInterner>,
@@ -194,6 +196,9 @@ pub(crate) struct HeaderProducts {
     failures: BTreeMap<DefId, Vec<hirsel_types::UniqueFailure>>,
 }
 impl HeaderProducts {
+    pub(crate) fn staged_constants(&self) -> &BTreeMap<DefPath, crate::comptime::StagedConstant> {
+        &self.staged
+    }
     pub(crate) fn capture(engine: &QueryEngine) -> Arc<Self> {
         let private = private::PrivateProducts::capture(engine);
         let declarations = engine.declarations.frozen();
@@ -257,6 +262,8 @@ impl HeaderProducts {
                 .map(|headers| headers.syntax.clone())
                 .unwrap_or_else(|| Arc::new(HeaderSources::capture(engine))),
             private,
+            private_working: AtomicU64::new(0),
+            private_registrations: Default::default(),
             declarations: engine.declarations.header_inputs(),
             catalog: engine.catalog.clone(),
             types: engine.types.clone(),
@@ -285,6 +292,15 @@ impl HeaderProducts {
         (self.provisional
             && engine.private_summary_active
             && self.declarations.revision() == engine.declarations.revision()
+            && self.staged.len() == engine.staged_constants.len()
+            && self.staged.iter().all(|(path, previous)| {
+                engine.staged_constants.get(path).is_some_and(|current| {
+                    previous.owner == current.owner
+                        && previous.expression == current.expression
+                        && previous.inputs == current.inputs
+                        && previous.signature.fingerprint == current.signature.fingerprint
+                })
+            })
             && self.environment == engine.environment
             && self.limits == engine.comptime_limits
             && self.published_manifest == engine.published_manifest
@@ -292,7 +308,7 @@ impl HeaderProducts {
             && engine.private_signature_publications.is_empty())
         .then(|| self.clone())
     }
-    fn execution(self: &Arc<Self>) -> QueryEngine {
+    pub(in crate::queries) fn execution(self: &Arc<Self>) -> QueryEngine {
         let mut engine =
             QueryEngine::new_with_hold_bytes(self.environment.clone(), self.adapters.adapters(), 0);
         engine.sources = self.sources.clone();
@@ -710,7 +726,7 @@ impl HeaderProducts {
     /// Headers a later snapshot of the same request captured are charged to
     /// the Front partition, and prove private modules in its working space,
     /// exactly as the Front producer's own headers are.
-    pub(crate) fn inherit_front(&self, front: &Self) {
+    pub(crate) fn inherit_snapshot_scope(&self, front: &Self, inputs: &[[ContentHash; 3]]) {
         let shared = front
             .admission
             .lock()
@@ -721,7 +737,24 @@ impl HeaderProducts {
             *admission = shared;
         }
         drop(admission);
-        self.inherit_private(front);
+        self.inherit_private_snapshot(front, inputs);
+    }
+    pub(crate) fn inherit_registration_scope(
+        &self,
+        previous: &Self,
+        registrations: &[Arc<AcceptedFrontRegistration>],
+    ) {
+        let shared = previous
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
+        if admission.is_none() {
+            *admission = shared;
+        }
+        drop(admission);
+        self.inherit_private_scope(previous, registrations);
     }
     /// Evict one unpinned settled entry: a header row, else a module proof.
     pub(crate) fn evict(&self) -> bool {
@@ -813,6 +846,16 @@ impl QueryEngine {
         self.header_products
             .as_ref()
             .and_then(|headers| headers.declared_inputs(self))
+    }
+    pub(crate) fn inherit_demand_header_scope(&self, headers: &header_products::HeaderProducts) {
+        if self.private_bootstrap_active
+            && let Some(previous) = self
+                .snapshot
+                .as_ref()
+                .and_then(|(_, snapshot)| snapshot.header_products())
+        {
+            headers.inherit_snapshot_scope(previous, &self.private_summary_inputs);
+        }
     }
     pub(crate) fn adopt_completed_headers(&mut self) {
         let Some((stamp, snapshot)) = &self.snapshot else {

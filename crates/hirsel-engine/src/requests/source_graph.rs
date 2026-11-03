@@ -7,14 +7,12 @@
 use crate::runtime::*;
 use crate::store::{Domain, NoneStore, RequestStore, ResultStore};
 use crate::{
-    AcceptedFrontRegistration, CheckOutput, FRONT_BODY_KIND, FRONT_CHECK_KIND, FRONT_EVALUATE_KIND,
-    FRONT_GROWTH_KIND, FRONT_LOWER_KIND, FRONT_STAGE_KIND, FRONT_STORAGE_GRAPH_KIND,
-    FrontBodyQueries, FrontCarry, FrontCheckPlan, FrontCheckQueries, FrontGrowthQueries,
-    FrontInputFootprint, FrontInstanceBootstrap, FrontInstanceBootstrapAdmission,
-    FrontInstanceBootstrapError, FrontLowerQueries, FrontNativeDefinitionInputs,
-    FrontRegistrationBootstrapError, FrontRunInputs, FrontStageQueries, FrontStorageGraphQueries,
-    FrontStorageQueries, LowerCarry, LoweringPolicy, QueryEngine, QueryError, ToolError,
-    UnsafeFfiPackage,
+    CheckOutput, FRONT_BODY_KIND, FRONT_CHECK_KIND, FRONT_EVALUATE_KIND, FRONT_GROWTH_KIND,
+    FRONT_LOWER_KIND, FRONT_STORAGE_GRAPH_KIND, FrontBodyQueries, FrontCarry, FrontCheckPlan,
+    FrontCheckQueries, FrontDemandAdmission, FrontDemandError, FrontDemandScope,
+    FrontGrowthQueries, FrontInputFootprint, FrontLowerQueries, FrontNativeDefinitionInputs,
+    FrontRegistrationBootstrapError, FrontRunInputs, FrontStorageGraphQueries, FrontStorageQueries,
+    LowerCarry, LoweringPolicy, QueryEngine, QueryError, ToolError, UnsafeFfiPackage,
 };
 use hirsel_intern::jobs::Jobs;
 use hirsel_span::{FileId, SourceMap};
@@ -686,30 +684,86 @@ pub struct InstalledSource {
     pub errors: RuntimeErrors,
 }
 
-/// Install the scheduled source graph of `selection` in `engine`. The engine's
-/// private inference holds the runtime partition when this returns; the host
-/// releases it into the executor after adding its own roots.
-#[allow(clippy::too_many_arguments)]
-pub fn install(
-    engine: &mut QueryEngine,
-    selection: &SourceSelection,
-    shape: SourceShape,
+struct SourcePlanning {
+    definitions: Vec<DefPath>,
+    footprint: FrontInputFootprint,
+    run_inputs: Option<FrontRunInputs>,
+    catalogue: Option<FrontNativeDefinitionInputs>,
+    run_error: Option<QueryError>,
+    plan: Plan,
+}
+struct SourcePlanner<'a> {
+    selection: &'a SourceSelection,
+    host: &'a dyn SourceHost,
     jobs: Jobs,
+    shape: SourceShape,
+}
+impl SourcePlanner<'_> {
+    fn within(
+        &self,
+        limits: RequestLimits,
+        engine: &mut QueryEngine,
+        definitions: &[DefPath],
+        footprint: FrontInputFootprint,
+        run_inputs: &Option<FrontRunInputs>,
+        catalogue: &Option<FrontNativeDefinitionInputs>,
+    ) -> Result<Plan, ToolError> {
+        let inspection_bytes = self
+            .host
+            .inspection_bytes(definitions, engine.memo_snapshot().len())
+            .ok_or_else(|| uninstalled())?;
+        let source_index_bytes = engine.source_index_bytes().unwrap_or(0);
+        let contexts = self
+            .selection
+            .files
+            .iter()
+            .map(|(file, context, _)| (*file, context.clone()))
+            .collect::<Vec<_>>();
+        let check_inventory = engine
+            .front_check_input_bytes(
+                &contexts,
+                definitions,
+                self.selection.lint_package.as_ref(),
+                MemoryWeight::default(),
+            )
+            .ok_or_else(|| uninstalled())?;
+        Plan::new(
+            PlanInputs {
+                limits,
+                jobs: self.jobs,
+                input_bytes: self.selection.input_bytes,
+                definitions,
+                check_inventory,
+                shape: self.shape,
+                footprint,
+                run_input_bytes: run_inputs.as_ref().map_or(0, |inputs| inputs.input_bytes()),
+                semantic_queries: run_inputs
+                    .as_ref()
+                    .map_or(0, |inputs| inputs.semantic_query_count()),
+                catalogue_bytes: catalogue.as_ref().map_or(0, |inputs| inputs.input_bytes()),
+                inspection_bytes,
+                source_index_bytes,
+            },
+            self.host,
+        )
+    }
+}
+fn plan_source(
+    engine: &mut QueryEngine,
     limits: RequestLimits,
-    host: &dyn SourceHost,
-    mut loading: LoadingAdmission,
+    planner: &SourcePlanner<'_>,
     store: &dyn ResultStore,
-    carry: Option<&SourceCarry>,
-) -> Result<InstalledSource, ToolError> {
-    engine.admit_private_inference(loading.lend_runtime());
+) -> Result<SourcePlanning, ToolError> {
+    let shape = planner.shape;
+    let selection = planner.selection;
     // Capturing the footprint and the Run and native inputs can still name a
     // specialization (GEN-6); select again until no new root appears.
     let mut definitions = selected_definitions(engine);
     let mut run_error = None;
-    let (mut footprint, mut run_inputs, mut catalogue) = loop {
+    let (footprint, run_inputs, catalogue) = loop {
         let footprint = match engine.front_input_footprint(&definitions) {
             Ok(footprint) => footprint,
-            Err(error) => return Err(loading.failed(engine_error(engine, error))),
+            Err(error) => return Err(engine_error(engine, error)),
         };
         let run_inputs = if shape.run {
             match engine.front_run_inputs(limits.snapshot_bytes) {
@@ -721,7 +775,7 @@ pub fn install(
                     run_error = Some(error);
                     None
                 }
-                Err(error) => return Err(loading.failed(engine_error(engine, error))),
+                Err(error) => return Err(engine_error(engine, error)),
             }
         } else {
             None
@@ -730,12 +784,12 @@ pub fn install(
         // declarations need their accepted views from bootstrap first.
         let generated = match engine.front_generator_roots(&definitions) {
             Ok(generators) => !generators.is_empty(),
-            Err(error) => return Err(loading.failed(engine_error(engine, error))),
+            Err(error) => return Err(engine_error(engine, error)),
         };
         let catalogue = if shape.ownership && !generated {
             match engine.front_native_definition_inputs(&definitions, limits.snapshot_bytes) {
                 Ok(inputs) => Some(inputs),
-                Err(error) => return Err(loading.failed(engine_error(engine, error))),
+                Err(error) => return Err(engine_error(engine, error)),
             }
         } else {
             None
@@ -754,50 +808,7 @@ pub fn install(
         .cloned()
         .collect::<Vec<_>>();
     store.demand(&engine.front_store_keys(&root));
-    let plan_within = |limits,
-                       engine: &mut QueryEngine,
-                       definitions: &[DefPath],
-                       footprint,
-                       run_inputs: &Option<FrontRunInputs>,
-                       catalogue: &Option<FrontNativeDefinitionInputs>| {
-        let inspection_bytes = host
-            .inspection_bytes(definitions, engine.memo_snapshot().len())
-            .ok_or_else(|| uninstalled())?;
-        let source_index_bytes = engine.source_index_bytes().unwrap_or(0);
-        let contexts = selection
-            .files
-            .iter()
-            .map(|(file, context, _)| (*file, context.clone()))
-            .collect::<Vec<_>>();
-        let check_inventory = engine
-            .front_check_input_bytes(
-                &contexts,
-                definitions,
-                selection.lint_package.as_ref(),
-                MemoryWeight::default(),
-            )
-            .ok_or_else(|| uninstalled())?;
-        Plan::new(
-            PlanInputs {
-                limits,
-                jobs,
-                input_bytes: selection.input_bytes,
-                definitions,
-                check_inventory,
-                shape,
-                footprint,
-                run_input_bytes: run_inputs.as_ref().map_or(0, |inputs| inputs.input_bytes()),
-                semantic_queries: run_inputs
-                    .as_ref()
-                    .map_or(0, |inputs| inputs.semantic_query_count()),
-                catalogue_bytes: catalogue.as_ref().map_or(0, |inputs| inputs.input_bytes()),
-                inspection_bytes,
-                source_index_bytes,
-            },
-            host,
-        )
-    };
-    let mut plan = plan_within(
+    let plan = planner.within(
         limits,
         engine,
         &definitions,
@@ -805,138 +816,184 @@ pub fn install(
         &run_inputs,
         &catalogue,
     )?;
-    let mut final_limits = limits;
-    // Written generators are accepted before the final front captures its
-    // inputs. Their bootstrap borrows this graph's whole runtime and snapshot
-    // charge, sized like the final front and Lower, and shuts down before the
-    // charge it released is admitted again. Accepted views keep their own
-    // retained bytes, which the final partitions no longer count.
-    let generators = match engine.front_generator_roots(&definitions) {
-        Ok(generators) => generators,
-        Err(error) => return Err(loading.failed(engine_error(engine, error))),
-    };
-    let ordinary = definitions
-        .iter()
-        .filter(|path| !generators.contains(path))
-        .cloned()
-        .collect::<Vec<_>>();
-    let staged = match install_staged(
-        engine,
-        &ordinary,
-        &[],
-        jobs,
-        plan.body,
-        plan.snapshots.front,
-        &mut loading,
-        host,
-        final_limits,
-        store,
-    ) {
-        Ok((installed, limits)) => {
-            final_limits = limits;
-            installed
-        }
-        Err(error) => return Err(loading.failed(error)),
-    };
-    // Staged headers are inputs to V, including a generator's private
-    // execution. Capture the generator universe after installing those inputs.
-    let inference = match engine.release_private_inference_admission() {
-        Ok(allowance) => allowance,
-        Err(error) => return Err(loading.failed(engine_error(engine, error))),
-    };
-    loading.return_runtime(inference);
-    if staged {
-        plan = plan_within(
-            final_limits,
-            engine,
-            &definitions,
-            footprint,
-            &run_inputs,
-            &catalogue,
-        )?;
+    Ok(SourcePlanning {
+        definitions,
+        footprint,
+        run_inputs,
+        catalogue,
+        run_error,
+        plan,
+    })
+}
+
+/// Await exactly the operation's source roots before installing consumers of
+/// the completed capture. Registration and Lower share one demand producer.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_source_scope(
+    engine: &mut QueryEngine,
+    selection: &SourceSelection,
+    roots: &[DefPath],
+    policy: LoweringPolicy,
+    stop_on_error: bool,
+    shape: SourceShape,
+    jobs: Jobs,
+    limits: RequestLimits,
+    host: &dyn SourceHost,
+    loading: &mut LoadingAdmission,
+    store: &dyn ResultStore,
+) -> Result<(Option<Arc<crate::NamespaceCapture>>, RequestLimits), ToolError> {
+    engine.admit_private_inference(loading.lend_runtime());
+    let definitions = selected_definitions(engine);
+    let generators = engine
+        .front_generator_roots(&definitions)
+        .map_err(|error| engine_error(engine, error))?;
+    let staged = engine
+        .front_staged_roots(&definitions)
+        .map_err(|error| engine_error(engine, error))?;
+    if roots.is_empty() || (generators.is_empty() && staged.is_empty()) {
+        let runtime = engine
+            .release_private_inference_admission()
+            .map_err(|error| engine_error(engine, error))?;
+        loading.return_runtime(runtime);
+        return Ok((None, limits));
     }
-    let bootstrap = if generators.is_empty() {
-        None
-    } else {
-        let metadata = FrontInstanceBootstrap::input_bytes(&definitions, &generators)
-            .ok_or_else(|| uninstalled())?;
-        let (runtime, snapshot) = loading.lend();
-        let lent = (runtime.bytes(), snapshot.bytes());
-        let snapshot = MemoryReservationPool::new(snapshot).map_err(|_| uninstalled())?;
-        let split = |bytes| snapshot.take(bytes).ok_or_else(|| uninstalled());
-        let front = split(plan.snapshots.front)?;
-        let lower = split(plan.snapshots.lower)?;
-        let rest = lent
-            .1
-            .checked_sub(plan.snapshots.front)
-            .and_then(|bytes| bytes.checked_sub(plan.snapshots.lower))
-            .and_then(|bytes| bytes.checked_sub(MemoryReservationPool::metadata_bytes()))
-            .ok_or_else(|| uninstalled())?;
-        let metadata = metadata.max(rest / 8);
-        let reserved = split(metadata)?;
-        let rest = rest.checked_sub(metadata).ok_or_else(|| uninstalled())?;
-        let discovery = split(rest / 7)?;
-        let text = split((rest - rest / 7) / 2)?;
-        let syntax = split(rest - rest / 7 - (rest - rest / 7) / 2)?;
-        let admission = FrontInstanceBootstrapAdmission {
+    let planned = plan_source(
+        engine,
+        limits,
+        &SourcePlanner {
+            selection,
+            host,
             jobs,
-            weight: plan.body,
-            max_reads: lower_reads(&definitions)?,
-            runtime,
-            front,
-            lower,
-            text,
-            syntax,
-            discovery,
-            metadata: reserved,
-        };
-        let errors = runtime_errors(store)?;
-        let bootstrap = match engine.bootstrap_front_instances(
+            shape,
+        },
+        store,
+    )?;
+    let definitions = planned.definitions.clone();
+    let plan = planned.plan;
+    drop(planned.run_inputs);
+    drop(planned.catalogue);
+    let inference = engine
+        .release_private_inference_admission()
+        .map_err(|error| engine_error(engine, error))?;
+    loading.return_runtime(inference);
+    let metadata =
+        FrontDemandScope::input_bytes(&definitions, &generators).ok_or_else(|| uninstalled())?;
+    let (runtime, snapshot) = loading.lend();
+    let lent = (runtime.bytes(), snapshot.bytes());
+    let snapshot = MemoryReservationPool::new(snapshot).map_err(|_| uninstalled())?;
+    let split = |bytes| snapshot.take(bytes).ok_or_else(|| uninstalled());
+    let front = split(plan.snapshots.front)?;
+    let lower = split(plan.snapshots.lower)?;
+    let rest = lent
+        .1
+        .checked_sub(plan.snapshots.front)
+        .and_then(|bytes| bytes.checked_sub(plan.snapshots.lower))
+        .and_then(|bytes| bytes.checked_sub(MemoryReservationPool::metadata_bytes()))
+        .ok_or_else(|| uninstalled())?;
+    let metadata = metadata.max(rest / 8);
+    let reserved = split(metadata)?;
+    let rest = rest.checked_sub(metadata).ok_or_else(|| uninstalled())?;
+    let discovery = split(rest / 7)?;
+    let text = split((rest - rest / 7) / 2)?;
+    let syntax = split(rest - rest / 7 - (rest - rest / 7) / 2)?;
+    let errors = runtime_errors(store)?;
+    let scope = engine
+        .demand_front_scope_with_policy(
             &definitions,
-            &definitions,
+            roots,
             &generators,
-            admission,
+            policy,
+            stop_on_error,
+            FrontDemandAdmission {
+                jobs,
+                weight: plan.body,
+                max_reads: lower_reads(&definitions)?,
+                runtime,
+                front,
+                lower,
+                text,
+                syntax,
+                discovery,
+                metadata: reserved,
+            },
             errors,
-        ) {
-            Ok(bootstrap) => bootstrap,
-            Err(error) => {
-                return Err(loading.failed(instance_bootstrap_error(engine, error, errors)));
-            }
-        };
-        // Nested pools return every released subcharge to this original
-        // partition. Generated syntax, accepted text, source owners and the
-        // returned inventory keep exactly their live charges, including pool
-        // metadata, so the final graph can reuse only the returned bytes.
-        let snapshot_bytes = snapshot.available_bytes();
-        drop(snapshot);
-        if let Err(error) = host.readmit(&mut loading, lent.0, snapshot_bytes) {
-            return Err(loading.failed(error));
-        }
-        final_limits = RequestLimits {
+        )
+        .map_err(|error| instance_bootstrap_error(engine, error, errors))?;
+    let namespace = scope.namespace().clone();
+    drop(scope);
+    let snapshot_bytes = snapshot.available_bytes();
+    drop(snapshot);
+    host.readmit(loading, lent.0, snapshot_bytes)?;
+    Ok((
+        Some(namespace),
+        RequestLimits {
             snapshot_bytes,
             ..limits
-        };
-        definitions = bootstrap.definitions().to_vec();
-        // Bootstrap publishes ordinary rows before accepted generators. The
-        // final inventory uses the host's canonical DefPath order.
-        definitions.sort();
-        Some(bootstrap)
-    };
-    let registrations = bootstrap
-        .as_ref()
-        .map_or_else(Vec::new, |b| b.registrations().to_vec());
+        },
+    ))
+}
+
+/// Install the scheduled source graph of `selection` in `engine`. The engine's
+/// private inference holds the runtime partition when this returns; the host
+/// releases it into the executor after adding its own roots.
+#[allow(clippy::too_many_arguments)]
+pub fn install(
+    engine: &mut QueryEngine,
+    selection: &SourceSelection,
+    shape: SourceShape,
+    jobs: Jobs,
+    limits: RequestLimits,
+    host: &dyn SourceHost,
+    mut loading: LoadingAdmission,
+    store: &dyn ResultStore,
+    carry: Option<&SourceCarry>,
+    namespace: Option<Arc<crate::NamespaceCapture>>,
+) -> Result<InstalledSource, ToolError> {
     engine.admit_private_inference(loading.lend_runtime());
+    let planner = SourcePlanner {
+        selection,
+        host,
+        jobs,
+        shape,
+    };
+    let SourcePlanning {
+        definitions,
+        footprint: _,
+        mut run_inputs,
+        mut catalogue,
+        mut run_error,
+        plan: _,
+    } = match plan_source(engine, limits, &planner, store) {
+        Ok(planned) => planned,
+        Err(error) => return Err(loading.failed(error)),
+    };
+    let final_limits = limits;
+    let registrations = namespace.as_ref().map_or_else(Vec::new, |namespace| {
+        namespace.registrations.values().cloned().collect()
+    });
     if shape.run || shape.ownership {
         if let Err(error) = engine.prepare_namespace_registrations(&registrations) {
             return Err(loading.failed(engine_error(engine, error)));
         }
         engine.prepare_private_summaries();
     }
-    let namespace =
-        match engine.capture_namespace(&definitions, &registrations, final_limits.snapshot_bytes) {
+    let namespace = match namespace {
+        Some(capture) => {
+            capture
+                .require_environment(engine)
+                .map_err(|error| engine_error(engine, error))?;
+            capture
+        }
+        None => match engine.capture_namespace(
+            &definitions,
+            &registrations,
+            final_limits.snapshot_bytes,
+        ) {
             Ok(capture) => capture,
             Err(error) => return Err(loading.failed(engine_error(engine, error))),
-        };
+        },
+    };
+    let footprint;
     // Registration changes the source namespace. Capture every final consumer
     // against the same accepted views, including Run and ownership catalogues.
     {
@@ -983,7 +1040,7 @@ pub fn install(
             current_definitions.len()
         ))));
     }
-    plan = plan_within(
+    let plan = planner.within(
         final_limits,
         engine,
         &definitions,
@@ -1281,7 +1338,7 @@ impl QueryEngine {
         jobs: Jobs,
         limits: RequestLimits,
         budget: &Arc<ProcessBudget>,
-        loading: LoadingAdmission,
+        mut loading: LoadingAdmission,
         store: &Arc<RequestStore>,
     ) -> Result<CheckOutput, ToolError> {
         let shape = SourceShape {
@@ -1292,6 +1349,20 @@ impl QueryEngine {
             front: carry.front.clone(),
             lower: carry.lower.clone(),
         });
+        let roots = selected_definitions(self);
+        let (namespace, limits) = prepare_source_scope(
+            self,
+            selection,
+            &roots,
+            LoweringPolicy::Comptime,
+            false,
+            shape,
+            jobs,
+            limits,
+            &BudgetHost(budget),
+            &mut loading,
+            store.as_ref(),
+        )?;
         let mut installed = install(
             self,
             selection,
@@ -1302,6 +1373,7 @@ impl QueryEngine {
             loading,
             store.as_ref(),
             carry.as_ref(),
+            namespace,
         )?;
         let check = installed.check(self, selection)?;
         let runtime = self
@@ -1354,115 +1426,6 @@ impl QueryEngine {
     }
 }
 
-/// Staged headers are admitted source products before any final Lower or V
-/// universe is captured. Their P work runs on the same request executor.
-#[allow(clippy::too_many_arguments)]
-fn install_staged(
-    engine: &mut QueryEngine,
-    definitions: &[DefPath],
-    registrations: &[Arc<AcceptedFrontRegistration>],
-    jobs: Jobs,
-    weight: MemoryWeight,
-    front_bytes: u64,
-    loading: &mut LoadingAdmission,
-    host: &dyn SourceHost,
-    limits: RequestLimits,
-    store: &dyn ResultStore,
-) -> Result<(bool, RequestLimits), ToolError> {
-    let roots = engine
-        .front_staged_roots(definitions)
-        .map_err(|error| engine_error(engine, error))?;
-    if roots.is_empty() {
-        return Ok((false, limits));
-    }
-    let errors = runtime_errors(store)?;
-    let (mut runtime, snapshot) = loading.lend();
-    let snapshot = MemoryReservationPool::new(snapshot).map_err(|_| uninstalled())?;
-    let front = engine
-        .front_body_queries_with_registrations(
-            definitions,
-            registrations,
-            weight,
-            snapshot.take(front_bytes).ok_or_else(|| uninstalled())?,
-            errors,
-        )
-        .map_err(|error| engine_error(engine, error))?;
-    let inference = engine
-        .release_private_inference_admission()
-        .map_err(|error| engine_error(engine, error))?;
-    runtime.join(inference).map_err(|_| uninstalled())?;
-    let runtime_bytes = runtime.bytes();
-    // The producer and the installed source copy have independent grants;
-    // unused producer bytes return before the final source graph is admitted.
-    let stage = FrontStageQueries::new(
-        &roots,
-        front.clone(),
-        weight,
-        snapshot
-            .take(snapshot.available_bytes() / 2)
-            .ok_or_else(|| uninstalled())?,
-        errors,
-    )
-    .map_err(|error| engine_error(engine, error))?;
-    let mut executor = AdmittedRuntime::new(jobs, runtime, errors)
-        .map_err(|error| ToolError::Runtime(error.to_string()))?;
-    executor
-        .register(FRONT_BODY_KIND, front.factory())
-        .map_err(registration)?;
-    executor
-        .register(FRONT_STAGE_KIND, stage.factory())
-        .map_err(registration)?;
-    for root in roots {
-        let query = stage.query(&root).ok_or_else(|| uninstalled())?;
-        let request = executor.request(&[query]);
-        let products = executor.wait(request).map_err(|reference| {
-            stage
-                .failure(reference)
-                .map(|error| engine_error(engine, error))
-                .unwrap_or_else(|| {
-                    ToolError::Runtime(format!(
-                        "staged declaration preparation refused: {reference:?}"
-                    ))
-                })
-        })?;
-        let [product] = products.as_slice() else {
-            return Err(uninstalled());
-        };
-        let output = stage
-            .outcome(product.clone())
-            .ok_or_else(|| uninstalled())?;
-        let installed = output
-            .installation_bytes()
-            .map_err(|error| engine_error(engine, error))?;
-        engine
-            .accept_front_staged(
-                &output,
-                snapshot.take(installed).ok_or_else(|| uninstalled())?,
-            )
-            .map_err(|error| engine_error(engine, error))?;
-    }
-    let runtime = executor
-        .shutdown_with_reservation()
-        .ok_or_else(|| uninstalled())?;
-    // Reclaim the producers' whole partitions, leaving only accepted source
-    // copies retained by the engine's sources and every later immutable clone.
-    drop(executor);
-    drop(stage);
-    drop(front);
-    let returned = snapshot.available_bytes();
-    drop(snapshot);
-    drop(runtime);
-    host.readmit(loading, runtime_bytes, returned)?;
-    engine.admit_private_inference(loading.lend_runtime());
-    Ok((
-        true,
-        RequestLimits {
-            snapshot_bytes: returned,
-            ..limits
-        },
-    ))
-}
-
 /// The retained text bytes of the selected source files.
 pub fn source_bytes(sources: &SourceMap, files: &[(FileId, FileContext, LoweringPolicy)]) -> u64 {
     files
@@ -1501,12 +1464,12 @@ pub fn lower_reads(definitions: &[DefPath]) -> Result<usize, ToolError> {
 
 fn instance_bootstrap_error(
     engine: &QueryEngine,
-    error: FrontInstanceBootstrapError,
+    error: FrontDemandError,
     errors: RuntimeErrors,
 ) -> ToolError {
     match error {
-        FrontInstanceBootstrapError::Bootstrap(error) => bootstrap_error(engine, error),
-        FrontInstanceBootstrapError::Front {
+        FrontDemandError::Generator(error) => bootstrap_error(engine, error),
+        FrontDemandError::Front {
             reference,
             error,
             sources,
@@ -1538,7 +1501,7 @@ fn instance_bootstrap_error(
             crate::QueryKind::Check,
             sources.retain_owner(owner),
         ),
-        FrontInstanceBootstrapError::Discovery {
+        FrontDemandError::Discovery {
             error,
             sources,
             owner,

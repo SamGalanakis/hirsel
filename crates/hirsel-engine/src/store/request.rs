@@ -109,9 +109,9 @@ impl RequestStore {
         )?);
         Ok(Self::admitted(backend, admission))
     }
-    /// Preserve V's private content under the same admitted request transport.
-    /// Its selected cache may evict rows or bodies independently; only V still
-    /// issues associations and opaque acceptance capabilities.
+    /// Keep verifier content and associations in admitted request transport.
+    /// A backend without a verifier uses request-local rows. Only V issues
+    /// associations and opaque acceptance capabilities.
     pub fn with_scratch_and_verifier_transport(
         backend: Arc<dyn ResultStore>,
         memory: MemoryReservation,
@@ -119,13 +119,24 @@ impl RequestStore {
         disk_bytes: u64,
     ) -> std::io::Result<Self> {
         let mut request = Self::with_scratch(backend, memory, parent, disk_bytes)?;
-        if let Some(verifier) = &request.verifier {
-            request.verifier = Some(verifier.with_transport(Arc::new(RequestVerifierRows {
-                backend: request.backend.clone(),
-                admission: request.memory.clone(),
-                rows: Mutex::new(BTreeMap::new()),
-            })));
+        let metadata = (size_of::<RequestVerifierRows>()
+            + size_of::<hirsel_validate::VerifierCache>()
+            + 8 * size_of::<usize>()) as u64;
+        if !request.memory.charge(metadata) {
+            return Err(std::io::Error::other(
+                "verifier owner metadata exceeds request transport",
+            ));
         }
+        let rows = Arc::new(RequestVerifierRows {
+            backend: request.backend.clone(),
+            admission: request.memory.clone(),
+            rows: Mutex::new(BTreeMap::new()),
+            metadata,
+        });
+        request.verifier = Some(match &request.verifier {
+            Some(verifier) => verifier.with_transport(rows),
+            None => Arc::new(hirsel_validate::VerifierCache::hosted(rows)),
+        });
         Ok(request)
     }
     fn admitted(backend: Arc<dyn ResultStore>, memory: Arc<Admission>) -> Self {
@@ -173,6 +184,7 @@ struct RequestVerifierRows {
     backend: Arc<dyn ResultStore>,
     admission: Arc<Admission>,
     rows: Mutex<BTreeMap<ContentHash, Reference>>,
+    metadata: u64,
 }
 fn verifier_row_bytes(entries: usize) -> u64 {
     if entries == 0 {
@@ -189,7 +201,8 @@ impl Drop for RequestVerifierRows {
             .get_mut()
             .unwrap_or_else(|error| error.into_inner())
             .len();
-        self.admission.release(verifier_row_bytes(entries));
+        self.admission
+            .release(verifier_row_bytes(entries) + self.metadata);
     }
 }
 impl hirsel_artifact_store::Contents for RequestVerifierRows {
@@ -1155,6 +1168,7 @@ mod tests {
                 backend: Arc::new(NoneStore),
                 admission: admission.clone(),
                 rows: Mutex::new(BTreeMap::new()),
+                metadata: 0,
             };
             for index in 0u32..256 {
                 rows.set_row(ContentHash::of_bytes(&index.to_le_bytes()), reference);

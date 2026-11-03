@@ -32,6 +32,7 @@ struct Stored {
     decode_bytes: u64,
 }
 pub(in crate::queries) struct Data {
+    diagnostic_sources: Option<Arc<namespace::DiagnosticSources>>,
     definition: DefId,
     namespace: Arc<NamespaceCapture>,
     text: Result<String, QueryError>,
@@ -63,6 +64,12 @@ impl Data {
     }
 }
 impl FrontRegistrationOutput {
+    pub fn sources(&self) -> &SourceMap {
+        self.data
+            .diagnostic_sources
+            .as_ref()
+            .map_or(&self.data.namespace.sources, |sources| &sources.sources)
+    }
     pub fn namespace(&self) -> &Arc<NamespaceCapture> {
         &self.data.namespace
     }
@@ -98,8 +105,7 @@ pub struct FrontRegistrationQueries {
     outcomes: Mutex<BTreeMap<ContentHash, Completed>>,
     weight: MemoryWeight,
     errors: RuntimeErrors,
-    output_pool: MemoryReservationPool,
-    total: u64,
+    output_pool: Arc<MemoryReservationPool>,
     _inputs: MemoryReservation,
 }
 impl FrontRegistrationQueries {
@@ -123,7 +129,14 @@ impl FrontRegistrationQueries {
         Arc::new(Factory(self.clone()))
     }
     pub fn retained_bytes(&self) -> u64 {
-        self.total - self.output_pool.available_bytes()
+        self._inputs.bytes()
+            + self
+                .outcomes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .map(|(_, data)| data._allowance.as_ref().map_or(0, MemoryReservation::bytes))
+                .sum::<u64>()
     }
     pub fn outcome(self: &Arc<Self>, product: ProductRef) -> Option<FrontRegistrationOutput> {
         let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
@@ -138,7 +151,11 @@ impl FrontRegistrationQueries {
         })?;
         Some(FrontRegistrationOutput { data: data.clone() })
     }
-    async fn run(self: Arc<Self>, id: QueryId, reads: QueryReads) -> Result<ProductRef, Reference> {
+    pub(in crate::queries) async fn run(
+        self: Arc<Self>,
+        id: QueryId,
+        reads: QueryReads,
+    ) -> Result<ProductRef, Reference> {
         let input = &self.inputs[&id.address.0];
         let (mut data, namespace) = if let Some(data) = self.restore(input) {
             (Arc::new(data), self.lower.namespace.clone())
@@ -160,6 +177,8 @@ impl FrontRegistrationQueries {
                     self.weight.retained,
                 ))),
                 successor: Rc::default(),
+                restart: Rc::default(),
+                diagnostic_sources: Rc::default(),
             };
             source.record(
                 ReadKey::ExecutedBody(input.definition),
@@ -176,6 +195,52 @@ impl FrontRegistrationQueries {
                         lower_input_error(input.definition.path(), "executing a generator", error)
                     })
             };
+            let restart = source.restart.borrow_mut().take();
+            if let Some(restart) = restart {
+                let producer = restart
+                    .owner()
+                    .demand_producer()
+                    .ok_or(self.errors.protocol)?;
+                let mut engine = producer
+                    .assembly(restart.namespace())
+                    .map_err(|_| self.errors.resource)?;
+                let replay = engine
+                    .front_registration_queries_in_pool(
+                        std::slice::from_ref(input.definition.path()),
+                        restart.owner().clone(),
+                        self.weight,
+                        self.output_pool.clone(),
+                        self.errors,
+                    )
+                    .map_err(|_| self.errors.resource)?;
+                let query = replay
+                    .query(input.definition.path())
+                    .ok_or(self.errors.protocol)?;
+                let reads = source.reads.clone();
+                drop(engine);
+                drop(text);
+                drop(source);
+                let selected = Box::pin(replay.clone().run(query, reads)).await;
+                let (mut product, data) = replay
+                    .outcomes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&query.address.0)
+                    .cloned()
+                    .ok_or_else(|| {
+                        selected
+                            .as_ref()
+                            .err()
+                            .copied()
+                            .unwrap_or(self.errors.protocol)
+                    })?;
+                product.address = id.address;
+                self.outcomes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(id.address.0, (product.clone(), data));
+                return selected.map(|_| product);
+            }
             if let Some(reference) = source.refusal.get() {
                 return Err(reference);
             }
@@ -190,6 +255,7 @@ impl FrontRegistrationQueries {
             depth.first[0] = None;
             (
                 Arc::new(Data {
+                    diagnostic_sources: source.diagnostic_sources.borrow().clone(),
                     definition: input.definition,
                     namespace: source.capture(),
                     text,
@@ -206,7 +272,10 @@ impl FrontRegistrationQueries {
             .lower
             .records
             .encode_with_decode_bytes(
-                &*namespace.anchors,
+                &namespace::DiagnosticRecordSource {
+                    base: &namespace.anchors,
+                    diagnostics: data.diagnostic_sources.as_deref(),
+                },
                 &(
                     input.definition,
                     &data.text,
@@ -370,6 +439,7 @@ impl FrontRegistrationQueries {
             return None;
         }
         Some(Data {
+            diagnostic_sources: None,
             definition: input.definition,
             namespace: self.lower.namespace.clone(),
             text,
@@ -516,12 +586,16 @@ impl FrontRegistrationQueries {
         );
         source.merge(&admission.reads);
         source.evidence.borrow_mut().executed = true;
-        let runtime = self.lower.runtime_types()?;
+        let runtime = source.active_owner().runtime_types()?;
+        let admission = admission.result?;
+        source
+            .evidence
+            .borrow_mut()
+            .accepted(admission.acceptance().cloned());
         let result = admission
-            .result?
             .run_async(
-                &self.lower.namespace.sources,
-                self.lower.namespace.limits,
+                &source.capture().sources,
+                source.capture().limits,
                 &runtime,
                 source,
             )
@@ -559,18 +633,28 @@ impl QueryEngine {
         definitions: &[DefPath],
         lower: Arc<FrontLowerQueries>,
         weight: MemoryWeight,
-        mut allowance: MemoryReservation,
+        allowance: MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontRegistrationQueries>, QueryError> {
+        let pool = MemoryReservationPool::new(allowance).map_err(|_| QueryError::NotImplemented)?;
+        self.front_registration_queries_in_pool(definitions, lower, weight, Arc::new(pool), errors)
+    }
+    pub(crate) fn front_registration_queries_in_pool(
+        &mut self,
+        definitions: &[DefPath],
+        lower: Arc<FrontLowerQueries>,
+        weight: MemoryWeight,
+        output_pool: Arc<MemoryReservationPool>,
+        errors: RuntimeErrors,
+    ) -> Result<Arc<FrontRegistrationQueries>, QueryError> {
+        let available = output_pool.available_bytes();
         let refused = || {
             QueryError::Operational(hirsel_types::OperationalFailure {
             operation: "generator registration admission".into(), message: "generator input inventory exceeds admission or differs from its source snapshot".into(),
         })
         };
         let mut required = FrontRegistrationQueries::input_bytes(definitions);
-        if required > allowance.bytes()
-            || !Arc::ptr_eq(&self.types, lower.namespace.snapshot.types())
-        {
+        if required > available || !Arc::ptr_eq(&self.types, lower.namespace.snapshot.types()) {
             return Err(refused());
         }
         let signer = self.adapters.signature.clone().ok_or_else(refused)?;
@@ -604,7 +688,7 @@ impl QueryEngine {
                         .ok_or_else(refused)? as u64,
                 )
                 .ok_or_else(refused)?;
-            if required > allowance.bytes() {
+            if required > available {
                 return Err(refused());
             }
             let mut checked_prefix = Vec::with_capacity(prefix_len);
@@ -617,7 +701,7 @@ impl QueryEngine {
             for (_, bytes) in instance_reads.allocations() {
                 required = required.checked_add(bytes as u64).ok_or_else(refused)?;
             }
-            if required > allowance.bytes() {
+            if required > available {
                 return Err(refused());
             }
             inputs.insert(
@@ -633,15 +717,7 @@ impl QueryEngine {
                 },
             );
         }
-        let total = allowance.bytes();
-        let inputs_allowance = allowance
-            .split(
-                required
-                    .checked_sub(MemoryReservationPool::metadata_bytes())
-                    .ok_or_else(refused)?,
-            )
-            .ok_or_else(refused)?;
-        let output_pool = MemoryReservationPool::new(allowance).map_err(|_| refused())?;
+        let inputs_allowance = output_pool.take(required).ok_or_else(refused)?;
         Ok(Arc::new(FrontRegistrationQueries {
             inputs,
             lower,
@@ -650,7 +726,6 @@ impl QueryEngine {
             weight,
             errors,
             output_pool,
-            total,
             _inputs: inputs_allowance,
         }))
     }

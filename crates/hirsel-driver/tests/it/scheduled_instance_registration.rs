@@ -663,7 +663,7 @@ fn bounded_instance_bootstrap_reuses_one_grant_and_refreshes_nested_final_univer
                 let definitions = program.engine.front_source_roots();
                 let generators = program.engine.front_generator_roots(&definitions).unwrap();
                 assert_eq!(generators.len(), 2);
-                let admission = FrontInstanceBootstrapAdmission {
+                let admission = FrontDemandAdmission {
                     jobs: hirsel_intern::jobs::Jobs::new(jobs),
                     weight: weight(),
                     max_reads: 64,
@@ -679,7 +679,7 @@ fn bounded_instance_bootstrap_reuses_one_grant_and_refreshes_nested_final_univer
                 assert_eq!(reserved, 404 << 20);
                 let bootstrap = program
                     .engine
-                    .bootstrap_front_instances(
+                    .demand_front_scope(
                         &definitions,
                         &[program.entry.clone()],
                         &generators,
@@ -773,16 +773,15 @@ fn bounded_instance_bootstrap_refuses_short_metadata_before_body_work_or_registr
             fixture(SOURCE, jobs, |program, budget| {
                 let definitions = program.engine.front_source_roots();
                 let generators = program.engine.front_generator_roots(&definitions).unwrap();
-                let required =
-                    FrontInstanceBootstrap::input_bytes(&definitions, &generators).unwrap();
+                let required = FrontDemandScope::input_bytes(&definitions, &generators).unwrap();
                 let before = program.engine.work_stats();
                 let error = program
                     .engine
-                    .bootstrap_front_instances(
+                    .demand_front_scope(
                         &definitions,
                         &[program.entry.clone()],
                         &generators,
-                        FrontInstanceBootstrapAdmission {
+                        FrontDemandAdmission {
                             jobs: hirsel_intern::jobs::Jobs::new(jobs),
                             weight: weight(),
                             max_reads: 64,
@@ -798,13 +797,13 @@ fn bounded_instance_bootstrap_refuses_short_metadata_before_body_work_or_registr
                     )
                     .err()
                     .expect("short cursor grant");
-                let FrontInstanceBootstrapError::Bootstrap(
-                    FrontRegistrationBootstrapError::Admission(QueryError::Operational(error)),
-                ) = error
+                let FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(
+                    QueryError::Operational(error),
+                )) = error
                 else {
                     panic!("{error:?}")
                 };
-                assert_eq!(error.operation, "generated instance bootstrap admission");
+                assert_eq!(error.operation, "generated instance demand admission");
                 assert_eq!(program.engine.work_stats(), before);
                 assert_eq!(budget.reserved(), 0);
                 assert!(program.engine.generated_sources().next().is_none());
@@ -848,11 +847,11 @@ fn instance_bootstrap_failure(zero_depth: bool) {
             let budget = ProcessBudget::new(1 << 30);
             let error = program
                 .engine
-                .bootstrap_front_instances(
+                .demand_front_scope(
                     &definitions,
                     &[program.entry.clone()],
                     &generators,
-                    FrontInstanceBootstrapAdmission {
+                    FrontDemandAdmission {
                         jobs: hirsel_intern::jobs::Jobs::new(jobs),
                         weight: weight(),
                         max_reads: 64,
@@ -868,7 +867,7 @@ fn instance_bootstrap_failure(zero_depth: bool) {
                 )
                 .err()
                 .expect("generator refusal");
-            let FrontInstanceBootstrapError::Bootstrap(FrontRegistrationBootstrapError::Runtime {
+            let FrontDemandError::Generator(FrontRegistrationBootstrapError::Runtime {
                 reference,
                 error: Some(failure),
                 sources,
@@ -938,11 +937,11 @@ fn instance_bootstrap_keeps_ordinary_failure_local_until_selected_front_demand()
                 let generators = program.engine.front_generator_roots(&definitions).unwrap();
                 let bootstrap = program
                     .engine
-                    .bootstrap_front_instances(
+                    .demand_front_scope(
                         &definitions,
                         &[program.entry.clone()],
                         &generators,
-                        FrontInstanceBootstrapAdmission {
+                        FrontDemandAdmission {
                             jobs: hirsel_intern::jobs::Jobs::new(jobs),
                             weight: weight(),
                             max_reads: 64,
@@ -1001,7 +1000,7 @@ fn instance_bootstrap_keeps_ordinary_failure_local_until_selected_front_demand()
                     .require_complete_front()
                     .err()
                     .expect("complete Front keeps the ordinary rejection");
-                let FrontInstanceBootstrapError::Front {
+                let FrontDemandError::Front {
                     error: Some(QueryError::Diagnostics(required)),
                     sources: required_sources,
                     ..

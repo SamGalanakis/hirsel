@@ -197,6 +197,7 @@ fn decode_definition(owner: &FrontLowerQueries, body: Reference) -> Option<Defin
 }
 #[derive(Clone)]
 struct Outcome {
+    diagnostic_sources: Option<Arc<namespace::DiagnosticSources>>,
     result: Result<Value, QueryError>,
     reads: Reads,
     reads_decode_bytes: u64,
@@ -378,7 +379,29 @@ pub struct FrontLowerOutput {
     query_observations: Option<ProductArchive>,
     owner: Arc<LowerSource>,
 }
+pub(crate) struct LowerPartition {
+    allowance: Arc<MemoryReservation>,
+    remaining: Arc<Mutex<u64>>,
+}
+impl LowerPartition {
+    pub(crate) fn new(allowance: MemoryReservation) -> Self {
+        Self {
+            remaining: Arc::new(Mutex::new(allowance.bytes())),
+            allowance: Arc::new(allowance),
+        }
+    }
+}
+struct LowerInputCharge {
+    remaining: Arc<Mutex<u64>>,
+    bytes: u64,
+}
+impl Drop for LowerInputCharge {
+    fn drop(&mut self) {
+        *self.remaining.lock().unwrap_or_else(|e| e.into_inner()) += self.bytes;
+    }
+}
 struct LowerSource {
+    _inputs: LowerInputCharge,
     anchors: crate::NativeRecordContext,
     records: crate::NativeRecords,
     store: Arc<dyn ResultStore>,
@@ -410,7 +433,17 @@ impl FrontLowerOutput {
         &self.owner.store
     }
 }
+#[derive(Clone)]
+struct ForwardedLower {
+    id: QueryId,
+    owner: Arc<FrontLowerQueries>,
+    selected: Result<ProductRef, Reference>,
+    alias: Result<ProductRef, Reference>,
+}
 pub struct FrontLowerQueries {
+    demand: std::sync::OnceLock<std::sync::Weak<generation::demand::DemandProducer>>,
+    demand_owner: Mutex<Option<Arc<generation::demand::DemandProducer>>>,
+    forwarded: Mutex<BTreeMap<(u32, ContentHash), ForwardedLower>>,
     namespace: Arc<NamespaceCapture>,
     inputs: Inputs,
     generator: Option<(DefId, Span)>,
@@ -442,6 +475,37 @@ pub struct FrontLowerQueries {
     source: Arc<LowerSource>,
 }
 impl FrontLowerQueries {
+    pub(crate) fn bind_demand(self: &Arc<Self>, demand: &Arc<generation::demand::DemandProducer>) {
+        let _ = self.demand.set(Arc::downgrade(demand));
+        self.front.bind_demand(demand);
+    }
+    pub(crate) fn keep_demand(&self, demand: Arc<generation::demand::DemandProducer>) {
+        *self.demand_owner.lock().unwrap_or_else(|e| e.into_inner()) = Some(demand);
+    }
+    pub(crate) fn owns_query(&self, id: QueryId) -> bool {
+        self.path(id).is_some()
+    }
+    fn demand_producer(&self) -> Option<Arc<generation::demand::DemandProducer>> {
+        self.demand.get()?.upgrade()
+    }
+    fn delegated(
+        &self,
+        id: QueryId,
+        selected: &Result<ProductRef, Reference>,
+    ) -> Option<ForwardedLower> {
+        self.forwarded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(id.kind, id.address.0))
+            .filter(|row| &row.alias == selected)
+            .cloned()
+    }
+    pub(crate) fn capture(&self) -> &Arc<NamespaceCapture> {
+        &self.namespace
+    }
+    pub(crate) fn body_front(&self) -> &Arc<FrontBodyQueries> {
+        &self.front
+    }
     /// Compact potential dependency inventory; no Lower/Evaluate output or
     /// maximum continuation is reserved until that query is actually demanded.
     pub fn input_bytes(definitions: &[DefPath]) -> Option<u64> {
@@ -500,7 +564,8 @@ impl FrontLowerQueries {
                     input.captured.evaluate.0,
                 ),
             ] {
-                if outcomes.contains_key(&(kind, address)) {
+                if outcomes.contains_key(&(kind, self.namespace.query_id(kind, address).address.0))
+                {
                     keys.push(crate::memo::MemoKey::new(phase, DefId::intern(path)));
                 }
             }
@@ -520,7 +585,9 @@ impl FrontLowerQueries {
                     input.captured.evaluate.0,
                 ),
             ] {
-                if let Some((_, outcome, _)) = outcomes.get(&(kind, address)) {
+                if let Some((_, outcome, _)) =
+                    outcomes.get(&(kind, self.namespace.query_id(kind, address).address.0))
+                {
                     rows.push((
                         crate::memo::MemoKey::new(phase, DefId::intern(path)),
                         Arc::new(outcome.reads(self)?),
@@ -747,13 +814,33 @@ impl FrontLowerQueries {
         } else {
             hirsel_tir::constant_instance_path(path, arguments)
         };
-        let id = self
-            .evaluate_query(&selected)
-            .ok_or(QueryError::NotImplemented)?;
-        let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
-        let selected = outcomes
+        let completed = || {
+            self.completed_owner(&selected, FRONT_EVALUATE_KIND)
+                .ok_or(QueryError::NotImplemented)?
+                .settled_constant(path, arguments)
+        };
+        let Some(id) = self.evaluate_query(&selected) else {
+            return completed();
+        };
+        if let Some(row) = self
+            .forwarded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&(id.kind, id.address.0))
-            .ok_or(QueryError::NotImplemented)?;
+            .cloned()
+        {
+            row.selected.as_ref().map_err(|reference| {
+                row.owner
+                    .failure(*reference)
+                    .unwrap_or(QueryError::NotImplemented)
+            })?;
+            return row.owner.settled_constant(path, arguments);
+        }
+        let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(selected) = outcomes.get(&(id.kind, id.address.0)) else {
+            drop(outcomes);
+            return completed();
+        };
         match &selected.1.result {
             Ok(Value::Constant(value)) => value
                 .decoded(
@@ -979,10 +1066,7 @@ impl FrontLowerQueries {
         } else {
             &input.captured.evaluate
         };
-        Some(QueryId {
-            kind,
-            address: hirsel_artifact_store::Address(key.0),
-        })
+        Some(self.namespace.query_id(kind, key.0))
     }
     fn path(&self, id: QueryId) -> Option<DefPath> {
         self.paths
@@ -995,9 +1079,27 @@ impl FrontLowerQueries {
             })
     }
     pub fn factory(self: &Arc<Self>) -> Arc<dyn LocalQueryFactory> {
-        Arc::new(Factory(self.clone()))
+        Arc::new(Factory {
+            owner: self.clone(),
+            _demand: self
+                .demand_owner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .or_else(|| self.demand_producer()),
+        })
     }
     pub fn outcome(self: &Arc<Self>, product: ProductRef) -> Option<FrontLowerOutput> {
+        if let Some(row) = self.delegated(
+            QueryId {
+                kind: FRONT_LOWER_KIND,
+                address: product.address,
+            },
+            &Ok(product.clone()),
+        ) {
+            return row.owner.outcome(row.selected.ok()?);
+        }
+
         if let Some(live) = product.lower_value() {
             self.selected(
                 QueryId {
@@ -1062,6 +1164,16 @@ impl FrontLowerQueries {
     /// Native adaptation reads compact metadata only. Neither an unchanged
     /// Definition nor a native Value/Ready body is reconstructed here.
     pub fn native_product(&self, product: ProductRef) -> Option<crate::NativeOriginalProduct> {
+        if let Some(row) = self.delegated(
+            QueryId {
+                kind: FRONT_LOWER_KIND,
+                address: product.address,
+            },
+            &Ok(product.clone()),
+        ) {
+            return row.owner.native_product(row.selected.ok()?);
+        }
+
         self.selected(
             QueryId {
                 kind: FRONT_LOWER_KIND,
@@ -1098,6 +1210,16 @@ impl FrontLowerQueries {
     /// Complete settled query observations for Check. This retains the existing
     /// compact descriptor, without retaining or archiving the live TIR owner.
     pub(crate) fn observation_product(&self, product: ProductRef) -> Option<ProductRef> {
+        if let Some(row) = self.delegated(
+            QueryId {
+                kind: FRONT_LOWER_KIND,
+                address: product.address,
+            },
+            &Ok(product.clone()),
+        ) {
+            return row.owner.observation_product(row.selected.ok()?);
+        }
+
         let id = QueryId {
             kind: FRONT_LOWER_KIND,
             address: product.address,
@@ -1115,18 +1237,61 @@ impl FrontLowerQueries {
         ))
     }
     pub fn failure(&self, reference: Reference) -> Option<QueryError> {
-        self.outcomes
+        let local = self
+            .outcomes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .values()
-            .find(|(r, _, _)| *r == reference)?
-            .1
-            .result
-            .as_ref()
-            .err()
-            .cloned()
+            .find(|(r, _, _)| *r == reference)
+            .and_then(|(_, outcome, _)| outcome.result.as_ref().err().cloned());
+        if local.is_some() {
+            return local;
+        }
+        let owners = self
+            .forwarded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|row| row.selected == Err(reference))
+            .map(|row| row.owner.clone())
+            .collect::<Vec<_>>();
+        owners
+            .into_iter()
+            .find_map(|owner| owner.failure(reference))
+    }
+    pub fn failure_sources(&self, reference: Reference) -> Option<SourceMap> {
+        let local = self
+            .outcomes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .find(|(r, _, _)| *r == reference)
+            .map(|(_, outcome, _)| {
+                outcome.diagnostic_sources.as_ref().map_or_else(
+                    || self.namespace.sources.clone(),
+                    |sources| sources.sources.clone(),
+                )
+            });
+        if local.is_some() {
+            return local;
+        }
+        let owners = self
+            .forwarded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|row| row.selected == Err(reference))
+            .map(|row| row.owner.clone())
+            .collect::<Vec<_>>();
+        owners
+            .into_iter()
+            .find_map(|owner| owner.failure_sources(reference))
     }
     fn selected(&self, id: QueryId, selected: Result<ProductRef, Reference>) -> Option<Outcome> {
+        if let Some(row) = self.delegated(id, &selected) {
+            return row.owner.selected(row.id, row.selected);
+        }
+
         self.outcomes.lock().unwrap_or_else(|e| e.into_inner())
             .get(&(id.kind, id.address.0))
             .filter(|(reference, outcome, _)| match &selected {
@@ -1213,6 +1378,8 @@ impl FrontLowerQueries {
                 self.weight.retained,
             ))),
             successor: Rc::default(),
+            restart: Rc::default(),
+            diagnostic_sources: Rc::default(),
         };
         // A root observes its own body before preparation, including when
         // that preparation fails. Nested callers keep the same root receipt.
@@ -1237,6 +1404,89 @@ impl FrontLowerQueries {
             self.compute(id.kind, &path, selection.as_ref(), &mut source)
                 .await
         };
+        let restart = source.restart.borrow_mut().take();
+        if let Some(successor) = restart {
+            let owner = successor.owner().clone();
+            let actual = match &selection {
+                Some(selection) => owner
+                    .staged_query(selection.declaration.path(), &selection.arguments)
+                    .map_err(|_| self.errors.protocol)?,
+                None => owner.id(&path, id.kind).ok_or(self.errors.protocol)?,
+            };
+            if actual == id {
+                return Err(self.errors.protocol);
+            }
+            let reads = source.reads.clone();
+            drop(computed);
+            drop(source);
+            let selected = reads.read_consuming(actual).await;
+            let alias = selected.clone().map(|mut product| {
+                product.address = id.address;
+                product
+            });
+            self.forwarded
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(
+                    (id.kind, id.address.0),
+                    ForwardedLower {
+                        id: actual,
+                        owner,
+                        selected,
+                        alias: alias.clone(),
+                    },
+                );
+            return alias;
+        }
+        let owner = source.active_owner();
+        if !Arc::ptr_eq(&owner, &self) {
+            let actual = match &selection {
+                Some(selection) => owner
+                    .staged_query(selection.declaration.path(), &selection.arguments)
+                    .map_err(|_| self.errors.protocol)?,
+                None => owner.id(&path, id.kind).ok_or(self.errors.protocol)?,
+            };
+            let key = if let Some(selection) = &selection {
+                selection.key.clone()
+            } else if id.kind == FRONT_LOWER_KIND {
+                owner.inputs[&path].captured.lower.clone()
+            } else {
+                owner.inputs[&path].captured.evaluate.clone()
+            };
+            let selected = owner
+                .clone()
+                .finish_computation(actual, path, key, source, computed)
+                .await;
+            let alias = selected.clone().map(|mut product| {
+                product.address = id.address;
+                product
+            });
+            self.forwarded
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(
+                    (id.kind, id.address.0),
+                    ForwardedLower {
+                        id: actual,
+                        owner,
+                        selected,
+                        alias: alias.clone(),
+                    },
+                );
+            return alias;
+        }
+        self.clone()
+            .finish_computation(id, path, key.clone(), source, computed)
+            .await
+    }
+    async fn finish_computation(
+        self: Arc<Self>,
+        id: QueryId,
+        path: DefPath,
+        key: EntryKey,
+        source: Source,
+        computed: Result<Computed, QueryError>,
+    ) -> Result<ProductRef, Reference> {
         let (mut result, verification, raw) = match computed {
             Ok(computed) => (Ok(computed.value), computed.verification, computed.raw),
             Err(error) => (
@@ -1275,6 +1525,7 @@ impl FrontLowerQueries {
             evidence::archived_reads(&observed, execution.as_ref()).ok_or(self.errors.protocol)?;
         let selections = std::mem::take(&mut *source.selections.borrow_mut());
         let mut reads_decode_bytes = 0;
+        let diagnostic_sources = source.diagnostic_sources.borrow().clone();
         let bytes = match &mut result {
             Ok(Value::Lower(lower)) => {
                 let mut weight = crate::NativeMetadataWeight::default();
@@ -1336,7 +1587,10 @@ impl FrontLowerQueries {
                 self.namespace.manifest,
             ),
             Err(error) => self.records.encode(
-                &*self.namespace.anchors,
+                &namespace::DiagnosticRecordSource {
+                    base: &self.namespace.anchors,
+                    diagnostics: diagnostic_sources.as_deref(),
+                },
                 &(&path, error, &observed, &depth, executed),
             ),
         }
@@ -1355,7 +1609,7 @@ impl FrontLowerQueries {
         } else {
             CONSTANT_DESCRIPTOR
         };
-        let execution_subject = persistent::evaluation_subject(key, &bytes);
+        let execution_subject = persistent::evaluation_subject(&key, &bytes);
         if let Some((definition, evidence)) = verification
             && let Ok(Value::Lower(lower)) = &mut result
             && let Some(cache) = self.store.verifier()
@@ -1409,6 +1663,7 @@ impl FrontLowerQueries {
                 });
         }
         let outcome = Outcome {
+            diagnostic_sources: source.diagnostic_sources.borrow().clone(),
             result,
             reads: observed,
             reads_decode_bytes,
@@ -1418,10 +1673,10 @@ impl FrontLowerQueries {
             execution,
             execution_subject,
         };
-        self.remember_carry(id, key, &bytes, &outcome);
+        self.remember_carry(id, &key, &bytes, &outcome);
         self.publish(
             id,
-            key,
+            &key,
             outcome,
             Publication {
                 domain,
@@ -1646,7 +1901,8 @@ impl FrontLowerQueries {
         if failed {
             return Err(record);
         }
-        self.store.associate_product(id.address, action, record);
+        self.store
+            .associate_product(hirsel_artifact_store::Address(key.0), action, record);
         if let Some(live) = live {
             return Ok(ProductRef::lower(live));
         }
@@ -1665,6 +1921,16 @@ impl FrontLowerQueries {
     ) -> Result<Computed, QueryError> {
         let front = self.front.query(path).ok_or(QueryError::NotImplemented)?;
         let selected = source.reads.read_consuming(front).await;
+        if let Err(reference) = selected
+            && let Some(sources) = self.front.diagnostic_sources(reference)
+        {
+            *source.diagnostic_sources.borrow_mut() = Some(sources);
+        }
+        if let Some(successor) = self.front.successor_for(path) {
+            source.join(Some(successor))?;
+            let owner = source.active_owner();
+            return Box::pin(owner.compute(kind, path, selection, source)).await;
+        }
         let body = match self.front.outcome(selected.clone()) {
             Some(body) => body,
             None if selected.is_ok() => {
@@ -1683,6 +1949,15 @@ impl FrontLowerQueries {
             }
             None => return Err(source.refused(selected.err().unwrap_or(self.errors.protocol))),
         };
+        if let Some(producer) = self.demand_producer()
+            && let Some(successor) = producer
+                .stage_body(&source.capture(), path, source.reads.clone())
+                .await?
+        {
+            source.join(Some(successor))?;
+            let owner = source.active_owner();
+            return Box::pin(owner.compute(kind, path, selection, source)).await;
+        }
         source.merge(&body.outcome.reads);
         if self.verify == Verify::On {
             let mut observed = ReadsBuilder::new();
@@ -1859,11 +2134,12 @@ impl FrontLowerQueries {
                 raw: None,
             });
         }
+        let completed = source.active_owner();
         let lowering = self.lowering.as_deref().ok_or(QueryError::NotImplemented)?;
         self.count(path, |work| work.lowerings += 1);
         let output = lowering
             .lower(
-                self.namespace.snapshot.types(),
+                completed.namespace.snapshot.types(),
                 &self.memo,
                 &analyzed.value,
                 &Comptime {
@@ -1886,18 +2162,18 @@ impl FrontLowerQueries {
             let mut observed = ReadsBuilder::new();
             // A refused V read refuses this producer: nothing it computed is kept.
             FrozenProvider::new(
-                &self.namespace.snapshot,
+                &completed.namespace.snapshot,
                 path.0.package.clone(),
                 &mut observed,
             )
             .validation_universe()
             .map_err(|_| source.refused(self.errors.resource))?;
             source.merge(&observed.finish().map_err(|_| QueryError::NotImplemented)?);
-            let (report, ran, accepted, evidence) = self
+            let (report, ran, accepted, evidence) = completed
                 .namespace
                 .snapshot
                 .validate_source_artifact(&definition, |anchor| {
-                    self.namespace.anchors.record_owner(anchor)
+                    completed.namespace.anchors.record_owner(anchor)
                 })
                 .map_err(|_| source.refused(self.errors.resource))?;
             acceptance = accepted;
@@ -1920,9 +2196,9 @@ impl FrontLowerQueries {
         if has_errors(&output.diagnostics) {
             return Err(QueryError::Diagnostics(output.diagnostics));
         }
-        let (bytes, record_decode_bytes) = self
+        let (bytes, record_decode_bytes) = completed
             .records
-            .encode_tir_with_decode_bytes(&*self.namespace.anchors, &definition)
+            .encode_tir_with_decode_bytes(&*completed.namespace.anchors, &definition)
             .ok_or(QueryError::NotImplemented)?;
         // Arc/slice decoding can temporarily overlap its construction buffers.
         // Count serialized shared rows independently; source sharing is not a
@@ -1947,9 +2223,9 @@ impl FrontLowerQueries {
             .put_content(crate::NATIVE_ORIGINAL_BODY, &bytes)
             .ok_or(QueryError::NotImplemented)?;
         drop(bytes);
-        let materialized = self
+        let materialized = completed
             .records
-            .encode(&*self.namespace.anchors, &constants)
+            .encode(&*completed.namespace.anchors, &constants)
             .filter(|bytes| bytes.len() as u64 <= self.weight.scratch)
             .and_then(|bytes| self.store.put_content(LOWER_MATERIALIZED, &bytes))
             .ok_or(QueryError::NotImplemented)?;
@@ -1986,7 +2262,10 @@ impl FrontLowerQueries {
         })
     }
 }
-struct Factory(Arc<FrontLowerQueries>);
+struct Factory {
+    owner: Arc<FrontLowerQueries>,
+    _demand: Option<Arc<generation::demand::DemandProducer>>,
+}
 // This producer's settled Outcome allocations and provider archives have
 // independent owners. Only the saved future/mailbox/working state belongs to
 // the runtime continuation, and S5 retires it after destruction at home.
@@ -2007,20 +2286,52 @@ impl LocalQueryTask for LowerTask {
 }
 impl LocalQueryFactory for Factory {
     fn weight(&self, id: QueryId) -> Result<MemoryWeight, Reference> {
-        if !matches!(id.kind, FRONT_LOWER_KIND | FRONT_EVALUATE_KIND) || self.0.path(id).is_none() {
-            return Err(self.0.errors.protocol);
+        if let Some(demand) = self
+            .owner
+            .demand_producer()
+            .filter(|demand| demand.owns_demand(id))
+        {
+            return Ok(demand.task_weight());
         }
-        Ok(self.0.weight)
+        if self.owner.path(id).is_none()
+            && let Some(owner) = self
+                .owner
+                .demand_producer()
+                .and_then(|demand| demand.lower_for(id))
+        {
+            return owner.factory().weight(id);
+        }
+        if !matches!(id.kind, FRONT_LOWER_KIND | FRONT_EVALUATE_KIND)
+            || self.owner.path(id).is_none()
+        {
+            return Err(self.owner.errors.protocol);
+        }
+        Ok(self.owner.weight)
     }
     fn create(&self, id: QueryId) -> Result<Box<dyn LocalQueryTask>, Reference> {
+        if let Some(demand) = self
+            .owner
+            .demand_producer()
+            .filter(|demand| demand.owns_demand(id))
+        {
+            return demand.task(id);
+        }
+        if self.owner.path(id).is_none()
+            && let Some(owner) = self
+                .owner
+                .demand_producer()
+                .and_then(|demand| demand.lower_for(id))
+        {
+            return owner.factory().create(id);
+        }
         let weight = self.weight(id)?;
-        let path = self.0.path(id).ok_or(self.0.errors.protocol)?;
-        let owner = self.0.clone();
+        let path = self.owner.path(id).ok_or(self.owner.errors.protocol)?;
+        let owner = self.owner.clone();
         Ok(Box::new(LowerTask(LocalFutureTask::new(
             id,
             weight,
-            self.0.max_reads,
-            self.0.errors,
+            self.owner.max_reads,
+            self.owner.errors,
             move |reads| owner.run(id, path, reads),
         )?)))
     }
@@ -2038,6 +2349,8 @@ struct Source {
     framed: bool,
     evidence: Rc<RefCell<Evidence>>,
     successor: Rc<RefCell<Option<SuccessorCapture>>>,
+    diagnostic_sources: Rc<RefCell<Option<Arc<namespace::DiagnosticSources>>>>,
+    restart: Rc<RefCell<Option<SuccessorCapture>>>,
 }
 struct PendingRequest<'a> {
     owner: &'a FrontLowerQueries,
@@ -2067,6 +2380,12 @@ impl FrontLowerQueries {
     }
 }
 impl Source {
+    fn active_owner(&self) -> Arc<FrontLowerQueries> {
+        self.successor
+            .borrow()
+            .as_ref()
+            .map_or_else(|| self.owner.clone(), |next| next.owner().clone())
+    }
     fn capture(&self) -> Arc<NamespaceCapture> {
         self.successor.borrow().as_ref().map_or_else(
             || self.owner.namespace.clone(),
@@ -2089,6 +2408,9 @@ impl Source {
         let Some(successor) = successor else {
             return Ok(());
         };
+        if successor.namespace().identity() == self.capture().identity() {
+            return Ok(());
+        }
         if !successor.follows(&self.capture()) {
             return Err(successor::refused(
                 "dependency does not descend from its consumer capture",
@@ -2100,12 +2422,32 @@ impl Source {
             .clone()
             .finish()
             .map_err(|_| successor::refused("inconsistent reads before joining"))?;
-        let reads = self.evidence.borrow_mut().join(
+        if successor
+            .changed_input(
+                self.root.path(),
+                &reads,
+                self.evidence.borrow().finish(&reads).is_some(),
+            )
+            .is_some()
+        {
+            *self.restart.borrow_mut() = Some(successor);
+            return Err(successor::refused(
+                "changed semantic inputs require the consumer to restart",
+            ));
+        }
+        let joined = self.evidence.borrow_mut().join(
             &successor,
             self.root.path(),
             &reads,
             self.owner.verify,
-        )?;
+        );
+        let reads = match joined {
+            Ok(reads) => reads,
+            Err(error) => {
+                *self.restart.borrow_mut() = Some(successor);
+                return Err(error);
+            }
+        };
         let mut observed = ReadsBuilder::new();
         observed.merge(&reads);
         *self.observed.borrow_mut() = observed;
@@ -2168,13 +2510,9 @@ impl Source {
         &self,
         dependencies: impl IntoIterator<Item = &'a SignatureDependency>,
     ) {
+        let owner = self.active_owner();
         for dependency in dependencies {
-            if let Some(signature) = self
-                .owner
-                .namespace
-                .snapshot
-                .signature(dependency.definition)
-            {
+            if let Some(signature) = owner.namespace.snapshot.signature(dependency.definition) {
                 self.record(
                     ReadKey::ExecutedSignature(dependency.definition),
                     memos::signature_value(signature.ok().map(|s| s.fingerprint)),
@@ -2183,10 +2521,11 @@ impl Source {
         }
     }
     fn signature(&self, path: &DefPath) -> Result<hirsel_types::SignatureRef, QueryError> {
+        let owner = self.active_owner();
         let mut observed = ReadsBuilder::new();
         let result = SignatureProvider::signature(
             &mut FrozenProvider::new(
-                &self.owner.namespace.snapshot,
+                &owner.namespace.snapshot,
                 path.0.package.clone(),
                 &mut observed,
             ),
@@ -2196,8 +2535,9 @@ impl Source {
         result
     }
     async fn value(&self, path: &DefPath, kind: u32, site: Span) -> Result<Value, QueryError> {
+        let owner = self.active_owner();
         if kind == FRONT_LOWER_KIND
-            && let Some((generator, site)) = self.owner.generator
+            && let Some((generator, site)) = owner.generator
             && generator.path() == path
         {
             return Err(QueryError::Diagnostics(vec![Diagnostic::error(
@@ -2206,7 +2546,7 @@ impl Source {
                 "compile-time dependency cycle: this generator runs its own declaration",
             )]));
         }
-        let id = self.owner.id(path, kind).ok_or_else(|| {
+        let id = owner.id(path, kind).ok_or_else(|| {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "Lower dependency".into(),
                 message: format!(
@@ -2219,7 +2559,7 @@ impl Source {
                 ),
             })
         })?;
-        self.selected_value(id, path, kind, site).await
+        self.selected_value_in(owner, id, path, kind, site).await
     }
     async fn selected_value(
         &self,
@@ -2228,29 +2568,41 @@ impl Source {
         kind: u32,
         site: Span,
     ) -> Result<Value, QueryError> {
-        self.owner.with_request_site(self.id, |pending| {
+        self.selected_value_in(self.active_owner(), id, path, kind, site)
+            .await
+    }
+    async fn selected_value_in(
+        &self,
+        owner: Arc<FrontLowerQueries>,
+        id: QueryId,
+        path: &DefPath,
+        kind: u32,
+        site: Span,
+    ) -> Result<Value, QueryError> {
+        owner.with_request_site(self.id, |pending| {
             *pending = (kind == FRONT_EVALUATE_KIND).then_some(site);
         });
         let pending = PendingRequest {
-            owner: &self.owner,
+            owner: &owner,
             id: self.id,
         };
         let selected = self.reads.read_consuming(id).await;
+
         drop(pending);
-        if selected == Err(self.owner.errors.cycle) {
+        if selected == Err(owner.errors.cycle) {
             self.record(
                 ReadKey::ExecutedBody(DefId::intern(path)),
-                memos::optional(Some(self.owner.inputs[path].captured.implementation)),
+                memos::optional(Some(owner.inputs[path].captured.implementation)),
             );
             let members = self.reads.take_cycle();
             if members.is_empty() {
-                return Err(self.refused(self.owner.errors.resource));
+                return Err(self.refused(owner.errors.resource));
             }
             // Match the scalar coordinator's cycle_sites: pending evaluation
             // requests contribute their expression sites, not declaration names.
             let mut diagnostics: Vec<_> = members
                 .into_iter()
-                .filter_map(|id| self.owner.with_request_site(id, |site| *site).flatten())
+                .filter_map(|id| owner.with_request_site(id, |site| *site).flatten())
                 .chain((kind == FRONT_EVALUATE_KIND).then_some(site))
                 .map(|site| {
                     Diagnostic::error(
@@ -2260,22 +2612,34 @@ impl Source {
                     )
                 })
                 .collect();
-            diagnostics =
-                crate::select_diagnostics(diagnostics, Some(&self.owner.namespace.sources));
+            diagnostics = crate::select_diagnostics(diagnostics, Some(&owner.namespace.sources));
             if diagnostics.is_empty() {
-                return Err(self.refused(self.owner.errors.protocol));
+                return Err(self.refused(owner.errors.protocol));
             }
             return Err(QueryError::Diagnostics(vec![diagnostics.remove(0)]));
         }
-        let outcome = self
-            .owner
-            .selected(id, selected.clone())
-            .ok_or_else(|| self.refused(selected.err().unwrap_or(self.owner.errors.protocol)))?;
+        let mut owner = owner;
+        let mut selected = selected;
+        let mut selected_id = id;
+        while let Some(row) = owner.delegated(selected_id, &selected) {
+            owner = row.owner;
+            selected = row.selected;
+            selected_id = row.id;
+        }
+        if self.capture().identity() != owner.namespace.identity() {
+            self.join(Some(SuccessorCapture::new(&self.capture(), owner.clone())?))?;
+        }
+        let outcome = owner
+            .selected(selected_id, selected.clone())
+            .ok_or_else(|| self.refused(selected.err().unwrap_or(owner.errors.protocol)))?;
         self.merge(
             &outcome
-                .reads(&self.owner)
-                .ok_or_else(|| self.refused(self.owner.errors.resource))?,
+                .reads(&owner)
+                .ok_or_else(|| self.refused(owner.errors.resource))?,
         );
+        if let Some(sources) = &outcome.diagnostic_sources {
+            *self.diagnostic_sources.borrow_mut() = Some(sources.clone());
+        }
         self.select(&outcome.selections)?;
         self.evidence
             .borrow_mut()
@@ -2299,7 +2663,7 @@ impl Source {
         }
         self.record(
             ReadKey::ExecutedBody(DefId::intern(path)),
-            memos::optional(Some(self.owner.inputs[path].captured.implementation)),
+            memos::optional(Some(owner.inputs[path].captured.implementation)),
         );
         outcome.result
     }
@@ -2321,12 +2685,12 @@ impl Source {
         path: &DefPath,
         site: Span,
     ) -> Result<(Materialized, Vec<(hirsel_syntax::ExprId, Materialized)>), QueryError> {
-        if self.owner.front.query(path).is_none() {
-            if let Some(value) = self
-                .owner
+        let active = self.active_owner();
+        if active.front.query(path).is_none() {
+            if let Some(value) = active
                 .namespace
                 .snapshot
-                .builtin_dictionary_value(&self.owner.memo, path)?
+                .builtin_dictionary_value(&active.memo, path)?
             {
                 self.signature(path)?;
                 return Ok((value, vec![]));
@@ -2335,10 +2699,10 @@ impl Source {
         match self.value(path, FRONT_EVALUATE_KIND, site).await? {
             Value::Constant(value) => value
                 .decoded(
-                    &self.owner.records,
-                    &*self.owner.namespace.anchors,
-                    &*self.owner.store,
-                    self.owner.weight.scratch,
+                    &self.active_owner().records,
+                    &*self.capture().anchors,
+                    &*self.active_owner().store,
+                    self.active_owner().weight.scratch,
                 )
                 .ok_or(QueryError::NotImplemented),
             _ => Err(QueryError::NotImplemented),
@@ -2349,7 +2713,7 @@ impl s1::AsyncDependencySource for Source {
     async fn definition(&mut self, path: &DefPath) -> s1::DependencyProduct<DefinitionRef> {
         let previous = self.capture();
         let result = match self.value(path, FRONT_LOWER_KIND, Span::default()).await {
-            Ok(Value::Lower(lower)) => match lower.decode(&self.owner) {
+            Ok(Value::Lower(lower)) => match lower.decode(&self.active_owner()) {
                 Some(output) => {
                     self.execution_signatures(output.dependencies.iter());
                     Ok(output.value)
@@ -2386,28 +2750,28 @@ impl s1::AsyncDependencySource for Source {
         }
         let previous = self.capture();
         let result = async {
-            let id = self.owner.staged_query(path, arguments)?;
+            let active = self.active_owner();
+            let id = active.staged_query(path, arguments)?;
             self.select(&[(DefId::intern(path), arguments.to_vec())])?;
-            let declaration = self
-                .owner
+            let declaration = active
                 .staged
                 .declarations
                 .get(&DefId::intern(path))
                 .ok_or(QueryError::NotImplemented)?;
             let owner = declaration.owner.clone();
-            let site = self.owner.inputs[&owner].captured.site;
+            let site = active.inputs[&owner].captured.site;
             let Value::Constant(value) = self
-                .selected_value(id, &owner, FRONT_EVALUATE_KIND, site)
+                .selected_value_in(active, id, &owner, FRONT_EVALUATE_KIND, site)
                 .await?
             else {
                 return Err(QueryError::NotImplemented);
             };
             value
                 .decoded(
-                    &self.owner.records,
-                    &*self.owner.namespace.anchors,
-                    &*self.owner.store,
-                    self.owner.weight.scratch,
+                    &self.active_owner().records,
+                    &*self.capture().anchors,
+                    &*self.active_owner().store,
+                    self.active_owner().weight.scratch,
                 )
                 .map(|(value, _)| Arc::new(value))
                 .ok_or(QueryError::NotImplemented)
@@ -2426,16 +2790,55 @@ impl s1::AsyncDependencySource for Source {
         arguments: &[hirsel_types::GenericArgument],
     ) -> s1::DependencyProduct<Option<DefPath>> {
         let previous = self.capture();
-        let result = self
-            .owner
-            .namespace
-            .instances
-            .resolve(
-                DefId::intern(path),
-                self.owner.namespace.snapshot.types(),
-                arguments,
-            )
-            .map(|selected| selected.map(|id| id.path().clone()));
+        let active = self.active_owner();
+        let result = if let Some(producer) = active.demand_producer() {
+            match producer
+                .demand(
+                    &previous,
+                    path,
+                    arguments,
+                    previous
+                        .syntax(path)
+                        .map_or(Span::default(), |syntax| syntax.item.name_span),
+                    self.reads.clone(),
+                )
+                .await
+            {
+                Ok(product) => {
+                    if let Err(error) = &product.result {
+                        if let Ok(failure) = producer.demand_failure(
+                            path,
+                            &previous,
+                            error.clone(),
+                            product.reads.clone(),
+                        ) {
+                            *self.diagnostic_sources.borrow_mut() = Some(failure.sources);
+                        }
+                    }
+                    let joined = self.join(product.successor);
+                    self.merge(&product.reads);
+                    joined.and(product.result)
+                }
+                Err(error) => {
+                    if let Ok(failure) =
+                        producer.demand_failure(path, &previous, error.clone(), Reads::empty())
+                    {
+                        *self.diagnostic_sources.borrow_mut() = Some(failure.sources);
+                    }
+                    Err(error)
+                }
+            }
+        } else {
+            active
+                .namespace
+                .instances
+                .resolve(
+                    DefId::intern(path),
+                    active.namespace.snapshot.types(),
+                    arguments,
+                )
+                .map(|selected| selected.map(|id| id.path().clone()))
+        };
         let successor = self.successor_since(&previous);
         s1::DependencyProduct {
             successor: successor.as_ref().ok().and_then(Clone::clone),
@@ -2549,7 +2952,7 @@ async fn evaluate(
     constants: Vec<(hirsel_syntax::ExprId, Materialized)>,
     sizes: Vec<(hirsel_types::SizeParameterRef, u64)>,
 ) -> Result<s1::DependencyProduct<Materialized>, QueryError> {
-    let owner = source.owner.clone();
+    let owner = source.active_owner();
     let site = analyzed.value.typed.syntax.tree.expressions[expression.0 as usize]
         .origin
         .span;
@@ -2575,8 +2978,12 @@ async fn evaluate(
         s1::ValidatedEvaluation::recorded_in(prepared, previous.clone(), owner.verify, site);
     source.merge(&admission.reads);
     let runtime = owner.runtime_types()?;
+    let admission = admission.result?;
+    source
+        .evidence
+        .borrow_mut()
+        .accepted(admission.acceptance().cloned());
     let product = admission
-        .result?
         .run_async(
             &owner.namespace.sources,
             owner.namespace.limits,
@@ -2587,6 +2994,7 @@ async fn evaluate(
     source.join(product.value.successor)?;
     source.merge(&product.value.reads);
     source.evidence.borrow_mut().accepted(product.acceptance);
+    let owner = source.active_owner();
     let result = product.value.result.and_then(|(value, ty)| {
         let mut observed = ReadsBuilder::new();
         let result = crate::materialized::reify_value(
@@ -2613,6 +3021,7 @@ async fn evaluate(
         reads: Reads::empty(),
     })
 }
+
 struct Materializer<'a> {
     provider: FrozenProvider<'a>,
     source: &'a Source,
@@ -2664,7 +3073,75 @@ impl QueryEngine {
         front: Arc<FrontBodyQueries>,
         weight: MemoryWeight,
         max_reads: usize,
-        allowance: MemoryReservation,
+        mut allowance: MemoryReservation,
+        errors: RuntimeErrors,
+        generator: Option<(DefId, Span)>,
+    ) -> Result<Arc<FrontLowerQueries>, QueryError> {
+        front.namespace().require_environment(self)?;
+        let refusal = || {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "front Lower admission".into(),
+                message: "immutable Lower inputs exceed admission or lack phase/source bindings"
+                    .into(),
+            })
+        };
+        let pending = generator.is_none()
+            && !self.private_bootstrap_active
+            && (!self.front_staged_roots(definitions)?.is_empty()
+                || !front.namespace().instances.declarations.is_empty()
+                || definitions.iter().any(|path| {
+                    front
+                        .namespace()
+                        .bodies
+                        .get(&DefId::intern(path))
+                        .is_some_and(|body| body.generated)
+                        && !front
+                            .namespace()
+                            .registrations
+                            .contains_key(&DefId::intern(path))
+                }));
+        let demand_admission = if pending {
+            let part = allowance.bytes() / 6;
+            let mut take = || allowance.split(part).ok_or_else(refusal);
+            Some(generation::demand::DemandAdmission {
+                front: take()?,
+                lower: take()?,
+                text: take()?,
+                syntax: take()?,
+            })
+        } else {
+            None
+        };
+        let partition = LowerPartition::new(allowance);
+        let lower = self.front_lower_queries_in_partition(
+            definitions,
+            front,
+            weight,
+            max_reads,
+            &partition,
+            errors,
+            generator,
+        )?;
+        if let Some(admission) = demand_admission {
+            generation::demand::DemandProducer::new(
+                self,
+                lower.clone(),
+                admission,
+                weight,
+                max_reads,
+                errors,
+            )?;
+        }
+        Ok(lower)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn front_lower_queries_in_partition(
+        &mut self,
+        definitions: &[DefPath],
+        front: Arc<FrontBodyQueries>,
+        weight: MemoryWeight,
+        max_reads: usize,
+        partition: &LowerPartition,
         errors: RuntimeErrors,
         generator: Option<(DefId, Span)>,
     ) -> Result<Arc<FrontLowerQueries>, QueryError> {
@@ -2677,10 +3154,15 @@ impl QueryEngine {
             })
         };
         let input_bytes = FrontLowerQueries::input_bytes(definitions).ok_or_else(refusal)?;
-        if input_bytes > allowance.bytes() {
-            return Err(refusal());
+        let retention = partition.remaining.clone();
+        {
+            let mut remaining = retention.lock().unwrap_or_else(|e| e.into_inner());
+            *remaining = remaining.checked_sub(input_bytes).ok_or_else(refusal)?;
         }
-        let retention = Arc::new(Mutex::new(allowance.bytes() - input_bytes));
+        let mut input_charge = LowerInputCharge {
+            remaining: retention.clone(),
+            bytes: input_bytes,
+        };
         let store = self.result_store.clone().ok_or_else(refusal)?;
         let lowering = self.adapters.lowering.clone();
         let mut inputs = Vec::with_capacity(definitions.len());
@@ -2734,35 +3216,64 @@ impl QueryEngine {
         {
             let mut retention = retention.lock().unwrap_or_else(|e| e.into_inner());
             *retention = retention.checked_sub(layout_bytes).ok_or_else(refusal)?;
+            input_charge.bytes += layout_bytes;
         }
-        let staged = staged::Staged::new(&self.staged_constants);
+        let staged = staged::Staged::new(
+            namespace
+                .snapshot
+                .header_products()
+                .map_or(&self.staged_constants, |headers| headers.staged_constants()),
+        );
         {
             let mut remaining = retention.lock().unwrap_or_else(|error| error.into_inner());
             *remaining = remaining
                 .checked_sub(staged.retained_bytes())
                 .ok_or_else(refusal)?;
+            input_charge.bytes += staged.retained_bytes();
         }
         let paths = inputs
             .iter()
             .flat_map(|(path, input)| {
                 let path = DefId::intern(path);
                 [
-                    ((FRONT_LOWER_KIND, input.captured.lower.0), path),
-                    ((FRONT_EVALUATE_KIND, input.captured.evaluate.0), path),
+                    (
+                        (
+                            FRONT_LOWER_KIND,
+                            namespace
+                                .query_id(FRONT_LOWER_KIND, input.captured.lower.0)
+                                .address
+                                .0,
+                        ),
+                        path,
+                    ),
+                    (
+                        (
+                            FRONT_EVALUATE_KIND,
+                            namespace
+                                .query_id(FRONT_EVALUATE_KIND, input.captured.evaluate.0)
+                                .address
+                                .0,
+                        ),
+                        path,
+                    ),
                 ]
             })
             .collect();
-        let allowance = Arc::new(allowance);
+        let allowance = partition.allowance.clone();
         let anchors = (*namespace.anchors).clone();
         let records = crate::NativeRecords::new(self.types.clone(), store.clone());
         let source = Arc::new(LowerSource {
+            _inputs: input_charge,
             anchors: anchors.clone(),
             records: records.clone(),
             store: store.clone(),
             _sources: self.sources.clone(),
             _allowance: allowance.clone(),
         });
-        Ok(Arc::new(FrontLowerQueries {
+        let lower = Arc::new(FrontLowerQueries {
+            demand: Default::default(),
+            demand_owner: Default::default(),
+            forwarded: Mutex::new(BTreeMap::new()),
             source,
             inputs,
             generator,
@@ -2788,7 +3299,8 @@ impl QueryEngine {
             errors,
             retention,
             _allowance: allowance,
-        }))
+        });
+        Ok(lower)
     }
 }
 
@@ -2804,6 +3316,7 @@ mod retention_tests {
         let substitutions_bytes =
             substitutions.capacity() * std::mem::size_of::<(hirsel_syntax::ExprId, Materialized)>();
         let outcome = Outcome {
+            diagnostic_sources: None,
             result: Ok(Value::Constant(Box::new(Constants::new(
                 Materialized {
                     root: hirsel_tir::ValueNode {

@@ -326,11 +326,9 @@ impl QueryEngine {
             if bindings.is_empty() && summary.frames[0].generic {
                 continue;
             }
-            for call in summary
-                .calls
-                .iter()
-                .filter(|call| call.target_frame.is_none())
-            {
+            for call in summary.calls.iter().filter(|call| {
+                call.target_frame.is_none() && call.class != CallClass::ComptimeExecuted
+            }) {
                 let callee = call.callee.path();
                 if !self.declared(callee) {
                     continue;

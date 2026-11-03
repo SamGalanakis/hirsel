@@ -49,10 +49,9 @@ pub use scheduled_check::{
 pub use scheduled_stage::{FRONT_STAGE_KIND, FrontStageOutput, FrontStageQueries};
 mod scheduled_growth;
 pub use generation::{
-    AcceptedFrontRegistration, FrontInstanceBootstrap, FrontInstanceBootstrapAdmission,
-    FrontInstanceBootstrapError, FrontInstanceDiscovery, FrontInstanceRequest, FrontInstanceSyntax,
-    FrontRegistrationBootstrap, FrontRegistrationBootstrapAdmission,
-    FrontRegistrationBootstrapError, FrontRegistrationFailure,
+    AcceptedFrontRegistration, FrontDemandAdmission, FrontDemandError, FrontDemandScope,
+    FrontInstanceDiscovery, FrontInstanceRequest, FrontInstanceSyntax, FrontRegistrationBootstrap,
+    FrontRegistrationBootstrapAdmission, FrontRegistrationBootstrapError, FrontRegistrationFailure,
 };
 pub use parallel::{
     FRONT_BODY_KIND, FRONT_STORAGE_KIND, FrontBodyOutput, FrontBodyQueries, FrontCarry,
@@ -181,6 +180,50 @@ pub struct PhaseAdapters {
     pub interpreter: Option<Box<dyn InterpreterPhase>>,
     /// The front phases a complete compiler was built from (`PhaseAdapters::compiler`).
     pub phases: Option<Arc<dyn Phases>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct SourcePhases {
+    lexer: Option<Arc<dyn LexerPhase>>,
+    parser: Option<Arc<dyn ParserPhase>>,
+    formatter: Option<Arc<dyn FormatterPhase>>,
+    resolver: Option<Arc<dyn ResolverPhase>>,
+    signature: Option<Arc<dyn SignaturePhase>>,
+    checker: Option<Arc<dyn CheckerPhase>>,
+    modes: Option<Arc<dyn ModesPhase>>,
+    lowering: Option<Arc<dyn LoweringPhase>>,
+    phases: Option<Arc<dyn Phases>>,
+}
+impl PhaseAdapters {
+    pub(crate) fn source_phases(&self) -> SourcePhases {
+        SourcePhases {
+            lexer: self.lexer.clone(),
+            parser: self.parser.clone(),
+            formatter: self.formatter.clone(),
+            resolver: self.resolver.clone(),
+            signature: self.signature.clone(),
+            checker: self.checker.clone(),
+            modes: self.modes.clone(),
+            lowering: self.lowering.clone(),
+            phases: self.phases.clone(),
+        }
+    }
+}
+impl SourcePhases {
+    pub(crate) fn adapters(&self) -> PhaseAdapters {
+        PhaseAdapters {
+            lexer: self.lexer.clone(),
+            parser: self.parser.clone(),
+            formatter: self.formatter.clone(),
+            resolver: self.resolver.clone(),
+            signature: self.signature.clone(),
+            checker: self.checker.clone(),
+            modes: self.modes.clone(),
+            lowering: self.lowering.clone(),
+            interpreter: None,
+            phases: self.phases.clone(),
+        }
+    }
 }
 
 /// Reads survive errors and missing phases, rather than being lost in QueryError.

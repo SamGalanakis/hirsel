@@ -93,8 +93,6 @@ pub(super) struct PrivateProducts {
     revision: AtomicU64,
     candidates: hirsel_syntax::DefMap<Candidate>,
     modules: BTreeMap<Module, ModuleSlot>,
-    working: AtomicU64,
-    registrations: OnceLock<Vec<Arc<AcceptedFrontRegistration>>>,
 }
 impl PrivateProducts {
     fn publish(&self, slot: &ModuleSlot, next: ProofState) {
@@ -165,8 +163,6 @@ impl PrivateProducts {
         Some(Self {
             candidates,
             modules,
-            working: AtomicU64::new(0),
-            registrations: OnceLock::new(),
             revision: AtomicU64::new(0),
         })
     }
@@ -224,20 +220,31 @@ impl HeaderProducts {
         working: u64,
         registrations: &[Arc<AcceptedFrontRegistration>],
     ) {
-        if let Some(private) = &self.private {
-            private.working.store(working, Ordering::Relaxed);
-            let _ = private.registrations.set(registrations.to_vec());
+        self.private_working.store(working, Ordering::Relaxed);
+        let _ = self.private_registrations.set(registrations.to_vec());
+    }
+    /// Preserve the working grant even when the previous snapshot needed no
+    /// private proof rows. Registration inputs still select their exact view.
+    pub(super) fn inherit_private_snapshot(&self, front: &Self, inputs: &[[ContentHash; 3]]) {
+        self.private_working.store(
+            front.private_working.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        if let Some(registrations) = front.private_registrations.get()
+            && private_unique::registration_inputs(registrations).as_ref() == inputs
+        {
+            let _ = self.private_registrations.set(registrations.clone());
         }
     }
-    /// A later snapshot of the same request proves private modules in the
-    /// working space and registration view its Front producer configured.
-    pub(super) fn inherit_private(&self, front: &Self) {
-        if let Some(private) = &front.private {
-            self.configure_private(
-                private.working.load(Ordering::Relaxed),
-                private.registrations.get().map_or(&[], Vec::as_slice),
-            );
-        }
+    pub(super) fn inherit_private_scope(
+        &self,
+        previous: &Self,
+        registrations: &[Arc<AcceptedFrontRegistration>],
+    ) {
+        self.configure_private(
+            previous.private_working.load(Ordering::Relaxed),
+            registrations,
+        );
     }
     /// The proof of the module declaring `id`, demanded again if evicted.
     pub(crate) fn module_proof(&self, id: DefId) -> Result<Option<ModuleProof>, QueryError> {
@@ -299,7 +306,7 @@ impl HeaderProducts {
                 ),
             })
         };
-        let working = private.working.load(Ordering::Relaxed);
+        let working = self.private_working.load(Ordering::Relaxed);
         if working == 0 {
             return Err(refusal("private working partition is not configured"));
         }
@@ -327,7 +334,7 @@ impl HeaderProducts {
         slot.inferences.fetch_add(1, Ordering::Relaxed);
         let (facts, complete) = match engine.infer_private_module(
             working,
-            private.registrations.get().map_or(&[], Vec::as_slice),
+            self.private_registrations.get().map_or(&[], Vec::as_slice),
             id,
         ) {
             Ok(result) => result,
@@ -681,6 +688,8 @@ impl HeaderProducts {
             summary_reads: self.summary_reads.clone(),
             failures: Default::default(),
             private: None,
+            private_working: AtomicU64::new(self.private_working.load(Ordering::Relaxed)),
+            private_registrations: Default::default(),
         })
     }
 }
@@ -729,8 +738,6 @@ mod adoption_tests {
             .into_iter()
             .collect(),
             modules: [(module, slot)].into(),
-            working: AtomicU64::new(0),
-            registrations: OnceLock::new(),
             revision: AtomicU64::new(0),
         });
         (headers, engine, id)

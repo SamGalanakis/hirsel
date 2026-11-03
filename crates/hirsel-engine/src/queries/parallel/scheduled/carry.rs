@@ -572,7 +572,7 @@ impl BodyTask {
         self.store_compact(reference, &outcome.reads, &bytes, decode_bytes);
         if let Some(carry) = carry {
             carry.remember(
-                self.input,
+                queries.inputs[&self.input].key.0,
                 queries.inputs[&self.input].definition,
                 queries.inputs[&self.input].key.1,
                 outcome.reads.clone(),
@@ -600,7 +600,7 @@ impl BodyTask {
         };
         let input = &queries.inputs[&self.input];
         carry.remember(
-            self.input,
+            input.key.0,
             input.definition,
             input.key.1,
             reads,
@@ -625,10 +625,10 @@ impl BodyTask {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let rows = carry.rows.lock().unwrap_or_else(|e| e.into_inner());
-        let row = rows.entries.get(&self.input)?;
-        let clean = changes
-            .as_ref()
-            .is_some_and(|changes| changes.clean.get(&self.input) == Some(&row.generation));
+        let row = rows.entries.get(&self.queries.inputs[&self.input].key.0)?;
+        let clean = changes.as_ref().is_some_and(|changes| {
+            changes.clean.get(&self.queries.inputs[&self.input].key.0) == Some(&row.generation)
+        });
         let input = &queries.inputs[&self.input];
         if row.text != input.key.1
             || row.decode_bytes > self.weight.scratch

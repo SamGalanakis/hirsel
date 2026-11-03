@@ -98,6 +98,10 @@ pub(crate) struct EvaluationOutcome {
     pub(crate) limit: Option<hirsel_tir::ToolingLimit>,
 }
 impl ValidatedEvaluation {
+    pub(crate) fn acceptance(&self) -> Option<&hirsel_validate::AcceptedArtifact> {
+        self.acceptance.as_ref()
+    }
+
     pub(crate) fn recorded_in(
         prepared: crate::comptime::PreparedEvaluation,
         capture: Arc<NamespaceCapture>,

@@ -275,10 +275,13 @@ impl QueryTask for Task {
         self.id
     }
     fn weight(&self) -> MemoryWeight {
-        self.queries.weight
+        MemoryWeight {
+            retained: (size_of::<Self>() + size_of::<ProductRef>()) as u64,
+            ..self.queries.weight
+        }
     }
     fn continuation_bytes(&self) -> u64 {
-        self.queries.weight.retained
+        self.weight().retained
     }
     fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
         if let Some(result) = self.terminal.clone() {
@@ -450,16 +453,19 @@ impl QueryEngine {
             {
                 continue;
             }
-            let signature = self.item_signature(path)?.value;
-            if !signature
-                .generics()
+            self.materialize(path)?;
+            let syntax = self.snapshot(path)?;
+            let generics = match &syntax.item.kind {
+                hirsel_syntax::ItemKind::Function { signature, .. } => &signature.generics,
+                hirsel_syntax::ItemKind::Type { generics, .. } => generics,
+                _ => continue,
+            };
+            if !generics
                 .iter()
-                .any(|parameter| matches!(parameter, hirsel_types::GenericParameter::Size { .. }))
+                .any(|parameter| matches!(parameter.kind, hirsel_syntax::GenericKind::Size))
             {
                 continue;
             }
-            self.materialize(path)?;
-            let syntax = self.snapshot(path)?;
             if syntax
                 .tree
                 .expressions

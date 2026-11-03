@@ -2517,3 +2517,46 @@ fn ordered_publication_admits_a_later_root_as_an_earlier_prerequisite() {
         );
     }
 }
+
+struct PublicationAfterHandledFailure;
+impl LocalQueryFactory for PublicationAfterHandledFailure {
+    fn weight(&self, _: QueryId) -> Result<MemoryWeight, Reference> {
+        Ok(MemoryWeight {
+            retained: 16384,
+            scratch: 32,
+            stack: 0,
+        })
+    }
+    fn create(&self, id: QueryId) -> Result<Box<dyn LocalQueryTask>, Reference> {
+        Ok(Box::new(LocalFutureTask::new(
+            id,
+            self.weight(id)?,
+            3,
+            errors(),
+            move |reads| async move {
+                if id == local_query(0) {
+                    assert_eq!(
+                        reads.read_consuming(local_query(1)).await,
+                        Err(errors().protocol)
+                    );
+                    reads.read_consuming(local_query(2)).await?;
+                } else if id == local_query(1) {
+                    return Err(errors().protocol);
+                } else {
+                    reads.publication().await?;
+                }
+                Ok(product(id))
+            },
+        )?))
+    }
+}
+#[test]
+fn ordered_publication_advances_past_a_consumed_dependency_failure() {
+    for jobs in [1, 2, 8] {
+        let mut rt = runtime(jobs, 16 << 20);
+        rt.register_local(2, Arc::new(PublicationAfterHandledFailure))
+            .unwrap();
+        let request = rt.request(&[local_query(0)]);
+        assert_eq!(rt.wait(request), Ok(vec![product(local_query(0))]));
+    }
+}

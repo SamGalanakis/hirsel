@@ -882,7 +882,7 @@ impl QueryEngine {
                 // Keep its budget reservation, but release admission before any
                 // such request can acquire the same process-wide lock.
                 prepared.and_then(|reservation| {
-                    reservation.map_or(Ok(()), |reservation| self.standalone_bootstrap(reservation))
+                    reservation.map_or(Ok(()), |reservation| self.standalone_demand(reservation))
                 })
             }
         };
@@ -931,10 +931,7 @@ impl QueryEngine {
         }
         Ok(Some(reservation))
     }
-    fn standalone_bootstrap(
-        &mut self,
-        mut reservation: MemoryReservation,
-    ) -> Result<(), QueryError> {
+    fn standalone_demand(&mut self, mut reservation: MemoryReservation) -> Result<(), QueryError> {
         let definitions = self.front_source_roots();
         let generators = self.front_generator_roots(&definitions)?;
         let refused = || {
@@ -954,7 +951,7 @@ impl QueryEngine {
             }));
         }
         let mut split = |bytes| reservation.split(bytes).ok_or_else(refused);
-        let admission = FrontInstanceBootstrapAdmission {
+        let admission = FrontDemandAdmission {
             jobs: hirsel_intern::jobs::Jobs::new(1),
             weight: MemoryWeight {
                 scratch: 8 << 20,
@@ -1011,33 +1008,29 @@ impl QueryEngine {
             self.result_store = Some(Arc::new(crate::store::MemStore::default()));
         }
         let result = self
-            .bootstrap_front_instances(&definitions, &definitions, &generators, admission, errors)
-            .and_then(FrontInstanceBootstrap::require_complete_front);
+            .demand_front_scope(&definitions, &definitions, &generators, admission, errors)
+            .and_then(FrontDemandScope::require_complete_front);
         self.result_store = previous;
         result.map(|_| ()).map_err(|error| match error {
-            FrontInstanceBootstrapError::Bootstrap(FrontRegistrationBootstrapError::Admission(
-                error,
-            ))
-            | FrontInstanceBootstrapError::Discovery { error, .. }
-            | FrontInstanceBootstrapError::Front {
+            FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
+            | FrontDemandError::Discovery { error, .. }
+            | FrontDemandError::Front {
                 error: Some(error), ..
             } => error,
-            FrontInstanceBootstrapError::Bootstrap(
-                FrontRegistrationBootstrapError::Acceptance(error),
-            ) => {
+            FrontDemandError::Generator(FrontRegistrationBootstrapError::Acceptance(error)) => {
                 self.sources = error.sources;
                 error.error
             }
-            FrontInstanceBootstrapError::Bootstrap(FrontRegistrationBootstrapError::Runtime {
+            FrontDemandError::Generator(FrontRegistrationBootstrapError::Runtime {
                 error: Some(error),
                 ..
             }) => error,
-            FrontInstanceBootstrapError::Front {
+            FrontDemandError::Front {
                 reference,
                 error: None,
                 ..
             }
-            | FrontInstanceBootstrapError::Bootstrap(FrontRegistrationBootstrapError::Runtime {
+            | FrontDemandError::Generator(FrontRegistrationBootstrapError::Runtime {
                 reference,
                 error: None,
                 ..

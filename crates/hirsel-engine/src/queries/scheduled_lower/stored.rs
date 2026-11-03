@@ -66,7 +66,7 @@ impl FrontLowerQueries {
     }
 
     pub(super) async fn load_stored(
-        &self,
+        self: &Arc<Self>,
         id: QueryId,
         path: &DefPath,
         key: &EntryKey,
@@ -77,6 +77,67 @@ impl FrontLowerQueries {
         }
         let storage = stored_key(key);
         let entry = Entry::load(&*self.store, &storage);
+        // A candidate may name staged headers that are absent from the written
+        // capture. Demand those headers from their source producer, then let the
+        // successor validate every read and V receipt before reopening a value.
+        for variant in &entry.variants {
+            if variant.inputs != storage.1 || !variant.valid(&storage) {
+                continue;
+            }
+            let mut staged = BTreeSet::new();
+            let compatible = variant.reads.iter().all(|(read, expected)| {
+                if let ReadKey::Signature(declaration) = read
+                    && declaration.path().0.name.starts_with("$comptime:")
+                    && !self.staged.declarations.contains_key(declaration)
+                {
+                    let mut weight = crate::NativeMetadataWeight::default();
+                    weight.tree::<DefId, ()>(
+                        staged.len() + usize::from(!staged.contains(declaration)),
+                    );
+                    if staged.len() >= self.max_reads || weight.bytes() > self.weight.scratch {
+                        return false;
+                    }
+                    staged.insert(*declaration);
+                    true
+                } else {
+                    self.observe(path, read) == Some(*expected)
+                }
+            });
+            if !compatible || staged.is_empty() {
+                continue;
+            }
+            if variant.output.len > self.weight.scratch {
+                continue;
+            }
+            let candidate = variant.resolve(&*self.store, &storage)?;
+            let record: Record = bincode::deserialize(&candidate.payload).ok()?;
+            let domain = if id.kind == FRONT_LOWER_KIND {
+                LOWER_DESCRIPTOR
+            } else {
+                CONSTANT_DESCRIPTOR
+            };
+            if record.descriptor.domain != domain || record.descriptor.len > self.weight.scratch {
+                continue;
+            }
+            let producer = self.demand_producer()?;
+            let mut capture = self.namespace.clone();
+            let mut successor = None;
+            for declaration in staged {
+                if let Some(next) = producer
+                    .stage_declaration(&capture, declaration.path(), query_reads.clone())
+                    .await
+                    .ok()?
+                {
+                    capture = next.namespace().clone();
+                    successor = Some(next);
+                }
+            }
+            if let Some(successor) = successor {
+                let owner = successor.owner().clone();
+                let actual = owner.id(path, id.kind)?;
+                return Some(self.forward_capture(id, actual, owner, query_reads).await);
+            }
+        }
         let variant =
             entry.resolve_current(&*self.store, &storage, |read| self.observe(path, read))?;
         // This outer record contains only fixed-size references and bounds.
@@ -262,6 +323,7 @@ impl FrontLowerQueries {
             return None;
         }
         let outcome = Outcome {
+            diagnostic_sources: None,
             result: Ok(value),
             reads,
             reads_decode_bytes: record.reads_decode_bytes,

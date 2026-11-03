@@ -62,6 +62,51 @@ pub struct NamespaceCapture {
     admission: std::sync::OnceLock<NamespaceAdmission>,
 }
 
+pub(crate) struct DiagnosticSources {
+    pub(crate) definition: DefId,
+    pub(crate) sources: SourceMap,
+    pub(crate) _allowance: Arc<crate::runtime::MemoryReservation>,
+}
+impl DiagnosticSources {
+    pub(crate) fn owner(&self, anchor: hirsel_span::Anchor) -> Option<(DefPath, u32)> {
+        let (file, base) = self.sources.anchor(anchor)?;
+        let source = self.sources.file(file)?;
+        Some((
+            persistent::generated_codec_owner(self.definition.path(), source.text()),
+            base,
+        ))
+    }
+}
+
+pub(crate) struct DiagnosticRecordSource<'a> {
+    pub(crate) base: &'a NativeRecordContext,
+    pub(crate) diagnostics: Option<&'a DiagnosticSources>,
+}
+impl crate::NativeRecordSource for DiagnosticRecordSource<'_> {
+    fn record_types(&self) -> &Arc<hirsel_types::TypeInterner> {
+        crate::NativeRecordSource::record_types(self.base)
+    }
+    fn record_owner(&self, anchor: hirsel_span::Anchor) -> Option<(DefPath, u32)> {
+        crate::NativeRecordSource::record_owner(self.base, anchor)
+            .or_else(|| self.diagnostics?.owner(anchor))
+    }
+    fn record_source_anchor(
+        &self,
+        owner: &DefPath,
+        occurrence: u32,
+    ) -> Option<hirsel_span::Anchor> {
+        crate::NativeRecordSource::record_source_anchor(self.base, owner, occurrence).or_else(
+            || {
+                let diagnostics = self.diagnostics?;
+                diagnostics.sources.anchors().find_map(|(anchor, _, _)| {
+                    (diagnostics.owner(anchor).as_ref() == Some(&(owner.clone(), occurrence)))
+                        .then_some(anchor)
+                })
+            },
+        )
+    }
+}
+
 struct NamespaceAdmission {
     _reservation: crate::runtime::MemoryReservation,
     _sources: SourceMap,
@@ -123,6 +168,42 @@ impl NamespaceCapture {
                     .is_some_and(|current| previous.text() == current.text())
             })
     }
+    /// Reconstruct metadata from this capture for a registration transaction.
+    /// This assembler has no session, active S1 stack or ambient body cache.
+    pub(crate) fn assembly(&self, adapters: &SourcePhases) -> Result<QueryEngine, QueryError> {
+        let headers = self
+            .snapshot
+            .header_products()
+            .ok_or_else(|| refused("missing captured header inputs"))?;
+        let mut engine = headers.execution();
+        engine.adapters = adapters.adapters();
+        engine.verify = self.verify;
+        engine.sources = self.sources.clone();
+        engine.result_store = Some(self.store.clone());
+        engine.instance_bodies = (*self.instances).clone();
+        engine.generated.bind(engine.source_ownership.clone());
+        // Metadata assembly must never invoke the standalone execution driver.
+        engine.private_bootstrap_active = true;
+        for id in self.bodies.keys() {
+            engine
+                .items
+                .insert(id.path().clone(), vec![self.syntax(id.path())?]);
+        }
+        for (id, registration) in &self.registrations {
+            engine
+                .generated
+                .insert(id.path().clone(), registration.source());
+        }
+        engine.private_summary_inputs = private_unique::registration_inputs(
+            &self.registrations.values().cloned().collect::<Vec<_>>(),
+        );
+        engine.snapshot = Some((engine.snapshot_stamp(), self.snapshot.clone()));
+        engine.adopt_completed_headers();
+        engine.header_products = None;
+        engine.inherit_source_records((*self.anchors).clone());
+        engine.retire_snapshot();
+        Ok(engine)
+    }
     pub(crate) fn input_bytes(definitions: &[DefPath]) -> Option<u64> {
         let mut weight = crate::NativeMetadataWeight::default();
         weight.add(
@@ -175,6 +256,19 @@ impl NamespaceCapture {
                 captured.logical_path() == current.logical_path()
                     && captured.text() == current.text()
             })
+    }
+    pub(crate) fn query_id(&self, kind: u32, key: ContentHash) -> crate::runtime::QueryId {
+        crate::runtime::QueryId {
+            kind,
+            address: hirsel_artifact_store::Address(ContentHash::of_parts(
+                "hirsel.namespace.query.v1",
+                [
+                    self.identity.0.as_slice(),
+                    key.0.as_slice(),
+                    kind.to_le_bytes().as_slice(),
+                ],
+            )),
+        }
     }
     pub fn identity(&self) -> ContentHash {
         self.identity
@@ -308,13 +402,23 @@ impl QueryEngine {
         &mut self,
         registrations: &[Arc<AcceptedFrontRegistration>],
     ) -> Result<(), QueryError> {
-        for registration in registrations {
-            registration.validate(self)?;
-        }
         if !private_unique::registrations_covered(&self.private_summary_inputs, registrations) {
             self.private_summary_inputs = private_unique::registration_inputs(registrations);
             self.private_summary_revision = None;
             self.retire_snapshot();
+        }
+        let previous = self
+            .snapshot
+            .as_ref()
+            .and_then(|(_, snapshot)| snapshot.header_products().cloned());
+        let snapshot = self.signature_inputs();
+        if let (Some(previous), Some(current)) = (previous, snapshot.header_products())
+            && !Arc::ptr_eq(&previous, current)
+        {
+            current.inherit_registration_scope(&previous, registrations);
+        }
+        for registration in registrations {
+            registration.validate(self)?;
         }
         Ok(())
     }
@@ -328,9 +432,7 @@ impl QueryEngine {
             self.materialize(path)?;
         }
         self.register_specializations(definitions);
-        for registration in registrations {
-            registration.validate(self)?;
-        }
+        self.prepare_namespace_registrations(registrations)?;
         let declarations = self.frozen_declarations().headers_only();
         let anchors = Arc::new(NativeRecordContext::capture(self));
         let store = self
@@ -383,12 +485,10 @@ impl QueryEngine {
                     syntax.anchor,
                 );
             }
-            let queries = if generated && registration.is_none() {
-                None
-            } else {
+            let queries = {
                 let mut key = |kind| match registration {
                     Some(accepted) => self.accepted_front_store_key(accepted, kind),
-                    None if generation::instance_bodied(&syntax) => {
+                    None if generation::generator(&syntax).is_some() => {
                         self.front_declaration_store_key(path, kind)
                     }
                     None => self
@@ -510,12 +610,21 @@ impl QueryEngine {
         let body_bytes = records
             .encode(&*anchors, &body_identities)
             .ok_or_else(|| refused("body identity encoding"))?;
+        let staged = self
+            .staged_constants
+            .iter()
+            .map(|(path, constant)| (DefId::intern(path), constant.signature.fingerprint))
+            .collect::<Vec<_>>();
+        let staged = records
+            .encode(&*anchors, &staged)
+            .ok_or_else(|| refused("staged header identity encoding"))?;
         let identity = ContentHash::of_parts(
             "hirsel.namespace.capture.v1",
             [
                 base.0.as_slice(),
                 manifest.output.0.0.as_slice(),
                 body_bytes.as_slice(),
+                staged.as_slice(),
             ],
         );
         let registrations: BTreeMap<_, _> = registrations

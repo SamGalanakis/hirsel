@@ -2434,3 +2434,143 @@ fn running_hello_builds_runtime_type_rows_only_for_types_its_closure_reaches() {
         );
     });
 }
+
+#[test]
+fn frozen_frontier_generator_demand_skips_a_dead_compile_time_branch() {
+    use hirsel_engine::runtime::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    struct CountGenerators(Arc<dyn LoweringPhase>, Arc<AtomicUsize>);
+    impl LoweringPhase for CountGenerators {
+        fn lower(
+            &self,
+            types: &hirsel_types::TypeInterner,
+            memo: &hirsel_types::TypeMemo,
+            body: &AnalyzedBody,
+            comptime: &Comptime,
+            signature: &hirsel_types::Signature,
+        ) -> Result<QueryOutput<hirsel_tir::Definition>, QueryError> {
+            self.0.lower(types, memo, body, comptime, signature)
+        }
+        fn lower_evaluation(
+            &self,
+            types: &hirsel_types::TypeInterner,
+            memo: &hirsel_types::TypeMemo,
+            body: &AnalyzedBody,
+            staged: &[(hirsel_syntax::ExprId, hirsel_types::TypeId)],
+            signature: &hirsel_types::Signature,
+            expression: hirsel_syntax::ExprId,
+            result: hirsel_types::TypeId,
+            constants: &[(hirsel_syntax::ExprId, hirsel_tir::Materialized)],
+        ) -> Result<hirsel_tir::Definition, QueryError> {
+            if matches!(
+                body.typed.syntax.item.generated,
+                Some(hirsel_syntax::Generated::Generator(_))
+            ) {
+                self.1.fetch_add(1, Ordering::Relaxed);
+            }
+            self.0.lower_evaluation(
+                types, memo, body, staged, signature, expression, result, constants,
+            )
+        }
+        fn entry_body(&self) -> hirsel_tir::BodyId {
+            self.0.entry_body()
+        }
+    }
+    with_compiler_stack(|| {
+        for jobs in [1, 2, 8] {
+            for selected in [false, true] {
+                let source = format!(
+                    "type Point{{x:u64}}\nfn make[T](s:TypeShape[T])->Result[Body[fn(T)->u64 uses {{}}],String]{{let _=s;Ok(codegen.body(\"fn(p:standalone@0/Point)->u64 uses {{}}{{let _=p;7u64}}\"))}}\nfn width[T](p:T)->u64 uses {{}}=comptime make(shape(T))\nconst A:u64=comptime if {selected} {{width(Point(x:1u64))}} else {{42u64}}\n"
+                );
+                let mut engine =
+                    engine(&source).with_result_store(Arc::new(store::MemStore::default()));
+                let generations = Arc::new(AtomicUsize::new(0));
+                engine.adapters.lowering = Some(Arc::new(CountGenerators(
+                    engine.adapters.lowering.take().unwrap(),
+                    generations.clone(),
+                )));
+                let paths = engine.indexed_definitions();
+                let domain = store::Domain {
+                    kind: 0x4601_00f1,
+                    schema: 1,
+                };
+                let errors = RuntimeErrors {
+                    resource: domain.reference(b"resource").unwrap(),
+                    cycle: domain.reference(b"cycle").unwrap(),
+                    cancelled: domain.reference(b"cancelled").unwrap(),
+                    protocol: domain.reference(b"protocol").unwrap(),
+                    panicked: domain.reference(b"panicked").unwrap(),
+                };
+                let budget = ProcessBudget::new(512 << 20);
+                let weight = MemoryWeight {
+                    retained: 128 << 10,
+                    scratch: 8 << 20,
+                    stack: 0,
+                };
+                let front = engine
+                    .front_body_queries(&paths, weight, budget.reserve(64 << 20).unwrap(), errors)
+                    .unwrap();
+                let lower = engine
+                    .front_lower_queries(
+                        &paths,
+                        front.clone(),
+                        weight,
+                        64,
+                        budget.reserve(128 << 20).unwrap(),
+                        errors,
+                    )
+                    .unwrap();
+                let mut runtime = AdmittedRuntime::new(
+                    hirsel_intern::jobs::Jobs::new(jobs),
+                    budget.reserve(256 << 20).unwrap(),
+                    errors,
+                )
+                .unwrap();
+                runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
+                runtime
+                    .register_local(FRONT_LOWER_KIND, lower.factory())
+                    .unwrap();
+                runtime
+                    .register_local(FRONT_EVALUATE_KIND, lower.factory())
+                    .unwrap();
+                let request = runtime.request(&[lower.evaluate_query(&path("A")).unwrap()]);
+                let result = runtime.wait(request);
+                assert!(
+                    result.is_ok(),
+                    "selected={selected} jobs={jobs}: {result:?}, {:?}",
+                    result
+                        .as_ref()
+                        .err()
+                        .and_then(|reference| lower.failure(*reference))
+                );
+                assert_eq!(
+                    lower.settled_constant(&path("A"), &[]).unwrap().root.kind,
+                    hirsel_tir::ValueKind::Constant(Constant::Integer(if selected {
+                        7
+                    } else {
+                        42
+                    }))
+                );
+                assert!(engine.generated_source(&path("width")).is_none());
+                assert_eq!(
+                    generations.load(Ordering::Relaxed) > 0,
+                    selected,
+                    "an unselected branch performs no generator execution",
+                );
+                drop(result);
+                drop(runtime);
+                drop(lower);
+                drop(front);
+                drop(engine);
+                assert_eq!(
+                    budget.reserved(),
+                    0,
+                    "completed demand owners release their grants"
+                );
+            }
+        }
+    });
+}

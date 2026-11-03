@@ -75,10 +75,18 @@ impl Ord for RecordOwner {
 /// observations. Mutating a source table drops this one product; detached
 /// workers retain their immutable generation through NativeRecordContext.
 #[derive(Default)]
-pub(crate) struct SourceOwnership(std::sync::Mutex<Option<(u64, NativeRecordContext)>>);
+pub(crate) struct SourceOwnership {
+    current: std::sync::Mutex<Option<(u64, NativeRecordContext)>>,
+    // Execution assemblies retain the complete admitted source base while
+    // registrations add bindings. Ordinary edited engines have no inherited base.
+    inherited: std::sync::Mutex<Option<NativeRecordContext>>,
+}
 impl SourceOwnership {
     fn changed(&self) {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
     }
 }
 /// Source tables invalidate their own ownership projection on mutable access.
@@ -145,10 +153,18 @@ impl<K: Ord, V> FromIterator<(K, V)> for SourceTable<K, V> {
     }
 }
 impl QueryEngine {
+    pub(crate) fn inherit_source_records(&self, context: NativeRecordContext) {
+        *self
+            .source_ownership
+            .inherited
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(context);
+        self.source_ownership.changed();
+    }
     pub(crate) fn source_records(&self) -> NativeRecordContext {
         let mut current = self
             .source_ownership
-            .0
+            .current
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if let Some((placement, context)) = &*current
@@ -157,12 +173,78 @@ impl QueryEngine {
         {
             return context.clone();
         }
-        let context = NativeRecordContext::build(self);
+        let mut context = NativeRecordContext::build(self);
+        if let Some(inherited) = self
+            .source_ownership
+            .inherited
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            context = context.extend(inherited, &self.sources);
+        }
         *current = Some((self.sources.placement_revision(), context.clone()));
         context
     }
 }
 impl NativeRecordContext {
+    fn extend(&self, inherited: &Self, sources: &hirsel_span::SourceMap) -> Self {
+        let mut owners = self
+            .bindings
+            .owners
+            .iter()
+            .cloned()
+            .collect::<BTreeMap<_, _>>();
+        let mut anchors = self
+            .bindings
+            .anchors
+            .iter()
+            .cloned()
+            .collect::<BTreeMap<_, _>>();
+        let mut definitions = self
+            .bindings
+            .source_definitions
+            .iter()
+            .copied()
+            .collect::<BTreeMap<_, _>>();
+        for (anchor, owner) in &inherited.bindings.owners {
+            owners.entry(*anchor).or_insert_with(|| owner.clone());
+        }
+        for (owner, anchor) in &inherited.bindings.anchors {
+            let same_source = |other| {
+                let ((old_file, old_base), (new_file, new_base)) =
+                    (sources.anchor(*anchor)?, sources.anchor(other)?);
+                let (old, new) = (sources.file(old_file)?, sources.file(new_file)?);
+                Some(
+                    old_base == new_base
+                        && old.logical_path() == new.logical_path()
+                        && old.text() == new.text(),
+                )
+            };
+            match anchors.entry(owner.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(*anchor);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry)
+                    if same_source(*entry.get()) == Some(true) =>
+                {
+                    entry.insert(*anchor);
+                }
+                _ => {}
+            }
+        }
+        for (anchor, definition) in &inherited.bindings.source_definitions {
+            definitions.entry(*anchor).or_insert(*definition);
+        }
+        Self {
+            types: self.types.clone(),
+            bindings: Arc::new(SourceBindings {
+                owners: owners.into_iter().collect(),
+                anchors: anchors.into_iter().collect(),
+                source_definitions: definitions.into_iter().collect(),
+            }),
+        }
+    }
     pub(crate) fn bindings_hold(&self, current: &Self) -> bool {
         Arc::ptr_eq(&self.types, &current.types)
             && (Arc::ptr_eq(&self.bindings, &current.bindings)

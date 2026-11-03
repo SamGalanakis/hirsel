@@ -80,6 +80,7 @@ impl Graph {
                 loading,
                 &*store,
                 None,
+                None,
             )?;
             let check = installed.check(engine, &selection)?;
             Ok((installed, check))

@@ -1299,7 +1299,21 @@ impl QueryEngine {
     /// Select a persistent result store. Library engines default to no store;
     /// CLI engines use dir@1. Injected stores keep integration tests isolated.
     pub fn with_result_store(mut self, store: Arc<dyn crate::store::ResultStore>) -> Self {
-        self.result_store = store.transports().then_some(store);
+        let selected = store.transports().then_some(store);
+        let previous_verifier = self
+            .result_store
+            .as_ref()
+            .and_then(|store| store.verifier());
+        let selected_verifier = selected.as_ref().and_then(|store| store.verifier());
+        let same_verifier = match (&previous_verifier, &selected_verifier) {
+            (None, None) => true,
+            (Some(previous), Some(selected)) => Arc::ptr_eq(previous, selected),
+            _ => false,
+        };
+        if !same_verifier {
+            self.retire_snapshot();
+        }
+        self.result_store = selected;
         self
     }
     /// Recompute store hits and compare their canonical bytes (cache oracle).
@@ -1396,7 +1410,7 @@ impl QueryEngine {
         kind: QueryKind,
     ) -> Result<EntryKey, QueryError> {
         let syntax = self.snapshot(path)?;
-        if !generation::instance_bodied(&syntax)
+        if generation::generator(&syntax).is_none()
             || !matches!(
                 kind,
                 QueryKind::Modes | QueryKind::Lower | QueryKind::Evaluate

@@ -190,6 +190,7 @@ mod tests {
             records.encode(&anchors, &expected).unwrap()
         );
         let mut outcome = Outcome {
+            diagnostic_sources: None,
             result: Ok(Value::Lower(Box::new(LowerProduct {
                 live: None,
                 definition,
@@ -307,6 +308,7 @@ mod tests {
         let reference = store.put_content(CONSTANT_DESCRIPTOR, &bytes).unwrap();
         let bound = constants.working_bytes();
         let mut outcome = Outcome {
+            diagnostic_sources: None,
             result: Ok(Value::Constant(Box::new(constants))),
             reads: reads.clone(),
             reads_decode_bytes: 0,

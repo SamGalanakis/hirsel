@@ -625,6 +625,13 @@ fn invalid(message: impl Into<String>) -> QueryError {
     })
 }
 impl QueryEngine {
+    /// Written roots selected by a native export with no explicit root list.
+    pub fn front_native_source_roots(&self) -> Vec<DefPath> {
+        self.source_paths()
+            .into_iter()
+            .filter(|path| !self.package_manifests.contains_key(&path.0.package))
+            .collect()
+    }
     pub fn front_native_queries(
         &mut self,
         plan: FrontNativePlan,
@@ -639,10 +646,7 @@ impl QueryEngine {
         }
         let all = self.source_paths();
         let mut seeds = if plan.roots.is_empty() {
-            all.iter()
-                .filter(|path| !self.package_manifests.contains_key(&path.0.package))
-                .cloned()
-                .collect::<Vec<_>>()
+            self.front_native_source_roots()
         } else {
             plan.roots
         };

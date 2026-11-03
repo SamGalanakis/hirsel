@@ -223,7 +223,7 @@ impl FrontBodyQueries {
             })?;
         let decode_bytes = outer.checked_add(facts.bytes(true))?;
         let record = RecordRef {
-            key,
+            key: self.inputs.get(&key)?.key.0,
             body: archive,
             reads: &outcome.reads,
             decode_bytes,
@@ -281,7 +281,7 @@ impl BodyTask {
             .reject_trailing_bytes()
             .deserialize(&bytes)
             .ok()?;
-        if record.key != self.input
+        if record.key != self.queries.inputs[&self.input].key.0
             || reference
                 .len
                 .checked_mul(8)?
@@ -317,7 +317,7 @@ impl BodyTask {
             return;
         }
         let record = RecordRef {
-            key: self.input,
+            key: queries.inputs[&self.input].key.0,
             body,
             reads,
             decode_bytes,
@@ -363,7 +363,7 @@ impl BodyTask {
             .reject_trailing_bytes()
             .deserialize(&variant.payload)
             .ok()?;
-        if record.key != self.input
+        if record.key != self.queries.inputs[&self.input].key.0
             || record.body.is_some_and(|body| {
                 body.domain != crate::store::product_domain(QueryKind::Modes)
                     || body.len > self.weight.scratch

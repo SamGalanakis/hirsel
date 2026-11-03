@@ -295,7 +295,7 @@ impl FrontLowerQueries {
             return;
         };
         carry.remember(
-            (id.kind, id.address.0),
+            (id.kind, key.0),
             Row {
                 generation: 0,
                 owner,
@@ -325,15 +325,13 @@ impl FrontLowerQueries {
     ) -> Option<Result<ProductRef, Reference>> {
         let carry = self.carry()?;
         let rows = carry.rows.lock().unwrap_or_else(|e| e.into_inner());
-        let row = rows.entries.get(&(id.kind, id.address.0))?;
+        let row = rows.entries.get(&(id.kind, key.0))?;
         let clean = self
             .carry_changes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-            .is_some_and(|changes| {
-                changes.clean.get(&(id.kind, id.address.0)) == Some(&row.generation)
-            });
+            .is_some_and(|changes| changes.clean.get(&(id.kind, key.0)) == Some(&row.generation));
         if row.text != key.1
             || row.descriptor.len() as u64 > self.weight.scratch
             || row.reads_decode_bytes > self.weight.scratch
@@ -438,6 +436,7 @@ impl FrontLowerQueries {
                 id,
                 key,
                 Outcome {
+                    diagnostic_sources: None,
                     result: Ok(value),
                     reads,
                     reads_decode_bytes,

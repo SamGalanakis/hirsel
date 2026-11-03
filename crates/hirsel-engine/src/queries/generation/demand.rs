@@ -543,14 +543,17 @@ impl DemandProducer {
         {
             return Ok(None);
         }
-        let mut engine = previous.assembly(&self.adapters)?;
-        if engine
-            .front_staged_roots(std::slice::from_ref(path))?
-            .is_empty()
+        if previous
+            .snapshot
+            .header_products()
+            .and_then(|headers| headers.source_facts(id))
+            .is_some_and(|facts| facts.comptime.is_empty())
         {
             return Ok(None);
         }
-        drop(engine);
+        if !scheduled_stage::has_staged_body(&previous.syntax(path)?) {
+            return Ok(None);
+        }
         reads
             .publication()
             .await

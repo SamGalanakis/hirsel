@@ -438,6 +438,22 @@ impl FrontStageQueries {
     }
 }
 
+pub(in crate::queries) fn has_staged_body(syntax: &ItemSyntax) -> bool {
+    let generics = match &syntax.item.kind {
+        hirsel_syntax::ItemKind::Function { signature, .. } => &signature.generics,
+        hirsel_syntax::ItemKind::Type { generics, .. } => generics,
+        _ => return false,
+    };
+    generics
+        .iter()
+        .any(|parameter| matches!(parameter.kind, hirsel_syntax::GenericKind::Size))
+        && syntax
+            .tree
+            .expressions
+            .iter()
+            .any(|expression| matches!(expression.kind, hirsel_syntax::ExprKind::Comptime(_)))
+}
+
 impl QueryEngine {
     /// Syntactic candidates only. The stage producer determines the actual
     /// size inputs after ordinary P; selecting roots executes no body phase.
@@ -455,23 +471,7 @@ impl QueryEngine {
             }
             self.materialize(path)?;
             let syntax = self.snapshot(path)?;
-            let generics = match &syntax.item.kind {
-                hirsel_syntax::ItemKind::Function { signature, .. } => &signature.generics,
-                hirsel_syntax::ItemKind::Type { generics, .. } => generics,
-                _ => continue,
-            };
-            if !generics
-                .iter()
-                .any(|parameter| matches!(parameter.kind, hirsel_syntax::GenericKind::Size))
-            {
-                continue;
-            }
-            if syntax
-                .tree
-                .expressions
-                .iter()
-                .any(|expression| matches!(expression.kind, hirsel_syntax::ExprKind::Comptime(_)))
-            {
+            if has_staged_body(&syntax) {
                 roots.push(path.clone());
             }
         }

@@ -438,13 +438,16 @@ impl QueryEngine {
     fn publish_private_signature(&mut self, id: DefId) -> Result<(), QueryError> {
         // Source projections omit resolver products. The canonical writer must
         // reconstruct them before comparing or publishing a complete record.
-        if self.signatures.get(&id).is_some_and(|entry| {
+        let projected = self.signatures.get(&id).is_some_and(|entry| {
             !entry.products.signature_persisted && entry.products.resolution.is_none()
-        }) {
+        });
+        if projected {
             self.signatures.remove(&id);
             self.adopted_headers = None;
+            self.signature_query_local(id)?;
+        } else {
+            self.signature_query_id(id)?;
         }
-        self.signature_query_id(id)?;
         if let Some(entry) = self.signatures.get(&id).cloned() {
             if self.verify_store == crate::store::VerifyStore::Recompute {
                 // Select the oracle variant only after the module proof is installed.

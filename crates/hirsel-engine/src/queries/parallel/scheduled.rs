@@ -30,6 +30,10 @@ const FAILURE: Domain = Domain {
 };
 type Key = ContentHash;
 type CheckedProduct = Option<(Arc<CheckedSummary>, Arc<Reads>, Arc<OrderedSignatureReads>)>;
+struct SignatureInput {
+    signature: Result<Arc<QueryOutput<SignatureRef>>, QueryError>,
+    reads: Arc<Reads>,
+}
 enum FrontState {
     Failed {
         record: Reference,
@@ -276,6 +280,7 @@ pub struct FrontBodyQueries {
     /// body computation drops it before running a phase; compact facts never
     /// keep a growing collection of analyzed bodies.
     handoff: Mutex<Option<LiveAnalyzedProduct>>,
+    handoff_limit: u64,
     carry: Mutex<Option<Arc<FrontCarry>>>,
     /// Subscription generations validated against this immutable source view.
     carry_changes: Mutex<Option<Arc<CarryChanges>>>,
@@ -497,14 +502,15 @@ impl FrontBodyQueries {
             None => Err(QueryError::NotImplemented),
         }
     }
-    fn signature_reads(&self, input: &Input) -> Result<Arc<Reads>, QueryError> {
+    fn signature_input(&self, input: &Input, scratch: u64) -> Result<SignatureInput, QueryError> {
         let mut reads = ReadsBuilder::new();
-        if let Some(product) = self
+        let product = self
             .namespace
             .snapshot
             .header_products()
-            .and_then(|headers| headers.product(input.definition))
-            .transpose()?
+            .and_then(|headers| headers.working_product(input.definition, scratch))
+            .transpose()?;
+        if let Some(product) = &product
             && let Some(entry) = &product.entry
         {
             reads.merge(entry.reads());
@@ -512,12 +518,20 @@ impl FrontBodyQueries {
         if let Some(registration) = &input.registration {
             reads.merge(&registration.reads);
         }
-        reads.finish().map(Arc::new).map_err(|read| {
-            QueryError::Operational(hirsel_types::OperationalFailure {
-                operation: "front inherited reads".into(),
-                message: format!("inconsistent registration read: {read:?}"),
+        let signature =
+            product.map_or_else(|| self.signature(input), |product| product.result.clone());
+        reads
+            .finish()
+            .map(|reads| SignatureInput {
+                signature,
+                reads: Arc::new(reads),
             })
-        })
+            .map_err(|read| {
+                QueryError::Operational(hirsel_types::OperationalFailure {
+                    operation: "front inherited reads".into(),
+                    message: format!("inconsistent registration read: {read:?}"),
+                })
+            })
     }
     fn syntax(&self, input: &Input) -> Option<Arc<ItemSyntax>> {
         // Accepted literals are parser-created immutable source, and legitimately
@@ -1794,6 +1808,7 @@ impl QueryContext for DetachedFrontContext<'_> {
 struct Factory(Arc<FrontBodyQueries>);
 impl QueryFactory for Factory {
     fn evict(&self, query: QueryId, product: &ProductRef, scratch: u64) -> bool {
+        self.0.release_handoff();
         let mut slots = self.0.slots.lock().unwrap_or_else(|e| e.into_inner());
         let (outcome, observations) = match slots.get(&query.address.0) {
             Some(FrontSlot::Archived(_)) | None => return false,
@@ -2336,14 +2351,18 @@ impl BodyTask {
         let worker = queries.worker();
         queries.release_handoff();
         let syntax = queries.syntax(input).ok_or(queries.errors.protocol)?;
+        let SignatureInput {
+            signature,
+            reads: signature_reads,
+        } = queries
+            .signature_input(input, cx.scratch_bytes())
+            .map_err(|_| queries.errors.resource)?;
         let mut done = worker.run(Task {
             index: 0,
             definition: input.definition.path().clone(),
             syntax,
-            signature: queries.signature(input),
-            signature_reads: queries
-                .signature_reads(input)
-                .map_err(|_| queries.errors.protocol)?,
+            signature,
+            signature_reads,
             registration: input.registration.clone(),
             text: input.text,
             resolution: None,
@@ -2533,7 +2552,9 @@ impl BodyTask {
                 crate::store::query_action(&input.key, input.key.1, &outcome.reads),
             )
         };
-        let handoff = (!failed && !queries.store.persistence().retains()).then(|| outcome.clone());
+        let handoff =
+            (!failed && queries.handoff_limit != 0 && !queries.store.persistence().retains())
+                .then(|| outcome.clone());
         let mut cached = queries
             .publish_facts(
                 cx, self.input, record, action, outcome, checked, dead_arms, table_keys, memo_rows,
@@ -2552,7 +2573,8 @@ impl BodyTask {
                 )))
             });
             if charge.is_some_and(|bytes| {
-                bytes <= *queries.retention.lock().unwrap_or_else(|e| e.into_inner())
+                bytes <= queries.handoff_limit
+                    && bytes <= *queries.retention.lock().unwrap_or_else(|e| e.into_inner())
             }) && let Some(product) = queries.admit_body(
                 cx,
                 queries
@@ -2960,6 +2982,7 @@ impl QueryEngine {
             store,
             slots: Mutex::new(BTreeMap::new()),
             handoff: Mutex::new(None),
+            handoff_limit: self.hold_bytes,
             carry: Mutex::new(None),
             carry_changes: Mutex::new(None),
             clean_memos: Mutex::new(BTreeSet::new()),

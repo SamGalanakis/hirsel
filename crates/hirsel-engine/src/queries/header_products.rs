@@ -197,6 +197,9 @@ pub(crate) struct HeaderProducts {
     failures: BTreeMap<DefId, Vec<hirsel_types::UniqueFailure>>,
 }
 impl HeaderProducts {
+    pub(crate) fn needs_written_signatures(&self) -> bool {
+        self.adapters.signature.is_none()
+    }
     pub(crate) fn staged_constants(&self) -> &BTreeMap<DefPath, crate::comptime::StagedConstant> {
         &self.staged
     }
@@ -458,6 +461,26 @@ impl HeaderProducts {
             (None, Ok(_)) => None,
         }
     }
+    /// A task may use an uncached header within its active scratch grant.
+    /// Only a retained row enters the shared table or advances its revision.
+    pub(crate) fn working_product(
+        self: &Arc<Self>,
+        id: DefId,
+        scratch: u64,
+    ) -> Option<Result<Arc<HeaderProduct>, QueryError>> {
+        let cell = self.rows.get(&id)?;
+        if let Some(product) = cell.get() {
+            return Some(Ok(product));
+        }
+        let mut working = None;
+        let demanded =
+            self.produce_with_working(&mut self.execution(), id, Some((&mut working, scratch)));
+        match (cell.get().or(working), demanded) {
+            (Some(product), _) => Some(Ok(product)),
+            (None, Err(error)) => Some(Err(error)),
+            (None, Ok(_)) => None,
+        }
+    }
     fn admitted(&self) -> bool {
         self.admission
             .lock()
@@ -478,6 +501,14 @@ impl HeaderProducts {
         result
     }
     fn produce(self: &Arc<Self>, engine: &mut QueryEngine, id: DefId) -> SignatureOutput {
+        self.produce_with_working(engine, id, None)
+    }
+    fn produce_with_working(
+        self: &Arc<Self>,
+        engine: &mut QueryEngine,
+        id: DefId,
+        working: Option<(&mut Option<Arc<HeaderProduct>>, u64)>,
+    ) -> SignatureOutput {
         if let Some(failures) = self.failures.get(&id) {
             engine
                 .private_unique_failures
@@ -577,20 +608,39 @@ impl HeaderProducts {
             .saturating_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
                 HeaderProduct,
             >::uninit()));
-        let charge = self.admit(bytes)?;
-        let (product, settled) = self.publish(
-            cell,
-            HeaderProduct {
-                result,
-                entry,
-                recomputes,
-                graph_work: if local { 0 } else { recomputes },
-                publication: self.provisional,
-                charge,
-                origin,
-                accounted: AtomicBool::new(local),
-            },
-        );
+        let (charge, transient) = match self.admit(bytes) {
+            Ok(charge) => (charge, false),
+            Err(_)
+                if working.as_ref().is_some_and(|(_, scratch)| {
+                    bytes
+                        .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                            std::sync::Mutex<HeaderCharge>,
+                        >::uninit(
+                        )))
+                        .is_some_and(|required| required <= *scratch)
+                }) =>
+            {
+                (Charge::engine(), true)
+            }
+            Err(error) => return Err(error),
+        };
+        let product = HeaderProduct {
+            result,
+            entry,
+            recomputes,
+            graph_work: if local { 0 } else { recomputes },
+            publication: self.provisional,
+            charge,
+            origin,
+            accounted: AtomicBool::new(local),
+        };
+        if transient {
+            let product = Arc::new(product);
+            let result = product.result.clone();
+            *working.expect("working header input").0 = Some(product);
+            return result;
+        }
+        let (product, settled) = self.publish(cell, product);
         if settled {
             self.generation.fetch_add(1, Ordering::Relaxed);
         }

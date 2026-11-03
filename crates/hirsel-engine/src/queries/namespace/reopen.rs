@@ -74,7 +74,10 @@ impl NamespaceCapture {
         reads: &Reads,
         limit: u64,
     ) -> Option<Reference> {
-        let mut manifest = self.stored_manifest(self.manifest, limit)?;
+        if self.manifest.len > limit {
+            return None;
+        }
+        let mut manifest = self.manifest_inputs.clone();
         let mut needed = BTreeSet::new();
         let mut pending = std::iter::once(root)
             .chain(reads.iter().filter_map(|(key, _)| key.definition()))
@@ -93,12 +96,23 @@ impl NamespaceCapture {
         }
         manifest.dependencies.retain(|(id, _)| needed.contains(id));
         manifest.trace.retain(|id| needed.contains(id));
-        manifest.instances.instances.retain(|_, rows| {
+        let instances = Arc::make_mut(&mut manifest.instances);
+        instances.instances.retain(|_, rows| {
             rows.retain(|_, row| needed.contains(&row.definition));
             !rows.is_empty()
         });
-        manifest.instances.declarations = manifest.instances.instances.keys().copied().collect();
+        instances.declarations = instances.instances.keys().copied().collect();
         manifest.base = self.scope_base(&manifest)?;
+        for (id, reference) in &manifest.dependencies {
+            let bytes =
+                generation_bytes(&self.records, &self.anchors, self.registrations.get(id)?)?;
+            if bytes.len() as u64 > limit
+                || GENERATION.reference(&bytes) != Some(*reference)
+                || self.store.put_content(GENERATION, &bytes) != Some(*reference)
+            {
+                return None;
+            }
+        }
         let bytes = self.records.encode(&*self.anchors, &manifest)?;
         if bytes.len() as u64 > limit {
             return None;
@@ -138,9 +152,7 @@ impl NamespaceCapture {
         if self.scope_base(&manifest) != Some(manifest.base) {
             return false;
         }
-        let Some(current) = self.stored_manifest(self.manifest, limit) else {
-            return false;
-        };
+        let current = &self.manifest_inputs;
         manifest
             .dependencies
             .iter()

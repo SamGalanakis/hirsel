@@ -1226,9 +1226,7 @@ impl QueryContext for Context<'_> {
                         .analyzed_value()
                         .is_some_and(|body| body.cache_only())
                         || product.lower_value().is_some_and(|body| body.cache_only());
-                    let summary = product
-                        .summary_value()
-                        .is_some_and(|summary| summary.cache_owners(2));
+                    let summary = product.summary_value().is_some();
                     (body || summary).then_some((order, body))
                 })
                 .min();

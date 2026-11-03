@@ -78,7 +78,7 @@ impl SiblingSources {
                                 | hirsel_types::SignatureKind::Const { .. }
                         )
                     });
-                variant || (value && !normalized)
+                variant || (value && headers.needs_written_signatures() && !normalized)
             })
             .cloned()
             .collect::<Vec<_>>()
@@ -284,6 +284,7 @@ mod tests {
         let mut engine = engine.with_result_store(Arc::new(crate::store::MemStore::default()));
         engine.adapters.lexer = None;
         engine.adapters.parser = None;
+        engine.adapters.signature = None;
         let store = engine.result_store.clone().unwrap();
         let owners = Arc::new(crate::NativeRecordContext::capture(&engine));
         let records = crate::NativeRecords::new(engine.types.clone(), store);

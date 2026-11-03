@@ -54,6 +54,7 @@ pub struct NamespaceCapture {
     environment: ContentHash,
     verify: Verify,
     pub(crate) manifest: Reference,
+    manifest_inputs: Manifest,
     identity: ContentHash,
     retained: u64,
     admission: std::sync::OnceLock<NamespaceAdmission>,
@@ -108,12 +109,12 @@ struct NamespaceAdmission {
     _reservation: crate::runtime::MemoryReservation,
     _sources: SourceMap,
 }
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Manifest {
     base: ContentHash,
     dependencies: Vec<(DefId, Reference)>,
     trace: Vec<DefId>,
-    instances: hirsel_tir::InstanceBodies,
+    instances: Arc<hirsel_tir::InstanceBodies>,
     budget: u64,
     depth: usize,
     charging_version: u32,
@@ -398,6 +399,23 @@ fn refused(message: &str) -> QueryError {
         message: message.into(),
     })
 }
+fn generation_bytes(
+    records: &NativeRecords,
+    anchors: &NativeRecordContext,
+    registration: &AcceptedFrontRegistration,
+) -> Option<Vec<u8>> {
+    records.encode(
+        anchors,
+        &(
+            DefId::intern(registration.definition()),
+            registration.text(),
+            &registration.syntax,
+            registration.reads(),
+            registration.checked_prefix(),
+            registration.depth(),
+        ),
+    )
+}
 impl QueryEngine {
     pub(crate) fn prepare_namespace_registrations(
         &mut self,
@@ -558,18 +576,7 @@ impl QueryEngine {
         let mut dependencies = BTreeMap::new();
         for registration in registrations {
             let id = DefId::intern(registration.definition());
-            let bytes = records
-                .encode(
-                    &*anchors,
-                    &(
-                        id,
-                        registration.text(),
-                        &registration.syntax,
-                        registration.reads(),
-                        registration.checked_prefix(),
-                        registration.depth(),
-                    ),
-                )
+            let bytes = generation_bytes(&records, &anchors, registration)
                 .ok_or_else(|| refused("generation encoding"))?;
             if bytes.len() as u64 > limit {
                 return Err(refused("generation exceeds admission"));
@@ -608,7 +615,10 @@ impl QueryEngine {
         if generation_base.len() as u64 > limit {
             return Err(refused("generation headers exceed admission"));
         }
-        let manifest = Manifest {
+        let mut instance_weight = crate::NativeMetadataWeight::default();
+        instance_weight.instance_bodies(&mut instances);
+        let instances = Arc::new(instances);
+        let manifest_inputs = Manifest {
             base: ContentHash::of_parts("hirsel.generation.base.v1", [generation_base.as_slice()]),
             dependencies: dependencies.into_iter().collect(),
             trace: registrations
@@ -621,7 +631,7 @@ impl QueryEngine {
             charging_version: hirsel_tir::CHARGING_VERSION,
         };
         let bytes = records
-            .encode(&*anchors, &manifest)
+            .encode(&*anchors, &manifest_inputs)
             .ok_or_else(|| refused("manifest encoding"))?;
         if bytes.len() as u64 > limit {
             return Err(refused("manifest exceeds admission"));
@@ -689,9 +699,11 @@ impl QueryEngine {
             .into_boxed_slice();
         let mut weight = crate::NativeMetadataWeight::default();
         weight.add(size_of_val(&*source_paths) + size_of_val(&*roots));
-        weight.instance_bodies(&mut instances);
+        weight.flat_vec(&manifest_inputs.dependencies);
+        weight.flat_vec(&manifest_inputs.trace);
         let retained = NamespaceCapture::input_bytes(definitions)
             .and_then(|bytes| bytes.checked_add(weight.bytes()))
+            .and_then(|bytes| bytes.checked_add(instance_weight.bytes()))
             .and_then(|bytes| {
                 bytes.checked_add(header_products::HeaderProducts::written_source_bytes(self))
             })
@@ -711,7 +723,7 @@ impl QueryEngine {
             sources: self.sources.clone(),
             anchors,
             store,
-            instances: Arc::new(instances),
+            instances,
             bodies,
             registrations,
             private_sources,
@@ -720,6 +732,7 @@ impl QueryEngine {
             environment: self.environment_value(),
             verify: self.verify,
             manifest,
+            manifest_inputs,
             identity,
             retained,
             admission: std::sync::OnceLock::new(),

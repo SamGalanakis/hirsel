@@ -312,9 +312,12 @@ impl NativeSourceProvider for FrozenNativeSource {
         &self.inputs.declarations
     }
     fn receipt_provider(&self) -> Option<crate::native::receipt_source::provider::Front<'_>> {
-        Some(crate::native::receipt_source::provider::Front::new(
-            self.reader(),
-        ))
+        Some(
+            crate::native::receipt_source::provider::Front::with_originals(
+                self.reader(),
+                &self.inputs.lower,
+            ),
+        )
     }
     fn verification(&self) -> Verify {
         self.reader().verification()

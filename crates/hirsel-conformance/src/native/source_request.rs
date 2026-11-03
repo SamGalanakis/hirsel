@@ -16,6 +16,7 @@ use std::{
 pub(crate) struct Source {
     path: PathBuf,
     inputs: FrozenInputs,
+    text: Arc<str>,
     primary: PathBuf,
     requests: RefCell<CompilerRequests>,
     pub entry: DefPath,
@@ -39,14 +40,14 @@ impl Source {
         let path = match path {
             Some(path) => path.to_owned(),
             None => {
-                let path = directory.as_ref().unwrap().dir().join("source.hir");
+                let path = directory.as_ref().unwrap().dir().join("case.hir");
                 std::fs::write(&path, source)?;
                 let entry = crate::selected_entry(source, &hirsel_engine::default_context());
                 std::fs::write(
                     path.with_extension("hir.json"),
                     serde_json::json!({
                         "schema":1,"package":{"name":"standalone","version":"0"},
-                        "sources":[{"path":"source.hir","module":[]}],"dependencies":[],
+                        "sources":[{"path":"case.hir","module":[]}],"dependencies":[],
                         "entry":{"module":[],"name":entry.0.name.as_str()}
                     })
                     .to_string(),
@@ -82,6 +83,7 @@ impl Source {
         Ok(Self {
             path,
             inputs,
+            text: source.into(),
             primary,
             entry,
             requests: RefCell::new(requests),
@@ -110,12 +112,51 @@ impl Source {
             operation,
         })
     }
+    /// Temporary transport paths are not the standalone case's observation
+    /// name. Keep every placed anchor and its logical artifact identity while
+    /// giving reference and native observations the same stable diagnostic name.
+    fn observation_sources(
+        &self,
+        sources: &hirsel_span::SourceMap,
+    ) -> Result<hirsel_span::SourceMap, ToolError> {
+        let mut relocated = sources.clone();
+        if self._directory.is_none() {
+            return Ok(relocated);
+        }
+        let placed = sources
+            .anchors()
+            .filter(|(_, file, _)| {
+                sources
+                    .file(*file)
+                    .is_some_and(|file| file.path == self.primary)
+            })
+            .collect::<Vec<_>>();
+        let mut aliases = BTreeMap::new();
+        for (anchor, file, base) in placed {
+            let alias = if let Some(alias) = aliases.get(&file) {
+                *alias
+            } else {
+                let source = sources.file(file).ok_or(ToolError::SourceTooLarge)?;
+                let alias = relocated
+                    .add_logical("case.hir", source.logical_path(), source.text().to_owned())
+                    .ok_or(ToolError::SourceTooLarge)?;
+                aliases.insert(file, alias);
+                alias
+            };
+            relocated.move_anchor(anchor, alias, base);
+        }
+        Ok(relocated)
+    }
     pub fn check(&self) -> Result<CheckOutput, ToolError> {
         let output = self.execute(CompileOperation::Check {
             lowering: LoweringPolicy::Reachable,
         })?;
         match &output.result {
-            CompileResult::Check(checked) => Ok(checked.clone()),
+            CompileResult::Check(checked) => {
+                let mut checked = checked.clone();
+                checked.sources = self.observation_sources(&checked.sources)?;
+                Ok(checked)
+            }
             _ => Err(ToolError::Runtime("native source expected Check".into())),
         }
     }
@@ -124,7 +165,12 @@ impl Source {
             definition: Some(self.entry.clone()),
         })?;
         match &output.result {
-            CompileResult::Tir(input) => Ok(input.clone()),
+            CompileResult::Tir(input) => {
+                let mut input = input.clone();
+                let sources = self.observation_sources(&input.sources)?;
+                Arc::make_mut(&mut input).sources = sources;
+                Ok(input)
+            }
             _ => Err(ToolError::Runtime("native reference expected TIR".into())),
         }
     }
@@ -135,17 +181,48 @@ impl Source {
             validator: false,
             message,
         };
+        // The scratch file selects the package. Put the actual body in a named
+        // source input before S0 so native sites retain the case's name, too.
+        let (inputs, supplemental_sources) = if self._directory.is_some() {
+            let requests = self.requests.borrow();
+            let inputs = self
+                .inputs
+                .replace_sources(
+                    &BTreeMap::from([(self.primary.clone(), Arc::<[u8]>::from([]))]),
+                    requests.input_limits().bytes,
+                )
+                .map_err(|error| failure(error.to_string()))?;
+            (
+                inputs,
+                vec![NativeSourceText {
+                    name: "case.hir".into(),
+                    context: hirsel_syntax::FileContext {
+                        package: self.entry.0.package.clone(),
+                        modules: self.entry.0.modules.clone(),
+                    },
+                    text: self.text.clone(),
+                }],
+            )
+        } else {
+            (self.inputs.clone(), vec![])
+        };
         let output = self
-            .execute(CompileOperation::NativeBuild(NativeRequest {
-                definition: Some(self.entry.clone()),
-                test_entries: vec![],
-                supplemental_sources: vec![],
-                output: NativeOutput::Ready,
-                options: BuildOptions::new(options.clone(), Backend::Llvm, OptLevel::Default),
-                run: None,
-                fuel: false,
-                evidence: None,
-            }))
+            .requests
+            .borrow_mut()
+            .execute_request(&CompileRequest {
+                path: self.path.clone(),
+                inputs: inputs.into(),
+                operation: CompileOperation::NativeBuild(NativeRequest {
+                    definition: Some(self.entry.clone()),
+                    test_entries: vec![],
+                    supplemental_sources,
+                    output: NativeOutput::Ready,
+                    options: BuildOptions::new(options.clone(), Backend::Llvm, OptLevel::Default),
+                    run: None,
+                    fuel: false,
+                    evidence: None,
+                }),
+            })
             .map_err(|error| failure(error.to_string()))?;
         match &output.result {
             CompileResult::NativeReady(ready) => Ok(ready.clone()),

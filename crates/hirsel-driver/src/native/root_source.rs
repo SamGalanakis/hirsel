@@ -188,13 +188,19 @@ impl NativeLinkSource {
             let (verified, _, implementation, signature) = lower
                 .input(path)
                 .ok_or_else(|| failed(format!("selected source has no settled Lower {path}")))?;
+            // Recompute readers retain the original Lower but do not accept
+            // its producer's reusable V output. Compare only the evidence
+            // selected by this reader; original reads still run V themselves.
+            let source_output = source.lower.as_ref().filter(|_| {
+                verified.is_some()
+                    || lower.verification() != hirsel_engine::Verify::On
+                    || lower.query_policy().reuse
+            });
             if implementation != source.source.implementation_revision
                 || signature != source.signature.fingerprint
                 || !facts.semantic.semantic_contains(path)
-                || verified
-                    .zip(source.lower.as_ref())
-                    .is_some_and(|(a, b)| a != b)
-                || verified.is_some() != source.lower.is_some()
+                || verified.zip(source_output).is_some_and(|(a, b)| a != b)
+                || verified.is_some() != source_output.is_some()
             {
                 return Err(failed(format!("selected Lower source differs for {path}")));
             }

@@ -359,6 +359,7 @@ where
             inputs: self.observer.current().unwrap().clone().into(),
             operation,
         };
+        let _timing = hirsel_intern::timings::interval(hirsel_intern::timings::Interval::Parallel);
         let output = self
             .host
             .request(&request)?

@@ -995,6 +995,7 @@ pub(super) fn install(
     host_toolchain: bool,
     #[cfg(test)] before_check: Option<fn(&mut LoadedProgram)>,
 ) -> Result<Arc<InstalledGraph>, ToolError> {
+    let _timing = hirsel_intern::timings::interval(hirsel_intern::timings::Interval::FrontPrepare);
     if matches!(request.operation, CompileOperation::Precompute)
         && config.verify == hirsel_engine::Verify::Off
     {

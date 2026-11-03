@@ -689,30 +689,7 @@ impl Task {
                         let lower = &self.queries.plan.lower;
                         let id = lower.query(path).ok_or(self.queries.errors.protocol)?;
                         let selected = match cx.read(id) {
-                            Poll::Pending => {
-                                // With a second worker, the next evaluation root
-                                // runs meanwhile; results are still consumed, and
-                                // a failure still stops, in source order. Only the
-                                // current root pins its body. One root ahead
-                                // bounds the Check to two live Lower bodies;
-                                // admission waits for the other to settle when
-                                // both do not fit.
-                                let ahead = if rest || self.selecting_instances {
-                                    0
-                                } else {
-                                    cx.workers().min(2) - 1
-                                };
-                                let mut pending = vec![id];
-                                for path in paths.iter().skip(self.root + 1).take(ahead) {
-                                    let id =
-                                        lower.query(path).ok_or(self.queries.errors.protocol)?;
-                                    if cx.read(id).is_pending() {
-                                        pending.push(id);
-                                    }
-                                    cx.release_body(id);
-                                }
-                                return Ok(Some(pending));
-                            }
+                            Poll::Pending => return Ok(Some(vec![id])),
                             Poll::Ready(selected) => selected,
                         };
                         match selected {

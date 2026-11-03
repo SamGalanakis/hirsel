@@ -120,6 +120,26 @@ fn path_requests_reuse_one_session_per_thread_and_observe_edits() {
 }
 
 fn session_representation_edit_matches_cold(opaque: bool, reads_field: bool) {
+    struct InstalledNone(Arc<dyn store::ResultStore>);
+    impl store::ResultStore for InstalledNone {
+        fn installed_package(
+            &self,
+            package: &hirsel_syntax::PackageId,
+            compiler: hirsel_syntax::ContentHash,
+        ) -> Result<Arc<store::InstalledPackage>, String> {
+            self.0.installed_package(package, compiler)
+        }
+        fn persistence(&self) -> store::Persistence {
+            store::Persistence::Disabled
+        }
+        fn get(&self, _: &store::EntryKey) -> Option<store::Bytes> {
+            None
+        }
+        fn put(&self, _: &store::EntryKey, _: &[u8]) {}
+        fn name(&self) -> &'static str {
+            "none@1"
+        }
+    }
     with_compiler_stack(|| {
         let fixture = crate::image_fixture::Fixture::new();
         let source = fixture.0.join("main.hir");
@@ -133,7 +153,7 @@ fn session_representation_edit_matches_cold(opaque: bool, reads_field: bool) {
         std::fs::write(&source, &initial).unwrap();
         let config = CompileConfig {
             retention: memo::Retention::Resident,
-            store: store::store_by_name("none@1", None).unwrap(),
+            store: Arc::new(InstalledNone(store::store_by_name("none@1", None).unwrap())),
             ..CompileConfig::default()
         };
         let mut session = session::Session::open_configured(&source, config.clone());

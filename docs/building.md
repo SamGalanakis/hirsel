@@ -870,11 +870,11 @@ The report keeps three measures apart (`hirsel_intern::timings`):
   intervals add up. Today's driver maps onto them as follows:
   - `S0`: loading the package graph and sources, parsing, publishing std's
     declarations into the session, and the program check's own steps;
-  - `parallel`: checking each source file's definitions and lowering the
-    program's reachable closure, which drive each definition's resolve,
-    check, modes, lowering and V;
-  - `front prepare`: serial preparation of immutable P and S1 worker inputs,
-    including signature snapshot normalization; this pauses its enclosing interval;
+  - `parallel`: driving the scheduled source and native request tasks, including
+    each definition's resolve, check, modes, lowering and V;
+  - `front prepare`: installing the immutable request graph and preparing P and
+    S1 worker inputs, including signature snapshot normalization; this pauses
+    its enclosing interval;
   - `GEN-5`: the whole-program generic-instance growth verdict;
   - `merge`: publishing checked packages and dropping the session;
   - `plan`: exporting, importing and adapting the native input;

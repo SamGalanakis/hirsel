@@ -430,6 +430,7 @@ impl hirsel_engine::requests::OutputReadiness for CompilerReadiness {
         &mut self,
         products: &[hirsel_engine::runtime::ProductRef],
     ) -> Result<Self::Output, Self::Error> {
+        let _timing = hirsel_intern::timings::interval(hirsel_intern::timings::Interval::Merge);
         let operation = self.read_scope.take();
         let output = (self.materialize)(products)?;
         let complete = match &output.result {

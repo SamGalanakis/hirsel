@@ -220,33 +220,33 @@ impl hirsel_engine::store::ResultStore for GeneratorInputUnavailable {
             let mut entry = Entry::load(&*self.store, key);
             for variant in &mut entry.variants {
                 let bytes = self.store.get_content(variant.output)?;
-                if bytes.len() != 56 {
+                if bytes.len() != 104 {
                     continue;
                 }
-                // Schema 2 stores Reference (48 bytes), then the decode bound.
-                if u32::from_le_bytes(bytes[32..36].try_into().unwrap()) != 0x4601_0006
-                    || u32::from_le_bytes(bytes[36..40].try_into().unwrap()) != 2
+                // Manifest and output references are 48 bytes each, followed by the decode bound.
+                if u32::from_le_bytes(bytes[80..84].try_into().unwrap()) != 0x4601_0006
+                    || u32::from_le_bytes(bytes[84..88].try_into().unwrap()) != 3
                 {
                     continue;
                 }
                 let original = hirsel_engine::store::Reference {
                     output: hirsel_engine::store::Output(hirsel_syntax::ContentHash(
-                        bytes[..32].try_into().unwrap(),
+                        bytes[48..80].try_into().unwrap(),
                     )),
                     domain: hirsel_engine::store::Domain {
                         kind: 0x4601_0006,
-                        schema: 2,
+                        schema: 3,
                     },
-                    len: u64::from_le_bytes(bytes[40..48].try_into().unwrap()),
+                    len: u64::from_le_bytes(bytes[88..96].try_into().unwrap()),
                 };
                 let mut text = self.store.get_content(original)?.to_vec();
                 let at = text.windows(5).position(|bytes| bytes == b"{7u8}")?;
                 text[at + 1] = b'8';
                 let replacement = self.store.put_content(original.domain, &text)?;
                 let mut forged = bytes.to_vec();
-                forged[..32].copy_from_slice(&replacement.output.0.0);
-                forged[40..48].copy_from_slice(&replacement.len.to_le_bytes());
-                forged[48..56].fill(0);
+                forged[48..80].copy_from_slice(&replacement.output.0.0);
+                forged[88..96].copy_from_slice(&replacement.len.to_le_bytes());
+                forged[96..104].fill(0);
                 *variant = VariantRef::publish(&*self.store, key, variant.reads.clone(), &forged)?;
                 self.corrupted
                     .store(true, std::sync::atomic::Ordering::Relaxed);

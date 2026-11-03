@@ -3,6 +3,7 @@
 use super::*;
 use crate::store::{Domain, EntryKey, Reference};
 use crate::{NativeRecordContext, NativeRecords};
+mod reopen;
 
 const GENERATION: Domain = Domain {
     kind: 0x4601_0008,

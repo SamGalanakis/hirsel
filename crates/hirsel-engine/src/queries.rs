@@ -312,6 +312,7 @@ pub struct QueryEngine {
     generated: native_records::SourceTable<DefPath, GeneratedSource>,
     /// Selected instances of generic generated declarations (CT-5).
     pub(crate) instance_bodies: hirsel_tir::InstanceBodies,
+    pub(crate) selected_instances: BTreeMap<DefId, BTreeSet<hirsel_types::GeneratedActualKey>>,
     pub sources: SourceMap,
     pub environment: QueryEnvironment,
     pub adapters: PhaseAdapters,
@@ -500,6 +501,10 @@ impl Drop for QueryEngine {
             take(&mut self.snapshot_sources),
         );
         released("engine: instance bodies", take(&mut self.instance_bodies));
+        released(
+            "engine: instance selections",
+            take(&mut self.selected_instances),
+        );
         released("engine: staged values", take(&mut self.staged_values));
         released("engine: generated", take(&mut self.generated));
         released("engine: recomputes", take(&mut self.recomputes));
@@ -725,6 +730,7 @@ impl QueryEngine {
             staged_values: BTreeMap::new(),
             generated: native_records::SourceTable::new(source_ownership.clone()),
             instance_bodies: hirsel_tir::InstanceBodies::default(),
+            selected_instances: BTreeMap::new(),
             sources: SourceMap::default(),
             environment,
             adapters,
@@ -2238,7 +2244,7 @@ impl QueryEngine {
             }
             let required = self.lower_requires_execution(definition, entry.reads());
             self.merge_lower_acceptance(entry.acceptance.as_ref(), required);
-            self.record_selections(&entry.selections);
+            self.record_selections(&entry.selections)?;
             self.merge_execution(entry.reads());
             return entry.output();
         }
@@ -2248,7 +2254,7 @@ impl QueryEngine {
             self.depth_replay_requests(entry.depth.as_ref().expect("stored depth receipt"))?;
             let required = self.lower_requires_execution(definition, entry.reads());
             self.merge_lower_acceptance(entry.acceptance.as_ref(), required);
-            self.record_selections(&entry.selections);
+            self.record_selections(&entry.selections)?;
             self.merge_execution(entry.reads());
             self.lowered.insert(id, entry.clone());
             return entry.output();
@@ -2376,6 +2382,7 @@ impl DefinitionQueries for QueryEngine {
                 return result.clone();
             }
         }
+        self.selected_instances.clear();
         let mut output = match self.parse_syntax(file, context) {
             Ok(output) => output,
             Err(error) => {

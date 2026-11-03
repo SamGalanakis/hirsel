@@ -59,6 +59,100 @@ struct State {
     views: Vec<Arc<FrontLowerQueries>>,
     trace: Vec<(DefId, Vec<hirsel_types::GenericArgument>)>,
     charges: Vec<MemoryReservation>,
+    selected: Vec<(DefId, hirsel_types::GeneratedActualKey)>,
+    producing: BTreeMap<DefId, (usize, MemoryReservation)>,
+    staged_log: Vec<(DefId, ContentHash)>,
+}
+struct Production {
+    producer: Arc<DemandProducer>,
+    definition: DefId,
+}
+impl Drop for Production {
+    fn drop(&mut self) {
+        let mut state = self
+            .producer
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((count, _)) = state.producing.get_mut(&self.definition) {
+            *count -= 1;
+            if *count == 0 {
+                state.producing.remove(&self.definition);
+            }
+        }
+    }
+}
+struct DemandTransaction {
+    producer: Arc<DemandProducer>,
+    current: Weak<FrontLowerQueries>,
+    views: usize,
+    trace: usize,
+    charges: usize,
+    selected: usize,
+    staged: usize,
+    completed: bool,
+}
+impl DemandTransaction {
+    fn new(producer: &Arc<DemandProducer>) -> Self {
+        let state = producer.state.lock().unwrap_or_else(|e| e.into_inner());
+        Self {
+            producer: producer.clone(),
+            current: state.current.clone(),
+            views: state.views.len(),
+            trace: state.trace.len(),
+            charges: state.charges.len(),
+            selected: state.selected.len(),
+            staged: state.staged_log.len(),
+            completed: false,
+        }
+    }
+}
+impl Drop for DemandTransaction {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let (views, charges, staged) = {
+            let mut state = self
+                .producer
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if state.views.len() < self.views
+                || state.trace.len() < self.trace
+                || state.charges.len() < self.charges
+                || state.selected.len() < self.selected
+                || state.staged_log.len() < self.staged
+            {
+                return;
+            }
+            state.current = self.current.clone();
+            state.trace.truncate(self.trace);
+            state.selected.truncate(self.selected);
+            let discarded = (
+                state.views.split_off(self.views),
+                state.charges.split_off(self.charges),
+                state.staged_log.split_off(self.staged),
+            );
+            state.views.shrink_to_fit();
+            state.charges.shrink_to_fit();
+            state.trace.shrink_to_fit();
+            state.selected.shrink_to_fit();
+            state.staged_log.shrink_to_fit();
+            discarded
+        };
+        {
+            let mut selected = self
+                .producer
+                .staged
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for key in staged {
+                selected.remove(&key);
+            }
+        }
+        drop((views, charges));
+    }
 }
 fn refused(message: &str) -> QueryError {
     QueryError::Operational(hirsel_types::OperationalFailure {
@@ -91,6 +185,9 @@ impl DemandProducer {
                 views: vec![],
                 trace: vec![],
                 charges: vec![],
+                selected: vec![],
+                producing: BTreeMap::new(),
+                staged_log: vec![],
             }),
             front: Arc::new(pool(admission.front)?),
             lower: scheduled_lower::LowerPartition::new(admission.lower),
@@ -130,6 +227,69 @@ impl DemandProducer {
     }
     pub(crate) fn rounds(&self) -> usize {
         self.rounds.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn charge_instance(
+        &self,
+        capture: &NamespaceCapture,
+        declaration: &DefPath,
+        arguments: &[hirsel_types::GenericArgument],
+        site: Span,
+    ) -> Result<(), QueryError> {
+        let id = DefId::intern(declaration);
+        if !capture.instances.declarations.contains(&id) {
+            return Ok(());
+        }
+        let key = hirsel_tir::InstanceBodies::key(capture.snapshot.types(), arguments)
+            .ok_or_else(|| refused("selected instance has no canonical key"))?;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.selected.contains(&(id, key)) {
+            return Ok(());
+        }
+        if state
+            .selected
+            .iter()
+            .filter(|(declaration, _)| *declaration == id)
+            .count()
+            >= MAX_GENERATED_INSTANCES
+        {
+            let syntax = capture.syntax(declaration)?;
+            let body = generator(&syntax).ok_or(QueryError::NotImplemented)?;
+            return Err(instance_limit(
+                declaration,
+                key,
+                syntax.tree.expressions[body.0 as usize].origin.span,
+                site,
+            ));
+        }
+        let charge = Self::take(
+            &self.syntax,
+            (3 * (size_of::<(DefId, hirsel_types::GeneratedActualKey)>()
+                + size_of::<MemoryReservation>())) as u64,
+        )?;
+        state.selected.push((id, key));
+        state.charges.push(charge);
+        Ok(())
+    }
+    pub(crate) async fn charge_manifest(
+        &self,
+        capture: &NamespaceCapture,
+        manifest: crate::store::Reference,
+        site: Span,
+        reads: &QueryReads,
+    ) -> Result<(), QueryError> {
+        let demands = capture
+            .manifest_demands(manifest, self.weight.scratch)
+            .ok_or_else(|| refused("missing selected generation manifest"))?;
+        if !demands.is_empty() {
+            reads
+                .publication()
+                .await
+                .map_err(|_| refused("cached instance selection cancelled before admission"))?;
+        }
+        for demand in demands {
+            self.charge_instance(capture, &demand.declaration, &demand.arguments, site)?;
+        }
+        Ok(())
     }
     pub(crate) fn front_failure(&self, roots: &[DefPath]) -> Option<scope::FrontDemandError> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -596,7 +756,8 @@ impl DemandProducer {
             Self::take(
                 &self.syntax,
                 next.bytes().saturating_sub(previous.bytes())
-                    + (3 * size_of::<MemoryReservation>()) as u64,
+                    + (3 * (size_of::<MemoryReservation>() + size_of::<(DefId, ContentHash)>()))
+                        as u64,
             )?
         };
         let mut engine = owner.capture().assembly(&self.adapters)?;
@@ -615,15 +776,16 @@ impl DemandProducer {
             .cloned()
             .collect::<Vec<_>>();
         let successor = self.view(&mut engine, &definitions, &registrations)?;
-        self.staged
+        let inserted = self
+            .staged
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(key);
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .charges
-            .push(metadata);
+        if inserted {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.staged_log.push(key);
+            state.charges.push(metadata);
+        }
         if successor.capture().identity() == previous.identity() {
             return Ok(None);
         }
@@ -638,6 +800,63 @@ impl DemandProducer {
             .current
             .upgrade()
             .ok_or_else(|| refused("demand owner has ended"))
+    }
+    pub(crate) async fn reopen_manifest(
+        self: &Arc<Self>,
+        previous: &Arc<NamespaceCapture>,
+        manifest: crate::store::Reference,
+        reads: QueryReads,
+    ) -> Option<scheduled_lower::SuccessorCapture> {
+        let demands = previous.manifest_demands(manifest, self.weight.scratch)?;
+        {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if demands.iter().any(|demand| {
+                let selected = if demand.arguments.is_empty() {
+                    demand.declaration.clone()
+                } else {
+                    let Some(key) = hirsel_tir::InstanceBodies::key(
+                        previous.snapshot.types(),
+                        &demand.arguments,
+                    ) else {
+                        return true;
+                    };
+                    instance_path(&demand.declaration, key)
+                };
+                state.producing.contains_key(&DefId::intern(&selected))
+            }) {
+                return None;
+            }
+        }
+        let mut capture = previous.clone();
+        let mut last = None;
+        for demand in demands {
+            let site = capture
+                .bodies
+                .get(&DefId::intern(&demand.declaration))?
+                .queries
+                .as_ref()
+                .map(|keys| keys.site)
+                .unwrap_or_default();
+            let output = self
+                .demand(
+                    &capture,
+                    &demand.declaration,
+                    &demand.arguments,
+                    site,
+                    reads.clone(),
+                )
+                .await
+                .ok()?;
+            output.result.ok()?;
+            if let Some(successor) = output.successor {
+                capture = successor.namespace().clone();
+                last = Some(successor);
+            }
+        }
+        if !capture.manifest_inputs_hold(manifest, self.weight.scratch) {
+            return None;
+        }
+        last
     }
     async fn complete_scope(
         self: &Arc<Self>,
@@ -702,11 +921,7 @@ impl DemandProducer {
                         }
                     }
                     let current = self.current()?;
-                    let front = if current.body_front().query(path).is_some() {
-                        current.body_front()
-                    } else {
-                        initial.body_front()
-                    };
+                    let front = current.body_front();
                     let query = front
                         .query(path)
                         .ok_or_else(|| refused("scope body has no Front producer"))?;
@@ -727,17 +942,7 @@ impl DemandProducer {
                 }
                 let owner = self.current()?;
                 let mut engine = owner.capture().discovery_assembly(&self.adapters)?;
-                let mut fronts = Vec::new();
-                fronts.extend(
-                    self.state
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .views
-                        .iter()
-                        .rev()
-                        .map(|view| view.body_front().clone()),
-                );
-                fronts.push(initial.body_front().clone());
+                let fronts = [owner.body_front().clone()];
                 let discovery = engine.discover_front_instances(
                     &demanded,
                     &fronts,
@@ -902,6 +1107,23 @@ impl DemandProducer {
             .collect::<Vec<_>>();
         let namespace =
             engine.capture_namespace(definitions, registrations, self.front.available_bytes())?;
+        let mut refreshed = Vec::with_capacity(registrations.len());
+        let mut changed = false;
+        for registration in registrations {
+            let current = registration.in_capture(
+                &namespace,
+                |path, key| engine.observe(path, key),
+                &self.syntax,
+            )?;
+            changed |= !Arc::ptr_eq(registration, &current);
+            refreshed.push(current);
+        }
+        let namespace = if changed {
+            drop(namespace);
+            engine.capture_namespace(definitions, &refreshed, self.front.available_bytes())?
+        } else {
+            namespace
+        };
         {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let existing = state
@@ -979,240 +1201,290 @@ impl DemandProducer {
                 .publication()
                 .await
                 .map_err(|_| refused("demand cancelled before admission"))?;
-            let current = self
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .current
-                .upgrade()
-                .ok_or_else(|| refused("demand owner has ended"))?;
-            if previous.identity() != current.capture().identity()
-                && !previous.admits_successor(current.capture())
-            {
-                return Err(refused(
-                    "demand does not descend from its consuming capture",
-                ));
-            }
-            let original = current.capture().syntax(declaration)?;
-            if generator(&original).is_none() {
-                return Ok(s1::DependencyProduct {
-                    result: Ok(None),
-                    reads: Reads::empty(),
-                    successor: None,
-                });
-            }
-            let generic = instance_bodied(&original);
-            if !generic {
-                if !arguments.is_empty() {
-                    return Err(refused("nongeneric generator has actual arguments"));
+            let mut transaction = DemandTransaction::new(self);
+            let result = async {
+                let current = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .current
+                    .upgrade()
+                    .ok_or_else(|| refused("demand owner has ended"))?;
+                if previous.identity() != current.capture().identity()
+                    && !previous.admits_successor(current.capture())
+                {
+                    return Err(refused(
+                        "demand does not descend from its consuming capture",
+                    ));
                 }
+                self.charge_instance(current.capture(), declaration, arguments, site)?;
+                let original = current.capture().syntax(declaration)?;
+                if generator(&original).is_none() {
+                    return Ok(s1::DependencyProduct {
+                        result: Ok(None),
+                        reads: Reads::empty(),
+                        successor: None,
+                    });
+                }
+                let generic = instance_bodied(&original);
+                if !generic {
+                    if !arguments.is_empty() {
+                        return Err(refused("nongeneric generator has actual arguments"));
+                    }
+                    if current
+                        .capture()
+                        .registrations
+                        .contains_key(&declaration_id)
+                    {
+                        return Ok(s1::DependencyProduct {
+                            result: Ok(Some(declaration.clone())),
+                            reads: Reads::empty(),
+                            successor: (previous.identity() != current.capture().identity())
+                                .then(|| scheduled_lower::SuccessorCapture::new(previous, current))
+                                .transpose()?,
+                        });
+                    }
+                }
+                let mut engine = if generic {
+                    current.capture().assembly(&self.adapters)?
+                } else {
+                    current.capture().discovery_assembly(&self.adapters)?
+                };
+                let actual_key =
+                    hirsel_tir::InstanceBodies::key(current.capture().snapshot.types(), arguments);
+                let fresh = instance_bodied(&original)
+                    && actual_key.is_some_and(|key| {
+                        !current
+                            .capture()
+                            .instances
+                            .instances
+                            .get(&declaration_id)
+                            .is_some_and(|rows| rows.contains_key(&key))
+                    });
+                let selected = if instance_bodied(&original) {
+                    let request = FrontInstanceRequest {
+                        declaration: declaration.clone(),
+                        actuals: hirsel_types::Actuals {
+                            arguments: arguments.to_vec(),
+                        },
+                        site,
+                    };
+                    let syntax = engine
+                        .register_front_instance(
+                            &request,
+                            Self::take(&self.syntax, self.syntax.available_bytes())?,
+                        )
+                        .map_err(|failure| failure.error)?;
+                    syntax.definition().clone()
+                } else {
+                    if !arguments.is_empty() {
+                        return Err(refused("nongeneric generator has actual arguments"));
+                    }
+                    declaration.clone()
+                };
                 if current
                     .capture()
                     .registrations
-                    .contains_key(&declaration_id)
+                    .contains_key(&DefId::intern(&selected))
                 {
                     return Ok(s1::DependencyProduct {
-                        result: Ok(Some(declaration.clone())),
+                        result: Ok(Some(selected)),
                         reads: Reads::empty(),
                         successor: (previous.identity() != current.capture().identity())
                             .then(|| scheduled_lower::SuccessorCapture::new(previous, current))
                             .transpose()?,
                     });
                 }
-            }
-            let mut engine = if generic {
-                current.capture().assembly(&self.adapters)?
-            } else {
-                current.capture().discovery_assembly(&self.adapters)?
-            };
-            let actual_key =
-                hirsel_tir::InstanceBodies::key(current.capture().snapshot.types(), arguments);
-            let fresh = instance_bodied(&original)
-                && actual_key.is_some_and(|key| {
-                    !current
-                        .capture()
-                        .instances
-                        .instances
-                        .get(&declaration_id)
-                        .is_some_and(|rows| rows.contains_key(&key))
-                });
-            let selected = if instance_bodied(&original) {
-                let request = FrontInstanceRequest {
-                    declaration: declaration.clone(),
-                    actuals: hirsel_types::Actuals {
-                        arguments: arguments.to_vec(),
-                    },
-                    site,
-                };
-                let syntax = engine
-                    .register_front_instance(
-                        &request,
-                        Self::take(&self.syntax, self.syntax.available_bytes())?,
-                    )
-                    .map_err(|failure| failure.error)?;
-                syntax.definition().clone()
-            } else {
-                if !arguments.is_empty() {
-                    return Err(refused("nongeneric generator has actual arguments"));
+                let mut definitions = current
+                    .capture()
+                    .bodies
+                    .keys()
+                    .map(|id| id.path().clone())
+                    .collect::<Vec<_>>();
+                if !definitions.contains(&selected) {
+                    definitions.push(selected.clone());
+                    definitions.sort();
                 }
-                declaration.clone()
-            };
-            if current
-                .capture()
-                .registrations
-                .contains_key(&DefId::intern(&selected))
-            {
-                return Ok(s1::DependencyProduct {
-                    result: Ok(Some(selected)),
-                    reads: Reads::empty(),
-                    successor: (previous.identity() != current.capture().identity())
-                        .then(|| scheduled_lower::SuccessorCapture::new(previous, current))
-                        .transpose()?,
-                });
-            }
-            let mut definitions = current
-                .capture()
-                .bodies
-                .keys()
-                .map(|id| id.path().clone())
-                .collect::<Vec<_>>();
-            if !definitions.contains(&selected) {
-                definitions.push(selected.clone());
-                definitions.sort();
-            }
-            let registrations = current
-                .capture()
-                .registrations
-                .values()
-                .cloned()
-                .collect::<Vec<_>>();
-            let lower = if generic {
-                self.view(&mut engine, &definitions, &registrations)?
-            } else {
-                current.clone()
-            };
-            // The selected head is an admitted prerequisite of private execution.
-            // Nested demand descends from this explicit head capture.
-            self.state.lock().unwrap_or_else(|e| e.into_inner()).current = Arc::downgrade(&lower);
+                let registrations = current
+                    .capture()
+                    .registrations
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let lower = if generic {
+                    self.view(&mut engine, &definitions, &registrations)?
+                } else {
+                    current.clone()
+                };
+                // The selected head is an admitted prerequisite of private execution.
+                // Nested demand descends from this explicit head capture.
+                self.state.lock().unwrap_or_else(|e| e.into_inner()).current =
+                    Arc::downgrade(&lower);
 
-            let text = engine.front_registration_queries_in_pool(
-                std::slice::from_ref(&selected),
-                lower,
-                self.weight,
-                self.text.clone(),
-                self.errors,
-            )?;
-            let query = text
-                .query(&selected)
-                .ok_or_else(|| refused("missing generator execution input"))?;
-            drop(engine);
-            let product = text.clone().run(query, reads.clone()).await;
-            let output = match product {
-                Ok(product) => text.outcome(product),
-                Err(reference) => {
-                    let output = text.failed(reference);
-                    if let Some(output) = &output
-                        && let Err(mut error) = output.text()
-                    {
-                        if fresh && let QueryError::Diagnostics(diagnostics) = &mut error {
-                            let key = actual_key
-                                .ok_or_else(|| refused("selected instance has no canonical key"))?;
-                            for diagnostic in diagnostics {
-                                diagnostic.secondary.push(hirsel_diag::Label {
-                                    span: site,
-                                    message: format!(
-                                        "selects instance {}",
-                                        key.instance_name(declaration)
-                                    ),
-                                });
+                let text = engine.front_registration_queries_in_pool(
+                    std::slice::from_ref(&selected),
+                    lower,
+                    self.weight,
+                    self.text.clone(),
+                    self.errors,
+                )?;
+                let definition = DefId::intern(&selected);
+                {
+                    let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some((count, _)) = state.producing.get_mut(&definition) {
+                        *count = count
+                            .checked_add(1)
+                            .ok_or_else(|| refused("producer depth overflow"))?;
+                    } else {
+                        let mut weight = crate::NativeMetadataWeight::default();
+                        weight.tree::<DefId, (usize, MemoryReservation)>(1);
+                        state
+                            .producing
+                            .insert(definition, (1, Self::take(&self.syntax, weight.bytes())?));
+                    }
+                }
+                let _production = Production {
+                    producer: self.clone(),
+                    definition,
+                };
+                let query = text
+                    .query(&selected)
+                    .ok_or_else(|| refused("missing generator execution input"))?;
+                drop(engine);
+                let product = text.clone().run_tentative(query, reads.clone()).await;
+                let completed = product.as_ref().ok().cloned();
+                let output = match product {
+                    Ok(product) => text.outcome(product),
+                    Err(reference) => {
+                        let output = text.failed(reference);
+                        if let Some(output) = &output
+                            && let Err(mut error) = output.text()
+                        {
+                            if fresh && let QueryError::Diagnostics(diagnostics) = &mut error {
+                                let key = actual_key.ok_or_else(|| {
+                                    refused("selected instance has no canonical key")
+                                })?;
+                                for diagnostic in diagnostics {
+                                    diagnostic.secondary.push(hirsel_diag::Label {
+                                        span: site,
+                                        message: format!(
+                                            "selects instance {}",
+                                            key.instance_name(declaration)
+                                        ),
+                                    });
+                                }
                             }
-                        }
-                        *self.failure.lock().unwrap_or_else(|e| e.into_inner()) =
-                            Some(FrontRegistrationBootstrapError::Runtime {
-                                reference,
-                                error: Some(error.clone()),
-                                sources: output.sources().clone(),
-                                owner: text.clone(),
+                            *self.failure.lock().unwrap_or_else(|e| e.into_inner()) =
+                                Some(FrontRegistrationBootstrapError::Runtime {
+                                    reference,
+                                    error: Some(error.clone()),
+                                    sources: output.sources().clone(),
+                                    owner: text.clone(),
+                                });
+                            let owner =
+                                self.capture_owner(output.namespace()).ok_or_else(|| {
+                                    refused("failed generator lost its capture owner")
+                                })?;
+                            return Ok(s1::DependencyProduct {
+                                result: Err(error),
+                                reads: output.reads().clone(),
+                                successor: Some(scheduled_lower::SuccessorCapture::new(
+                                    previous, owner,
+                                )?),
                             });
+                        }
+                        output
+                    }
+                }
+                .ok_or_else(|| refused("generator execution refused its product"))?;
+                let manifest = output
+                    .namespace()
+                    .manifest_for_reads(
+                        DefId::intern(&selected),
+                        output.reads(),
+                        self.weight.scratch,
+                    )
+                    .ok_or_else(|| refused("generator demand manifest"))?;
+                self.charge_manifest(output.namespace(), manifest, site, &reads)
+                    .await?;
+                // Cancellation is checked again after execution and before allocating
+                // any accepted source. A cancelled future drops every tentative owner.
+                reads
+                    .publication()
+                    .await
+                    .map_err(|_| refused("demand cancelled at acceptance"))?;
+                let metadata = Self::take(
+                    &self.syntax,
+                    (3 * (size_of::<(DefId, Vec<hirsel_types::GenericArgument>)>()
+                        + size_of::<MemoryReservation>())
+                        + size_of_val(arguments)) as u64,
+                )?;
+                let observed = output.reads().clone();
+                let output_capture = output.namespace().clone();
+                let mut engine = output_capture.assembly(&self.adapters)?;
+                let accepted = match engine.accept_front_registration(
+                    output,
+                    Self::take(&self.syntax, self.syntax.available_bytes())?,
+                ) {
+                    Ok(accepted) => accepted,
+                    Err(failure) => {
+                        let error = failure.error.clone();
+                        *self.failure.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(FrontRegistrationBootstrapError::Acceptance(failure));
                         let owner = self
-                            .capture_owner(output.namespace())
-                            .ok_or_else(|| refused("failed generator lost its capture owner"))?;
+                            .capture_owner(&output_capture)
+                            .ok_or_else(|| refused("rejected generator lost its capture owner"))?;
                         return Ok(s1::DependencyProduct {
                             result: Err(error),
-                            reads: output.reads().clone(),
+                            reads: observed,
                             successor: Some(scheduled_lower::SuccessorCapture::new(
                                 previous, owner,
                             )?),
                         });
                     }
-                    output
+                };
+                reads
+                    .publication()
+                    .await
+                    .map_err(|_| refused("demand cancelled during acceptance"))?;
+                let mut registrations = output_capture
+                    .registrations
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                registrations.push(accepted);
+                let definitions = output_capture
+                    .bodies
+                    .keys()
+                    .map(|id| id.path().clone())
+                    .collect::<Vec<_>>();
+                let successor = self.view(&mut engine, &definitions, &registrations)?;
+                let result = scheduled_lower::SuccessorCapture::new(previous, successor.clone())?;
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if state.current.upgrade().is_some_and(|published| {
+                    published.capture().identity() != current.capture().identity()
+                        && !published.capture().admits_successor(successor.capture())
+                }) {
+                    return Err(refused("publication conflicts with a committed dependency"));
                 }
-            }
-            .ok_or_else(|| refused("generator execution refused its product"))?;
-            // Cancellation is checked again after execution and before allocating
-            // any accepted source. A cancelled future drops every tentative owner.
-            reads
-                .publication()
-                .await
-                .map_err(|_| refused("demand cancelled at acceptance"))?;
-            let metadata = Self::take(
-                &self.syntax,
-                (3 * (size_of::<(DefId, Vec<hirsel_types::GenericArgument>)>()
-                    + size_of::<MemoryReservation>())
-                    + size_of_val(arguments)) as u64,
-            )?;
-            let observed = output.reads().clone();
-            let output_capture = output.namespace().clone();
-            let mut engine = output_capture.assembly(&self.adapters)?;
-            let accepted = match engine.accept_front_registration(
-                output,
-                Self::take(&self.syntax, self.syntax.available_bytes())?,
-            ) {
-                Ok(accepted) => accepted,
-                Err(failure) => {
-                    let error = failure.error.clone();
-                    *self.failure.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some(FrontRegistrationBootstrapError::Acceptance(failure));
-                    let owner = self
-                        .capture_owner(&output_capture)
-                        .ok_or_else(|| refused("rejected generator lost its capture owner"))?;
-                    return Ok(s1::DependencyProduct {
-                        result: Err(error),
-                        reads: observed,
-                        successor: Some(scheduled_lower::SuccessorCapture::new(previous, owner)?),
-                    });
+                state
+                    .trace
+                    .push((DefId::intern(declaration), arguments.to_vec()));
+                state.charges.push(metadata);
+                state.current = Arc::downgrade(&successor);
+                drop(state);
+                if let Some(completed) = completed {
+                    text.commit(&completed);
                 }
-            };
-            let mut registrations = output_capture
-                .registrations
-                .values()
-                .cloned()
-                .collect::<Vec<_>>();
-            registrations.push(accepted);
-            let definitions = output_capture
-                .bodies
-                .keys()
-                .map(|id| id.path().clone())
-                .collect::<Vec<_>>();
-            let successor = self.view(&mut engine, &definitions, &registrations)?;
-            let result = scheduled_lower::SuccessorCapture::new(previous, successor.clone())?;
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state.current.upgrade().is_some_and(|published| {
-                published.capture().identity() != current.capture().identity()
-                    && !published.capture().admits_successor(successor.capture())
-            }) {
-                return Err(refused("publication conflicts with a committed dependency"));
+                Ok(s1::DependencyProduct {
+                    result: Ok(Some(selected)),
+                    reads: observed,
+                    successor: Some(result),
+                })
             }
-            state
-                .trace
-                .push((DefId::intern(declaration), arguments.to_vec()));
-            state.charges.push(metadata);
-            state.current = Arc::downgrade(&successor);
-            Ok(s1::DependencyProduct {
-                result: Ok(Some(selected)),
-                reads: observed,
-                successor: Some(result),
-            })
+            .await;
+            transaction.completed = true;
+            result
         })
     }
 }

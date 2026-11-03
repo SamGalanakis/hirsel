@@ -10,7 +10,7 @@ const INPUT: Domain = Domain {
 };
 const OUTPUT: Domain = Domain {
     kind: 0x4601_0006,
-    schema: 2,
+    schema: 3,
 };
 const FAILURE: Domain = Domain {
     kind: 0x4601_0007,
@@ -40,6 +40,7 @@ pub(in crate::queries) struct Data {
     dependencies: Vec<SignatureDependency>,
     depth: DepthEvidence<Span>,
     acceptance: Option<hirsel_validate::ExecutionReceipt>,
+    decode_bytes: u64,
     _allowance: Option<MemoryReservation>,
 }
 type Completed = (ProductRef, Arc<Data>);
@@ -50,6 +51,9 @@ pub struct FrontRegistrationOutput {
     data: Arc<Data>,
 }
 impl Data {
+    pub(in crate::queries) fn manifest(&self) -> Reference {
+        self.namespace.manifest
+    }
     pub(in crate::queries) fn definition(&self) -> &DefPath {
         self.definition.path()
     }
@@ -156,6 +160,18 @@ impl FrontRegistrationQueries {
         id: QueryId,
         reads: QueryReads,
     ) -> Result<ProductRef, Reference> {
+        let result = self.clone().run_tentative(id, reads.clone()).await;
+        if let Ok(product) = &result {
+            reads.publication().await?;
+            self.commit(product);
+        }
+        result
+    }
+    pub(in crate::queries) async fn run_tentative(
+        self: Arc<Self>,
+        id: QueryId,
+        reads: QueryReads,
+    ) -> Result<ProductRef, Reference> {
         let input = &self.inputs[&id.address.0];
         let (mut data, namespace) = if let Some(data) = self.restore(input) {
             (Arc::new(data), self.lower.namespace.clone())
@@ -220,7 +236,7 @@ impl FrontRegistrationQueries {
                 drop(engine);
                 drop(text);
                 drop(source);
-                let selected = Box::pin(replay.clone().run(query, reads)).await;
+                let selected = Box::pin(replay.clone().run_tentative(query, reads)).await;
                 let (mut product, data) = replay
                     .outcomes
                     .lock()
@@ -263,6 +279,7 @@ impl FrontRegistrationQueries {
                     dependencies,
                     depth,
                     acceptance,
+                    decode_bytes: 0,
                     _allowance: None,
                 }),
                 source.capture(),
@@ -340,24 +357,46 @@ impl FrontRegistrationQueries {
             ProductArchive::from_encoded_in(record, bytes, &self.output_pool)
                 .map_err(|_| self.errors.resource)?,
         );
-        if !failed
-            && let Some(decode_bytes) = weight
-                .bytes()
-                .checked_mul(2)
-                .and_then(|bytes| bytes.checked_add(record_decode_bytes))
-        {
-            self.remember(input, record, &data, decode_bytes, namespace.manifest);
-        }
+        Arc::get_mut(&mut data)
+            .expect("unpublished generator output")
+            .decode_bytes = weight
+            .bytes()
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(record_decode_bytes))
+            .ok_or(self.errors.resource)?;
         self.outcomes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id.address.0, (product.clone(), data));
         if failed { Err(record) } else { Ok(product) }
     }
+    pub(in crate::queries) fn commit(&self, product: &ProductRef) {
+        let Some(input) = self.inputs.get(&product.address.0) else {
+            return;
+        };
+        let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
+        let Some((current, data)) = outcomes.get(&product.address.0).cloned() else {
+            return;
+        };
+        drop(outcomes);
+        if &current != product || data.text.is_err() {
+            return;
+        }
+        let Ok(archive) = product.archive(ArchiveAdmission::Retained) else {
+            return;
+        };
+        self.remember(
+            input,
+            archive.reference(),
+            &data,
+            data.decode_bytes,
+            data.namespace.manifest,
+        );
+    }
     fn storage_key(input: &Input) -> EntryKey {
         EntryKey(
             ContentHash::of_parts(
-                "hirsel.front.registration.variants.v1",
+                "hirsel.front.registration.variants.v2",
                 [input.key.0.0.as_slice()],
             ),
             input.key.1,
@@ -418,6 +457,7 @@ impl FrontRegistrationQueries {
             .lower
             .records
             .decode(&*self.lower.namespace.anchors, &bytes)?;
+        let reads = evidence::current_reads(reads, acceptance.as_ref())?;
         if definition != input.definition
             || text.is_err()
             || reads
@@ -447,6 +487,7 @@ impl FrontRegistrationQueries {
             dependencies,
             depth,
             acceptance,
+            decode_bytes: stored.decode_bytes,
             _allowance: None,
         })
     }

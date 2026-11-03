@@ -14,7 +14,9 @@ struct Retained {
     definition_decode_layout: DefinitionDecodeLayout,
     constant_selection_bytes: u64,
 }
+#[derive(Clone)]
 struct Row {
+    manifest: Reference,
     generation: u64,
     owner: DefId,
     text: ContentHash,
@@ -208,7 +210,7 @@ impl FrontLowerQueries {
         let Some(carry) = self.carry() else {
             return;
         };
-        let (lower, references) = match &outcome.result {
+        let (lower, mut references) = match &outcome.result {
             Ok(Value::Lower(lower)) => (
                 Some(Retained {
                     verified: lower.verified.clone(),
@@ -231,6 +233,20 @@ impl FrontLowerQueries {
             Ok(Value::Constant(..)) => (None, vec![]),
             Err(_) => return,
         };
+        let Some(scope) = self.manifest_for_outcome(id, &outcome.reads) else {
+            return;
+        };
+        let Some(manifest) = self
+            .namespace
+            .manifest_references(scope, self.weight.scratch)
+        else {
+            return;
+        };
+        references.extend(
+            manifest
+                .into_iter()
+                .map(|reference| (reference.domain, reference)),
+        );
         let mut weight = crate::NativeMetadataWeight::default();
         // At most one full internal node per row bounds every BTree split.
         weight.tree::<(u32, ContentHash), Row>(0);
@@ -297,6 +313,7 @@ impl FrontLowerQueries {
         carry.remember(
             (id.kind, key.0),
             Row {
+                manifest: scope,
                 generation: 0,
                 owner,
                 text: key.1,
@@ -317,7 +334,7 @@ impl FrontLowerQueries {
     /// The carried outcome of this query, adopted when its text and reads are
     /// current. Its content returns to this graph's store before publication.
     pub(super) async fn load_carry(
-        &self,
+        self: &Arc<Self>,
         id: QueryId,
         path: &DefPath,
         key: &EntryKey,
@@ -325,7 +342,8 @@ impl FrontLowerQueries {
     ) -> Option<Result<ProductRef, Reference>> {
         let carry = self.carry()?;
         let rows = carry.rows.lock().unwrap_or_else(|e| e.into_inner());
-        let row = rows.entries.get(&(id.kind, key.0))?;
+        let row = rows.entries.get(&(id.kind, key.0))?.clone();
+        drop(rows);
         let clean = self
             .carry_changes
             .lock()
@@ -336,16 +354,52 @@ impl FrontLowerQueries {
             || row.descriptor.len() as u64 > self.weight.scratch
             || row.reads_decode_bytes > self.weight.scratch
             || row.constant_decode_bytes > self.weight.scratch
-            || (!clean
-                && row
-                    .reads
-                    .first_changed(|read| self.observe(path, read))
-                    .is_some())
         {
             return None;
         }
         for (domain, bytes) in &row.contents {
             self.store.put_content(*domain, bytes)?;
+        }
+        if !self
+            .namespace
+            .manifest_inputs_hold(row.manifest, self.weight.scratch)
+        {
+            if !self.namespace.manifest_source_reads_hold(
+                row.manifest,
+                self.weight.scratch,
+                &row.reads,
+                |read| self.observe(path, read),
+            ) {
+                return None;
+            }
+            let producer = self.demand_producer()?;
+            let successor = producer
+                .reopen_manifest(&self.namespace, row.manifest, query_reads.clone())
+                .await?;
+            let owner = successor.owner().clone();
+            let actual = owner.id(path, id.kind)?;
+            return Some(self.forward_capture(id, actual, owner, query_reads).await);
+        }
+        if !clean
+            && row
+                .reads
+                .first_changed(|read| self.observe(path, read))
+                .is_some()
+        {
+            return None;
+        }
+        if let Some(producer) = self.demand_producer() {
+            producer
+                .charge_manifest(
+                    &self.namespace,
+                    row.manifest,
+                    self.inputs
+                        .get(path)
+                        .map_or(Span::default(), |input| input.captured.site),
+                    query_reads,
+                )
+                .await
+                .ok()?;
         }
         let result = if id.kind == FRONT_LOWER_KIND {
             let retained = row.lower.clone()?;
@@ -363,7 +417,10 @@ impl FrontLowerQueries {
             ): reads::Descriptor = self
                 .records
                 .decode(&*self.namespace.anchors, &row.descriptor)?;
-            if !self.namespace.manifest_holds(manifest, self.weight.scratch) {
+            if !self
+                .namespace
+                .manifest_inputs_hold(manifest, self.weight.scratch)
+            {
                 return None;
             }
             let lower = LowerProduct {
@@ -401,7 +458,10 @@ impl FrontLowerQueries {
             ) = self
                 .records
                 .decode(&*self.namespace.anchors, &row.descriptor)?;
-            if !self.namespace.manifest_holds(manifest, self.weight.scratch) {
+            if !self
+                .namespace
+                .manifest_inputs_hold(manifest, self.weight.scratch)
+            {
                 return None;
             }
             let mut constants = Constants::new(value, substitutions);
@@ -422,7 +482,6 @@ impl FrontLowerQueries {
         let reads_decode_bytes = row.reads_decode_bytes;
         let execution = row.execution.clone();
         let descriptor = row.descriptor.clone();
-        drop(rows);
         let domain = if id.kind == FRONT_LOWER_KIND {
             LOWER_DESCRIPTOR
         } else {

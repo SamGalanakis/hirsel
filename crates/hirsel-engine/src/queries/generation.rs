@@ -99,6 +99,26 @@ pub(crate) fn abstract_family(syntax: &ItemSyntax) -> bool {
 /// The most instances one generic generated declaration may select (CT-5).
 pub const MAX_GENERATED_INSTANCES: usize = 256;
 
+fn instance_limit(
+    declaration: &DefPath,
+    key: hirsel_types::GeneratedActualKey,
+    generator_site: Span,
+    site: Span,
+) -> QueryError {
+    let mut diagnostic = Diagnostic::error(
+        const { hirsel_diag::RuleId::of("CT-1") },
+        generator_site,
+        format!(
+            "a generic generated declaration selects at most {MAX_GENERATED_INSTANCES} instances"
+        ),
+    );
+    diagnostic.secondary.push(hirsel_diag::Label {
+        span: site,
+        message: format!("selects instance {}", key.instance_name(declaration)),
+    });
+    QueryError::Diagnostics(vec![diagnostic])
+}
+
 fn renamed(definition: &DefPath, suffix: &str) -> DefPath {
     let mut path = definition.clone();
     path.0.name = format!("{}${suffix}", path.0.name);
@@ -156,6 +176,28 @@ struct Recording {
 }
 
 impl QueryEngine {
+    pub(crate) fn charge_generated_path(&mut self, instance: DefId) -> Result<(), QueryError> {
+        let selected = self
+            .instance_bodies
+            .instances
+            .iter()
+            .find_map(|(declaration, rows)| {
+                rows.iter()
+                    .find(|(_, row)| row.definition == instance)
+                    .map(|(key, _)| (*declaration, *key))
+            });
+        if let Some((declaration, key)) = selected {
+            let syntax = self.snapshot(declaration.path())?;
+            let body = generator(&syntax).ok_or(QueryError::NotImplemented)?;
+            let site = syntax.tree.expressions[body.0 as usize].origin.span;
+            let selected = self.selected_instances.entry(declaration).or_default();
+            if !selected.contains(&key) && selected.len() >= MAX_GENERATED_INSTANCES {
+                return Err(instance_limit(declaration.path(), key, site, site));
+            }
+            selected.insert(key);
+        }
+        Ok(())
+    }
     /// Late mode failures use the same generated-source explanations as checking.
     /// Only diagnostic-bearing results are copied; successful bodies stay shared.
     pub(super) fn label_generated_result<T: Clone>(
@@ -339,7 +381,7 @@ impl QueryEngine {
             }
             self.merge_execution(entry.reads());
             self.merge_lower_acceptance(entry.acceptance.as_ref(), true);
-            self.record_selections(&entry.selections);
+            self.record_selections(&entry.selections)?;
             return entry.result();
         }
         timings::count(Count::Definitions);
@@ -413,7 +455,7 @@ impl QueryEngine {
             reads.observed.merged.merge(&observed);
             reads.reads = record.detail;
             self.merge_lower_acceptance(record.acceptance.as_ref(), true);
-            self.record_selections(&record.selections);
+            self.record_selections(&record.selections)?;
             record.text
         } else {
             self.begin_evaluation_validation();
@@ -948,6 +990,7 @@ impl QueryEngine {
         actuals: &hirsel_types::Actuals,
         site: Span,
     ) -> Result<(DefPath, bool), QueryError> {
+        self.note_environment();
         let key =
             hirsel_tir::InstanceBodies::key(&self.types, &actuals.arguments).ok_or_else(|| {
                 QueryError::Operational(hirsel_types::OperationalFailure {
@@ -956,14 +999,6 @@ impl QueryEngine {
                 })
             })?;
         let declaration_id = DefId::intern(declaration);
-        if let Some(instance) = self
-            .instance_bodies
-            .instances
-            .get(&declaration_id)
-            .and_then(|instances| instances.get(&key))
-        {
-            return Ok((instance.definition.path().clone(), false));
-        }
         self.materialize(declaration)?;
         let snapshot = self.snapshot(declaration)?;
         let source = &snapshot.item;
@@ -976,27 +1011,21 @@ impl QueryEngine {
             return Err(QueryError::NotImplemented);
         };
         let generator_site = snapshot.tree.expressions[body.0 as usize].origin.span;
-        let selected = self
+        let selected = self.selected_instances.entry(declaration_id).or_default();
+        if !selected.contains(&key) && selected.len() >= MAX_GENERATED_INSTANCES {
+            return Err(instance_limit(declaration, key, generator_site, site));
+        }
+        selected.insert(key);
+        if let Some(instance) = self
             .instance_bodies
             .instances
             .get(&declaration_id)
-            .map_or(0, |instances| instances.len());
-        let spellings = key.spellings();
-        let instance_name = format!("{}[{}]", declaration, spellings.join(", "));
-        if selected >= MAX_GENERATED_INSTANCES {
-            let mut d = Diagnostic::error(
-                const { hirsel_diag::RuleId::of("CT-1") },
-                generator_site,
-                format!(
-                    "a generic generated declaration selects at most {MAX_GENERATED_INSTANCES} instances"
-                ),
-            );
-            d.secondary.push(hirsel_diag::Label {
-                span: site,
-                message: format!("selects instance {instance_name}"),
-            });
-            return Err(QueryError::Diagnostics(vec![d]));
+            .and_then(|instances| instances.get(&key))
+        {
+            return Ok((instance.definition.path().clone(), false));
         }
+        let spellings = key.spellings();
+        let instance_name = key.instance_name(declaration);
         // The instance's source: the declaration's tokens with the generic list
         // after its name left out and each generic parameter replaced by its
         // actual's spelling, on the declaration's own lines.

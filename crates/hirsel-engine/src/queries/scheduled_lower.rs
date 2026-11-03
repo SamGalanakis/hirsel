@@ -1524,6 +1524,10 @@ impl FrontLowerQueries {
         let descriptor_reads =
             evidence::archived_reads(&observed, execution.as_ref()).ok_or(self.errors.protocol)?;
         let selections = std::mem::take(&mut *source.selections.borrow_mut());
+        let manifest = self
+            .namespace
+            .manifest_for_reads(DefId::intern(&path), &observed, self.weight.scratch)
+            .ok_or(self.errors.resource)?;
         let mut reads_decode_bytes = 0;
         let diagnostic_sources = source.diagnostic_sources.borrow().clone();
         let bytes = match &mut result {
@@ -1565,7 +1569,7 @@ impl FrontLowerQueries {
                             &depth,
                             executed,
                             &selections,
-                            self.namespace.manifest,
+                            manifest,
                         ),
                     )
                     .ok_or(self.errors.resource)?;
@@ -1584,7 +1588,7 @@ impl FrontLowerQueries {
                 &depth,
                 executed,
                 &selections,
-                self.namespace.manifest,
+                manifest,
             ),
             Err(error) => self.records.encode(
                 &namespace::DiagnosticRecordSource {
@@ -1713,7 +1717,12 @@ impl FrontLowerQueries {
             [
                 key.0.0.as_slice(),
                 key.1.0.as_slice(),
-                self.namespace.manifest.output.0.0.as_slice(),
+                self.manifest_for_outcome(id, &outcome.reads)
+                    .ok_or(self.errors.resource)?
+                    .output
+                    .0
+                    .0
+                    .as_slice(),
                 crate::store::payload_reads_hash(&outcome.reads)
                     .0
                     .as_slice(),

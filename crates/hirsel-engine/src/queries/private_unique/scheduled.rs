@@ -385,6 +385,12 @@ impl QueryEngine {
         {
             return Ok(reservation);
         }
+        if self.private_summary_failure.is_some() {
+            self.adopt_completed_headers();
+            self.header_products = None;
+            self.adopted_headers = None;
+            self.retire_snapshot();
+        }
         self.private_summary_active = true;
         self.private_summary_failure = None;
         let result = self
@@ -500,6 +506,7 @@ impl QueryEngine {
         // The inference view contains conservative declared rows. Replace it
         // before selecting settled signature variants for this module.
         let headers = header_products::HeaderProducts::capture(self);
+        headers.configure_private(working_bytes, registrations);
         self.header_products = Some(headers);
         self.snapshot = None;
         let publications: Vec<_> = self
@@ -624,6 +631,12 @@ impl QueryEngine {
             self.materialize(path)?;
         }
         let snapshot = (!pending.is_empty()).then(|| self.signature_inputs());
+        if let Some(headers) = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.header_products())
+        {
+            headers.configure_private(working_bytes, registrations);
+        }
         let declarations = self.frozen_declarations();
         for (package, module, paths, potential, expected) in pending {
             let mut complete = true;

@@ -900,6 +900,7 @@ impl QueryEngine {
             self.build_inputs_revision(),
         );
         if self.environment_seen.as_ref() != Some(&now) {
+            self.selected_instances.clear();
             if let Some((previous, _, _)) = &self.environment_seen {
                 let mut changes = ChangeSet::default();
                 changes.read(ReadKey::Environment, Durability::High);

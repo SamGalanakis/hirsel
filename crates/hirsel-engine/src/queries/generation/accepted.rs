@@ -1,7 +1,7 @@
 //! Accepted CT-5 syntax. The private generator output and its admission owner
 //! survive every front that consumes the normalized declaration.
 use super::*;
-use crate::runtime::MemoryReservation;
+use crate::runtime::{MemoryReservation, MemoryReservationPool};
 
 /// A rejected registration retains the sources its diagnostics cite without
 /// publishing generated syntax into the engine's accepted namespace.
@@ -22,14 +22,67 @@ pub struct AcceptedFrontRegistration {
     pub(crate) syntax: Arc<ItemSyntax>,
     pub(crate) reads: Arc<Reads>,
     output: Arc<scheduled_lower::GeneratorResult>,
+    execution: Option<hirsel_validate::ExecutionReceipt>,
     original: (hirsel_span::Anchor, u32, ContentHash),
     generated: (FileId, Span),
     schema_origins: Vec<(std::ops::Range<usize>, hirsel_diag::Label)>,
     checked_prefix: Vec<SignatureDependency>,
     _allowance: Arc<MemoryReservation>,
+    _refresh: Option<Arc<MemoryReservation>>,
     retained: u64,
 }
 impl AcceptedFrontRegistration {
+    pub(crate) fn in_capture(
+        self: &Arc<Self>,
+        capture: &NamespaceCapture,
+        observe: impl FnMut(&DefPath, &ReadKey) -> Option<ContentHash>,
+        pool: &MemoryReservationPool,
+    ) -> Result<Arc<Self>, QueryError> {
+        let (reads, execution) = self.validate_current(capture, observe)?;
+        if reads == *self.reads {
+            return Ok(self.clone());
+        }
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(
+            size_of::<Self>()
+                + size_of::<Reads>()
+                + 6 * size_of::<usize>()
+                + size_of::<MemoryReservation>(),
+        );
+        weight.vec(&self.schema_origins, |weight, (_, label)| {
+            weight.add(label.message.capacity())
+        });
+        weight.flat_vec(&self.checked_prefix);
+        for (_, bytes) in reads.allocations() {
+            weight.add(bytes);
+        }
+        if let Some(execution) = &execution {
+            weight.add(
+                execution
+                    .retained_bytes()
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .ok_or_else(refusal)?,
+            );
+        }
+        let refresh = Arc::new(pool.take(weight.bytes()).ok_or_else(refusal)?);
+        Ok(Arc::new(Self {
+            syntax: self.syntax.clone(),
+            reads: Arc::new(reads),
+            output: self.output.clone(),
+            execution,
+            original: self.original,
+            generated: self.generated,
+            schema_origins: self.schema_origins.clone(),
+            checked_prefix: self.checked_prefix.clone(),
+            _allowance: self._allowance.clone(),
+            retained: self
+                ._allowance
+                .bytes()
+                .checked_add(refresh.bytes())
+                .ok_or_else(refusal)?,
+            _refresh: Some(refresh),
+        }))
+    }
     pub fn definition(&self) -> &DefPath {
         self.output.definition()
     }
@@ -166,11 +219,14 @@ impl AcceptedFrontRegistration {
             .text()
             .expect("accepted successful generator text")
     }
+    pub(crate) fn generation_manifest(&self) -> crate::store::Reference {
+        self.output.manifest()
+    }
     pub(crate) fn depth(&self) -> &crate::memo::DepthEvidence<Span> {
         self.output.depth()
     }
     pub(crate) fn acceptance(&self) -> Option<&hirsel_validate::ExecutionReceipt> {
-        self.output.acceptance()
+        self.execution.as_ref()
     }
     pub(crate) fn validate(&self, engine: &mut QueryEngine) -> Result<(), QueryError> {
         let invalid = |reason: String| {
@@ -316,6 +372,35 @@ impl AcceptanceInputs {
         let mut sources = self.sources.clone();
         let mut generated = None;
         let result = (|| -> Result<Arc<AcceptedFrontRegistration>, QueryError> {
+            let execution = if self.verify == Verify::On {
+                let receipt = output.acceptance().ok_or_else(refusal)?;
+                Some(
+                    self.snapshot
+                        .revalidate_execution(receipt, |path, occurrence| {
+                            crate::NativeRecordSource::record_source_anchor(
+                                &*self.citations.owners,
+                                path,
+                                occurrence,
+                            )
+                            .or_else(|| {
+                                self.citations.items.iter().find_map(|(owner, candidates)| {
+                                    (task::GeneratorInput::private_path(owner) == *path
+                                        && occurrence == 0)
+                                        .then(|| candidates.first().map(|syntax| syntax.anchor))
+                                        .flatten()
+                                })
+                            })
+                        })
+                        .ok_or_else(refusal)?,
+                )
+            } else {
+                None
+            };
+            let execution_reads = scheduled_lower::evidence::current_reads(
+                output.reads().clone(),
+                execution.as_ref(),
+            )
+            .ok_or_else(refusal)?;
             let text = output.text()?.to_owned();
             let original = &self.original;
             if original.item.definition != definition {
@@ -324,7 +409,7 @@ impl AcceptanceInputs {
             if let Some((key, current)) = self
                 .current
                 .iter()
-                .find(|(key, current)| output.reads().get(key) != *current)
+                .find(|(key, current)| execution_reads.get(key) != *current)
             {
                 if let Some(failure) = &self.private_failure {
                     return Err(failure.clone());
@@ -333,12 +418,12 @@ impl AcceptanceInputs {
                     operation: "generated syntax acceptance".into(),
                     message: format!(
                         "{definition}: changed generator read {key:?}: {:?} -> {current:?}",
-                        output.reads().get(key)
+                        execution_reads.get(key)
                     ),
                 }));
             }
             if self.verify == Verify::On {
-                let receipt = output.acceptance().ok_or_else(refusal)?;
+                let receipt = execution.as_ref().ok_or_else(refusal)?;
                 for (package, digest) in receipt.contexts() {
                     if self.snapshot.validation_input_digest(package).ok() != Some(*digest) {
                         return Err(refusal());
@@ -360,7 +445,7 @@ impl AcceptanceInputs {
                 return Err(QueryError::NotImplemented);
             };
             let mut observed = ReadsBuilder::new();
-            observed.merge(output.reads());
+            observed.merge(&execution_reads);
             let mut dependencies = output.dependencies().to_vec();
             let normalize = (|| {
                 let literal = syntax::parse_literal(
@@ -440,6 +525,14 @@ impl AcceptanceInputs {
                 weight.add(bytes);
             }
             weight.flat_vec(&dependencies);
+            if let Some(execution) = &execution {
+                weight.add(
+                    execution
+                        .retained_bytes()
+                        .and_then(|bytes| bytes.try_into().ok())
+                        .ok_or_else(refusal)?,
+                );
+            }
             let retained = weight.bytes();
             let retained_allowance = Arc::new(allowance.split(retained).ok_or_else(|| QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "generated syntax acceptance".into(),
@@ -450,11 +543,13 @@ impl AcceptanceInputs {
                 syntax,
                 reads,
                 output: output.into_data(),
+                execution,
                 original: (original.anchor, original.occurrence, original.text_hash),
                 generated: (file, site),
                 schema_origins: self.schema_origins,
                 checked_prefix: dependencies,
                 _allowance: retained_allowance,
+                _refresh: None,
                 retained,
             }))
         })();
@@ -500,12 +595,9 @@ impl QueryEngine {
         let captured = (|| {
             let original = self.snapshot(&definition)?;
             let mut current = Vec::new();
-            for (key, expected) in output.reads().observed() {
+            for (key, _) in output.reads().observed() {
                 let observed = self.observe(&definition, key);
                 current.push((*key, observed));
-                if observed != Some(*expected) {
-                    break;
-                }
             }
             let private_failure = self
                 .private_summary_failure
@@ -526,12 +618,18 @@ impl QueryEngine {
                     })
                     .collect()
             });
+            let snapshot = self.signature_inputs();
+            for (key, value) in &mut current {
+                if let ReadKey::ValidationUniverse(package) = key {
+                    *value = snapshot.validation_input_digest(&package.id()).ok();
+                }
+            }
             Ok((
                 original,
                 current,
                 private_failure,
                 schema_origins,
-                self.signature_inputs(),
+                snapshot,
                 self.frozen_declarations(),
             ))
         })();

@@ -999,8 +999,8 @@ impl QueryEngine {
             .iter()
             .any(|(key, _)| matches!(key, crate::ReadKey::ValidationUniverse(_)))
     }
-    fn merge_evaluation_validation(&mut self, value: &EvaluatedConstant) {
-        self.record_selections(&value.selections);
+    fn merge_evaluation_validation(&mut self, value: &EvaluatedConstant) -> Result<(), QueryError> {
+        self.record_selections(&value.selections)?;
         if let Some(receipt) = &value.acceptance {
             for artifact in receipt.artifacts() {
                 self.record_evaluation_acceptance(Some(artifact.clone()));
@@ -1024,6 +1024,7 @@ impl QueryEngine {
                 self.evaluation_validation.fill(None);
             }
         }
+        Ok(())
     }
     pub(crate) fn record_staged_selection(&mut self, path: DefId, arguments: &[u64]) {
         for frame in &mut self.evaluation_selections {
@@ -1035,10 +1036,16 @@ impl QueryEngine {
             frame.push(Selection::Generated(path));
         }
     }
-    pub(crate) fn record_selections(&mut self, selections: &[Selection]) {
+    pub(crate) fn record_selections(&mut self, selections: &[Selection]) -> Result<(), QueryError> {
+        for selection in selections {
+            if let Selection::Generated(instance) = selection {
+                self.charge_generated_path(*instance)?;
+            }
+        }
         for frame in &mut self.evaluation_selections {
             frame.extend_from_slice(selections);
         }
+        Ok(())
     }
     /// Complete execution evidence of a retained constant materialization.
     /// This includes lookup, citation, private-view and transitive body reads;
@@ -1134,7 +1141,7 @@ impl QueryEngine {
             {
                 self.depth_admit(&value.depth, reference)?;
                 self.merge_execution(&value.executed);
-                self.merge_evaluation_validation(&value);
+                self.merge_evaluation_validation(&value)?;
                 self.depth_requested(&value.depth, reference);
                 return Ok(value);
             }
@@ -1143,7 +1150,7 @@ impl QueryEngine {
         if let Some(value) = self.load_evaluation(path) {
             self.depth_admit(&value.depth, reference)?;
             self.merge_execution(&value.executed);
-            self.merge_evaluation_validation(&value);
+            self.merge_evaluation_validation(&value)?;
             self.depth_requested(&value.depth, reference);
             self.constant_values.insert(path.clone(), value.clone());
             return Ok(value);
@@ -1559,7 +1566,7 @@ impl QueryEngine {
             {
                 self.depth_admit(&value.depth, site)?;
                 self.merge_execution(&value.executed);
-                self.merge_evaluation_validation(&value);
+                self.merge_evaluation_validation(&value)?;
                 self.depth_requested(&value.depth, site);
                 return Ok(value);
             }
@@ -1567,7 +1574,7 @@ impl QueryEngine {
         if let Some(value) = self.load_staged_evaluation(path, arguments) {
             self.depth_admit(&value.depth, site)?;
             self.merge_execution(&value.executed);
-            self.merge_evaluation_validation(&value);
+            self.merge_evaluation_validation(&value)?;
             self.depth_requested(&value.depth, site);
             self.staged_values.insert(key, value.clone());
             return Ok(value);

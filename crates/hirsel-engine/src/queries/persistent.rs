@@ -1435,6 +1435,12 @@ impl QueryEngine {
         }
         let path = accepted.definition();
         let mut text = self.key_text(path, kind)?;
+        let manifest = bincode::serialize(&accepted.generation_manifest())
+            .map_err(|_| QueryError::NotImplemented)?;
+        text = ContentHash::of_parts(
+            "hirsel.generated-source.inputs.v1",
+            [text.0.as_slice(), manifest.as_slice()],
+        );
         if kind == QueryKind::Modes {
             let dependencies = bincode::serialize(accepted.checked_prefix())
                 .map_err(|_| QueryError::NotImplemented)?;
@@ -2186,6 +2192,7 @@ impl QueryEngine {
                     self.staged_values.insert(key, selected);
                 }
                 Selection::Generated(id) => {
+                    self.charge_generated_path(*id).ok()?;
                     let old = self.checked.get(id).cloned();
                     let valid = old.is_some_and(|entry| {
                         self.key_text(id.path(), QueryKind::Check)
@@ -2405,7 +2412,7 @@ impl QueryEngine {
         self.replay_selections(&record.selections)?;
         self.depth_replay_requests(&record.depth).ok()?;
         self.merge_execution(&variant.reads);
-        self.record_selections(&record.selections);
+        self.record_selections(&record.selections).ok()?;
         timings::count(Count::StoreHits);
         self.store_adoptions += 1;
         Some((record.content, record.dependencies))
@@ -2517,7 +2524,7 @@ impl QueryEngine {
         self.depth_replay_requests(&record.depth).ok()?;
         self.merge_execution(&variant.reads);
         self.merge_lower_acceptance(acceptance.as_ref(), required);
-        self.record_selections(&record.selections);
+        self.record_selections(&record.selections).ok()?;
         timings::count(Count::StoreHits);
         self.store_adoptions += 1;
         Some(record.products)

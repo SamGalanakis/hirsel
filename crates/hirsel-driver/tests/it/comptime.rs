@@ -2574,3 +2574,179 @@ fn frozen_frontier_generator_demand_skips_a_dead_compile_time_branch() {
         }
     });
 }
+#[test]
+fn frozen_generator_instance_allowance_counts_current_selections_including_hits() {
+    use hirsel_engine::{FrontInstanceRequest, runtime::ProcessBudget};
+    use hirsel_types::{Actuals, GenericArgument, Size};
+    with_compiler_stack(|| {
+        let source = "fn make[n:size]()->u64 uses {}=comptime Ok(codegen.body(\"fn()->u64 uses {}{7u64}\"))\n";
+        let mut engine = engine(source);
+        let revision = engine
+            .sources
+            .add("revision.hir", "const UNUSED:u64=1\n".into())
+            .unwrap();
+        engine.parse_file(revision, &default_context()).unwrap();
+        let budget = ProcessBudget::new(64 << 20);
+        let select = |engine: &mut QueryEngine, n| {
+            engine.register_front_instance(
+                &FrontInstanceRequest {
+                    declaration: path("make"),
+                    actuals: Actuals {
+                        arguments: vec![GenericArgument::Size(Size::Constant(n))],
+                    },
+                    site: hirsel_span::Span::default(),
+                },
+                budget.reserve(budget.limit() - budget.reserved()).unwrap(),
+            )
+        };
+        for n in 0..256 {
+            select(&mut engine, n).unwrap();
+        }
+        assert!(matches!(select(&mut engine, 256), Err(failure)
+            if matches!(failure.error, QueryError::Diagnostics(ref ds) if ds.iter().any(|d| d.rule.as_str() == "CT-1"))));
+        let file = engine
+            .sources
+            .add("revision.hir", "const UNUSED:u64=2\n".into())
+            .unwrap();
+        engine.parse_file(file, &default_context()).unwrap();
+        let retained = engine.indexed_definitions().len();
+        select(&mut engine, 0).unwrap();
+        assert_eq!(
+            engine.indexed_definitions().len(),
+            retained,
+            "a selected cache hit retains its syntax"
+        );
+        for n in 256..511 {
+            select(&mut engine, n).unwrap();
+        }
+        assert!(
+            matches!(select(&mut engine, 511), Err(failure)
+            if matches!(failure.error, QueryError::Diagnostics(ref ds) if ds.iter().any(|d| d.rule.as_str() == "CT-1"))),
+            "the reused instance consumes one of this program's 256 selections"
+        );
+        drop(engine);
+        assert_eq!(budget.reserved(), 0);
+    });
+}
+
+#[test]
+fn frozen_generator_acceptance_cancellation_publishes_no_registration() {
+    use hirsel_engine::runtime::*;
+    use std::sync::{Arc, Mutex, mpsc};
+    with_compiler_stack(|| {
+        let source = "type Point{x:u64}\nfn gen[T](s:TypeShape[T])->Result[Body[fn(T)->u64 uses {}],String]{let _=s;Ok(codegen.body(\"fn(v:standalone@0/Point)->u64 uses {}{let _=v;7u64}\"))}\nfn width[T](v:T)->u64 uses {}=comptime gen(shape(T))\nconst A:u64=comptime width(Point(x:1u64))\n";
+        let store = Arc::new(store::MemStore::default());
+        let mut engine = engine(source).with_result_store(store.clone());
+        let (entered, ready) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        struct BlockingSignature(
+            Arc<dyn SignaturePhase>,
+            mpsc::Sender<()>,
+            Mutex<Option<mpsc::Receiver<()>>>,
+        );
+        impl SignaturePhase for BlockingSignature {
+            fn signature_items(
+                &self,
+                t: &hirsel_types::TypeInterner,
+                m: &hirsel_types::TypeMemo,
+                items: &[Arc<hirsel_syntax::ItemSyntax>],
+                declarations: &hirsel_engine::Declarations,
+                products: &mut PhaseProducts,
+                provider: &mut dyn hirsel_types::SignatureProvider,
+            ) -> Result<QueryOutput<hirsel_types::Signature>, QueryError> {
+                self.0
+                    .signature_items(t, m, items, declarations, products, provider)
+            }
+            fn signature(
+                &self,
+                t: &hirsel_types::TypeInterner,
+                m: &hirsel_types::TypeMemo,
+                syntax: Arc<hirsel_syntax::ItemSyntax>,
+                declarations: &hirsel_engine::Declarations,
+                products: &mut PhaseProducts,
+                provider: &mut dyn hirsel_types::SignatureProvider,
+            ) -> Result<QueryOutput<hirsel_types::Signature>, QueryError> {
+                if syntax.item.definition.0.name.ends_with("$literal") {
+                    self.1.send(()).unwrap();
+                    self.2.lock().unwrap().take().unwrap().recv().unwrap();
+                }
+                self.0
+                    .signature(t, m, syntax, declarations, products, provider)
+            }
+        }
+        engine.adapters.signature = Some(Arc::new(BlockingSignature(
+            engine.adapters.signature.take().unwrap(),
+            entered,
+            Mutex::new(Some(released)),
+        )));
+        let paths = engine.indexed_definitions();
+        let domain = store::Domain {
+            kind: 0x4601_00f2,
+            schema: 1,
+        };
+        let errors = RuntimeErrors {
+            resource: domain.reference(b"resource").unwrap(),
+            cycle: domain.reference(b"cycle").unwrap(),
+            cancelled: domain.reference(b"cancelled").unwrap(),
+            protocol: domain.reference(b"protocol").unwrap(),
+            panicked: domain.reference(b"panicked").unwrap(),
+        };
+        let budget = ProcessBudget::new(512 << 20);
+        let weight = MemoryWeight {
+            retained: 128 << 10,
+            scratch: 8 << 20,
+            stack: 0,
+        };
+        let front = engine
+            .front_body_queries(&paths, weight, budget.reserve(64 << 20).unwrap(), errors)
+            .unwrap();
+        let lower = engine
+            .front_lower_queries(
+                &paths,
+                front.clone(),
+                weight,
+                64,
+                budget.reserve(128 << 20).unwrap(),
+                errors,
+            )
+            .unwrap();
+        let mut runtime = AdmittedRuntime::new(
+            hirsel_intern::jobs::Jobs::new(1),
+            budget.reserve(256 << 20).unwrap(),
+            errors,
+        )
+        .unwrap();
+        runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
+        runtime
+            .register_local(FRONT_LOWER_KIND, lower.factory())
+            .unwrap();
+        runtime
+            .register_local(FRONT_EVALUATE_KIND, lower.factory())
+            .unwrap();
+        let request = runtime.request(&[lower.evaluate_query(&path("A")).unwrap()]);
+        ready
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .unwrap();
+        runtime.cancel(request);
+        release.send(()).unwrap();
+        runtime.shutdown();
+        assert_eq!(
+            runtime.poll(request),
+            std::task::Poll::Ready(Err(errors.cancelled))
+        );
+        assert!(
+            store.take().keys().all(|key| key.2 != QueryKind::Generate),
+            "cancelled private execution publishes no generator registration variant"
+        );
+        assert!(engine.generated_source(&path("width")).is_none());
+        drop(runtime);
+        drop(lower);
+        drop(front);
+        drop(engine);
+        assert_eq!(
+            budget.reserved(),
+            0,
+            "cancelled demand releases every grant"
+        );
+    });
+}

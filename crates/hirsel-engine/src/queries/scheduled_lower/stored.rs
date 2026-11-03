@@ -6,6 +6,7 @@ use crate::store::Entry;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Record {
+    manifest: Reference,
     descriptor: Reference,
     reads_decode_bytes: u64,
     constant_decode_bytes: u64,
@@ -14,13 +15,23 @@ struct Record {
 
 fn stored_key(key: &EntryKey) -> EntryKey {
     EntryKey(
-        ContentHash::of_parts("hirsel.front.lower-variants.v1", [key.0.0.as_slice()]),
+        ContentHash::of_parts("hirsel.front.lower-variants.v3", [key.0.0.as_slice()]),
         key.1,
         key.2,
     )
 }
 
 impl FrontLowerQueries {
+    pub(super) fn manifest_for_outcome(&self, id: QueryId, reads: &Reads) -> Option<Reference> {
+        let owner = self
+            .paths
+            .get(&(id.kind, id.address.0))
+            .copied()
+            .or_else(|| self.staged.selection(id).map(|selection| selection.owner))?;
+        self.namespace
+            .manifest_for_reads(owner, reads, self.weight.scratch)
+    }
+
     pub(super) fn remember_stored(
         &self,
         id: QueryId,
@@ -47,7 +58,11 @@ impl FrontLowerQueries {
         if self.verify == Verify::On && outcome.executed && outcome.execution.is_none() {
             return;
         }
+        let Some(manifest) = self.manifest_for_outcome(id, &outcome.reads) else {
+            return;
+        };
         let record = Record {
+            manifest,
             descriptor,
             reads_decode_bytes: outcome.reads_decode_bytes,
             constant_decode_bytes,
@@ -77,6 +92,43 @@ impl FrontLowerQueries {
         }
         let storage = stored_key(key);
         let entry = Entry::load(&*self.store, &storage);
+        for variant in &entry.variants {
+            if variant.inputs != storage.1
+                || !variant.valid(&storage)
+                || variant.output.len > self.weight.scratch
+            {
+                continue;
+            }
+            let Some(candidate) = variant.resolve(&*self.store, &storage) else {
+                continue;
+            };
+            let Ok(record) = bincode::deserialize::<Record>(&candidate.payload) else {
+                continue;
+            };
+            if self
+                .namespace
+                .manifest_inputs_hold(record.manifest, self.weight.scratch)
+                || !self.namespace.manifest_source_reads_hold(
+                    record.manifest,
+                    self.weight.scratch,
+                    &variant.reads,
+                    |read| self.observe(path, read),
+                )
+            {
+                continue;
+            }
+            let Some(producer) = self.demand_producer() else {
+                continue;
+            };
+            if let Some(successor) = producer
+                .reopen_manifest(&self.namespace, record.manifest, query_reads.clone())
+                .await
+            {
+                let owner = successor.owner().clone();
+                let actual = owner.id(path, id.kind)?;
+                return Some(self.forward_capture(id, actual, owner, query_reads).await);
+            }
+        }
         // A candidate may name staged headers that are absent from the written
         // capture. Demand those headers from their source producer, then let the
         // successor validate every read and V receipt before reopening a value.
@@ -155,6 +207,19 @@ impl FrontLowerQueries {
             return None;
         }
         let descriptor = self.store.get_content(record.descriptor)?;
+        if let Some(producer) = self.demand_producer() {
+            producer
+                .charge_manifest(
+                    &self.namespace,
+                    record.manifest,
+                    self.inputs
+                        .get(path)
+                        .map_or(Span::default(), |input| input.captured.site),
+                    query_reads,
+                )
+                .await
+                .ok()?;
+        }
         let (value, reads, depth, executed, selections) = if id.kind == FRONT_LOWER_KIND {
             let (layout, constant_selection_bytes) = record.lower?;
             if layout.total()? > self.weight.scratch {
@@ -172,7 +237,9 @@ impl FrontLowerQueries {
                 selections,
                 manifest,
             ): reads::Descriptor = self.records.decode(&*self.namespace.anchors, &descriptor)?;
-            if !self.namespace.manifest_holds(manifest, self.weight.scratch)
+            if !self
+                .namespace
+                .manifest_inputs_hold(manifest, self.weight.scratch)
                 || definition.path() != path
                 || body.domain != crate::NATIVE_ORIGINAL_BODY
                 || body.len > self.weight.scratch
@@ -285,7 +352,10 @@ impl FrontLowerQueries {
                 staged::Selections,
                 Reference,
             ) = self.records.decode(&*self.namespace.anchors, &descriptor)?;
-            if !self.namespace.manifest_holds(manifest, self.weight.scratch) {
+            if !self
+                .namespace
+                .manifest_inputs_hold(manifest, self.weight.scratch)
+            {
                 return None;
             }
             let mut constants = Constants::new(value, substitutions);

@@ -1623,6 +1623,8 @@ extern "unused" fn unused()"#
             let parsed = engine.parse_file(file, &context).unwrap();
             let path = parsed.value.items[0].item.definition.clone();
             let written = Arc::downgrade(&parsed.value.items[0]);
+            engine.adapters.lexer = None;
+            engine.adapters.parser = None;
             let snapshot = engine.signature_inputs();
             drop(parsed);
             drop(engine);

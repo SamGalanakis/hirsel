@@ -44,6 +44,7 @@ pub(crate) struct SourceFacts {
     pub(crate) constant: bool,
     pub(crate) execution: bool,
     pub(crate) specializes: bool,
+    pub(crate) staged: bool,
     pub(crate) comptime: Vec<(u32, u32, u32)>,
     pub(crate) fact: bool,
     pub(crate) associations: Vec<(u8, u32, u32)>,
@@ -92,6 +93,7 @@ impl SourceFacts {
             constant,
             execution: constant || !comptime.is_empty(),
             specializes: crate::families::closes(syntax),
+            staged: super::scheduled_stage::has_staged_body(syntax),
             comptime,
             fact: matches!(
                 item.kind,
@@ -288,6 +290,7 @@ impl Catalog {
             candidates.extend(previous);
             for syntax in syntaxes {
                 let (file, base) = sources.anchor(syntax.anchor).expect("indexed anchor");
+                candidates.retain(|candidate| candidate.head.name.anchor != syntax.anchor || candidate.occurrence != syntax.occurrence);
                 candidates.push(Candidate {
                     head: DeclarationHead::capture(sources, syntax),
                     file,
@@ -412,16 +415,6 @@ impl Catalog {
     pub(super) fn site(&self, path: &DefPath) -> Option<Span> {
         Some(self.candidates.get(path)?.first()?.head.name)
     }
-    /// File and candidate bounds available before lazy syntax is materialized.
-    pub(super) fn sibling_inventory(&self) -> Option<(usize, usize)> {
-        Some((
-            self.files.len(),
-            self.candidates
-                .values()
-                .try_fold(0usize, |n, rows| n.checked_add(rows.len()))?,
-        ))
-    }
-
     pub(super) fn input_bytes(&self) -> Option<u64> {
         let mut n = std::mem::size_of::<Self>() as u64;
         for candidates in self.candidates.values() {
@@ -896,7 +889,7 @@ impl QueryEngine {
             .collect();
         heads.sort_by_key(|h| (h.base, h.definition.path().clone()));
         FileHeads {
-            schema: 5,
+            schema: 6,
             integrity: heads_integrity(&heads),
             context: context.clone(),
             source: ContentHash::of_bytes(self.sources.file(file).unwrap().text().as_bytes()),
@@ -907,7 +900,7 @@ impl QueryEngine {
         let Some(source) = self.sources.file(file) else {
             return false;
         };
-        record.schema == 5
+        record.schema == 6
             && record.integrity == heads_integrity(&record.heads)
             && record.context == *context
             && record.source == ContentHash::of_bytes(source.text().as_bytes())
@@ -1477,7 +1470,7 @@ mod tests {
                 let file = engine.sources.add("heads.hir", source.into()).unwrap();
                 let key = engine.catalog_key(file, &context).unwrap();
                 let mut record = FileHeads {
-                    schema: 5,
+                    schema: 6,
                     integrity: ContentHash::default(),
                     context: context.clone(),
                     source: ContentHash::of_bytes(source.as_bytes()),
@@ -1498,6 +1491,7 @@ mod tests {
                             constant: false,
                             execution: false,
                             specializes: false,
+                            staged: false,
                             comptime: vec![],
                             fact: false,
                             associations: vec![],

@@ -54,31 +54,44 @@ impl SiblingSources {
         let mut engine = headers.execution();
         engine.materialize(&syntax.item.definition)?;
         let declarations = engine.frozen_declarations();
-        let items = declarations.siblings(syntax).iter().filter(|sibling| {
-            let variant = matches!(&sibling.item.kind, hirsel_syntax::ItemKind::Type {
-                body: hirsel_syntax::TypeBody::Variants(_), ..
-            });
-            let value = matches!(sibling.item.kind, hirsel_syntax::ItemKind::Function { .. } | hirsel_syntax::ItemKind::Const { .. });
-            let normalized = headers.settled_signature(DefId::intern(&sibling.item.definition))
-                .is_some_and(|signature| matches!(signature.kind, hirsel_types::SignatureKind::Function(_) | hirsel_types::SignatureKind::Const { .. }));
-            variant || (value && !normalized)
-        }).cloned().collect::<Vec<_>>().into();
+        let items = declarations
+            .siblings(syntax)
+            .iter()
+            .filter(|sibling| {
+                let variant = matches!(
+                    &sibling.item.kind,
+                    hirsel_syntax::ItemKind::Type {
+                        body: hirsel_syntax::TypeBody::Variants(_),
+                        ..
+                    }
+                );
+                let value = matches!(
+                    sibling.item.kind,
+                    hirsel_syntax::ItemKind::Function { .. }
+                        | hirsel_syntax::ItemKind::Const { .. }
+                );
+                let normalized = headers
+                    .settled_signature(DefId::intern(&sibling.item.definition))
+                    .is_some_and(|signature| {
+                        matches!(
+                            signature.kind,
+                            hirsel_types::SignatureKind::Function(_)
+                                | hirsel_types::SignatureKind::Const { .. }
+                        )
+                    });
+                variant || (value && !normalized)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
         self.admit(items).map_err(refused)
     }
     fn admit(&self, items: Arc<[Arc<ItemSyntax>]>) -> Result<LiveSiblings, &'static str> {
         let bytes = items
             .iter()
-            .try_fold(
-                crate::memo::retained_arc_bytes(items.as_ref()),
-                |bytes, syntax| {
-                    bytes.checked_add(crate::memo::retained::retained_syntax_bytes(syntax))
-                },
-            )
-            .and_then(|bytes| {
-                bytes.checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                    LiveSourceBacking,
-                >::uninit(
-                )))
+            .filter(|syntax| !self.namespace.retains_written(syntax))
+            .try_fold(0u64, |bytes, syntax| {
+                bytes.checked_add(crate::memo::retained::retained_syntax_bytes(syntax))
             })
             .ok_or("sibling memory size overflow")?;
         let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
@@ -121,7 +134,36 @@ impl FrontInputFootprint {
         self.source_headers.checked_add(self.front_inputs)
     }
 }
+pub(super) fn sibling_input_bytes(files: usize, rows: usize) -> Option<u64> {
+    let mut weight = crate::NativeMetadataWeight::default();
+    weight.tree::<FileId, SiblingFile>(files);
+    weight.add(rows.checked_mul(size_of::<Arc<ItemSyntax>>())?);
+    weight.add(files.checked_mul(4 * size_of::<usize>() + size_of::<LiveSourceBacking>())?);
+    Some(weight.bytes())
+}
 impl QueryEngine {
+    pub(super) fn front_sibling_inventory(&self) -> Option<(usize, usize)> {
+        let files = self
+            .sources
+            .anchors()
+            .map(|(_, file, _)| file)
+            .collect::<BTreeSet<_>>()
+            .len();
+        let rows = self.source_paths().iter().try_fold(0usize, |rows, path| {
+            let candidates = self
+                .items
+                .get(path)
+                .map_or(0, Vec::len)
+                .max(
+                    self.declarations
+                        .headers(path)
+                        .map_or(0, <[ContentHash]>::len),
+                )
+                .max(1);
+            rows.checked_add(candidates)
+        })?;
+        Some((files, rows))
+    }
     /// Bound front backing from indexed metadata. Planning must not demand
     /// syntax or freeze declarations. Source owners use their existing
     /// immutable indexed product, including its path allocations.
@@ -138,14 +180,8 @@ impl QueryEngine {
         if self.result_store.is_none() {
             return Err(refused());
         }
-        let (files, siblings) = self.declarations.sibling_inventory();
-        // Lazy files already own declaration heads and source anchors. Their
-        // eventual syntax capture cannot require more rows than that index.
-        let (lazy_files, lazy_siblings) = self.catalog.sibling_inventory().ok_or_else(refused)?;
-        let files = files.checked_add(lazy_files).ok_or_else(refused)?;
-        let siblings = siblings.checked_add(lazy_siblings).ok_or_else(refused)?;
-        let mut index = crate::NativeMetadataWeight::default();
-        index.tree::<FileId, SiblingFile>(files);
+        let (files, siblings) = self.front_sibling_inventory().ok_or_else(refused)?;
+        let sibling_bytes = sibling_input_bytes(files, siblings).ok_or_else(refused)?;
         let mut instance_weight = crate::NativeMetadataWeight::default();
         instance_weight
             .instance_bodies(&mut self.instance_bodies(&definitions.iter().cloned().collect()));
@@ -157,14 +193,11 @@ impl QueryEngine {
             .ok_or_else(refused)?;
         let front_inputs = FrontBodyQueries::input_bytes(definitions)
             .and_then(|bytes| bytes.checked_add(instance_weight.bytes()))
-            .and_then(|bytes| bytes.checked_add(header_products::HeaderProducts::written_source_bytes(self)))
-            .and_then(|bytes| bytes.checked_add(source_rows as u64))
-            .and_then(|bytes| bytes.checked_add(index.bytes()))
             .and_then(|bytes| {
-                bytes.checked_add(
-                    (siblings as u64).checked_mul(std::mem::size_of::<Arc<ItemSyntax>>() as u64)?,
-                )
+                bytes.checked_add(header_products::HeaderProducts::written_source_bytes(self))
             })
+            .and_then(|bytes| bytes.checked_add(source_rows as u64))
+            .and_then(|bytes| bytes.checked_add(sibling_bytes))
             .ok_or_else(refused)?;
         let owner_bytes = crate::NativeRecordContext::capture(self)
             .input_bytes()
@@ -240,6 +273,8 @@ mod tests {
     fn fixture() -> (SiblingSources, Vec<Arc<ItemSyntax>>) {
         let (engine, file, written) = parsed();
         let mut engine = engine.with_result_store(Arc::new(crate::store::MemStore::default()));
+        engine.adapters.lexer = None;
+        engine.adapters.parser = None;
         let store = engine.result_store.clone().unwrap();
         let owners = Arc::new(crate::NativeRecordContext::capture(&engine));
         let records = crate::NativeRecords::new(engine.types.clone(), store);

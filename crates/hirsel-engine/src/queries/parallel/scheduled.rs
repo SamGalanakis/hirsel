@@ -2807,10 +2807,14 @@ impl QueryEngine {
         for (_, file, _) in namespace.sources.anchors() {
             siblings.entry(file).or_insert_with(SiblingFile::default);
         }
-        let mut sibling_index = crate::NativeMetadataWeight::default();
-        sibling_index.tree::<FileId, SiblingFile>(siblings.len());
+        let (_, sibling_rows) = self
+            .front_sibling_inventory()
+            .ok_or_else(|| refusal("sibling inventory overflow"))?;
         required = required
-            .checked_add(sibling_index.bytes())
+            .checked_add(
+                source::sibling_input_bytes(siblings.len(), sibling_rows)
+                    .ok_or_else(|| refusal("sibling index overflow"))?,
+            )
             .ok_or_else(|| refusal("sibling index overflow"))?;
         if required > available {
             return Err(refused_inputs(required));

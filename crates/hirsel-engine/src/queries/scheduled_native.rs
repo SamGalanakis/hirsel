@@ -56,6 +56,131 @@ struct Data {
     reads: Arc<Reads>,
     original: Option<Arc<crate::NativeOriginalProduct>>,
 }
+struct LiveDefinition {
+    source: Arc<crate::NativeDefinitionProduct>,
+    contracts: Option<crate::NativeBodyContracts>,
+    requirements: InstanceGraph,
+    reads: Arc<Reads>,
+    original: Option<(ContentHash, ContentHash)>,
+    records: crate::NativeRecords,
+    anchors: crate::NativeRecordContext,
+    archive: Mutex<Option<ProductArchive>>,
+    remaining: Arc<Mutex<u64>>,
+    charge: u64,
+    _ownership: Arc<SourceOwnership>,
+}
+impl Drop for LiveDefinition {
+    fn drop(&mut self) {
+        *self.remaining.lock().unwrap_or_else(|e| e.into_inner()) += self.charge;
+    }
+}
+impl LiveDefinition {
+    fn encode(&self) -> Option<Vec<u8>> {
+        let source = &self.source;
+        let lower_identity = source
+            .lower
+            .as_ref()
+            .map(|v| (v.reference(), v.observation_identity()));
+        self.records.encode(
+            &self.anchors,
+            &(
+                &source.definition,
+                &source.signature,
+                &source.signature_dependencies,
+                source.source.syntax.text_hash,
+                source
+                    .source
+                    .generated
+                    .as_ref()
+                    .map(|source| (&source.text, source.site)),
+                &source.summary,
+                source.summary_identity,
+                (self.original, lower_identity),
+                &source.audit,
+                &source.materialized,
+                source.representation.as_ref().map(|r| {
+                    (
+                        &r.definition,
+                        r.representation_revision,
+                        &r.generics,
+                        r.private_shape,
+                        &r.layout_promises,
+                        r.resource,
+                        &r.finalizer,
+                        r.unsafe_ffi_package,
+                    )
+                }),
+                &source.constant,
+                &self.contracts,
+                &self.requirements,
+                &*self.reads,
+            ),
+        )
+    }
+}
+impl LiveProductValue for LiveDefinition {
+    fn domain(&self) -> Domain {
+        OUTPUT
+    }
+    fn archive(&self, admission: ArchiveAdmission<'_>) -> std::io::Result<ProductArchive> {
+        let mut cached = self.archive.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(archive) = &*cached {
+            return Ok(archive.clone());
+        }
+        let archive = ProductArchive::materialize(OUTPUT, admission, |grant| {
+            if grant.bytes() < self.charge {
+                return Err(std::io::ErrorKind::OutOfMemory.into());
+            }
+            let bytes = self
+                .encode()
+                .ok_or_else(|| std::io::Error::other("native definition encoding"))?;
+            if bytes.len() as u64 > grant.bytes() {
+                return Err(std::io::ErrorKind::OutOfMemory.into());
+            }
+            Ok(bytes)
+        })?;
+        *cached = Some(archive.clone());
+        Ok(archive)
+    }
+}
+fn live_bytes(
+    source: &crate::NativeDefinitionProduct,
+    contracts: &Option<crate::NativeBodyContracts>,
+    requirements: &InstanceGraph,
+    reads: &Reads,
+) -> Option<u64> {
+    let mut weight = crate::NativeMetadataWeight::default();
+    weight.add(
+        size_of::<LiveDefinition>()
+            + size_of::<Data>()
+            + size_of::<crate::NativeDiscoveryProduct>()
+            + size_of::<crate::NativeDefinitionProduct>()
+            + size_of::<crate::NativeOriginalProduct>()
+            + size_of::<Reads>()
+            + 12 * size_of::<usize>(),
+    );
+    weight.source(source);
+    for (_, bytes) in reads.allocations() {
+        weight.add(bytes);
+    }
+    // The output and the live publication each retain these small owned rows.
+    for _ in 0..2 {
+        if let Some(contracts) = contracts {
+            weight.flat_vec(&contracts.source_anchors);
+            weight.flat_vec(&contracts.entry_parameters);
+            weight.flat_vec(&contracts.caller_bodies);
+            weight.vec(&contracts.scoped_parameters, |w, body| {
+                w.vec(body, |w, (_, parameters)| w.flat_vec(parameters))
+            });
+        }
+        weight.vec(&requirements.edges, |w, edge| {
+            w.path(&edge.owner);
+            w.path(&edge.callee);
+            w.flat_vec(&edge.arguments);
+        });
+    }
+    Some(weight.bytes())
+}
 /// Shares the settled product its owner charged to the output budget, so a
 /// reader holds handles rather than another decoded copy.
 pub struct FrontNativeDefinitionOutput {
@@ -183,6 +308,24 @@ impl FrontNativeDefinitionQueries {
             reads: data.reads.clone(),
             _owner: self.clone(),
         })
+    }
+    pub(crate) fn export_archive(&self, product: &ProductRef, scratch: u64) -> Result<ProductArchive, QueryError> {
+        if !self.completed.lock().unwrap_or_else(|e| e.into_inner()).get(&product.address.0)
+            .is_some_and(|(selected, _)| selected == product) {
+            return Err(native_selection_error("native export has another producer"));
+        }
+        let live = product.live_value::<LiveDefinition>().ok_or(QueryError::NotImplemented)?;
+        let mut cached = live.archive.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(archive) = &*cached { return Ok(archive.clone()); }
+        if live.charge > scratch { return Err(native_selection_error("native export exceeds scratch admission")); }
+        let bytes = live.encode().ok_or(QueryError::NotImplemented)?;
+        if bytes.len() as u64 > scratch { return Err(native_selection_error("native export encoding exceeds scratch admission")); }
+        let record = self.store.put_content(OUTPUT, &bytes).ok_or(QueryError::NotImplemented)?;
+        let archive = ProductArchive::from_retained_bytes(record, bytes.into(), self._ownership._allowance.clone(), self.remaining.clone())
+            .map_err(|_| native_selection_error("native export exceeds retained admission"))?;
+        if self.store.persistence().retains() { self.store.associate_product(product.address, product.action, record); }
+        *cached = Some(archive.clone());
+        Ok(archive)
     }
     pub fn failure(&self, reference: Reference) -> Option<QueryError> {
         self.failures
@@ -432,78 +575,60 @@ impl Task {
             let (source, contracts, requirements) = self
                 .complete(&front, &lower, finalizer, constant)
                 .map_err(|e| owner.fail(e))?;
-            let lower_identity = source
-                .lower
-                .as_ref()
-                .map(|v| (v.reference(), v.observation_identity()));
-            let bytes = owner
-                .records
-                .encode(
-                    &owner.anchors,
-                    &(
-                        &source.definition,
-                        &source.signature,
-                        &source.signature_dependencies,
-                        // The parser already identifies these immutable source arenas.
-                        source.source.syntax.text_hash,
-                        source
-                            .source
-                            .generated
-                            .as_ref()
-                            .map(|source| (&source.text, source.site)),
-                        &source.summary,
-                        source.summary_identity,
-                        (
-                            ordinary
-                                .as_ref()
-                                .map(|p| (p.implementation_revision, p.signature)),
-                            lower_identity,
-                        ),
-                        &source.audit,
-                        &source.materialized,
-                        source.representation.as_ref().map(|r| {
-                            (
-                                &r.definition,
-                                r.representation_revision,
-                                &r.generics,
-                                r.private_shape,
-                                &r.layout_promises,
-                                r.resource,
-                                &r.finalizer,
-                                r.unsafe_ffi_package,
-                            )
-                        }),
-                        &source.constant,
-                        &contracts,
-                        &requirements,
-                        &*reads,
-                    ),
-                )
+            let charge = live_bytes(&source, &contracts, &requirements, &reads)
                 .ok_or(owner.errors.resource)?;
-            if bytes.len() as u64 > owner.weight.scratch {
-                return Err(owner.errors.resource);
+            {
+                let mut remaining = owner.remaining.lock().unwrap_or_else(|e| e.into_inner());
+                *remaining = remaining.checked_sub(charge).ok_or(owner.errors.resource)?;
             }
-            // Encoding is transient scratch. The retained source rows share
-            // their producers' ownership; charge this durable payload once.
-            let record = owner
-                .store
-                .put_content(OUTPUT, &bytes)
-                .ok_or(owner.errors.resource)?;
             let action = hirsel_artifact_store::Action(ContentHash::of_parts(
-                "hirsel.front.native-definition-action.v1",
-                [self.id.address.0.0.as_slice(), record.output.0.0.as_slice()],
+                "hirsel.front.native-definition-action.v2",
+                [
+                    self.id.address.0.0.as_slice(),
+                    source.source.syntax.text_hash.0.as_slice(),
+                    source.signature.fingerprint.0.as_slice(),
+                    source.summary_identity.as_ref().map_or(&[][..], |identity| identity.0.as_slice()),
+                    reads.digest().0.as_slice(),
+                ],
             ));
-            let product = ProductRef::import_archive(
-                self.id.address,
-                action,
-                ProductArchive::from_retained_bytes(
+            let source = Arc::new(source);
+            let live = Arc::new(LiveDefinition {
+                source: source.clone(),
+                contracts: contracts.clone(),
+                requirements: requirements.clone(),
+                reads: reads.clone(),
+                original: ordinary
+                    .as_ref()
+                    .map(|p| (p.implementation_revision, p.signature)),
+                records: owner.records.clone(),
+                anchors: owner.anchors.clone(),
+                archive: Mutex::new(None),
+                remaining: owner.remaining.clone(),
+                charge,
+                _ownership: owner._ownership.clone(),
+            });
+            if owner.store.persistence().retains() {
+                let bytes = live.encode().ok_or(owner.errors.resource)?;
+                if bytes.len() as u64 > owner.weight.scratch {
+                    return Err(owner.errors.resource);
+                }
+                let record = owner
+                    .store
+                    .put_content(OUTPUT, &bytes)
+                    .ok_or(owner.errors.resource)?;
+                let archive = ProductArchive::from_retained_bytes(
                     record,
                     bytes.into(),
                     owner._ownership._allowance.clone(),
                     owner.remaining.clone(),
                 )
-                .map_err(|_| owner.errors.resource)?,
-            );
+                .map_err(|_| owner.errors.resource)?;
+                *live.archive.lock().unwrap_or_else(|e| e.into_inner()) = Some(archive);
+                owner
+                    .store
+                    .associate_product(self.id.address, action, record);
+            }
+            let product = ProductRef::live(self.id.address, action, live);
             owner
                 .completed
                 .lock()
@@ -515,7 +640,7 @@ impl Task {
                         Arc::new(Data {
                             product: Arc::new(crate::NativeDiscoveryProduct {
                                 product: Some(product.clone()),
-                                source: Arc::new(source),
+                                source,
                                 contracts,
                                 requirements,
                             }),
@@ -524,9 +649,6 @@ impl Task {
                         }),
                     ),
                 );
-            owner
-                .store
-                .associate_product(self.id.address, action, record);
             Ok(product)
         })())
     }

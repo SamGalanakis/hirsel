@@ -118,11 +118,9 @@ fn lower_captures_only_its_demand_and_full_check_still_rejects_unused_body() {
         let product = runtime.wait(request).unwrap().remove(0);
         assert!(lower.outcome(product).is_some());
         assert_eq!(lower.work(&unused).lowerings, 0);
-        assert!(
-            !front
-                .signatures()
-                .header_ready(hirsel_syntax::DefId::intern(&unused))
-        );
+        for kind in [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes] {
+            assert_eq!(front.recompute_count(&unused, kind), 0);
+        }
         assert!(
             store.syntax_writes.lock().unwrap().is_empty(),
             "live body demand must not use syntax archives"
@@ -188,5 +186,110 @@ fn full_check_agrees_cold_resident_restarted_store_off_and_remote_restore() {
                 "Check must use live syntax owners"
             );
         }
+    });
+}
+
+#[test]
+fn native_catalogue_is_lazy_and_store_off_archives_require_export() {
+    with_compiler_stack(|| {
+        let (_directory, manifest) = fixture();
+        let store = Arc::new(Observed {
+            inner: Arc::new(NoneStore),
+            syntax_writes: Mutex::default(),
+        });
+        let compiler = COMPILER
+            .with_config(CompileConfig {
+                store,
+                ..Default::default()
+            })
+            .with_owned_engines();
+        let mut program = compiler.load_program(&manifest).unwrap();
+        let definitions = program.engine.front_source_roots();
+        let mut unused = program.entry.clone();
+        unused.0.name = "unused".into();
+        let budget = ProcessBudget::new(1 << 30);
+        let weight = MemoryWeight {
+            retained: 2 << 20,
+            scratch: 8 << 20,
+            stack: 0,
+        };
+        let errors = crate::scheduled_front::errors();
+        let front = program
+            .engine
+            .front_body_queries(
+                &definitions,
+                weight,
+                budget.reserve(8 << 20).unwrap(),
+                errors,
+            )
+            .unwrap();
+        let lower = program
+            .engine
+            .front_lower_queries(
+                &definitions,
+                front.clone(),
+                weight,
+                32,
+                budget.reserve(8 << 20).unwrap(),
+                errors,
+            )
+            .unwrap();
+        let native = program
+            .engine
+            .front_native_definition_queries(
+                &definitions,
+                front.clone(),
+                lower.clone(),
+                weight,
+                budget.reserve(8 << 20).unwrap(),
+                errors,
+            )
+            .unwrap();
+        assert!(
+            !front
+                .signatures()
+                .header_ready(hirsel_syntax::DefId::intern(&unused))
+        );
+        let mut runtime = AdmittedRuntime::new(
+            hirsel_intern::jobs::Jobs::new(1),
+            budget.reserve(512 << 20).unwrap(),
+            errors,
+        )
+        .unwrap();
+        runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
+        runtime
+            .register_local(FRONT_LOWER_KIND, lower.factory())
+            .unwrap();
+        runtime
+            .register_local(FRONT_EVALUATE_KIND, lower.factory())
+            .unwrap();
+        runtime
+            .register(FRONT_NATIVE_DEFINITION_KIND, native.factory())
+            .unwrap();
+        let request = runtime.request(&[native.query(&program.entry).unwrap()]);
+        let product = runtime
+            .wait(request)
+            .unwrap_or_else(|error| panic!("{error:?}: {:?}", native.failure(error)))
+            .remove(0);
+        assert!(native.outcome(product.clone()).is_some());
+        assert!(product.archive(ArchiveAdmission::Retained).is_err());
+        for kind in [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes] {
+            assert_eq!(front.recompute_count(&unused, kind), 0);
+        }
+        let mut scratch = budget.reserve(2 << 20).unwrap();
+        let archive = product
+            .archive(ArchiveAdmission::Materialize {
+                scratch: &mut scratch,
+                working_bytes: 2 << 20,
+            })
+            .unwrap();
+        assert_eq!(
+            archive.reference(),
+            product
+                .archive(ArchiveAdmission::Retained)
+                .unwrap()
+                .reference()
+        );
+        runtime.shutdown();
     });
 }

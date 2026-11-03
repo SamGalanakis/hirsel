@@ -347,9 +347,9 @@ impl Task {
             self.definitions.push(output);
             self.cursor += 1;
         }
-        Poll::Ready(self.complete().map_err(|error| owner.fail(error)))
+        Poll::Ready(self.complete(cx.scratch_bytes()).map_err(|error| owner.fail(error)))
     }
-    fn complete(&self) -> Result<ProductRef, QueryError> {
+    fn complete(&self, scratch: u64) -> Result<ProductRef, QueryError> {
         let owner = &self.owner;
         let selected = self.selected.as_ref().ok_or(QueryError::NotImplemented)?;
         let run_product = self.run_product.clone().ok_or(QueryError::NotImplemented)?;
@@ -514,7 +514,7 @@ impl Task {
                             d.product
                                 .as_ref()
                                 .map(|p| {
-                                    p.archive(ArchiveAdmission::Retained).map(|archive| {
+                                    owner.definitions.export_archive(p, scratch).map(|archive| {
                                         (p.address.0, p.action.0, archive.reference())
                                     })
                                 })

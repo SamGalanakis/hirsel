@@ -262,7 +262,7 @@ impl HeaderProducts {
             private_working: AtomicU64::new(0),
             private_registrations: Default::default(),
             declarations: engine.declarations.header_inputs(),
-            catalog: engine.catalog.clone(),
+            catalog: engine.catalog.source_carry(&engine.sources, &engine.items, &engine.indexed_sources).restore(),
             installed_sources: engine.installed_sources.clone(),
             types: engine.types.clone(),
             memo: engine.memo.clone(),
@@ -360,14 +360,25 @@ impl HeaderProducts {
     pub(crate) fn captured_text(&self, id: DefId) -> Option<sources::CapturedText> {
         self.syntax.text(id)
     }
+    pub(crate) fn owns_written(&self, syntax: &Arc<ItemSyntax>) -> bool {
+        self.syntax.owns(syntax)
+    }
     pub(crate) fn written_source_bytes(engine: &QueryEngine) -> u64 {
         HeaderSources::written_bytes(engine)
     }
     pub(crate) fn settled_signature(&self, id: DefId) -> Option<hirsel_types::SignatureRef> {
-        self.rows.get(&id)?.get()?.result.as_ref().ok().map(|output| output.value.clone())
+        self.rows
+            .get(&id)?
+            .get()?
+            .result
+            .as_ref()
+            .ok()
+            .map(|output| output.value.clone())
     }
     pub(crate) fn source_fact_index_bytes(engine: &QueryEngine, private: bool) -> u64 {
-        HeaderSources::facts_index_bytes(engine.source_paths().len()).saturating_add(if private {
+        HeaderSources::facts_index_bytes(engine.source_paths().len())
+            .saturating_add(engine.catalog.source_carry_bytes(&engine.items, &engine.indexed_sources))
+            .saturating_add(if private {
             private::PrivateProducts::index_bytes(engine)
         } else {
             0

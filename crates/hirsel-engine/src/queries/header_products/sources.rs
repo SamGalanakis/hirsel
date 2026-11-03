@@ -20,17 +20,26 @@ pub(super) struct HeaderSources {
     files: BTreeMap<FileId, Vec<Arc<ItemSyntax>>>,
 }
 impl HeaderSources {
+    fn needs_live(engine: &QueryEngine, syntax: &ItemSyntax) -> bool {
+        syntax.item.generated.is_some()
+            || engine.adapters.lexer.is_none()
+            || engine.adapters.parser.is_none()
+            || !engine.indexed_sources.contains_key(&engine.item_file(syntax))
+    }
     pub(super) fn capture(engine: &QueryEngine) -> Self {
         let mut files = BTreeMap::<_, Vec<_>>::new();
         let mut by_definition = hirsel_syntax::DefMap::<Vec<FileId>>::default();
         for (path, candidates) in &engine.items {
             let mut selected = BTreeSet::new();
             for syntax in candidates {
+                if !Self::needs_live(engine, syntax) { continue; }
                 let file = engine.item_file(syntax);
                 selected.insert(file);
                 files.entry(file).or_default().push(syntax.clone());
             }
-            by_definition.insert(DefId::intern(path), selected.into_iter().collect());
+            if !selected.is_empty() {
+                by_definition.insert(DefId::intern(path), selected.into_iter().collect());
+            }
         }
         let facts = engine
             .items
@@ -59,7 +68,10 @@ impl HeaderSources {
             })
             .collect();
         Self {
-            parent: engine.header_products.as_ref().map(|headers| headers.syntax.clone()),
+            parent: engine
+                .header_products
+                .as_ref()
+                .map(|headers| headers.syntax.clone()),
             by_definition,
             facts,
             texts,
@@ -67,10 +79,16 @@ impl HeaderSources {
         }
     }
     pub(super) fn facts(&self, id: DefId) -> Option<catalog::SourceFacts> {
-        self.facts.get(&id).map(|facts| (**facts).clone()).or_else(|| self.parent.as_ref()?.facts(id))
+        self.facts
+            .get(&id)
+            .map(|facts| (**facts).clone())
+            .or_else(|| self.parent.as_ref()?.facts(id))
     }
     pub(super) fn text(&self, id: DefId) -> Option<CapturedText> {
-        self.texts.get(&id).copied().or_else(|| self.parent.as_ref()?.text(id))
+        self.texts
+            .get(&id)
+            .copied()
+            .or_else(|| self.parent.as_ref()?.text(id))
     }
     pub(super) fn facts_index_bytes(definitions: usize) -> u64 {
         let mut weight = crate::NativeMetadataWeight::default();
@@ -82,15 +100,46 @@ impl HeaderSources {
         fn add(seen: &mut BTreeSet<usize>, syntax: &Arc<ItemSyntax>) -> u64 {
             if seen.insert(Arc::as_ptr(syntax) as usize) {
                 crate::memo::retained::retained_syntax_bytes(syntax)
-            } else { 0 }
+            } else {
+                0
+            }
         }
         fn inherited(owner: &HeaderSources, seen: &mut BTreeSet<usize>) -> u64 {
-            owner.files.values().flatten().fold(0u64, |n, syntax| n.saturating_add(add(seen, syntax)))
-                .saturating_add(owner.parent.as_ref().map_or(0, |parent| inherited(parent, seen)))
+            owner
+                .files
+                .values()
+                .flatten()
+                .fold(0u64, |n, syntax| n.saturating_add(add(seen, syntax)))
+                .saturating_add(
+                    owner
+                        .parent
+                        .as_ref()
+                        .map_or(0, |parent| inherited(parent, seen)),
+                )
         }
         let mut seen = BTreeSet::new();
-        engine.items.values().flatten().fold(0u64, |n, syntax| n.saturating_add(add(&mut seen, syntax)))
-            .saturating_add(engine.header_products.as_ref().map_or(0, |headers| inherited(&headers.syntax, &mut seen)))
+        engine
+            .items
+            .values()
+            .flatten()
+            .filter(|syntax| Self::needs_live(engine, syntax))
+            .fold(0u64, |n, syntax| n.saturating_add(add(&mut seen, syntax)))
+            .saturating_add(
+                engine
+                    .header_products
+                    .as_ref()
+                    .map_or(0, |headers| inherited(&headers.syntax, &mut seen)),
+            )
+    }
+    pub(super) fn owns(&self, syntax: &Arc<ItemSyntax>) -> bool {
+        self.files
+            .values()
+            .flatten()
+            .any(|written| Arc::ptr_eq(written, syntax))
+            || self
+                .parent
+                .as_ref()
+                .is_some_and(|parent| parent.owns(syntax))
     }
     pub(super) fn materialize(
         &self,
@@ -101,7 +150,10 @@ impl HeaderSources {
             return Ok(true);
         }
         let Some(files) = self.by_definition.get(&DefId::intern(path)) else {
-            return self.parent.as_ref().map_or(Ok(false), |parent| parent.materialize(engine, path));
+            return self
+                .parent
+                .as_ref()
+                .map_or(Ok(false), |parent| parent.materialize(engine, path));
         };
         let refused = || {
             QueryError::Operational(hirsel_types::OperationalFailure {

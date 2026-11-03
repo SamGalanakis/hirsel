@@ -334,6 +334,13 @@ impl NamespaceCapture {
     pub(crate) fn anchors(&self) -> &Arc<NativeRecordContext> {
         &self.anchors
     }
+    pub(crate) fn retains_written(&self, syntax: &Arc<ItemSyntax>) -> bool {
+        self.admission.get().is_some()
+            && self
+                .snapshot
+                .header_products()
+                .is_some_and(|headers| headers.owns_written(syntax))
+    }
     pub(crate) fn retained_bytes(&self) -> u64 {
         self.retained
     }
@@ -424,13 +431,24 @@ impl QueryEngine {
         let records = NativeRecords::new(self.types.clone(), store.clone());
         let mut bodies = BTreeMap::new();
         let mut private_sources = BTreeMap::new();
-        let base = self.source_paths().iter().map(|path| {
-            ContentHash::of_parts("hirsel.namespace.declaration.v1", [
-                path.fingerprint().0.as_slice(), self.candidates_value(path).0.as_slice(),
-            ])
-        }).collect::<Vec<_>>();
-        let base = ContentHash::of_parts("hirsel.namespace.base.v2",
-            std::iter::once(self.environment_value().0.as_slice()).chain(base.iter().map(|hash| hash.0.as_slice())));
+        let base = self
+            .source_paths()
+            .iter()
+            .map(|path| {
+                ContentHash::of_parts(
+                    "hirsel.namespace.declaration.v1",
+                    [
+                        path.fingerprint().0.as_slice(),
+                        self.candidates_value(path).0.as_slice(),
+                    ],
+                )
+            })
+            .collect::<Vec<_>>();
+        let base = ContentHash::of_parts(
+            "hirsel.namespace.base.v2",
+            std::iter::once(self.environment_value().0.as_slice())
+                .chain(base.iter().map(|hash| hash.0.as_slice())),
+        );
         let environment = ContentHash::of_parts(
             "hirsel.persisted-products.v1",
             [
@@ -445,7 +463,11 @@ impl QueryEngine {
             let implementation = self
                 .implementation_hash(path)
                 .ok_or_else(|| refused("missing declaration identity"))?;
-            let site = self.items.get(path).and_then(|items| items.first()).map(|syntax| syntax.item.name_span)
+            let site = self
+                .items
+                .get(path)
+                .and_then(|items| items.first())
+                .map(|syntax| syntax.item.name_span)
                 .or_else(|| self.catalog.site(path))
                 .or_else(|| self.captured_text(path).map(|text| text.site))
                 .ok_or_else(|| refused(&format!("missing declaration site for {path}")))?;
@@ -503,7 +525,19 @@ impl QueryEngine {
         }
         self.prepare_namespace_registrations(registrations)?;
         let snapshot = self.signature_inputs();
-        let mut instances = self.instance_bodies(&definitions.iter().cloned().collect());
+        let selected = definitions.iter().cloned().collect::<BTreeSet<_>>();
+        let mut instances = self.instance_bodies(&selected);
+        for path in definitions {
+            if self.source_facts(path).is_some_and(|facts| facts.instance_bodied) {
+                let id = DefId::intern(path);
+                instances.declarations.insert(id);
+                if let Some(bodies) = self.instance_bodies.instances.get(&id) {
+                    let bodies = bodies.iter().filter(|(_, body)| selected.contains(body.definition.path()))
+                        .map(|(key, body)| (*key, body.clone())).collect::<std::collections::HashMap<_, _>>();
+                    if !bodies.is_empty() { instances.instances.insert(id, bodies); }
+                }
+            }
+        }
         let mut dependencies = BTreeMap::new();
         for registration in registrations {
             let id = DefId::intern(registration.definition());
@@ -641,7 +675,9 @@ impl QueryEngine {
         weight.instance_bodies(&mut instances);
         let retained = NamespaceCapture::input_bytes(definitions)
             .and_then(|bytes| bytes.checked_add(weight.bytes()))
-            .and_then(|bytes| bytes.checked_add(header_products::HeaderProducts::written_source_bytes(self)))
+            .and_then(|bytes| {
+                bytes.checked_add(header_products::HeaderProducts::written_source_bytes(self))
+            })
             .ok_or_else(|| refused("capture size overflow"))?;
         if retained > limit {
             return Err(refused("capture exceeds admission"));

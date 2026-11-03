@@ -266,7 +266,7 @@ pub struct NativeOriginalContext {
     cache: Option<Arc<hirsel_validate::VerifierCache>>,
     policy: ContentHash,
     instances: Arc<hirsel_tir::InstanceBodies>,
-    expected: BTreeMap<DefPath, (ContentHash, ContentHash)>,
+    expected: BTreeMap<DefPath, ContentHash>,
     verify: Verify,
     reuse: bool,
 }
@@ -293,8 +293,13 @@ impl NativeOriginalContext {
         for product in products {
             let path = product.definition.clone();
             if !seen.insert(path.clone())
-                || self.expected.get(&path)
-                    != Some(&(product.implementation_revision, product.signature))
+                || self.expected.get(&path) != Some(&product.implementation_revision)
+                || self
+                    .signatures
+                    .signature(DefId::intern(&path))
+                    .and_then(Result::ok)
+                    .map(|signature| signature.fingerprint)
+                    != Some(product.signature)
                 || !product.body.matches(&product, &self.anchors)
                 || product
                     .verified
@@ -369,12 +374,8 @@ impl QueryEngine {
                 .bodies
                 .get(&DefId::intern(path))
                 .ok_or_else(|| source_transport("native definition outside namespace capture"))?;
-            let signature = namespace
-                .snapshot
-                .signature(DefId::intern(path))
-                .ok_or(QueryError::NotImplemented)??;
             if input.executable {
-                expected.insert(path.clone(), (input.implementation, signature.fingerprint));
+                expected.insert(path.clone(), input.implementation);
             }
         }
         Ok(NativeOriginalContext {
@@ -398,15 +399,12 @@ impl QueryEngine {
         let paths: BTreeSet<_> = paths.iter().cloned().collect();
         let mut expected = BTreeMap::new();
         for path in &paths {
-            let syntax = self.parse_definition(path)?.value;
-            let signature = self.item_signature(path)?;
-            if crate::queries::has_errors(&signature.diagnostics) {
-                return Err(QueryError::Diagnostics(signature.diagnostics));
-            }
-            if crate::queries::generation::executable(&syntax) {
+            let facts = self.source_facts(path).ok_or(QueryError::NotImplemented)?;
+            if facts.executable {
                 expected.insert(
                     path.clone(),
-                    (syntax.text_hash, signature.value.fingerprint),
+                    self.implementation_hash(path)
+                        .ok_or(QueryError::NotImplemented)?,
                 );
             }
         }
@@ -414,7 +412,7 @@ impl QueryEngine {
             owner: None,
             admission: None,
             anchors: Arc::new(NativeRecordContext::capture(self)),
-            signatures: self.signature_snapshot(),
+            signatures: self.signature_inputs(),
             cache: self.product_store().and_then(|store| store.verifier()),
             policy: self.source_verification_policy(),
             instances: Arc::new(self.instance_bodies(&paths)),
@@ -562,7 +560,7 @@ impl QueryEngine {
         }
         Ok(Some(NativeLowerReader {
             anchors: Arc::new(NativeRecordContext::capture(self)),
-            signatures: self.signature_snapshot(),
+            signatures: self.signature_inputs(),
             cache: Some(cache),
             policy: self.source_verification_policy(),
             selected,
@@ -857,7 +855,7 @@ impl QueryEngine {
             admission: None,
             verified: NativeLowerReader {
                 anchors: Arc::new(NativeRecordContext::capture(self)),
-                signatures: self.signature_snapshot(),
+                signatures: self.signature_inputs(),
                 cache,
                 policy: self.source_verification_policy(),
                 selected,

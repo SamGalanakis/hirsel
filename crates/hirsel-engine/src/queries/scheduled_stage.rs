@@ -463,15 +463,8 @@ impl QueryEngine {
     ) -> Result<Vec<DefPath>, QueryError> {
         let mut roots = Vec::new();
         for path in definitions {
-            if self
-                .source_facts(path)
-                .is_some_and(|facts| facts.comptime.is_empty())
-            {
-                continue;
-            }
-            self.materialize(path)?;
-            let syntax = self.snapshot(path)?;
-            if has_staged_body(&syntax) {
+            let facts = self.source_facts(path).ok_or(QueryError::NotImplemented)?;
+            if facts.staged {
                 roots.push(path.clone());
             }
         }

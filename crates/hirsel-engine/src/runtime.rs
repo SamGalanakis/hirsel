@@ -83,6 +83,13 @@ pub trait QueryContext {
     /// and released its raw body. Keep the semantic edge and subscriptions;
     /// only its in-flight body pin ends, until the next read.
     fn release_body(&mut self, _query: QueryId) {}
+    /// The caller owns the selected result, its complete observations and exact
+    /// facets independently of the execution slot. Release this read's claim;
+    /// a later read may reopen a fresh execution generation. This works without
+    /// persistence. Pending reads must be consumed only after they settle.
+    fn consume(&mut self, query: QueryId) {
+        self.release_body(query);
+    }
     /// Workers that can run ready tasks of this graph at once. A producer
     /// that consumes independent dependencies in order demands at most this
     /// many ahead, so one worker keeps today's one-at-a-time schedule.

@@ -43,6 +43,9 @@ pub(super) struct Nodes {
     rows: Vec<Node>,
     free: Vec<u32>,
     order: Vec<u32>,
+    // Consumed recorded reads use logical identities, never reusable slots.
+    // These complement the active edges and retain the same cycle authority.
+    history: BTreeMap<Key, BTreeSet<Key>>,
     serial: u32,
     repair_epoch: u32,
     pub repair_visits: u64,
@@ -225,7 +228,16 @@ impl Nodes {
             .map(|&edge| edge as usize)
     }
     pub fn insert_edge(&mut self, source: NodeId, target: NodeId) -> Option<usize> {
-        if source.slot == target.slot {
+        if source.slot == target.slot
+            || (!self.history.is_empty()
+                && self
+                    .recorded_path(
+                        self.key_at(source.slot),
+                        self.key_at(target.slot),
+                        usize::MAX,
+                    )
+                    .is_some())
+        {
             return None;
         }
         let start = self.rows[target.slot as usize].position as usize;
@@ -291,6 +303,135 @@ impl Nodes {
             });
         Some(edge)
     }
+    pub fn recorded_bytes(&self, source: NodeId, target: Option<Key>) -> u64 {
+        let source_key = self.key_at(source.slot);
+        let recorded = self.history.get(&source_key);
+        let targets = target.map_or_else(
+            || {
+                self.rows[source.slot as usize]
+                    .dependencies
+                    .iter()
+                    .map(|edge| self.key_at(edge.target()))
+                    .collect::<Vec<_>>()
+            },
+            |target| vec![target],
+        );
+        let new = targets
+            .iter()
+            .filter(|target| recorded.is_none_or(|r| !r.contains(target)))
+            .count();
+        // Sparse B-tree nodes, including one root per adjacency set. The exact
+        // allocated-capacity accounting below verifies this conservative debit.
+        (new as u64) * 256
+            + if new != 0 && recorded.is_none() {
+                512
+            } else {
+                0
+            }
+    }
+    fn detach(&mut self, source: NodeId, edge: usize) {
+        let source_key = self.key_at(source.slot);
+        let target = self.rows[source.slot as usize].dependencies[edge].target();
+        let target_key = self.key_at(target);
+        self.history
+            .entry(source_key)
+            .or_default()
+            .insert(target_key);
+        self.edges.remove(&(source.slot, target));
+        self.rows[target as usize]
+            .subscribers
+            .retain(|s| s.waiter != source);
+        self.reclaim(target);
+        self.rows[source.slot as usize]
+            .dependencies
+            .swap_remove(edge);
+        if let Some(moved) = self.rows[source.slot as usize].dependencies.get(edge) {
+            let moved_target = moved.target();
+            self.edges.insert((source.slot, moved_target), edge as u32);
+            let subscriber = self.rows[moved_target as usize]
+                .subscribers
+                .iter_mut()
+                .find(|s| s.waiter == source)
+                .expect("reverse edge");
+            subscriber.edge = edge as u32;
+        }
+    }
+    pub fn consume_read(&mut self, source: NodeId, target: Key) -> bool {
+        if self.get_id(source).is_none() {
+            return false;
+        }
+        let Some(producer) = self.node_id(target) else {
+            return false;
+        };
+        let Some(edge) = self.edge_to(source, producer) else {
+            return false;
+        };
+        if self.rows[source.slot as usize].dependencies[edge].token != 0
+            || !matches!(self.rows[producer.slot as usize].status, Status::Settled(_))
+        {
+            return false;
+        }
+        self.detach(source, edge);
+        true
+    }
+    pub fn release_claims(&mut self, source: NodeId) {
+        // A terminal continuation cancels any outstanding claims, including
+        // reads preceding a failed result. Stale completions have no reverse
+        // subscription with which to wake this generation.
+        self.rows[source.slot as usize].unsatisfied = 0;
+        while !self.rows[source.slot as usize].dependencies.is_empty() {
+            self.detach(source, 0);
+        }
+    }
+    pub fn reclaimable(&self, query: Key) -> bool {
+        self.get(&query).is_some_and(|node| {
+            matches!(node.status, Status::Settled(_))
+                && node.subscribers.is_empty()
+                && node.unsatisfied == 0
+        })
+    }
+    pub fn recorded_path(&self, source: Key, target: Key, limit: usize) -> Option<Vec<Key>> {
+        if limit == 0 {
+            return None;
+        }
+        let mut parents = BTreeMap::new();
+        let mut pending = vec![target];
+        parents.insert(target, target);
+        while let Some(current) = pending.pop() {
+            if current == source {
+                let mut path = Vec::new();
+                let mut current = current;
+                loop {
+                    if path.len() == limit {
+                        return None;
+                    }
+                    path.push(current);
+                    if current == target {
+                        path.reverse();
+                        return Some(path);
+                    }
+                    current = parents[&current];
+                }
+            }
+            let live = self
+                .get(&current)
+                .into_iter()
+                .flat_map(|node| node.dependencies.iter())
+                .map(|edge| self.key_at(edge.target()));
+            let recorded = self
+                .history
+                .get(&current)
+                .into_iter()
+                .flat_map(|targets| targets.iter().copied());
+            for next in live.chain(recorded) {
+                if let std::collections::btree_map::Entry::Vacant(entry) = parents.entry(next) {
+                    entry.insert(current);
+                    pending.push(next);
+                }
+            }
+        }
+        None
+    }
     pub fn retain_body(&mut self, source: NodeId, edge: usize) {
         if self.get_id(source).is_some() {
             self.rows[source.slot as usize].dependencies[edge].target.0 &= !BODY_CONSUMED;
@@ -299,6 +440,7 @@ impl Nodes {
     /// Recover the rejected edge's path through the same dense DAG used by
     /// insert_edge. Its predecessor, traversal and path slots fit the existing
     /// twelve-byte-per-row topology workspace; no second graph is built.
+    #[cfg(test)]
     pub fn cycle_path(&self, source: NodeId, target: NodeId, limit: usize) -> Option<Vec<u32>> {
         self.get_id(source)?;
         self.get_id(target)?;
@@ -421,6 +563,12 @@ impl Nodes {
             + self.rows.len() * 12
             + buckets * (size_of::<((u32, u32), u32)>() + 1)
             + 32
+            + tree_bytes::<Key, BTreeSet<Key>>(self.history.len())
+            + self
+                .history
+                .values()
+                .map(|targets| tree_bytes::<Key, ()>(targets.len()))
+                .sum::<usize>()
             + self
                 .rows
                 .iter()

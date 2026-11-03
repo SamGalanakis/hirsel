@@ -98,6 +98,7 @@ pub struct RuntimeStats {
     pub peak_bytes: u64,
     pub charged_bytes: u64,
     pub active: usize,
+    pub peak_live_nodes: usize,
     pub settled: u64,
     pub body_evictions: u64,
     pub bookkeeping_bytes: u64,
@@ -146,9 +147,14 @@ struct Node {
     // A cancelled in-flight poll is drained before a new claim can replace it.
     discard: bool,
 }
+struct Spilled {
+    result: Outcome,
+    retained: u64,
+}
 struct State {
     factories: BTreeMap<u32, Factory>,
     nodes: Nodes,
+    spill: BTreeMap<Key, Spilled>,
     ready: BTreeSet<(Reverse<u64>, Key)>,
     cleanup: Vec<BTreeMap<Key, Option<Reference>>>,
     costs: BTreeMap<Key, u64>,
@@ -325,6 +331,7 @@ impl AdmittedRuntime {
             state: Mutex::new(State {
                 factories: BTreeMap::new(),
                 nodes: Nodes::default(),
+                spill: BTreeMap::new(),
                 ready: BTreeSet::new(),
                 cleanup: (0..count).map(|_| BTreeMap::new()).collect(),
                 costs: BTreeMap::new(),
@@ -470,6 +477,7 @@ impl AdmittedRuntime {
             + 2 * size_of::<usize>()
             + self.workers.capacity() * size_of::<JoinHandle<()>>()) as u64
             + state.nodes.allocated_bytes()
+            + tree_bytes::<Key, Spilled>(state.spill.len()) as u64
             + (tree_bytes::<(Reverse<u64>, Key), ()>(state.ready.len())
                 + tree_bytes::<Key, u64>(state.costs.len())
                 + tree_bytes::<u32, Factory>(state.factories.len())
@@ -522,6 +530,7 @@ impl AdmittedRuntime {
         let _caller = self.shared.caller.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.shared.lock();
         state.nodes.clear();
+        state.spill.clear();
         state.ready.clear();
         state.retained = 0;
         state.stacks = 0;
@@ -578,7 +587,11 @@ impl QueryRuntime for AdmittedRuntime {
                 })
                 .collect();
             for k in idle {
-                state.remove(k);
+                let source = state.nodes.node_id(k).expect("settled node");
+                if state.record_claims(source, None) {
+                    state.nodes.release_claims(source);
+                    state.remove(k);
+                }
             }
             if missing > state.max_entries.saturating_sub(state.nodes.len()) {
                 return RequestId(request.0 | REFUSED_REQUEST);
@@ -637,10 +650,14 @@ impl QueryRuntime for AdmittedRuntime {
             })
             .collect();
         for key in idle {
-            if state.retained <= retained_bytes {
+            if retained_bytes != 0 && state.retained <= retained_bytes {
                 break;
             }
-            state.remove(key);
+            let source = state.nodes.node_id(key).expect("settled node");
+            if state.record_claims(source, None) {
+                state.nodes.release_claims(source);
+                state.remove(key);
+            }
         }
         state.account();
         self.shared.changed.notify_all();
@@ -725,67 +742,92 @@ impl State {
             return Ok(id);
         }
         if !self.nodes.can_insert(query, self.max_entries) {
+            self.retire_oldest();
+        }
+        if !self.nodes.can_insert(query, self.max_entries) {
             return Err(self.errors.resource);
         }
         self.stats.claims += 1;
         self.event(RuntimeEvent::Claim(id(query)));
+        let spilled = self.spill.remove(&query);
+        let precharged = spilled.is_some();
         let factory = self.factories.get(&query.0).cloned();
-        let created = catch_unwind(AssertUnwindSafe(|| match factory {
-            Some(Factory::Send(factory)) => {
-                let task = factory.create(id(query))?;
-                if task.id() != id(query) {
-                    return Err(self.errors.protocol);
-                }
-                let weight = task.weight();
-                let continuation = task.continuation_bytes();
-                if continuation > weight.retained {
-                    return Err(self.errors.protocol);
-                }
-                Ok((Task::Send(Some(task)), weight, continuation))
-            }
-            Some(Factory::Local(factory)) => {
-                let weight = factory.weight(id(query))?;
-                Ok((
-                    Task::Local {
-                        factory,
-                        home: None,
-                    },
-                    weight,
-                    0,
-                ))
-            }
-            None => Err(self.errors.protocol),
-        }))
-        .unwrap_or(Err(self.errors.panicked));
-        let (task, weight, continuation, status) = match created {
-            Ok((task, weight, continuation))
-                if weight
-                    .scratch
-                    .checked_add(weight.retained)
-                    .is_some_and(|n| {
-                        n <= self.budget.saturating_sub(self.stacks + self.metadata)
-                    })
-                    && weight.retained
-                        <= self.budget.saturating_sub(
-                            self.stacks + self.metadata + self.retained + self.scratch,
-                        ) =>
-            {
-                (task, weight, continuation, Status::Ready)
-            }
-            Ok(_) => (
-                Task::Send(None),
-                MemoryWeight::default(),
-                0,
-                Status::Settled(Box::new(Err(self.errors.resource))),
-            ),
-            Err(error) => (
-                Task::Send(None),
-                MemoryWeight::default(),
-                0,
-                Status::Settled(Box::new(Err(error))),
-            ),
+        let created = if precharged {
+            None
+        } else {
+            Some(
+                catch_unwind(AssertUnwindSafe(|| match factory {
+                    Some(Factory::Send(factory)) => {
+                        let task = factory.create(id(query))?;
+                        if task.id() != id(query) {
+                            return Err(self.errors.protocol);
+                        }
+                        let weight = task.weight();
+                        let continuation = task.continuation_bytes();
+                        if continuation > weight.retained {
+                            return Err(self.errors.protocol);
+                        }
+                        Ok((Task::Send(Some(task)), weight, continuation))
+                    }
+                    Some(Factory::Local(factory)) => {
+                        let weight = factory.weight(id(query))?;
+                        Ok((
+                            Task::Local {
+                                factory,
+                                home: None,
+                            },
+                            weight,
+                            0,
+                        ))
+                    }
+                    None => Err(self.errors.protocol),
+                }))
+                .unwrap_or(Err(self.errors.panicked)),
+            )
         };
-        self.retained += weight.retained;
+        let (task, weight, continuation, status) = if let Some(spilled) = spilled {
+            (
+                Task::Send(None),
+                MemoryWeight {
+                    retained: spilled.retained,
+                    ..MemoryWeight::default()
+                },
+                0,
+                Status::Settled(Box::new(spilled.result)),
+            )
+        } else {
+            match created.expect("factory construction") {
+                Ok((task, weight, continuation))
+                    if weight
+                        .scratch
+                        .checked_add(weight.retained)
+                        .is_some_and(|n| {
+                            n <= self.budget.saturating_sub(self.stacks + self.metadata)
+                        })
+                        && weight.retained
+                            <= self.budget.saturating_sub(
+                                self.stacks + self.metadata + self.retained + self.scratch,
+                            ) =>
+                {
+                    (task, weight, continuation, Status::Ready)
+                }
+                Ok(_) => (
+                    Task::Send(None),
+                    MemoryWeight::default(),
+                    0,
+                    Status::Settled(Box::new(Err(self.errors.resource))),
+                ),
+                Err(error) => (
+                    Task::Send(None),
+                    MemoryWeight::default(),
+                    0,
+                    Status::Settled(Box::new(Err(error))),
+                ),
+            }
+        };
+        if !precharged {
+            self.retained += weight.retained;
+        }
         let ready = matches!(status, Status::Ready);
         let node_id = self.nodes.insert(
             query,
@@ -811,8 +853,95 @@ impl State {
         if ready {
             self.queue(query);
         }
+        self.stats.peak_live_nodes = self.stats.peak_live_nodes.max(self.nodes.len());
         self.account();
         Ok(node_id)
+    }
+    fn record_claims(&mut self, source: NodeId, target: Option<Key>) -> bool {
+        let bytes = self.nodes.recorded_bytes(source, target);
+        // Reserve history and exact traversal workspace independently of the
+        // unchanged execution inventory, from this runtime's existing grant.
+        if bytes
+            > self
+                .budget
+                .saturating_sub(self.stacks + self.metadata + self.retained + self.scratch)
+        {
+            return false;
+        }
+        self.metadata += bytes;
+        true
+    }
+    fn retire_node(&mut self, query: Key, spill: bool) -> bool {
+        if self.requests.values().any(|roots| roots.contains(&query))
+            || !self.nodes.reclaimable(query)
+        {
+            return false;
+        }
+        let source = self.nodes.node_id(query).expect("settled node");
+        let extra = if spill { 512 } else { 0 };
+        let bytes = self
+            .nodes
+            .recorded_bytes(source, None)
+            .saturating_add(extra);
+        if bytes
+            > self
+                .budget
+                .saturating_sub(self.stacks + self.metadata + self.retained + self.scratch)
+            || !self.record_claims(source, None)
+        {
+            return false;
+        }
+        // Request-local spill transfers the result's existing retained debit.
+        // Its key/record space comes from this same grant, even with store off.
+        self.metadata += extra;
+        self.nodes.release_claims(source);
+        if spill {
+            let result = self.result(query).expect("settled result");
+            let execution = self
+                .nodes
+                .get_mut(&query)
+                .unwrap()
+                .execution
+                .as_mut()
+                .expect("execution");
+            let retained = std::mem::take(&mut execution.weight.retained);
+            self.spill.insert(query, Spilled { result, retained });
+        }
+        self.remove(query);
+        self.costs.remove(&query);
+        self.stats.body_evictions += 1;
+        self.account();
+        true
+    }
+    fn retire_oldest(&mut self) -> bool {
+        // Settled continuations have independently owned results. Under node
+        // pressure they cancel their remaining execution claims while keeping
+        // every recorded read, including reads of failed producers.
+        let terminal = self
+            .nodes
+            .iter()
+            .filter_map(|(&key, node)| {
+                (matches!(node.status, Status::Settled(_)) && !node.dependencies.is_empty())
+                    .then_some(key)
+            })
+            .collect::<Vec<_>>();
+        for query in terminal {
+            let source = self.nodes.node_id(query).expect("settled node");
+            if self.record_claims(source, None) {
+                self.nodes.release_claims(source);
+            }
+        }
+        self.edges = self.nodes.edge_count();
+        let candidate = self
+            .nodes
+            .iter()
+            .filter(|(key, _)| {
+                self.nodes.reclaimable(**key)
+                    && !self.requests.values().any(|roots| roots.contains(key))
+            })
+            .min_by_key(|(key, node)| (node.settled_at, **key))
+            .map(|(key, _)| *key);
+        candidate.is_some_and(|query| self.retire_node(query, true))
     }
     fn mark_live(&mut self) {
         self.nodes
@@ -948,6 +1077,28 @@ impl QueryContext for Context<'_> {
             .nodes
             .release_body(self.generation, key(dependency));
     }
+    fn consume(&mut self, dependency: QueryId) {
+        let mut state = self.shared.lock();
+        let dependency = key(dependency);
+        let Some(producer) = state.nodes.node_id(dependency) else {
+            return;
+        };
+        if state.nodes.get_id(self.generation).is_none()
+            || state.nodes.edge_to(self.generation, producer).is_none()
+            || state.nodes.result(producer).is_none()
+        {
+            return;
+        }
+        if state.record_claims(self.generation, Some(dependency))
+            && state.nodes.consume_read(self.generation, dependency)
+        {
+            state.edges = state.nodes.edge_count();
+            state.retire_node(dependency, false);
+            state.advance_progress();
+            state.account();
+            self.shared.changed.notify_all();
+        }
+    }
     fn evict_body(&mut self) -> bool {
         let mut state = self.shared.lock();
         let roots = state
@@ -1017,6 +1168,11 @@ impl QueryContext for Context<'_> {
                 break key;
             }
         };
+        let source = state.nodes.node_id(key).expect("settled node");
+        if !state.record_claims(source, None) {
+            return false;
+        }
+        state.nodes.release_claims(source);
         state.remove(key);
         state.stats.body_evictions += 1;
         state.account();
@@ -1069,15 +1225,12 @@ impl QueryContext for Context<'_> {
             .scratch;
         // The slot path and its converted identities coexist during collection.
         // Vec growth is bounded by twice their lengths.
-        let bytes_per_member = 2 * (size_of::<QueryId>() + size_of::<u32>()) as u64;
+        let bytes_per_member = 512;
         let limit = limit.min(usize::try_from(scratch / bytes_per_member).ok()?);
-        let target = state.nodes.node_id(key(dependency))?;
-        let path = state.nodes.cycle_path(self.generation, target, limit)?;
-        Some(
-            path.into_iter()
-                .map(|slot| id(state.nodes.key_at(slot)))
-                .collect(),
-        )
+        let path = state
+            .nodes
+            .recorded_path(self.query, key(dependency), limit)?;
+        Some(path.into_iter().map(id).collect())
     }
 
     fn read(&mut self, dependency: QueryId) -> Poll<Outcome> {

@@ -2149,3 +2149,140 @@ fn compact_metadata_capacity_bound_covers_measured_allocations() {
         );
     }
 }
+
+#[test]
+fn consumed_failed_records_detect_cycles_after_slot_reuse() {
+    let mut nodes = Nodes::default();
+    let a = nodes.insert(key(query(0)), bare_node());
+    let b = nodes.insert(key(query(1)), bare_node());
+    let edge = nodes.insert_edge(a, b).unwrap();
+    assert!(nodes.subscribe(a, edge, b));
+    nodes.get_id_mut(b).unwrap().status = Status::Settled(Box::new(Err(errors().protocol)));
+    nodes.consume(b, 0);
+    assert!(nodes.consume_read(a, key(query(1))));
+    assert!(nodes.reclaimable(key(query(1))));
+    nodes.remove(&key(query(1)));
+    let unrelated = nodes.insert(key(query(2)), bare_node());
+    assert_eq!(unrelated.slot, b.slot);
+    assert!(nodes.consume(b, 0).is_none());
+    let reopened = nodes.insert(key(query(1)), bare_node());
+    assert_ne!(reopened, b);
+    assert!(nodes.insert_edge(reopened, a).is_none());
+    assert_eq!(
+        nodes.recorded_path(key(query(1)), key(query(0)), 2),
+        Some(vec![key(query(0)), key(query(1))])
+    );
+    assert!(
+        nodes
+            .recorded_path(key(query(1)), key(query(0)), 1)
+            .is_none()
+    );
+    assert_eq!(nodes.get_id(a).unwrap().unsatisfied, 0);
+    assert!(nodes.insert_edge(unrelated, a).is_some());
+}
+
+#[test]
+fn consumed_stream_reopens_fresh_generations_with_pinned_request_roots() {
+    struct StreamFactory;
+    struct StreamTask {
+        id: QueryId,
+        cursor: u64,
+    }
+    impl QueryFactory for StreamFactory {
+        fn create(&self, id: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
+            Ok(Box::new(StreamTask { id, cursor: 1 }))
+        }
+    }
+    impl QueryTask for StreamTask {
+        fn id(&self) -> QueryId {
+            self.id
+        }
+        fn weight(&self) -> MemoryWeight {
+            MemoryWeight {
+                retained: 64,
+                scratch: 32,
+                stack: 0,
+            }
+        }
+        fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+            if self.id == query(0) {
+                while self.cursor <= 9000 {
+                    // Return to the first product after all other slots have
+                    // been recycled. A separate owner survives its retirement.
+                    let next = query(if self.cursor == 9000 { 1 } else { self.cursor });
+                    match cx.read(next) {
+                        Poll::Pending => return QueryPoll::Waiting(vec![next]),
+                        Poll::Ready(Err(e)) => return QueryPoll::Failed(e),
+                        Poll::Ready(Ok(selected)) => {
+                            assert_eq!(selected, product(next));
+                            cx.consume(next);
+                            self.cursor += 1;
+                        }
+                    }
+                }
+            }
+            QueryPoll::Complete(product(self.id))
+        }
+    }
+    let mut rt = runtime(1, 16 << 20);
+    let capacity = rt.shared.lock().max_entries;
+    assert!(capacity < 8192);
+    rt.register(1, Arc::new(StreamFactory)).unwrap();
+    let request = rt.request(&[query(0)]);
+    assert_eq!(rt.wait(request), Ok(vec![product(query(0))]));
+    assert_eq!(rt.stats().claims, 9001);
+    assert_eq!(rt.stats().peak_live_nodes, 2);
+    assert_eq!(rt.shared.lock().max_entries, capacity);
+    assert!(rt.shared.lock().nodes.get(&key(query(0))).is_some());
+    assert!(rt.metadata_capacity_bytes() <= rt.stats().bookkeeping_bytes);
+}
+
+#[test]
+fn node_pressure_spills_results_without_persistence_and_preserves_root_delivery() {
+    let bytes = STACK as u64 + 32 * ENTRY_BYTES;
+    let budget = ProcessBudget::new(bytes);
+    let mut rt = AdmittedRuntime::with_metadata(
+        Jobs::ONE,
+        budget.reserve(bytes).unwrap(),
+        errors(),
+        STACK,
+        Some(3),
+        false,
+    )
+    .unwrap();
+    let claims = install(
+        &mut rt,
+        &[
+            (0, Spec::deps(&[1])),
+            (1, Spec::deps(&[2])),
+            (2, Spec::deps(&[])),
+            (3, Spec::deps(&[])),
+        ],
+    );
+    let request = rt.request(&[query(0)]);
+    rt.completion().wait(request);
+    let old = rt.shared.lock().nodes.node_id(key(query(2))).unwrap();
+    {
+        let mut state = rt.shared.lock();
+        state.ensure(key(query(3))).unwrap();
+        assert!(
+            state.nodes.node_id(key(query(0))).is_some(),
+            "undelivered root is pinned"
+        );
+        assert!(state.spill.contains_key(&key(query(2))));
+        assert_eq!(state.max_entries, 3);
+        assert_eq!(state.nodes.len(), 3);
+    }
+    assert_eq!(rt.wait(request), Ok(vec![product(query(0))]));
+    let request = rt.request(&[query(2)]);
+    assert_eq!(rt.wait(request), Ok(vec![product(query(2))]));
+    let reopened = rt.shared.lock().nodes.node_id(key(query(2))).unwrap();
+    assert_ne!(old, reopened);
+    assert_eq!(
+        claims.load(Ordering::SeqCst),
+        4,
+        "spill reopens without another factory execution"
+    );
+    assert!(rt.metadata_capacity_bytes() <= rt.stats().bookkeeping_bytes);
+    assert!(rt.stats().peak_bytes <= bytes);
+}

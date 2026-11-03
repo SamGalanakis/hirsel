@@ -1,6 +1,10 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::MemStore, *};
-use std::{sync::Arc, task::Poll};
+use std::{
+    sync::{Arc, Mutex, mpsc},
+    task::Poll,
+    time::Duration,
+};
 
 struct Fixture {
     program: LoadedProgram,
@@ -19,6 +23,14 @@ impl Fixture {
         Self::in_directory(source, jobs, Arc::new(tempfile::tempdir().unwrap()))
     }
     fn in_directory(source: &str, jobs: usize, directory: Arc<tempfile::TempDir>) -> Self {
+        Self::with_completion_order(source, jobs, directory, None).0
+    }
+    fn with_completion_order(
+        source: &str,
+        jobs: usize,
+        directory: Arc<tempfile::TempDir>,
+        order: Option<[&str; 2]>,
+    ) -> (Self, Arc<CompletionOrder>) {
         let manifest = directory.path().join("hirsel.json");
         std::fs::write(directory.path().join("main.hir"), source).unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"phase_admission","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
@@ -91,7 +103,30 @@ impl Fixture {
                 errors,
             )
             .unwrap();
-        runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
+        let paths = order.map(|names| {
+            names.map(|name| {
+                let mut path = program.entry.clone();
+                path.0.name = name.into();
+                front.query(&path).unwrap()
+            })
+        });
+        let (release, wait) = mpsc::channel();
+        let completion = Arc::new(CompletionOrder {
+            order: paths,
+            release,
+            events: Mutex::new(Vec::new()),
+        });
+        runtime.observe(completion.clone()).unwrap();
+        runtime
+            .register(
+                FRONT_BODY_KIND,
+                Arc::new(CompletionFactory {
+                    inner: front.factory(),
+                    delayed: paths.map(|ids| ids[1]),
+                    wait: Arc::new(Mutex::new(Some(wait))),
+                }),
+            )
+            .unwrap();
         runtime
             .register_local(FRONT_LOWER_KIND, lower.factory())
             .unwrap();
@@ -102,18 +137,21 @@ impl Fixture {
             .register(FRONT_GROWTH_KIND, growth.factory())
             .unwrap();
         runtime.register(FRONT_CHECK_KIND, check.factory()).unwrap();
-        Self {
-            program,
-            runtime,
-            front,
-            lower,
-            check,
-            budget,
-            weight,
-            errors,
-            store,
-            _directory: directory,
-        }
+        (
+            Self {
+                program,
+                runtime,
+                front,
+                lower,
+                check,
+                budget,
+                weight,
+                errors,
+                store,
+                _directory: directory,
+            },
+            completion,
+        )
     }
     fn path(&self, name: &str) -> hirsel_syntax::DefPath {
         let mut path = self.program.entry.clone();
@@ -334,40 +372,172 @@ fn failed_check_withholds_acceptance_but_independent_lower_still_runs() {
     });
 }
 
+// The factory seam already used by the cancellation law holds one producer
+// before its first poll. Only the other producer's Settled event opens it.
+// Zed's order.rs:72-125 supplies the permutation technique; the source and
+// the request roots stay fixed here, and only physical completion is permuted.
+struct CompletionOrder {
+    order: Option<[QueryId; 2]>,
+    release: mpsc::Sender<()>,
+    events: Mutex<Vec<RuntimeEvent>>,
+}
+impl RuntimeObserver for CompletionOrder {
+    fn record(&self, event: RuntimeEvent) {
+        if let RuntimeEvent::Settled { query, .. } = &event
+            && self.order.is_some_and(|ids| ids[0] == *query)
+        {
+            self.release.send(()).unwrap();
+        }
+        self.events.lock().unwrap().push(event);
+    }
+}
+struct CompletionFactory {
+    inner: Arc<dyn QueryFactory>,
+    delayed: Option<QueryId>,
+    wait: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
+}
+impl QueryFactory for CompletionFactory {
+    fn evict(&self, id: QueryId, product: &ProductRef, scratch: u64) -> bool {
+        self.inner.evict(id, product, scratch)
+    }
+    fn create(&self, id: QueryId) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference> {
+        Ok(Box::new(CompletionTask {
+            inner: self.inner.create(id)?,
+            wait: (self.delayed == Some(id)).then(|| self.wait.clone()),
+        }))
+    }
+}
+struct CompletionTask {
+    inner: Box<dyn QueryTask>,
+    wait: Option<Arc<Mutex<Option<mpsc::Receiver<()>>>>>,
+}
+impl QueryTask for CompletionTask {
+    fn id(&self) -> QueryId {
+        self.inner.id()
+    }
+    fn weight(&self) -> MemoryWeight {
+        self.inner.weight()
+    }
+    fn continuation_bytes(&self) -> u64 {
+        self.inner.continuation_bytes()
+    }
+    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+        if let Some(wait) = self.wait.take() {
+            wait.lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(30))
+                .expect("independent producer did not settle before the completion gate deadline");
+        }
+        self.inner.poll(cx)
+    }
+}
+
 #[test]
 fn diagnostics_and_source_prefix_archives_are_identical_at_jobs_one_two_and_eight() {
     with_compiler_stack(|| {
         for source in [
             "const BAD:u8=comptime(1u8/0u8);\nconst LATER:u8=comptime 2u8;\npub fn main()->u8{LATER}\n",
             "pub fn early()->u8{true}\npub fn main()->u8{7u8}\npub fn later()->u64{false}\n",
+            "pub fn early()->u8{3u8}\npub fn main()->u8{7u8}\npub fn later()->u8{9u8}\n",
         ] {
+            let names = if source.starts_with("const") {
+                ["BAD", "LATER"]
+            } else {
+                ["early", "later"]
+            };
             let mut expected = None;
             let directory = Arc::new(tempfile::tempdir().unwrap());
-            for jobs in [1, 2, 8] {
-                let mut f = Fixture::in_directory(source, jobs, directory.clone());
+            for (jobs, reverse) in [
+                (1, None),
+                (2, Some(false)),
+                (2, Some(true)),
+                (8, Some(false)),
+                (8, Some(true)),
+            ] {
+                let order =
+                    reverse.map(|reverse| if reverse { [names[1], names[0]] } else { names });
+                let (mut f, completion) =
+                    Fixture::with_completion_order(source, jobs, directory.clone(), order);
+                let roots = names.map(|name| f.front.query(&f.path(name)).unwrap());
+                // Both independent producers are demanded in the same order,
+                // including when source admission is waiting on the first one.
+                let producers = f.runtime.request(&roots);
                 let request = f.runtime.request(&[f.check.query()]);
                 let product = f.runtime.wait(request).unwrap()[0].clone();
+                let producer_result = f.runtime.wait(producers);
                 let output = f.check.outcome(product.clone()).unwrap();
-                let actual = (
+                let archive = |product: &ProductRef| {
+                    let mut scratch = f.budget.reserve(f.weight.scratch).unwrap();
                     product
-                        .archive(ArchiveAdmission::Retained)
+                        .archive(ArchiveAdmission::Materialize {
+                            scratch: &mut scratch,
+                            working_bytes: f.weight.scratch,
+                        })
                         .unwrap()
                         .bytes()
-                        .to_vec(),
+                        .to_vec()
+                };
+                let actual = (
+                    (
+                        product.address,
+                        product.action,
+                        product.domain(),
+                        archive(&product),
+                    ),
                     output
                         .checked
                         .diagnostics
                         .iter()
-                        .map(|diagnostic| diagnostic.render_human(&output.checked.sources))
+                        .flat_map(|diagnostic| {
+                            diagnostic
+                                .render_human(&output.checked.sources)
+                                .into_bytes()
+                        })
                         .collect::<Vec<_>>(),
+                    f.check.accepted(product.clone()),
+                    output
+                        .front
+                        .iter()
+                        .map(|(path, observation)| {
+                            (
+                                path.clone(),
+                                observation.address,
+                                observation.action,
+                                observation.domain(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                    output
+                        .lowered
+                        .iter()
+                        .map(|(path, product)| {
+                            (
+                                path.clone(),
+                                product.address,
+                                product.action,
+                                product.domain(),
+                                archive(product),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                    producer_result
+                        .map(|products| products.iter().map(archive).collect::<Vec<_>>()),
                 );
-                if let Some(expected) = &expected {
-                    assert_eq!(&actual, expected, "jobs={jobs}");
+                if source.contains("true") || source.starts_with("const") {
+                    assert_eq!(actual.2, Some(false));
+                    assert!(!actual.1.is_empty());
+                    assert!(
+                        actual.4.is_empty(),
+                        "failed file accepts no executable prefix"
+                    );
                 } else {
-                    expected = Some(actual);
+                    assert_eq!(actual.2, Some(true));
+                    assert!(actual.1.is_empty());
+                    assert_eq!(actual.3.len(), 3);
+                    assert_eq!(actual.4.len(), 3);
                 }
-                // This is also an admission law, so the old barrier fails the
-                // complete vector even when its already ordered bytes agree.
                 let independent = if source.starts_with("const") {
                     f.path("LATER")
                 } else {
@@ -375,6 +545,67 @@ fn diagnostics_and_source_prefix_archives_are_identical_at_jobs_one_two_and_eigh
                 };
                 assert_eq!(f.lower.work(&independent).lowerings, 1);
                 f.runtime.shutdown();
+                let stats = f.runtime.stats();
+                assert_eq!(stats.active, 0);
+                assert_eq!(stats.charged_bytes, 0);
+                assert_eq!(stats.claims, stats.settled, "all admitted producers drain");
+                let events = completion.events.lock().unwrap();
+                let settled = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        RuntimeEvent::Settled { query, .. } if roots.contains(query) => {
+                            Some(*query)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(order) = completion.order {
+                    assert_eq!(settled, order, "forced completion order at jobs={jobs}");
+                }
+                // Poll counts vary. The dependency graph and each producer's
+                // first-read order must not, nor may any worker claim leak.
+                let mut reads = std::collections::BTreeMap::new();
+                let mut claims = std::collections::BTreeMap::new();
+                let mut running = std::collections::BTreeMap::new();
+                for event in events.iter() {
+                    match event {
+                        RuntimeEvent::Read { query, dependency } => {
+                            let row = reads
+                                .entry((query.kind, query.address.0))
+                                .or_insert_with(Vec::new);
+                            if !row.contains(dependency) {
+                                row.push(*dependency);
+                            }
+                        }
+                        RuntimeEvent::Claim(query) => {
+                            *claims.entry((query.kind, query.address.0)).or_insert(0i32) += 1;
+                        }
+                        RuntimeEvent::Settled { query, .. } => {
+                            *claims.entry((query.kind, query.address.0)).or_insert(0i32) -= 1;
+                        }
+                        RuntimeEvent::Admit { query, .. } => {
+                            *running.entry((query.kind, query.address.0)).or_insert(0i32) += 1;
+                        }
+                        RuntimeEvent::Release { query, .. } => {
+                            *running.entry((query.kind, query.address.0)).or_insert(0i32) -= 1;
+                        }
+                        _ => {}
+                    }
+                }
+                assert!(
+                    claims.values().all(|count| *count == 0),
+                    "every producer claim settles"
+                );
+                assert!(
+                    running.values().all(|count| *count == 0),
+                    "every worker admission is released"
+                );
+                let actual = (actual, reads, claims, stats.active, stats.charged_bytes);
+                if let Some(expected) = &expected {
+                    assert_eq!(&actual, expected, "jobs={jobs}, reverse={reverse:?}");
+                } else {
+                    expected = Some(actual);
+                }
             }
         }
     });

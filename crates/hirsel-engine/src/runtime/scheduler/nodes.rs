@@ -36,6 +36,16 @@ pub(super) struct Subscriber {
     edge: u32,
 }
 #[derive(Default)]
+struct Recorded {
+    settled: BTreeSet<Key>,
+    pending: BTreeSet<Key>,
+}
+impl Recorded {
+    fn contains(&self, target: &Key) -> bool {
+        self.settled.contains(target) || self.pending.contains(target)
+    }
+}
+#[derive(Default)]
 pub(super) struct Nodes {
     index: BTreeMap<Key, u32>,
     edges: std::collections::HashMap<(u32, u32), u32>,
@@ -45,7 +55,7 @@ pub(super) struct Nodes {
     order: Vec<u32>,
     // Consumed recorded reads use logical identities, never reusable slots.
     // These complement the active edges and retain the same cycle authority.
-    history: BTreeMap<Key, BTreeSet<Key>>,
+    history: BTreeMap<Key, Recorded>,
     serial: u32,
     repair_epoch: u32,
     pub repair_visits: u64,
@@ -53,6 +63,12 @@ pub(super) struct Nodes {
 impl Nodes {
     pub fn len(&self) -> usize {
         self.index.len()
+    }
+    pub fn arena_len(&self) -> usize {
+        self.rows.len()
+    }
+    pub fn next_arena_len(&self, query: Key) -> usize {
+        self.rows.len() + usize::from(!self.index.contains_key(&query) && self.free.is_empty())
     }
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
@@ -200,7 +216,12 @@ impl Nodes {
         if !matches!(node.status, Status::Settled(_) | Status::Dormant) {
             // Cancellation discards this unfinished generation's reads. Slot
             // retirement of terminal results retains all successful/failed reads.
-            self.history.remove(key);
+            if let Some(recorded) = self.history.get_mut(key) {
+                recorded.pending.clear();
+                if recorded.settled.is_empty() {
+                    self.history.remove(key);
+                }
+            }
         }
         node.status = Status::Dormant;
         node.unsatisfied = 0;
@@ -315,9 +336,14 @@ impl Nodes {
         {
             return 0;
         }
-        self.history
-            .get(&query)
-            .map_or(0, |targets| 512 + targets.len() as u64 * 512)
+        self.history.get(&query).map_or(0, |recorded| {
+            recorded.pending.len() as u64 * 512 + if recorded.settled.is_empty() { 1024 } else { 0 }
+        })
+    }
+    pub fn settle_records(&mut self, query: Key) {
+        if let Some(recorded) = self.history.get_mut(&query) {
+            recorded.settled.append(&mut recorded.pending);
+        }
     }
     pub fn recorded_bytes(&self, source: NodeId, target: Option<Key>) -> u64 {
         let source_key = self.key_at(source.slot);
@@ -341,7 +367,7 @@ impl Nodes {
         // allocated-capacity accounting below also covers retained records.
         (new as u64) * 512
             + if new != 0 && recorded.is_none() {
-                512
+                1024
             } else {
                 0
             }
@@ -350,10 +376,16 @@ impl Nodes {
         let source_key = self.key_at(source.slot);
         let target = self.rows[source.slot as usize].dependencies[edge].target();
         let target_key = self.key_at(target);
-        self.history
-            .entry(source_key)
-            .or_default()
-            .insert(target_key);
+        let terminal = matches!(self.rows[source.slot as usize].status, Status::Settled(_));
+        let recorded = self.history.entry(source_key).or_default();
+        if !recorded.settled.contains(&target_key) {
+            if terminal {
+                recorded.pending.remove(&target_key);
+                recorded.settled.insert(target_key);
+            } else {
+                recorded.pending.insert(target_key);
+            }
+        }
         self.edges.remove(&(source.slot, target));
         self.rows[target as usize]
             .subscribers
@@ -439,7 +471,7 @@ impl Nodes {
                 .history
                 .get(&current)
                 .into_iter()
-                .flat_map(|targets| targets.iter().copied());
+                .flat_map(|recorded| recorded.settled.iter().chain(&recorded.pending).copied());
             for next in live.chain(recorded) {
                 if let std::collections::btree_map::Entry::Vacant(entry) = parents.entry(next) {
                     entry.insert(current);
@@ -580,11 +612,14 @@ impl Nodes {
             + self.rows.len() * 12
             + buckets * (size_of::<((u32, u32), u32)>() + 1)
             + 32
-            + tree_bytes::<Key, BTreeSet<Key>>(self.history.len())
+            + tree_bytes::<Key, Recorded>(self.history.len())
             + self
                 .history
                 .values()
-                .map(|targets| tree_bytes::<Key, ()>(targets.len()))
+                .map(|recorded| {
+                    tree_bytes::<Key, ()>(recorded.settled.len())
+                        + tree_bytes::<Key, ()>(recorded.pending.len())
+                })
                 .sum::<usize>()
             + self
                 .rows

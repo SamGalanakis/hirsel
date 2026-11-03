@@ -30,6 +30,7 @@ struct Reads {
     working: MemoryWeight,
     requested: BTreeMap<Key, QueryId>,
     completed: BTreeMap<Key, Outcome>,
+    consumed: Vec<QueryId>,
     limit: usize,
     resource: Reference,
 }
@@ -112,11 +113,10 @@ impl QueryReads {
     pub async fn read(&self, query: QueryId) -> Outcome {
         poll_fn(|_| self.poll_read(query, false)).await
     }
-    /// Consume one completed mailbox row. The query runtime keeps its settled
-    /// latch and the producer keeps its product and admission owners; a later
-    /// read subscribes to that same latch without rerunning the producer.
-    /// Use this after each result is taken into independently admitted state,
-    /// so sequential dependencies need only their concurrently live rows.
+    /// Consume a completed mailbox row and its scheduler claim. The caller
+    /// takes the result into independently admitted state; a later read may
+    /// reopen a fresh generation from its producer's retained owner or archive.
+    /// Sequential dependencies retain only their concurrently live rows.
     pub async fn read_consuming(&self, query: QueryId) -> Outcome {
         poll_fn(|_| self.poll_read(query, true)).await
     }
@@ -128,6 +128,9 @@ impl QueryReads {
             reads.completed.get(&key(query)).cloned()
         };
         if let Some(result) = selected {
+            if consuming {
+                reads.consumed.push(query);
+            }
             return Poll::Ready(result);
         }
         if !reads.requested.contains_key(&key(query)) {
@@ -192,6 +195,7 @@ impl LocalFutureTask {
             working: weight,
             requested: BTreeMap::new(),
             completed: BTreeMap::new(),
+            consumed: Vec::new(),
             limit: max_reads,
             resource: errors.resource,
         })));
@@ -264,11 +268,17 @@ impl LocalFutureTask {
                 other => other,
             };
             self.reads.0.borrow_mut().composed = composed;
-            match self
+            let polled = self
                 .future
                 .as_mut()
-                .poll(&mut Context::from_waker(Waker::noop()))
-            {
+                .poll(&mut Context::from_waker(Waker::noop()));
+            // At most the already completed mailbox rows can be consumed by
+            // one future poll. Flush before servicing its next requested read.
+            let consumed = std::mem::take(&mut self.reads.0.borrow_mut().consumed);
+            for query in consumed {
+                cx.consume(query);
+            }
+            match polled {
                 Poll::Ready(result) => {
                     self.terminal = Some(result.clone());
                     return finish(result);
@@ -350,6 +360,7 @@ mod tests {
             working: MemoryWeight::default(),
             requested: BTreeMap::new(),
             completed: BTreeMap::new(),
+            consumed: Vec::new(),
             limit: 0,
             resource: error(),
         })))

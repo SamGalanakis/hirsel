@@ -165,6 +165,8 @@ struct State {
     stacks: u64,
     budget: u64,
     metadata: u64,
+    bookkeeping_grant: u64,
+    recorded: u64,
     edges: usize,
     progress_revision: u64,
     // Nodes parked inside producer admission, keyed to the progress revision
@@ -342,6 +344,8 @@ impl AdmittedRuntime {
                 stacks: count as u64 * stack as u64,
                 budget,
                 metadata,
+                bookkeeping_grant: metadata,
+                recorded: 0,
                 edges: 0,
                 progress_revision: 1,
                 admission_waiters: BTreeMap::new(),
@@ -530,11 +534,14 @@ impl AdmittedRuntime {
         let _caller = self.shared.caller.lock().unwrap_or_else(|e| e.into_inner());
         let mut state = self.shared.lock();
         state.nodes.clear();
+        state.edges = 0;
         state.spill.clear();
         state.ready.clear();
         state.retained = 0;
         state.stacks = 0;
         state.metadata = 0;
+        state.bookkeeping_grant = 0;
+        state.recorded = 0;
         state.costs.clear();
         state.factories.clear();
         state.observer = None;
@@ -597,6 +604,22 @@ impl QueryRuntime for AdmittedRuntime {
                 return RequestId(request.0 | REFUSED_REQUEST);
             }
         }
+        let inventory = (root_count + roots.len()).max(state.requests.len() + 1);
+        let metadata = state
+            .bookkeeping(state.recorded, state.nodes.arena_len(), state.edges)
+            .max(
+                (inventory as u64)
+                    .saturating_mul(ENTRY_BYTES)
+                    .saturating_add(state.recorded),
+            );
+        if metadata.saturating_sub(state.metadata)
+            > state
+                .budget
+                .saturating_sub(state.stacks + state.metadata + state.retained + state.scratch)
+        {
+            return RequestId(request.0 | REFUSED_REQUEST);
+        }
+        state.metadata = metadata;
         let roots: Vec<_> = roots.iter().copied().map(key).collect();
         state.event(RuntimeEvent::Request {
             request,
@@ -677,7 +700,34 @@ impl State {
     fn elapsed(&self) -> u64 {
         self.origin.elapsed().as_nanos().min(u64::MAX as u128) as u64
     }
+    fn bookkeeping(&self, recorded: u64, rows: usize, edges: usize) -> u64 {
+        let inventory = rows
+            .max(edges.div_ceil(4))
+            .max(self.costs.len())
+            .max(self.requests.len())
+            .max(self.requests.values().map(Vec::len).sum())
+            .max(self.factories.len());
+        self.bookkeeping_grant.max(
+            (inventory as u64)
+                .saturating_mul(ENTRY_BYTES)
+                .saturating_add(recorded),
+        )
+    }
+    fn reserve_bookkeeping(&mut self, recorded: u64, rows: usize, edges: usize) -> bool {
+        let metadata = self.bookkeeping(recorded, rows, edges);
+        if metadata.saturating_sub(self.metadata)
+            > self
+                .budget
+                .saturating_sub(self.stacks + self.metadata + self.retained + self.scratch)
+        {
+            return false;
+        }
+        self.recorded = recorded;
+        self.metadata = metadata;
+        true
+    }
     fn account(&mut self) {
+        self.metadata = self.bookkeeping(self.recorded, self.nodes.arena_len(), self.edges);
         let bytes = self.stacks + self.metadata + self.retained + self.scratch;
         self.stats.bookkeeping_bytes = self.metadata;
         self.stats.charged_bytes = bytes;
@@ -747,11 +797,16 @@ impl State {
         if !self.nodes.can_insert(query, self.max_entries) {
             return Err(self.errors.resource);
         }
+        if !self.reserve_bookkeeping(self.recorded, self.nodes.next_arena_len(query), self.edges) {
+            return Err(self.errors.resource);
+        }
         self.stats.claims += 1;
         self.event(RuntimeEvent::Claim(id(query)));
         let spilled = self.spill.remove(&query);
         if spilled.is_some() {
-            self.metadata -= 512;
+            self.recorded -= 512;
+            self.metadata =
+                self.bookkeeping(self.recorded, self.nodes.next_arena_len(query), self.edges);
         }
         let precharged = spilled.is_some();
         let factory = self.factories.get(&query.0).cloned();
@@ -862,17 +917,13 @@ impl State {
     }
     fn record_claims(&mut self, source: NodeId, target: Option<Key>) -> bool {
         let bytes = self.nodes.recorded_bytes(source, target);
-        // Reserve history and exact traversal workspace independently of the
-        // unchanged execution inventory, from this runtime's existing grant.
-        if bytes
-            > self
-                .budget
-                .saturating_sub(self.stacks + self.metadata + self.retained + self.scratch)
-        {
-            return false;
-        }
-        self.metadata += bytes;
-        true
+        // Slot retirement recycles the original bookkeeping reservation first.
+        // Only records beyond that reservation debit additional working bytes.
+        self.reserve_bookkeeping(
+            self.recorded.saturating_add(bytes),
+            self.nodes.arena_len(),
+            self.edges,
+        )
     }
     fn retire_node(&mut self, query: Key, spill: bool) -> bool {
         if self.requests.values().any(|roots| roots.contains(&query))
@@ -886,17 +937,13 @@ impl State {
             .nodes
             .recorded_bytes(source, None)
             .saturating_add(extra);
-        if bytes
-            > self
-                .budget
-                .saturating_sub(self.stacks + self.metadata + self.retained + self.scratch)
-            || !self.record_claims(source, None)
-        {
+        if !self.reserve_bookkeeping(
+            self.recorded.saturating_add(bytes),
+            self.nodes.arena_len(),
+            self.edges,
+        ) {
             return false;
         }
-        // Request-local spill transfers the result's existing retained debit.
-        // Its key/record space comes from this same grant, even with store off.
-        self.metadata += extra;
         self.nodes.release_claims(source);
         if spill {
             let result = self.result(query).expect("settled result");
@@ -934,7 +981,7 @@ impl State {
         };
         let spilled = self.spill.remove(&query).expect("selected spill");
         self.retained -= spilled.retained;
-        self.metadata -= 512;
+        self.recorded -= 512;
         drop(spilled);
         self.stats.body_evictions += 1;
         self.account();
@@ -977,13 +1024,14 @@ impl State {
     fn remove(&mut self, query: Key) {
         self.unqueue(query);
         self.admission_waiters.remove(&query);
-        self.metadata -= self.nodes.cancelled_record_bytes(query);
+        self.recorded -= self.nodes.cancelled_record_bytes(query);
         if let Some(execution) = self.nodes.remove(&query) {
             let retained = execution.weight.retained;
             drop(execution);
             self.retained -= retained;
         }
         self.edges = self.nodes.edge_count();
+        self.costs.remove(&query);
     }
     fn restart(&mut self, query: Key) {
         // Incoming recorded reads retain the semantic slot. Pending tokens are
@@ -1056,10 +1104,12 @@ impl State {
         }
     }
     fn settle(&mut self, query: Key, result: Outcome) {
+        if result == Err(self.errors.resource) {}
         let node = self.nodes.get_mut(&query).expect("claimed query");
         node.execution.as_mut().expect("active execution").task = Task::Send(None);
         node.status = Status::Settled(Box::new(result.clone()));
         node.settled_at = self.stats.settled;
+        self.nodes.settle_records(query);
         self.stats.settled += 1;
         self.admission_waiters.remove(&query);
         self.event(RuntimeEvent::Settled {
@@ -1290,6 +1340,14 @@ impl QueryContext for Context<'_> {
             Ok(producer) => producer,
             Err(error) => return Poll::Ready(Err(error)),
         };
+        if existing.is_none() {
+            let recorded = state.recorded;
+            let rows = state.nodes.arena_len();
+            let edges = state.edges + 1;
+            if !state.reserve_bookkeeping(recorded, rows, edges) {
+                return Poll::Ready(Err(state.errors.resource));
+            }
+        }
         let edge = if let Some(edge) = existing {
             state.stats.duplicate_reads += 1;
             edge

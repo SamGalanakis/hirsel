@@ -2346,3 +2346,113 @@ fn body_admission_can_evict_a_spilled_result_after_its_factory_preserves_the_arc
     let reopened = rt.request(&[query(0)]);
     assert_eq!(rt.wait(reopened), Ok(vec![product(query(0))]));
 }
+
+#[test]
+fn completed_reads_survive_cancellation_of_a_later_reopen_generation() {
+    let mut rt = runtime(1, 16 << 20);
+    install(&mut rt, &[(0, Spec::deps(&[1])), (1, Spec::deps(&[]))]);
+    let request = rt.request(&[query(0)]);
+    let _owner = rt.wait(request).unwrap();
+    let mut state = rt.shared.lock();
+    let first = state.nodes.node_id(key(query(0))).unwrap();
+    assert!(state.record_claims(first, Some(key(query(1)))));
+    assert!(state.nodes.consume_read(first, key(query(1))));
+    state.remove(key(query(0)));
+    state.ensure(key(query(0))).unwrap();
+    state.remove(key(query(0)));
+    let reopened = state.ensure(key(query(0))).unwrap();
+    let target = state.nodes.node_id(key(query(1))).unwrap();
+    assert!(
+        state.nodes.insert_edge(target, reopened).is_none(),
+        "cancelled reopen cannot erase the preceding completed product's reads"
+    );
+}
+
+#[test]
+fn consuming_async_mailbox_releases_execution_slots_and_reopens_after_9000_products() {
+    struct Stream;
+    impl LocalQueryFactory for Stream {
+        fn weight(&self, _: QueryId) -> Result<MemoryWeight, Reference> {
+            Ok(MemoryWeight {
+                retained: 64 << 10,
+                scratch: 32,
+                stack: 0,
+            })
+        }
+        fn create(&self, id: QueryId) -> Result<Box<dyn LocalQueryTask>, Reference> {
+            Ok(Box::new(LocalFutureTask::new(
+                id,
+                self.weight(id)?,
+                1,
+                errors(),
+                move |reads| async move {
+                    if id == query(0) {
+                        for n in 1..=9000 {
+                            let next = query(if n == 9000 { 1 } else { n });
+                            assert_eq!(reads.read_consuming(next).await?, product(next));
+                        }
+                    }
+                    Ok(product(id))
+                },
+            )?))
+        }
+    }
+    let mut rt = runtime(1, 16 << 20);
+    let capacity = rt.shared.lock().max_entries;
+    rt.register_local(1, Arc::new(Stream)).unwrap();
+    let request = rt.request(&[query(0)]);
+    assert_eq!(rt.wait(request), Ok(vec![product(query(0))]));
+    assert_eq!(rt.stats().claims, 9001);
+    assert_eq!(rt.stats().peak_live_nodes, 2);
+    assert_eq!(rt.shared.lock().max_entries, capacity);
+    assert!(rt.metadata_capacity_bytes() <= rt.stats().bookkeeping_bytes);
+}
+
+#[test]
+fn consumed_records_reuse_slot_bookkeeping_before_debiting_working_memory() {
+    struct Stream;
+    impl LocalQueryFactory for Stream {
+        fn weight(&self, _: QueryId) -> Result<MemoryWeight, Reference> {
+            Ok(MemoryWeight {
+                retained: 4096,
+                scratch: 16 << 10,
+                stack: 0,
+            })
+        }
+        fn create(&self, id: QueryId) -> Result<Box<dyn LocalQueryTask>, Reference> {
+            Ok(Box::new(LocalFutureTask::new(
+                id,
+                self.weight(id)?,
+                1,
+                errors(),
+                move |reads| async move {
+                    if id == query(0) {
+                        for n in 1..=16 {
+                            assert_eq!(reads.read_consuming(query(n)).await?, product(query(n)));
+                        }
+                    }
+                    Ok(product(id))
+                },
+            )?))
+        }
+    }
+    let bytes = STACK as u64 + 8 * ENTRY_BYTES + (16 << 10) + 2 * 4096;
+    let budget = ProcessBudget::new(bytes);
+    let mut rt = AdmittedRuntime::with_metadata(
+        Jobs::ONE,
+        budget.reserve(bytes).unwrap(),
+        errors(),
+        STACK,
+        Some(8),
+        false,
+    )
+    .unwrap();
+    rt.register_local(1, Arc::new(Stream)).unwrap();
+    let request = rt.request(&[query(0)]);
+    assert_eq!(rt.wait(request), Ok(vec![product(query(0))]));
+    assert_eq!(rt.stats().claims, 17);
+    assert_eq!(rt.stats().peak_live_nodes, 2);
+    assert_eq!(rt.stats().bookkeeping_bytes, 8 * ENTRY_BYTES);
+    assert!(rt.stats().peak_bytes <= bytes);
+    assert!(rt.metadata_capacity_bytes() <= rt.stats().bookkeeping_bytes);
+}

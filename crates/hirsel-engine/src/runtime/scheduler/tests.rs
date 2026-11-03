@@ -2455,4 +2455,65 @@ fn consumed_records_reuse_slot_bookkeeping_before_debiting_working_memory() {
     assert_eq!(rt.stats().bookkeeping_bytes, 8 * ENTRY_BYTES);
     assert!(rt.stats().peak_bytes <= bytes);
     assert!(rt.metadata_capacity_bytes() <= rt.stats().bookkeeping_bytes);
+struct OrderedPublication {
+    published: Arc<Mutex<Vec<QueryId>>>,
+    prerequisite: Option<(QueryId, QueryId)>,
+}
+impl LocalQueryFactory for OrderedPublication {
+    fn weight(&self, _: QueryId) -> Result<MemoryWeight, Reference> {
+        Ok(MemoryWeight {
+            retained: 16384,
+            scratch: 32,
+            stack: 0,
+        })
+    }
+    fn create(&self, id: QueryId) -> Result<Box<dyn LocalQueryTask>, Reference> {
+        let published = self.published.clone();
+        let dependency = self
+            .prerequisite
+            .filter(|(root, _)| *root == id)
+            .map(|(_, dependency)| dependency);
+        Ok(Box::new(LocalFutureTask::new(
+            id,
+            self.weight(id)?,
+            2,
+            errors(),
+            move |reads| async move {
+                if let Some(dependency) = dependency {
+                    reads.read_consuming(dependency).await?;
+                }
+                reads.publication().await?;
+                published.lock().unwrap().push(id);
+                Ok(product(id))
+            },
+        )?))
+    }
+}
+#[test]
+fn ordered_publication_admits_a_later_root_as_an_earlier_prerequisite() {
+    for jobs in [1, 2, 8] {
+        let mut rt = runtime(jobs, 16 << 20);
+        let published = Arc::new(Mutex::new(vec![]));
+        rt.register_local(
+            2,
+            Arc::new(OrderedPublication {
+                published: published.clone(),
+                prerequisite: Some((local_query(0), local_query(2))),
+            }),
+        )
+        .unwrap();
+        let request = rt.request(&[local_query(0), local_query(1), local_query(2)]);
+        assert_eq!(
+            rt.wait(request),
+            Ok(vec![
+                product(local_query(0)),
+                product(local_query(1)),
+                product(local_query(2))
+            ])
+        );
+        assert_eq!(
+            *published.lock().unwrap(),
+            vec![local_query(2), local_query(0), local_query(1)]
+        );
+    }
 }

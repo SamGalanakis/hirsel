@@ -23,7 +23,15 @@ enum Eviction {
     Requested,
     Completed(bool),
 }
+#[derive(Default)]
+enum Publication {
+    #[default]
+    Idle,
+    Requested,
+    Completed(Result<(), Reference>),
+}
 struct Reads {
+    publication: Publication,
     eviction: Eviction,
     cycle: Vec<QueryId>,
     composed: Composed,
@@ -110,6 +118,19 @@ impl QueryReads {
         })
         .await
     }
+    pub(crate) async fn publication(&self) -> Result<(), Reference> {
+        poll_fn(|_| {
+            let mut reads = self.0.borrow_mut();
+            match std::mem::take(&mut reads.publication) {
+                Publication::Completed(result) => Poll::Ready(result),
+                Publication::Idle | Publication::Requested => {
+                    reads.publication = Publication::Requested;
+                    Poll::Pending
+                }
+            }
+        })
+        .await
+    }
     pub async fn read(&self, query: QueryId) -> Outcome {
         poll_fn(|_| self.poll_read(query, false)).await
     }
@@ -189,6 +210,7 @@ impl LocalFutureTask {
         let max_reads = Self::read_capacity(weight.retained, std::mem::size_of::<F>(), max_reads)
             .ok_or(errors.resource)?;
         let reads = QueryReads(Rc::new(RefCell::new(Reads {
+            publication: Publication::Idle,
             eviction: Eviction::Idle,
             cycle: Vec::new(),
             composed: Composed::Idle,
@@ -212,6 +234,14 @@ impl LocalFutureTask {
     }
     fn advance(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
         loop {
+            if matches!(self.reads.0.borrow().publication, Publication::Requested) {
+                match cx.poll_publication() {
+                    Poll::Ready(result) => {
+                        self.reads.0.borrow_mut().publication = Publication::Completed(result)
+                    }
+                    Poll::Pending => return QueryPoll::Waiting(Vec::new()),
+                }
+            }
             if matches!(self.reads.0.borrow().eviction, Eviction::Requested) {
                 let evicted = match cx.poll_evict_body() {
                     Poll::Ready(evicted) => evicted,
@@ -286,7 +316,8 @@ impl LocalFutureTask {
                 Poll::Pending
                     if self.reads.0.borrow().requested.is_empty()
                         && !matches!(self.reads.0.borrow().composed, Composed::Requested(_))
-                        && !matches!(self.reads.0.borrow().eviction, Eviction::Requested) =>
+                        && !matches!(self.reads.0.borrow().eviction, Eviction::Requested)
+                        && !matches!(self.reads.0.borrow().publication, Publication::Requested) =>
                 {
                     // External async operations cannot wake the query graph.
                     // Reject rather than leaving an unregistered sleeping task.
@@ -354,6 +385,7 @@ mod tests {
     }
     fn reads() -> QueryReads {
         QueryReads(Rc::new(RefCell::new(Reads {
+            publication: Publication::Idle,
             eviction: Eviction::Idle,
             cycle: Vec::new(),
             composed: Composed::Idle,

@@ -110,6 +110,11 @@ pub trait QueryContext {
     fn cycle_members(&self, _dependency: QueryId, _limit: usize) -> Option<Vec<QueryId>> {
         None
     }
+    /// Admit an ordered side effect only on the first unfinished logical
+    /// root/dependency path. The runtime rechecks liveness at acceptance.
+    fn poll_publication(&mut self) -> Poll<Result<(), Reference>> {
+        Poll::Ready(Ok(()))
+    }
     /// Records an actual dependency. Pending never blocks a worker thread.
     fn read(&mut self, key: QueryId) -> Poll<Result<ProductRef, Reference>>;
 }

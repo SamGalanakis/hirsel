@@ -253,6 +253,26 @@ impl Nodes {
             .get(&(source.slot, target.slot))
             .map(|&edge| edge as usize)
     }
+    pub fn publication_frontier(&self, root: Key, candidate: NodeId) -> bool {
+        let Some(mut cursor) = self.node_id(root) else {
+            return false;
+        };
+        // insert_edge preserves read order. The graph is acyclic, so each
+        // descent consumes one of its admitted nodes without recursion.
+        loop {
+            if cursor == candidate {
+                return true;
+            }
+            let node = &self.rows[cursor.slot as usize];
+            let Some(next) = node.dependencies.iter().find_map(|edge| {
+                let slot = edge.target();
+                (!matches!(self.rows[slot as usize].status, Status::Settled(_))
+                    || (!edge.body_consumed() && matches!(self.rows[slot as usize].status, Status::Settled(ref result) if result.is_err())))
+                    .then_some(NodeId { slot, generation: self.rows[slot as usize].generation })
+            }) else { return false; };
+            cursor = next;
+        }
+    }
     pub fn insert_edge(&mut self, source: NodeId, target: NodeId) -> Option<usize> {
         if source.slot == target.slot
             || (!self.history.is_empty()

@@ -1300,6 +1300,34 @@ impl QueryContext for Context<'_> {
         }
     }
 
+    fn poll_publication(&mut self) -> Poll<Result<(), Reference>> {
+        let mut state = self.shared.lock();
+        if state.stopped
+            || state
+                .nodes
+                .get_id(self.generation)
+                .is_none_or(|node| !node.live || node.discard)
+        {
+            return Poll::Ready(Err(state.errors.cancelled));
+        }
+        let first = state
+            .requests
+            .values()
+            .flatten()
+            .copied()
+            .find(|root| state.result(*root).is_none());
+        if first.is_some_and(|root| state.nodes.publication_frontier(root, self.generation)) {
+            state.admission_waiters.remove(&self.query);
+            self.admission_wait = false;
+            Poll::Ready(Ok(()))
+        } else {
+            let revision = state.progress_revision;
+            state.admission_waiters.insert(self.query, revision);
+            self.admission_wait = true;
+            Poll::Pending
+        }
+    }
+
     fn cycle_members(&self, dependency: QueryId, limit: usize) -> Option<Vec<QueryId>> {
         let state = self.shared.lock();
         let scratch = state

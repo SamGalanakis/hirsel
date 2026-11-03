@@ -12,7 +12,7 @@ use hirsel_types::{
     BuiltinType, ForeignThreads, FunctionType, GenericArgument, SignatureKind, Type, TypeId,
     TypeInterner, TypeKind,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Each extern's dispatch word: its package's `threads`, its `@blocking` and its package's
 /// ordinal among the program's `unsafe ffi` packages, which names the package's `serial`
@@ -75,7 +75,7 @@ pub(crate) fn check_callbacks(
     let snapshot = input;
     // Each callback type a parameter of a non-home extern carries, with the first such
     // extern.
-    let mut handed: BTreeMap<String, DefPath> = BTreeMap::new();
+    let mut handed: HashMap<CallbackType, DefPath> = HashMap::new();
     for (path, signature) in snapshot.signatures {
         match program.foreign_dispatch.get(path) {
             Some(word) if word & FOREIGN_THREADS_MASK != FOREIGN_THREADS_HOME => {}
@@ -107,7 +107,7 @@ pub(crate) fn check_callbacks(
         let SignatureKind::Function(function) = &signature.kind else {
             continue;
         };
-        let Some(extern_) = handed.get(&function_shape(&snapshot.types, function)) else {
+        let Some(extern_) = handed.get(&callback_type(&snapshot.types, function)) else {
             continue;
         };
         if let Some(reach) = input.semantic.home_reach(callback) {
@@ -138,7 +138,7 @@ pub(crate) fn check_callbacks(
 
 /// Visit the shape of each callback type `ty` carries: a `FnPtr`'s function type, also as a
 /// type argument or a tuple element.
-fn callback_types(types: &TypeInterner, ty: TypeId, visit: &mut impl FnMut(String)) {
+fn callback_types(types: &TypeInterner, ty: TypeId, visit: &mut impl FnMut(CallbackType)) {
     let Some(row) = types.get(ty) else {
         return;
     };
@@ -161,7 +161,7 @@ fn callback_types(types: &TypeInterner, ty: TypeId, visit: &mut impl FnMut(Strin
                         ..
                     }) = types.get(*target)
                 {
-                    visit(function_shape(types, function));
+                    visit(callback_type(types, function));
                 }
             }
         }
@@ -178,78 +178,23 @@ fn callback_types(types: &TypeInterner, ty: TypeId, visit: &mut impl FnMut(Strin
     }
 }
 
-/// A function type's nominal shape: its parameters' and result's types, without names,
-/// passing modes or uniqueness, which a callback's definition and an extern's `FnPtr`
-/// spell differently.
-fn function_shape(types: &TypeInterner, function: &FunctionType) -> String {
-    let mut out = String::from("fn(");
-    for parameter in function.parameters.iter() {
-        type_shape(types, parameter.ty, &mut out, 0);
-        out.push(',');
-    }
-    out.push_str(")->");
-    type_shape(types, function.result, &mut out, 0);
-    out
+/// Exact nominal callback identity in one source interner. Names, passing modes and
+/// uniqueness differ between definitions and `FnPtr` declarations; flow depends on the
+/// parameter and result types. Their interned shape IDs retain every nested constructor
+/// and nominal argument without a depth cutoff.
+#[derive(PartialEq, Eq, Hash)]
+struct CallbackType {
+    parameters: Vec<TypeId>,
+    result: TypeId,
 }
 
-fn type_shape(types: &TypeInterner, ty: TypeId, out: &mut String, depth: u32) {
-    use std::fmt::Write;
-    let Some(row) = types.get(ty).filter(|_| depth < 32) else {
-        out.push('?');
-        return;
-    };
-    let arguments = |arguments: &[GenericArgument], out: &mut String| {
-        out.push('[');
-        for argument in arguments {
-            match argument {
-                GenericArgument::Type(ty) => type_shape(types, *ty, out, depth + 1),
-                GenericArgument::Size(size) => {
-                    let _ = write!(out, "{size:?}");
-                }
-            }
-            out.push(',');
-        }
-        out.push(']');
-    };
-    match &row.kind {
-        TypeKind::Primitive(primitive) => {
-            let _ = write!(out, "{primitive:?}");
-        }
-        TypeKind::Named {
-            definition,
-            arguments: a,
-        } => {
-            let _ = write!(out, "{definition}");
-            arguments(a, out);
-        }
-        TypeKind::Builtin { kind, arguments: a } => {
-            let _ = write!(out, "{kind:?}");
-            arguments(a, out);
-        }
-        TypeKind::Tuple(elements) => {
-            out.push('(');
-            for element in elements.iter() {
-                type_shape(types, *element, out, depth + 1);
-                out.push(',');
-            }
-            out.push(')');
-        }
-        TypeKind::Box(inner) => {
-            out.push_str("Box ");
-            type_shape(types, *inner, out, depth + 1);
-        }
-        TypeKind::Function(function) => {
-            out.push_str("fn(");
-            for parameter in function.parameters.iter() {
-                type_shape(types, parameter.ty, out, depth + 1);
-                out.push(',');
-            }
-            out.push_str(")->");
-            type_shape(types, function.result, out, depth + 1);
-        }
-        // Structural and generic rows spell their whole row: callbacks are monomorphic.
-        other => {
-            let _ = write!(out, "{other:?}");
-        }
+fn callback_type(types: &TypeInterner, function: &FunctionType) -> CallbackType {
+    CallbackType {
+        parameters: function
+            .parameters
+            .iter()
+            .map(|parameter| types.shape(parameter.ty))
+            .collect(),
+        result: types.shape(function.result),
     }
 }

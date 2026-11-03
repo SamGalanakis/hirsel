@@ -608,6 +608,76 @@ pub fn main(u: Unsafe) -> Result[(), ()] {{
     });
 }
 
+/// S-13 distinguishes callback parameter types even below 32 pointer layers.
+#[test]
+fn deep_callback_types_only_refuse_matching_home_reach() {
+    with_compiler_stack(|| {
+        let pointer = |leaf: &str| format!("{}{leaf}{}", "Ptr[".repeat(33), "]".repeat(33));
+        let bytes = pointer("u8");
+        for (name, home_pointer, refuses) in [
+            ("distinct", pointer("bool"), false),
+            ("matching", bytes.clone(), true),
+        ] {
+            let main = format!(
+                r#"fn safe(mut ctx: (Unsafe, u64), p: {bytes}) -> u8 {{ 0u8 }}
+fn reaches_home(mut ctx: (Unsafe, u64), p: {home_pointer}) -> u8 {{
+  let (u, _) = ctx
+  let _ = homelib.tid(u)
+  1u8
+}}
+pub fn main(u: Unsafe) -> Result[(), ()] {{
+  let mut ctx = (u, 0u64)
+  let _ = anylib.anylib_deep(u, mut ctx, safe)
+  let _ = homelib.homelib_deep(u, mut ctx, reaches_home)
+  Ok(())
+}}
+"#
+            );
+            let fixture = fixture(&format!("deep-{name}"), &main);
+            for (package, pointer) in [("anylib", &bytes), ("homelib", &home_pointer)] {
+                let path = fixture.root.join(package).join("lib.hir");
+                let mut source = std::fs::read_to_string(&path).unwrap();
+                source.push_str(&format!(
+                    r#"
+/// Calls the callback during this call and retains nothing.
+pub extern "c" fn {package}_deep(
+  u: Unsafe,
+  mut ctx: unique (Unsafe, u64),
+  f: FnPtr[fn(mut context: unique (Unsafe, u64), value: {pointer}) -> u8]
+) -> u8
+"#
+                ));
+                std::fs::write(path, source).unwrap();
+            }
+            let mut loaded = load_program(&fixture.manifest).unwrap();
+            loaded.check_for_execution().unwrap();
+            let input = loaded.engine.export_native_input().unwrap();
+            let validated = loaded.engine.import_native_input(input).unwrap();
+            for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+                let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+                let result = native::build(&validated, &options).and_then(|ready| {
+                    native::emit_backend_objects(
+                        &ready,
+                        backend,
+                        native::OptLevel::None,
+                        native::Partition::Singleton,
+                        false,
+                        None,
+                    )
+                });
+                if refuses {
+                    let error = result.err().expect("S-13 refusal").to_string();
+                    for expected in ["PROG-4", "reaches_home", "homelib_tid", "anylib_deep"] {
+                        assert!(error.contains(expected), "{backend:?}: {error}");
+                    }
+                } else {
+                    result.unwrap_or_else(|error| panic!("{backend:?}: {error}"));
+                }
+            }
+        }
+    });
+}
+
 /// `threads` is a trusted manifest member: `home` by default, `serial` or `any`, reported
 /// by check (an unknown value is in `foreign::unsafe_ffi_metadata_errors_are_tool_errors`).
 #[test]

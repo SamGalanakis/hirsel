@@ -637,7 +637,7 @@ impl DemandProducer {
         self: &Arc<Self>,
         previous: &Arc<NamespaceCapture>,
         roots: &[DefPath],
-        policy: LoweringPolicy,
+        _policy: LoweringPolicy,
         stop_on_error: bool,
         reads: QueryReads,
     ) -> Result<scheduled_lower::SuccessorCapture, QueryError> {
@@ -807,24 +807,26 @@ impl DemandProducer {
                     .bodies
                     .get(&DefId::intern(path))
                     .is_some_and(|body| body.executable);
-                let needed =
-                    executable
-                        && (policy == LoweringPolicy::Reachable
-                            || facts.lowering.as_ref().is_some_and(|use_| {
-                                use_.needed_with(|id| {
-                                    owner.capture().snapshot.signature(id).is_some_and(
-                                        |signature| {
-                                            signature.is_ok_and(|signature| {
-                                                matches!(
-                                                    signature.kind,
-                                                    hirsel_types::SignatureKind::Const { .. }
-                                                )
-                                            })
-                                        },
-                                    )
+                // Ordinary lowering belongs to the consuming Check/Run graph.
+                // Preparation only executes bodies that can select CT work.
+                let needs_comptime = executable
+                    && facts.lowering.as_ref().is_some_and(|use_| {
+                        use_.needed_with(|id| {
+                            owner
+                                .capture()
+                                .snapshot
+                                .signature(id)
+                                .is_some_and(|signature| {
+                                    signature.is_ok_and(|signature| {
+                                        matches!(
+                                            signature.kind,
+                                            hirsel_types::SignatureKind::Const { .. }
+                                        )
+                                    })
                                 })
-                            }));
-                if needed {
+                        })
+                    });
+                if needs_comptime {
                     let query = owner
                         .query(path)
                         .ok_or_else(|| refused("scope body has no Lower producer"))?;

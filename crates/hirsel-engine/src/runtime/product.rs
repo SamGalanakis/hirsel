@@ -455,18 +455,41 @@ pub struct LiveSummaryProduct {
 /// consumed through the current product and cannot be observed through this
 /// facet. Keeping it retains its complete original admitted backing.
 #[derive(Clone)]
-pub struct SummaryFacet(Arc<Owner<Arc<PublishedSummary>>>);
+pub struct SummaryFacet(SummaryFacetOwner);
+#[derive(Clone)]
+enum SummaryFacetOwner {
+    Definition(Arc<Owner<Arc<PublishedSummary>>>),
+    Component(Arc<crate::SourceGrowthComponent>),
+}
 impl SummaryFacet {
+    fn component(value: Arc<crate::SourceGrowthComponent>) -> Self {
+        Self(SummaryFacetOwner::Component(value))
+    }
     pub fn same_owner(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        match (&self.0, &other.0) {
+            (SummaryFacetOwner::Definition(a), SummaryFacetOwner::Definition(b)) => {
+                Arc::ptr_eq(a, b)
+            }
+            (SummaryFacetOwner::Component(a), SummaryFacetOwner::Component(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
     }
     pub fn equivalent(&self, other: &Self) -> bool {
-        self.same_owner(other)
-            || SummaryView::from(&*self.0.value).equivalent(
-                self.0.source.context().record_types(),
-                SummaryView::from(&*other.0.value),
-                other.0.source.context().record_types(),
-            )
+        match (&self.0, &other.0) {
+            (SummaryFacetOwner::Definition(a), SummaryFacetOwner::Definition(b)) => {
+                Arc::ptr_eq(a, b)
+                    || SummaryView::from(&*a.value).equivalent(
+                        a.source.context().record_types(),
+                        SummaryView::from(&*b.value),
+                        b.source.context().record_types(),
+                    )
+            }
+            (SummaryFacetOwner::Component(a), SummaryFacetOwner::Component(b)) => {
+                crate::summary::SettledSummary::component(a)
+                    .equivalent(&crate::summary::SettledSummary::component(b))
+            }
+            _ => false,
+        }
     }
 }
 impl LiveSummaryProduct {
@@ -514,7 +537,7 @@ impl LiveSummaryProduct {
             _reservation: ValueAdmission::Owned(reservation),
         });
         Some(Self {
-            facet: SummaryFacet(current.clone()),
+            facet: SummaryFacet(SummaryFacetOwner::Definition(current.clone())),
             current,
         })
     }
@@ -541,12 +564,13 @@ impl LiveSummaryProduct {
             _reservation: ValueAdmission::Owned(reservation),
         });
         Some(Self {
-            facet: SummaryFacet(current.clone()),
+            facet: SummaryFacet(SummaryFacetOwner::Definition(current.clone())),
             current,
         })
     }
     pub(crate) fn cache_owners(&self, owners: usize) -> bool {
-        Arc::ptr_eq(&self.current, &self.facet.0) && Arc::strong_count(&self.current) == owners * 2
+        matches!(&self.facet.0, SummaryFacetOwner::Definition(facet) if Arc::ptr_eq(&self.current, facet))
+            && Arc::strong_count(&self.current) == owners * 2
     }
     pub fn value(&self) -> &PublishedSummary {
         &self.current.value
@@ -570,16 +594,19 @@ impl LiveSummaryProduct {
         self.current.source.context().record_types()
     }
     pub fn retained_bytes(&self) -> u64 {
+        let SummaryFacetOwner::Definition(facet) = &self.facet.0 else {
+            unreachable!()
+        };
         self.current._reservation.bytes()
             + self.current.source.retained_bytes()
-            + if Arc::ptr_eq(&self.current, &self.facet.0) {
+            + if Arc::ptr_eq(&self.current, facet) {
                 0
             } else {
-                self.facet.0._reservation.bytes()
-                    + if Arc::ptr_eq(&self.current.source.shared.0, &self.facet.0.source.shared.0) {
+                facet._reservation.bytes()
+                    + if Arc::ptr_eq(&self.current.source.shared.0, &facet.source.shared.0) {
                         0
                     } else {
-                        self.facet.0.source.retained_bytes()
+                        facet.source.retained_bytes()
                     }
             }
     }
@@ -639,17 +666,18 @@ impl LiveSummaryProduct {
 pub struct LiveGrowthProduct(Arc<Owner<Arc<crate::source_components::SourceGrowthData>>>);
 pub const LIVE_GROWTH: Domain = Domain {
     kind: 0x4600_0009,
-    schema: 4,
+    schema: 5,
 };
 impl LiveGrowthProduct {
     pub(crate) fn value_bytes(value: &crate::source_components::SourceGrowthData) -> Option<u64> {
         let mut weight = Weight::default();
         weight.add(retained_arc_bytes(value) as usize);
-        // Facets have their own exact charge in the same growth output pool.
         weight.arc(&value.diagnostics, |w, diagnostics| {
             w.vec(diagnostics, |w, diagnostic| w.diagnostic(diagnostic));
         });
-        weight.reads(&value.reads);
+        if value._reads_owner.is_none() {
+            weight.reads(&value.reads);
+        }
         weight
             .bytes
             .checked_add(owner_bytes::<Arc<crate::source_components::SourceGrowthData>>())
@@ -700,6 +728,180 @@ impl LiveGrowthProduct {
                     source.records().encode_with_admission(
                         source.context(),
                         &**value,
+                        grant,
+                        working,
+                    )
+                })
+                .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))
+        })
+    }
+}
+
+/// Membership and one SCC are ordinary independently addressed live products.
+/// Their complete current reads remain separate from the exact settled facet.
+#[derive(serde::Serialize)]
+pub(crate) enum SourceGrowthQueryData {
+    Membership {
+        value: Arc<crate::source_components::SourceMembership>,
+        reads: Arc<Reads>,
+    },
+    Component {
+        value: Arc<crate::SourceGrowthComponent>,
+        reads: Arc<Reads>,
+    },
+}
+pub(crate) struct GrowthPublicationSource {
+    source: ProductSource,
+    pub(crate) reads: Mutex<crate::memo::ReadPool>,
+    _reservation: MemoryReservation,
+}
+pub(crate) struct SourceGrowthPublication {
+    pub(crate) reads: Arc<Reads>,
+    source: Arc<GrowthPublicationSource>,
+}
+#[derive(Clone)]
+enum SourceGrowthValue {
+    Membership(Arc<crate::source_components::SourceMembership>),
+    Component(Arc<crate::SourceGrowthComponent>),
+}
+#[derive(Clone)]
+pub struct LiveSourceGrowthProduct(SourceGrowthValue, Option<SummaryFacet>);
+pub const LIVE_SOURCE_MEMBERSHIP: Domain = Domain {
+    kind: 0x4600_0024,
+    schema: 1,
+};
+pub const LIVE_SOURCE_COMPONENT: Domain = Domain {
+    kind: 0x4600_0025,
+    schema: 1,
+};
+impl LiveSourceGrowthProduct {
+    pub(crate) fn source_bytes() -> u64 {
+        retained_arc_bytes(&std::mem::MaybeUninit::<GrowthPublicationSource>::uninit())
+            + ProductSource::metadata_bytes()
+    }
+    pub(crate) fn admit_source(
+        source: ProductSourceInput,
+        allowance: &mut MemoryReservation,
+    ) -> Option<Arc<GrowthPublicationSource>> {
+        let mut reservation = allowance.split(Self::source_bytes())?;
+        let source = source.admit(&mut reservation)?;
+        Some(Arc::new(GrowthPublicationSource {
+            source,
+            reads: Mutex::default(),
+            _reservation: reservation,
+        }))
+    }
+    /// Values own their allocation grant. Observations are self-admitted by
+    /// this publication source's pool, independently of Front's policy.
+    pub(crate) fn new(
+        identity: (Address, Action),
+        value: SourceGrowthQueryData,
+        source: Arc<GrowthPublicationSource>,
+    ) -> Option<Self> {
+        let (value, facet) = match value {
+            SourceGrowthQueryData::Membership { mut value, reads } => {
+                if (value.product.address, value.product.action) != identity {
+                    return None;
+                }
+                Arc::get_mut(&mut value)?.publication =
+                    Some(SourceGrowthPublication { reads, source });
+                (SourceGrowthValue::Membership(value), None)
+            }
+            SourceGrowthQueryData::Component { mut value, reads } => {
+                if (value.product.address, value.product.action) != identity {
+                    return None;
+                }
+                Arc::get_mut(&mut value)?.publication =
+                    Some(SourceGrowthPublication { reads, source });
+                let facet = SummaryFacet::component(value.clone());
+                (SourceGrowthValue::Component(value), Some(facet))
+            }
+        };
+        Some(Self(value, facet))
+    }
+    fn publication(&self) -> &SourceGrowthPublication {
+        match &self.0 {
+            SourceGrowthValue::Membership(v) => v.publication.as_ref().unwrap(),
+            SourceGrowthValue::Component(v) => v.publication.as_ref().unwrap(),
+        }
+    }
+    pub(crate) fn value(&self) -> SourceGrowthQueryData {
+        let reads = self.publication().reads.clone();
+        match &self.0 {
+            SourceGrowthValue::Membership(value) => SourceGrowthQueryData::Membership {
+                value: value.clone(),
+                reads,
+            },
+            SourceGrowthValue::Component(value) => SourceGrowthQueryData::Component {
+                value: value.clone(),
+                reads,
+            },
+        }
+    }
+    fn identity(&self) -> crate::SourceGrowthIdentity {
+        match &self.0 {
+            SourceGrowthValue::Membership(v) => v.product,
+            SourceGrowthValue::Component(v) => v.product,
+        }
+    }
+    pub fn address(&self) -> Address {
+        self.identity().address
+    }
+    pub fn action(&self) -> Action {
+        self.identity().action
+    }
+    pub fn domain(&self) -> Domain {
+        match &self.0 {
+            SourceGrowthValue::Membership(_) => LIVE_SOURCE_MEMBERSHIP,
+            SourceGrowthValue::Component(_) => LIVE_SOURCE_COMPONENT,
+        }
+    }
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (SourceGrowthValue::Membership(a), SourceGrowthValue::Membership(b)) => {
+                Arc::ptr_eq(a, b)
+            }
+            (SourceGrowthValue::Component(a), SourceGrowthValue::Component(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+    pub fn facet(&self) -> Option<&SummaryFacet> {
+        self.1.as_ref()
+    }
+    pub fn equivalent(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (SourceGrowthValue::Membership(a), SourceGrowthValue::Membership(b)) => {
+                a.components.len() == b.components.len()
+                    && a.components
+                        .iter()
+                        .zip(&b.components)
+                        .all(|(a, b)| a.members == b.members && a.inputs == b.inputs)
+            }
+            (SourceGrowthValue::Component(_), SourceGrowthValue::Component(_)) => self
+                .1
+                .as_ref()
+                .zip(other.1.as_ref())
+                .is_some_and(|(a, b)| a.equivalent(b)),
+            _ => false,
+        }
+    }
+    pub fn backdated(&self, previous: &Self) -> Option<Self> {
+        self.equivalent(previous)
+            .then(|| Self(self.0.clone(), previous.1.clone()))
+    }
+    pub(super) fn archive_with(
+        &self,
+        admission: ArchiveAdmission<'_>,
+    ) -> io::Result<ProductArchive> {
+        let source = &self.publication().source.source;
+        materialize_archive(self.domain(), admission, |grant| {
+            self.publication()
+                .reads
+                .encoding_working_bytes()
+                .and_then(|working| {
+                    source.records().encode_with_admission(
+                        source.context(),
+                        &self.value(),
                         grant,
                         working,
                     )
@@ -1141,13 +1343,21 @@ mod tests {
             namespace: descriptor().0,
             scratch: 1 << 20,
         }
-        .settle(Vec::new())
+        .accept(
+            crate::SourceGrowthIdentity {
+                address: descriptor().0,
+                action: descriptor().1,
+                output: hirsel_syntax::ContentHash::default(),
+            },
+            Vec::new(),
+        )
         .unwrap();
         (
             Arc::new(crate::source_components::SourceGrowthData {
                 facets: Arc::new(facets),
                 diagnostics: Arc::new(Vec::new()),
                 reads: Arc::new(Reads::empty()),
+                _reads_owner: None,
             }),
             source,
         )
@@ -1819,6 +2029,86 @@ mod tests {
         drop(reused);
         assert!(old_producer.upgrade().is_none());
         assert!(new_producer.upgrade().is_none());
+        assert_eq!(budget.reserved(), 0);
+    }
+}
+
+#[cfg(test)]
+mod source_component_tests {
+    use super::*;
+    use crate::runtime::{MemoryReservationPool, ProcessBudget};
+    use crate::{PhaseAdapters, QueryEngine, SourceGrowthProducer};
+    use hirsel_syntax::{ContentHash, DefId, DefPath};
+
+    #[test]
+    fn equal_component_facet_retains_the_old_owner_and_current_observations() {
+        let engine = QueryEngine::new(crate::default_environment(), PhaseAdapters::default());
+        let context = engine.source_records();
+        let budget = ProcessBudget::new(1 << 20);
+        let pool = MemoryReservationPool::new(budget.reserve(512 << 10).unwrap())
+            .ok()
+            .unwrap();
+        let producer = SourceGrowthProducer {
+            source: &context,
+            output_pool: &pool,
+            namespace: Address(ContentHash::default()),
+            scratch: 64 << 10,
+        };
+        let records = NativeRecords::new(
+            context.record_types().clone(),
+            Arc::new(crate::store::MemStore::default()),
+        );
+        let input = ProductSource::prepare(context.clone(), records, Arc::new(())).unwrap();
+        let mut allowance = budget
+            .reserve(LiveSourceGrowthProduct::source_bytes())
+            .unwrap();
+        let source = LiveSourceGrowthProduct::admit_source(input, &mut allowance).unwrap();
+        let owner = DefId::intern(&DefPath::core("component-facet"));
+        let make = |label: &[u8], reads: Arc<Reads>| {
+            let value = producer
+                .component_value(
+                    vec![owner].into_boxed_slice(),
+                    Box::new([]),
+                    Action(ContentHash::of_bytes(label)),
+                )
+                .unwrap();
+            let identity = value.product;
+            let product = LiveSourceGrowthProduct::new(
+                (identity.address, identity.action),
+                SourceGrowthQueryData::Component { value, reads },
+                source.clone(),
+            )
+            .unwrap();
+            let SourceGrowthValue::Component(value) = &product.0 else {
+                unreachable!()
+            };
+            let weak = Arc::downgrade(value);
+            (product, weak)
+        };
+        let (old, old_owner) = make(b"old", Arc::new(Reads::empty()));
+        let mut reads = crate::ReadsBuilder::new();
+        reads.record(
+            crate::ReadKey::Environment,
+            ContentHash::of_bytes(b"current"),
+        );
+        let reads = Arc::new(reads.finish().unwrap());
+        let (fresh, _) = make(b"new", reads.clone());
+        assert!(!fresh.facet().unwrap().same_owner(old.facet().unwrap()));
+        let reused = fresh.backdated(&old).unwrap();
+        assert!(reused.facet().unwrap().same_owner(old.facet().unwrap()));
+        assert_eq!(reused.action(), fresh.action());
+        let SourceGrowthQueryData::Component { reads: current, .. } = reused.value() else {
+            unreachable!()
+        };
+        assert_eq!(current.as_ref(), reads.as_ref());
+        drop(old);
+        assert!(old_owner.upgrade().is_some());
+        drop(reused);
+        assert!(old_owner.upgrade().is_none());
+        drop(fresh);
+        drop(source);
+        drop(pool);
+        drop(allowance);
         assert_eq!(budget.reserved(), 0);
     }
 }

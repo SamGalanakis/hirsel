@@ -11,6 +11,7 @@ use std::sync::{Arc, Weak};
 pub(crate) enum SettledSummary {
     Published(Weak<PublishedSummary>, Weak<TypeInterner>),
     Checked(Weak<CheckedSummary>, Weak<TypeInterner>),
+    Component(Weak<crate::SourceGrowthComponent>),
     #[cfg(test)]
     Test(ContentHash),
 }
@@ -20,6 +21,9 @@ impl SettledSummary {
     }
     pub(crate) fn checked(value: &Arc<CheckedSummary>, types: &Arc<TypeInterner>) -> Self {
         Self::Checked(Arc::downgrade(value), Arc::downgrade(types))
+    }
+    pub(crate) fn component(value: &Arc<crate::SourceGrowthComponent>) -> Self {
+        Self::Component(Arc::downgrade(value))
     }
     pub(crate) fn equivalent(&self, other: &Self) -> bool {
         match (self, other) {
@@ -41,6 +45,10 @@ impl SettledSummary {
                 (Arc::ptr_eq(&a, &b) && Arc::ptr_eq(&at, &bt))
                     || SummaryView::from(&*a).equivalent(&at, SummaryView::from(&*b), &bt)
             }
+            (Self::Component(a), Self::Component(b)) => match (a.upgrade(), b.upgrade()) {
+                (Some(a), Some(b)) => a.equivalent(&b),
+                _ => false,
+            },
             #[cfg(test)]
             (Self::Test(a), Self::Test(b)) => a == b,
             _ => false,

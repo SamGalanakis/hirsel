@@ -3,8 +3,15 @@
 //! factories and output inspection execute no compiler phase.
 use super::*;
 use crate::runtime::*;
+use crate::source_components::{SourceGrowthQueryRecord, SourceMembership};
 use crate::store::{Domain, Reference, ResultStore};
-use std::{sync::Mutex, task::Poll};
+use std::{
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering::Relaxed},
+    },
+    task::Poll,
+};
 pub const FRONT_GROWTH_KIND: u32 = 0x4600_0008;
 const OBSERVATIONS: Domain = Domain {
     kind: 0x4600_0023,
@@ -25,6 +32,10 @@ pub struct FrontGrowthQueries {
     package: hirsel_syntax::PackageId,
     store: Arc<dyn ResultStore>,
     completed: Mutex<Option<ProductRef>>,
+    membership: Mutex<Option<ProductRef>>,
+    publication_source: Mutex<Option<Arc<GrowthPublicationSource>>>,
+    solves: AtomicU64,
+    memberships: AtomicU64,
     failure: Mutex<Option<(Reference, QueryError)>>,
     weight: MemoryWeight,
     errors: RuntimeErrors,
@@ -71,6 +82,18 @@ impl FrontGrowthQueries {
             .as_ref()
             .and_then(|(selected, error)| (*selected == reference).then(|| error.clone()))
     }
+    pub fn component_solves(&self) -> u64 {
+        self.solves.load(Relaxed)
+    }
+    pub fn membership_solves(&self) -> u64 {
+        self.memberships.load(Relaxed)
+    }
+    fn membership_query(&self) -> QueryId {
+        QueryId {
+            kind: FRONT_GROWTH_KIND,
+            address: self.producer().membership_address(),
+        }
+    }
     pub fn query(&self) -> QueryId {
         self.query
     }
@@ -92,36 +115,381 @@ impl FrontGrowthQueries {
 struct Factory(Arc<FrontGrowthQueries>);
 impl QueryFactory for Factory {
     fn create(&self, id: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
-        if id != self.0.query {
-            return Err(self.0.errors.protocol);
+        let queries = self.0.clone();
+        if id == queries.query {
+            return Ok(Box::new(Task {
+                queries,
+                membership: None,
+                components: Vec::new(),
+                cursor: 0,
+                table_keys: BTreeMap::new(),
+                required: BTreeMap::new(),
+                reads: ReadsBuilder::new(),
+                waiting: None,
+                terminal: None,
+            }));
         }
-        let fact_bytes = (self.0.roots.len() as u64)
-            .saturating_mul(std::mem::size_of::<SourceGrowthFact>() as u64);
-        if fact_bytes > self.0.output_budget {
-            return Err(self.0.errors.resource);
+        let component = if id == queries.membership_query() {
+            None
+        } else {
+            let selected = queries.membership.lock().unwrap_or_else(|e| e.into_inner());
+            let SourceGrowthQueryData::Membership { value, .. } = selected
+                .as_ref()
+                .and_then(ProductRef::source_growth_value)
+                .map(LiveSourceGrowthProduct::value)
+                .ok_or(queries.errors.protocol)?
+            else {
+                return Err(queries.errors.protocol);
+            };
+            let index = value
+                .components
+                .iter()
+                .position(|c| c.address == id.address.0)
+                .ok_or(queries.errors.protocol)?;
+            Some((value.clone(), index))
+        };
+        if id.kind != FRONT_GROWTH_KIND {
+            return Err(queries.errors.protocol);
         }
-        Ok(Box::new(Task {
-            queries: self.0.clone(),
-            selected: vec![None; self.0.roots.len()],
+        if queries.weight.retained
+            < (std::mem::size_of::<FactTask>() + 2 * std::mem::size_of::<usize>()) as u64
+        {
+            return Err(queries.errors.resource);
+        }
+        let count = component
+            .as_ref()
+            .map_or(queries.roots.len(), |(m, i)| m.components[*i].inputs.len());
+        let bytes = (count as u64)
+            .checked_mul(
+                (std::mem::size_of::<SourceGrowthFact>() + std::mem::size_of::<Arc<Reads>>())
+                    as u64,
+            )
+            .ok_or(queries.errors.resource)?;
+        let admission = queries
+            .output_pool
+            .take(bytes)
+            .ok_or(queries.errors.resource)?;
+        Ok(Box::new(FactTask {
+            queries,
+            id,
+            component,
+            count,
+            waiting: None,
             cursor: 0,
-            facts: Vec::with_capacity(self.0.roots.len()),
-            fact_bytes,
-            table_keys: BTreeMap::new(),
-            required: BTreeMap::new(),
-            reads: ReadsBuilder::new(),
+            facts: Vec::with_capacity(count),
+            reads: Vec::with_capacity(count),
             terminal: None,
+            admission,
         }))
+    }
+}
+fn finish(result: Result<ProductRef, Reference>) -> QueryPoll {
+    match result {
+        Ok(product) => QueryPoll::Complete(product),
+        Err(error) => QueryPoll::Failed(error),
+    }
+}
+struct FactTask {
+    queries: Arc<FrontGrowthQueries>,
+    id: QueryId,
+    component: Option<(Arc<SourceMembership>, usize)>,
+    count: usize,
+    waiting: Option<QueryId>,
+    cursor: usize,
+    facts: Vec<SourceGrowthFact>,
+    reads: Vec<Arc<Reads>>,
+    terminal: Option<Result<ProductRef, Reference>>,
+    admission: MemoryReservation,
+}
+impl FactTask {
+    fn input(&self, i: usize) -> QueryId {
+        self.component
+            .as_ref()
+            .map_or(self.queries.roots.get(i).copied(), |(m, index)| {
+                Some(QueryId {
+                    kind: FRONT_BODY_KIND,
+                    address: hirsel_artifact_store::Address(m.components[*index].inputs[i]),
+                })
+            })
+            .unwrap()
+    }
+    fn advance(&mut self, cx: &mut dyn QueryContext) -> Poll<Result<ProductRef, Reference>> {
+        while self.cursor < self.count {
+            let input = self.input(self.cursor);
+            self.waiting = Some(input);
+            let selected = match cx.read(input) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(selected) => selected,
+            };
+            if let Some(checked) = self.queries.front.checked(selected.clone()) {
+                let Some(reads) = self.queries.publication_source().ok().and_then(|source| {
+                    self.queries
+                        .front
+                        .retained_reads_in(cx, &checked.reads, &source.reads)
+                }) else {
+                    return Poll::Ready(Err(self.queries.errors.resource));
+                };
+                self.reads.push(reads);
+                let observed = selected
+                    .as_ref()
+                    .map(|p| p.action.0)
+                    .unwrap_or_else(|r| r.output.0);
+                let Some(fact) = self.queries.producer().fact_observed(
+                    self.input(self.cursor).address,
+                    checked.summary,
+                    selected.into(),
+                    observed,
+                ) else {
+                    return Poll::Ready(Err(self.queries.errors.resource));
+                };
+                let bytes = fact.input_bytes() - std::mem::size_of::<SourceGrowthFact>() as u64;
+                let Some(charge) = self.queries.output_pool.take(bytes) else {
+                    return Poll::Ready(Err(self.queries.errors.resource));
+                };
+                if self.admission.join(charge).is_err() {
+                    return Poll::Ready(Err(self.queries.errors.protocol));
+                }
+                self.facts.push(fact);
+            } else if let Some(facts) = self.queries.front.check_facts(selected.clone())
+                && matches!(facts.result, Err(QueryError::Diagnostics(_)))
+            {
+                let Some(reads) = self.queries.publication_source().ok().and_then(|source| {
+                    self.queries
+                        .front
+                        .retained_reads_in(cx, &facts.reads, &source.reads)
+                }) else {
+                    return Poll::Ready(Err(self.queries.errors.resource));
+                };
+                self.reads.push(reads);
+            } else {
+                return Poll::Ready(Err(selected.err().unwrap_or(self.queries.errors.protocol)));
+            }
+            cx.release_body(input);
+            self.cursor += 1;
+        }
+        self.waiting = None;
+        Poll::Ready(self.complete(cx))
+    }
+    fn complete(&mut self, cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
+        let queries = &self.queries;
+        self.facts
+            .sort_by_key(|fact| (fact.owner, fact.definition.0.0));
+        // Input observations own their growth-pool grants across suspension.
+        // The flat union exists only during this admitted scratch frame.
+        let mut union = ReadsBuilder::new();
+        for reads in &self.reads {
+            union.merge(reads);
+        }
+        let union = union.finish().map_err(|_| queries.errors.protocol)?;
+        let reads = self
+            .reads
+            .iter()
+            .find(|reads| reads.as_ref() == &union && reads.observed().eq(union.observed()))
+            .cloned()
+            .unwrap_or_else(|| Arc::new(union));
+        let reads = queries
+            .front
+            .retained_reads_in(cx, &reads, &queries.publication_source()?.reads)
+            .ok_or(queries.errors.resource)?;
+        let producer = queries.producer();
+        let (identity, data) = if let Some((membership, index)) = &self.component {
+            let members = &membership.components[*index].members;
+            let action = producer
+                .component_action(members, &self.facts)
+                .ok_or(queries.errors.resource)?;
+            let cached = queries
+                .store
+                .lookup_product(self.id.address)
+                .filter(|a| a.action == action && a.reference.domain == LIVE_SOURCE_COMPONENT)
+                .and_then(|a| queries.load_record(a.reference));
+            let value = if let Some(SourceGrowthQueryRecord::Component {
+                product,
+                members: stored,
+                growing,
+                ..
+            }) = cached
+            {
+                if stored.as_ref() != members.as_ref()
+                    || product.address != self.id.address
+                    || product.action != action
+                {
+                    return Err(queries.errors.protocol);
+                }
+                let value = producer
+                    .component_value(stored, growing, action)
+                    .ok_or(queries.errors.resource)?;
+                if value.product != product {
+                    return Err(queries.errors.protocol);
+                }
+                value
+            } else {
+                queries.solves.fetch_add(1, Relaxed);
+                producer
+                    .component(members, &self.facts)
+                    .ok_or(queries.errors.resource)?
+            };
+            (
+                value.product,
+                SourceGrowthQueryData::Component { value, reads },
+            )
+        } else {
+            let inputs = producer
+                .membership_action(&self.facts)
+                .ok_or(queries.errors.resource)?;
+            // Rejected roots without a checked summary still contribute every
+            // failed lookup and signature observation to this computation.
+            let action = hirsel_artifact_store::Action(ContentHash::of_parts(
+                "hirsel.source-growth.membership.query-action.v1",
+                [
+                    inputs.0.0.as_slice(),
+                    crate::store::payload_reads_hash(&reads).0.as_slice(),
+                ],
+            ));
+            let cached = queries
+                .store
+                .lookup_product(self.id.address)
+                .filter(|a| a.action == action && a.reference.domain == LIVE_SOURCE_MEMBERSHIP)
+                .and_then(|a| queries.load_record(a.reference));
+            let value = if let Some(SourceGrowthQueryRecord::Membership {
+                product,
+                components,
+                ..
+            }) = cached
+            {
+                if product.address != self.id.address || product.action != action {
+                    return Err(queries.errors.protocol);
+                }
+                producer
+                    .membership_value(product, components)
+                    .ok_or(queries.errors.resource)?
+            } else {
+                queries.memberships.fetch_add(1, Relaxed);
+                let mut value = producer
+                    .membership(&self.facts)
+                    .ok_or(queries.errors.resource)?;
+                value.product.action = action;
+                value
+            };
+            (
+                value.product,
+                SourceGrowthQueryData::Membership {
+                    value: Arc::new(value),
+                    reads,
+                },
+            )
+        };
+        // Drop accepted input facts before charging the settled publication.
+        self.facts.clear();
+        self.facts.shrink_to_fit();
+        self.reads.clear();
+        self.reads.shrink_to_fit();
+        let old = std::mem::replace(
+            &mut self.admission,
+            queries.output_pool.take(0).ok_or(queries.errors.resource)?,
+        );
+        drop(old);
+        let value = LiveSourceGrowthProduct::new(
+            (identity.address, identity.action),
+            data,
+            queries.publication_source()?,
+        )
+        .ok_or(queries.errors.resource)?;
+        let product = ProductRef::source_growth(value);
+        queries.persist(&product);
+        if self.component.is_none() {
+            *queries.membership.lock().unwrap_or_else(|e| e.into_inner()) = Some(product.clone());
+        }
+        Ok(product)
+    }
+}
+impl QueryTask for FactTask {
+    fn id(&self) -> QueryId {
+        self.id
+    }
+    fn weight(&self) -> MemoryWeight {
+        // The producer pool already owns both retained input vectors. A new
+        // component does not reserve another whole-program root continuation.
+        MemoryWeight {
+            retained: (std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>()) as u64,
+            ..self.queries.weight
+        }
+    }
+    fn continuation_bytes(&self) -> u64 {
+        self.weight().retained
+    }
+    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+        if let Some(result) = &self.terminal {
+            return finish(result.clone());
+        }
+        match self.advance(cx) {
+            Poll::Pending => QueryPoll::Waiting(self.waiting.into_iter().collect()),
+            Poll::Ready(result) => {
+                self.terminal = Some(result.clone());
+                finish(result)
+            }
+        }
+    }
+}
+impl FrontGrowthQueries {
+    fn publication_source(&self) -> Result<Arc<GrowthPublicationSource>, Reference> {
+        let mut source = self
+            .publication_source
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(source) = &*source {
+            return Ok(source.clone());
+        }
+        let input = ProductSource::prepare(
+            (*self.items).clone(),
+            self.records.clone(),
+            self.front.clone(),
+        )
+        .ok_or(self.errors.protocol)?;
+        let mut allowance = self
+            .output_pool
+            .take(LiveSourceGrowthProduct::source_bytes())
+            .ok_or(self.errors.resource)?;
+        let admitted = LiveSourceGrowthProduct::admit_source(input, &mut allowance)
+            .ok_or(self.errors.resource)?;
+        *source = Some(admitted.clone());
+        Ok(admitted)
+    }
+    fn load_record(&self, reference: Reference) -> Option<SourceGrowthQueryRecord> {
+        if reference.len.checked_mul(8)? > self.weight.scratch {
+            return None;
+        }
+        self.records
+            .decode(&*self.items, &self.store.get_content(reference)?)
+    }
+    fn persist(&self, product: &ProductRef) {
+        if !self.store.persistence().retains() {
+            return;
+        }
+        let Some(value) = product.source_growth_value() else {
+            return;
+        };
+        let Some(bytes) = self.records.encode(&*self.items, &value.value()) else {
+            return;
+        };
+        if (bytes.len() as u64)
+            .checked_mul(8)
+            .is_none_or(|bytes| bytes > self.weight.scratch)
+        {
+            return;
+        }
+        self.store
+            .cache_product(product.address, product.action, product.domain(), &bytes);
     }
 }
 struct Task {
     queries: Arc<FrontGrowthQueries>,
-    selected: Vec<Option<Result<ProductRef, Reference>>>,
+    membership: Option<Arc<SourceMembership>>,
+    components: Vec<Arc<SourceGrowthComponent>>,
     cursor: usize,
-    facts: Vec<SourceGrowthFact>,
-    fact_bytes: u64,
     table_keys: BTreeMap<DefPath, Arc<crate::table_keys::TableKeyUse>>,
     required: BTreeMap<DefPath, BTreeSet<usize>>,
     reads: ReadsBuilder,
+    waiting: Option<QueryId>,
     terminal: Option<Result<ProductRef, Reference>>,
 }
 impl QueryTask for Task {
@@ -131,19 +499,15 @@ impl QueryTask for Task {
     fn weight(&self) -> MemoryWeight {
         self.queries.weight
     }
+    fn continuation_bytes(&self) -> u64 {
+        self.weight().retained
+    }
     fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
-        if let Some(result) = self.terminal.clone() {
-            return finish(result);
+        if let Some(result) = &self.terminal {
+            return finish(result.clone());
         }
         match self.advance(cx) {
-            Poll::Pending => QueryPoll::Waiting(
-                self.queries
-                    .roots
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, id)| self.selected[i].is_none().then_some(*id))
-                    .collect(),
-            ),
+            Poll::Pending => QueryPoll::Waiting(self.waiting.into_iter().collect()),
             Poll::Ready(result) => {
                 self.terminal = Some(result.clone());
                 finish(result)
@@ -151,73 +515,87 @@ impl QueryTask for Task {
         }
     }
 }
-fn finish(result: Result<ProductRef, Reference>) -> QueryPoll {
-    match result {
-        Ok(product) => QueryPoll::Complete(product),
-        Err(error) => QueryPoll::Failed(error),
-    }
-}
 impl Task {
     fn advance(&mut self, cx: &mut dyn QueryContext) -> Poll<Result<ProductRef, Reference>> {
-        for (i, query) in self.queries.roots.iter().enumerate() {
-            if self.selected[i].is_none()
-                && let Poll::Ready(result) = cx.read(*query)
-            {
-                self.selected[i] = Some(result);
-            }
+        let queries = self.queries.clone();
+        if self.membership.is_none() {
+            let id = queries.membership_query();
+            self.waiting = Some(id);
+            let product = match cx.read(id) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(p)) => p,
+            };
+            let Some(SourceGrowthQueryData::Membership { value, reads }) = product
+                .source_growth_value()
+                .map(LiveSourceGrowthProduct::value)
+            else {
+                return Poll::Ready(Err(queries.errors.protocol));
+            };
+            self.reads.merge(&reads);
+            self.membership = Some(value.clone());
         }
-        while let Some(Some(selected)) = self.selected.get(self.cursor).cloned() {
-            let Some(checked) = self.queries.front.checked(selected.clone()) else {
-                if let Some(facts) = self.queries.front.check_facts(selected.clone())
-                    && matches!(facts.result, Err(QueryError::Diagnostics(_)))
-                {
-                    self.reads.merge(&facts.reads);
-                    self.cursor += 1;
-                    continue;
-                }
-                return Poll::Ready(Err(selected.err().unwrap_or(self.queries.errors.protocol)));
+        let membership = self.membership.as_ref().unwrap();
+        while self.components.len() < membership.components.len() {
+            let id = QueryId {
+                kind: FRONT_GROWTH_KIND,
+                address: hirsel_artifact_store::Address(
+                    membership.components[self.components.len()].address,
+                ),
             };
-            for call in &checked.summary.summary.calls {
-                let slots = hirsel_types::core_roles::table_key_parameters(call.callee.path());
-                if !slots.is_empty() {
-                    self.required
-                        .entry(call.callee.path().clone())
-                        .or_default()
-                        .extend(slots);
-                }
-            }
-            self.table_keys.insert(
-                checked.summary.summary.owner.path().clone(),
-                checked.table_keys,
-            );
-            self.reads.merge(&checked.reads);
-            let observed = selected
-                .as_ref()
-                .map(|product| product.action.0)
-                .unwrap_or_else(|reference| reference.output.0);
-            let Some(fact) = self.queries.producer().fact_observed(
-                self.queries.roots[self.cursor].address,
-                checked.summary,
-                selected.into(),
-                observed,
-            ) else {
-                return Poll::Ready(Err(self.queries.errors.resource));
+            self.waiting = Some(id);
+            let product = match cx.read(id) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(p)) => p,
             };
-            self.fact_bytes = self.fact_bytes.saturating_add(
-                fact.input_bytes() - std::mem::size_of::<SourceGrowthFact>() as u64,
-            );
-            if self.fact_bytes > self.queries.output_budget {
-                return Poll::Ready(Err(self.queries.errors.resource));
+            let Some(SourceGrowthQueryData::Component { value, reads }) = product
+                .source_growth_value()
+                .map(LiveSourceGrowthProduct::value)
+            else {
+                return Poll::Ready(Err(queries.errors.protocol));
+            };
+            self.reads.merge(&reads);
+            self.components.push(value.clone());
+        }
+        // Table-key acceptance reduces the same complete checked roots. It
+        // neither builds membership nor solves a source component.
+        while self.cursor < queries.roots.len() {
+            let id = queries.roots[self.cursor];
+            self.waiting = Some(id);
+            let selected = match cx.read(id) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(p) => p,
+            };
+            if let Some(checked) = queries.front.checked(selected.clone()) {
+                for call in &checked.summary.summary.calls {
+                    let slots = hirsel_types::core_roles::table_key_parameters(call.callee.path());
+                    if !slots.is_empty() {
+                        self.required
+                            .entry(call.callee.path().clone())
+                            .or_default()
+                            .extend(slots);
+                    }
+                }
+                self.table_keys.insert(
+                    checked.summary.summary.owner.path().clone(),
+                    checked.table_keys,
+                );
+                self.reads.merge(&checked.reads);
+            } else if let Some(facts) = queries.front.check_facts(selected.clone())
+                && matches!(facts.result, Err(QueryError::Diagnostics(_)))
+            {
+                self.reads.merge(&facts.reads);
+            } else {
+                return Poll::Ready(Err(selected.err().unwrap_or(queries.errors.protocol)));
             }
-            self.facts.push(fact);
+            cx.release_body(id);
             self.cursor += 1;
         }
-        if self.cursor < self.selected.len() {
-            return Poll::Pending;
-        }
+        self.waiting = None;
         Poll::Ready(self.complete(cx))
     }
-    fn complete(&mut self, cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
+    fn complete(&mut self, _cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
         let queries = &self.queries;
         let mut table_reads = ReadsBuilder::new();
         let mut provider =
@@ -252,10 +630,10 @@ impl Task {
                 return Err(reference);
             }
         };
-        let facts = std::mem::take(&mut self.facts);
+        let membership = self.membership.as_ref().ok_or(queries.errors.protocol)?;
         let facets = queries
             .producer()
-            .settle(facts)
+            .accept(membership.product, std::mem::take(&mut self.components))
             .ok_or(queries.errors.resource)?;
         let diagnostics = crate::select_diagnostics(
             table_diagnostics
@@ -298,13 +676,24 @@ impl Task {
             "hirsel.front.source-growth.action.v3",
             [queries.query.address.0.0.as_slice(), observed.0.as_slice()],
         ));
+        let membership_reads = &membership
+            .publication
+            .as_ref()
+            .ok_or(queries.errors.protocol)?
+            .reads;
+        let shared_reads =
+            reads == **membership_reads && reads.observed().eq(membership_reads.observed());
+        let reads_owner = shared_reads.then(|| membership.clone());
+        let reads = if shared_reads {
+            membership_reads.clone()
+        } else {
+            Arc::new(reads)
+        };
         let data = Arc::new(crate::source_components::SourceGrowthData {
             facets: Arc::new(facets),
             diagnostics: Arc::new(diagnostics),
-            reads: queries
-                .front
-                .retained_reads(cx, &Arc::new(reads))
-                .ok_or(queries.errors.resource)?,
+            reads,
+            _reads_owner: reads_owner,
         });
         let required = LiveGrowthProduct::value_bytes(&data).ok_or(queries.errors.resource)?;
         let mut allowance = queries
@@ -412,6 +801,7 @@ impl QueryEngine {
         };
         let store = self.result_store.clone().ok_or_else(refusal)?;
         Ok(Arc::new(FrontGrowthQueries {
+            publication_source: Mutex::new(None),
             query,
             roots,
             front: front.clone(),
@@ -424,6 +814,9 @@ impl QueryEngine {
             package,
             store,
             completed: Mutex::new(None),
+            membership: Mutex::new(None),
+            solves: AtomicU64::new(0),
+            memberships: AtomicU64::new(0),
             failure: Mutex::new(None),
             weight,
             errors,

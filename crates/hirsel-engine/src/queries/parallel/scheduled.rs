@@ -541,6 +541,20 @@ impl FrontBodyQueries {
         let Some(pool) = self.read_pool.get() else {
             return Some(reads.clone());
         };
+        self.retained_reads_in(cx, reads, pool)
+    }
+    /// Admit a consumer's shared observations without selecting compact read
+    /// retention for ordinary Front body producers.
+    pub(crate) fn retained_reads_in(
+        &self,
+        cx: &mut dyn QueryContext,
+        reads: &Arc<Reads>,
+        pool: &Mutex<crate::memo::ReadPool>,
+    ) -> Option<Arc<Reads>> {
+        let pool = self.read_pool.get().unwrap_or(pool);
+        if Reads::tracked_by(reads, &self.retention) {
+            return Some(reads.clone());
+        }
         let mut pool = pool.lock().unwrap_or_else(|e| e.into_inner());
         let charge = pool.required_tracked_bytes(reads)?;
         if self.make_room(cx, charge).is_none() {

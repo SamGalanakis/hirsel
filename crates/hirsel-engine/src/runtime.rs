@@ -11,11 +11,13 @@ mod scheduler;
 pub use budget::{MemoryReservation, MemoryReservationPool, ProcessBudget};
 pub use future_task::{LocalFutureTask, QueryReads};
 pub use product::{
-    ArchiveAdmission, LIVE_ANALYZED, LIVE_GROWTH, LIVE_LOWER, LIVE_SUMMARY, LiveAnalyzedProduct,
-    LiveGrowthProduct, LiveLowerProduct, LiveSummaryProduct, ProductArchive, SummaryFacet,
+    ArchiveAdmission, LIVE_ANALYZED, LIVE_GROWTH, LIVE_LOWER, LIVE_SOURCE_COMPONENT,
+    LIVE_SOURCE_MEMBERSHIP, LIVE_SUMMARY, LiveAnalyzedProduct, LiveGrowthProduct, LiveLowerProduct,
+    LiveSourceGrowthProduct, LiveSummaryProduct, ProductArchive, SummaryFacet,
 };
 pub(crate) use product::{
-    LiveAdmission, ProductSource, SharedProductSource, WeakAnalyzedProduct, WeakLowerProduct,
+    GrowthPublicationSource, LiveAdmission, ProductSource, SharedProductSource,
+    SourceGrowthPublication, SourceGrowthQueryData, WeakAnalyzedProduct, WeakLowerProduct,
 };
 pub use scheduler::{
     AdmittedRuntime, RuntimeCompletion, RuntimeErrors, RuntimeEvent, RuntimeObserver, RuntimeStats,

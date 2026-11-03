@@ -1600,3 +1600,258 @@ mod read_names_wire {
         }
     }
 }
+
+/// This fixture supplies checked call edges through the ordinary Front producer.
+/// Growth solving, query identities, stores and scheduler are production code.
+struct SccChecker {
+    base: Arc<Fake>,
+    calls: std::collections::BTreeMap<String, Vec<String>>,
+}
+impl CheckerPhase for SccChecker {
+    fn check(
+        &self,
+        types: &TypeInterner,
+        memo: &TypeMemo,
+        syntax: Arc<ItemSyntax>,
+        resolution: Resolution,
+        signature: &Signature,
+        provider: &mut dyn SignatureProvider,
+    ) -> Result<QueryOutput<TypedBody>, QueryError> {
+        let mut output = self
+            .base
+            .check(types, memo, syntax, resolution, signature, provider)?;
+        output.value.checked.instantiations = self
+            .calls
+            .get(&output.value.syntax.item.definition.0.name)
+            .into_iter()
+            .flatten()
+            .map(|name| Instantiation {
+                expression: ExprId(0),
+                callee: path(name),
+                arguments: Vec::new(),
+            })
+            .collect();
+        Ok(output)
+    }
+}
+fn scheduled_scc_run(
+    text: &str,
+    calls: &[(&str, &[&str])],
+    store: Arc<dyn hirsel_engine::store::ResultStore>,
+    jobs: usize,
+    output_bytes: u64,
+) -> (FrontGrowthOutput, u64, u64) {
+    let fake = Arc::new(Fake {
+        events: Default::default(),
+        reject: None,
+        missing_lookup: false,
+    });
+    let adapters = PhaseAdapters {
+        lexer: Some(fake.clone()),
+        parser: Some(fake.clone()),
+        resolver: Some(fake.clone()),
+        signature: Some(fake.clone()),
+        modes: Some(fake.clone()),
+        lowering: Some(fake.clone()),
+        checker: Some(Arc::new(SccChecker {
+            base: fake,
+            calls: calls
+                .iter()
+                .map(|(name, calls)| ((*name).into(), calls.iter().map(|s| (*s).into()).collect()))
+                .collect(),
+        })),
+        ..Default::default()
+    };
+    let operation = store.operation_scope();
+    let mut engine = QueryEngine::new(default_environment(), adapters).with_result_store(store);
+    parse(&mut engine, text);
+    let definitions = engine.front_source_roots();
+    let budget = ProcessBudget::new(1 << 30);
+    let weight = MemoryWeight {
+        retained: 64 << 10,
+        scratch: 8 << 20,
+        stack: 0,
+    };
+    let errors = runtime_errors();
+    let front = engine
+        .front_body_queries(
+            &definitions,
+            weight,
+            budget.reserve(8 << 20).unwrap(),
+            errors,
+        )
+        .unwrap();
+    let inventory = FrontGrowthQueries::input_bytes(&definitions, weight).unwrap();
+    let growth = engine
+        .front_growth_queries(
+            &path("main"),
+            front.clone(),
+            weight,
+            budget.reserve(inventory + output_bytes).unwrap(),
+            errors,
+        )
+        .unwrap();
+    let mut runtime = AdmittedRuntime::new(
+        hirsel_intern::jobs::Jobs::new(jobs),
+        budget.reserve(512 << 20).unwrap(),
+        errors,
+    )
+    .unwrap();
+    runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
+    runtime
+        .register(FRONT_GROWTH_KIND, growth.factory())
+        .unwrap();
+    let request = runtime.request(&[growth.query()]);
+    let products = runtime.wait(request).unwrap_or_else(|e| {
+        panic!(
+            "growth failed {e:?}, solves {}, memberships {}, runtime {:?}",
+            growth.component_solves(),
+            growth.membership_solves(),
+            runtime.stats()
+        )
+    });
+    let output = growth.outcome(products[0].clone()).unwrap();
+    assert!(output.diagnostics.is_empty());
+    assert_eq!(
+        runtime.stats().claims as usize,
+        definitions.len() + output.facets.components.len() + 2
+    );
+    let solves = growth.component_solves();
+    let memberships = growth.membership_solves();
+    runtime.shutdown();
+    operation.finish().unwrap();
+    (output, solves, memberships)
+}
+fn scc_products(output: &FrontGrowthOutput) -> Vec<SourceGrowthIdentity> {
+    output.facets.components.iter().map(|c| c.product).collect()
+}
+#[test]
+fn scheduled_scc_equal_edit_solves_no_downstream_or_unaffected_component() {
+    let store = Arc::new(MemStore::default());
+    let text = "fn a {b}\nfn b {a}\nfn caller {a}\nfn main {caller}\n";
+    let calls: &[(&str, &[&str])] = &[
+        ("a", &["b"]),
+        ("b", &["a"]),
+        ("caller", &["a"]),
+        ("main", &["caller"]),
+    ];
+    let (first, solves, memberships) = scheduled_scc_run(text, calls, store.clone(), 1, 8 << 20);
+    assert_eq!((solves, memberships), (3, 1));
+    let changed_text = text.replace("{b}", "{a;b}");
+    let changed_calls: &[(&str, &[&str])] = &[
+        ("a", &["a", "b"]),
+        ("b", &["a"]),
+        ("caller", &["a"]),
+        ("main", &["caller"]),
+    ];
+    let (changed, solves, memberships) =
+        scheduled_scc_run(&changed_text, changed_calls, store, 2, 8 << 20);
+    assert_eq!(
+        solves, 1,
+        "only the edited SCC is solved; downstream and unrelated SCCs reuse products"
+    );
+    assert_eq!(
+        memberships, 1,
+        "a changed edge rebuilds membership even when its partition is equal"
+    );
+    assert_eq!(
+        first.facets.membership.output,
+        changed.facets.membership.output
+    );
+    for (a, b) in first
+        .facets
+        .components
+        .iter()
+        .zip(&changed.facets.components)
+    {
+        assert_eq!(a.product.output, b.product.output);
+        if a.members.iter().any(|id| id.path().0.name == "a") {
+            assert_ne!(a.product.action, b.product.action);
+        } else {
+            assert_eq!(a.product, b.product);
+        }
+    }
+    let (cold, _, _) = scheduled_scc_run(
+        &changed_text,
+        changed_calls,
+        Arc::new(MemStore::default()),
+        1,
+        8 << 20,
+    );
+    assert_eq!(scc_products(&changed), scc_products(&cold));
+}
+#[test]
+fn scheduled_scc_split_merge_and_durable_reopen_agree_with_cold_solve() {
+    let directory = tempfile::tempdir().unwrap();
+    let open = || {
+        Arc::new(hirsel_engine::store::DirStore::new(
+            directory.path().to_path_buf(),
+        )) as Arc<dyn hirsel_engine::store::ResultStore>
+    };
+    let cases: &[(&str, &[(&str, &[&str])])] = &[
+        (
+            "fn a {b}\nfn b {a}\nfn main {a}\n",
+            &[("a", &["b"]), ("b", &["a"]), ("main", &["a"])],
+        ),
+        (
+            "fn a {b}\nfn b {}\nfn main {a}\n",
+            &[("a", &["b"]), ("main", &["a"])],
+        ),
+        (
+            "fn a {b}\nfn b {a}\nfn main {a}\n",
+            &[("a", &["b"]), ("b", &["a"]), ("main", &["a"])],
+        ),
+    ];
+    let mut previous_membership = None;
+    for (text, calls) in cases {
+        let (resident, _, memberships) = scheduled_scc_run(text, calls, open(), 1, 8 << 20);
+        assert_eq!(memberships, 1);
+        if let Some(previous) = previous_membership {
+            assert_ne!(resident.facets.membership.output, previous);
+        }
+        previous_membership = Some(resident.facets.membership.output);
+        let cached_membership = open()
+            .lookup_product(resident.facets.membership.address)
+            .expect("membership association is durable");
+        assert_eq!(
+            cached_membership.action, resident.facets.membership.action,
+            "case {text}"
+        );
+        assert_eq!(
+            cached_membership.reference.domain,
+            hirsel_engine::runtime::LIVE_SOURCE_MEMBERSHIP
+        );
+        let (cold, _, _) =
+            scheduled_scc_run(text, calls, Arc::new(MemStore::default()), 1, 8 << 20);
+        assert_eq!(scc_products(&resident), scc_products(&cold));
+        let (reopened, solves, memberships) = scheduled_scc_run(text, calls, open(), 2, 8 << 20);
+        assert_eq!(
+            resident.facets.membership.action, reopened.facets.membership.action,
+            "membership observes the same checked inputs after reopening"
+        );
+        assert_eq!(
+            (solves, memberships),
+            (0, 0),
+            "a new provider and engine reopen each independently addressed product"
+        );
+        assert_eq!(scc_products(&resident), scc_products(&reopened));
+        assert_eq!(resident.reads.as_ref(), reopened.reads.as_ref());
+    }
+}
+#[test]
+fn scheduled_scc_products_fit_the_existing_complete_growth_output_grant() {
+    let mut text = String::new();
+    for i in 0..256 {
+        text.push_str(&format!("fn f{i} {{}}\n"));
+    }
+    text.push_str("fn main {}\n");
+    let (output, solves, memberships) = scheduled_scc_run(
+        &text,
+        &[],
+        Arc::new(MemStore::default()),
+        1,
+        106_172 - hirsel_engine::runtime::MemoryReservationPool::metadata_bytes(),
+    );
+    assert_eq!(output.facets.components.len(), 257);
+    assert_eq!((solves, memberships), (257, 1));
+}

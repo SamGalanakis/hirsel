@@ -1,6 +1,6 @@
 use super::{
     ArchiveAdmission, LiveAnalyzedProduct, LiveDependencyProduct, LiveGrowthProduct,
-    LiveLowerProduct, LiveSummaryProduct, ProductArchive,
+    LiveLowerProduct, LiveSourceGrowthProduct, LiveSummaryProduct, ProductArchive,
 };
 use hirsel_artifact_store::{Action, Address, Domain};
 use std::{any::Any, fmt, io, sync::Arc};
@@ -25,6 +25,7 @@ pub struct ProductRef {
 enum Value {
     Summary(LiveSummaryProduct),
     Growth(LiveGrowthProduct),
+    SourceGrowth(LiveSourceGrowthProduct),
     Analyzed(LiveAnalyzedProduct),
     Lower(LiveLowerProduct),
     Dependencies(LiveDependencyProduct),
@@ -43,6 +44,19 @@ impl ProductRef {
     pub fn live_value<T: LiveProductValue>(&self) -> Option<&T> {
         match &self.value {
             Value::Live(value) => (&**value as &dyn Any).downcast_ref(),
+            _ => None,
+        }
+    }
+    pub fn source_growth(value: LiveSourceGrowthProduct) -> Self {
+        Self {
+            address: value.address(),
+            action: value.action(),
+            value: Value::SourceGrowth(value),
+        }
+    }
+    pub fn source_growth_value(&self) -> Option<&LiveSourceGrowthProduct> {
+        match &self.value {
+            Value::SourceGrowth(value) => Some(value),
             _ => None,
         }
     }
@@ -105,6 +119,7 @@ impl ProductRef {
         match &self.value {
             Value::Summary(value) => value.domain(),
             Value::Growth(value) => value.domain(),
+            Value::SourceGrowth(value) => value.domain(),
             Value::Analyzed(value) => value.domain(),
             Value::Lower(value) => value.domain(),
             Value::Dependencies(value) => value.domain(),
@@ -136,6 +151,7 @@ impl ProductRef {
         match &self.value {
             Value::Summary(value) => value.archive_with(admission),
             Value::Growth(value) => value.archive_with(admission),
+            Value::SourceGrowth(value) => value.archive_with(admission),
             Value::Analyzed(value) => value.archive_with(admission),
             Value::Lower(value) => value.archive_with(admission),
             Value::Dependencies(value) => value.archive(admission),
@@ -153,6 +169,7 @@ impl PartialEq for ProductRef {
         match (&self.value, &other.value) {
             (Value::Summary(a), Value::Summary(b)) => a.same_owner(b),
             (Value::Growth(a), Value::Growth(b)) => a.same_owner(b),
+            (Value::SourceGrowth(a), Value::SourceGrowth(b)) => a.same_owner(b),
             (Value::Analyzed(a), Value::Analyzed(b)) => a.same_owner(b),
             (Value::Lower(a), Value::Lower(b)) => a.same_owner(b),
             (Value::Dependencies(a), Value::Dependencies(b)) => a.equivalent(b),

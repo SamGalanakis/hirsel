@@ -573,14 +573,20 @@ pub fn bind_pretransfer_inventory(
         let Some(primitive) = hirsel_lir::pretransfer::primitive(view.key.definition()) else {
             continue;
         };
-        let Some(body) = instances.ids().find(|other| {
-            instances.view(*other).key.definition() == &primitive
-                && instances.actuals[other.index()].arguments
-                    == instances.actuals[id.index()].arguments
-        }) else {
+        let primitive_key = crate::instance::key_of(
+            &program.types,
+            &primitive,
+            tir::BodyId(0),
+            &instances.actuals[id.index()],
+            None,
+            None,
+        )
+        .map_err(|e| format!("materialized adapter primitive key: {e:?}"))?;
+        let Some(body) = instances.get(&primitive_key) else {
             return Err("materialized adapter has no independently planned primitive".into());
         };
         let reference = crate::invocations::keyed_adapter(
+            &program.types,
             view,
             &instances.actuals[id.index()].arguments,
             instances.view(body),

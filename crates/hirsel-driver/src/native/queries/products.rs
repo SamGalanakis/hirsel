@@ -629,8 +629,13 @@ impl NativeProducts for DemandProducts {
             let raw = binding.materialize::<Ready>(body)?;
             self.ready_materializations += 1;
             snapshot.materializations.fetch_add(1, Ordering::Relaxed);
-            let unit = hirsel_lir::validate::validate(raw, &inputs)
-                .map_err(|e| format!("emission Ready refused: {:?}", e.violations))?;
+            let definition = raw.header.definition.clone();
+            let unit = hirsel_lir::validate::validate(raw, &inputs).map_err(|e| {
+                format!(
+                    "emission Ready refused for {definition:?}: {:?}",
+                    e.violations
+                )
+            })?;
             units.push(unit);
         }
         let mut statics = BTreeMap::new();

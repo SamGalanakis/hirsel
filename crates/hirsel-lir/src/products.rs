@@ -131,10 +131,19 @@ impl LayoutClosure {
                 abi_ids.push(id);
             }
         }
+        let mut reached_layouts = direct_layouts.clone();
+        if let Some(source) = inputs
+            .operations
+            .seal_environments(&unit.unit().header.definition, unit.unit().header.instance)
+            .and_then(|environments| environments.entry)
+        {
+            let environment = source.check_ordinary_entry(unit.unit(), table)?;
+            reached_layouts.push(environment);
+        }
         let closure = Self::select_indexed(
             table,
             inputs.target,
-            &direct_layouts,
+            &reached_layouts,
             &abi_ids,
             &keys,
             &index,

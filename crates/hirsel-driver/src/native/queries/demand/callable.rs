@@ -365,7 +365,7 @@ impl DemandInstances {
                 .calls
                 .iter()
                 .filter_map(|call| match call.callee {
-                    Callee::Direct(s) | Callee::Bound { code: s, .. } => {
+                    Callee::Direct(s) => {
                         let symbol = &unit.tables.symbols[s.index()];
                         symbol.instance.map(|id| (symbol.definition.clone(), id))
                     }

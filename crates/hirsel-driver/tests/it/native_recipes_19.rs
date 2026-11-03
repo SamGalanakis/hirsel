@@ -629,3 +629,62 @@ fn synthesized_cursor_finalizer_recipes_share_erased_actual_modes() {
         assert_eq!(captures[0].2, captures[1].2);
     });
 }
+
+#[test]
+fn keyed_value_import_retains_the_original_pretransfer_cleanup() {
+    use hirsel_engine::store::ResultStore;
+    with_compiler_stack(|| {
+        let budget = runtime::ProcessBudget::new(64 << 20);
+        let store: Arc<dyn store::ResultStore> = Arc::new(store::RequestStore::new(
+            Arc::new(store::MemStore::default()),
+            budget.reserve(64 << 20).unwrap(),
+        ));
+        let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
+            .with_result_store(store.clone());
+        let file = engine.sources.add("keyed-edge.hir", "pub fn main()->u64 {let m:Map[u64,u64]=map.empty();let get:fn(Map[u64,u64],u64)->Option[u64]=map.get;match get(m,1u64) {Some(x)=>x,None=>0u64}}".into()).unwrap();
+        engine.parse_file(file, &default_context()).unwrap();
+        let inputs = crate::native_front_fixture::inputs(&mut engine, &[]);
+        let mut source = inputs.provider();
+        let target = hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu();
+        let mut demand = native::queries::demand::DemandInstances::new_from_source(
+            &source,
+            store.clone(),
+            target.clone(),
+            hirsel_syntax::ContentHash::of_bytes(b"keyed edge control"),
+        );
+        let roots = demand.roots_from(&source).unwrap();
+        let main = roots
+            .iter()
+            .find(|key| key.instance.definition().0.name == "main")
+            .unwrap();
+        let output = demand
+            .instance_from(&mut source, main, &native::Options::new(target.clone()))
+            .unwrap();
+        assert_eq!(
+            output.facts.source.adapters.len(),
+            1,
+            "original inventory: {:?}",
+            output.facts
+        );
+        let decode = |reference| store.get_content(reference).unwrap();
+        let layout_bytes = decode(output.product.layout_closure);
+        let closure: hirsel_lir::products::LayoutClosure =
+            hirsel_codec::from_text(std::str::from_utf8(&layout_bytes).unwrap()).unwrap();
+        let body_bytes = decode(output.product.value);
+        let body: hirsel_lir::products::UnitBody =
+            hirsel_codec::from_text(std::str::from_utf8(&body_bytes).unwrap()).unwrap();
+        let binding = hirsel_lir::products::Binding::new(&target, &[&closure]).unwrap();
+        let unit = binding.materialize::<hirsel_lir::Value>(&body).unwrap();
+        assert_eq!(
+            unit.tables
+                .calls
+                .iter()
+                .filter(|call| call.pretransfer_failure.is_some())
+                .count(),
+            1,
+            "calls {:?}, symbols {:?}",
+            unit.tables.calls,
+            unit.tables.symbols
+        );
+    });
+}

@@ -14,7 +14,7 @@ use std::{
 pub const NATIVE_DISCOVERY_KIND: u32 = 0x4e00_0006;
 const DISCOVERY: Domain = Domain {
     kind: NATIVE_DISCOVERY_KIND,
-    schema: 3,
+    schema: 4,
 };
 
 /// Source contracts of every lexical body, without its executable contents.

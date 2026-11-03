@@ -330,6 +330,7 @@ fn source_evidence_factory_31_uses_original_source_and_planned_instances() {
         let abi = lowered.instances.abis[adapter_id.index()];
         assert_eq!(
             &hirsel_rc::invocations::keyed_adapter(
+                &program.types,
                 adapter,
                 actuals,
                 primitive,
@@ -339,11 +340,46 @@ fn source_evidence_factory_31_uses_original_source_and_planned_instances() {
             .unwrap(),
             expected
         );
-        assert!(
-            hirsel_rc::invocations::keyed_adapter(adapter, actuals, primitive, &[], abi).is_err()
+        let mut equivalent = primitive_actuals.to_vec();
+        let hirsel_types::GenericArgument::Type(ty) = &mut equivalent[0] else {
+            unreachable!()
+        };
+        let mut row = (*program.types.get(*ty).unwrap()).clone();
+        row.modes.uniqueness = hirsel_types::Uniqueness::Unique;
+        *ty = program.types.intern(row);
+        assert_eq!(
+            hirsel_rc::invocations::keyed_adapter(
+                &program.types,
+                adapter,
+                actuals,
+                primitive,
+                &equivalent,
+                abi
+            )
+            .unwrap(),
+            *expected,
         );
         assert!(
-            hirsel_rc::invocations::keyed_adapter(adapter, actuals, view, actuals, abi).is_err()
+            hirsel_rc::invocations::keyed_adapter(
+                &program.types,
+                adapter,
+                actuals,
+                primitive,
+                &[],
+                abi
+            )
+            .is_err()
+        );
+        assert!(
+            hirsel_rc::invocations::keyed_adapter(
+                &program.types,
+                adapter,
+                actuals,
+                view,
+                actuals,
+                abi
+            )
+            .is_err()
         );
     });
 }

@@ -61,7 +61,13 @@ fn roots(
     .map_err(|e| format!("receipt original root registration: {e:?}"))?;
     Ok(roots
         .into_iter()
-        .filter(|id| instances.roles[id.index()] == hirsel_rc::instance::InstanceRole::Function)
+        .filter(|id| {
+            matches!(
+                instances.roles[id.index()],
+                hirsel_rc::instance::InstanceRole::Function
+                    | hirsel_rc::instance::InstanceRole::Finalizer
+            )
+        })
         .map(|id| NamedInput {
             base: instances.lexical_key(id).clone(),
             actuals: instances.actuals[id.index()].clone(),

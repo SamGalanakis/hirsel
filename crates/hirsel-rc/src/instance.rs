@@ -1617,6 +1617,35 @@ impl Expander<'_, '_, '_> {
             } = &block.terminator
             {
                 self.source_reference(path, arguments, &actuals)?;
+                if path.is_core("codec.decode") {
+                    for argument in arguments {
+                        let GenericArgument::Type(ty) = argument else {
+                            continue;
+                        };
+                        let ty = substitute(types, &self.program.memo, *ty, &actuals, true)
+                            .map_err(|e| InstanceError::Substitution(path.clone(), e))?;
+                        let schema = hirsel_types::serialization::serializable_schema(
+                            types,
+                            ty,
+                            &hirsel_types::GenericDeclarations::default(),
+                            &mut |definition| {
+                                Ok(self.program.signatures.get(definition.path()).cloned())
+                            },
+                        )
+                        .map_err(|e| InstanceError::Malformed(format!("codec schema: {e:?}")))?;
+                        if let Some(schema) = schema {
+                            for node in &schema.nodes {
+                                if let hirsel_types::serialization::SchemaNode::Nominal {
+                                    check: Some(check),
+                                    ..
+                                } = node
+                                {
+                                    self.source_reference(check, &[], &Actuals::none())?;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         for value in &body.rvalues {

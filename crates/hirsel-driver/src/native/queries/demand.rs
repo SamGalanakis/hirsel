@@ -938,7 +938,11 @@ impl DemandInstances {
             let inputs = roots
                 .iter()
                 .filter(|id| {
-                    instances.roles[id.index()] == hirsel_rc::instance::InstanceRole::Function
+                    matches!(
+                        instances.roles[id.index()],
+                        hirsel_rc::instance::InstanceRole::Function
+                            | hirsel_rc::instance::InstanceRole::Finalizer
+                    )
                 })
                 .map(|id| crate::native::receipt_source::factory::NamedInput {
                     base: instances.lexical_key(*id).clone(),
@@ -1229,10 +1233,12 @@ impl DemandInstances {
                 }
             }
             let [selected] = matching.as_slice() else {
-                return Err(
-                    "native request is absent or ambiguous in current original receipt graph"
-                        .into(),
-                );
+                return Err(format!(
+                    "native request is absent or ambiguous in current original receipt graph: {:?} body {}, {} matches",
+                    lexical.definition(),
+                    lexical.body(),
+                    matching.len(),
+                ));
             };
             let selected = *selected;
             if selected.aware_key().unwrap_or(&lexical) != &key.instance {
@@ -1428,6 +1434,25 @@ impl DemandInstances {
                 }
             }
         }
+        // Original root and lexical plans can name an adapter in a child body
+        // that this import does not materialize. Register its declaration and
+        // primitive before pruning caller-owned pretransfer cleanup.
+        let plan_bytes = self
+            .store
+            .get_content(request.plan)
+            .ok_or("missing native original instance plan")?;
+        let plan: InstancePlan = self
+            .records
+            .decode(inputs, &plan_bytes)
+            .ok_or("native original instance plan decoding failed")?;
+        plan.register(
+            &inputs.declarations().program,
+            &inputs.declarations().context,
+            &request.lexical.bind()?,
+            request.source_definition().is_none(),
+            &mut layouts,
+            &mut instances,
+        )?;
         self.imports += 1;
         if let Some(expected) = self
             .seal_inventory

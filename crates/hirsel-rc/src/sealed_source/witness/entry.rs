@@ -242,6 +242,103 @@ impl SourceInput {
         Ok(function)
     }
 
+    fn finalizer_entry_selected(
+        &self,
+        base: &InstanceKey,
+        types: &TypeInterner,
+        signature: &Signature,
+        actuals: &crate::instance::Actuals,
+        memo: &hirsel_types::TypeMemo,
+    ) -> Result<SourceCallableEntry, SourceError> {
+        let SignatureKind::Type(declaration) = &signature.kind else {
+            return Err(SourceError::Malformed(
+                "original finalizer declaration kind",
+            ));
+        };
+        let body = self.demand_body(base)?;
+        if signature.definition != self.definition.path
+            || signature.fingerprint != self.definition.signature_hash
+            || declaration.drop.as_ref() != Some(base.definition())
+            || base.body() != self.definition.entry.0
+            || !actuals.outer.is_empty()
+            || declaration.generics.len() != actuals.arguments.len()
+            || (!declaration.generics.is_empty() && actuals.binder != Some(body.parameter_scope))
+            || body
+                .locals
+                .iter()
+                .any(|local| local.storage == hirsel_tir::Storage::Capture)
+        {
+            return Err(SourceError::Malformed(
+                "original finalizer declaration identity",
+            ));
+        }
+        let expected = crate::instance::key_of(
+            types,
+            base.definition(),
+            self.definition.entry,
+            actuals,
+            None,
+            None,
+        )
+        .map_err(|error| SourceError::Type(format!("{error:?}")))?;
+        if &expected != base {
+            return Err(SourceError::Malformed(
+                "original finalizer specialization key differs",
+            ));
+        }
+        let [local] = body.parameters.as_slice() else {
+            return Err(SourceError::Malformed(
+                "original finalizer self parameter arity",
+            ));
+        };
+        let parameter = body
+            .locals
+            .get(local.0 as usize)
+            .ok_or(SourceError::Malformed(
+                "original finalizer self parameter local",
+            ))?;
+        let self_type = types.get(parameter.ty).ok_or(SourceError::Malformed(
+            "original finalizer self parameter type",
+        ))?;
+        if !matches!(&self_type.kind, TypeKind::Named { definition, .. } if *definition == signature.definition)
+        {
+            return Err(SourceError::Malformed(
+                "original finalizer self owner differs",
+            ));
+        }
+        let function = FunctionType {
+            state_promises: Default::default(),
+            generics: Vec::new().into(),
+            parameters: vec![hirsel_types::Parameter {
+                name: None,
+                label: None,
+                passing: hirsel_syntax::PassingMode::Borrow,
+                ty: parameter.ty,
+            }]
+            .into(),
+            result: types.intern(hirsel_types::Type::unit()),
+            error: None,
+            allocation: hirsel_types::Allocation::MayAllocate,
+            authority: hirsel_types::AuthoritySummary::Unknown,
+            uses: hirsel_types::Uses::Unrestricted,
+            contracts: Vec::new().into(),
+            incomplete: false,
+            foreign: None,
+        };
+        self.entry(
+            base,
+            types,
+            &function,
+            SourceEntryKind::Definition {
+                declaration: signature.fingerprint,
+            },
+            &mut |ty| {
+                crate::instance::substitute(types, memo, ty, actuals, true)
+                    .map_err(|error| SourceError::Type(format!("{error:?}")))
+            },
+        )
+    }
+
     /// Select a generic named entry using explicit ORIGINAL source actuals.
     /// Rebuild the existing base key before substituting either source binder;
     /// no native view, derived key or callback can stand in for this selection.
@@ -254,6 +351,9 @@ impl SourceInput {
         actuals: &crate::instance::Actuals,
         memo: &hirsel_types::TypeMemo,
     ) -> Result<SourceCallableEntry, SourceError> {
+        if let SignatureKind::Type(_) = &signature.kind {
+            return self.finalizer_entry_selected(base, types, signature, actuals, memo);
+        }
         let function = self.named_declaration(base, signature)?;
         let body = self.demand_body(base)?;
         if !actuals.outer.is_empty() {

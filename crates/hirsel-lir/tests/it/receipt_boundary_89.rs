@@ -1415,6 +1415,24 @@ fn ordinary_capture_entry_174_requires_complete_original_storage_and_refuses_reg
     });
     let accepted = check(&unit, &table, &manifest, &declarations);
     assert!(accepted.is_empty(), "{accepted:#?}");
+    let inputs = Inputs {
+        memo: Default::default(),
+        target: &target,
+        layouts: &table,
+        operations: &declarations,
+        manifest: &manifest,
+        discharge: None,
+    };
+    let checked = hirsel_lir::validate::validate(unit.clone(), &inputs).unwrap();
+    let (closure, body) =
+        hirsel_lir::products::LayoutClosure::capture(&checked, &inputs, &[]).unwrap();
+    let binding = hirsel_lir::products::Binding::new(&target, &[&closure]).unwrap();
+    let rebound = binding.materialize::<Rc>(&body).unwrap();
+    let rebound_inputs = Inputs {
+        layouts: &binding.table,
+        ..inputs
+    };
+    hirsel_lir::validate::validate(rebound, &rebound_inputs).unwrap();
     for mutation in 0..4 {
         let mut changed = declarations.environments.clone().unwrap();
         match mutation {

@@ -66,7 +66,7 @@ impl InstancePlan {
         if &selected != key {
             return Err("native original plan actuals differ from selected key".into());
         }
-        let requests = if library {
+        let mut requests = if library {
             if let Some(primitive) = hirsel_lir::pretransfer::primitive(key.definition()) {
                 let request = hirsel_rc::library::keyed::request(
                     program,
@@ -95,6 +95,10 @@ impl InstancePlan {
             )
             .map_err(|e| format!("native source adapter requirements: {e:?}"))?
         };
+        requests.extend(
+            hirsel_rc::library::keyed::root_requests(program, context)
+                .map_err(|e| format!("native root adapter requirements: {e:?}"))?,
+        );
         for adapter in requests {
             let primitive = hirsel_rc::library::keyed::primitive_request(
                 program,

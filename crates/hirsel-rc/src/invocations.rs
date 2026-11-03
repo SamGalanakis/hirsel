@@ -153,6 +153,7 @@ pub fn source_instance_from_output(
 /// Bind a materialized keyed adapter and its primitive from the original
 /// instance plans. ABI is the planner's ABI, never a candidate call's selector.
 pub fn keyed_adapter(
+    types: &TypeInterner,
     adapter: &InstanceView,
     adapter_actuals: &[GenericArgument],
     primitive: &InstanceView,
@@ -161,7 +162,22 @@ pub fn keyed_adapter(
 ) -> Result<AdapterReference, &'static str> {
     if hirsel_lir::pretransfer::primitive(adapter.key.definition()).as_ref()
         != Some(primitive.key.definition())
-        || adapter_actuals != primitive_actuals
+    {
+        return Err("keyed adapter differs from independently planned primitive or actuals");
+    }
+    let key = |path: &DefPath, arguments: &[GenericArgument]| {
+        let actuals = crate::instance::Actuals {
+            binder: (!arguments.is_empty())
+                .then(|| crate::library::binder(primitive.key.definition())),
+            arguments: arguments.to_vec(),
+            outer: Vec::new(),
+        };
+        crate::instance::key_of(types, path, BodyId(0), &actuals, None, None)
+            .map_err(|_| "keyed adapter has incomplete independently planned actuals")
+    };
+    if key(adapter.key.definition(), adapter_actuals)? != adapter.key
+        || key(primitive.key.definition(), primitive_actuals)? != primitive.key
+        || key(primitive.key.definition(), adapter_actuals)? != primitive.key
     {
         return Err("keyed adapter differs from independently planned primitive or actuals");
     }

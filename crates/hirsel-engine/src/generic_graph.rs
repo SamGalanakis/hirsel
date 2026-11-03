@@ -281,8 +281,19 @@ impl Collector<'_> {
         callee: &DefPath,
         arguments: &[GenericArgument],
     ) -> Result<(), QueryError> {
-        let Some(binder) = (self.binder)(callee)? else {
-            return Ok(());
+        let binder = match (self.binder)(callee)? {
+            Some(binder) => binder,
+            None if edge.kind == InstanceKind::Reference
+                && ["map.insert", "set.insert", "map.get", "set.contains"]
+                    .iter()
+                    .any(|name| callee.is_core(name)) =>
+            {
+                // Registry operations have no selected source body. Their
+                // materialized values still need an independently planned
+                // keyed adapter and its caller-owned rejection cleanup.
+                hirsel_syntax::LexicalOwner::first(callee).site(NameSite::Item)
+            }
+            None => return Ok(()),
         };
         if self.edges[self.store_start..].iter().any(|known| {
             known.site == edge.site

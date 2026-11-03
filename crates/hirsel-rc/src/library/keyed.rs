@@ -95,6 +95,35 @@ pub fn source_requests(
     Ok(requests)
 }
 
+/// A callable passed through another root's result can select any compatible
+/// adapter materialized by those original roots. Registry declarations alone
+/// never establish materialization.
+pub fn root_requests(
+    program: &Program,
+    context: &crate::instance::DiscoveryContext,
+) -> Result<Vec<Request>, InstanceError> {
+    let mut requests = Vec::new();
+    for (owner, signature) in &program.signatures {
+        if !context.sources.contains_key(owner) {
+            continue;
+        }
+        let root = match &signature.kind {
+            hirsel_types::SignatureKind::Function(function) => function.generics.is_empty(),
+            hirsel_types::SignatureKind::Type(nominal) => nominal.generics.is_empty(),
+            _ => false,
+        };
+        if root {
+            requests.extend(source_requests(
+                program,
+                context,
+                owner,
+                &crate::instance::Actuals::none(),
+            )?);
+        }
+    }
+    Ok(requests)
+}
+
 fn build(cx: &mut Cx<'_>) -> Result<LirUnit<Value>, PassError> {
     let request =
         primitive_request(cx.program, &cx.path, cx.arguments.clone())?.expect("keyed adapter path");

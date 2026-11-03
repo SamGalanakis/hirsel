@@ -586,3 +586,77 @@ fn borrowed_capture_retains_distinct_source_and_receiving_envelopes() {
         super::super::super::closed_storage_type(&types, receiving).unwrap()
     );
 }
+
+#[test]
+fn finalizer_entries_require_the_original_owner_declaration_and_self_type() {
+    let (types, scalar, _) = types();
+    let unit = types.intern(Type::unit());
+    let mut definition = witness_definition(body(&[scalar, unit], 1));
+    let owner = definition.path;
+    let self_type = types.intern(Type::with_kind(TypeKind::Named {
+        definition: owner,
+        arguments: Default::default(),
+    }));
+    let original = Arc::make_mut(&mut definition);
+    original.bodies[0].locals[0].ty = self_type;
+    original.bodies[0].places[0].ty = self_type;
+    let signature = Signature {
+        definition: owner,
+        metadata: Default::default(),
+        fingerprint: definition.signature_hash,
+        kind: SignatureKind::Type(Box::new(TypeDefinition {
+            loop_source: None,
+            format: None,
+            destructor_allocation: Allocation::MayAllocate,
+            generics: vec![],
+            representation: None,
+            bounds: vec![],
+            authority: AuthoritySummary::inert(),
+            capability: None,
+            implementation_authority: None,
+            serializable: false,
+            serializable_check: None,
+            layout: Default::default(),
+            distinct: false,
+            resource: true,
+            drop: Some(owner.path().clone()),
+            fact: None,
+            captures: None,
+        })),
+    };
+    let key = InstanceKey::new(owner.path(), 0, &[], &types, None, None).unwrap();
+    let source = SourceInput::capture(ContentHash([1; 32]), ContentHash([2; 32]), definition);
+    let actuals = crate::instance::Actuals::none();
+    let memo = TypeMemo::default();
+    let entry = source
+        .named_entry_selected(&key, &types, &signature, &actuals, &memo)
+        .unwrap();
+    assert_eq!(entry.reference().definition, *owner.path());
+    assert_eq!(entry.parameters().len(), 1);
+    assert_eq!(
+        entry.parameters()[0].passing,
+        hirsel_core_contract::Passing::Borrow
+    );
+    for mutation in 0..4 {
+        let mut changed_source = source.clone();
+        let mut changed_signature = signature.clone();
+        match mutation {
+            0 => {
+                let SignatureKind::Type(declaration) = &mut changed_signature.kind else {
+                    unreachable!()
+                };
+                declaration.drop = None;
+            }
+            1 => changed_signature.fingerprint = ContentHash([9; 32]),
+            2 => Arc::make_mut(&mut changed_source.definition).bodies[0].locals[0].ty = scalar,
+            3 => Arc::make_mut(&mut changed_source.definition).bodies[0].result = scalar,
+            _ => unreachable!(),
+        }
+        assert!(
+            changed_source
+                .named_entry_selected(&key, &types, &changed_signature, &actuals, &memo)
+                .is_err(),
+            "mutation {mutation}"
+        );
+    }
+}

@@ -1163,7 +1163,10 @@ impl DemandProducer {
             )?;
             let observed = output.reads().clone();
             let output_capture = output.namespace().clone();
-            let mut engine = output_capture.assembly(&self.adapters)?;
+            let mut engine = output_capture.discovery_assembly(&self.adapters)?;
+            engine
+                .items
+                .insert(selected.clone(), vec![output_capture.syntax(&selected)?]);
             let accepted = match engine.accept_front_registration(
                 output,
                 Self::take(&self.syntax, self.syntax.available_bytes())?,

@@ -1104,7 +1104,6 @@ impl State {
         }
     }
     fn settle(&mut self, query: Key, result: Outcome) {
-        if result == Err(self.errors.resource) {}
         let node = self.nodes.get_mut(&query).expect("claimed query");
         node.execution.as_mut().expect("active execution").task = Task::Send(None);
         node.status = Status::Settled(Box::new(result.clone()));

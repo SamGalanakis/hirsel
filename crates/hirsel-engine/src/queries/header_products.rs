@@ -602,6 +602,13 @@ impl HeaderProducts {
                 Charge::engine()
             });
         };
+        // An ended Front returns its lent charges and leaves this table with
+        // the engine. Later rows and proofs have that same engine owner; the
+        // ended source pool cannot lend another reservation.
+        let Some(partition) = admission.partition.upgrade() else {
+            admission.release();
+            return Ok(Charge::engine());
+        };
         // The charge cell itself is part of what the partition retains.
         let bytes =
             bytes.saturating_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
@@ -619,20 +626,16 @@ impl HeaderProducts {
         }
         // Held past the grant's lock: the partition's last owner may drop it,
         // and its drop returns charges to this same grant.
-        let partition = admission.partition.upgrade();
         let mut grant = admission
             .remaining
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let allowance = partition
-            .as_ref()
-            .and_then(|partition| partition.take_header(bytes))
-            .ok_or_else(|| {
-                QueryError::Operational(hirsel_types::OperationalFailure {
-                    operation: "header admission".into(),
-                    message: format!("header source allowance cannot retain {bytes} bytes"),
-                })
-            })?;
+        let allowance = partition.take_header(bytes).ok_or_else(|| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "header admission".into(),
+                message: format!("header source allowance cannot retain {bytes} bytes"),
+            })
+        })?;
         *grant = grant.checked_sub(bytes).ok_or_else(|| {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "header admission".into(),

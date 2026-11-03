@@ -290,9 +290,18 @@ impl HeaderProducts {
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
+        let refusal = |reason: &str| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "private inference admission".into(),
+                message: format!(
+                    "demanded module proof exceeds its existing front partition; owner {}; {reason}",
+                    id.path()
+                ),
+            })
+        };
         let working = private.working.load(Ordering::Relaxed);
         if working == 0 {
-            return Err(private_refusal());
+            return Err(refusal("private working partition is not configured"));
         }
         // This fixed point reads declared headers only. It cannot demand
         // another settled module while its own publication is in progress.
@@ -384,7 +393,7 @@ impl HeaderProducts {
         // The proof is charged like any settled header row: unpinned rows and
         // proofs are evicted first, and a refusal stays a resource failure.
         if !self.standalone && !self.admitted() {
-            return Err(private_refusal());
+            return Err(refusal("module proof has no admitted source owner"));
         }
         let charge = self.admit(weight.bytes()).map_err(|error| {
             QueryError::Operational(hirsel_types::OperationalFailure {

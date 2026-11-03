@@ -116,25 +116,46 @@ struct Factory(Arc<FrontGrowthQueries>);
 impl QueryFactory for Factory {
     fn create(&self, id: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
         let queries = self.0.clone();
+        if id.kind != FRONT_GROWTH_KIND {
+            return Err(queries.errors.protocol);
+        }
+        let membership_query = queries.membership_query();
+        let component = if id == queries.query || id == membership_query {
+            None
+        } else {
+            let selected = queries.membership.lock().unwrap_or_else(|e| e.into_inner());
+            let SourceGrowthQueryData::Membership { value, .. } = selected
+                .as_ref()
+                .and_then(ProductRef::source_growth_value)
+                .map(LiveSourceGrowthProduct::value)
+                .ok_or(queries.errors.protocol)?
+            else {
+                return Err(queries.errors.protocol);
+            };
+            let index = value
+                .component_index(id.address.0)
+                .ok_or(queries.errors.protocol)?;
+            Some((value, index))
+        };
         let cached = if id == queries.query {
             queries
                 .completed
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone()
-        } else if id == queries.membership_query() {
+        } else if id == membership_query {
             queries
                 .membership
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone()
         } else {
+            let (_, index) = component.as_ref().ok_or(queries.errors.protocol)?;
             let value = queries
                 .components
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .find(|value| value.product.address == id.address)
+                .get(*index)
                 .cloned()
                 .or_else(|| {
                     queries
@@ -146,8 +167,7 @@ impl QueryFactory for Factory {
                         .value()
                         .facets
                         .components
-                        .iter()
-                        .find(|value| value.product.address == id.address)
+                        .get(*index)
                         .cloned()
                 });
             value
@@ -170,31 +190,7 @@ impl QueryFactory for Factory {
                 terminal: None,
             }));
         }
-        let component = if id == queries.membership_query() {
-            None
-        } else {
-            let selected = queries.membership.lock().unwrap_or_else(|e| e.into_inner());
-            let SourceGrowthQueryData::Membership { value, .. } = selected
-                .as_ref()
-                .and_then(ProductRef::source_growth_value)
-                .map(LiveSourceGrowthProduct::value)
-                .ok_or(queries.errors.protocol)?
-            else {
-                return Err(queries.errors.protocol);
-            };
-            let index = value
-                .components
-                .iter()
-                .position(|c| c.address == id.address.0)
-                .ok_or(queries.errors.protocol)?;
-            Some((value.clone(), index))
-        };
-        if id.kind != FRONT_GROWTH_KIND {
-            return Err(queries.errors.protocol);
-        }
-        if queries.weight.retained
-            < (std::mem::size_of::<FactTask>() + 2 * std::mem::size_of::<usize>()) as u64
-        {
+        if queries.weight.retained < (size_of::<FactTask>() + 2 * size_of::<usize>()) as u64 {
             return Err(queries.errors.resource);
         }
         let count = component

@@ -1744,10 +1744,16 @@ fn scheduled_scc_run_with_capacity(
     let solves = growth.component_solves();
     let memberships = growth.membership_solves();
     let streamed_peak = runtime.stats().peak_live_nodes;
+    if capacity.is_some() {
+        println!(
+            "streamed SCC reduction complete: components={} peak_live_nodes={streamed_peak}",
+            output.facets.components.len()
+        );
+    }
     // Retire and reopen the root, membership and every SCC from their admitted
     // owners, including with persistence disabled. No source solve repeats.
     runtime.evict_to(0);
-    for query in
+    for (index, query) in
         std::iter::once(growth.query())
             .chain(std::iter::once(hirsel_engine::runtime::QueryId {
                 kind: FRONT_GROWTH_KIND,
@@ -1759,7 +1765,11 @@ fn scheduled_scc_run_with_capacity(
                     address: component.product.address,
                 }
             }))
+            .enumerate()
     {
+        if capacity.is_some() && index % 1024 == 0 {
+            println!("streamed SCC reopen progress: {index}");
+        }
         let request = runtime.request(&[query]);
         let products = runtime.wait(request).unwrap();
         assert_eq!(products[0].address, query.address);

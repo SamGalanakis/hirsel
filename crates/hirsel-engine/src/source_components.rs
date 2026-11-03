@@ -80,6 +80,15 @@ impl SourceGrowthComponents {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+    pub fn get(&self, index: usize) -> Option<&Arc<SourceGrowthComponent>> {
+        if index >= self.len {
+            return None;
+        }
+        self.pages
+            .get(index / Self::PAGE)?
+            .values
+            .get(index % Self::PAGE)
+    }
     pub fn iter(&self) -> SourceGrowthIter<'_> {
         SourceGrowthIter {
             pages: self.pages.iter(),
@@ -154,7 +163,7 @@ impl<'a> IntoIterator for &'a SourceGrowthComponents {
 impl std::ops::Index<usize> for SourceGrowthComponents {
     type Output = Arc<SourceGrowthComponent>;
     fn index(&self, index: usize) -> &Self::Output {
-        &self.pages[index / Self::PAGE].values[index % Self::PAGE]
+        self.get(index).expect("source component index")
     }
 }
 impl serde::Serialize for SourceGrowthFacets {
@@ -181,7 +190,19 @@ pub(crate) struct SourceMembership {
     pub product: SourceGrowthIdentity,
     pub components: Box<[SourceComponentMembers]>,
     #[serde(skip)]
+    address_order: Box<[u32]>,
+    #[serde(skip)]
     _reservation: MemoryReservation,
+}
+
+impl SourceMembership {
+    pub(crate) fn component_index(&self, address: ContentHash) -> Option<usize> {
+        let index = self
+            .address_order
+            .binary_search_by_key(&address, |&i| self.components[i as usize].address)
+            .ok()?;
+        Some(self.address_order[index] as usize)
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -364,13 +385,27 @@ impl SourceGrowthProducer<'_> {
             action: self.membership_action(facts)?,
             output: hash_value("hirsel.source-growth.membership.value.v1", &components)?,
         };
+        // Index facts once. Component construction visits only its members'
+        // ranges, retaining the original input order even for unordered callers.
+        let index_bytes = facts.len().checked_mul(3 * size_of::<usize>())? as u64;
+        if graph_bytes(nodes.len(), edges, facts.len())?.checked_add(index_bytes)? > self.scratch {
+            return None;
+        }
+        let mut by_owner: Vec<_> = (0..facts.len()).collect();
+        by_owner.sort_unstable_by_key(|&i| (facts[i].owner, i));
         let components = components
             .into_iter()
             .map(|members| {
-                let inputs = facts
-                    .iter()
-                    .filter(|f| members.contains(&f.owner))
-                    .map(|f| f.definition.0)
+                let mut positions = Vec::new();
+                for member in &members {
+                    let start = by_owner.partition_point(|&i| facts[i].owner < *member);
+                    let end = by_owner.partition_point(|&i| facts[i].owner <= *member);
+                    positions.extend_from_slice(&by_owner[start..end]);
+                }
+                positions.sort_unstable();
+                let inputs = positions
+                    .into_iter()
+                    .map(|i| facts[i].definition.0)
                     .collect();
                 Some(SourceComponentMembers {
                     address: self.component_address(&members)?.0,
@@ -394,11 +429,17 @@ impl SourceGrowthProducer<'_> {
             weight.add(std::mem::size_of_val(&*component.members));
             weight.add(std::mem::size_of_val(&*component.inputs));
         }
+        let count = u32::try_from(components.len()).ok()?;
+        weight.add(components.len().checked_mul(size_of::<u32>())?);
+        let reservation = self.output_pool.take(weight.bytes())?;
+        let mut address_order: Vec<_> = (0..count).collect();
+        address_order.sort_unstable_by_key(|&i| components[i as usize].address);
         Some(SourceMembership {
             publication: None,
             product,
             components,
-            _reservation: self.output_pool.take(weight.bytes())?,
+            address_order: address_order.into_boxed_slice(),
+            _reservation: reservation,
         })
     }
     pub(crate) fn membership_action(&self, facts: &[SourceGrowthFact]) -> Option<Action> {

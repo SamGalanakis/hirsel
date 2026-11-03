@@ -850,24 +850,22 @@ impl DemandProducer {
                         .ok_or_else(|| refused("scope body has no Lower producer"))?;
                     let selected = reads.read_consuming(query).await;
                     if let Err(reference) = selected {
-                        let error = owner
-                            .failure(reference)
-                            .ok_or_else(|| {
-                                let reason = if reference == self.errors.resource {
-                                    "resource admission"
-                                } else if reference == self.errors.protocol {
-                                    "runtime protocol"
-                                } else if reference == self.errors.cancelled {
-                                    "cancellation"
-                                } else if reference == self.errors.cycle {
-                                    "dependency cycle"
-                                } else if reference == self.errors.panicked {
-                                    "producer panic"
-                                } else {
-                                    "unavailable outcome"
-                                };
-                                refused(&format!("scope Lower {path} refused: {reason}"))
-                            })?;
+                        let error = owner.failure(reference).ok_or_else(|| {
+                            let reason = if reference == self.errors.resource {
+                                "resource admission"
+                            } else if reference == self.errors.protocol {
+                                "runtime protocol"
+                            } else if reference == self.errors.cancelled {
+                                "cancellation"
+                            } else if reference == self.errors.cycle {
+                                "dependency cycle"
+                            } else if reference == self.errors.panicked {
+                                "producer panic"
+                            } else {
+                                "unavailable outcome"
+                            };
+                            refused(&format!("scope Lower {path} refused: {reason}"))
+                        })?;
                         if stop_on_error || !error.cacheable() {
                             return Err(error);
                         }
@@ -1008,7 +1006,11 @@ impl DemandProducer {
                 if !arguments.is_empty() {
                     return Err(refused("nongeneric generator has actual arguments"));
                 }
-                if current.capture().registrations.contains_key(&declaration_id) {
+                if current
+                    .capture()
+                    .registrations
+                    .contains_key(&declaration_id)
+                {
                     return Ok(s1::DependencyProduct {
                         result: Ok(Some(declaration.clone())),
                         reads: Reads::empty(),

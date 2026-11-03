@@ -50,6 +50,7 @@ pub struct FrontDemandScope {
     definitions: Vec<DefPath>,
     registrations: Vec<Arc<AcceptedFrontRegistration>>,
     namespace: Arc<NamespaceCapture>,
+    front: Arc<FrontBodyQueries>,
     rounds: usize,
     stats: RuntimeStats,
     failure: Option<FrontDemandError>,
@@ -64,6 +65,9 @@ impl FrontDemandScope {
     }
     pub fn namespace(&self) -> &Arc<NamespaceCapture> {
         &self.namespace
+    }
+    pub(crate) fn front(&self) -> &Arc<FrontBodyQueries> {
+        &self.front
     }
     pub fn rounds(&self) -> usize {
         self.rounds
@@ -241,6 +245,7 @@ impl QueryEngine {
             definitions,
             registrations,
             namespace,
+            front: successor.owner().body_front().clone(),
             rounds,
             stats,
             failure,

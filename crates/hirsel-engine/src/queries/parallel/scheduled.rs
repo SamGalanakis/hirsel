@@ -379,6 +379,17 @@ impl FrontBodyQueries {
     pub fn namespace(&self) -> &Arc<NamespaceCapture> {
         &self.namespace
     }
+    pub(crate) fn covers_scope(
+        &self,
+        definitions: &[DefPath],
+        namespace: &Arc<NamespaceCapture>,
+        weight: MemoryWeight,
+    ) -> bool {
+        Arc::ptr_eq(&self.namespace, namespace)
+            && self.by_definition.len() == definitions.len()
+            && definitions.iter().all(|path| self.query(path).is_some())
+            && self.inputs.values().all(|input| input.weight == weight)
+    }
     pub(crate) fn snapshot(&self) -> &Arc<SignatureSnapshot> {
         &self.namespace.snapshot
     }

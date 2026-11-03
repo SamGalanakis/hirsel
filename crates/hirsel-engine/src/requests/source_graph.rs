@@ -841,7 +841,7 @@ pub fn prepare_source_scope(
     host: &dyn SourceHost,
     loading: &mut LoadingAdmission,
     store: &dyn ResultStore,
-) -> Result<(Option<Arc<crate::NamespaceCapture>>, RequestLimits), ToolError> {
+) -> Result<(Option<FrontDemandScope>, RequestLimits), ToolError> {
     engine.admit_private_inference(loading.lend_runtime());
     let definitions = selected_definitions(engine);
     let generators = engine
@@ -919,13 +919,11 @@ pub fn prepare_source_scope(
             errors,
         )
         .map_err(|error| instance_bootstrap_error(engine, error, errors))?;
-    let namespace = scope.namespace().clone();
-    drop(scope);
     let snapshot_bytes = snapshot.available_bytes();
     drop(snapshot);
     host.readmit(loading, lent.0, snapshot_bytes)?;
     Ok((
-        Some(namespace),
+        Some(scope),
         RequestLimits {
             snapshot_bytes,
             ..limits
@@ -947,8 +945,10 @@ pub fn install(
     mut loading: LoadingAdmission,
     store: &dyn ResultStore,
     carry: Option<&SourceCarry>,
-    namespace: Option<Arc<crate::NamespaceCapture>>,
+    scope: Option<FrontDemandScope>,
 ) -> Result<InstalledSource, ToolError> {
+    let prepared_front = scope.as_ref().map(|scope| scope.front().clone());
+    let namespace = scope.map(|scope| scope.namespace().clone());
     engine.admit_private_inference(loading.lend_runtime());
     let planner = SourcePlanner {
         selection,
@@ -1040,7 +1040,7 @@ pub fn install(
             current_definitions.len()
         ))));
     }
-    let plan = planner.within(
+    let mut plan = planner.within(
         final_limits,
         engine,
         &definitions,
@@ -1048,6 +1048,14 @@ pub fn install(
         &run_inputs,
         &catalogue,
     )?;
+    let prepared_front = prepared_front.filter(|front| {
+        !shape.compact_reads && front.covers_scope(&definitions, &namespace, plan.body)
+    });
+    if prepared_front.is_some() {
+        // The completed owner retains its original admitted Front partition.
+        // Installation needs no second reservation for the same products.
+        plan.snapshots.front = 0;
+    }
     let sources = engine.sources.clone();
     let inference = match engine.release_private_inference_admission() {
         Ok(allowance) => allowance,
@@ -1080,9 +1088,15 @@ pub fn install(
     };
     drop(transport);
     let errors = runtime_errors(store)?;
-    let front = engine
-        .front_body_queries_in(&definitions, namespace, plan.body, front, errors)
-        .map_err(query_error)?;
+    let front = match prepared_front {
+        Some(prepared) => {
+            drop(front);
+            prepared
+        }
+        None => engine
+            .front_body_queries_in(&definitions, namespace, plan.body, front, errors)
+            .map_err(query_error)?,
+    };
     if shape.compact_reads {
         front.compact_retained_reads();
     }

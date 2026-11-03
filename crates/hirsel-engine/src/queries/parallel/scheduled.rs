@@ -2761,7 +2761,10 @@ impl QueryEngine {
                 ),
             })
         };
+        // The pool has already reserved its metadata before exposing available
+        // bytes. The public footprint includes that owner exactly once.
         let mut required = FrontBodyQueries::input_bytes(definitions)
+            .and_then(|bytes| bytes.checked_sub(MemoryReservationPool::metadata_bytes()))
             .ok_or_else(|| refusal("input size overflow"))?;
         if required > available {
             return Err(refused_inputs(required));

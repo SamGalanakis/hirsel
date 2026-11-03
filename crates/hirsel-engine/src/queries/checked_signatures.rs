@@ -94,6 +94,30 @@ impl FrontCheckedSignatures {
     }
 }
 impl QueryEngine {
+    fn captured_signature_coverage(
+        &self,
+        snapshot: &SignatureSnapshot,
+        path: &DefPath,
+    ) -> Result<Vec<SignatureDependency>, QueryError> {
+        if let Some(product) = snapshot
+            .header_products()
+            .and_then(|headers| headers.product(DefId::intern(path)))
+        {
+            let product = product?;
+            let output = product.result.as_ref().map_err(Clone::clone)?;
+            return Ok(product.entry.as_ref().map_or_else(
+                || output.dependencies.clone(),
+                |entry| entry.covered.clone(),
+            ));
+        }
+        if self.builtins.contains_key(path) || self.registry.get(path).is_some() {
+            return Ok(Vec::new());
+        }
+        Err(QueryError::Operational(hirsel_types::OperationalFailure {
+            operation: "checked signature inputs".into(),
+            message: format!("missing captured signature coverage: {path}"),
+        }))
+    }
     fn validate_checked_registrations(
         &mut self,
         front: &FrontBodyQueries,
@@ -130,7 +154,10 @@ impl QueryEngine {
     ) -> Result<u64, QueryError> {
         let snapshot = front.signatures();
         if !Arc::ptr_eq(&snapshot, &self.signature_inputs()) {
-            return Err(QueryError::NotImplemented);
+            return Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "checked signature inputs".into(),
+                message: "captured header snapshot differs from current source inputs".into(),
+            }));
         }
         self.validate_checked_registrations(front)?;
         let paths: BTreeSet<_> = self
@@ -159,10 +186,13 @@ impl QueryEngine {
                 owned.signature(signature);
             }
             weight.path(&path);
-            weight.flat_vec(&self.signature_coverage(&path)?);
+            weight.flat_vec(&self.captured_signature_coverage(&snapshot, &path)?);
         }
         if !Arc::ptr_eq(&snapshot, &self.signature_inputs()) {
-            return Err(QueryError::NotImplemented);
+            return Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "checked signature inputs".into(),
+                message: "captured header snapshot differs from current source inputs".into(),
+            }));
         }
         weight
             .bytes()
@@ -231,7 +261,7 @@ impl QueryEngine {
                 .body_view(&path.0.package, id)
                 .and_then(Result::ok)
                 .filter(|owner| **owner != *public);
-            let coverage = self.signature_coverage(&path)?;
+            let coverage = self.captured_signature_coverage(&snapshot, &path)?;
             weight.path(&path);
             weight.flat_vec(&coverage);
             if weight

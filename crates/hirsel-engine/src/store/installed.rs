@@ -100,6 +100,34 @@ mod tests {
                 .contains("corrupt")
         );
     }
+    #[test]
+    fn duplicate_content_checks_preserve_full_reference_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, compiler, package, reference) = fixture(directory.path());
+        let installed = InstalledPackage::open(directory.path(), &package, compiler).unwrap();
+        for invalid in [
+            Reference {
+                len: reference.len + 1,
+                ..reference
+            },
+            Reference {
+                domain: Domain {
+                    schema: reference.domain.schema + 1,
+                    ..reference.domain
+                },
+                ..reference
+            },
+        ] {
+            let mut changed = (*installed).clone();
+            changed.contents.push(invalid);
+            assert!(
+                changed
+                    .check_records(&store)
+                    .unwrap_err()
+                    .contains("corrupt package product content")
+            );
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -170,17 +198,26 @@ impl InstalledPackage {
         store.associate(address(), Action(reference.output.0), reference)
     }
     fn check_records(&self, store: &hirsel_artifact_store::Store) -> Result<(), String> {
+        let mut checked = std::collections::BTreeSet::new();
+        let mut check_content = |reference: Reference| {
+            !checked.insert((
+                reference.output.0,
+                reference.domain.kind,
+                reference.domain.schema,
+                reference.len,
+            )) || store.get(reference).is_some()
+        };
         for &(address, action, reference) in &self.rows {
             if !store
                 .lookup(Address(address))
                 .is_some_and(|row| row.action.0 == action && row.reference == reference)
-                || store.get(reference).is_none()
+                || !check_content(reference)
             {
                 return Err("partial or corrupt package product row".into());
             }
         }
         for &reference in &self.contents {
-            if store.get(reference).is_none() {
+            if !check_content(reference) {
                 return Err("partial or corrupt package product content".into());
             }
         }

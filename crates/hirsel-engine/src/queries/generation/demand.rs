@@ -995,7 +995,6 @@ impl DemandProducer {
                     "demand does not descend from its consuming capture",
                 ));
             }
-            let mut engine = current.capture().assembly(&self.adapters)?;
             let original = current.capture().syntax(declaration)?;
             if generator(&original).is_none() {
                 return Ok(s1::DependencyProduct {
@@ -1004,6 +1003,26 @@ impl DemandProducer {
                     successor: None,
                 });
             }
+            let generic = instance_bodied(&original);
+            if !generic {
+                if !arguments.is_empty() {
+                    return Err(refused("nongeneric generator has actual arguments"));
+                }
+                if current.capture().registrations.contains_key(&declaration_id) {
+                    return Ok(s1::DependencyProduct {
+                        result: Ok(Some(declaration.clone())),
+                        reads: Reads::empty(),
+                        successor: (previous.identity() != current.capture().identity())
+                            .then(|| scheduled_lower::SuccessorCapture::new(previous, current))
+                            .transpose()?,
+                    });
+                }
+            }
+            let mut engine = if generic {
+                current.capture().assembly(&self.adapters)?
+            } else {
+                current.capture().discovery_assembly(&self.adapters)?
+            };
             let actual_key =
                 hirsel_tir::InstanceBodies::key(current.capture().snapshot.types(), arguments);
             let fresh = instance_bodied(&original)
@@ -1065,7 +1084,11 @@ impl DemandProducer {
                 .values()
                 .cloned()
                 .collect::<Vec<_>>();
-            let lower = self.view(&mut engine, &definitions, &registrations)?;
+            let lower = if generic {
+                self.view(&mut engine, &definitions, &registrations)?
+            } else {
+                current.clone()
+            };
             // The selected head is an admitted prerequisite of private execution.
             // Nested demand descends from this explicit head capture.
             self.state.lock().unwrap_or_else(|e| e.into_inner()).current = Arc::downgrade(&lower);

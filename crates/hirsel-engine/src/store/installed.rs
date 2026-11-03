@@ -128,6 +128,35 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn operation_shares_installed_inputs_and_revalidates_at_the_next_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, compiler, package, _) = fixture(directory.path());
+        let provider = DirStore::new(directory.path().join("cache"))
+            .with_read_only_root(directory.path().to_owned());
+        let operation = provider.for_operation().unwrap();
+        let first = operation.installed_package(&package, compiler).unwrap();
+        let second = operation.installed_package(&package, compiler).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(
+            operation
+                .installed_package(&package, ContentHash::default())
+                .unwrap_err()
+                .contains("compiler identity mismatch")
+        );
+        std::fs::remove_file(
+            store
+                .association_path(Address(ContentHash::of_bytes(b"row")))
+                .unwrap(),
+        )
+        .unwrap();
+        let next = provider.for_operation().unwrap();
+        assert!(
+            next.installed_package(&package, compiler)
+                .unwrap_err()
+                .contains("partial")
+        );
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

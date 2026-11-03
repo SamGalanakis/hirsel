@@ -3,6 +3,7 @@
 use super::{EntryKey, ResultStore};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// The store format version in the directory name.
 pub const FORMAT: u32 = 15;
@@ -18,6 +19,7 @@ pub struct DirStore {
     verifier_identity: Option<hirsel_syntax::ContentHash>,
     verifier: std::sync::Arc<hirsel_validate::VerifierCache>,
     operation: bool,
+    installed_capture: Option<Arc<Mutex<Option<Arc<super::InstalledPackage>>>>>,
     installation: Option<std::sync::Arc<std::sync::Mutex<super::installed::InstallationRecords>>>,
 }
 
@@ -44,6 +46,7 @@ impl DirStore {
             read_only: vec![],
             cap: DEFAULT_CAP,
             operation: false,
+            installed_capture: None,
             installation: None,
         }
     }
@@ -105,6 +108,7 @@ impl DirStore {
     pub fn with_read_only_root(mut self, root: PathBuf) -> Self {
         if root != self.root && !self.read_only.iter().any(|store| store.root() == root) {
             self.read_only.push(hirsel_artifact_store::Store::new(root));
+            self.installed_capture = None;
         }
         self
     }
@@ -193,6 +197,7 @@ impl DirStore {
             verifier_identity: None,
             verifier,
             operation: false,
+            installed_capture: None,
             installation: None,
         })
     }
@@ -259,10 +264,25 @@ impl ResultStore for DirStore {
         package: &hirsel_syntax::PackageId,
         compiler: hirsel_syntax::ContentHash,
     ) -> Result<std::sync::Arc<super::InstalledPackage>, String> {
+        let mut captured = self
+            .installed_capture
+            .as_ref()
+            .map(|slot| slot.lock().unwrap_or_else(|error| error.into_inner()));
+        if let Some(installed) = captured.as_deref().and_then(Option::as_ref)
+            && installed.package == *package
+            && installed.compiler == compiler
+        {
+            return Ok(installed.clone());
+        }
         let mut failures = Vec::new();
         for root in &self.read_only {
             match super::InstalledPackage::open(root.root(), package, compiler) {
-                Ok(package) => return Ok(package),
+                Ok(package) => {
+                    if let Some(captured) = &mut captured {
+                        **captured = Some(package.clone());
+                    }
+                    return Ok(package);
+                }
                 Err(error) => failures.push(error),
             }
         }
@@ -291,6 +311,7 @@ impl ResultStore for DirStore {
                 .collect(),
             cap: self.cap,
             operation: true,
+            installed_capture: Some(Default::default()),
             verifier_identity: None,
             installation: self.installation.clone(),
         };
@@ -527,6 +548,7 @@ mod tests {
             verifier_identity: None,
             verifier: std::sync::Arc::new(verifier),
             operation: false,
+            installed_capture: None,
             installation: None,
         };
         // Initialize the installed store's ordinary read lock before observing

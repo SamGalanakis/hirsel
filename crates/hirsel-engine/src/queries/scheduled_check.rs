@@ -1,12 +1,12 @@
-//! One ordered source check transaction, over actual P/GEN-5/Lower tasks.
-//! Worker completion is separate from file publication: ordinary P diagnostics
-//! accumulate, unavailable P withholds the file suffix, and a Lower failure
-//! withholds its later roots. This replaces no default until all source-rule
-//! and registration producers are installed.
+//! Dependency admission and ordered publication of one complete source Check.
+//! The admission producer streams P/Lower work independently of SCC acceptance.
+//! This owner reduces settled observations in source order. An unavailable P or
+//! failed Lower still withholds its publication suffix, never independent work.
 use super::*;
 use crate::runtime::*;
 use crate::store::{Domain, Reference, ResultStore};
 use std::{sync::Mutex, task::Poll};
+mod admission;
 mod products;
 pub use products::FrontCheckedInput;
 mod scope;
@@ -188,6 +188,16 @@ impl FrontCheckQueries {
     pub fn query(&self) -> QueryId {
         self.query
     }
+    /// The bounded body stream is a dependency of Check, not an acceptance root.
+    pub fn admission_query(&self) -> QueryId {
+        QueryId {
+            kind: FRONT_CHECK_KIND,
+            address: hirsel_artifact_store::Address(ContentHash::of_parts(
+                "hirsel.front.check-admission.address.v1",
+                [self.query.address.0.0.as_slice()],
+            )),
+        }
+    }
     pub fn diagnostic_phase(&self, diagnostic: &Diagnostic) -> Option<String> {
         let matches = |candidate: &Diagnostic| {
             candidate.rule == diagnostic.rule && candidate.primary == diagnostic.primary
@@ -252,6 +262,27 @@ impl FrontCheckQueries {
                 && !has_errors(&data.checked.diagnostics)
         })
     }
+    /// Reuse this exact rejected Check's existing diagnostic storage. A native
+    /// acceptance join retains no second copy of a whole source failure.
+    pub(crate) fn rejection(&self, reference: Reference) -> Option<QueryError> {
+        let completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
+        let (product, data) = completed.as_ref()?;
+        if product
+            .archive(ArchiveAdmission::Retained)
+            .ok()?
+            .reference()
+            != reference
+        {
+            return None;
+        }
+        if has_errors(&data.checked.diagnostics) {
+            Some(QueryError::Diagnostics(data.checked.diagnostics.clone()))
+        } else if data.checked.completion != CheckCompletion::Complete {
+            Some(QueryError::NotImplemented)
+        } else {
+            None
+        }
+    }
     pub fn failure(&self, reference: Reference) -> Option<(QueryError, Option<QueryKind>)> {
         let failures = self.failures.lock().unwrap_or_else(|e| e.into_inner());
         let (selected, error, phase) = failures.get(&reference.output.0)?;
@@ -261,6 +292,9 @@ impl FrontCheckQueries {
 struct Factory(Arc<FrontCheckQueries>);
 impl QueryFactory for Factory {
     fn create(&self, id: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
+        if id == self.0.admission_query() {
+            return Ok(Box::new(admission::Task::new(self.0.clone())));
+        }
         if id != self.0.query {
             return Err(self.0.errors.protocol);
         }
@@ -268,7 +302,8 @@ impl QueryFactory for Factory {
         Ok(Box::new(Task {
             queries: self.0.clone(),
             files: self.0.files.iter().cloned().map(File::new).collect(),
-            stage: Stage::Front,
+            publication: Publication::Front,
+            admitted: false,
             file: 0,
             root: 0,
             selecting_instances: false,
@@ -279,7 +314,6 @@ impl QueryFactory for Factory {
             lowered: Vec::new(),
             failed_front: Vec::new(),
             failed_lowered: Vec::new(),
-            instance_front: 0,
             lint_seen: 0,
             lint_complete: true,
             lint_errors: BTreeSet::new(),
@@ -322,8 +356,10 @@ impl File {
         }
     }
 }
+// Ordered reduction only. All body work, including selected instances and
+// staged evaluation, has already been admitted by the independent stream.
 #[derive(Clone, Copy)]
-enum Stage {
+enum Publication {
     Front,
     Growth,
     Storage,
@@ -335,7 +371,8 @@ enum Stage {
 struct Task {
     queries: Arc<FrontCheckQueries>,
     files: Vec<File>,
-    stage: Stage,
+    publication: Publication,
+    admitted: bool,
     file: usize,
     root: usize,
     selecting_instances: bool,
@@ -346,7 +383,6 @@ struct Task {
     lowered: Vec<(DefPath, ProductRef)>,
     failed_front: Vec<(DefPath, Reference)>,
     failed_lowered: Vec<(DefPath, Reference)>,
-    instance_front: usize,
     lint_seen: usize,
     lint_complete: bool,
     lint_errors: BTreeSet<DefPath>,
@@ -363,6 +399,27 @@ impl QueryTask for Task {
     fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
         if let Some(result) = self.terminal.clone() {
             return finish(result);
+        }
+        // These producers can make progress independently. In particular the
+        // body stream must not be a continuation of the aggregate SCC verdict.
+        if !self.admitted {
+            let mut pending = Vec::new();
+            let admission = self.queries.admission_query();
+            match cx.read(admission) {
+                Poll::Pending => pending.push(admission),
+                Poll::Ready(Err(error)) => return QueryPoll::Failed(error),
+                Poll::Ready(Ok(_)) => cx.release_body(admission),
+            }
+            if self.files.iter().any(File::clean) {
+                let growth = self.queries.plan.growth.query();
+                if cx.read(growth).is_pending() {
+                    pending.push(growth);
+                }
+            }
+            if !pending.is_empty() {
+                return QueryPoll::Waiting(pending);
+            }
+            self.admitted = true;
         }
         match self.advance(cx) {
             Ok(Some(waiting)) => QueryPoll::Waiting(waiting),
@@ -383,8 +440,8 @@ fn finish(result: Result<ProductRef, Reference>) -> QueryPoll {
 impl Task {
     fn advance(&mut self, cx: &mut dyn QueryContext) -> Result<Option<Vec<QueryId>>, Reference> {
         loop {
-            match self.stage {
-                Stage::Front => {
+            match self.publication {
+                Publication::Front => {
                     // Only this source-order window pins speculative P work.
                     // Consumed roots retain observations and release their edge.
                     while self.file < self.files.len() {
@@ -509,48 +566,11 @@ impl Task {
                         cx.release_body(id);
                         self.root += 1;
                     }
-                    // Accepted instance work is speculative; diagnostics still
-                    // publish only when a clean file selects its obligations.
-                    while self.instance_front < self.queries.instances.len() {
-                        let mut pending = Vec::new();
-                        for path in self
-                            .queries
-                            .instances
-                            .iter()
-                            .skip(self.instance_front)
-                            .take(FRONT_WINDOW)
-                        {
-                            let id = self
-                                .queries
-                                .plan
-                                .front
-                                .query(path)
-                                .ok_or(self.queries.errors.protocol)?;
-                            if cx.read(id).is_pending() {
-                                pending.push(id);
-                            }
-                        }
-                        if !pending.is_empty() {
-                            return Ok(Some(pending));
-                        }
-                        let end =
-                            (self.instance_front + FRONT_WINDOW).min(self.queries.instances.len());
-                        for path in &self.queries.instances[self.instance_front..end] {
-                            cx.release_body(
-                                self.queries
-                                    .plan
-                                    .front
-                                    .query(path)
-                                    .ok_or(self.queries.errors.protocol)?,
-                            );
-                        }
-                        self.instance_front = end;
-                    }
-                    self.stage = Stage::Growth;
+                    self.publication = Publication::Growth;
                     self.file = 0;
                     self.root = 0;
                 }
-                Stage::Growth => {
+                Publication::Growth => {
                     if self.files.iter().any(File::clean) {
                         let id = self.queries.plan.growth.query();
                         let selected = match cx.read(id) {
@@ -594,9 +614,9 @@ impl Task {
                             }
                         }
                     }
-                    self.stage = Stage::Storage;
+                    self.publication = Publication::Storage;
                 }
-                Stage::Storage => {
+                Publication::Storage => {
                     if self.files.iter().any(File::clean)
                         && self.files.iter().any(|file| file.source_rules)
                     {
@@ -639,10 +659,10 @@ impl Task {
                             }
                         }
                     }
-                    self.stage = Stage::Comptime;
+                    self.publication = Publication::Comptime;
                 }
-                Stage::Comptime | Stage::Rest => {
-                    let rest = matches!(self.stage, Stage::Rest);
+                Publication::Comptime | Publication::Rest => {
+                    let rest = matches!(self.publication, Publication::Rest);
                     while self.file < self.files.len() {
                         let file = &mut self.files[self.file];
                         if !file.clean()
@@ -735,13 +755,13 @@ impl Task {
                     }
                     self.file = 0;
                     self.root = 0;
-                    self.stage = if rest {
-                        Stage::RuntimeStaged
+                    self.publication = if rest {
+                        Publication::RuntimeStaged
                     } else {
-                        Stage::Rest
+                        Publication::Rest
                     };
                 }
-                Stage::RuntimeStaged => {
+                Publication::RuntimeStaged => {
                     while self.file < self.files.len() {
                         let file = &mut self.files[self.file];
                         if !file.clean() {
@@ -803,9 +823,9 @@ impl Task {
                         }
                         self.root += 1;
                     }
-                    self.stage = Stage::Done;
+                    self.publication = Publication::Done;
                 }
-                Stage::Done => return Ok(None),
+                Publication::Done => return Ok(None),
             }
         }
     }

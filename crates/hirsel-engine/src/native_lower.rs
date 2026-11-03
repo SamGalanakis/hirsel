@@ -1,8 +1,7 @@
 //! Shared ordinary Lower owners and explicit checked archive inputs. Raw
 //! ownership grants no V/native acceptance; source and policy checks stay local.
 use crate::{
-    DefinitionQueries, NativeRecordContext, NativeRecordSource, QueryEngine, QueryError,
-    SignatureSnapshot, Verify,
+    NativeRecordContext, NativeRecordSource, QueryEngine, QueryError, SignatureSnapshot, Verify,
 };
 use hirsel_syntax::{ContentHash, DefId, DefPath};
 use std::{

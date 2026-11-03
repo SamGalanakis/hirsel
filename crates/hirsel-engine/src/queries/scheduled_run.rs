@@ -1,5 +1,6 @@
 //! Immutable launch facts from the admitted source semantic closure.
 use super::*;
+mod acceptance;
 mod content;
 mod graph_reader;
 mod precompute;
@@ -280,6 +281,22 @@ impl FrontRunQueries {
     pub fn query(&self, path: &DefPath) -> Option<QueryId> {
         self.ids.get(path).copied()
     }
+    /// Dependency-ready native metadata. This is not a launch acceptance root;
+    /// the native source owner joins the complete Check separately.
+    pub(crate) fn preparation_query(&self, path: &DefPath) -> Option<QueryId> {
+        let query = self.query(path)?;
+        Some(QueryId {
+            kind: query.kind,
+            address: hirsel_artifact_store::Address(ContentHash::of_parts(
+                "hirsel.front.run-preparation.address.v1",
+                [query.address.0.0.as_slice()],
+            )),
+        })
+    }
+    pub(crate) fn source_check(&self) -> Option<&Arc<FrontCheckQueries>> {
+        self.check.as_ref()
+    }
+
     /// A native source request has one whole-program Run root. Its complete
     /// source/core semantic namespace remains independently demandable.
     pub(crate) fn with_selected_run_root(
@@ -299,6 +316,13 @@ impl FrontRunQueries {
     pub fn query_inventory(&self) -> impl Iterator<Item = QueryId> + '_ {
         self.semantic_ids.values().chain(self.ids.values()).copied()
     }
+    pub(crate) fn preparation_inventory(&self) -> impl Iterator<Item = QueryId> + '_ {
+        self.semantic_ids.values().copied().chain(
+            self.ids
+                .keys()
+                .filter_map(|path| self.preparation_query(path)),
+        )
+    }
 
     pub fn factory(self: &Arc<Self>) -> Arc<dyn QueryFactory> {
         Arc::new(Factory(self.clone()))
@@ -317,8 +341,17 @@ impl FrontRunQueries {
     }
     pub fn failure(&self, reference: Reference) -> Option<QueryError> {
         let values = self.failures.lock().unwrap_or_else(|e| e.into_inner());
-        let (selected, error) = values.get(&reference.output.0)?;
-        (*selected == reference).then(|| error.clone())
+        if let Some((selected, error)) = values.get(&reference.output.0)
+            && *selected == reference
+        {
+            return Some(error.clone());
+        }
+        drop(values);
+        self.check
+            .as_ref()?
+            .failure(reference)
+            .map(|(error, _)| error)
+            .or_else(|| self.check.as_ref()?.rejection(reference))
     }
     fn failure_record(&self, error: QueryError) -> Reference {
         let Some(bytes) = self.records.encode(&self.anchors, &error) else {
@@ -349,6 +382,14 @@ impl QueryFactory for Factory {
         if let Some(task) = precompute::create_universe(&self.0, query) {
             return Ok(task);
         }
+        if let Some(root) = self
+            .0
+            .ids
+            .iter()
+            .find_map(|(root, id)| (*id == query).then(|| root.clone()))
+        {
+            return Ok(Box::new(acceptance::Task::new(self.0.clone(), root, query)));
+        }
         let (root, completed) = if let Some((batch, roots)) = &self.0.batch
             && query == *batch
         {
@@ -366,7 +407,10 @@ impl QueryFactory for Factory {
                 .0
                 .ids
                 .iter()
-                .find_map(|(path, id)| (*id == query).then(|| path.clone()))
+                .find_map(|(path, id)| {
+                    (*id == query || self.0.preparation_query(path) == Some(query))
+                        .then(|| path.clone())
+                })
                 .ok_or(self.0.errors.protocol)?;
             let completed = self
                 .0
@@ -388,7 +432,7 @@ impl QueryFactory for Factory {
             queries: self.0.clone(),
             query,
             root,
-            checked: false,
+            started: false,
             pending: Vec::new(),
             entries: BTreeMap::new(),
             waiting: None,
@@ -406,7 +450,7 @@ struct Task {
     queries: Arc<FrontRunQueries>,
     query: QueryId,
     root: DefPath,
-    checked: bool,
+    started: bool,
     pending: Vec<DefId>,
     entries: BTreeMap<DefId, Arc<GraphEntry>>,
     waiting: Option<QueryId>,
@@ -455,30 +499,8 @@ impl Task {
         }
     }
     fn advance(&mut self, cx: &mut dyn QueryContext) -> Poll<Result<ProductRef, Reference>> {
-        if !self.checked {
-            let Some(check) = self.queries.check.clone() else {
-                return Poll::Ready(Err(self.queries.errors.protocol));
-            };
-            let product = match self.read(cx, check.query()) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(product)) => product,
-            };
-            let Some(output) = check.outcome(product) else {
-                return Poll::Ready(Err(self.queries.errors.protocol));
-            };
-            if output.checked.completion != CheckCompletion::Complete {
-                return Poll::Ready(Err(self.queries.failure_record(operational(format!(
-                    "Run source check is incomplete: {:?}",
-                    output.checked.completion
-                )))));
-            }
-            if has_errors(&output.checked.diagnostics) {
-                return Poll::Ready(Err(self
-                    .queries
-                    .failure_record(QueryError::Diagnostics(output.checked.diagnostics))));
-            }
-            self.checked = true;
+        if !self.started {
+            self.started = true;
             self.pending.push(DefId::intern(&self.root));
             self.pending
                 .extend(self.queries.native_roots.iter().map(DefId::intern));
@@ -552,6 +574,32 @@ impl Task {
             }
             if self.pending.is_empty() {
                 break;
+            }
+        }
+        if self.queries.preparation_query(&self.root) != Some(self.query) {
+            // Source acceptance gates Run publication after dependency-ready
+            // semantic/Lower work, rather than gating its admission.
+            let Some(check) = self.queries.check.clone() else {
+                return Poll::Ready(Err(self.queries.errors.protocol));
+            };
+            let product = match self.read(cx, check.query()) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(product)) => product,
+            };
+            let Some(output) = check.outcome(product) else {
+                return Poll::Ready(Err(self.queries.errors.protocol));
+            };
+            if output.checked.completion != CheckCompletion::Complete {
+                return Poll::Ready(Err(self.queries.failure_record(operational(format!(
+                    "Run source check is incomplete: {:?}",
+                    output.checked.completion
+                )))));
+            }
+            if has_errors(&output.checked.diagnostics) {
+                return Poll::Ready(Err(self
+                    .queries
+                    .failure_record(QueryError::Diagnostics(output.checked.diagnostics))));
             }
         }
         Poll::Ready(

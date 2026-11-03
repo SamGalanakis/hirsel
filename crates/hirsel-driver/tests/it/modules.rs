@@ -172,6 +172,7 @@ mod package_head_22;
 mod package_slots;
 mod packages;
 mod packed_walk;
+mod phase_admission;
 mod pipeline;
 mod prepared_source_inputs_49;
 mod private_inference_83;

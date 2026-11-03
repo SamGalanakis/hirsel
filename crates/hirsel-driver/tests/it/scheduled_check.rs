@@ -2,7 +2,7 @@ use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::MemStore, *};
 use std::sync::Arc;
 #[test]
-fn ordered_check_gates_lowering_and_preserves_file_failure_prefixes() {
+fn ordered_check_preserves_source_diagnostics_and_file_failure_prefixes() {
     with_compiler_stack(|| {
         for (source, reject_growth, fail_lower) in [
             (
@@ -198,8 +198,8 @@ fn check_case(
         constant.0.name = "A".into();
         assert_eq!(
             lower.work(&constant).initializers,
-            0,
-            "GEN5 rejection withholds S1"
+            1,
+            "independent S1 admission precedes the aggregate GEN5 verdict"
         );
     }
     if fail_lower {
@@ -207,13 +207,28 @@ fn check_case(
         later.0.name = "LATER".into();
         assert_eq!(
             lower.work(&later).initializers,
-            0,
-            "failed earlier Lower withholds suffix"
+            1,
+            "an earlier Lower failure does not bar independent work"
         );
     }
     let expected = program.check(policy);
     match (actual, expected) {
         (Ok(actual), Ok(expected)) => {
+            if reject_growth {
+                assert!(
+                    actual.lowered.is_empty(),
+                    "GEN5 rejection publishes no Lower prefix"
+                );
+            }
+            if fail_lower {
+                assert!(
+                    !actual
+                        .lowered
+                        .iter()
+                        .any(|(path, _)| path.0.name == "LATER"),
+                    "the ordered Lower failure still withholds its publication suffix"
+                );
+            }
             assert_eq!(actual.checked.completion, expected.completion);
             assert_eq!(
                 actual.checked.diagnostics, expected.diagnostics,

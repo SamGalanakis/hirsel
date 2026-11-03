@@ -2066,9 +2066,10 @@ impl QueryFactory for CheckRoots {
         &self,
         query: QueryId,
     ) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference> {
-        let check = if query == self.reachable.query() {
+        let check = if query == self.reachable.query() || query == self.reachable.admission_query()
+        {
             &self.reachable
-        } else if query == self.comptime.query() {
+        } else if query == self.comptime.query() || query == self.comptime.admission_query() {
             &self.comptime
         } else {
             return Err(self.errors.protocol);

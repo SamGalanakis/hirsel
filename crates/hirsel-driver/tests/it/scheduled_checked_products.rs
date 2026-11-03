@@ -243,7 +243,7 @@ fn products_case_with_decode_layout(
                 assert!(scope.failed_lowered().contains(&bad));
                 assert!(scope.reads().contains_key(&bad));
                 assert!(!scope.lowered().contains(&later));
-                assert_eq!(lower.work(&later).initializers, 0);
+                assert_eq!(lower.work(&later).initializers, 1);
                 let before = lower.work(&bad);
                 assert!(
                     scope.definition(&bad).is_err(),

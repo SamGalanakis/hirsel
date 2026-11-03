@@ -6,6 +6,7 @@ use crate::runtime::*;
 use crate::store::{Domain, Reference, ResultStore};
 use hirsel_types::SignatureKind;
 use std::{sync::Mutex, task::Poll};
+mod acceptance;
 
 pub const FRONT_NATIVE_ROOT_KIND: u32 = 0x4600_001a;
 const OUTPUT: Domain = Domain {
@@ -54,6 +55,7 @@ pub struct FrontNativeQueries {
     anchors: crate::NativeRecordContext,
     store: Arc<dyn ResultStore>,
     completed: Mutex<Option<(ProductRef, Arc<FrontNativeProducts>)>>,
+    accepted: Mutex<Option<ProductRef>>,
     failure: Mutex<Option<(Reference, QueryError)>>,
     weight: MemoryWeight,
     errors: RuntimeErrors,
@@ -146,29 +148,41 @@ impl FrontNativeQueries {
     pub fn query(&self) -> QueryId {
         self.query
     }
+    /// Native source data can feed independently validated native producers
+    /// before complete source acceptance. Executable consumers join `query()`.
+    pub fn preparation_query(&self) -> QueryId {
+        QueryId {
+            kind: FRONT_NATIVE_ROOT_KIND,
+            address: hirsel_artifact_store::Address(ContentHash::of_parts(
+                "hirsel.front.native-preparation.address.v1",
+                [self.query.address.0.0.as_slice()],
+            )),
+        }
+    }
     pub fn factory(self: &Arc<Self>) -> Arc<dyn QueryFactory> {
         Arc::new(Factory(self.clone()))
     }
     pub(crate) fn export_run(&self, entry: &DefPath) -> Option<Arc<FrontRunQueries>> {
         (entry == &self.entry).then(|| self.run.clone())
     }
-    /// The exact completed Run selected by this exact completed native root.
+    /// The exact metadata Run selected by this native preparation or acceptance.
     /// No source-root selection or new query is performed here.
     pub fn completed_run_product(&self, product: ProductRef) -> Option<ProductRef> {
         let completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
         let (selected, _) = completed.as_ref()?;
-        if *selected != product {
+        if *selected != product && !self.is_accepted(&product) {
             return None;
         }
-        self.run.completed_product(self.run.query(&self.entry)?)
+        self.run
+            .completed_product(self.run.preparation_query(&self.entry)?)
     }
     /// Actual IDs from the Run view after native source-root selection.
     pub fn run_query(&self, path: &DefPath) -> Option<QueryId> {
-        self.run.query(path)
+        self.run.preparation_query(path)
     }
     /// Every admitted semantic address, including core, and the one Run root.
     pub fn run_query_inventory(&self) -> impl Iterator<Item = QueryId> + '_ {
-        self.run.query_inventory()
+        self.run.preparation_inventory()
     }
 
     /// Actual IDs from the selected source catalogue captured by this root.
@@ -184,10 +198,17 @@ impl FrontNativeQueries {
     pub fn outcome(self: &Arc<Self>, product: ProductRef) -> Option<FrontNativeOutput> {
         let value = self.completed.lock().unwrap_or_else(|e| e.into_inner());
         let (selected, data) = value.as_ref()?;
-        (*selected == product).then(|| FrontNativeOutput {
+        (*selected == product || self.is_accepted(&product)).then(|| FrontNativeOutput {
             products: data.clone(),
             _owner: self.clone(),
         })
+    }
+    fn is_accepted(&self, product: &ProductRef) -> bool {
+        self.accepted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|selected| selected == product)
     }
     pub fn failure(&self, reference: Reference) -> Option<QueryError> {
         self.failure
@@ -197,6 +218,13 @@ impl FrontNativeQueries {
             .and_then(|(selected, error)| (*selected == reference).then(|| error.clone()))
             .or_else(|| self.definitions.failure(reference))
             .or_else(|| self.run.failure(reference))
+            .or_else(|| {
+                self.run
+                    .source_check()?
+                    .failure(reference)
+                    .map(|(error, _)| error)
+            })
+            .or_else(|| self.run.source_check()?.rejection(reference))
     }
     fn fail(&self, error: QueryError) -> Reference {
         let Some(bytes) = self.records.encode(&self.anchors, &error) else {
@@ -215,7 +243,10 @@ impl FrontNativeQueries {
 struct Factory(Arc<FrontNativeQueries>);
 impl QueryFactory for Factory {
     fn create(&self, id: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
-        if id != self.0.query {
+        if id == self.0.query {
+            return Ok(Box::new(acceptance::Task::new(self.0.clone())));
+        }
+        if id != self.0.preparation_query() {
             return Err(self.0.errors.protocol);
         }
         let terminal = self
@@ -227,8 +258,10 @@ impl QueryFactory for Factory {
             .map(|(p, _)| Ok(p.clone()));
         Ok(Box::new(Task {
             owner: self.0.clone(),
+            id,
             selected: None,
             cursor: 0,
+            seeds: 0,
             definitions: Vec::new(),
             used: 0,
             run_product: None,
@@ -239,8 +272,10 @@ impl QueryFactory for Factory {
 }
 struct Task {
     owner: Arc<FrontNativeQueries>,
+    id: QueryId,
     selected: Option<Vec<DefPath>>,
     cursor: usize,
+    seeds: usize,
     definitions: Vec<FrontNativeDefinitionOutput>,
     used: u64,
     run_product: Option<ProductRef>,
@@ -249,7 +284,7 @@ struct Task {
 }
 impl QueryTask for Task {
     fn id(&self) -> QueryId {
-        self.owner.query
+        self.id
     }
     fn weight(&self) -> MemoryWeight {
         self.owner.weight
@@ -291,8 +326,20 @@ impl Task {
     }
     fn advance(&mut self, cx: &mut dyn QueryContext) -> Poll<Result<ProductRef, Reference>> {
         let owner = self.owner.clone();
+        while self.seeds < owner.template.definitions.len() {
+            let path = &owner.template.definitions[self.seeds];
+            let Some(id) = owner.definitions.query(path) else {
+                return Poll::Ready(Err(owner.errors.protocol));
+            };
+            match self.read(cx, id) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(_)) => cx.release_body(id),
+            }
+            self.seeds += 1;
+        }
         if self.selected.is_none() {
-            let Some(id) = owner.run.query(&owner.entry) else {
+            let Some(id) = owner.run.preparation_query(&owner.entry) else {
                 return Poll::Ready(Err(owner.errors.protocol));
             };
             let product = match self.read(cx, id) {
@@ -539,13 +586,10 @@ impl Task {
             .ok_or(QueryError::NotImplemented)?;
         let action = hirsel_artifact_store::Action(ContentHash::of_parts(
             "hirsel.front.native-root-action.v1",
-            [
-                owner.query.address.0.0.as_slice(),
-                record.output.0.0.as_slice(),
-            ],
+            [self.id.address.0.0.as_slice(), record.output.0.0.as_slice()],
         ));
         let product = ProductRef::import_archive(
-            owner.query.address,
+            self.id.address,
             action,
             ProductArchive::from_retained_bytes(
                 record,
@@ -673,7 +717,7 @@ impl QueryEngine {
         }
         let registry = crate::registry::BuiltinRegistry::shared();
         let template = crate::NativeSourceRoots {
-            definitions: Vec::new(),
+            definitions: seeds.clone(),
             environment: self.environment.clone(),
             registry_revision: registry.revision(),
             operations: registry.operation_inventory(),
@@ -768,6 +812,7 @@ impl QueryEngine {
             anchors: crate::NativeRecordContext::capture(self),
             store,
             completed: Mutex::new(None),
+            accepted: Mutex::new(None),
             failure: Mutex::new(None),
             weight,
             errors,

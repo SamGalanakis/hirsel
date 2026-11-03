@@ -244,7 +244,7 @@ impl FrontNativeDefinitionQueries {
             ));
         }
         let query = run
-            .query(&root)
+            .preparation_query(&root)
             .ok_or_else(|| native_selection_error("native selection root is missing"))?;
         let this = Arc::get_mut(&mut self).ok_or_else(|| {
             native_selection_error("native selection requires an unshared catalogue")
@@ -475,24 +475,6 @@ impl Task {
     }
     fn advance(&mut self, cx: &mut dyn QueryContext) -> Poll<Result<ProductRef, Reference>> {
         let owner = self.owner.clone();
-        if let Some((run, root)) = &owner.selection {
-            let Some(id) = run.query(root) else {
-                return Poll::Ready(Err(owner.errors.protocol));
-            };
-            let product = match self.read(cx, id) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(product)) => product,
-            };
-            let Some(output) = run.outcome(product) else {
-                return Poll::Ready(Err(owner.errors.protocol));
-            };
-            if !output.semantic.semantic_contains(&self.path) {
-                return Poll::Ready(Err(owner.fail(native_selection_error(
-                    "definition is outside the native source selection",
-                ))));
-            }
-        }
         let input = match owner.input(&self.path) {
             Ok(input) => input,
             Err(error) => return Poll::Ready(Err(owner.fail(error))),
@@ -607,6 +589,24 @@ impl Task {
         } else {
             None
         };
+        if let Some((run, root)) = &owner.selection {
+            let Some(id) = run.preparation_query(root) else {
+                return Poll::Ready(Err(owner.errors.protocol));
+            };
+            let product = match self.read(cx, id) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(product)) => product,
+            };
+            let Some(output) = run.outcome(product) else {
+                return Poll::Ready(Err(owner.errors.protocol));
+            };
+            if !output.semantic.semantic_contains(&self.path) {
+                return Poll::Ready(Err(owner.fail(native_selection_error(
+                    "definition is outside the native source selection",
+                ))));
+            }
+        }
         Poll::Ready((|| {
             let reads = Arc::new(reads.finish().map_err(|_| owner.errors.protocol)?);
             let (source, contracts, requirements) = self
@@ -778,7 +778,9 @@ impl Task {
                     return Ok(None);
                 }
                 if let Some((run, root)) = &owner.selection {
-                    let selected = run.query(root).and_then(|id| run.completed_product(id));
+                    let selected = run
+                        .preparation_query(root)
+                        .and_then(|id| run.completed_product(id));
                     let Some(selected) = selected.and_then(|p| run.outcome(p)) else {
                         return Err(QueryError::NotImplemented);
                     };

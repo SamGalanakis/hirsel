@@ -1,7 +1,7 @@
-//! Check first, then demand every source-owned semantic/body product and each
-//! source package's universe summary. The continuation retains only its
-//! position and fold, never a launch or revision.
+//! Dependency-ready source products and universe summaries. The fold retains
+//! only its cursor and digest; a separate Check join owns durable publication.
 use super::*;
+mod acceptance;
 use hirsel_syntax::PackageId;
 use hirsel_validate::PackageUniverse;
 const OUTPUT: Domain = Domain {
@@ -237,30 +237,35 @@ impl UniverseTask {
         Ok(product)
     }
 }
+fn preparation_query(query: QueryId) -> QueryId {
+    QueryId {
+        kind: query.kind,
+        address: hirsel_artifact_store::Address(ContentHash::of_parts(
+            "hirsel.front.precompute-preparation.address.v1",
+            [query.address.0.0.as_slice()],
+        )),
+    }
+}
 pub(super) fn create(queries: &Arc<FrontRunQueries>, query: QueryId) -> Option<Box<dyn QueryTask>> {
-    if queries.precompute_query() != Some(query) {
+    let root = queries.precompute_query()?;
+    if query == root {
+        return Some(Box::new(acceptance::Task::new(queries.clone(), query)));
+    }
+    if query != preparation_query(root) {
         return None;
     }
-    let terminal = queries
-        .precomputed
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .as_ref()
-        .map(|(product, _)| Ok(product.clone()));
     Some(Box::new(Task {
         queries: queries.clone(),
         query,
-        checked: false,
         index: 0,
         digest: ContentHash::default(),
         waiting: None,
-        terminal,
+        terminal: None,
     }))
 }
 struct Task {
     queries: Arc<FrontRunQueries>,
     query: QueryId,
-    checked: bool,
     index: usize,
     digest: ContentHash,
     waiting: Option<QueryId>,
@@ -313,28 +318,6 @@ impl Task {
         }
     }
     fn advance(&mut self, cx: &mut dyn QueryContext) -> Poll<Result<ProductRef, Reference>> {
-        if !self.checked {
-            let Some(check) = self.queries.check.clone() else {
-                return Poll::Ready(Err(self.queries.errors.protocol));
-            };
-            let product = match self.read(cx, check.query()) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(product)) => product,
-            };
-            let Some(output) = check.outcome(product) else {
-                return Poll::Ready(Err(self.queries.errors.protocol));
-            };
-            if has_errors(&output.checked.diagnostics) {
-                return Poll::Ready(Err(self
-                    .queries
-                    .failure_record(QueryError::Diagnostics(output.checked.diagnostics))));
-            }
-            if output.checked.completion != CheckCompletion::Complete {
-                return Poll::Ready(Err(self.queries.failure_record(QueryError::NotImplemented)));
-            }
-            self.checked = true;
-        }
         let queries = self.queries.clone();
         let Some(selection) = &queries.precompute else {
             return Poll::Ready(Err(queries.errors.protocol));
@@ -410,21 +393,9 @@ impl Task {
                     .admit_archive(record, bytes)
                     .map_err(|_| queries.errors.resource)?,
             );
-            // The precompute output is the request's root: under Complete it
-            // becomes visible only after every component it folds is durable.
-            if !queries
+            queries
                 .store
-                .publish_root(product.address, product.action, record)
-                && queries.store.persistence() == crate::store::Persistence::Complete
-            {
-                return Err(queries.failure_record(operational(
-                    "precompute closure could not be stored durably",
-                )));
-            }
-            *queries
-                .precomputed
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()) = Some((product.clone(), output));
+                .associate_product(product.address, product.action, record);
             Ok(product)
         })())
     }

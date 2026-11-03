@@ -49,7 +49,7 @@ fn constants_reachable_jobs2() {
 }
 
 #[test]
-fn growth_rejection_withholds_initializers() {
+fn growth_rejection_preserves_source_diagnostics() {
     for jobs in [1, 2] {
         for policy in [LoweringPolicy::Comptime, LoweringPolicy::Reachable] {
             check_case(
@@ -80,7 +80,7 @@ fn dead_error_arms_warn_like_the_package_check() {
 }
 
 #[test]
-fn failed_lower_withholds_suffix() {
+fn failed_lower_preserves_publication_suffix() {
     for jobs in [1, 2] {
         for policy in [LoweringPolicy::Comptime, LoweringPolicy::Reachable] {
             check_case(
@@ -229,8 +229,8 @@ fn check_case(
             constant.0.name = "A".into();
             assert_eq!(
                 lower.work(&constant).initializers,
-                0,
-                "GEN5 rejection withholds S1"
+                1,
+                "independent S1 admission precedes the aggregate GEN5 verdict"
             );
         }
         if fail_lower {
@@ -238,8 +238,8 @@ fn check_case(
             later.0.name = "LATER".into();
             assert_eq!(
                 lower.work(&later).initializers,
-                0,
-                "failed earlier Lower withholds suffix"
+                1,
+                "an earlier Lower failure does not bar independent work"
             );
         }
         let dead_arms = actual.as_ref().map_or(0, |actual| {
@@ -249,6 +249,21 @@ fn check_case(
         let expected = program.check(policy);
         match (actual, expected) {
             (Ok(actual), Ok(expected)) => {
+                if reject_growth {
+                    assert!(
+                        actual.lowered.is_empty(),
+                        "GEN5 rejection publishes no Lower prefix"
+                    );
+                }
+                if fail_lower {
+                    assert!(
+                        !actual
+                            .lowered
+                            .iter()
+                            .any(|(path, _)| path.0.name == "LATER"),
+                        "the ordered Lower failure still withholds its publication suffix"
+                    );
+                }
                 assert_eq!(actual.checked.completion, expected.completion);
                 assert_eq!(
                     actual.checked.diagnostics, expected.diagnostics,

@@ -53,7 +53,7 @@ pub(super) fn create(queries: &Arc<FrontRunQueries>, query: QueryId) -> Option<B
             queries: queries.clone(),
             query,
             root: path,
-            checked: false,
+            started: false,
             pending: Vec::new(),
             entries: BTreeMap::new(),
             waiting: None,

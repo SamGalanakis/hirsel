@@ -504,11 +504,14 @@ impl FrontProofExport {
         if !Arc::ptr_eq(&run, &self.run) {
             return Err(QueryError::NotImplemented);
         }
-        self.input(
-            native
-                .completed_run_product(product)
-                .ok_or(QueryError::NotImplemented)?,
-        )
+        let selected = native
+            .completed_run_product(product)
+            .ok_or(QueryError::NotImplemented)?;
+        let output = self
+            .run
+            .outcome(selected)
+            .ok_or(QueryError::NotImplemented)?;
+        self.input_from_run(&output)
     }
     /// Complete observed source reads for the selected closure. Exact frozen
     /// header fingerprint coverage is available through headers().
@@ -558,6 +561,9 @@ impl FrontProofExport {
             .run
             .outcome(product)
             .ok_or(QueryError::NotImplemented)?;
+        self.input_from_run(&output)
+    }
+    fn input_from_run(&self, output: &FrontRunOutput) -> Result<ExportInput, QueryError> {
         let closure = output.semantic.definitions();
         if !self.roots.is_subset(closure) {
             return Err(QueryError::NotImplemented);

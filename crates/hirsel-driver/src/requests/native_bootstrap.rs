@@ -1,5 +1,5 @@
-//! Admit native tasks only after their ordinary source root has settled. The
-//! bootstrap is itself a dependency task; host readiness never runs a compiler.
+//! Native compilation follows dependency-ready source data. A separate join
+//! requires complete source acceptance before publishing executable readiness.
 use super::{native_lower, native_routing::NativeRouting};
 use crate::native::{
     self,
@@ -227,6 +227,15 @@ impl NativeBootstrap {
     }
     pub fn query(&self) -> QueryId {
         self.query
+    }
+    fn preparation_query(&self) -> QueryId {
+        QueryId {
+            kind: KIND,
+            address: Address(ContentHash::of_parts(
+                "hirsel.host.native-preparation.v1",
+                [self.query.address.0.0.as_slice()],
+            )),
+        }
     }
     pub fn factory(self: &Arc<Self>) -> Arc<dyn QueryFactory> {
         Arc::new(Factory(self.clone()))
@@ -546,12 +555,15 @@ pub(super) fn discharge_rows(
 struct Factory(Arc<NativeBootstrap>);
 impl QueryFactory for Factory {
     fn create(&self, query: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
-        if query != self.0.query {
+        if query == self.0.query {
+            return Ok(Box::new(acceptance::Task::new(self.0.clone())));
+        }
+        if query != self.0.preparation_query() {
             return Err(self.0.errors.protocol);
         }
         Ok(Box::new(Task {
             owner: self.0.clone(),
-            terminal: self.0.completed.get().map(|c| Ok(c.product.clone())),
+            terminal: None,
         }))
     }
 }
@@ -561,7 +573,7 @@ struct Task {
 }
 impl QueryTask for Task {
     fn id(&self) -> QueryId {
-        self.owner.query
+        self.owner.preparation_query()
     }
     fn weight(&self) -> MemoryWeight {
         self.owner.weight
@@ -570,8 +582,10 @@ impl QueryTask for Task {
         let result = if let Some(result) = self.terminal.clone() {
             result
         } else {
-            let source = match cx.read(self.owner.source.query()) {
-                Poll::Pending => return QueryPoll::Waiting(vec![self.owner.source.query()]),
+            let source = match cx.read(self.owner.source.preparation_query()) {
+                Poll::Pending => {
+                    return QueryPoll::Waiting(vec![self.owner.source.preparation_query()]);
+                }
                 Poll::Ready(Err(error)) => {
                     self.terminal = Some(Err(error));
                     return QueryPoll::Failed(error);
@@ -585,12 +599,25 @@ impl QueryTask for Task {
                         return QueryPoll::Waiting(vec![prepared.compilation.query_id()]);
                     }
                     Poll::Ready(Err(error)) => Err(error),
-                    Poll::Ready(Ok(product))
-                        if product.address == prepared.compilation.query_id().address =>
+                    Poll::Ready(Ok(compilation))
+                        if compilation.address == prepared.compilation.query_id().address =>
                     {
-                        self.owner
-                            .publish(product)
-                            .map_err(|error| self.owner.fail(error))
+                        let action = Action(ContentHash::of_parts(
+                            "hirsel.host.native-preparation-action.v1",
+                            [
+                                compilation.address.0.0.as_slice(),
+                                compilation.action.0.0.as_slice(),
+                            ],
+                        ));
+                        LiveDependencyProduct::new(
+                            self.owner.store.as_ref(),
+                            self.id().address,
+                            action,
+                            OUTPUT,
+                            vec![compilation],
+                        )
+                        .map(ProductRef::dependencies)
+                        .map_err(|_| self.owner.errors.resource)
                     }
                     _ => Err(self.owner.errors.protocol),
                 },
@@ -604,5 +631,6 @@ impl QueryTask for Task {
     }
 }
 
+mod acceptance;
 #[cfg(test)]
 mod tests;

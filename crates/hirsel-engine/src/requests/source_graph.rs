@@ -949,7 +949,7 @@ pub fn install(
     carry: Option<&SourceCarry>,
     scope: Option<FrontDemandScope>,
 ) -> Result<InstalledSource, ToolError> {
-    let prepared_front = scope.as_ref().map(|scope| scope.front().clone());
+    let prepared_front = scope.as_ref().and_then(|scope| scope.front().cloned());
     let front_carry = scope
         .as_ref()
         .and_then(|scope| scope.carry().cloned())

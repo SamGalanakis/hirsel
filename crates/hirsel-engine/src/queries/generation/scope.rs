@@ -52,7 +52,7 @@ pub struct FrontDemandScope {
     definitions: Vec<DefPath>,
     registrations: Vec<Arc<AcceptedFrontRegistration>>,
     namespace: Arc<NamespaceCapture>,
-    front: Arc<FrontBodyQueries>,
+    front: Option<Arc<FrontBodyQueries>>,
     rounds: usize,
     stats: RuntimeStats,
     failure: Option<FrontDemandError>,
@@ -71,8 +71,8 @@ impl FrontDemandScope {
     pub fn namespace(&self) -> &Arc<NamespaceCapture> {
         &self.namespace
     }
-    pub(crate) fn front(&self) -> &Arc<FrontBodyQueries> {
-        &self.front
+    pub(crate) fn front(&self) -> Option<&Arc<FrontBodyQueries>> {
+        self.front.as_ref()
     }
     pub fn rounds(&self) -> usize {
         self.rounds
@@ -159,13 +159,7 @@ impl QueryEngine {
             discovery,
             mut metadata,
         } = admission;
-        let carry = match carry {
-            Some(carry) => {
-                drop(discovery);
-                Some(carry)
-            }
-            None => FrontCarry::new(discovery).ok(),
-        };
+        drop(discovery);
         let front_grant = front
             .split(front.bytes() / 2)
             .ok_or_else(|| admission_error("Front partition"))?;
@@ -258,12 +252,15 @@ impl QueryEngine {
         let metadata = metadata
             .split(required)
             .ok_or_else(|| admission_error("completed scope metadata"))?;
+        let front = carry
+            .as_ref()
+            .map(|_| successor.owner().body_front().clone());
         Ok(FrontDemandScope {
             carry,
             definitions,
             registrations,
             namespace,
-            front: successor.owner().body_front().clone(),
+            front,
             rounds,
             stats,
             failure,

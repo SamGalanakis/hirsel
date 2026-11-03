@@ -648,12 +648,9 @@ impl DemandProducer {
         reads: QueryReads,
     ) -> Result<scheduled_lower::SuccessorCapture, QueryError> {
         let initial = self.current()?;
-        let mut demanded = Vec::new();
         let mut checked = BTreeSet::new();
         for root in roots {
-            if !demanded.contains(root) {
-                demanded.push(root.clone());
-            }
+            let mut demanded = vec![root.clone()];
             loop {
                 if self
                     .rounds

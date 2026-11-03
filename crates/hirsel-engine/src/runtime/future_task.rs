@@ -266,7 +266,7 @@ impl LocalFutureTask {
                             let reads = self.reads.0.borrow();
                             let occupied = reads.completed.len()
                                 + reads.requested.len()
-                                                + reads.composed.slots();
+                                + reads.composed.slots();
                             cx.cycle_members(query, reads.limit.saturating_sub(occupied))
                         } else {
                             None

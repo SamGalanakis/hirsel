@@ -2455,6 +2455,8 @@ fn consumed_records_reuse_slot_bookkeeping_before_debiting_working_memory() {
     assert_eq!(rt.stats().bookkeeping_bytes, 8 * ENTRY_BYTES);
     assert!(rt.stats().peak_bytes <= bytes);
     assert!(rt.metadata_capacity_bytes() <= rt.stats().bookkeeping_bytes);
+}
+
 struct OrderedPublication {
     published: Arc<Mutex<Vec<QueryId>>>,
     prerequisite: Option<(QueryId, QueryId)>,

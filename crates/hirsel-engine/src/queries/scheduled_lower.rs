@@ -3104,6 +3104,7 @@ impl QueryEngine {
             let part = allowance.bytes() / 6;
             let mut take = || allowance.split(part).ok_or_else(refusal);
             Some(generation::demand::DemandAdmission {
+                carry: None,
                 front: take()?,
                 lower: take()?,
                 text: take()?,

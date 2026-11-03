@@ -197,6 +197,11 @@ impl Nodes {
     pub fn remove(&mut self, key: &Key) -> Option<Box<Execution>> {
         let &slot = self.index.get(key)?;
         let node = &mut self.rows[slot as usize];
+        if !matches!(node.status, Status::Settled(_) | Status::Dormant) {
+            // Cancellation discards this unfinished generation's reads. Slot
+            // retirement of terminal results retains all successful/failed reads.
+            self.history.remove(key);
+        }
         node.status = Status::Dormant;
         node.unsatisfied = 0;
         let generation = node.generation;
@@ -303,6 +308,17 @@ impl Nodes {
             });
         Some(edge)
     }
+    pub fn cancelled_record_bytes(&self, query: Key) -> u64 {
+        if self
+            .get(&query)
+            .is_none_or(|node| matches!(node.status, Status::Settled(_) | Status::Dormant))
+        {
+            return 0;
+        }
+        self.history
+            .get(&query)
+            .map_or(0, |targets| 512 + targets.len() as u64 * 512)
+    }
     pub fn recorded_bytes(&self, source: NodeId, target: Option<Key>) -> u64 {
         let source_key = self.key_at(source.slot);
         let recorded = self.history.get(&source_key);
@@ -320,9 +336,10 @@ impl Nodes {
             .iter()
             .filter(|target| recorded.is_none_or(|r| !r.contains(target)))
             .count();
-        // Sparse B-tree nodes, including one root per adjacency set. The exact
-        // allocated-capacity accounting below verifies this conservative debit.
-        (new as u64) * 256
+        // Sparse B-tree nodes, one root per adjacency set, and exact traversal
+        // parents, pending keys and the returned path share this debit. The
+        // allocated-capacity accounting below also covers retained records.
+        (new as u64) * 512
             + if new != 0 && recorded.is_none() {
                 512
             } else {

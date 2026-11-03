@@ -2179,6 +2179,12 @@ fn consumed_failed_records_detect_cycles_after_slot_reuse() {
     );
     assert_eq!(nodes.get_id(a).unwrap().unsatisfied, 0);
     assert!(nodes.insert_edge(unrelated, a).is_some());
+    nodes.remove(&key(query(0)));
+    let restarted = nodes.insert(key(query(0)), bare_node());
+    assert!(
+        nodes.insert_edge(reopened, restarted).is_some(),
+        "cancelled generation's consumed reads are discarded"
+    );
 }
 
 #[test]
@@ -2285,4 +2291,58 @@ fn node_pressure_spills_results_without_persistence_and_preserves_root_delivery(
     );
     assert!(rt.metadata_capacity_bytes() <= rt.stats().bookkeeping_bytes);
     assert!(rt.stats().peak_bytes <= bytes);
+}
+
+#[test]
+fn body_admission_can_evict_a_spilled_result_after_its_factory_preserves_the_archive() {
+    struct Archived {
+        value: ProductRef,
+        evictions: Arc<AtomicUsize>,
+    }
+    impl QueryFactory for Archived {
+        fn create(&self, id: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
+            Ok(Box::new(Task {
+                id,
+                spec: Spec::deps(&[]),
+            }))
+        }
+        fn evict(&self, selected: QueryId, value: &ProductRef, _: u64) -> bool {
+            if selected == query(0) && value == &self.value {
+                self.evictions.fetch_add(1, Ordering::SeqCst);
+                true
+            } else {
+                false
+            }
+        }
+    }
+    let mut rt = runtime(1, 16 << 20);
+    let evictions = Arc::new(AtomicUsize::new(0));
+    rt.register(
+        1,
+        Arc::new(Archived {
+            value: product(query(0)),
+            evictions: evictions.clone(),
+        }),
+    )
+    .unwrap();
+    let first = rt.request(&[query(0)]);
+    rt.wait(first).unwrap();
+    let generation = {
+        let mut state = rt.shared.lock();
+        assert!(state.retire_node(key(query(0)), true));
+        assert!(state.spill.contains_key(&key(query(0))));
+        state.ensure(key(query(1))).unwrap()
+    };
+    let mut cx = Context {
+        shared: &rt.shared,
+        query: key(query(1)),
+        generation,
+        pending: BTreeSet::new(),
+        admission_wait: false,
+    };
+    assert!(cx.evict_body());
+    assert_eq!(evictions.load(Ordering::SeqCst), 1);
+    assert!(rt.shared.lock().spill.is_empty());
+    let reopened = rt.request(&[query(0)]);
+    assert_eq!(rt.wait(reopened), Ok(vec![product(query(0))]));
 }

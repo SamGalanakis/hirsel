@@ -246,9 +246,9 @@ impl AdmittedRuntime {
     ) -> std::io::Result<Self> {
         Self::with_reservation(jobs, reservation, errors, COMPILER_STACK_BYTES)
     }
-    /// Reserve scheduler rows for the immutable query inventory within the
-    /// supplied runtime grant. Worker stacks and task working memory use its
-    /// remainder; this never obtains an additional process reservation.
+    /// Reserve execution slots for the live frontier within the supplied
+    /// runtime grant. Recorded reads, request-local spill, worker stacks and
+    /// task memory share its remainder without another process reservation.
     /// A one-worker compiler runs on its caller. If no additional worker can
     /// start, completion waits drive the same admitted graph on the caller.
     pub fn with_query_capacity(
@@ -750,6 +750,9 @@ impl State {
         self.stats.claims += 1;
         self.event(RuntimeEvent::Claim(id(query)));
         let spilled = self.spill.remove(&query);
+        if spilled.is_some() {
+            self.metadata -= 512;
+        }
         let precharged = spilled.is_some();
         let factory = self.factories.get(&query.0).cloned();
         let created = if precharged {
@@ -913,6 +916,30 @@ impl State {
         self.account();
         true
     }
+    fn evict_spill(&mut self, scratch: u64) -> bool {
+        let selected = self.spill.iter().find_map(|(&query, spilled)| {
+            let product = spilled.result.as_ref().ok()?;
+            let body = product
+                .analyzed_value()
+                .is_some_and(|body| body.cache_only())
+                || product.lower_value().is_some_and(|body| body.cache_only());
+            let archived = match self.factories.get(&query.0) {
+                Some(Factory::Send(factory)) if !body => factory.evict(id(query), product, scratch),
+                _ => false,
+            };
+            (body || archived).then_some(query)
+        });
+        let Some(query) = selected else {
+            return false;
+        };
+        let spilled = self.spill.remove(&query).expect("selected spill");
+        self.retained -= spilled.retained;
+        self.metadata -= 512;
+        drop(spilled);
+        self.stats.body_evictions += 1;
+        self.account();
+        true
+    }
     fn retire_oldest(&mut self) -> bool {
         // Settled continuations have independently owned results. Under node
         // pressure they cancel their remaining execution claims while keeping
@@ -950,6 +977,7 @@ impl State {
     fn remove(&mut self, query: Key) {
         self.unqueue(query);
         self.admission_waiters.remove(&query);
+        self.metadata -= self.nodes.cancelled_record_bytes(query);
         if let Some(execution) = self.nodes.remove(&query) {
             let retained = execution.weight.retained;
             drop(execution);
@@ -1101,6 +1129,15 @@ impl QueryContext for Context<'_> {
     }
     fn evict_body(&mut self) -> bool {
         let mut state = self.shared.lock();
+        let scratch = state
+            .nodes
+            .get(&self.query)
+            .and_then(|node| node.execution.as_ref())
+            .map_or(0, |execution| execution.weight.scratch);
+        if state.evict_spill(scratch) {
+            self.shared.changed.notify_all();
+            return true;
+        }
         let roots = state
             .requests
             .values()

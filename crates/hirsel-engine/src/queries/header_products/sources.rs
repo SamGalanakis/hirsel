@@ -233,24 +233,32 @@ impl HeaderSources {
         if let Some(parent) = &self.parent {
             parent.install_live(engine);
         }
-        for syntax in self.files.values().flatten() {
-            if engine.catalog.body(&syntax.item.definition) == Some(syntax.text_hash)
-                && engine
-                    .catalog
-                    .anchor(&syntax.item.definition, syntax.occurrence)
-                    == Some(syntax.anchor)
-            {
-                let items = engine
-                    .items
-                    .entry(syntax.item.definition.clone())
-                    .or_default();
-                if !items
-                    .iter()
-                    .any(|old| old.anchor == syntax.anchor && old.occurrence == syntax.occurrence)
+        for (file, syntaxes) in &self.files {
+            let mut listed = Vec::new();
+            for syntax in syntaxes {
+                if engine.catalog.body(&syntax.item.definition) == Some(syntax.text_hash)
+                    && engine
+                        .catalog
+                        .anchor(&syntax.item.definition, syntax.occurrence)
+                        == Some(syntax.anchor)
                 {
-                    items.push(syntax.clone());
-                    items.sort_by_key(|syntax| syntax.occurrence);
+                    let items = engine
+                        .items
+                        .entry(syntax.item.definition.clone())
+                        .or_default();
+                    if !items.iter().any(|old| {
+                        old.anchor == syntax.anchor && old.occurrence == syntax.occurrence
+                    }) {
+                        items.push(syntax.clone());
+                        items.sort_by_key(|syntax| syntax.occurrence);
+                    }
+                    listed.push(syntax.clone());
                 }
+            }
+            if !listed.is_empty() {
+                engine
+                    .declarations
+                    .place_file(*file, listed, &engine.sources);
             }
         }
     }

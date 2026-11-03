@@ -97,13 +97,8 @@ fn checked_product_requests_record_private_layout_reads_as_the_cold_receipt_does
         let CompileResult::CheckedProducts { products, .. } = &output.result else {
             panic!("checked-products root returned another operation")
         };
-        let mut cold = crate::COMPILER
-            .with_config(config())
-            .with_owned_engines()
-            .load_program(&entry)
-            .unwrap();
-        cold.check(LoweringPolicy::Comptime).unwrap();
-        let expected = cold.engine.checked_products(&cold.entry).unwrap();
+        let mut cold = crate::session::Session::open_configured(&entry, config());
+        let expected = cold.checked_products(true).unwrap();
         assert_eq!(products.canonical, expected.canonical);
         assert_eq!(products.canonical_reads(), expected.canonical_reads());
         assert_eq!(products.digest, expected.digest);
@@ -133,13 +128,8 @@ fn checked_product_requests_match_the_cold_receipt_with_and_without_text() {
             let mut host = Host::new(CompilerRequests::for_host(crate::COMPILER, config()));
             let full = products(host.request(&full).unwrap().wait().unwrap());
             let digest = products(host.request(&digest).unwrap().wait().unwrap());
-            let mut cold = crate::COMPILER
-                .with_config(config())
-                .with_owned_engines()
-                .load_program(&entry)
-                .unwrap();
-            cold.check(LoweringPolicy::Comptime).unwrap();
-            let expected = cold.engine.checked_products(&cold.entry).unwrap();
+            let mut cold = crate::session::Session::open_configured(&entry, config());
+            let expected = cold.checked_products(true).unwrap();
             assert_eq!(full.digest, expected.digest);
             assert_eq!(full.canonical, expected.canonical);
             assert_eq!(full.canonical_reads(), expected.canonical_reads());
@@ -661,13 +651,8 @@ fn unread_representation_edit_adopts_reader_bodies_and_matches_the_cold_receipt(
             before,
             "a view that does not read the representation keeps its P work"
         );
-        let mut cold = crate::COMPILER
-            .with_config(config())
-            .with_owned_engines()
-            .load_program(&entry)
-            .unwrap();
-        cold.check(LoweringPolicy::Comptime).unwrap();
-        let expected = cold.engine.checked_products(&cold.entry).unwrap();
+        let mut cold = crate::session::Session::open_configured(&entry, config());
+        let expected = cold.checked_products(true).unwrap();
         assert_eq!(products.canonical, expected.canonical);
         assert_eq!(products.canonical_reads(), expected.canonical_reads());
         assert_eq!(products.digest, expected.digest);

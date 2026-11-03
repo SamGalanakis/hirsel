@@ -1,5 +1,5 @@
 //! A restored checked constant still owns its separately evaluated value.
-use hirsel_driver::{COMPILER, session};
+use hirsel_driver::session;
 use hirsel_engine::{CompileConfig, LoweringPolicy, store, with_compiler_stack};
 use std::sync::Arc;
 
@@ -35,13 +35,9 @@ fn restored_constant_lower_preserves_complete_cold_receipt_after_unread_type_edi
         }]);
         assert!(warm.check_applied().unwrap().diagnostics.is_empty());
         let actual = warm.checked_products(true).unwrap();
-        let mut cold = COMPILER
-            .with_config(config)
-            .with_owned_engines()
-            .load_program(&manifest)
-            .unwrap();
-        assert!(cold.check_configured().unwrap().diagnostics.is_empty());
-        let expected = cold.engine.checked_products(&cold.entry).unwrap();
+        let mut cold = session::Session::open_configured(&manifest, config);
+        assert!(cold.check().unwrap().diagnostics.is_empty());
+        let expected = cold.checked_products(true).unwrap();
         assert_eq!(actual.canonical, expected.canonical);
         assert_eq!(actual.canonical_reads(), expected.canonical_reads());
         assert_eq!(actual.digest, expected.digest);

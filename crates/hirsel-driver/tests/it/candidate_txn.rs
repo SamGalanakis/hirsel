@@ -579,11 +579,12 @@ fn store_fault_checks(candidate: bool) -> String {
         hirsel_engine::with_compiler_stack(|| {
             let compiler = hirsel_driver::COMPILER
                 .clone()
-                .with_config(config)
+                .with_config(config.clone())
                 .with_owned_engines();
             let mut program = compiler.load_program_source(&f.entry(), None).unwrap();
             let output = program.check(LoweringPolicy::Comptime).unwrap();
-            let products = program.engine.checked_products(&program.entry).unwrap();
+            let mut cold = hirsel_driver::session::Session::open_configured(&f.entry(), config);
+            let products = (*cold.checked_products(true).unwrap()).clone();
             (output, products, program.engine.store_adoptions())
         })
     }
@@ -827,18 +828,9 @@ fn candidate_ordinary_products_keep_snapshots_frozen_and_allow_library_edits() {
             .unwrap();
         let actual = result(&w, &candidate);
         assert_eq!(actual.verdict, Verdict::Pass, "{:?}", actual.loader_error);
-        let compiler = hirsel_driver::COMPILER
-            .clone()
-            .with_config(config.clone())
-            .with_owned_engines();
-        let mut cold = compiler.load_program_source(&entry, None).unwrap();
-        assert!(
-            cold.check(LoweringPolicy::Comptime)
-                .unwrap()
-                .diagnostics
-                .is_empty()
-        );
-        let expected = cold.engine.checked_products(&cold.entry).unwrap();
+        let mut cold = hirsel_driver::session::Session::open_configured(&entry, config.clone());
+        assert!(cold.check().unwrap().diagnostics.is_empty());
+        let expected = cold.checked_products(true).unwrap();
         assert_eq!(
             actual.checked_products.as_ref().unwrap().digest,
             expected.digest
@@ -962,17 +954,16 @@ fn candidate_recursive_source_missing_name_becomes_available_in_a_sibling() {
 
 fn cold_products(entry: &std::path::Path, jobs: usize) -> hirsel_engine::CheckedProducts {
     hirsel_engine::with_compiler_stack(|| {
-        let compiler = hirsel_driver::COMPILER
-            .clone()
-            .with_config(CompileConfig {
+        let mut session = hirsel_driver::session::Session::open_configured(
+            entry,
+            CompileConfig {
                 jobs: hirsel_intern::jobs::Jobs::new(jobs),
                 ..CompileConfig::for_memory_cap(None)
-            })
-            .with_owned_engines();
-        let mut program = compiler.load_program_source(entry, None).unwrap();
-        let output = program.check(LoweringPolicy::Comptime).unwrap();
+            },
+        );
+        let output = session.check().unwrap();
         assert_eq!(output.completion, hirsel_engine::CheckCompletion::Complete);
-        program.engine.checked_products(&program.entry).unwrap()
+        (*session.checked_products(true).unwrap()).clone()
     })
 }
 fn assert_read_difference(parent: &CheckReceipt, child: &CheckReceipt) {

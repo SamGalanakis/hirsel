@@ -68,7 +68,7 @@ const PHASES: [&str; 21] = [
     "declarations",
     "signature normalize",
 ];
-const COUNTS: [&str; 69] = [
+const COUNTS: [&str; 70] = [
     "definitions",
     "units",
     "V runs",
@@ -138,6 +138,7 @@ const COUNTS: [&str; 69] = [
     "store summary misses",
     "store mode hits",
     "store mode misses",
+    "header source files materialized",
 ];
 
 fn build(source: &std::path::Path, timings: &str) -> std::process::Output {
@@ -309,6 +310,7 @@ fn native_memory_separates_phase_rss_structural_bytes_and_stack_reservations() {
         [
             "front complete",
             "global Value complete",
+            "native emission cache pressure",
             "native workers complete",
             "link complete"
         ]

@@ -173,14 +173,9 @@ fn session_representation_edit_matches_cold(opaque: bool, reads_field: bool) {
             );
         }
 
-        let mut cold = hirsel_driver::COMPILER
-            .clone()
-            .with_config(config)
-            .with_owned_engines()
-            .load_program(&source)
-            .unwrap();
-        let expected = cold.check_configured().unwrap();
-        let expected_receipt = cold.engine.checked_products(&cold.entry).unwrap();
+        let mut cold = session::Session::open_configured(&source, config);
+        let expected = cold.check().unwrap();
+        let expected_receipt = cold.checked_products(true).unwrap();
         assert_eq!(diagnostics(&actual), diagnostics(&expected));
         assert_eq!(actual.completion, expected.completion);
         if receipt.digest != expected_receipt.digest {
@@ -426,11 +421,10 @@ fn manifest_session_preserves_the_cold_loader_syntax_error_boundary() {
         assert_eq!(session.stats().loads, 1);
         assert_eq!(session.stats().replaced, 2);
         let receipt = session.checked_products(true).unwrap();
-        let mut fresh = hirsel_driver::COMPILER
-            .load_check_package(&manifest)
-            .unwrap();
-        assert!(fresh.check_configured().unwrap().diagnostics.is_empty());
-        let expected = fresh.engine.checked_products(&fresh.entry).unwrap();
+        let mut fresh =
+            session::Session::open(&manifest, hirsel_driver::session::Policy::default());
+        assert!(fresh.check().unwrap().diagnostics.is_empty());
+        let expected = fresh.checked_products(true).unwrap();
         assert_eq!(receipt.canonical, expected.canonical);
         assert_eq!(receipt.digest, expected.digest);
         // The error output owns the invalid snapshot even after the repair.

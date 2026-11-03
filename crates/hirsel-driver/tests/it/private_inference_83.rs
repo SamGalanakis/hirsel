@@ -365,17 +365,12 @@ fn a_changed_registration_reinfers_only_the_modules_that_read_it() {
         // The retained proofs are the ones a cold compiler infers. The export
         // carries every signature's unique summary; read receipts differ by path.
         let warm = session.checked_products(true).unwrap();
-        let mut cold = COMPILER
-            .with_config(CompileConfig {
-                store: Arc::new(MemStore::default()),
-                hold_bytes: 0,
-                ..Default::default()
-            })
-            .with_owned_engines()
-            .load_program(session.entry())
-            .unwrap();
-        cold.check(session.configuration().lowering).unwrap();
-        let cold = cold.engine.checked_products(&cold.entry).unwrap();
+        let mut cold = hirsel_driver::session::Session::open_configured(
+            session.entry(),
+            session.configuration().clone(),
+        );
+        assert!(cold.check().unwrap().diagnostics.is_empty());
+        let cold = cold.checked_products(true).unwrap();
         assert_eq!(warm.canonical, cold.canonical);
     });
 }

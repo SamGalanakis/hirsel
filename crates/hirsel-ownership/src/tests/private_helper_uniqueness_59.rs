@@ -284,17 +284,29 @@ fn private_helper_uniqueness_59_forged_headers_are_independently_reproved() {
 fn private_helper_uniqueness_59_stored_headers_settle_before_body_receipts() {
     with_compiler_stack(|| {
         use std::sync::Arc;
-        let store = Arc::new(hirsel_engine::store::MemStore::default());
-        let mut engine =
-            QueryEngine::new(default_environment(), compiler_adapters()).with_result_store(store);
-        engine.set_retention(hirsel_engine::memo::Retention::Batch);
-        let source = "fn epoch_day() -> i128 { 1 }\nfn format() -> i128 { epoch_day() }\npub fn main() { let _ = format() }";
-        let file = engine.sources.add("stored.hir", source.into()).unwrap();
-        let output = source_check_request(&mut engine, file, &default_context()).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "hirsel-private-stored-headers-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("hirsel.json"), r#"{"schema":1,"package":{"name":"stored","version":"1"},"sources":[{"path":"stored.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
+        let source = dir.join("stored.hir");
+        std::fs::write(
+            &source,
+            "fn epoch_day() -> i128 { 1 }\nfn format() -> i128 { epoch_day() }\npub fn main() { let _ = format() }",
+        )
+        .unwrap();
+        let config = CompileConfig {
+            store: Arc::new(hirsel_engine::store::MemStore::default()),
+            retention: hirsel_engine::memo::Retention::Batch,
+            ..Default::default()
+        };
+        let mut session =
+            hirsel_driver::session::Session::open_configured(&dir.join("hirsel.json"), config);
+        let output = session.check().unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
-        engine
-            .checked_products(&entry_path(&default_context()))
-            .unwrap();
+        session.checked_products(true).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     });
 }
 

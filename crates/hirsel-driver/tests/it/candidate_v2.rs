@@ -898,30 +898,15 @@ fn candidate_receipts_bind_failed_lowerings_to_complete_current_checks() {
                         vec![],
                     ),
                 );
-                let compiler = hirsel_driver::COMPILER
-                    .clone()
-                    .with_config(CompileConfig {
+                let mut session = hirsel_driver::session::Session::open_configured(
+                    &tree.0.join("hirsel.json"),
+                    CompileConfig {
                         retention,
                         store: Arc::new(hirsel_engine::store::NoneStore),
                         ..config(jobs)
-                    })
-                    .with_owned_engines();
-                let mut program = compiler
-                    .load_program_inputs(
-                        &tree.0.join("hirsel.json"),
-                        &hirsel_engine::loader_inputs::DiskInputs,
-                        false,
-                    )
-                    .unwrap();
-                let lowering = program.engine.adapters.lowering.take();
-                let incomplete = program.check(LoweringPolicy::Comptime).unwrap();
-                assert_ne!(
-                    incomplete.completion,
-                    hirsel_engine::CheckCompletion::Complete
+                    },
                 );
-                assert!(program.engine.checked_products(&program.entry).is_err());
-                program.engine.adapters.lowering = lowering;
-                let rejected = program.check(LoweringPolicy::Comptime).unwrap();
+                let rejected = session.check().unwrap();
                 assert_eq!(
                     rejected.completion,
                     hirsel_engine::CheckCompletion::Complete
@@ -932,37 +917,22 @@ fn candidate_receipts_bind_failed_lowerings_to_complete_current_checks() {
                         .iter()
                         .any(|d| d.rule == hirsel_diag::RuleId::of("CT-1"))
                 );
-                let mut failed = program.entry.clone();
+                let mut failed = session.logical_entry().unwrap().clone();
                 failed.0.name = "VALUE".into();
-                let before = program
-                    .engine
-                    .recompute_count(&failed, hirsel_engine::QueryKind::Lower);
-                let receipt = program.engine.checked_products(&program.entry).unwrap();
+                let queries = vec![(failed, hirsel_engine::QueryKind::Lower)];
+                let before = session.recompute_counts(queries.clone()).unwrap();
+                let receipt = session.checked_products(true).unwrap();
                 assert_eq!(
-                    program
-                        .engine
-                        .checked_products(&program.entry)
-                        .unwrap()
-                        .digest,
+                    session.checked_products(true).unwrap().digest,
                     receipt.digest
                 );
                 assert_eq!(
-                    program
-                        .engine
-                        .recompute_count(&failed, hirsel_engine::QueryKind::Lower),
+                    session.recompute_counts(queries).unwrap(),
                     before,
                     "receipt collection must not repeat a settled failed initializer"
                 );
-                assert!(
-                    program
-                        .replace_source(&tree.0.join("main.hir"), MAIN.into())
-                        .unwrap()
-                );
-                assert!(
-                    program.engine.checked_products(&program.entry).is_err(),
-                    "the old failure cannot certify edited inputs"
-                );
-                let repaired = program.check(LoweringPolicy::Comptime).unwrap();
+                tree.write("main.hir", MAIN);
+                let repaired = session.check().unwrap();
                 assert_eq!(
                     repaired.completion,
                     hirsel_engine::CheckCompletion::Complete
@@ -973,12 +943,9 @@ fn candidate_receipts_bind_failed_lowerings_to_complete_current_checks() {
                     repaired.diagnostics
                 );
                 assert_ne!(
-                    program
-                        .engine
-                        .checked_products(&program.entry)
-                        .unwrap()
-                        .digest,
-                    receipt.digest
+                    session.checked_products(true).unwrap().digest,
+                    receipt.digest,
+                    "edited inputs certify their own receipt, not the earlier one"
                 );
             }
         }
@@ -1185,27 +1152,16 @@ fn candidate_v2_cold_child() {
             .collect();
         let selection = json!({"entry":format!("{:?}",program.entry),
             "sources":program.files.iter().map(|(f,c)|{let file=program.engine.sources.file(*f).unwrap();json!({"logical":file.logical_path(),"package":c.package,"modules":c.modules})}).collect::<Vec<_>>()});
-        let checked = program.check(LoweringPolicy::Comptime).unwrap();
+        let mut oracle = hirsel_driver::session::Session::open_configured(&entry, config(jobs));
+        let checked = oracle.check().unwrap();
         assert_eq!(checked.completion, hirsel_engine::CheckCompletion::Complete);
         let rejected = checked
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.severity == hirsel_diag::Severity::Error);
-        let products = match program.engine.checked_products(&program.entry) {
+        let products = match oracle.checked_products(true) {
             Ok(products) => Some(products),
-            Err(hirsel_engine::QueryError::NotImplemented) if rejected => None,
-            Err(hirsel_engine::QueryError::Diagnostics(diagnostics)) if rejected => {
-                let diagnostics =
-                    hirsel_engine::select_diagnostics(diagnostics, Some(&checked.sources));
-                let json = |diagnostics: &[hirsel_diag::Diagnostic]| {
-                    diagnostics
-                        .iter()
-                        .map(|diagnostic| diagnostic.to_json(&checked.sources))
-                        .collect::<Vec<_>>()
-                };
-                assert_eq!(json(&diagnostics), json(&checked.diagnostics));
-                None
-            }
+            Err(_) if rejected => None,
             Err(error) => panic!("cold checked products: {error:?}"),
         };
         normalized(

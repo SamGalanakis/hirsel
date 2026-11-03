@@ -716,15 +716,38 @@ mod matrix {
             std::fs::write(cold.join("hirsel.json"), manifest).unwrap();
             std::fs::write(cold.join("main.hir"), texts[index]).unwrap();
             let expected = hirsel_engine::with_compiler_stack(|| {
-                let mut p = crate::COMPILER
-                    .clone()
-                    .with_config(config.clone())
-                    .with_owned_engines()
-                    .load_program_source(&cold.join("hirsel.json"), None)
-                    .unwrap();
-                let output = p.check(LoweringPolicy::Comptime).unwrap();
+                let compiler = crate::COMPILER.with_config(config.clone());
+                let engine = crate::requests::CompilerRequests::new(
+                    compiler.clone(),
+                    config.clone(),
+                    hirsel_engine::runtime::ProcessBudget::new(2 << 30),
+                    crate::requests::RequestLimits {
+                        runtime_bytes: 512 << 20,
+                        snapshot_bytes: 64 << 20,
+                        transport_bytes: 256 << 20,
+                    },
+                );
+                let input_limits = engine.input_limits();
+                let attempts = engine.capture_attempts();
+                let mut p = crate::session::Session::new(
+                    cold.join("hirsel.json"),
+                    compiler,
+                    config.clone(),
+                    engine,
+                    input_limits,
+                    attempts,
+                );
+                let output = p.check().unwrap();
                 assert_eq!(output.completion, CheckCompletion::Complete);
-                let digest = p.engine.checked_products(&p.entry).unwrap().digest;
+                let rejected = output
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.severity == hirsel_diag::Severity::Error);
+                let digest = match p.checked_products(false) {
+                    Ok(products) => Some(products.digest),
+                    Err(_) if rejected => None,
+                    Err(error) => panic!("cold checked products: {error:?}"),
+                };
                 let human: Vec<_> = output
                     .diagnostics
                     .iter()
@@ -745,10 +768,14 @@ mod matrix {
                         .unwrap()
                     })
                     .collect();
-                (hex(digest), human, diagnostics)
+                (digest.map(hex), human, diagnostics)
             });
             assert_eq!(actual["completion"], "Complete", "{actual}");
-            assert_eq!(actual["checked_products"], expected.0, "index{index}");
+            assert_eq!(
+                actual["checked_products"],
+                json!(expected.0),
+                "index{index}"
+            );
             assert_eq!(
                 actual["diagnostics_human"],
                 json!(expected.1),

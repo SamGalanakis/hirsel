@@ -177,9 +177,93 @@ fn scope_case(source: &str, failed_front: bool, failed_lower: bool) {
             }
             assert!(scope.definition(&DefPath::core("unselected")).is_err());
             assert_eq!(front.live_body_count(), 0);
-            let expected = program.check(LoweringPolicy::Comptime).unwrap();
-            assert_eq!(expected.completion, output.checked.completion);
-            let expected = program.engine.checked_products(&program.entry).unwrap();
+            runtime.shutdown();
+            let oracle_errors = crate::scheduled_front::errors();
+            let mut oracle_runtime = AdmittedRuntime::new(
+                hirsel_intern::jobs::Jobs::new(jobs),
+                budget.reserve(512 << 20).unwrap(),
+                oracle_errors,
+            )
+            .unwrap();
+            let oracle_front = program
+                .engine
+                .front_body_queries(
+                    &definitions,
+                    weight,
+                    budget.reserve(8 << 20).unwrap(),
+                    oracle_errors,
+                )
+                .unwrap();
+            let oracle_lower = program
+                .engine
+                .front_lower_queries(
+                    &definitions,
+                    oracle_front.clone(),
+                    weight,
+                    32,
+                    budget.reserve(8 << 20).unwrap(),
+                    oracle_errors,
+                )
+                .unwrap();
+            let oracle_growth = program
+                .engine
+                .front_growth_queries(
+                    &program.entry,
+                    oracle_front.clone(),
+                    weight,
+                    budget.reserve(8 << 20).unwrap(),
+                    oracle_errors,
+                )
+                .unwrap();
+            let oracle_check = program
+                .engine
+                .front_check_queries(
+                    FrontCheckPlan {
+                        files: program
+                            .files
+                            .iter()
+                            .map(|(file, context)| {
+                                (*file, context.clone(), LoweringPolicy::Comptime)
+                            })
+                            .collect(),
+                        front: oracle_front.clone(),
+                        lower: oracle_lower.clone(),
+                        growth: oracle_growth.clone(),
+                        unsafe_ffi: program.unsafe_ffi.clone(),
+                        lint_package: None,
+                    },
+                    weight,
+                    budget.reserve(8 << 20).unwrap(),
+                    oracle_errors,
+                )
+                .unwrap();
+            oracle_runtime
+                .register(FRONT_BODY_KIND, oracle_front.factory())
+                .unwrap();
+            oracle_runtime
+                .register_local(FRONT_LOWER_KIND, oracle_lower.factory())
+                .unwrap();
+            oracle_runtime
+                .register_local(FRONT_EVALUATE_KIND, oracle_lower.factory())
+                .unwrap();
+            oracle_runtime
+                .register(FRONT_GROWTH_KIND, oracle_growth.factory())
+                .unwrap();
+            oracle_runtime
+                .register(FRONT_CHECK_KIND, oracle_check.factory())
+                .unwrap();
+            let oracle_request = oracle_runtime.request(&[oracle_check.query()]);
+            let oracle_product = oracle_runtime.wait(oracle_request).unwrap()[0].clone();
+            let oracle_completion = oracle_check
+                .outcome(oracle_product.clone())
+                .unwrap()
+                .checked
+                .completion;
+            let oracle_scope = oracle_check
+                .completed_scope(oracle_product, budget.reserve(1 << 20).unwrap())
+                .unwrap();
+            oracle_runtime.shutdown();
+            assert_eq!(oracle_completion, output.checked.completion);
             let canonical = |reads: &hirsel_engine::Reads| {
                 reads
                     .iter()
@@ -190,16 +274,20 @@ fn scope_case(source: &str, failed_front: bool, failed_lower: bool) {
                     })
                     .collect::<std::collections::BTreeMap<_, _>>()
             };
+            let expected = oracle_scope
+                .reads()
+                .iter()
+                .map(|(path, reads)| (path.clone(), canonical(reads)))
+                .collect::<std::collections::BTreeMap<_, _>>();
             let actual = scope
                 .reads()
                 .iter()
                 .map(|(path, reads)| (path.clone(), canonical(reads)))
                 .collect::<std::collections::BTreeMap<_, _>>();
             assert_eq!(
-                actual, expected.reads,
+                actual, expected,
                 "the completed S5 scope preserves scalar complete reads, including failure obligations"
             );
-            runtime.shutdown();
             drop(program);
             assert!(
                 !scope.reads().is_empty(),

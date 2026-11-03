@@ -18,17 +18,6 @@ fn emit(v: serde_json::Value) {
     println!("{v}");
     io::stdout().flush().unwrap();
 }
-fn selected_file(program: &hirsel_engine::LoadedProgram, path: &Path) -> hirsel_span::FileId {
-    let files: Vec<_> = program
-        .files
-        .iter()
-        .filter_map(|(id, _)| {
-            (program.engine.sources.file(*id).unwrap().path == path).then_some(*id)
-        })
-        .collect();
-    assert_eq!(files.len(), 1, "selected source must be unique");
-    files[0]
-}
 fn fresh_receipt_file(sources: &hirsel_span::SourceMap, path: &Path) -> hirsel_span::FileId {
     // Fresh candidate engines cannot hold historical snapshots for this path.
     // Assert that invariant rather than choose a text matching the request.
@@ -114,24 +103,25 @@ fn main() {
         let tree = Path::new(spec["trees"][index].as_str().unwrap());
         let row = hirsel_engine::with_compiler_stack(|| {
             let load = Instant::now();
-            let mut p = compiler.load_program_source(tree, None).unwrap();
+            let mut session =
+                hirsel_driver::session::Session::open_configured(tree, config.clone());
             let load_ns = ns(load);
             let check = Instant::now();
-            let output = p.check(LoweringPolicy::Comptime).unwrap();
+            let output = session.check().unwrap();
             let check_ns = ns(check);
             assert_eq!(output.completion, CheckCompletion::Complete);
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
-            let adopted = p.engine.store_adoptions();
-            let recomputed = p.engine.memo_stats().recomputed.values().sum::<u64>();
+            let adopted = session.store_adoptions();
+            let recomputed = session.recomputations();
             let receipt = Instant::now();
             let checked_source = checked_source_hash(
                 &output.sources,
-                selected_file(
-                    &p,
+                fresh_receipt_file(
+                    &output.sources,
                     &tree.parent().unwrap().join(source.file_name().unwrap()),
                 ),
             );
-            let products = p.engine.checked_products(&p.entry).unwrap();
+            let products = session.checked_products(true).unwrap();
             save_products(&spec, index, &products);
             let digest = products.digest;
             serde_json::json!({"checked_source_sha256":checked_source,"digest":digest.0,"load_ns":load_ns,"check_ns":check_ns,"receipt_ns":ns(receipt),"adoptions":adopted,"recomputations":recomputed})
@@ -288,25 +278,26 @@ fn main() {
             let tree = Path::new(spec["trees"][i].as_str().unwrap());
             let output = hirsel_engine::with_compiler_stack(|| {
                 let t = Instant::now();
-                let mut p = compiler.load_program_source(tree, None).unwrap();
+                let mut session =
+                    hirsel_driver::session::Session::open_configured(tree, config.clone());
                 load_ns = ns(t);
                 let t = Instant::now();
-                let out = p.check(LoweringPolicy::Comptime).unwrap();
+                let out = session.check().unwrap();
                 check_ns = ns(t);
                 assert_eq!(out.completion, CheckCompletion::Complete);
                 assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
-                adopted = p.engine.store_adoptions();
-                recomputed = p.engine.memo_stats().recomputed.values().sum::<u64>();
+                adopted = session.store_adoptions();
+                recomputed = session.recomputations();
                 let t = Instant::now();
-                let products = p.engine.checked_products(&p.entry).unwrap();
+                let products = session.checked_products(true).unwrap();
                 save_products(&spec, i, &products);
                 receipt_ns = ns(t);
                 (
                     products.digest,
                     checked_source_hash(
                         &out.sources,
-                        selected_file(
-                            &p,
+                        fresh_receipt_file(
+                            &out.sources,
                             &tree.parent().unwrap().join(source.file_name().unwrap()),
                         ),
                     ),

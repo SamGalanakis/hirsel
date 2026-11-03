@@ -4,6 +4,7 @@ use super::*;
 mod syntax;
 use crate::snapshot::DeclarationHead;
 use bincode::Options;
+use hirsel_syntax::PackageId;
 use serde::{Deserialize, Serialize};
 
 /// Bounds for item-local lexical identities, independent of expression data.
@@ -173,18 +174,21 @@ struct Candidate {
 }
 #[derive(Default)]
 pub(crate) struct Catalog {
+    installed: BTreeMap<PackageId, Arc<crate::store::InstalledSourceRecords>>,
     files: super::native_records::SourceTable<FileId, FileContext>,
     candidates: super::native_records::SourceTable<DefPath, Vec<Candidate>>,
     facts_cache:
         std::sync::RwLock<BTreeMap<hirsel_syntax::LexicalOwner, (ContentHash, Arc<SourceFacts>)>>,
 }
 pub(super) struct SourceCatalog {
+    installed: BTreeMap<PackageId, Arc<crate::store::InstalledSourceRecords>>,
     files: Box<[(FileId, FileContext)]>,
     candidates: Box<[(DefId, Box<[Candidate]>)]>,
 }
 impl SourceCatalog {
     pub(super) fn restore(self) -> Catalog {
         Catalog {
+            installed: self.installed,
             files: self.files.into_vec().into_iter().collect(),
             candidates: self
                 .candidates
@@ -199,6 +203,7 @@ impl SourceCatalog {
 impl Clone for Catalog {
     fn clone(&self) -> Self {
         Self {
+            installed: self.installed.clone(),
             files: self.files.clone(),
             candidates: self.candidates.clone(),
             // Facts are recomputable memoization, not source observations.
@@ -207,6 +212,13 @@ impl Clone for Catalog {
     }
 }
 impl Catalog {
+    fn installed_bytes(&self, weight: &mut crate::NativeMetadataWeight) {
+        weight.tree::<PackageId, Arc<crate::store::InstalledSourceRecords>>(self.installed.len());
+        for (package, owner) in &self.installed {
+            weight
+                .add(package.name.capacity() + package.version.capacity() + owner.metadata_bytes());
+        }
+    }
     pub(super) fn with_ownership(ownership: Arc<super::native_records::SourceOwnership>) -> Self {
         let mut catalog = Self::default();
         catalog.bind_ownership(ownership);
@@ -233,6 +245,7 @@ impl Catalog {
     }
     fn payload_bytes(&self, cached_facts: bool, packed: bool) -> u64 {
         let mut weight = crate::NativeMetadataWeight::default();
+        self.installed_bytes(&mut weight);
         if !packed {
             weight.add(
                 4 * size_of::<usize>()
@@ -307,6 +320,7 @@ impl Catalog {
             carry.candidates.insert(path.clone(), candidates);
         }
         SourceCatalog {
+            installed: carry.installed,
             files: carry
                 .files
                 .into_iter()
@@ -329,6 +343,7 @@ impl Catalog {
         indexed: &BTreeMap<FileId, (FileContext, QueryEnvironment)>,
     ) -> u64 {
         let mut weight = crate::NativeMetadataWeight::default();
+        self.installed_bytes(&mut weight);
         let files = self.files.len()
             + indexed
                 .keys()
@@ -611,12 +626,21 @@ impl QueryEngine {
                 ),
             })
         };
+        if !self.catalog.installed.contains_key(&context.package) {
+            let records = self
+                .result_store
+                .as_ref()
+                .ok_or_else(missing)?
+                .installed_package(&context.package, self.store_identity)
+                .map_err(|_| missing())?
+                .source_records()
+                .ok_or_else(missing)?;
+            self.catalog
+                .installed
+                .insert(context.package.clone(), records);
+        }
         let key = self.catalog_key(file, context).ok_or_else(missing)?;
-        let bytes = self
-            .result_store
-            .as_ref()
-            .and_then(|store| store.get(&key))
-            .ok_or_else(missing)?;
+        let bytes = self.source_record(&key, context).ok_or_else(missing)?;
         let record: FileHeads = bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .with_limit(bytes.len() as u64)
@@ -738,6 +762,17 @@ impl QueryEngine {
                     .as_ref()?
                     .source_facts(DefId::intern(path))
             })
+    }
+    fn source_record(
+        &self,
+        key: &crate::store::EntryKey,
+        context: &FileContext,
+    ) -> Option<crate::store::Bytes> {
+        if let Some(owner) = self.catalog.installed.get(&context.package) {
+            owner.get(key)
+        } else {
+            self.result_store.as_ref()?.get(key)
+        }
     }
     /// Parse heads and parse syntax are cached only where a provider retains
     /// them; a store-off request neither captures nor encodes them.

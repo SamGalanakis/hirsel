@@ -104,7 +104,7 @@ fn valid_output(
 impl QueryEngine {
     pub(super) fn has_parse_syntax(&self, file: FileId, context: &FileContext) -> bool {
         self.parse_syntax_key(file, context)
-            .and_then(|key| self.result_store.as_ref()?.get(&key))
+            .and_then(|key| self.source_record(&key, context))
             .is_some()
     }
     fn parse_syntax_key(
@@ -156,7 +156,7 @@ impl QueryEngine {
         context: &FileContext,
     ) -> Option<QueryOutput<SyntaxFile>> {
         let key = self.parse_syntax_key(file, context)?;
-        let bytes = self.result_store.as_ref()?.get(&key)?;
+        let bytes = self.source_record(&key, context)?;
         let record: ParsedSource = options().deserialize(&bytes).ok()?;
         let source = self.sources.file(file)?;
         if record.schema != 2

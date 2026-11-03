@@ -335,7 +335,12 @@ impl FrontNativeDefinitionQueries {
                 "native export exceeds scratch admission",
             ));
         }
-        let bytes = live.encode().ok_or(QueryError::NotImplemented)?;
+        let bytes = live.encode().ok_or_else(|| {
+            native_selection_error(format!(
+                "native export encoding for {}",
+                live.source.definition
+            ))
+        })?;
         if bytes.len() as u64 > scratch {
             return Err(native_selection_error(
                 "native export encoding exceeds scratch admission",

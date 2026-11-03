@@ -101,6 +101,51 @@ mod tests {
         );
     }
     #[test]
+    fn installed_source_owner_keeps_published_references_without_query_cache_access() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, compiler, package, _) = fixture(directory.path());
+        let key = EntryKey(
+            ContentHash::of_bytes(b"source"),
+            ContentHash::default(),
+            crate::QueryKind::Parse,
+        );
+        let first = store
+            .put(super::super::entry_domain(key.2), b"original source")
+            .unwrap();
+        store
+            .associate(Address(key.0), Action(first.output.0), first)
+            .unwrap();
+        let mut installed =
+            (*InstalledPackage::open(directory.path(), &package, compiler).unwrap()).clone();
+        let mut records = InstallationRecords::default();
+        for (address, action, reference) in &installed.rows {
+            records.rows.insert(*address, (Action(*action), *reference));
+        }
+        for reference in &installed.contents {
+            records.contents.insert(reference.output.0, *reference);
+        }
+        records.rows.insert(key.0, (Action(first.output.0), first));
+        records.contents.insert(first.output.0, first);
+        installed.publish(&store, &records).unwrap();
+        let owner = InstalledPackage::open(directory.path(), &package, compiler)
+            .unwrap()
+            .source_records()
+            .unwrap();
+        let changed = store
+            .put(super::super::entry_domain(key.2), b"replacement source")
+            .unwrap();
+        store
+            .associate(Address(key.0), Action(changed.output.0), changed)
+            .unwrap();
+        assert_eq!(&*owner.get(&key).unwrap(), b"original source");
+        assert!(
+            owner
+                .get(&EntryKey(key.0, key.1, crate::QueryKind::Modes))
+                .is_none()
+        );
+        assert!(InstalledPackage::open(directory.path(), &package, compiler).is_err());
+    }
+    #[test]
     fn duplicate_content_checks_preserve_full_reference_identity() {
         let directory = tempfile::tempdir().unwrap();
         let (store, compiler, package, reference) = fixture(directory.path());
@@ -168,6 +213,30 @@ pub struct InstalledSource {
     pub text: String,
 }
 
+#[derive(Debug)]
+/// Immutable installed parse inputs, independent of result-cache policy.
+pub(crate) struct InstalledSourceRecords {
+    store: hirsel_artifact_store::Store,
+    rows: BTreeMap<ContentHash, Reference>,
+}
+impl InstalledSourceRecords {
+    pub(crate) fn get(&self, key: &EntryKey) -> Option<Bytes> {
+        if key.2 != crate::QueryKind::Parse {
+            return None;
+        }
+        self.store.get(*self.rows.get(&key.0)?)
+    }
+    pub(crate) fn metadata_bytes(&self) -> usize {
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(
+            std::mem::size_of::<Self>()
+                + 2 * std::mem::size_of::<usize>()
+                + self.store.root().as_os_str().len(),
+        );
+        weight.tree::<ContentHash, Reference>(self.rows.len());
+        weight.bytes().try_into().unwrap_or(usize::MAX)
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InstalledPackage {
     pub compiler: ContentHash,
@@ -178,6 +247,8 @@ pub struct InstalledPackage {
     /// Physical action rows and content required by the completed Precompute.
     rows: Vec<(ContentHash, ContentHash, Reference)>,
     contents: Vec<Reference>,
+    #[serde(skip)]
+    records: Option<Arc<InstalledSourceRecords>>,
 }
 
 #[derive(Debug, Default)]
@@ -187,6 +258,9 @@ pub(super) struct InstallationRecords {
 }
 
 impl InstalledPackage {
+    pub(crate) fn source_records(&self) -> Option<Arc<InstalledSourceRecords>> {
+        self.records.clone()
+    }
     pub(crate) fn new(
         compiler: ContentHash,
         package: PackageId,
@@ -202,6 +276,7 @@ impl InstalledPackage {
             dependencies,
             rows: vec![],
             contents: vec![],
+            records: None,
         }
     }
     pub(super) fn publish(
@@ -269,7 +344,7 @@ impl InstalledPackage {
             let bytes = store
                 .get(row.reference)
                 .ok_or("corrupt installed package product")?;
-            let installed: Self = bincode::DefaultOptions::new()
+            let mut installed: Self = bincode::DefaultOptions::new()
                 .with_fixint_encoding()
                 .with_limit(MAX_RECORD as u64)
                 .reject_trailing_bytes()
@@ -297,6 +372,15 @@ impl InstalledPackage {
                 return Err("installed package dependency products are unavailable".into());
             }
             installed.check_records(&store)?;
+            let rows = installed
+                .rows
+                .iter()
+                .filter(|(_, _, reference)| {
+                    reference.domain == super::entry_domain(crate::QueryKind::Parse)
+                })
+                .map(|(address, _, reference)| (*address, *reference))
+                .collect();
+            installed.records = Some(Arc::new(InstalledSourceRecords { store, rows }));
             Ok(installed)
         };
         read()

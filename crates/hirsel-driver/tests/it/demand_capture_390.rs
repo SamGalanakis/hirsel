@@ -298,3 +298,30 @@ fn native_catalogue_is_lazy_and_store_off_archives_require_export() {
         runtime.shutdown();
     });
 }
+
+#[test]
+fn native_source_export_with_installed_std_uses_lazy_constant_inventory() {
+    with_compiler_stack(|| {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("main.hir");
+        std::fs::write(
+            &source,
+            include_str!("../../../../bench/native/startup/serial.hir"),
+        )
+        .unwrap();
+        let mut session = session::Session::open_configured(
+            &source,
+            CompileConfig {
+                store: store_by_name("none@1", None).unwrap(),
+                ..Default::default()
+            },
+        );
+        let output = session
+            .request(hirsel_driver::requests::CompileOperation::NativeSources { roots: vec![] })
+            .unwrap_or_else(|error| panic!("startup native sources: {error}"));
+        assert!(matches!(
+            output.result,
+            hirsel_driver::requests::CompileResult::NativeSources(_)
+        ));
+    });
+}

@@ -20,6 +20,7 @@ mod installed;
 mod remote;
 mod request;
 pub use dir::{DirStore, FORMAT, GcReport};
+pub(crate) use installed::InstalledSourceRecords;
 pub use installed::{InstalledPackage, InstalledSource};
 pub use remote::RemoteStore;
 pub use request::RequestStore;

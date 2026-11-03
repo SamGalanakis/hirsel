@@ -184,13 +184,23 @@ impl QueryEngine {
         let mut instance_weight = crate::NativeMetadataWeight::default();
         instance_weight
             .instance_bodies(&mut self.instance_bodies(&definitions.iter().cloned().collect()));
-        let source_rows = self
-            .source_paths()
+        let paths = self.source_paths();
+        let mut roots = paths.iter().cloned().collect::<BTreeSet<_>>();
+        for path in &paths {
+            if self.source_facts(path).is_some_and(|facts| facts.fact) {
+                roots.insert(hirsel_check_protocol::fact::fact_path(path));
+            }
+        }
+        let source_rows = paths
             .len()
-            .checked_mul(3)
+            .checked_add(roots.len())
             .and_then(|count| count.checked_mul(size_of::<DefId>()))
             .ok_or_else(refused)?;
+        let owner_bytes = crate::NativeRecordContext::capture(self)
+            .input_bytes()
+            .ok_or_else(refused)?;
         let front_inputs = FrontBodyQueries::input_bytes(definitions)
+            .and_then(|bytes| bytes.checked_add(owner_bytes))
             .and_then(|bytes| bytes.checked_add(instance_weight.bytes()))
             .and_then(|bytes| {
                 bytes.checked_add(header_products::HeaderProducts::written_source_bytes(self))
@@ -200,9 +210,6 @@ impl QueryEngine {
             .and_then(|bytes| {
                 bytes.checked_add(header_products::SourceInputs::metadata_bytes(self)?)
             })
-            .ok_or_else(refused)?;
-        let owner_bytes = crate::NativeRecordContext::capture(self)
-            .input_bytes()
             .ok_or_else(refused)?;
         let source_headers = self
             .sources

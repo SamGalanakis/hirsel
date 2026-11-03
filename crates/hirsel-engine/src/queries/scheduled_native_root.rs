@@ -508,7 +508,7 @@ impl Task {
                         run_product.action.0,
                         run_product
                             .archive(ArchiveAdmission::Retained)
-                            .map_err(|_| QueryError::NotImplemented)?
+                            .map_err(|error| invalid(format!("native Run archive: {error}")))?
                             .reference(),
                     ),
                     catalogue
@@ -523,11 +523,10 @@ impl Task {
                                 })
                                 .transpose()
                         })
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(|_| QueryError::NotImplemented)?,
+                        .collect::<Result<Vec<_>, _>>()?,
                 ),
             )
-            .ok_or(QueryError::NotImplemented)?;
+            .ok_or_else(|| invalid("native root archive encoding"))?;
         if (bytes.len() as u64)
             .checked_add(used)
             .is_none_or(|used| used > owner.output_budget)
@@ -688,16 +687,30 @@ impl QueryEngine {
         };
         let mut declarations = Vec::new();
         for path in &all {
-            let signature = definitions
+            let settled = definitions
                 .signatures()
-                .signature(DefId::intern(path))
-                .ok_or(QueryError::NotImplemented)??
-                .clone();
-            if !matches!(signature.kind, SignatureKind::Const { .. }) {
+                .header_products()
+                .and_then(|headers| headers.settled_signature(DefId::intern(path)));
+            let constant = match settled {
+                Some(signature) => matches!(signature.kind, SignatureKind::Const { .. }),
+                None => {
+                    self.source_facts(path)
+                        .ok_or_else(|| invalid(format!("native declaration facts: {path}")))?
+                        .constant
+                }
+            };
+            if !constant {
                 continue;
             }
-            let syntax = self.snapshot(path)?;
-            let site = self.sources.resolve(syntax.item.name_span);
+            let span = self
+                .items
+                .get(path)
+                .and_then(|items| items.first())
+                .map(|syntax| syntax.item.name_span)
+                .or_else(|| self.catalog.site(path))
+                .or_else(|| self.captured_text(path).map(|text| text.site))
+                .ok_or_else(|| invalid(format!("native constant declaration site: {path}")))?;
+            let site = self.sources.resolve(span);
             let file = self
                 .sources
                 .file(site.file)

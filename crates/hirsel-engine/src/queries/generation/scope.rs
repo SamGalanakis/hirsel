@@ -249,9 +249,10 @@ impl QueryEngine {
         if Arc::ptr_eq(&namespace, initial.namespace()) {
             self.adopt_completed_headers();
         } else {
-            self.adopt_namespace(&namespace).map_err(|error| {
-                FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
-            })?;
+            self.adopt_namespace_inputs(&namespace, Some(initial.namespace().as_ref()))
+                .map_err(|error| {
+                    FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
+                })?;
         }
         let metadata = metadata
             .split(required)
@@ -271,19 +272,38 @@ impl QueryEngine {
             _metadata: metadata,
         })
     }
-    pub(crate) fn adopt_namespace(
+    fn adopt_namespace_inputs(
         &mut self,
         namespace: &Arc<NamespaceCapture>,
+        previous: Option<&NamespaceCapture>,
     ) -> Result<(), QueryError> {
         namespace.require_environment(self)?;
+        let previous = previous.filter(|previous| previous.admits_successor(namespace));
         self.sources = namespace.sources.clone();
         self.instance_bodies = (*namespace.instances).clone();
         if let Some(headers) = namespace.snapshot.header_products() {
             self.staged_constants = headers.staged_constants().clone();
         }
-        for id in namespace.bodies.keys() {
-            self.items
-                .insert(id.path().clone(), vec![namespace.syntax(id.path())?]);
+        for (id, input) in &namespace.bodies {
+            let retained = previous.is_some_and(|previous| {
+                previous
+                    .bodies
+                    .get(id)
+                    .is_some_and(|old| old.syntax == input.syntax)
+                    && self.items.get(id.path()).is_some_and(|items| {
+                        matches!(items.as_slice(), [syntax]
+                            if syntax.item.definition == *id.path()
+                                && syntax.text_hash == input.implementation
+                                && syntax.structurally_valid(|span| namespace.sources.slice(span).is_some())
+                                && crate::NativeRecordSource::record_owner(
+                                    previous.anchors().as_ref(), syntax.anchor,
+                                ) == Some((id.path().clone(), syntax.occurrence)))
+                    })
+            });
+            if !retained {
+                self.items
+                    .insert(id.path().clone(), vec![namespace.syntax(id.path())?]);
+            }
         }
         for (id, registration) in &namespace.registrations {
             self.generated

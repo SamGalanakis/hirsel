@@ -209,7 +209,10 @@ fn growth_output_admission_does_not_spend_its_grant_on_the_runtime_frame() {
                             .any(|id| id.path().0.name == member)),
                         "actual generic definitions must reach the component root"
                     );
-                    assert_eq!(runtime.stats().claims, definitions.len() as u64 + 1);
+                    assert_eq!(
+                        runtime.stats().claims,
+                        (3 * definitions.len() + output.facets.components.len() + 2) as u64
+                    );
                     Some(output.clone())
                 };
                 assert_eq!(front.live_body_count(), 0);

@@ -75,6 +75,7 @@ fn lease_output(leases: &OutputLeases, owner: Arc<dyn Send + Sync>) -> Arc<dyn S
 /// externally held source products keep their independent admitted owners.
 pub(super) struct GraphBudget {
     budget: Arc<ProcessBudget>,
+    reclaim: Arc<dyn Fn() + Send + Sync>,
     hot: Mutex<Vec<Arc<InstalledGraph>>>,
     metadata: Mutex<Vec<Arc<InstalledMetadata>>>,
 }
@@ -89,11 +90,11 @@ impl GraphBudget {
         bytes: u64,
     ) -> std::io::Result<MemoryReservation> {
         let owner = Self::shared(budget);
-        match budget.reserve(bytes) {
+        match budget.reserve_once(bytes) {
             Ok(reservation) => Ok(reservation),
             Err(_) => {
                 owner.release_idle();
-                budget.reserve(bytes)
+                budget.reserve_once(bytes)
             }
         }
     }
@@ -111,11 +112,20 @@ impl GraphBudget {
         }) {
             return owner;
         }
-        let owner = Arc::new(Self {
-            budget: budget.clone(),
-            hot: Mutex::new(vec![]),
-            metadata: Mutex::new(vec![]),
+        let owner = Arc::new_cyclic(|owner: &Weak<Self>| {
+            let idle = owner.clone();
+            Self {
+                budget: budget.clone(),
+                reclaim: Arc::new(move || {
+                    if let Some(owner) = idle.upgrade() {
+                        owner.release_idle();
+                    }
+                }),
+                hot: Mutex::new(vec![]),
+                metadata: Mutex::new(vec![]),
+            }
         });
+        budget.set_idle_reclaimer(Arc::downgrade(&owner.reclaim));
         budgets.push((Arc::downgrade(budget), Arc::downgrade(&owner)));
         owner
     }
@@ -139,12 +149,14 @@ impl GraphBudget {
         let mut seen = self.budget.reserved();
         let mut moved = std::time::Instant::now();
         loop {
-            let error = match LoadingAdmission::reserve(&self.budget, limits, native_transport) {
+            let error = match LoadingAdmission::reserve_once(&self.budget, limits, native_transport)
+            {
                 Ok(admission) => return Ok(admission),
                 Err(error) => error,
             };
             self.release_idle();
-            if let Ok(admission) = LoadingAdmission::reserve(&self.budget, limits, native_transport)
+            if let Ok(admission) =
+                LoadingAdmission::reserve_once(&self.budget, limits, native_transport)
             {
                 return Ok(admission);
             }
@@ -173,13 +185,13 @@ impl GraphBudget {
             .and_then(|bytes| bytes.checked_add(plan.growth))
             .and_then(|bytes| bytes.checked_add(plan.run));
         if snapshot.is_none_or(|bytes| bytes > limits.snapshot_bytes) {
-            return GraphAdmission::reserve(&self.budget, limits, plan);
+            return GraphAdmission::reserve_once(&self.budget, limits, plan);
         }
-        match GraphAdmission::reserve(&self.budget, limits, plan) {
+        match GraphAdmission::reserve_once(&self.budget, limits, plan) {
             Ok(admission) => Ok(admission),
             Err(_) => {
                 self.release_idle();
-                GraphAdmission::reserve(&self.budget, limits, plan)
+                GraphAdmission::reserve_once(&self.budget, limits, plan)
             }
         }
     }
@@ -202,8 +214,8 @@ impl GraphBudget {
     ) -> Result<(), ToolError> {
         let reserve = || -> std::io::Result<_> {
             Ok((
-                self.budget.reserve(runtime)?,
-                self.budget.reserve(snapshot)?,
+                self.budget.reserve_once(runtime)?,
+                self.budget.reserve_once(snapshot)?,
             ))
         };
         let (runtime, snapshot) = match reserve() {
@@ -752,6 +764,88 @@ mod tests {
         }
     }
     #[test]
+    fn host_admission_rolls_back_partial_grants_before_releasing_idle_metadata() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        struct Observed {
+            budget: Arc<ProcessBudget>,
+            dropped_at: Arc<AtomicU64>,
+            _reservation: MemoryReservation,
+        }
+        impl Drop for Observed {
+            fn drop(&mut self) {
+                self.dropped_at
+                    .store(self.budget.reserved(), Ordering::SeqCst);
+            }
+        }
+        impl GraphProducts for Observed {
+            fn select(
+                &self,
+                _: &CompileOperation,
+            ) -> Result<(Vec<QueryId>, CompilerReadiness), ToolError> {
+                unreachable!("admission must not select idle metadata products")
+            }
+        }
+        let (_, inputs) = hirsel_engine::requests::observe_inputs(
+            hirsel_engine::loader_inputs::InputLimits {
+                bytes: 0,
+                operations: 0,
+            },
+            1,
+            |_| Ok::<_, std::io::Error>(()),
+        )
+        .unwrap();
+        let error = hirsel_engine::store::Domain {
+            kind: 0x4600_00fe,
+            schema: 1,
+        }
+        .reference(b"fixture error")
+        .unwrap();
+        let budget = ProcessBudget::new(100);
+        let owner = GraphBudget::shared(&budget);
+        let dropped_at = Arc::new(AtomicU64::new(u64::MAX));
+        owner
+            .metadata
+            .lock()
+            .unwrap()
+            .push(Arc::new(InstalledMetadata {
+                path: "idle.hir".into(),
+                inputs: inputs.into(),
+                products: Arc::new(Observed {
+                    budget: budget.clone(),
+                    dropped_at: dropped_at.clone(),
+                    _reservation: budget.reserve(80).unwrap(),
+                }),
+                errors: RuntimeErrors {
+                    resource: error,
+                    cycle: error,
+                    cancelled: error,
+                    protocol: error,
+                    panicked: error,
+                },
+            }));
+        let loading = owner
+            .begin(
+                RequestLimits {
+                    runtime_bytes: 20,
+                    snapshot_bytes: 40,
+                    transport_bytes: 0,
+                },
+                false,
+                0,
+            )
+            .unwrap();
+        assert_eq!(
+            dropped_at.load(Ordering::SeqCst),
+            80,
+            "the host releases idle owners after the failed loading attempt drops its partial grants"
+        );
+        assert_eq!(budget.reserved(), 60);
+        drop(loading);
+        assert_eq!(budget.reserved(), 0);
+    }
+
+    #[test]
     fn shared_graph_budget_evicts_idle_views_but_refuses_to_overcommit_live_leases() {
         struct Empty {
             source: Arc<MemoryReservation>,
@@ -879,6 +973,11 @@ mod tests {
         drop(completed);
         drop(equal);
         drop(active);
+        let unrelated = budget
+            .reserve(bytes + 1)
+            .expect("an unrelated engine must reclaim idle retained graphs");
+        assert_eq!(budget.reserved(), bytes + 2);
+        drop(unrelated);
         let replacement = second
             .select(&request, |owner, _| create(owner, &request))
             .unwrap();

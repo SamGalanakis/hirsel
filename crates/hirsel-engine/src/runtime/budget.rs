@@ -1,11 +1,12 @@
 //! A process allowance shared by all simultaneously live immutable snapshots.
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
 pub struct ProcessBudget {
     limit: u64,
     reserved: Mutex<u64>,
     released: Condvar,
+    idle_reclaimer: Mutex<Option<Weak<dyn Fn() + Send + Sync>>>,
 }
 impl ProcessBudget {
     /// The engine subtracts its fixed overhead from the host limit first.
@@ -14,11 +15,43 @@ impl ProcessBudget {
             limit,
             reserved: Mutex::new(0),
             released: Condvar::new(),
+            idle_reclaimer: Mutex::new(None),
         })
+    }
+    /// Register the process's idle retention authority without extending its lifetime.
+    /// Reclamation runs outside the budget lock and must preserve live owners.
+    pub fn set_idle_reclaimer(&self, reclaimer: Weak<dyn Fn() + Send + Sync>) {
+        *self
+            .idle_reclaimer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(reclaimer);
     }
     /// Nonblocking: reject a new source snapshot instead of multiplying caps
     /// or waiting while holding another snapshot's allowance.
     pub fn reserve(self: &Arc<Self>, bytes: u64) -> std::io::Result<MemoryReservation> {
+        let error = match self.reserve_once(bytes) {
+            Ok(reservation) => return Ok(reservation),
+            Err(error) => error,
+        };
+        if bytes > self.limit {
+            return Err(error);
+        }
+        let reclaimer = self
+            .idle_reclaimer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade);
+        let Some(reclaimer) = reclaimer else {
+            return Err(error);
+        };
+        reclaimer();
+        drop(reclaimer);
+        self.reserve_once(bytes)
+    }
+    /// Reserve without reclaiming retained owners. A host that owns a multipart
+    /// admission releases idle state only after its failed attempt has rolled back.
+    pub fn reserve_once(self: &Arc<Self>, bytes: u64) -> std::io::Result<MemoryReservation> {
         let mut reserved = self.reserved.lock().unwrap_or_else(|e| e.into_inner());
         if bytes > self.limit.saturating_sub(*reserved) {
             return Err(std::io::Error::other(format!(

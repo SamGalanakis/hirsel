@@ -83,6 +83,21 @@ impl GraphAdmission {
         limits: RequestLimits,
         plan: SnapshotPlan,
     ) -> Result<Self, ToolError> {
+        Self::reserve_with(limits, plan, |bytes| budget.reserve(bytes))
+    }
+    /// Let the host reclaim idle owners after every partial grant has dropped.
+    pub fn reserve_once(
+        budget: &Arc<ProcessBudget>,
+        limits: RequestLimits,
+        plan: SnapshotPlan,
+    ) -> Result<Self, ToolError> {
+        Self::reserve_with(limits, plan, |bytes| budget.reserve_once(bytes))
+    }
+    fn reserve_with(
+        limits: RequestLimits,
+        plan: SnapshotPlan,
+        reserve: impl Fn(u64) -> std::io::Result<MemoryReservation>,
+    ) -> Result<Self, ToolError> {
         let snapshot = plan
             .source
             .checked_add(plan.front)
@@ -98,19 +113,15 @@ impl GraphAdmission {
         // A failed later reservation drops every earlier temporary. Nothing
         // becomes visible to request clients before this whole value exists.
         Ok(Self {
-            runtime: budget
-                .reserve(limits.runtime_bytes)
-                .map_err(ToolError::Io)?,
-            source: budget.reserve(plan.source).map_err(ToolError::Io)?,
-            front: budget.reserve(plan.front).map_err(ToolError::Io)?,
-            lower: budget.reserve(plan.lower).map_err(ToolError::Io)?,
-            check: budget.reserve(plan.check).map_err(ToolError::Io)?,
-            growth: budget.reserve(plan.growth).map_err(ToolError::Io)?,
-            run: budget.reserve(plan.run).map_err(ToolError::Io)?,
-            transport: budget
-                .reserve(limits.transport_bytes)
-                .map_err(ToolError::Io)?,
-            native_transport: budget.reserve(0).map_err(ToolError::Io)?,
+            runtime: reserve(limits.runtime_bytes).map_err(ToolError::Io)?,
+            source: reserve(plan.source).map_err(ToolError::Io)?,
+            front: reserve(plan.front).map_err(ToolError::Io)?,
+            lower: reserve(plan.lower).map_err(ToolError::Io)?,
+            check: reserve(plan.check).map_err(ToolError::Io)?,
+            growth: reserve(plan.growth).map_err(ToolError::Io)?,
+            run: reserve(plan.run).map_err(ToolError::Io)?,
+            transport: reserve(limits.transport_bytes).map_err(ToolError::Io)?,
+            native_transport: reserve(0).map_err(ToolError::Io)?,
         })
     }
 }
@@ -130,17 +141,26 @@ impl LoadingAdmission {
         limits: RequestLimits,
         native_transport: u64,
     ) -> Result<Self, ToolError> {
+        Self::reserve_with(limits, native_transport, |bytes| budget.reserve(bytes))
+    }
+    /// Let the host reclaim idle owners after every partial grant has dropped.
+    pub fn reserve_once(
+        budget: &Arc<ProcessBudget>,
+        limits: RequestLimits,
+        native_transport: u64,
+    ) -> Result<Self, ToolError> {
+        Self::reserve_with(limits, native_transport, |bytes| budget.reserve_once(bytes))
+    }
+    fn reserve_with(
+        limits: RequestLimits,
+        native_transport: u64,
+        reserve: impl Fn(u64) -> std::io::Result<MemoryReservation>,
+    ) -> Result<Self, ToolError> {
         Ok(Self {
-            runtime: budget
-                .reserve(limits.runtime_bytes)
-                .map_err(ToolError::Io)?,
-            snapshot: budget
-                .reserve(limits.snapshot_bytes)
-                .map_err(ToolError::Io)?,
-            transport: budget
-                .reserve(limits.transport_bytes)
-                .map_err(ToolError::Io)?,
-            native_transport: budget.reserve(native_transport).map_err(ToolError::Io)?,
+            runtime: reserve(limits.runtime_bytes).map_err(ToolError::Io)?,
+            snapshot: reserve(limits.snapshot_bytes).map_err(ToolError::Io)?,
+            transport: reserve(limits.transport_bytes).map_err(ToolError::Io)?,
+            native_transport: reserve(native_transport).map_err(ToolError::Io)?,
         })
     }
     /// Transfer the already admitted transport before S0 uses the provider.

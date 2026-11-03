@@ -246,9 +246,13 @@ impl QueryEngine {
             .map(|id| id.path().clone())
             .collect();
         let registrations = namespace.registrations.values().cloned().collect();
-        self.adopt_namespace(&namespace).map_err(|error| {
-            FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
-        })?;
+        if Arc::ptr_eq(&namespace, initial.namespace()) {
+            self.adopt_completed_headers();
+        } else {
+            self.adopt_namespace(&namespace).map_err(|error| {
+                FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
+            })?;
+        }
         let metadata = metadata
             .split(required)
             .ok_or_else(|| admission_error("completed scope metadata"))?;

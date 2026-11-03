@@ -719,7 +719,7 @@ impl DemandProducer {
                     break;
                 }
                 let owner = self.current()?;
-                let mut engine = owner.capture().assembly(&self.adapters)?;
+                let mut engine = owner.capture().discovery_assembly(&self.adapters)?;
                 let mut fronts = Vec::new();
                 fronts.extend(
                     self.state
@@ -845,7 +845,22 @@ impl DemandProducer {
                     if let Err(reference) = selected {
                         let error = owner
                             .failure(reference)
-                            .ok_or_else(|| refused("scope Lower outcome is unavailable"))?;
+                            .ok_or_else(|| {
+                                let reason = if reference == self.errors.resource {
+                                    "resource admission"
+                                } else if reference == self.errors.protocol {
+                                    "runtime protocol"
+                                } else if reference == self.errors.cancelled {
+                                    "cancellation"
+                                } else if reference == self.errors.cycle {
+                                    "dependency cycle"
+                                } else if reference == self.errors.panicked {
+                                    "producer panic"
+                                } else {
+                                    "unavailable outcome"
+                                };
+                                refused(&format!("scope Lower {path} refused: {reason}"))
+                            })?;
                         if stop_on_error || !error.cacheable() {
                             return Err(error);
                         }

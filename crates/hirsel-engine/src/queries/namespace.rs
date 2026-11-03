@@ -171,6 +171,19 @@ impl NamespaceCapture {
     /// Reconstruct metadata from this capture for a registration transaction.
     /// This assembler has no session, active S1 stack or ambient body cache.
     pub(crate) fn assembly(&self, adapters: &SourcePhases) -> Result<QueryEngine, QueryError> {
+        self.assemble(adapters, true)
+    }
+    pub(crate) fn discovery_assembly(
+        &self,
+        adapters: &SourcePhases,
+    ) -> Result<QueryEngine, QueryError> {
+        self.assemble(adapters, false)
+    }
+    fn assemble(
+        &self,
+        adapters: &SourcePhases,
+        materialize_all: bool,
+    ) -> Result<QueryEngine, QueryError> {
         let headers = self
             .snapshot
             .header_products()
@@ -184,7 +197,16 @@ impl NamespaceCapture {
         engine.generated.bind(engine.source_ownership.clone());
         // Metadata assembly must never invoke the standalone execution driver.
         engine.private_bootstrap_active = true;
-        for id in self.bodies.keys() {
+        for (id, body) in &self.bodies {
+            if !materialize_all
+                && headers
+                    .captured_text(*id)
+                    .is_some_and(|text| text.implementation == Some(body.implementation))
+                && !self.registrations.contains_key(id)
+                && !engine.staged_constants.contains_key(id.path())
+            {
+                continue;
+            }
             engine
                 .items
                 .insert(id.path().clone(), vec![self.syntax(id.path())?]);
@@ -198,10 +220,14 @@ impl NamespaceCapture {
             &self.registrations.values().cloned().collect::<Vec<_>>(),
         );
         engine.snapshot = Some((engine.snapshot_stamp(), self.snapshot.clone()));
-        engine.adopt_completed_headers();
-        engine.header_products = None;
+        if materialize_all {
+            engine.adopt_completed_headers();
+            engine.header_products = None;
+        }
         engine.inherit_source_records((*self.anchors).clone());
-        engine.retire_snapshot();
+        if materialize_all {
+            engine.retire_snapshot();
+        }
         Ok(engine)
     }
     pub(crate) fn input_bytes(definitions: &[DefPath]) -> Option<u64> {

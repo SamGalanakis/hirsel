@@ -664,6 +664,7 @@ fn bounded_instance_bootstrap_reuses_one_grant_and_refreshes_nested_final_univer
                 let generators = program.engine.front_generator_roots(&definitions).unwrap();
                 assert_eq!(generators.len(), 2);
                 let admission = FrontDemandAdmission {
+                    carry: None,
                     jobs: hirsel_intern::jobs::Jobs::new(jobs),
                     weight: weight(),
                     max_reads: 64,
@@ -782,6 +783,7 @@ fn bounded_instance_bootstrap_refuses_short_metadata_before_body_work_or_registr
                         &[program.entry.clone()],
                         &generators,
                         FrontDemandAdmission {
+                            carry: None,
                             jobs: hirsel_intern::jobs::Jobs::new(jobs),
                             weight: weight(),
                             max_reads: 64,
@@ -852,6 +854,7 @@ fn instance_bootstrap_failure(zero_depth: bool) {
                     &[program.entry.clone()],
                     &generators,
                     FrontDemandAdmission {
+                        carry: None,
                         jobs: hirsel_intern::jobs::Jobs::new(jobs),
                         weight: weight(),
                         max_reads: 64,
@@ -942,6 +945,7 @@ fn instance_bootstrap_keeps_ordinary_failure_local_until_selected_front_demand()
                         &[program.entry.clone()],
                         &generators,
                         FrontDemandAdmission {
+                            carry: None,
                             jobs: hirsel_intern::jobs::Jobs::new(jobs),
                             weight: weight(),
                             max_reads: 64,

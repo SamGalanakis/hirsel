@@ -5,6 +5,7 @@ use crate::runtime::*;
 use hirsel_intern::jobs::Jobs;
 
 pub struct FrontDemandAdmission {
+    pub carry: Option<Arc<FrontCarry>>,
     pub jobs: Jobs,
     pub weight: MemoryWeight,
     pub max_reads: usize,
@@ -47,6 +48,7 @@ impl std::fmt::Debug for FrontDemandError {
     }
 }
 pub struct FrontDemandScope {
+    carry: Option<Arc<FrontCarry>>,
     definitions: Vec<DefPath>,
     registrations: Vec<Arc<AcceptedFrontRegistration>>,
     namespace: Arc<NamespaceCapture>,
@@ -57,6 +59,9 @@ pub struct FrontDemandScope {
     _metadata: MemoryReservation,
 }
 impl FrontDemandScope {
+    pub(crate) fn carry(&self) -> Option<&Arc<FrontCarry>> {
+        self.carry.as_ref()
+    }
     pub fn definitions(&self) -> &[DefPath] {
         &self.definitions
     }
@@ -142,6 +147,7 @@ impl QueryEngine {
             ));
         }
         let FrontDemandAdmission {
+            carry,
             jobs,
             weight,
             max_reads,
@@ -153,6 +159,13 @@ impl QueryEngine {
             discovery,
             mut metadata,
         } = admission;
+        let carry = match carry {
+            Some(carry) => {
+                drop(discovery);
+                Some(carry)
+            }
+            None => FrontCarry::new(discovery).ok(),
+        };
         let front_grant = front
             .split(front.bytes() / 2)
             .ok_or_else(|| admission_error("Front partition"))?;
@@ -165,6 +178,10 @@ impl QueryEngine {
             let capture = self.capture_namespace(definitions, &[], front_grant.bytes())?;
             let front =
                 self.front_body_queries_in(definitions, capture, weight, front_grant, errors)?;
+            if let Some(carry) = &carry {
+                // An optional carry miss leaves ordinary production active.
+                let _ = front.install_carry(carry.clone());
+            }
             self.front_lower_queries(definitions, front, weight, max_reads, lower_grant, errors)
         })();
         self.private_bootstrap_active = previous;
@@ -175,6 +192,7 @@ impl QueryEngine {
             self,
             initial.clone(),
             demand::DemandAdmission {
+                carry: carry.clone(),
                 front,
                 lower,
                 text,
@@ -211,7 +229,6 @@ impl QueryEngine {
         runtime.shutdown();
         let stats = runtime.stats();
         drop(runtime);
-        drop(discovery);
         let successor = match result {
             Ok(successor) if selected.is_ok() => successor,
             result => {
@@ -242,6 +259,7 @@ impl QueryEngine {
             .split(required)
             .ok_or_else(|| admission_error("completed scope metadata"))?;
         Ok(FrontDemandScope {
+            carry,
             definitions,
             registrations,
             namespace,

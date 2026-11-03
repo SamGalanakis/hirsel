@@ -1272,6 +1272,7 @@ pub(super) fn install(
         &host,
         &mut loading,
         store.as_ref(),
+        carry,
     )?;
     let scope_roots = (prefix && namespace.is_some()).then(|| match &request.operation {
         CompileOperation::NativeSources { roots } => roots.clone(),

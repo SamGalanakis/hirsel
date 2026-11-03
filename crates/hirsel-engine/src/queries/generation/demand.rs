@@ -7,6 +7,7 @@ use crate::runtime::{
 use std::sync::{Mutex, Weak};
 
 pub(crate) struct DemandAdmission {
+    pub carry: Option<Arc<FrontCarry>>,
     pub front: MemoryReservation,
     pub lower: MemoryReservation,
     pub text: MemoryReservation,
@@ -14,6 +15,7 @@ pub(crate) struct DemandAdmission {
 }
 
 pub(crate) struct DemandProducer {
+    carry: Option<Arc<FrontCarry>>,
     adapters: SourcePhases,
     state: Mutex<State>,
     front: Arc<MemoryReservationPool>,
@@ -82,6 +84,7 @@ impl DemandProducer {
             .split((size_of::<Self>() + 2 * size_of::<usize>()) as u64)
             .ok_or_else(|| refused("producer owner metadata exceeds admission"))?;
         let producer = Arc::new(Self {
+            carry: admission.carry,
             adapters: engine.adapters.source_phases(),
             state: Mutex::new(State {
                 current: Arc::downgrade(&initial),
@@ -890,6 +893,10 @@ impl DemandProducer {
             self.front.clone(),
             self.errors,
         )?;
+        if let Some(carry) = &self.carry {
+            // An optional carry miss leaves ordinary production active.
+            let _ = front.install_carry(carry.clone());
+        }
         let lower = engine.front_lower_queries_in_partition(
             &ready,
             front,

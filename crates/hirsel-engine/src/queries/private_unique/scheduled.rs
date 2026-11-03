@@ -952,6 +952,7 @@ impl QueryEngine {
         }
         let mut split = |bytes| reservation.split(bytes).ok_or_else(refused);
         let admission = FrontDemandAdmission {
+            carry: None,
             jobs: hirsel_intern::jobs::Jobs::new(1),
             weight: MemoryWeight {
                 scratch: 8 << 20,

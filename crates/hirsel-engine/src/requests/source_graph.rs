@@ -841,6 +841,7 @@ pub fn prepare_source_scope(
     host: &dyn SourceHost,
     loading: &mut LoadingAdmission,
     store: &dyn ResultStore,
+    carry: Option<&SourceCarry>,
 ) -> Result<(Option<FrontDemandScope>, RequestLimits), ToolError> {
     engine.admit_private_inference(loading.lend_runtime());
     let definitions = selected_definitions(engine);
@@ -905,6 +906,7 @@ pub fn prepare_source_scope(
             policy,
             stop_on_error,
             FrontDemandAdmission {
+                carry: carry.map(|carry| carry.front.clone()),
                 jobs,
                 weight: plan.body,
                 max_reads: lower_reads(&definitions)?,
@@ -948,6 +950,10 @@ pub fn install(
     scope: Option<FrontDemandScope>,
 ) -> Result<InstalledSource, ToolError> {
     let prepared_front = scope.as_ref().map(|scope| scope.front().clone());
+    let front_carry = scope
+        .as_ref()
+        .and_then(|scope| scope.carry().cloned())
+        .or_else(|| carry.map(|carry| carry.front.clone()));
     let namespace = scope.map(|scope| scope.namespace().clone());
     engine.admit_private_inference(loading.lend_runtime());
     let planner = SourcePlanner {
@@ -1103,10 +1109,8 @@ pub fn install(
     }
     // Before any task: this fresh graph adopts the selector's earlier accepted
     // front facts only where their text and reads still validate.
-    if let Some(carry) = carry.filter(|_| !reuse_front) {
-        front
-            .install_carry(carry.front.clone())
-            .map_err(|_| uninstalled())?;
+    if let Some(carry) = front_carry.filter(|_| !reuse_front) {
+        front.install_carry(carry).map_err(|_| uninstalled())?;
     }
     let lower = engine
         .front_lower_queries(
@@ -1377,6 +1381,7 @@ impl QueryEngine {
             &BudgetHost(budget),
             &mut loading,
             store.as_ref(),
+            carry.as_ref(),
         )?;
         let mut installed = install(
             self,

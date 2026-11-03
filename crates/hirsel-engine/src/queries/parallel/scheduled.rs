@@ -21,7 +21,7 @@ use lint_facts::LintFacts;
 mod source;
 mod storage;
 pub use source::FrontInputFootprint;
-use source::{SiblingArchives, SiblingFile};
+use source::{SiblingFile, SiblingSources};
 pub use storage::{FRONT_STORAGE_KIND, FrontStorageOutput, FrontStorageQueries};
 pub const FRONT_BODY_KIND: u32 = 0x4600_0001;
 const FAILURE: Domain = Domain {
@@ -157,7 +157,6 @@ pub struct FrontMemoryRefusal {
 }
 struct Input {
     definition: DefId,
-    syntax: Reference,
     text: ContentHash,
     implementation: ContentHash,
     registration: Option<Arc<AcceptedFrontRegistration>>,
@@ -310,10 +309,6 @@ pub struct FrontCheckedOutput {
     pub reads: Arc<Reads>,
     _facts: Arc<FrontFacts>,
 }
-const SOURCE_INPUT: Domain = Domain {
-    kind: 0x4600_0013,
-    schema: 1,
-};
 impl FrontBodyQueries {
     fn delegated(&self, selected: &Result<ProductRef, Reference>) -> Option<Forwarded> {
         self.forwarded
@@ -537,18 +532,18 @@ impl FrontBodyQueries {
                 && syntax.text_hash == input.implementation)
                 .then(|| syntax.clone());
         }
-        let bytes = self.store.get_content(input.syntax)?;
-        let (mut syntax, occurrence): (ItemSyntax, u32) = self
-            .input_records
-            .decode(&*self.namespace.anchors, &bytes)?;
-        if syntax.item.definition != *input.definition.path()
-            || syntax.text_hash != input.implementation
-            || !syntax.structurally_valid(|span| self.citations.sources.slice(span).is_some())
-        {
+        let syntax = self.namespace.syntax(input.definition.path()).ok()?;
+        if syntax.text_hash != input.implementation {
             return None;
         }
-        syntax.occurrence = occurrence;
-        Some(Arc::new(syntax))
+        if generation::instance_bodied(&syntax) {
+            let mut header = (*syntax).clone();
+            if let hirsel_syntax::ItemKind::Function { body, .. } = &mut header.item.kind {
+                *body = None;
+            }
+            return Some(Arc::new(header));
+        }
+        Some(syntax)
     }
 
     /// Potential task, result and counter slots. Completed read/summary
@@ -2708,9 +2703,10 @@ impl QueryEngine {
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
         let capture = self.capture_namespace(definitions, registrations, allowance.bytes())?;
         for definition in definitions {
-            let syntax = capture.syntax(definition)?;
-            if generation::generator(&syntax).is_some()
-                && !generation::instance_bodied(&syntax)
+            if capture
+                .bodies
+                .get(&DefId::intern(definition))
+                .is_some_and(|body| body.generated)
                 && !capture
                     .registrations
                     .contains_key(&DefId::intern(definition))
@@ -2770,30 +2766,22 @@ impl QueryEngine {
         if required > available {
             return Err(refused_inputs(required));
         }
-        let store = self
-            .result_store
-            .clone()
-            .filter(|s| s.claims_content())
-            .ok_or_else(|| {
-                QueryError::Operational(hirsel_types::OperationalFailure {
-                    operation: "front source transport".into(),
-                    message: "source archives require a result provider that claims content".into(),
-                })
-            })?;
-        // Materialize only the selected ordinary Parse files before capturing
-        // their stable source/anchor archive inputs.
+        let store = self.result_store.clone().ok_or_else(|| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "front source transport".into(),
+                message: "source inputs require a result provider".into(),
+            })
+        })?;
         for definition in definitions {
-            self.materialize(definition)?;
             if namespace
                 .bodies
                 .get(&DefId::intern(definition))
                 .map(|input| input.implementation)
-                != Some(self.snapshot(definition)?.text_hash)
+                != self.implementation_hash(definition)
             {
                 return Err(refusal("written source differs from namespace capture"));
             }
         }
-        self.register_specializations(definitions);
         let anchors = namespace.anchors.clone();
         required = required
             .checked_add(
@@ -2814,106 +2802,32 @@ impl QueryEngine {
             return Err(refused_inputs(required));
         }
         let input_records = crate::NativeRecords::new(self.types.clone(), store.clone());
-        let declarations = self.frozen_declarations();
+        let declarations = namespace.declarations.clone();
         let mut siblings = BTreeMap::new();
-        let sibling_inputs = self.front_sibling_inputs(definitions)?;
+        for (_, file, _) in namespace.sources.anchors() {
+            siblings.entry(file).or_insert_with(SiblingFile::default);
+        }
         let mut sibling_index = crate::NativeMetadataWeight::default();
-        sibling_index.tree::<FileId, SiblingFile>(sibling_inputs.len());
+        sibling_index.tree::<FileId, SiblingFile>(siblings.len());
         required = required
             .checked_add(sibling_index.bytes())
             .ok_or_else(|| refusal("sibling index overflow"))?;
-        for (&file, original) in &sibling_inputs {
-            if let std::collections::btree_map::Entry::Vacant(slot) = siblings.entry(file) {
-                let written = declarations.siblings(original);
-                required = required
-                    .checked_add(
-                        (written.len() as u64)
-                            .checked_mul(std::mem::size_of::<Reference>() as u64)
-                            .ok_or_else(|| refusal("sibling size overflow"))?,
-                    )
-                    .ok_or_else(|| refusal("sibling size overflow"))?;
-                if required > available {
-                    return Err(refused_inputs(required));
-                }
-                let mut refs = Vec::with_capacity(written.len());
-                for sibling in written.iter() {
-                    // Item resolution reads variant spellings from siblings.
-                    // Retain written callable/constant fallback whenever the
-                    // provider does not already have the corresponding kind.
-                    let written_value = matches!(
-                        sibling.item.kind,
-                        hirsel_syntax::ItemKind::Function { .. }
-                            | hirsel_syntax::ItemKind::Const { .. }
-                    );
-                    let normalized_value = self
-                        .signatures
-                        .get(&DefId::intern(&sibling.item.definition))
-                        .filter(|entry| entry.consistent && !self.graph.is_dirty(&entry.memo.key))
-                        .and_then(|entry| entry.result().ok())
-                        .is_some_and(|output| {
-                            matches!(
-                                output.value.kind,
-                                hirsel_types::SignatureKind::Function(_)
-                                    | hirsel_types::SignatureKind::Const { .. }
-                            )
-                        });
-                    let variant = matches!(
-                        &sibling.item.kind,
-                        hirsel_syntax::ItemKind::Type {
-                            body: hirsel_syntax::TypeBody::Variants(_),
-                            ..
-                        }
-                    );
-                    if !variant && (!written_value || normalized_value) {
-                        continue;
-                    }
-                    let bytes = input_records
-                        .encode(&*anchors, &(sibling, sibling.occurrence))
-                        .ok_or_else(|| refusal("sibling archive encoding"))?;
-                    refs.push(store.put_content(SOURCE_INPUT, &bytes).ok_or_else(|| {
-                        refusal(&format!(
-                            "the store refuses the {} byte sibling archive of {}",
-                            bytes.len(),
-                            sibling.item.definition
-                        ))
-                    })?);
-                }
-                slot.insert(SiblingFile::from(refs));
-            }
+        if required > available {
+            return Err(refused_inputs(required));
         }
         let mut selected = Vec::new();
         for definition in definitions {
             let registration = registrations
                 .iter()
                 .find(|accepted| accepted.definition() == definition);
-            self.materialize(definition)?;
-            let original = namespace.syntax(definition)?;
-            let declaration = generation::instance_bodied(&original);
-            let syntax = if declaration {
-                if registration.is_some() {
-                    return Err(refusal("registration for a generic generated declaration"));
-                }
-                // As in declaration_check_query, a generic generated
-                // declaration checks its header. Only closed instances have
-                // executable generated bodies, each with an accepted view.
-                let mut header = (*original).clone();
-                if let hirsel_syntax::ItemKind::Function { body, .. } = &mut header.item.kind {
-                    *body = None;
-                }
-                Arc::new(header)
-            } else if generation::generator(&original).is_some() {
-                registration.map_or_else(
-                    || original.clone(),
-                    |registration| registration.syntax.clone(),
-                )
-            } else {
-                if registration.is_some() {
-                    return Err(refusal("registration for a non-generator"));
-                }
-                original
-            };
-            let implementation = syntax.text_hash;
-            let text = self.key_text(definition, QueryKind::Modes)?;
+            let input = namespace
+                .bodies
+                .get(&DefId::intern(definition))
+                .ok_or_else(|| refusal("definition outside accepted capture"))?;
+            let implementation = registration.map_or(input.implementation, |registration| {
+                registration.syntax.text_hash
+            });
+            let text = input.implementation;
             let key = namespace
                 .bodies
                 .get(&DefId::intern(definition))
@@ -2921,26 +2835,8 @@ impl QueryEngine {
                 .ok_or_else(|| refusal("definition outside accepted capture"))?
                 .modes
                 .clone();
-            // Immutable S0 variants provide body reuse. The construction
-            // inventory itself must never pin a mutable engine's checked body
-            // after a request settles, including the explicit zero hold policy.
-            let bytes = input_records
-                .encode(&*anchors, &(&syntax, syntax.occurrence))
-                .ok_or_else(|| {
-                    QueryError::Operational(hirsel_types::OperationalFailure {
-                        operation: "front syntax archive".into(),
-                        message: format!("cannot archive accepted source for {definition}"),
-                    })
-                })?;
-            if required > available {
-                return Err(refused_inputs(required));
-            }
-            let syntax = store
-                .put_content(SOURCE_INPUT, &bytes)
-                .ok_or_else(|| refusal("syntax archive store"))?;
             selected.push((
                 definition.clone(),
-                syntax,
                 text,
                 implementation,
                 key,
@@ -2951,17 +2847,15 @@ impl QueryEngine {
         let retention = Arc::new(Mutex::new(available - required));
         if let Some(headers) = snapshot.header_products() {
             headers.configure_private(weight.scratch, registrations);
-            headers.archive_sources(store.clone())?;
         }
         let mut inputs = BTreeMap::new();
-        for (definition, syntax, text, implementation, key, registration) in selected {
+        for (definition, text, implementation, key, registration) in selected {
             let id = DefId::intern(&definition);
             inputs.insert(
                 namespace.query_id(FRONT_BODY_KIND, key.0).address.0,
                 Input {
                     registration,
                     definition: id,
-                    syntax,
                     text,
                     implementation,
                     key,
@@ -3019,20 +2913,12 @@ impl QueryEngine {
             _sources: self.sources.clone(),
             headers: snapshot.header_products().map(Arc::downgrade),
         });
-        let sibling_archives = Arc::new(SiblingArchives {
+        let sibling_sources = Arc::new(SiblingSources {
             files: siblings,
             backing: backing.clone(),
             retention: retention.clone(),
-            sources: self.sources.clone(),
-            owners: anchors.clone(),
-            records: crate::NativeRecords::new(self.types.clone(), store.clone()),
-            store: store.clone(),
+            namespace: namespace.clone(),
         });
-        // Decoded siblings are immutable inputs, not evictable compact outputs.
-        // Capture their charge before readers observe the input baseline.
-        for syntax in sibling_inputs.values() {
-            crate::snapshot::DeclarationSiblings::siblings(sibling_archives.as_ref(), syntax)?;
-        }
         let header_allowance = snapshot
             .header_products()
             .map(|headers| headers.configure_source_backing(backing.clone(), retention.clone()));
@@ -3046,7 +2932,7 @@ impl QueryEngine {
             types: self.types.clone(),
             memo: self.memo.clone(),
             namespace,
-            declarations: declarations.with_archived_siblings(sibling_archives),
+            declarations: declarations.with_archived_siblings(sibling_sources),
             citations: OwnedSourceContext {
                 unique_failures: self.private_unique_failures.clone(),
                 sources: namespace_sources,

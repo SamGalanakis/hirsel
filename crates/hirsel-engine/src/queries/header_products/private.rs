@@ -672,6 +672,7 @@ impl HeaderProducts {
             syntax: self.syntax.clone(),
             declarations: self.declarations.clone(),
             catalog: self.catalog.clone(),
+            installed_sources: self.installed_sources.clone(),
             types: self.types.clone(),
             memo: self.memo.clone(),
             builtins: self.builtins.clone(),

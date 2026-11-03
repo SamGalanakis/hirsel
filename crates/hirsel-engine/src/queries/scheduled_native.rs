@@ -22,9 +22,12 @@ struct SourceOwnership {
     _lower: Arc<FrontLowerQueries>,
 }
 struct Input {
+    generated: Option<AcceptedNativeSource>,
+}
+struct DemandedInput<'a> {
     signature: SignatureRef,
     representation: Option<crate::representation::OwnerRecord>,
-    generated: Option<AcceptedNativeSource>,
+    generated: Option<&'a AcceptedNativeSource>,
 }
 struct AcceptedNativeSource {
     source: crate::NativeSource,
@@ -79,6 +82,32 @@ pub struct FrontNativeDefinitionQueries {
     _ownership: Arc<SourceOwnership>,
 }
 impl FrontNativeDefinitionQueries {
+    fn input(&self, path: &DefPath) -> Result<DemandedInput<'_>, QueryError> {
+        let namespace = self.front.namespace();
+        let signature = namespace.header(path)?.output.value.clone();
+        let representation = namespace.representation(path);
+        if representation.as_ref().is_some_and(|record| {
+            namespace
+                .bodies
+                .get(&DefId::intern(path))
+                .map(|input| input.implementation)
+                != Some(record.text_hash)
+        }) {
+            return Err(native_selection_error(format!(
+                "native representation revision differs from source: {path}"
+            )));
+        }
+        Ok(DemandedInput {
+            signature,
+            representation,
+            generated: self
+                .inputs
+                .get(path)
+                .ok_or(QueryError::NotImplemented)?
+                .generated
+                .as_ref(),
+        })
+    }
     pub(crate) fn with_selection(
         mut self: Arc<Self>,
         run: Arc<FrontRunQueries>,
@@ -284,7 +313,10 @@ impl Task {
                 ))));
             }
         }
-        let input = &owner.inputs[&self.path];
+        let input = match owner.input(&self.path) {
+            Ok(input) => input,
+            Err(error) => return Poll::Ready(Err(owner.fail(error))),
+        };
         let Some(id) = owner.front.query(&self.path) else {
             return Poll::Ready(Err(owner.errors.protocol));
         };
@@ -513,7 +545,7 @@ impl Task {
         QueryError,
     > {
         let owner = &self.owner;
-        let input = &owner.inputs[&self.path];
+        let input = owner.input(&self.path)?;
         let analyzed = front.outcome.result.as_ref().map_err(Clone::clone)?;
         let (syntax, signature) = owner
             .front
@@ -594,7 +626,7 @@ impl Task {
                 }
                 if !native_declaration(
                     owner.lower.signatures().types(),
-                    &owner.inputs[path].signature,
+                    &owner.input(path)?.signature,
                 ) {
                     return Ok(None);
                 }
@@ -662,7 +694,6 @@ impl QueryEngine {
                 accepted.validate(self)?;
             }
         }
-        let snapshot = namespace.snapshot.clone();
         let original_context = self.native_original_context_in(definitions, &namespace)?;
         let store = self.result_store.clone().ok_or_else(refuse)?;
         let records = crate::NativeRecords::new(self.types.clone(), store.clone());
@@ -714,36 +745,6 @@ impl QueryEngine {
                 }
                 None
             };
-            let signature = snapshot
-                .signature(DefId::intern(path))
-                .ok_or_else(refuse)??
-                .clone();
-            let representation = namespace.representation(path);
-            if let Some(record) = &representation {
-                let bytes = records
-                    .encode(
-                        &anchors,
-                        &(
-                            &record.representation.declaration,
-                            &record.dependencies,
-                            record.text_hash,
-                        ),
-                    )
-                    .ok_or_else(refuse)?;
-                required = required
-                    .checked_add(bytes.len() as u64)
-                    .ok_or_else(refuse)?;
-                if namespace
-                    .bodies
-                    .get(&DefId::intern(path))
-                    .map(|input| input.implementation)
-                    != Some(record.text_hash)
-                {
-                    return Err(native_selection_error(format!(
-                        "native representation revision differs from source: {path}"
-                    )));
-                }
-            }
             let bytes = serde_json::to_vec(path).map_err(|_| refuse())?;
             let id = QueryId {
                 kind: FRONT_NATIVE_DEFINITION_KIND,
@@ -757,14 +758,7 @@ impl QueryEngine {
                 )),
             };
             ids.insert(path.clone(), id);
-            inputs.insert(
-                path.clone(),
-                Input {
-                    signature,
-                    representation,
-                    generated,
-                },
-            );
+            inputs.insert(path.clone(), Input { generated });
         }
         if required > limit {
             return Err(native_selection_error(format!(

@@ -980,6 +980,10 @@ impl QueryEngine {
             } else {
                 body
             }
+        } else if kind != QueryKind::Signature && self.captured_text(definition).is_some() {
+            self.captured_text(definition)
+                .and_then(|text| text.implementation)
+                .ok_or(QueryError::NotImplemented)?
         } else if kind == QueryKind::Signature {
             self.signature_header(definition)?
         } else {

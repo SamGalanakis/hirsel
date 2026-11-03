@@ -233,6 +233,13 @@ impl QueryEngine {
         context: &FileContext,
         output: &QueryOutput<SyntaxFile>,
     ) -> Result<(), QueryError> {
+        if !self
+            .result_store
+            .as_ref()
+            .is_some_and(|store| store.persistence().retains())
+        {
+            return Ok(());
+        }
         let Some(key) = self.parse_syntax_key(file, context) else {
             return Ok(());
         };

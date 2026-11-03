@@ -409,6 +409,9 @@ impl Catalog {
         weight.bytes()
     }
 
+    pub(super) fn site(&self, path: &DefPath) -> Option<Span> {
+        Some(self.candidates.get(path)?.first()?.head.name)
+    }
     /// File and candidate bounds available before lazy syntax is materialized.
     pub(super) fn sibling_inventory(&self) -> Option<(usize, usize)> {
         Some((
@@ -743,9 +746,6 @@ impl QueryEngine {
     /// Parse heads and parse syntax are cached only where a provider retains
     /// them; a store-off request neither captures nor encodes them.
     fn catalog_key(&self, file: FileId, context: &FileContext) -> Option<crate::store::EntryKey> {
-        if !self.result_store.as_ref()?.persistence().retains() {
-            return None;
-        }
         let source = self.sources.file(file)?;
         if source.path.to_string_lossy().starts_with('<') {
             return None;
@@ -828,7 +828,11 @@ impl QueryEngine {
         // An edit first makes only its old source and duplicate candidates
         // concrete, preserving the ordinary occurrence/anchor transaction.
         self.prepare_catalog_edit(file)?;
-        let key = self.catalog_key(file, context);
+        let key = self
+            .result_store
+            .as_ref()
+            .filter(|store| store.persistence().retains())
+            .and_then(|_| self.catalog_key(file, context));
         let cached = key.as_ref().and_then(|key| {
             let bytes = self.result_store.as_ref()?.get(key)?;
             let record: FileHeads = bincode::DefaultOptions::new()

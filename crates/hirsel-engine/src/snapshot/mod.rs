@@ -1583,7 +1583,7 @@ extern "unused" fn unused()"#
     }
 
     #[test]
-    fn archived_header_demand_does_not_hold_the_written_body_arenas() {
+    fn live_header_demand_retains_the_shared_written_owner() {
         struct Header;
         impl SignaturePhase for Header {
             fn signature(
@@ -1624,16 +1624,11 @@ extern "unused" fn unused()"#
             let path = parsed.value.items[0].item.definition.clone();
             let written = Arc::downgrade(&parsed.value.items[0]);
             let snapshot = engine.signature_inputs();
-            snapshot
-                .header_products()
-                .unwrap()
-                .archive_sources(store)
-                .unwrap();
             drop(parsed);
             drop(engine);
             assert!(
-                written.upgrade().is_none(),
-                "a demand source retains only ordinary archive handles"
+                written.upgrade().is_some(),
+                "a live demand source shares the immutable written owner"
             );
             assert!(snapshot.signature(DefId::intern(&path)).unwrap().is_ok());
         });

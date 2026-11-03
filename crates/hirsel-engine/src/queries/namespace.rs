@@ -14,11 +14,6 @@ const MANIFEST: Domain = Domain {
     schema: 1,
 };
 
-const WRITTEN: Domain = Domain {
-    kind: 0x4601_000a,
-    schema: 1,
-};
-
 pub(crate) struct BodyKeys {
     pub implementation: ContentHash,
     pub site: Span,
@@ -27,7 +22,7 @@ pub(crate) struct BodyKeys {
     pub evaluate: EntryKey,
 }
 pub(crate) struct BodyInput {
-    pub syntax: Reference,
+    pub syntax: ContentHash,
     pub implementation: ContentHash,
     pub executable: bool,
     pub generated: bool,
@@ -171,20 +166,13 @@ impl NamespaceCapture {
     }
     /// Reconstruct metadata from this capture for a registration transaction.
     /// This assembler has no session, active S1 stack or ambient body cache.
-    pub(crate) fn assembly(&self, adapters: &SourcePhases) -> Result<QueryEngine, QueryError> {
-        self.assemble(adapters, true)
-    }
     pub(crate) fn discovery_assembly(
         &self,
         adapters: &SourcePhases,
     ) -> Result<QueryEngine, QueryError> {
-        self.assemble(adapters, false)
+        self.assembly(adapters)
     }
-    fn assemble(
-        &self,
-        adapters: &SourcePhases,
-        materialize_all: bool,
-    ) -> Result<QueryEngine, QueryError> {
+    pub(crate) fn assembly(&self, adapters: &SourcePhases) -> Result<QueryEngine, QueryError> {
         let headers = self
             .snapshot
             .header_products()
@@ -198,20 +186,6 @@ impl NamespaceCapture {
         engine.generated.bind(engine.source_ownership.clone());
         // Metadata assembly must never invoke the standalone execution driver.
         engine.private_bootstrap_active = true;
-        for (id, body) in &self.bodies {
-            if !materialize_all
-                && headers
-                    .captured_text(*id)
-                    .is_some_and(|text| text.implementation == Some(body.implementation))
-                && !self.registrations.contains_key(id)
-                && !engine.staged_constants.contains_key(id.path())
-            {
-                continue;
-            }
-            engine
-                .items
-                .insert(id.path().clone(), vec![self.syntax(id.path())?]);
-        }
         for (id, registration) in &self.registrations {
             engine
                 .generated
@@ -221,14 +195,7 @@ impl NamespaceCapture {
             &self.registrations.values().cloned().collect::<Vec<_>>(),
         );
         engine.snapshot = Some((engine.snapshot_stamp(), self.snapshot.clone()));
-        if materialize_all {
-            engine.adopt_completed_headers();
-            engine.header_products = None;
-        }
         engine.inherit_source_records((*self.anchors).clone());
-        if materialize_all {
-            engine.retire_snapshot();
-        }
         Ok(engine)
     }
     pub(crate) fn input_bytes(definitions: &[DefPath]) -> Option<u64> {
@@ -308,25 +275,17 @@ impl NamespaceCapture {
             .bodies
             .get(&DefId::intern(path))
             .ok_or_else(|| refused("body outside capture"))?;
-        if input.syntax.domain != WRITTEN {
-            return Err(refused("written syntax schema"));
-        }
-        let bytes = self
-            .store
-            .get_content(input.syntax)
-            .ok_or_else(|| refused("missing captured syntax"))?;
-        let (mut syntax, occurrence): (ItemSyntax, u32) = self
-            .records
-            .decode(&*self.anchors, &bytes)
-            .ok_or_else(|| refused("invalid captured syntax"))?;
-        if syntax.item.definition != *path
-            || syntax.text_hash != input.implementation
-            || !syntax.structurally_valid(|span| self.sources.slice(span).is_some())
-        {
+        let headers = self
+            .snapshot
+            .header_products()
+            .ok_or_else(|| refused("missing captured source owner"))?;
+        let mut engine = headers.execution();
+        engine.materialize(path)?;
+        let syntax = engine.snapshot(path)?;
+        if syntax.text_hash != input.implementation {
             return Err(refused("captured source binding changed"));
         }
-        syntax.occurrence = occurrence;
-        Ok(Arc::new(syntax))
+        Ok(syntax)
     }
     pub(crate) fn header(&self, path: &DefPath) -> Result<HeaderInput, QueryError> {
         let id = DefId::intern(path);
@@ -455,76 +414,71 @@ impl QueryEngine {
         registrations: &[Arc<AcceptedFrontRegistration>],
         limit: u64,
     ) -> Result<Arc<NamespaceCapture>, QueryError> {
-        for path in definitions {
-            self.materialize(path)?;
-        }
-        self.register_specializations(definitions);
         self.prepare_namespace_registrations(registrations)?;
         let declarations = self.frozen_declarations().headers_only();
-        let anchors = Arc::new(NativeRecordContext::capture(self));
+        let anchors = Arc::new(self.source_records());
         let store = self
             .result_store
             .clone()
-            .ok_or_else(|| refused("missing content store"))?;
+            .unwrap_or_else(|| Arc::new(crate::store::NoneStore));
         let records = NativeRecords::new(self.types.clone(), store.clone());
         let mut bodies = BTreeMap::new();
         let mut private_sources = BTreeMap::new();
-        let mut base = Vec::new();
-        // Header/source identities are canonical paths and hashes, never arena
-        // indices, source placement or insertion order.
-        for path in self.source_paths() {
-            let id = DefId::intern(&path);
-            base.push((id, self.candidates_value(&path)));
-        }
-        let base_bytes = records
-            .encode(&*anchors, &base)
-            .ok_or_else(|| refused("base encoding"))?;
-        if base_bytes.len() as u64 > limit {
-            return Err(refused("base exceeds admission"));
-        }
-        let base = ContentHash::of_parts(
-            "hirsel.namespace.base.v1",
-            [self.environment_value().0.as_slice(), base_bytes.as_slice()],
+        let base = self.source_paths().iter().map(|path| {
+            ContentHash::of_parts("hirsel.namespace.declaration.v1", [
+                path.fingerprint().0.as_slice(), self.candidates_value(path).0.as_slice(),
+            ])
+        }).collect::<Vec<_>>();
+        let base = ContentHash::of_parts("hirsel.namespace.base.v2",
+            std::iter::once(self.environment_value().0.as_slice()).chain(base.iter().map(|hash| hash.0.as_slice())));
+        let environment = ContentHash::of_parts(
+            "hirsel.persisted-products.v1",
+            [
+                self.environment_value().0.as_slice(),
+                self.store_identity.0.as_slice(),
+            ],
         );
         for path in definitions {
-            let syntax = self.snapshot(path)?;
+            let facts = self
+                .source_facts(path)
+                .ok_or_else(|| refused("missing declaration facts"))?;
+            let implementation = self
+                .implementation_hash(path)
+                .ok_or_else(|| refused("missing declaration identity"))?;
+            let site = self.items.get(path).and_then(|items| items.first()).map(|syntax| syntax.item.name_span)
+                .or_else(|| self.catalog.site(path))
+                .or_else(|| self.captured_text(path).map(|text| text.site))
+                .ok_or_else(|| refused(&format!("missing declaration site for {path}")))?;
             let registration = registrations
                 .iter()
                 .find(|accepted| accepted.definition() == path);
-            let syntax_bytes = records
-                .encode(&*anchors, &(&syntax, syntax.occurrence))
-                .ok_or_else(|| refused("written syntax encoding"))?;
-            if syntax_bytes.len() as u64 > limit {
-                return Err(refused("written syntax exceeds admission"));
-            }
-            let syntax_ref = store
-                .put_content(WRITTEN, &syntax_bytes)
-                .filter(|reference| WRITTEN.reference(&syntax_bytes) == Some(*reference))
-                .ok_or_else(|| refused("written syntax publication"))?;
-            let generated =
-                generation::generator(&syntax).is_some() && !generation::instance_bodied(&syntax);
+            let generated = facts.generator && !facts.instance_bodied;
             if generated {
                 private_sources.insert(
                     (
                         DefId::intern(&generation::task::GeneratorInput::private_path(path)),
                         0,
                     ),
-                    syntax.anchor,
+                    site.anchor,
                 );
             }
             let queries = {
                 let mut key = |kind| match registration {
                     Some(accepted) => self.accepted_front_store_key(accepted, kind),
-                    None if generation::generator(&syntax).is_some() => {
+                    None if facts.generator && self.items.contains_key(path) => {
                         self.front_declaration_store_key(path, kind)
                     }
-                    None => self
-                        .store_key(path, kind)
-                        .ok_or_else(|| refused("missing body key")),
+                    None => Ok(EntryKey::new(
+                        environment,
+                        path,
+                        implementation,
+                        kind,
+                        LoweringPolicy::Reachable,
+                    )),
                 };
                 Some(Arc::new(BodyKeys {
-                    implementation: syntax.text_hash,
-                    site: syntax.item.name_span,
+                    implementation,
+                    site,
                     modes: key(QueryKind::Modes)?,
                     lower: key(QueryKind::Lower)?,
                     evaluate: key(QueryKind::Evaluate)?,
@@ -533,9 +487,15 @@ impl QueryEngine {
             bodies.insert(
                 DefId::intern(path),
                 Arc::new(BodyInput {
-                    syntax: syntax_ref,
-                    implementation: syntax.text_hash,
-                    executable: generation::executable(&syntax),
+                    syntax: ContentHash::of_parts(
+                        "hirsel.namespace.syntax-input.v1",
+                        [
+                            implementation.0.as_slice(),
+                            self.cited_value(path).0.as_slice(),
+                        ],
+                    ),
+                    implementation,
+                    executable: facts.executable,
                     generated,
                     queries,
                 }),
@@ -563,10 +523,14 @@ impl QueryEngine {
             if bytes.len() as u64 > limit {
                 return Err(refused("generation exceeds admission"));
             }
-            let reference = store
-                .put_content(GENERATION, &bytes)
-                .filter(|r| GENERATION.reference(&bytes) == Some(*r))
-                .ok_or_else(|| refused("generation publication"))?;
+            let reference = GENERATION
+                .reference(&bytes)
+                .ok_or_else(|| refused("generation reference"))?;
+            if store.persistence().retains()
+                && store.put_content(GENERATION, &bytes) != Some(reference)
+            {
+                return Err(refused("generation publication"));
+            }
             if dependencies.insert(id, reference).is_some() {
                 return Err(refused("duplicate accepted registration"));
             }
@@ -611,10 +575,12 @@ impl QueryEngine {
         if bytes.len() as u64 > limit {
             return Err(refused("manifest exceeds admission"));
         }
-        let manifest = store
-            .put_content(MANIFEST, &bytes)
-            .filter(|r| MANIFEST.reference(&bytes) == Some(*r))
-            .ok_or_else(|| refused("manifest publication"))?;
+        let manifest = MANIFEST
+            .reference(&bytes)
+            .ok_or_else(|| refused("manifest reference"))?;
+        if store.persistence().retains() && store.put_content(MANIFEST, &bytes) != Some(manifest) {
+            return Err(refused("manifest publication"));
+        }
         let body_identities = bodies
             .iter()
             .map(|(id, body)| {
@@ -675,6 +641,7 @@ impl QueryEngine {
         weight.instance_bodies(&mut instances);
         let retained = NamespaceCapture::input_bytes(definitions)
             .and_then(|bytes| bytes.checked_add(weight.bytes()))
+            .and_then(|bytes| bytes.checked_add(header_products::HeaderProducts::written_source_bytes(self)))
             .ok_or_else(|| refused("capture size overflow"))?;
         if retained > limit {
             return Err(refused("capture exceeds admission"));
@@ -700,5 +667,95 @@ impl QueryEngine {
             retained,
             admission: std::sync::OnceLock::new(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{MemStore, Persistence, ResultStore};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct StoreOff {
+        installed: MemStore,
+        writes: AtomicUsize,
+    }
+    impl ResultStore for StoreOff {
+        fn name(&self) -> &'static str {
+            "capture-store-off"
+        }
+        fn persistence(&self) -> Persistence {
+            Persistence::Disabled
+        }
+        fn get(&self, key: &EntryKey) -> Option<crate::store::Bytes> {
+            self.installed.get(key)
+        }
+        fn put(&self, _: &EntryKey, _: &[u8]) {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+        }
+        fn put_content(&self, _: Domain, _: &[u8]) -> Option<Reference> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
+    fn indexed(store: Arc<dyn ResultStore>) -> (QueryEngine, Vec<DefPath>) {
+        let mut engine =
+            QueryEngine::new(default_environment(), crate::phases::engine_only_adapters())
+                .with_result_store(store);
+        let context = default_context();
+        for (file, source) in [
+            ("main.hir", "pub fn main()->u8{1u8}\n"),
+            ("unrelated.hir", "pub fn unrelated()->u8{2u8}\n"),
+        ] {
+            let file = engine.sources.add(file, source.into()).unwrap();
+            engine.index_source(file, &context).unwrap();
+        }
+        let definitions = engine.source_paths();
+        (engine, definitions)
+    }
+    #[test]
+    fn namespace_installation_keeps_indexed_bodies_undemanded() {
+        crate::with_compiler_stack(|| {
+            let store = Arc::new(MemStore::default());
+            drop(indexed(store.clone()));
+            let (mut engine, definitions) = indexed(store);
+            assert!(
+                engine.items.is_empty(),
+                "warm declaration indexing must be body free"
+            );
+            let capture = engine
+                .capture_namespace(&definitions, &[], 8 << 20)
+                .unwrap();
+            assert!(
+                engine.items.is_empty(),
+                "installing a capture must not demand any body"
+            );
+            assert!(engine.signatures.is_empty());
+            let syntax = capture.syntax(&definitions[0]).unwrap();
+            assert_eq!(syntax.item.definition, definitions[0]);
+            assert!(
+                engine.items.is_empty(),
+                "demand uses the immutable capture's owner"
+            );
+        });
+    }
+    #[test]
+    fn store_off_capture_needs_no_syntax_or_manifest_archive() {
+        crate::with_compiler_stack(|| {
+            let store = Arc::new(StoreOff::default());
+            let (mut engine, definitions) = indexed(store.clone());
+            let capture = engine
+                .capture_namespace(&definitions, &[], 8 << 20)
+                .unwrap();
+            drop(engine);
+            for definition in &definitions {
+                assert_eq!(
+                    capture.syntax(definition).unwrap().item.definition,
+                    *definition
+                );
+            }
+            assert_eq!(store.writes.load(Ordering::Relaxed), 0);
+        });
     }
 }

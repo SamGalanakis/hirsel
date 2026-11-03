@@ -1,18 +1,4 @@
 use super::*;
-use crate::store::{Domain, Reference};
-const SOURCE_INPUT: Domain = Domain {
-    kind: 0x4600_0013,
-    schema: 1,
-};
-enum Transport {
-    Stored {
-        files: BTreeMap<FileId, Vec<Reference>>,
-        records: crate::NativeRecords,
-        owners: Arc<crate::NativeRecordContext>,
-        store: Arc<dyn crate::store::ResultStore>,
-    },
-    Written(BTreeMap<FileId, Vec<Arc<ItemSyntax>>>),
-}
 #[derive(Clone, Copy)]
 pub(crate) struct CapturedText {
     pub(crate) cited: ContentHash,
@@ -21,15 +7,17 @@ pub(crate) struct CapturedText {
     pub(crate) header: ContentHash,
     /// The first candidate's file, which a signature's store key admits.
     pub(crate) file: FileId,
+    pub(crate) site: Span,
 }
 pub(super) struct HeaderSources {
+    parent: Option<Arc<HeaderSources>>,
     by_definition: hirsel_syntax::DefMap<Vec<FileId>>,
     facts: hirsel_syntax::DefMap<Arc<catalog::SourceFacts>>,
     /// Each captured definition's cited text, implementation text and header
     /// digest, so an execution engine that has not materialized it observes
     /// the values the capturing engine observes.
     texts: hirsel_syntax::DefMap<CapturedText>,
-    transport: std::sync::RwLock<Transport>,
+    files: BTreeMap<FileId, Vec<Arc<ItemSyntax>>>,
 }
 impl HeaderSources {
     pub(super) fn capture(engine: &QueryEngine) -> Self {
@@ -65,22 +53,24 @@ impl HeaderSources {
                         implementation: engine.implementation_hash(path),
                         header: engine.header_digest(path),
                         file: engine.item_file(candidates.first()?),
+                        site: candidates.first()?.item.name_span,
                     },
                 ))
             })
             .collect();
         Self {
+            parent: engine.header_products.as_ref().map(|headers| headers.syntax.clone()),
             by_definition,
             facts,
             texts,
-            transport: std::sync::RwLock::new(Transport::Written(files)),
+            files,
         }
     }
     pub(super) fn facts(&self, id: DefId) -> Option<catalog::SourceFacts> {
-        self.facts.get(&id).map(|facts| (**facts).clone())
+        self.facts.get(&id).map(|facts| (**facts).clone()).or_else(|| self.parent.as_ref()?.facts(id))
     }
     pub(super) fn text(&self, id: DefId) -> Option<CapturedText> {
-        self.texts.get(&id).copied()
+        self.texts.get(&id).copied().or_else(|| self.parent.as_ref()?.text(id))
     }
     pub(super) fn facts_index_bytes(definitions: usize) -> u64 {
         let mut weight = crate::NativeMetadataWeight::default();
@@ -88,45 +78,19 @@ impl HeaderSources {
         weight.tree::<DefId, CapturedText>(definitions);
         weight.bytes()
     }
-    pub(super) fn archive(
-        &self,
-        types: Arc<hirsel_types::TypeInterner>,
-        owners: Arc<crate::NativeRecordContext>,
-        store: Arc<dyn crate::store::ResultStore>,
-    ) -> Result<(), QueryError> {
-        let mut transport = self.transport.write().unwrap_or_else(|e| e.into_inner());
-        let Transport::Written(written) = &*transport else {
-            return Ok(());
-        };
-        let records = crate::NativeRecords::new(types, store.clone());
-        let refused = || {
-            QueryError::Operational(hirsel_types::OperationalFailure {
-                operation: "header source transport".into(),
-                message: "indexed source exceeds admitted input transport".into(),
-            })
-        };
-        let files = written
-            .iter()
-            .map(|(file, syntaxes)| {
-                let references = syntaxes
-                    .iter()
-                    .map(|syntax| {
-                        records
-                            .encode(&*owners, &(syntax, syntax.occurrence))
-                            .and_then(|bytes| store.put_content(SOURCE_INPUT, &bytes))
-                            .ok_or_else(refused)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok((*file, references))
-            })
-            .collect::<Result<BTreeMap<_, _>, QueryError>>()?;
-        *transport = Transport::Stored {
-            files,
-            records,
-            owners,
-            store,
-        };
-        Ok(())
+    pub(super) fn written_bytes(engine: &QueryEngine) -> u64 {
+        fn add(seen: &mut BTreeSet<usize>, syntax: &Arc<ItemSyntax>) -> u64 {
+            if seen.insert(Arc::as_ptr(syntax) as usize) {
+                crate::memo::retained::retained_syntax_bytes(syntax)
+            } else { 0 }
+        }
+        fn inherited(owner: &HeaderSources, seen: &mut BTreeSet<usize>) -> u64 {
+            owner.files.values().flatten().fold(0u64, |n, syntax| n.saturating_add(add(seen, syntax)))
+                .saturating_add(owner.parent.as_ref().map_or(0, |parent| inherited(parent, seen)))
+        }
+        let mut seen = BTreeSet::new();
+        engine.items.values().flatten().fold(0u64, |n, syntax| n.saturating_add(add(&mut seen, syntax)))
+            .saturating_add(engine.header_products.as_ref().map_or(0, |headers| inherited(&headers.syntax, &mut seen)))
     }
     pub(super) fn materialize(
         &self,
@@ -137,7 +101,7 @@ impl HeaderSources {
             return Ok(true);
         }
         let Some(files) = self.by_definition.get(&DefId::intern(path)) else {
-            return Ok(false);
+            return self.parent.as_ref().map_or(Ok(false), |parent| parent.materialize(engine, path));
         };
         let refused = || {
             QueryError::Operational(hirsel_types::OperationalFailure {
@@ -147,36 +111,8 @@ impl HeaderSources {
         };
         for file in files {
             hirsel_intern::timings::count(hirsel_intern::timings::Count::HeaderSourceFiles);
-            let transport = self.transport.read().unwrap_or_else(|e| e.into_inner());
-            let syntaxes = match &*transport {
-                Transport::Written(files) => files.get(file).ok_or_else(refused)?.clone(),
-                Transport::Stored {
-                    files,
-                    records,
-                    owners,
-                    store,
-                } => files
-                    .get(file)
-                    .ok_or_else(refused)?
-                    .iter()
-                    .map(|reference| {
-                        let bytes = store.get_content(*reference).ok_or_else(refused)?;
-                        let (mut syntax, occurrence): (ItemSyntax, u32) =
-                            records.decode(&**owners, &bytes).ok_or_else(refused)?;
-                        if !syntax.structurally_valid(|span| engine.sources.slice(span).is_some())
-                            || engine
-                                .sources
-                                .anchor(syntax.anchor)
-                                .is_none_or(|(owner, _)| owner != *file)
-                        {
-                            return Err(refused());
-                        }
-                        syntax.occurrence = occurrence;
-                        Ok(Arc::new(syntax))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            };
-            for syntax in &syntaxes {
+            let syntaxes = self.files.get(file).ok_or_else(refused)?;
+            for syntax in syntaxes {
                 let candidates = engine
                     .items
                     .entry(syntax.item.definition.clone())
@@ -191,7 +127,7 @@ impl HeaderSources {
             }
             engine
                 .declarations
-                .place_file(*file, syntaxes, &engine.sources);
+                .place_file(*file, syntaxes.clone(), &engine.sources);
         }
         Ok(true)
     }

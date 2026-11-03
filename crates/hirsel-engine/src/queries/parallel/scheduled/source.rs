@@ -1,100 +1,71 @@
-//! Ordinary syntax archives for a demanded file's written sibling headers.
-//! Front admission captures validated sibling transport once. Lookup shares
-//! that immutable input; no source parser or compiler phase is called here.
+//! Demand-owned written siblings. Installing a graph retains declaration
+//! metadata and the shared source owner, without encoding or decoding syntax.
 use super::*;
 use std::sync::OnceLock;
 
 #[derive(Default)]
 pub(super) struct SiblingFile {
-    references: Vec<Reference>,
-    decoded: OnceLock<Result<DecodedSiblings, &'static str>>,
+    live: OnceLock<Result<LiveSiblings, QueryError>>,
 }
-impl From<Vec<Reference>> for SiblingFile {
-    fn from(references: Vec<Reference>) -> Self {
-        Self {
-            references,
-            decoded: OnceLock::new(),
-        }
-    }
-}
-struct DecodedSiblings {
+struct LiveSiblings {
     items: Arc<[Arc<ItemSyntax>]>,
     _backing: Arc<LiveSourceBacking>,
 }
-pub(super) struct SiblingArchives {
+pub(super) struct SiblingSources {
     pub files: BTreeMap<FileId, SiblingFile>,
-    pub sources: SourceMap,
-    pub owners: Arc<crate::NativeRecordContext>,
-    pub records: crate::NativeRecords,
-    pub store: Arc<dyn ResultStore>,
+    pub namespace: Arc<NamespaceCapture>,
     pub backing: Arc<FrontSourceBacking>,
     pub retention: Arc<Mutex<u64>>,
 }
-impl crate::snapshot::DeclarationSiblings for SiblingArchives {
+impl crate::snapshot::DeclarationSiblings for SiblingSources {
     fn siblings(&self, syntax: &ItemSyntax) -> Result<Arc<[Arc<ItemSyntax>]>, QueryError> {
         let refusal = |detail: &str| {
             QueryError::Operational(hirsel_types::OperationalFailure {
-                operation: "front source transport".into(),
+                operation: "front source input".into(),
                 message: format!("{}: {detail}", syntax.item.definition),
             })
         };
         let file = self
+            .namespace
             .sources
             .anchor(syntax.anchor)
-            .ok_or_else(|| refusal("missing source anchor"))?
-            .0;
-        let file = self
-            .files
-            .get(&file)
+            .and_then(|(file, _)| self.files.get(&file))
             .ok_or_else(|| refusal("missing sibling file inventory"))?;
-        // The provider belongs to this immutable front request. OnceLock
-        // serializes first use without publishing a partially validated list.
-        // A refusal also stays local to this request, never a query-store hit.
-        file.decoded
-            .get_or_init(|| self.decode(&file.references))
+        file.live
+            .get_or_init(|| self.load(syntax))
             .as_ref()
-            .map(|decoded| decoded.items.clone())
-            .map_err(|detail| refusal(detail))
+            .map(|live| live.items.clone())
+            .map_err(Clone::clone)
     }
 }
-impl SiblingArchives {
-    fn decode(&self, references: &[Reference]) -> Result<DecodedSiblings, &'static str> {
-        let items: Arc<[Arc<ItemSyntax>]> = references
-            .iter()
-            .map(|reference| {
-                let bytes = self
-                    .store
-                    .get_content(*reference)
-                    .ok_or("missing sibling content")?;
-                let (mut syntax, occurrence): (ItemSyntax, u32) = self
-                    .records
-                    .decode(&*self.owners, &bytes)
-                    .ok_or("invalid sibling codec")?;
-                let (owner, base) = self
-                    .sources
-                    .anchor(syntax.anchor)
-                    .ok_or("missing sibling anchor")?;
-                let text = self
-                    .sources
-                    .file(owner)
-                    .ok_or("missing sibling source")?
-                    .text();
-                // Structural validation also checks that every span uses this
-                // item's anchor. Resolve its file/base once for the whole tree.
-                if !syntax.structurally_valid(|span| {
-                    text.get(
-                        base.saturating_add(span.start) as usize
-                            ..base.saturating_add(span.end) as usize,
-                    )
-                    .is_some()
-                }) {
-                    return Err("invalid sibling spans");
-                }
-                syntax.occurrence = occurrence;
-                Ok(Arc::new(syntax))
+impl SiblingSources {
+    fn load(&self, syntax: &ItemSyntax) -> Result<LiveSiblings, QueryError> {
+        let refused = |detail: &str| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "front source input".into(),
+                message: detail.into(),
             })
-            .collect::<Result<Vec<_>, _>>()?
-            .into();
+        };
+        let headers = self
+            .namespace
+            .snapshot
+            .header_products()
+            .ok_or_else(|| refused("missing live header owner"))?;
+        let mut engine = headers.execution();
+        engine.materialize(&syntax.item.definition)?;
+        let declarations = engine.frozen_declarations();
+        let items = declarations.siblings(syntax).iter().filter(|sibling| {
+            let variant = matches!(&sibling.item.kind, hirsel_syntax::ItemKind::Type {
+                body: hirsel_syntax::TypeBody::Variants(_), ..
+            });
+            let value = matches!(sibling.item.kind, hirsel_syntax::ItemKind::Function { .. } | hirsel_syntax::ItemKind::Const { .. });
+            let normalized = headers.settled_signature(DefId::intern(&sibling.item.definition))
+                .is_some_and(|signature| matches!(signature.kind, hirsel_types::SignatureKind::Function(_) | hirsel_types::SignatureKind::Const { .. }));
+            variant || (value && !normalized)
+        }).cloned().collect::<Vec<_>>().into();
+        self.admit(items).map_err(refused)
+    }
+    fn admit(&self, items: Arc<[Arc<ItemSyntax>]>) -> Result<LiveSiblings, &'static str> {
         let bytes = items
             .iter()
             .try_fold(
@@ -121,7 +92,7 @@ impl SiblingArchives {
             .ok_or("sibling memory allowance exhausted")?;
         *remaining = next;
         drop(remaining);
-        Ok(DecodedSiblings {
+        Ok(LiveSiblings {
             items,
             _backing: Arc::new(LiveSourceBacking {
                 _source: self.backing.clone(),
@@ -151,34 +122,6 @@ impl FrontInputFootprint {
     }
 }
 impl QueryEngine {
-    pub(super) fn front_sibling_inputs(
-        &self,
-        definitions: &[DefPath],
-    ) -> Result<BTreeMap<FileId, Arc<ItemSyntax>>, QueryError> {
-        let mut files = BTreeMap::new();
-        for definition in definitions {
-            let syntax = self.snapshot(definition)?;
-            let file = self
-                .sources
-                .anchor(syntax.anchor)
-                .ok_or(QueryError::NotImplemented)?
-                .0;
-            files.entry(file).or_insert(syntax);
-        }
-        // Private generator constants share their declaration's written file.
-        // That file can be absent from the ordinary P inputs during bootstrap.
-        for syntax in self.items.values().flatten() {
-            if generation::generator(syntax).is_some() {
-                let file = self
-                    .sources
-                    .anchor(syntax.anchor)
-                    .ok_or(QueryError::NotImplemented)?
-                    .0;
-                files.entry(file).or_insert_with(|| syntax.clone());
-            }
-        }
-        Ok(files)
-    }
     /// Bound front backing from indexed metadata. Planning must not demand
     /// syntax or freeze declarations. Source owners use their existing
     /// immutable indexed product, including its path allocations.
@@ -214,11 +157,12 @@ impl QueryEngine {
             .ok_or_else(refused)?;
         let front_inputs = FrontBodyQueries::input_bytes(definitions)
             .and_then(|bytes| bytes.checked_add(instance_weight.bytes()))
+            .and_then(|bytes| bytes.checked_add(header_products::HeaderProducts::written_source_bytes(self)))
             .and_then(|bytes| bytes.checked_add(source_rows as u64))
             .and_then(|bytes| bytes.checked_add(index.bytes()))
             .and_then(|bytes| {
                 bytes.checked_add(
-                    (siblings as u64).checked_mul(std::mem::size_of::<Reference>() as u64)?,
+                    (siblings as u64).checked_mul(std::mem::size_of::<Arc<ItemSyntax>>() as u64)?,
                 )
             })
             .ok_or_else(refused)?;
@@ -254,30 +198,7 @@ impl QueryEngine {
 mod tests {
     use super::*;
     use crate::{DefinitionQueries, snapshot::DeclarationSiblings};
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[derive(Default)]
-    struct CountingStore {
-        inner: crate::store::MemStore,
-        reads: AtomicUsize,
-    }
-    impl ResultStore for CountingStore {
-        fn name(&self) -> &'static str {
-            "counting-sibling-archives"
-        }
-        fn get(&self, key: &EntryKey) -> Option<crate::store::Bytes> {
-            self.inner.get(key)
-        }
-        fn put(&self, key: &EntryKey, bytes: &[u8]) {
-            self.inner.put(key, bytes);
-        }
-        fn get_content(&self, reference: Reference) -> Option<crate::store::Bytes> {
-            if reference.domain == SOURCE_INPUT {
-                self.reads.fetch_add(1, Ordering::Relaxed);
-            }
-            self.inner.get_content(reference)
-        }
-    }
     fn parsed() -> (QueryEngine, FileId, Vec<Arc<ItemSyntax>>) {
         let mut engine = QueryEngine::new(
             QueryEnvironment {
@@ -316,20 +237,19 @@ mod tests {
         assert_eq!(written.len(), 3);
         (engine, file, written.to_vec())
     }
-    fn fixture() -> (SiblingArchives, Vec<Arc<ItemSyntax>>, Arc<CountingStore>) {
+    fn fixture() -> (SiblingSources, Vec<Arc<ItemSyntax>>) {
         let (engine, file, written) = parsed();
-        let store = Arc::new(CountingStore::default());
+        let mut engine = engine.with_result_store(Arc::new(crate::store::MemStore::default()));
+        let store = engine.result_store.clone().unwrap();
         let owners = Arc::new(crate::NativeRecordContext::capture(&engine));
-        let records = crate::NativeRecords::new(engine.types.clone(), store.clone());
-        let references: Vec<_> = written
+        let records = crate::NativeRecords::new(engine.types.clone(), store);
+        let definitions = written
             .iter()
-            .map(|syntax| {
-                let bytes = records
-                    .encode(&*owners, &(syntax, syntax.occurrence))
-                    .unwrap();
-                store.put_content(SOURCE_INPUT, &bytes).unwrap()
-            })
-            .collect();
+            .map(|syntax| syntax.item.definition.clone())
+            .collect::<Vec<_>>();
+        let namespace = engine
+            .capture_namespace(&definitions, &[], 8 << 20)
+            .unwrap();
         let budget = ProcessBudget::new(8 << 20);
         let mut allowance = budget.reserve(8 << 20).unwrap();
         let products =
@@ -345,67 +265,19 @@ mod tests {
             headers: None,
         });
         (
-            SiblingArchives {
-                files: BTreeMap::from([(file, references.into())]),
-                sources: engine.sources.clone(),
-                owners,
-                records,
-                store: store.clone(),
+            SiblingSources {
+                files: BTreeMap::from([(file, SiblingFile::default())]),
+                namespace,
                 backing,
                 retention,
             },
             written,
-            store,
         )
     }
     #[test]
-    fn admitted_siblings_are_charged_before_compact_output_accounting() {
-        let (engine, _, written) = parsed();
-        let store = Arc::new(CountingStore::default());
-        let mut engine = engine.with_result_store(store.clone());
-        let definitions = written
-            .iter()
-            .map(|syntax| syntax.item.definition.clone())
-            .collect::<Vec<_>>();
-        let budget = ProcessBudget::new(16 << 20);
-        let error = SOURCE_INPUT.reference(b"unused fixture error").unwrap();
-        let front = engine
-            .front_body_queries(
-                &definitions,
-                MemoryWeight {
-                    retained: 1 << 20,
-                    scratch: 8 << 20,
-                    stack: 0,
-                },
-                budget.reserve(8 << 20).unwrap(),
-                RuntimeErrors {
-                    resource: error,
-                    cycle: error,
-                    cancelled: error,
-                    protocol: error,
-                    panicked: error,
-                },
-            )
-            .unwrap();
-        let initial = front.retained_bytes();
-        assert_eq!(store.reads.load(Ordering::Relaxed), written.len());
-        for syntax in &written {
-            assert_eq!(
-                front.declarations.try_siblings(syntax).unwrap().len(),
-                written.len()
-            );
-            assert_eq!(
-                front.retained_bytes(),
-                initial,
-                "sibling input bytes must not become compact observations"
-            );
-        }
-        assert_eq!(store.reads.load(Ordering::Relaxed), written.len());
-    }
-    #[test]
-    fn archived_siblings_decode_once_for_repeated_and_concurrent_lookups() {
+    fn live_siblings_share_once_for_repeated_and_concurrent_lookups() {
         for jobs in [1, 8] {
-            let (archives, written, store) = fixture();
+            let (sources, written) = fixture();
             let barrier = std::sync::Barrier::new(jobs);
             std::thread::scope(|scope| {
                 let handles: Vec<_> = (0..jobs)
@@ -415,16 +287,10 @@ mod tests {
                             let mut result = None;
                             for lookup in 0..32 {
                                 let siblings =
-                                    archives.siblings(&written[lookup % written.len()]).unwrap();
+                                    sources.siblings(&written[lookup % written.len()]).unwrap();
                                 assert_eq!(siblings.len(), written.len());
                                 for (actual, expected) in siblings.iter().zip(&written) {
-                                    let encode = |syntax: &Arc<ItemSyntax>| {
-                                        archives
-                                            .records
-                                            .encode(&*archives.owners, &(syntax, syntax.occurrence))
-                                            .unwrap()
-                                    };
-                                    assert_eq!(encode(actual), encode(expected));
+                                    assert!(Arc::ptr_eq(actual, expected));
                                 }
                                 result = Some(siblings);
                             }
@@ -436,86 +302,35 @@ mod tests {
                     .into_iter()
                     .map(|handle| handle.join().unwrap())
                     .collect();
-                assert_eq!(
-                    store.reads.load(Ordering::Relaxed),
-                    written.len(),
-                    "each sibling must be retrieved and decoded once at jobs={jobs}"
-                );
                 assert!(results.iter().all(|items| Arc::ptr_eq(items, &results[0])));
             });
         }
     }
     #[test]
-    fn archived_siblings_validate_before_publication_and_remember_refusals() {
-        for damage in ["missing", "codec", "spans"] {
-            let (mut archives, written, store) = fixture();
-            let reference = match damage {
-                "missing" => SOURCE_INPUT.reference(b"absent sibling").unwrap(),
-                "codec" => store.put_content(SOURCE_INPUT, b"invalid codec").unwrap(),
-                "spans" => {
-                    let mut invalid = (*written[1]).clone();
-                    invalid.item.name_span.end = u32::MAX;
-                    let bytes = archives
-                        .records
-                        .encode(&*archives.owners, &(&invalid, invalid.occurrence))
-                        .unwrap();
-                    store.put_content(SOURCE_INPUT, &bytes).unwrap()
-                }
-                _ => unreachable!(),
-            };
-            archives.files.values_mut().next().unwrap().references[1] = reference;
-            let before = *archives.retention.lock().unwrap();
-            for syntax in &written {
-                let error = archives.siblings(syntax).unwrap_err();
-                let QueryError::Operational(error) = error else {
-                    panic!("expected transport refusal")
-                };
-                assert!(
-                    error.message.contains(match damage {
-                        "missing" => "missing sibling content",
-                        "codec" => "invalid sibling codec",
-                        "spans" => "invalid sibling spans",
-                        _ => unreachable!(),
-                    }),
-                    "{error:?}"
-                );
-                assert!(
-                    error
-                        .message
-                        .starts_with(&syntax.item.definition.to_string())
-                );
-            }
-            assert_eq!(store.reads.load(Ordering::Relaxed), 2);
-            assert_eq!(*archives.retention.lock().unwrap(), before);
-        }
-    }
-    #[test]
-    fn archived_siblings_charge_the_partition_and_release_it_with_the_request() {
-        let (archives, written, store) = fixture();
-        let retention = archives.retention.clone();
-        let backing = archives.backing.clone();
+    fn live_siblings_charge_the_partition_and_release_it_with_the_request() {
+        let (sources, written) = fixture();
+        let retention = sources.retention.clone();
+        let backing = sources.backing.clone();
         let before = *retention.lock().unwrap();
         let available = backing.allowance.available_bytes();
-        let items = archives.siblings(&written[0]).unwrap();
+        let items = sources.siblings(&written[0]).unwrap();
         let charged = before - *retention.lock().unwrap();
         assert!(charged > crate::memo::retained::retained_syntax_bytes(&written[0]));
         assert_eq!(backing.allowance.available_bytes(), available - charged);
         drop(items);
         assert_eq!(*retention.lock().unwrap(), before - charged);
-        drop(archives);
+        drop(sources);
         assert_eq!(*retention.lock().unwrap(), before);
         assert_eq!(backing.allowance.available_bytes(), available);
-        assert_eq!(store.reads.load(Ordering::Relaxed), 3);
 
-        let (archives, written, store) = fixture();
-        *archives.retention.lock().unwrap() = 0;
+        let (sources, written) = fixture();
+        *sources.retention.lock().unwrap() = 0;
         for _ in 0..2 {
-            let error = archives.siblings(&written[0]).unwrap_err();
+            let error = sources.siblings(&written[0]).unwrap_err();
             assert!(
                 matches!(error, QueryError::Operational(error) if error.message.contains("sibling memory allowance exhausted"))
             );
         }
-        assert_eq!(store.reads.load(Ordering::Relaxed), 3);
-        assert_eq!(*archives.retention.lock().unwrap(), 0);
+        assert_eq!(*sources.retention.lock().unwrap(), 0);
     }
 }

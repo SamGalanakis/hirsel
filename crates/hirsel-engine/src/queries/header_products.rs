@@ -177,6 +177,7 @@ pub(crate) struct HeaderProducts {
     private_registrations: OnceLock<Vec<Arc<AcceptedFrontRegistration>>>,
     declarations: crate::DeclarationIndex,
     catalog: catalog::Catalog,
+    installed_sources: BTreeSet<FileId>,
     types: Arc<hirsel_types::TypeInterner>,
     memo: Arc<hirsel_types::TypeMemo>,
     builtins: BTreeMap<DefPath, hirsel_types::SignatureRef>,
@@ -228,7 +229,7 @@ impl HeaderProducts {
                 (id, cell)
             })
             .collect();
-        let owners = Arc::new(crate::NativeRecordContext::capture(engine));
+        let owners = Arc::new(engine.source_records());
         let summaries: hirsel_syntax::DefMap<_> = engine
             .private_summaries
             .iter()
@@ -256,16 +257,13 @@ impl HeaderProducts {
             provisional: engine.private_summary_active,
             standalone: !engine.private_inference_hosted && !engine.private_summary_active,
             failure: engine.current_private_summary_failure().cloned(),
-            syntax: engine
-                .header_products
-                .as_ref()
-                .map(|headers| headers.syntax.clone())
-                .unwrap_or_else(|| Arc::new(HeaderSources::capture(engine))),
+            syntax: Arc::new(HeaderSources::capture(engine)),
             private,
             private_working: AtomicU64::new(0),
             private_registrations: Default::default(),
             declarations: engine.declarations.header_inputs(),
             catalog: engine.catalog.clone(),
+            installed_sources: engine.installed_sources.clone(),
             types: engine.types.clone(),
             memo: engine.memo.clone(),
             builtins: engine.builtins.clone(),
@@ -321,6 +319,7 @@ impl HeaderProducts {
         engine.items = native_records::SourceTable::new(engine.source_ownership.clone());
         engine.declarations = self.declarations.clone();
         engine.catalog = self.catalog.clone();
+        engine.installed_sources = self.installed_sources.clone();
         engine
             .catalog
             .bind_ownership(engine.source_ownership.clone());
@@ -337,6 +336,7 @@ impl HeaderProducts {
         engine.comptime_limits = self.limits;
         engine.staged_constants = self.staged.clone();
         engine.header_products = Some(self.clone());
+        engine.inherit_source_records((*self.owners).clone());
         engine
     }
     pub(crate) fn generation(&self) -> u64 {
@@ -359,6 +359,12 @@ impl HeaderProducts {
     }
     pub(crate) fn captured_text(&self, id: DefId) -> Option<sources::CapturedText> {
         self.syntax.text(id)
+    }
+    pub(crate) fn written_source_bytes(engine: &QueryEngine) -> u64 {
+        HeaderSources::written_bytes(engine)
+    }
+    pub(crate) fn settled_signature(&self, id: DefId) -> Option<hirsel_types::SignatureRef> {
+        self.rows.get(&id)?.get()?.result.as_ref().ok().map(|output| output.value.clone())
     }
     pub(crate) fn source_fact_index_bytes(engine: &QueryEngine, private: bool) -> u64 {
         HeaderSources::facts_index_bytes(engine.source_paths().len()).saturating_add(if private {
@@ -390,16 +396,6 @@ impl HeaderProducts {
     }
     pub(crate) fn definitions(&self) -> impl Iterator<Item = DefId> + '_ {
         self.rows.keys().copied()
-    }
-    /// Freeze input transport under the front host's existing source grant.
-    /// Legacy scalar views keep their written immutable inputs; a disposable
-    /// result provider never becomes their required source-input owner.
-    pub(crate) fn archive_sources(
-        &self,
-        store: Arc<dyn crate::store::ResultStore>,
-    ) -> Result<(), QueryError> {
-        self.syntax
-            .archive(self.types.clone(), self.owners.clone(), store)
     }
     /// The settled summary of `id`. Err only for a resource refusal of its
     /// module proof; a failed proof has no summary.

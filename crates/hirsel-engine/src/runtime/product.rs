@@ -819,6 +819,11 @@ impl LiveSourceGrowthProduct {
         };
         Some(Self(value, facet))
     }
+    pub(crate) fn reopen_component(value: Arc<crate::SourceGrowthComponent>) -> Option<Self> {
+        value.publication.as_ref()?;
+        let facet = SummaryFacet::component(value.clone());
+        Some(Self(SourceGrowthValue::Component(value), Some(facet)))
+    }
     fn publication(&self) -> &SourceGrowthPublication {
         match &self.0 {
             SourceGrowthValue::Membership(v) => v.publication.as_ref().unwrap(),
@@ -1349,7 +1354,7 @@ mod tests {
                 action: descriptor().1,
                 output: hirsel_syntax::ContentHash::default(),
             },
-            Vec::new(),
+            crate::source_components::SourceGrowthComponents::default(),
         )
         .unwrap();
         (

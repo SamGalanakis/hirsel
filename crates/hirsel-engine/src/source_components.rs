@@ -57,8 +57,105 @@ pub struct SourceGrowthComponent {
 
 pub struct SourceGrowthFacets {
     pub membership: SourceGrowthIdentity,
-    pub components: Vec<Arc<SourceGrowthComponent>>,
+    pub components: SourceGrowthComponents,
     _reservation: MemoryReservation,
+}
+/// Admitted pages retain SCC values independently of scheduler execution slots.
+/// Each page owns its backing and directory charge before allocation.
+#[derive(Default)]
+pub struct SourceGrowthComponents {
+    pages: Vec<SourceGrowthPage>,
+    len: usize,
+    _directory: Option<MemoryReservation>,
+}
+struct SourceGrowthPage {
+    values: Vec<Arc<SourceGrowthComponent>>,
+    _reservation: MemoryReservation,
+}
+impl SourceGrowthComponents {
+    const PAGE: usize = 128;
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    pub fn iter(&self) -> SourceGrowthIter<'_> {
+        SourceGrowthIter {
+            pages: self.pages.iter(),
+            current: [].iter(),
+            remaining: self.len,
+        }
+    }
+    pub(crate) fn push(
+        &mut self,
+        value: Arc<SourceGrowthComponent>,
+        pool: &crate::runtime::MemoryReservationPool,
+        remaining: usize,
+    ) -> Option<()> {
+        if self
+            .pages
+            .last()
+            .is_none_or(|page| page.values.len() == page.values.capacity())
+        {
+            let count = remaining.clamp(1, Self::PAGE);
+            let bytes = count.checked_mul(size_of::<Arc<SourceGrowthComponent>>())?;
+            let reservation = pool.take(bytes as u64)?;
+            if self.pages.len() == self.pages.capacity() {
+                let capacity = self.pages.capacity().saturating_mul(2).max(4);
+                let bytes =
+                    (capacity - self.pages.capacity()).checked_mul(size_of::<SourceGrowthPage>())?;
+                let directory = pool.take(bytes as u64)?;
+                if let Some(held) = &mut self._directory {
+                    held.join(directory).ok()?;
+                } else {
+                    self._directory = Some(directory);
+                }
+                self.pages.reserve_exact(capacity - self.pages.len());
+            }
+            self.pages.push(SourceGrowthPage {
+                values: Vec::with_capacity(count),
+                _reservation: reservation,
+            });
+        }
+        self.pages.last_mut()?.values.push(value);
+        self.len += 1;
+        Some(())
+    }
+}
+pub struct SourceGrowthIter<'a> {
+    pages: std::slice::Iter<'a, SourceGrowthPage>,
+    current: std::slice::Iter<'a, Arc<SourceGrowthComponent>>,
+    remaining: usize,
+}
+impl<'a> Iterator for SourceGrowthIter<'a> {
+    type Item = &'a Arc<SourceGrowthComponent>;
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(value) = self.current.next() {
+                self.remaining -= 1;
+                return Some(value);
+            }
+            self.current = self.pages.next()?.values.iter();
+        }
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+impl ExactSizeIterator for SourceGrowthIter<'_> {}
+impl<'a> IntoIterator for &'a SourceGrowthComponents {
+    type Item = &'a Arc<SourceGrowthComponent>;
+    type IntoIter = SourceGrowthIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+impl std::ops::Index<usize> for SourceGrowthComponents {
+    type Output = Arc<SourceGrowthComponent>;
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.pages[index / Self::PAGE].values[index % Self::PAGE]
+    }
 }
 impl serde::Serialize for SourceGrowthFacets {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -424,14 +521,9 @@ impl SourceGrowthProducer<'_> {
     pub(crate) fn accept(
         &self,
         membership: SourceGrowthIdentity,
-        components: Vec<Arc<SourceGrowthComponent>>,
+        components: SourceGrowthComponents,
     ) -> Option<SourceGrowthFacets> {
-        let bytes = (std::mem::size_of::<SourceGrowthFacets>() + 2 * std::mem::size_of::<usize>())
-            .checked_add(
-                components
-                    .capacity()
-                    .checked_mul(std::mem::size_of::<Arc<SourceGrowthComponent>>())?,
-            )?;
+        let bytes = std::mem::size_of::<SourceGrowthFacets>() + 2 * std::mem::size_of::<usize>();
         Some(SourceGrowthFacets {
             membership,
             components,

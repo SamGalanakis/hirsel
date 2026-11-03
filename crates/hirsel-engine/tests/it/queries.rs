@@ -1641,6 +1641,16 @@ fn scheduled_scc_run(
     jobs: usize,
     output_bytes: u64,
 ) -> (FrontGrowthOutput, u64, u64) {
+    scheduled_scc_run_with_capacity(text, calls, store, jobs, output_bytes, None)
+}
+fn scheduled_scc_run_with_capacity(
+    text: &str,
+    calls: &[(&str, &[&str])],
+    store: Arc<dyn hirsel_engine::store::ResultStore>,
+    jobs: usize,
+    output_bytes: u64,
+    capacity: Option<usize>,
+) -> (FrontGrowthOutput, u64, u64) {
     let fake = Arc::new(Fake {
         events: Default::default(),
         reject: None,
@@ -1677,7 +1687,13 @@ fn scheduled_scc_run(
         .front_body_queries(
             &definitions,
             weight,
-            budget.reserve(8 << 20).unwrap(),
+            budget
+                .reserve(if capacity.is_some() {
+                    64 << 20
+                } else {
+                    8 << 20
+                })
+                .unwrap(),
             errors,
         )
         .unwrap();
@@ -1691,11 +1707,20 @@ fn scheduled_scc_run(
             errors,
         )
         .unwrap();
-    let mut runtime = AdmittedRuntime::new(
-        hirsel_intern::jobs::Jobs::new(jobs),
-        budget.reserve(512 << 20).unwrap(),
-        errors,
-    )
+    let mut runtime = if let Some(capacity) = capacity {
+        AdmittedRuntime::with_query_capacity(
+            hirsel_intern::jobs::Jobs::new(jobs),
+            budget.reserve(512 << 20).unwrap(),
+            errors,
+            capacity,
+        )
+    } else {
+        AdmittedRuntime::new(
+            hirsel_intern::jobs::Jobs::new(jobs),
+            budget.reserve(512 << 20).unwrap(),
+            errors,
+        )
+    }
     .unwrap();
     runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
     runtime
@@ -1714,10 +1739,45 @@ fn scheduled_scc_run(
     assert!(output.diagnostics.is_empty());
     assert_eq!(
         runtime.stats().claims as usize,
-        definitions.len() + output.facets.components.len() + 2
+        3 * definitions.len() + output.facets.components.len() + 2
     );
     let solves = growth.component_solves();
     let memberships = growth.membership_solves();
+    let streamed_peak = runtime.stats().peak_live_nodes;
+    // Retire and reopen the root, membership and every SCC from their admitted
+    // owners, including with persistence disabled. No source solve repeats.
+    runtime.evict_to(0);
+    for query in
+        std::iter::once(growth.query())
+            .chain(std::iter::once(hirsel_engine::runtime::QueryId {
+                kind: FRONT_GROWTH_KIND,
+                address: output.facets.membership.address,
+            }))
+            .chain(output.facets.components.iter().map(|component| {
+                hirsel_engine::runtime::QueryId {
+                    kind: FRONT_GROWTH_KIND,
+                    address: component.product.address,
+                }
+            }))
+    {
+        let request = runtime.request(&[query]);
+        let products = runtime.wait(request).unwrap();
+        assert_eq!(products[0].address, query.address);
+        runtime.evict_to(0);
+    }
+    assert_eq!(
+        (growth.component_solves(), growth.membership_solves()),
+        (solves, memberships)
+    );
+    if let Some(capacity) = capacity {
+        assert!(runtime.stats().peak_live_nodes <= capacity);
+        println!(
+            "streamed_sccs={} inventory={capacity} stream_peak_live_nodes={streamed_peak} peak_live_nodes={} claims={}",
+            output.facets.components.len(),
+            runtime.stats().peak_live_nodes,
+            runtime.stats().claims
+        );
+    }
     runtime.shutdown();
     operation.finish().unwrap();
     (output, solves, memberships)
@@ -1854,4 +1914,216 @@ fn scheduled_scc_products_fit_the_existing_complete_growth_output_grant() {
     );
     assert_eq!(output.facets.components.len(), 257);
     assert_eq!((solves, memberships), (257, 1));
+}
+
+#[test]
+fn scheduled_scc_stream_exceeds_8192_with_store_off_and_unchanged_inventory() {
+    let mut text = String::new();
+    for i in 0..8193 {
+        text.push_str(&format!("fn f{i} {{}}\n"));
+    }
+    text.push_str("fn main {}\n");
+    let transport = ProcessBudget::new(64 << 20);
+    let store = Arc::new(hirsel_engine::store::RequestStore::new(
+        Arc::new(hirsel_engine::store::NoneStore),
+        transport.reserve(64 << 20).unwrap(),
+    ));
+    assert_eq!(
+        hirsel_engine::store::ResultStore::persistence(&*store),
+        hirsel_engine::store::Persistence::Disabled
+    );
+    let (output, solves, memberships) =
+        scheduled_scc_run_with_capacity(&text, &[], store, 1, 8 << 20, Some(8192));
+    assert_eq!(output.facets.components.len(), 8194);
+    assert_eq!((solves, memberships), (8194, 1));
+}
+
+#[test]
+fn scheduled_scc_store_off_edit_split_merge_and_reopen_agree_with_cold_solve() {
+    let transport = ProcessBudget::new(8 << 20);
+    let store = Arc::new(hirsel_engine::store::RequestStore::new(
+        Arc::new(hirsel_engine::store::NoneStore),
+        transport.reserve(8 << 20).unwrap(),
+    ));
+    let cases: &[(&str, &[(&str, &[&str])])] = &[
+        (
+            "fn a {b}\nfn b {a}\nfn main {a}\n",
+            &[("a", &["b"]), ("b", &["a"]), ("main", &["a"])],
+        ),
+        (
+            "fn a {b; b}\nfn b {a}\nfn main {a}\n",
+            &[("a", &["b"]), ("b", &["a"]), ("main", &["a"])],
+        ),
+        (
+            "fn a {b}\nfn b {}\nfn main {a}\n",
+            &[("a", &["b"]), ("main", &["a"])],
+        ),
+        (
+            "fn a {b}\nfn b {a}\nfn main {a}\n",
+            &[("a", &["b"]), ("b", &["a"]), ("main", &["a"])],
+        ),
+    ];
+    for (text, calls) in cases {
+        let (resident, _, _) = scheduled_scc_run(text, calls, store.clone(), 1, 8 << 20);
+        let (cold, _, _) =
+            scheduled_scc_run(text, calls, Arc::new(MemStore::default()), 1, 8 << 20);
+        assert_eq!(scc_products(&resident), scc_products(&cold));
+        assert_eq!(*resident.reads, *cold.reads);
+    }
+}
+
+#[test]
+fn scheduled_scc_cancelled_prefix_reopens_and_records_its_consumed_reads() {
+    use hirsel_engine::runtime::*;
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
+        task::Poll,
+        time::Duration,
+    };
+    struct Gate {
+        root: QueryId,
+        growth: Arc<FrontGrowthQueries>,
+        once: AtomicBool,
+        started: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+    struct Factory {
+        inner: Arc<dyn QueryFactory>,
+        gate: Arc<Gate>,
+    }
+    struct Task {
+        inner: Box<dyn QueryTask>,
+        gate: Arc<Gate>,
+    }
+    impl QueryFactory for Factory {
+        fn create(
+            &self,
+            id: QueryId,
+        ) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference> {
+            Ok(Box::new(Task {
+                inner: self.inner.create(id)?,
+                gate: self.gate.clone(),
+            }))
+        }
+    }
+    impl QueryTask for Task {
+        fn id(&self) -> QueryId {
+            self.inner.id()
+        }
+        fn weight(&self) -> MemoryWeight {
+            self.inner.weight()
+        }
+        fn continuation_bytes(&self) -> u64 {
+            self.inner.continuation_bytes()
+        }
+        fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+            let polled = self.inner.poll(cx);
+            if self.id() == self.gate.root
+                && matches!(polled, QueryPoll::Waiting(_))
+                && self.gate.growth.component_solves() != 0
+                && !self.gate.once.swap(true, Ordering::SeqCst)
+            {
+                self.gate.started.send(()).unwrap();
+                self.gate
+                    .release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
+            }
+            polled
+        }
+    }
+    #[derive(Default)]
+    struct Reads(Mutex<Vec<(QueryId, QueryId)>>);
+    impl RuntimeObserver for Reads {
+        fn record(&self, event: RuntimeEvent) {
+            if let RuntimeEvent::Read { query, dependency } = event {
+                self.0.lock().unwrap().push((query, dependency));
+            }
+        }
+    }
+    let text = "fn a {}\nfn b {}\nfn c {}\nfn main {}\n";
+    let (mut engine, _) = make_engine_with_store(None, false);
+    parse(&mut engine, text);
+    let definitions = engine.front_source_roots();
+    let budget = ProcessBudget::new(1 << 30);
+    let weight = MemoryWeight {
+        retained: 64 << 10,
+        scratch: 8 << 20,
+        stack: 0,
+    };
+    let errors = runtime_errors();
+    let front = engine
+        .front_body_queries(
+            &definitions,
+            weight,
+            budget.reserve(8 << 20).unwrap(),
+            errors,
+        )
+        .unwrap();
+    let growth = engine
+        .front_growth_queries(
+            &path("main"),
+            front.clone(),
+            weight,
+            budget.reserve(8 << 20).unwrap(),
+            errors,
+        )
+        .unwrap();
+    let (started, receive) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let gate = Arc::new(Gate {
+        root: growth.query(),
+        growth: growth.clone(),
+        once: AtomicBool::new(false),
+        started,
+        release: Mutex::new(released),
+    });
+    let mut runtime = AdmittedRuntime::new(
+        hirsel_intern::jobs::Jobs::new(2),
+        budget.reserve(512 << 20).unwrap(),
+        errors,
+    )
+    .unwrap();
+    let reads = Arc::new(Reads::default());
+    runtime.observe(reads.clone()).unwrap();
+    runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
+    runtime
+        .register(
+            FRONT_GROWTH_KIND,
+            Arc::new(Factory {
+                inner: growth.factory(),
+                gate,
+            }),
+        )
+        .unwrap();
+    let cancelled = runtime.request(&[growth.query()]);
+    receive.recv_timeout(Duration::from_secs(10)).unwrap();
+    runtime.cancel(cancelled);
+    let resumed = runtime.request(&[growth.query()]);
+    release.send(()).unwrap();
+    let products = runtime.wait(resumed).unwrap();
+    assert_eq!(runtime.poll(cancelled), Poll::Ready(Err(errors.cancelled)));
+    let output = growth.outcome(products[0].clone()).unwrap();
+    assert_eq!(output.facets.components.len(), definitions.len());
+    assert_eq!(growth.component_solves(), definitions.len() as u64);
+    let first = output.facets.components[0].product.address;
+    assert_eq!(
+        reads
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(query, dependency)| *query == growth.query() && dependency.address == first)
+            .count(),
+        2,
+        "the new root generation records its read of the already consumed SCC again"
+    );
+    runtime.shutdown();
+    let (cold, _, _) = scheduled_scc_run(text, &[], Arc::new(MemStore::default()), 1, 8 << 20);
+    assert_eq!(scc_products(&output), scc_products(&cold));
 }

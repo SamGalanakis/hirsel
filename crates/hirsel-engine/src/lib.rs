@@ -52,8 +52,8 @@ pub use generic_graph::{InstanceEdge, InstanceGraph, InstanceKind};
 mod source_components;
 mod summary;
 pub use source_components::{
-    SourceGrowthComponent, SourceGrowthFacets, SourceGrowthFact, SourceGrowthIdentity,
-    SourceGrowthProducer,
+    SourceGrowthComponent, SourceGrowthComponents, SourceGrowthFacets, SourceGrowthFact,
+    SourceGrowthIdentity, SourceGrowthIter, SourceGrowthProducer,
 };
 pub use summary::{
     CallClass, CheckedSummary, DefinitionSummary, Frame, FrameKind, GenericParameterRef,

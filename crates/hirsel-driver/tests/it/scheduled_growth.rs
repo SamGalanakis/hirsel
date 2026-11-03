@@ -110,8 +110,8 @@ fn admitted_source_growth_demands_unexecuted_required_roots() {
                 assert_eq!(&*output.diagnostics, &expected);
                 assert_eq!(
                     runtime.stats().claims,
-                    definitions.len() as u64 + 1,
-                    "global growth plus every required source root, including unexecuted grow"
+                    (3 * definitions.len() + output.facets.components.len() + 2) as u64,
+                    "membership, independently settled SCCs and three consumed reads per required source root"
                 );
                 runtime.shutdown();
             }
@@ -290,7 +290,7 @@ fn changed_source_member_stops_at_equal_settled_component() {
             let output = growth.outcome((selected[0]).clone()).unwrap();
             assert_eq!(
                 runtime.stats().claims,
-                definitions.len() as u64 + 1,
+                (3 * definitions.len() + output.facets.components.len() + 2) as u64,
                 "every required source root still participates"
             );
             assert_eq!(

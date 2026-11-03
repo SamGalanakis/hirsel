@@ -97,7 +97,12 @@ fn settle(
             producer.component(&component.members, &facts)
         })
         .collect::<Option<Vec<_>>>()?;
-    producer.accept(membership.product, components)
+    let mut pages = SourceGrowthComponents::default();
+    let count = components.len();
+    for (index, component) in components.into_iter().enumerate() {
+        pages.push(component, producer.output_pool, count - index)?;
+    }
+    producer.accept(membership.product, pages)
 }
 
 #[test]

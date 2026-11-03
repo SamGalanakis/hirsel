@@ -3,7 +3,7 @@
 //! factories and output inspection execute no compiler phase.
 use super::*;
 use crate::runtime::*;
-use crate::source_components::{SourceGrowthQueryRecord, SourceMembership};
+use crate::source_components::{SourceGrowthComponents, SourceGrowthQueryRecord, SourceMembership};
 use crate::store::{Domain, Reference, ResultStore};
 use std::{
     sync::{
@@ -33,13 +33,13 @@ pub struct FrontGrowthQueries {
     store: Arc<dyn ResultStore>,
     completed: Mutex<Option<ProductRef>>,
     membership: Mutex<Option<ProductRef>>,
+    components: Mutex<SourceGrowthComponents>,
     publication_source: Mutex<Option<Arc<GrowthPublicationSource>>>,
     solves: AtomicU64,
     memberships: AtomicU64,
     failure: Mutex<Option<(Reference, QueryError)>>,
     weight: MemoryWeight,
     errors: RuntimeErrors,
-    output_budget: u64,
     output_pool: MemoryReservationPool,
     _allowance: MemoryReservation,
 }
@@ -116,11 +116,52 @@ struct Factory(Arc<FrontGrowthQueries>);
 impl QueryFactory for Factory {
     fn create(&self, id: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
         let queries = self.0.clone();
+        let cached = if id == queries.query {
+            queries
+                .completed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        } else if id == queries.membership_query() {
+            queries
+                .membership
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        } else {
+            let value = queries
+                .components
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .find(|value| value.product.address == id.address)
+                .cloned()
+                .or_else(|| {
+                    queries
+                        .completed
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_ref()?
+                        .growth_value()?
+                        .value()
+                        .facets
+                        .components
+                        .iter()
+                        .find(|value| value.product.address == id.address)
+                        .cloned()
+                });
+            value
+                .and_then(LiveSourceGrowthProduct::reopen_component)
+                .map(ProductRef::source_growth)
+        };
+        if let Some(product) = cached {
+            return Ok(Box::new(Reopened { product }));
+        }
         if id == queries.query {
             return Ok(Box::new(Task {
                 queries,
                 membership: None,
-                components: Vec::new(),
+                component_cursor: 0,
                 cursor: 0,
                 table_keys: BTreeMap::new(),
                 required: BTreeMap::new(),
@@ -181,6 +222,29 @@ impl QueryFactory for Factory {
             terminal: None,
             admission,
         }))
+    }
+}
+struct Reopened {
+    product: ProductRef,
+}
+impl QueryTask for Reopened {
+    fn id(&self) -> QueryId {
+        QueryId {
+            kind: FRONT_GROWTH_KIND,
+            address: self.product.address,
+        }
+    }
+    fn weight(&self) -> MemoryWeight {
+        MemoryWeight {
+            retained: (size_of::<Self>() + 2 * size_of::<usize>()) as u64,
+            ..MemoryWeight::default()
+        }
+    }
+    fn continuation_bytes(&self) -> u64 {
+        self.weight().retained
+    }
+    fn poll(&mut self, _: &mut dyn QueryContext) -> QueryPoll {
+        QueryPoll::Complete(self.product.clone())
     }
 }
 fn finish(result: Result<ProductRef, Reference>) -> QueryPoll {
@@ -264,7 +328,7 @@ impl FactTask {
             } else {
                 return Poll::Ready(Err(selected.err().unwrap_or(self.queries.errors.protocol)));
             }
-            cx.release_body(input);
+            cx.consume(input);
             self.cursor += 1;
         }
         self.waiting = None;
@@ -484,7 +548,7 @@ impl FrontGrowthQueries {
 struct Task {
     queries: Arc<FrontGrowthQueries>,
     membership: Option<Arc<SourceMembership>>,
-    components: Vec<Arc<SourceGrowthComponent>>,
+    component_cursor: usize,
     cursor: usize,
     table_keys: BTreeMap<DefPath, Arc<crate::table_keys::TableKeyUse>>,
     required: BTreeMap<DefPath, BTreeSet<usize>>,
@@ -534,13 +598,14 @@ impl Task {
             };
             self.reads.merge(&reads);
             self.membership = Some(value.clone());
+            cx.consume(id);
         }
         let membership = self.membership.as_ref().unwrap();
-        while self.components.len() < membership.components.len() {
+        while self.component_cursor < membership.components.len() {
             let id = QueryId {
                 kind: FRONT_GROWTH_KIND,
                 address: hirsel_artifact_store::Address(
-                    membership.components[self.components.len()].address,
+                    membership.components[self.component_cursor].address,
                 ),
             };
             self.waiting = Some(id);
@@ -556,7 +621,26 @@ impl Task {
                 return Poll::Ready(Err(queries.errors.protocol));
             };
             self.reads.merge(&reads);
-            self.components.push(value.clone());
+            let mut components = queries.components.lock().unwrap_or_else(|e| e.into_inner());
+            if self.component_cursor == components.len() {
+                if components
+                    .push(
+                        value.clone(),
+                        &queries.output_pool,
+                        membership.components.len() - self.component_cursor,
+                    )
+                    .is_none()
+                {
+                    return Poll::Ready(Err(queries.errors.resource));
+                }
+            } else if components[self.component_cursor].product != value.product {
+                return Poll::Ready(Err(queries.errors.protocol));
+            }
+            // A restarted reduction reads the retained prefix through the
+            // scheduler again, so this generation records every dependency.
+            drop(components);
+            cx.consume(id);
+            self.component_cursor += 1;
         }
         // Table-key acceptance reduces the same complete checked roots. It
         // neither builds membership nor solves a source component.
@@ -589,7 +673,7 @@ impl Task {
             } else {
                 return Poll::Ready(Err(selected.err().unwrap_or(queries.errors.protocol)));
             }
-            cx.release_body(id);
+            cx.consume(id);
             self.cursor += 1;
         }
         self.waiting = None;
@@ -633,7 +717,10 @@ impl Task {
         let membership = self.membership.as_ref().ok_or(queries.errors.protocol)?;
         let facets = queries
             .producer()
-            .accept(membership.product, std::mem::take(&mut self.components))
+            .accept(
+                membership.product,
+                std::mem::take(&mut *queries.components.lock().unwrap_or_else(|e| e.into_inner())),
+            )
             .ok_or(queries.errors.resource)?;
         let diagnostics = crate::select_diagnostics(
             table_diagnostics
@@ -815,12 +902,12 @@ impl QueryEngine {
             store,
             completed: Mutex::new(None),
             membership: Mutex::new(None),
+            components: Mutex::default(),
             solves: AtomicU64::new(0),
             memberships: AtomicU64::new(0),
             failure: Mutex::new(None),
             weight,
             errors,
-            output_budget,
             output_pool,
             _allowance: allowance,
         }))

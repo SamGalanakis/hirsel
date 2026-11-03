@@ -1862,7 +1862,7 @@ fn generated_body_failure_uses_generated_source_in_every_engine() {
         let tools = toolchain(&configurations);
         let mut mismatches = vec![];
         for (name, source, rule, line, column) in generated_failure_sources() {
-            let store: Arc<dyn ResultStore> = Arc::new(MemStore::default());
+            let store: Arc<dyn ResultStore> = admitted_native_store(Arc::new(MemStore::default()));
             let (facts, reference) = generated_request_products(&source, store.clone());
             let [failure] = reference.failures.as_slice() else {
                 panic!("{name}: {reference:?}")

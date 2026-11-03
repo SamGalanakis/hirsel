@@ -648,8 +648,15 @@ impl DemandProducer {
         reads: QueryReads,
     ) -> Result<scheduled_lower::SuccessorCapture, QueryError> {
         let initial = self.current()?;
-        let has_generators = !initial.capture().instances.declarations.is_empty()
-            || initial.capture().bodies.values().any(|body| body.generated);
+        // Nongeneric declarations already listed as roots are demanded in this
+        // loop. Static traversal is needed only to close generic instances or
+        // find a generator outside that explicit scope.
+        let needs_discovery = !initial.capture().instances.declarations.is_empty()
+            || initial
+                .capture()
+                .bodies
+                .iter()
+                .any(|(id, body)| body.generated && !roots.contains(id.path()));
         let mut checked = BTreeSet::new();
         for root in roots {
             let mut demanded = vec![root.clone()];
@@ -715,7 +722,7 @@ impl DemandProducer {
                     }
                     checked.insert(path.clone());
                 }
-                if !has_generators {
+                if !needs_discovery {
                     break;
                 }
                 let owner = self.current()?;

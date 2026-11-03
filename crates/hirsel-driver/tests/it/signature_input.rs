@@ -6,6 +6,9 @@ use hirsel_tir::*;
 use hirsel_types::{Destination, Primitive, SignatureKind, Type, TypeKind, UseKind};
 use hirsel_validate::SignatureMap;
 
+#[path = "../support/installed_remote.rs"]
+mod installed_remote;
+
 #[test]
 fn hand_built_opaque_construction_needs_the_owner_input_and_checks_fields() {
     with_compiler_stack(|| {
@@ -800,7 +803,6 @@ fn installed_std_publishes_the_universe_summary_its_full_table_computes() {
 #[test]
 fn hello_on_installed_std_answers_v_universe_questions_without_reading_std_rows() {
     with_compiler_stack(|| {
-        use hirsel_driver::requests::{CompileOperation, CompilerRequests};
         use hirsel_validate::{SignatureLookup, ValidatedSignatures};
         use std::sync::Arc;
         let dir = tempfile::tempdir().unwrap();
@@ -815,8 +817,9 @@ fn hello_on_installed_std_answers_v_universe_questions_without_reading_std_rows(
             hold_bytes: 0,
             ..Default::default()
         };
-        CompilerRequests::for_host(COMPILER.with_config(config.clone()), config)
-            .execute(&manifest, CompileOperation::Precompute)
+        COMPILER
+            .with_config(config)
+            .precompute_package(&manifest, &products)
             .unwrap();
         let path = dir.path().join("main.hir");
         std::fs::write(&path, "pub fn main()->u64{7u64}\n").unwrap();
@@ -943,7 +946,9 @@ fn dependency_universe_summary_without_local_verifier_is_ignored() {
         );
         let (address, action, reference) = universe_products.pop().unwrap();
         let address = store::Address(address);
-        let remote = store::store_by_name("remote@1", Some(dir.path().join("cas"))).unwrap();
+        let remote = installed_remote::bind(
+            store::store_by_name("remote@1", Some(dir.path().join("cas"))).unwrap(),
+        );
         assert!(remote.verifier().is_none());
         remote.cache_product(
             address,

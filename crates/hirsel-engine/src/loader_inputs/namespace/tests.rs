@@ -727,6 +727,25 @@ fn exact_counts_hardlinks_limits_and_live_lease_release() {
 }
 #[test]
 fn explicit_toolchain_context_loads_sidecar_graph_without_host_discovery() {
+    struct InstalledStd(Arc<crate::store::InstalledPackage>);
+    impl crate::store::ResultStore for InstalledStd {
+        fn installed_package(
+            &self,
+            package: &hirsel_syntax::PackageId,
+            compiler: ContentHash,
+        ) -> Result<Arc<crate::store::InstalledPackage>, String> {
+            assert_eq!(package, &self.0.package);
+            assert_eq!(compiler, self.0.compiler);
+            Ok(self.0.clone())
+        }
+        fn get(&self, _: &crate::store::EntryKey) -> Option<crate::store::Bytes> {
+            None
+        }
+        fn put(&self, _: &crate::store::EntryKey, _: &[u8]) {}
+        fn name(&self) -> &'static str {
+            "captured-std-fixture"
+        }
+    }
     let tree = Tree::new();
     tree.dir("std");
     tree.write("main.hir", b"pub fn main()->u64{1}\n");
@@ -741,6 +760,18 @@ fn explicit_toolchain_context_loads_sidecar_graph_without_host_discovery() {
     let config = || crate::CompileConfig {
         jobs: hirsel_intern::jobs::Jobs::new(1),
         ..crate::CompileConfig::for_memory_cap(None)
+    };
+    let manifest = p.std_manifest.as_ref().unwrap();
+    let installed = compiler
+        .clone()
+        .with_config(config())
+        .load_check_package_inputs(manifest, &base, false)
+        .unwrap()
+        .installation_inputs(compiler.identity(), base.read(manifest).unwrap().to_vec());
+    let store = Arc::new(InstalledStd(Arc::new(installed)));
+    let config = || crate::CompileConfig {
+        store: store.clone(),
+        ..config()
     };
     let _defaults_trap = crate::config::forbid_host_defaults();
     let loaded = base.load(&compiler, config(), false).unwrap();

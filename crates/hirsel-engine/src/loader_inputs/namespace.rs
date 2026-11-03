@@ -431,7 +431,7 @@ impl NamespaceLease {
         self.0.digest == other.0.digest && self.0.state == other.0.state
     }
 
-    /// Pure graph load with explicit policy, no lazy result store/environment.
+    /// Pure graph load with explicit policy and the request's installed products.
     /// The v2 owner still owns whole-closure checking and result/adoption logic.
     pub fn load(
         &self,
@@ -443,7 +443,6 @@ impl NamespaceLease {
             .clone()
             .with_owned_engines()
             .with_config(crate::CompileConfig {
-                store: Arc::new(crate::store::NoneStore),
                 verify: crate::Verify::On,
                 lowering: crate::LoweringPolicy::Comptime,
                 ..config

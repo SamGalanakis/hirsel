@@ -109,17 +109,19 @@ fn admitted_lower_retains_actual_metadata_and_refuses_an_insufficient_output_gra
 #[test]
 fn admitted_lower_consumes_many_constant_dependencies_with_original_mailbox_bound() {
     with_compiler_stack(|| {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("main.hir");
-        std::fs::write(&path, "pub fn main()->u64{0u64}\n").unwrap();
+        let manifest = crate::image_fixture::std_manifest();
         for jobs in [1, 2] {
             let mut program = COMPILER
                 .with_config(CompileConfig {
-                    store: Arc::new(MemStore::default().with_installed_products()),
+                    store: Arc::new(MemStore::default()),
                     ..Default::default()
                 })
                 .with_owned_engines()
-                .load_program(&path)
+                .load_check_package_inputs(
+                    &manifest,
+                    &hirsel_engine::loader_inputs::DiskInputs,
+                    true,
+                )
                 .unwrap();
             let definitions = program.engine.front_source_roots();
             let selected = definitions
@@ -213,6 +215,7 @@ fn admitted_lower_consumes_many_constant_dependencies_with_original_mailbox_boun
             );
             assert!(lower.retained_bytes() <= 32 << 20);
             let held = output.clone();
+            drop(products);
             runtime.shutdown();
             assert!(runtime.stats().peak_bytes <= 512 << 20);
             drop(output);

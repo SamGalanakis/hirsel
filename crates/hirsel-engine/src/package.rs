@@ -961,6 +961,10 @@ impl<'a> Graph<'a> {
                 Ok(_) => graph.visit(&sidecar, None)?,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     let source = inputs.canonicalize(path)?;
+                    let std_manifest = inputs
+                        .toolchain_std_manifest()
+                        .transpose()?
+                        .unwrap_or_else(|| PathBuf::from("/$hirsel-installed/std@1/hirsel.json"));
                     let mut manifest = source.as_os_str().to_os_string();
                     manifest.push(".json");
                     let value = serde_json::json!({
@@ -969,7 +973,7 @@ impl<'a> Graph<'a> {
                         "sources": [{"path": source.file_name().unwrap().to_string_lossy(), "module": []}],
                         "entry": {"module": [], "name": "main"},
                         "dependencies": [{
-                            "manifest": "/$hirsel-installed/std@1/hirsel.json",
+                            "manifest": std_manifest,
                             "package": {"name": "std", "version": "1"},
                             "expose": [],
                         }],
@@ -986,7 +990,7 @@ impl<'a> Graph<'a> {
                             bindings: BTreeMap::new(),
                         });
                     let std = graph.visit_from(
-                        Path::new("/$hirsel-installed/std@1/hirsel.json"),
+                        &std_manifest,
                         Some(&PackageId {
                             name: "std".into(),
                             version: "1".into(),

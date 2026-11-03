@@ -133,7 +133,7 @@ fn session_representation_edit_matches_cold(opaque: bool, reads_field: bool) {
         std::fs::write(&source, &initial).unwrap();
         let config = CompileConfig {
             retention: memo::Retention::Resident,
-            store: Arc::new(store::NoneStore),
+            store: store::store_by_name("none@1", None).unwrap(),
             ..CompileConfig::default()
         };
         let mut session = session::Session::open_configured(&source, config.clone());

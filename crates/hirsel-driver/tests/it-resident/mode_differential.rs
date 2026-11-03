@@ -12,6 +12,9 @@ use hirsel_intern::jobs::Jobs;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+#[path = "../support/installed_remote.rs"]
+mod installed_remote;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
     /// A new process per request with no result store: the from-scratch oracle.
@@ -37,10 +40,16 @@ impl Mode {
             Mode::StoreOff => (Retention::Resident, "none@1"),
             Mode::Remote => (Retention::Batch, "remote@1"),
         };
+        let selected = store_by_name(store, Some(store_root.to_path_buf())).unwrap();
+        let store = if self == Mode::Remote {
+            installed_remote::bind(selected)
+        } else {
+            selected
+        };
         CompileConfig {
             jobs: Jobs::new(jobs),
             retention,
-            store: store_by_name(store, Some(store_root.to_path_buf())).unwrap(),
+            store,
             ..CompileConfig::default()
         }
     }

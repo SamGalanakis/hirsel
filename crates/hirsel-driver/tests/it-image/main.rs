@@ -36,7 +36,10 @@ fn requests(path: &Path, products: Option<&Path>) -> CompilerRequests {
             store::DirStore::new(path.parent().unwrap().join("immutable-reader"))
                 .with_read_only_root(products.to_owned()),
         ),
-        None => Arc::new(store::NoneStore),
+        None => Arc::new(
+            store::DirStore::new(path.parent().unwrap().join("fresh-reader"))
+                .with_read_only_root(std_products()),
+        ),
     };
     let config = CompileConfig {
         store,
@@ -49,7 +52,7 @@ fn requests(path: &Path, products: Option<&Path>) -> CompilerRequests {
 fn precompute(requests: &mut CompilerRequests, path: &Path) -> Arc<PrecomputedSources> {
     let output = requests
         .execute(path, CompileOperation::Precompute)
-        .unwrap();
+        .unwrap_or_else(|error| panic!("precompute fixture: {error}"));
     let CompileResult::Precomputed { sources, .. } = &output.result else {
         panic!("expected complete source products")
     };
@@ -226,8 +229,17 @@ fn ordinary_std_complete_products_equal_fresh_ones() {
                 .unwrap();
             assert!(matches!(&output.result, CompileResult::NativeSources(_)));
         }
+        drop(cold_requests);
         let mut native_prechecked = load(&client, Some(&products));
-        let mut native_reference = load(&client, None);
+        let mut native_reference = COMPILER
+            .clone()
+            .with_config(CompileConfig {
+                store: store::store_by_name("none@1", None).unwrap(),
+                jobs: hirsel_intern::jobs::Jobs::ONE,
+                ..CompileConfig::for_memory_cap(None)
+            })
+            .load_program(&client)
+            .unwrap();
         native_prechecked.check(LoweringPolicy::Reachable).unwrap();
         native_reference.check(LoweringPolicy::Reachable).unwrap();
         let actual = native_prechecked.engine.export_native_input().unwrap();

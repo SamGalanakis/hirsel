@@ -551,7 +551,7 @@ impl DemandProducer {
         {
             return Ok(None);
         }
-        if !scheduled_stage::has_staged_body(&previous.syntax(path)?) {
+        if !scheduled_stage::has_staged_body(previous.syntax(path)?.as_ref()) {
             return Ok(None);
         }
         reads

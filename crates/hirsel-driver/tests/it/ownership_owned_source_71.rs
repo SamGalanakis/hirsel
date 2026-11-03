@@ -25,7 +25,7 @@ fn source_owned_and_resource_selections_keep_distinct_products_in_the_same_sessi
         std::fs::write(&source, "pub fn main()->Result[(),()] { let first=\"equal\"\nlet second=b\"equal\"\nlet moved=take first\nOk(()) }").unwrap();
         let config = CompileConfig {
             jobs: hirsel_intern::jobs::Jobs::ONE,
-            store: Arc::new(MemStore::default()),
+            store: Arc::new(MemStore::default().with_installed_products()),
             hold_bytes: 0,
             ..Default::default()
         };

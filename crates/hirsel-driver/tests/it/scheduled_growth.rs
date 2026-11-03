@@ -22,7 +22,7 @@ fn admitted_source_growth_demands_unexecuted_required_roots() {
         ] {
             std::fs::write(&path, source).unwrap();
             for jobs in [1, 2] {
-                let store = Arc::new(MemStore::default());
+                let store = Arc::new(MemStore::default().with_installed_products());
                 let mut program = COMPILER
                     .with_config(CompileConfig {
                         store: store.clone(),

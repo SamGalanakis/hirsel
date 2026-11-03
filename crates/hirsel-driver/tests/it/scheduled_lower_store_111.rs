@@ -361,7 +361,7 @@ fn check_live_lower_observations(live_only: bool) {
             let store: Arc<dyn ResultStore> = if live_only {
                 storage.clone()
             } else {
-                Arc::new(MemStore::default())
+                Arc::new(MemStore::default().with_installed_products())
             };
             let mut program = COMPILER
                 .with_config(CompileConfig {

@@ -255,8 +255,13 @@ fn independent_disk_oracle_child() {
         assert_eq!(loaded.entry.0.package.name, "app");
         assert_eq!(loaded.files.len(), 1);
         let (without_sidecar, _) = base.overlay(&[delete(&base, "main.hir.json")]).unwrap();
+        let failure = without_sidecar
+            .load(&compiler, config, false)
+            .err()
+            .expect("uncaptured standalone std must fail");
         assert!(
-            matches!(without_sidecar.load(&compiler,config,false),Err(crate::ToolError::Io(e)) if e.get_ref().is_some_and(|e| e.is::<InputUnavailable>()))
+            matches!(&failure, crate::ToolError::Io(e) if e.get_ref().is_some_and(|e| e.is::<InputUnavailable>())),
+            "{failure:?}"
         );
         eprintln!("NAMESPACE_FROZEN_END");
         assert!(

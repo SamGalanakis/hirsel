@@ -198,7 +198,7 @@ RUNTIME_ARCHIVES = "//:hirsel-rt-archives"
 # Ordinary std products: precomputed once by the built CLI,
 # then loaded by the tests and campaigns that run std programs (HIRSEL_PRODUCTS).
 PRODUCTS = "//:hirsel-std-products"
-PRODUCT_TESTS = {"hirsel-cli", "hirsel-conformance", "hirsel-driver", "hirsel-pipeline-tests"}
+PRODUCT_TESTS = {"hirsel-cli", "hirsel-conformance", "hirsel-driver", "hirsel-ownership", "hirsel-pipeline-tests"}
 
 # Cases that call full_matrix (44 configurations) for toolchain or configuration
 # discovery: every run outside the full gate skips them by name, and
@@ -1087,7 +1087,7 @@ def first_party(meta: dict) -> str:
                             files_env={"HIRSEL_DISTRIBUTION_NOTICES": "//tools/toolchain-dist:notices.py"}))
     out.append("\n" + call("hirsel_script_test", name="test-pubsub-registration", script="tools/tests/pubsub_registration.py", full=False,
                             data=Raw('glob(["tools/tests/pubsub_registration.py", "crates/hirsel-cli/tests/support/pubsub_relay_30/*.py", "crates/hirsel-cli/tests/support/pubsub_relay_30/cases.json", "crates/hirsel-cli/tests/cli/pubsub_relay_30*.rs"])')))
-    out.append("\n" + call("hirsel_script_test", name="test-land", script="tools/tests/land.py", full=False,
+    out.append("\n" + call("hirsel_script_test", name="test-land", script="tools/tests/land.py", full=False, host=True,
                             data=["tools/land", "tools/tests/land.py", "tools/check-hot-files", "tools/main-runs",
                                   "//tools/buck2:run_failures.py", "//tools/buck2:generated.py",
                                   "//tools/buck2:merging.py", "//tools/buck2:clippy.py", "//tools/buck2:fmt.py",

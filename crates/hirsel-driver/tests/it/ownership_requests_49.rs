@@ -30,7 +30,7 @@ fn source_request(explicit_manifest: bool) {
         } else {
             path
         };
-        let store: Arc<dyn ResultStore> = Arc::new(MemStore::default());
+        let store: Arc<dyn ResultStore> = Arc::new(MemStore::default().with_installed_products());
         let config = CompileConfig {
             jobs: hirsel_intern::jobs::Jobs::ONE,
             store,

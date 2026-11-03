@@ -531,7 +531,7 @@ fn admitted_lower_reserves_outputs_only_for_demanded_definitions() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.hir");
         std::fs::write(&path, "pub fn spare()->u8{1u8}\npub fn main()->u8{2u8}\n").unwrap();
-        let store = Arc::new(hirsel_engine::store::MemStore::default());
+        let store = Arc::new(hirsel_engine::store::MemStore::default().with_installed_products());
         let mut program = COMPILER
             .with_config(CompileConfig {
                 store,
@@ -1019,6 +1019,13 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         // recompute instead of being read back.
         struct Transport(Arc<MemStore>, bool);
         impl ResultStore for Transport {
+            fn installed_package(
+                &self,
+                package: &hirsel_syntax::PackageId,
+                compiler: hirsel_syntax::ContentHash,
+            ) -> Result<Arc<hirsel_engine::store::InstalledPackage>, String> {
+                self.0.installed_package(package, compiler)
+            }
             fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
                 self.1.then(|| self.0.verifier()).flatten()
             }
@@ -1063,7 +1070,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
                 // std is a source dependency: as in production, V gives its
                 // importers std's once-computed universe summary, warmed here by
                 // another program before the body fills the partition.
-                let store = Arc::new(MemStore::default());
+                let store = Arc::new(MemStore::default().with_installed_products());
                 COMPILER
                     .with_config(CompileConfig {
                         store: store.clone(),
@@ -1409,7 +1416,10 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         for mode in 0..5 {
             let mut program = COMPILER
                 .with_config(CompileConfig {
-                    store: Arc::new(Transport(Arc::default(), true)),
+                    store: Arc::new(Transport(
+                        Arc::new(MemStore::default().with_installed_products()),
+                        true,
+                    )),
                     hold_bytes: 0,
                     ..Default::default()
                 })
@@ -1581,7 +1591,10 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         for _ in 0..2 {
             let mut program = COMPILER
                 .with_config(CompileConfig {
-                    store: Arc::new(Transport(Arc::default(), true)),
+                    store: Arc::new(Transport(
+                        Arc::new(MemStore::default().with_installed_products()),
+                        true,
+                    )),
                     hold_bytes: 0,
                     ..Default::default()
                 })
@@ -1770,7 +1783,7 @@ fn admitted_front_actual_output_debit_refuses_insufficient_producer_allowance() 
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.hir");
         std::fs::write(&path, "pub fn main()->u8{1u8}\n").unwrap();
-        let store = Arc::new(MemStore::default());
+        let store = Arc::new(MemStore::default().with_installed_products());
         for extra in [1, 8 << 20] {
             let mut program = COMPILER
                 .with_config(CompileConfig {

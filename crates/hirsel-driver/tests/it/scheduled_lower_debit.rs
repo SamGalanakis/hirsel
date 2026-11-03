@@ -115,7 +115,7 @@ fn admitted_lower_consumes_many_constant_dependencies_with_original_mailbox_boun
         for jobs in [1, 2] {
             let mut program = COMPILER
                 .with_config(CompileConfig {
-                    store: Arc::new(MemStore::default()),
+                    store: Arc::new(MemStore::default().with_installed_products()),
                     ..Default::default()
                 })
                 .with_owned_engines()

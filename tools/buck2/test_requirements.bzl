@@ -27,6 +27,7 @@ EXACT_TEST_CPUS = {
 EXACT_CASE_CPUS = {
     "hirsel-cli-test-cli": {
         "chunk_backup_31::chunk_backup_31_scripted_native_record_replay": 4,
+        "config_migrate_29::config_migrate_29_native": 4,
         "cron_state_30::cron_state_30_numeric_step_native_and_tapes": 4,
         "cron_state_30::cron_state_30_ordered_cranelift": 4,
         "cron_state_30::cron_state_30_ordered_llvm": 4,

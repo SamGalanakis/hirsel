@@ -189,3 +189,25 @@ impl Literal {
         Ok(Arc::new(syntax))
     }
 }
+pub(crate) fn normalize_headers(
+    literal: &Literal,
+    types: &hirsel_types::TypeInterner,
+    mut signature: impl FnMut(Arc<ItemSyntax>) -> Result<QueryOutput<Signature>, QueryError>,
+) -> Result<(), QueryError> {
+    let normalized = signature(literal.syntax.clone())?;
+    if has_errors(&normalized.diagnostics) {
+        return Err(QueryError::Diagnostics(normalized.diagnostics));
+    }
+    let declared = signature(literal.header.clone())?;
+    if has_errors(&declared.diagnostics) {
+        return Err(QueryError::Diagnostics(declared.diagnostics));
+    }
+    if !same_function(types, &declared.value, &normalized.value) {
+        return Err(diagnostic(
+            "LANG-7",
+            literal.header_span,
+            "the generated function literal's type differs from the declared header",
+        ));
+    }
+    Ok(())
+}

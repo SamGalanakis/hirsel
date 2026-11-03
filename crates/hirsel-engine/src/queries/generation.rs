@@ -688,47 +688,16 @@ impl QueryEngine {
             &*lexer,
             &*parser,
         )?;
-        let normalized = self.recorded(definition, reads, |t, m, r| {
-            let declarations = r.engine.frozen_declarations();
-            let mut products = PhaseProducts::default();
-            let output = signer.signature(
-                t,
-                m,
-                literal.syntax.clone(),
-                &declarations,
-                &mut products,
-                r,
-            );
-            r.observed.products = Arc::new(products);
-            output
+        let types = self.types.clone();
+        syntax::normalize_headers(&literal, &types, |syntax| {
+            self.recorded(definition, reads, |t, m, r| {
+                let declarations = r.engine.frozen_declarations();
+                let mut products = PhaseProducts::default();
+                let output = signer.signature(t, m, syntax, &declarations, &mut products, r);
+                r.observed.products = Arc::new(products);
+                output
+            })
         })?;
-        if has_errors(&normalized.diagnostics) {
-            return Err(QueryError::Diagnostics(normalized.diagnostics));
-        }
-        let declared = self.recorded(definition, reads, |t, m, r| {
-            let declarations = r.engine.frozen_declarations();
-            let mut products = PhaseProducts::default();
-            let output = signer.signature(
-                t,
-                m,
-                literal.header.clone(),
-                &declarations,
-                &mut products,
-                r,
-            );
-            r.observed.products = Arc::new(products);
-            output
-        })?;
-        if has_errors(&declared.diagnostics) {
-            return Err(QueryError::Diagnostics(declared.diagnostics));
-        }
-        if !same_function(&self.types, &declared.value, &normalized.value) {
-            return Err(diagnostic(
-                "LANG-7",
-                literal.header_span,
-                "the generated function literal's type differs from the declared header",
-            ));
-        }
         let file = self.item_file(snapshot);
         literal.finish(
             snapshot,

@@ -306,7 +306,18 @@ fn native_source_export_with_installed_std_uses_lazy_constant_inventory() {
         let source = directory.path().join("main.hir");
         std::fs::write(
             &source,
-            include_str!("../../../../bench/native/startup/serial.hir"),
+            r###"pub type AppError = Grant(GrantError) | Pool(CpuPoolError)
+pub fn main(rt: Io, args: Args) -> Result[(), AppError] {
+  let output = io.stdout(rt) ? Grant
+  let pool = match arg.text(args, 0) { Ok("pool") => true, _ => false }
+  let width = match arg.text(args, 1) { Ok("4") => 4u32, _ => 1u32 }
+  let seed = match arg.text(args, 2) { Ok("21") => 21u64, _ => 0u64 }
+  let value = seed * 2u64
+  failure.check(value == (if pool && width == 4u32 { 180u64 } else { 42u64 }), Bounds())
+  let _ = out.print(output, f"{value}\n")
+  Ok(())
+}
+"###,
         )
         .unwrap();
         let mut session = session::Session::open_configured(

@@ -648,6 +648,8 @@ impl DemandProducer {
         reads: QueryReads,
     ) -> Result<scheduled_lower::SuccessorCapture, QueryError> {
         let initial = self.current()?;
+        let has_generators = !initial.capture().instances.declarations.is_empty()
+            || initial.capture().bodies.values().any(|body| body.generated);
         let mut checked = BTreeSet::new();
         for root in roots {
             let mut demanded = vec![root.clone()];
@@ -665,14 +667,17 @@ impl DemandProducer {
                     if checked.contains(path) {
                         continue;
                     }
-                    let syntax = owner.capture().syntax(path)?;
-                    if generator(&syntax).is_some()
-                        && !instance_bodied(&syntax)
+                    if owner
+                        .capture()
+                        .bodies
+                        .get(&DefId::intern(path))
+                        .is_some_and(|body| body.generated)
                         && !owner
                             .capture()
                             .registrations
                             .contains_key(&DefId::intern(path))
                     {
+                        let syntax = owner.capture().syntax(path)?;
                         match self
                             .demand(
                                 owner.capture(),
@@ -709,6 +714,9 @@ impl DemandProducer {
                         return Err(refused("scope Front outcome is unavailable"));
                     }
                     checked.insert(path.clone());
+                }
+                if !has_generators {
+                    break;
                 }
                 let owner = self.current()?;
                 let mut engine = owner.capture().assembly(&self.adapters)?;

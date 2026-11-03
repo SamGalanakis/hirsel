@@ -1051,6 +1051,7 @@ pub fn install(
     let prepared_front = prepared_front.filter(|front| {
         !shape.compact_reads && front.covers_scope(&definitions, &namespace, plan.body)
     });
+    let reuse_front = prepared_front.is_some();
     if prepared_front.is_some() {
         // The completed owner retains its original admitted Front partition.
         // Installation needs no second reservation for the same products.
@@ -1102,7 +1103,7 @@ pub fn install(
     }
     // Before any task: this fresh graph adopts the selector's earlier accepted
     // front facts only where their text and reads still validate.
-    if let Some(carry) = carry {
+    if let Some(carry) = carry.filter(|_| !reuse_front) {
         front
             .install_carry(carry.front.clone())
             .map_err(|_| uninstalled())?;

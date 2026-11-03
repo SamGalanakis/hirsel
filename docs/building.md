@@ -268,7 +268,7 @@ of the targets it builds for:
 
 | variable | needed for | names |
 |---|---|---|
-| `LLVM_SYS_231_PREFIX` | every target | the pinned LLVM 23.1.4 tree, whose `bin/ld.lld` links every executable |
+| `LLVM_SYS_231_PREFIX` | every target | the pinned LLVM 23.1.5 tree, whose `bin/ld.lld` links every executable |
 | `HIRSEL_LINK_KIT` | every target | the link kit: every link input besides the program, its runtime archive and foreign libraries |
 | `HIRSEL_RUNTIME_ARCHIVES` | every target (optional) | prebuilt runtime archives, `<dir>/<triple>/<variant>/libhirsel_rt.a`; without it the runtime is built once with Cargo from the source checkout |
 | `HIRSEL_NATIVE_CACHE` | every target (optional) | where Cargo-built runtime archives are kept |

@@ -29,7 +29,7 @@ with the [tour](tour.md), [building and running programs](building.md) and
 ## Toolchains
 
 Rust is pinned in `rust-toolchain.toml` (1.99.0) and installed by rustup.
-The native backend needs LLVM 23.1.4 (`tools/native-toolchain/llvm-23.lock`);
+The native backend needs LLVM 23.1.5 (`tools/native-toolchain/llvm-23.lock`);
 `.cargo/config.toml` points `LLVM_SYS_231_PREFIX` at `tools/buck2/toolchains/llvm-files`
 unless the environment already sets it. `tools/native-toolchain/README.md`
 installs the pinned tree. Native tests carry pinned qemu, an AArch64 cross toolchain and Valgrind as

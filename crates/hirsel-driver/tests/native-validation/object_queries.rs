@@ -41,7 +41,7 @@ fn key(name: &str) -> CodegenKey {
             policy: hash("VerifyOn"),
         },
         backend: "llvm".into(),
-        backend_version: hash("llvm23.1.4"),
+        backend_version: hash("llvm23.1.5"),
         target_features: hash("features"),
         profile_options: hash("debug"),
         runtime_abi: hash("abi"),

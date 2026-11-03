@@ -5,7 +5,7 @@ small RAII layer over the LLVM C API, returning an owned `hirsel_lir::ObjectArti
 
 Allowed dependencies: the pure `hirsel-graph` utility, the shared data crates `hirsel-lir`, `hirsel-core-contract` and
 `hirsel-syntax`, and `llvm-sys = "=231.0.1"` with `strict-versioning` and `force-dynamic`,
-bound to the shared libLLVM 23.1.4 pinned in `tools/native-toolchain/llvm-23.lock`. No
+bound to the shared libLLVM 23.1.5 pinned in `tools/native-toolchain/llvm-23.lock`. No
 Inkwell, no other implementation crate. Test-only: `hirsel-types` and `hirsel-tir` (fixture
 type stores and representation records). `.cargo/config.toml` points `LLVM_SYS_231_PREFIX` at
 the pinned install; an environment value wins, for example a local

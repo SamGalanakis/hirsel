@@ -266,7 +266,7 @@ def main():
         with tarfile.open(args.compiler_rt) as archive:
             members = [m for m in archive.getmembers() if "/compiler-rt/lib/builtins/" in m.name]
             archive.extractall(scratch, members=members, filter="data")
-        source = next(scratch.glob("llvm-project-*.src"))
+        (source,) = scratch.iterdir()
         unwind = source / "libunwind"
         builtins = source / "compiler-rt/lib/builtins"
         for triple, target in TARGETS.items():

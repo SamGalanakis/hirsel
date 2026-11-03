@@ -34,14 +34,14 @@
       "size": 253117
     },
     "libunwind": {
-      "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/llvm-project-23.1.4.src.tar.xz",
-      "sha256": "819ecf7351f1a66f76b2d701d8942faaf5faeb324cb90c9d5b090de142434bb2",
-      "size": 179272572
+      "url": "https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz",
+      "sha256": "51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5",
+      "size": 213678444
     },
     "compiler-rt": {
-      "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.4/llvm-project-23.1.4.src.tar.xz",
-      "sha256": "819ecf7351f1a66f76b2d701d8942faaf5faeb324cb90c9d5b090de142434bb2",
-      "size": 179272572
+      "url": "https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz",
+      "sha256": "51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5",
+      "size": 213678444
     },
     "glibc:amd64": {
       "url": "https://archive.debian.org/debian/pool/main/g/glibc/libc6_2.28-10+deb10u1_amd64.deb",

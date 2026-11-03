@@ -1371,7 +1371,7 @@ fn receipts_artifacts_and_manifests_round_trip_and_bind_the_unit_key() {
         }],
         abi: hash("abi"),
         reproducibility: Reproducibility {
-            toolchain: "llvm 23.1.4".into(),
+            toolchain: "llvm 23.1.5".into(),
             options: hash("O2"),
             lir_version: hirsel_lir::LIR_VERSION,
             runtime_abi_version: hirsel_lir::RUNTIME_ABI_VERSION,

@@ -2,7 +2,7 @@ case native-tests/replay/column-skew
 configuration synthetic/column-skew
 matrix 4
 observation-schema 5
-llvm 23.1.4
+llvm 23.1.5
 source-digest e7adee69c65e4f14cffcc016ad55b0f18170b0277fb869dc3fcdc12f11936c54
 --- expected
 observation 5

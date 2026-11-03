@@ -1,23 +1,27 @@
 # native-toolchain
 
-The pinned LLVM for native code. Track the latest stable release, pinned exactly; never trunk.
-The current release is `llvmorg-23.1.4`, published on 2026-10-20:
-https://github.com/llvm/llvm-project/releases/tag/llvmorg-23.1.4.
+The pinned LLVM for native code is the 23.1.5 release-branch snapshot at
+`a738f2737189bcc1de75c25e8cd1d4b466c9526e`, packaged on 2026-10-28.
+Its debs and matching source archive are retained at
+https://github.com/SamGalanakis/hirsel-lang/releases/tag/toolchain-llvm-23.1.5.
 
-- `llvm-23.lock`: the pin, the only place it is written. LLVM 23.1.4 from the apt.llvm.org
+- `llvm-23.lock`: the pin, the only place it is written. LLVM 23.1.5 from the
   `llvm-toolchain-noble-23` packages at one exact version, with each `.deb`'s SHA-256 and
-  size; the release tag, its commit and the source tarball's SHA-256 for a source build; and
+  size; the mirror release tag, upstream commit and source tarball's SHA-256; and
   llvm-sys 231.0.1 with its crates.io checksum.
-- `install`: prints the pinned apt commands; `--run` runs them as root; `--unpack DIR`
+- `install`: prints the install command and pinned asset URLs; `--run` fetches and verifies
+  the debs, installs those local files as root and holds the packages; `--unpack DIR`
   verifies every `.deb` and unpacks it under DIR without root, then prints the
   `LLVM_SYS_231_PREFIX` and loader path that select it; `--source` prints the pinned source
   build with a shared libLLVM.
+  Both paths fetch only the retained GitHub assets, with no apt.llvm.org repository or
+  pool URL. The hashes and sizes match its signed Packages and Sources indexes.
 - `check [--prefix DIR]`: passes only on the exact pin. It rejects a wrong `llvm-config`
   major, minor, patch or suffix, a static-only install (no `libLLVM-23.so`), missing
   headers, a missing X86 or AArch64 target, a clang or lld of another version, an installed
   package at another version (system prefix only), and a Cargo.lock llvm-sys other than the
   pinned version and checksum. It then links `fixtures/version.c` against the shared
-  libLLVM and requires it to report 23.1.4 at run time. It never searches PATH or falls back.
+  libLLVM and requires it to report 23.1.5 at run time. It never searches PATH or falls back.
 - `fixtures/`: `version.c` for `check`; `smoke.ll`, `smoke_harness.c` and `smoke.expected`,
   the FFI smoke that `crates/hirsel-llvm/tests/it/native.rs` compiles, links and runs.
 
@@ -96,7 +100,7 @@ which every executable links with instead of a compiler driver:
 
 - Debian's glibc 2.28-10+deb10u1 `libc6` and `libc6-dev` and Linux 4.19
   `linux-libc-dev` for amd64 and arm64 (archive.debian.org);
-- LLVM 23.1.4's `libunwind` and `compiler-rt` from its combined source archive;
+- LLVM 23.1.5's `libunwind` and `compiler-rt` from its combined source archive;
 - Zig's `lib/libc/glibc/abilists` at `bff490a2`.
 
 Per target the kit holds `Scrt1.o`, `crti.o`, `crtn.o` and `libc_nonshared.a`

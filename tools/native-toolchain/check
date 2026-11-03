@@ -64,7 +64,7 @@ for tool in clang ld.lld; do
   [[ "$tool_version" == *" $version"* ]] || fail "$bindir/$tool reports '$tool_version', not $version"
 done
 
-# The system prefix is the apt.llvm.org install: every locked package is installed at the
+# At the system prefix every locked package is installed at the
 # locked version. A local `install --unpack` prefix has no dpkg records to compare.
 if [[ "$prefix" == "$lock_prefix" ]] && command -v dpkg-query > /dev/null; then
   apt_version="$(lock_value apt_version)"

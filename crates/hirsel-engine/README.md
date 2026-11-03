@@ -597,7 +597,7 @@ then import, placement, insertion, elision, reuse and Ready lowering run per
 unit, and each stage's output is used only after that stage's validator in
 `hirsel-lir` sealed it. `Options` selects the target and whether regions,
 elision, reuse and flat walking run; none changes what a program observably does. The driver
-depends on `hirsel-llvm` unconditionally, so building it needs LLVM 23.1.4 at
+depends on `hirsel-llvm` unconditionally, so building it needs LLVM 23.1.5 at
 `tools/buck2/toolchains/llvm-files` (or `LLVM_SYS_231_PREFIX`).
 
 A native failure is a `NativeError` naming the stage, the definition and whether

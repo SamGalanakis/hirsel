@@ -2,7 +2,7 @@
 //! Ready LIR units that returns an owned `hirsel_lir::ObjectArtifact` after every LLVM and
 //! LIR temporary is dropped.
 //!
-//! The binding is llvm-sys `=231.0.1` against the shared libLLVM 23.1.4 pinned in
+//! The binding is llvm-sys `=231.0.1` against the shared libLLVM 23.1.5 pinned in
 //! `tools/native-toolchain/llvm-23.lock`. No raw LLVM handle is
 //! public, and there is no fallback to another LLVM.
 
@@ -51,7 +51,7 @@ impl fmt::Display for LlvmVersion {
 pub const PINNED_LLVM: LlvmVersion = LlvmVersion {
     major: 23,
     minor: 1,
-    patch: 4,
+    patch: 5,
 };
 
 /// Whether every emitted object includes ThreadSanitizer instrumentation.

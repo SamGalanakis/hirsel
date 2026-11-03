@@ -1251,9 +1251,9 @@ def native_toolchain_pins() -> str:
     records = [line.split() for line in READS.text(directory / "llvm-23.lock").splitlines()
                if line and not line.startswith("#")]
     scalars = {row[0]: " ".join(row[1:]) for row in records if row[0] != "deb"}
-    llvm = [{"url": f"{scalars['apt_pool']}/{name}_{scalars['apt_version'].split(':', 1)[1]}_{arch}.deb",
+    llvm = [{"url": f"{scalars['deb_pool']}/{asset}",
              "sha256": sha, "size": int(size)}
-            for key, name, arch, sha, size in (row for row in records if row[0] == "deb")]
+            for key, name, arch, sha, size, asset in (row for row in records if row[0] == "deb")]
     runtime = json.loads(READS.text(HERE / "llvm-runtime-lock.json"))["debs"]
     llvm += [{"url": row["urls"][0].replace("http:", "https:"), "sha256": row["sha256"], "size": row["size"]}
              for row in runtime]

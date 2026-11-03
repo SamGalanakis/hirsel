@@ -266,7 +266,7 @@ configured. Native changes use a filtered campaign:
 .buck2/bin/buck2 test -c hirsel.full=true //:gate-native-full -- --test-arg=--filter --test-arg=SEM-4-view-return-source-run --timeout 14400
 ```
 
-Native tests receive LLVM 23.1.4, the link kit and glibc 2.28 floor runtime
+Native tests receive LLVM 23.1.5, the link kit and glibc 2.28 floor runtime
 (`native-toolchain:kit`, `:glibc_floor`), Arm GNU 14.3.Rel1 with its Linux
 sysroot, static AArch64 qemu and Valgrind as SHA-pinned Buck2 downloads or
 builds from them. No worker
@@ -488,7 +488,7 @@ link replay after the original profile has been removed.
 - Rust: the official 1.99.0 components (rustc, std for x86-64 and AArch64,
   clippy, rustfmt), byte-identical to the rustup ones, from
   `hermeticbuild/rust-redist`.
-- C and linking: clang 23.1.4 from the pinned LLVM tree
+- C and linking: clang 23.1.5 from the pinned LLVM tree
   (`tools/native-toolchain/llvm-23.lock`). The Ubuntu clang and libLLVM load
   five libraries a minimal Ubuntu worker image lacks; `llvm-runtime-lock.json` pins
   them and `bootstrap_llvm.py` bundles them in the tree's `lib/`.

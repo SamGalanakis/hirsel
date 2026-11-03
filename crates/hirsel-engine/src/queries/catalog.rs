@@ -290,7 +290,10 @@ impl Catalog {
             candidates.extend(previous);
             for syntax in syntaxes {
                 let (file, base) = sources.anchor(syntax.anchor).expect("indexed anchor");
-                candidates.retain(|candidate| candidate.head.name.anchor != syntax.anchor || candidate.occurrence != syntax.occurrence);
+                candidates.retain(|candidate| {
+                    candidate.head.name.anchor != syntax.anchor
+                        || candidate.occurrence != syntax.occurrence
+                });
                 candidates.push(Candidate {
                     head: DeclarationHead::capture(sources, syntax),
                     file,

@@ -20,12 +20,69 @@ pub(super) struct HeaderSources {
     files: BTreeMap<FileId, Vec<Arc<ItemSyntax>>>,
     indexed: BTreeMap<FileId, Vec<std::sync::Weak<ItemSyntax>>>,
 }
+pub(crate) struct SourceInputs {
+    sources: SourceMap,
+    catalog: catalog::Catalog,
+    syntax: HeaderSources,
+    declarations: crate::DeclarationIndex,
+    installed: BTreeSet<FileId>,
+}
+impl SourceInputs {
+    pub(crate) fn capture(engine: &QueryEngine) -> Arc<Self> {
+        Arc::new(Self {
+            sources: engine.sources.clone(),
+            catalog: engine
+                .catalog
+                .source_carry(&engine.sources, &engine.items, &engine.indexed_sources)
+                .restore(),
+            syntax: HeaderSources::capture(engine),
+            declarations: engine.declarations.header_inputs(),
+            installed: engine.installed_sources.clone(),
+        })
+    }
+    pub(crate) fn metadata_bytes(engine: &QueryEngine) -> Option<u64> {
+        engine
+            .catalog
+            .source_carry_bytes(&engine.items, &engine.indexed_sources)
+            .checked_add(HeaderSources::facts_index_bytes(
+                engine.source_paths().len(),
+            ))?
+            .checked_add(engine.declarations.observation_bytes()?)?
+            .checked_add((size_of::<Self>() + 2 * size_of::<usize>()) as u64)
+    }
+    pub(crate) fn install(&self, engine: &mut QueryEngine) {
+        engine.sources = self.sources.clone();
+        engine.catalog = self.catalog.clone();
+        engine
+            .catalog
+            .bind_ownership(engine.source_ownership.clone());
+        engine.declarations = self.declarations.clone();
+        engine.installed_sources = self.installed.clone();
+        self.syntax.install_live(engine);
+    }
+    pub(crate) fn owns_written(&self, syntax: &Arc<ItemSyntax>) -> bool {
+        self.syntax.owns(syntax)
+    }
+    pub(crate) fn materialize(
+        &self,
+        engine: &mut QueryEngine,
+        path: &DefPath,
+    ) -> Result<(), QueryError> {
+        if !self.syntax.materialize(engine, path)? {
+            engine.header_products = None;
+            engine.materialize(path)?;
+        }
+        Ok(())
+    }
+}
 impl HeaderSources {
     fn needs_live(engine: &QueryEngine, syntax: &ItemSyntax) -> bool {
         syntax.item.generated.is_some()
             || engine.adapters.lexer.is_none()
             || engine.adapters.parser.is_none()
-            || !engine.indexed_sources.contains_key(&engine.item_file(syntax))
+            || !engine
+                .indexed_sources
+                .contains_key(&engine.item_file(syntax))
     }
     pub(super) fn capture(engine: &QueryEngine) -> Self {
         let mut files = BTreeMap::<_, Vec<_>>::new();
@@ -39,7 +96,10 @@ impl HeaderSources {
                 if Self::needs_live(engine, syntax) {
                     files.entry(file).or_default().push(syntax.clone());
                 } else {
-                    indexed.entry(file).or_default().push(Arc::downgrade(syntax));
+                    indexed
+                        .entry(file)
+                        .or_default()
+                        .push(Arc::downgrade(syntax));
                 }
             }
             if !selected.is_empty() {
@@ -111,21 +171,53 @@ impl HeaderSources {
             added
         }
         fn add(seen: &mut BTreeMap<usize, u64>, syntax: &Arc<ItemSyntax>) -> u64 {
-            charge(seen, Arc::as_ptr(syntax) as usize, crate::memo::retained::retained_syntax_bytes(syntax))
+            charge(
+                seen,
+                Arc::as_ptr(syntax) as usize,
+                crate::memo::retained::retained_syntax_bytes(syntax),
+            )
         }
         fn indexed(seen: &mut BTreeMap<usize, u64>, pointer: usize) -> u64 {
-            charge(seen, pointer, crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<ItemSyntax>::uninit()))
+            charge(
+                seen,
+                pointer,
+                crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<ItemSyntax>::uninit()),
+            )
         }
         fn inherited(owner: &HeaderSources, seen: &mut BTreeMap<usize, u64>) -> u64 {
-            let live = owner.files.values().flatten().fold(0u64, |n, syntax| n.saturating_add(add(seen, syntax)));
-            let weak = owner.indexed.values().flatten().fold(0u64, |n, syntax| n.saturating_add(indexed(seen, syntax.as_ptr() as usize)));
-            live.saturating_add(weak).saturating_add(owner.parent.as_ref().map_or(0, |parent| inherited(parent, seen)))
+            let live = owner
+                .files
+                .values()
+                .flatten()
+                .fold(0u64, |n, syntax| n.saturating_add(add(seen, syntax)));
+            let weak = owner.indexed.values().flatten().fold(0u64, |n, syntax| {
+                n.saturating_add(indexed(seen, syntax.as_ptr() as usize))
+            });
+            live.saturating_add(weak).saturating_add(
+                owner
+                    .parent
+                    .as_ref()
+                    .map_or(0, |parent| inherited(parent, seen)),
+            )
         }
         let mut seen = BTreeMap::new();
-        engine.items.values().flatten().fold(0u64, |n, syntax| {
-            n.saturating_add(if Self::needs_live(engine, syntax) { add(&mut seen, syntax) }
-                else { indexed(&mut seen, Arc::as_ptr(syntax) as usize) })
-        }).saturating_add(engine.header_products.as_ref().map_or(0, |headers| inherited(&headers.syntax, &mut seen)))
+        engine
+            .items
+            .values()
+            .flatten()
+            .fold(0u64, |n, syntax| {
+                n.saturating_add(if Self::needs_live(engine, syntax) {
+                    add(&mut seen, syntax)
+                } else {
+                    indexed(&mut seen, Arc::as_ptr(syntax) as usize)
+                })
+            })
+            .saturating_add(
+                engine
+                    .header_products
+                    .as_ref()
+                    .map_or(0, |headers| inherited(&headers.syntax, &mut seen)),
+            )
     }
     pub(super) fn owns(&self, syntax: &Arc<ItemSyntax>) -> bool {
         self.files
@@ -136,6 +228,31 @@ impl HeaderSources {
                 .parent
                 .as_ref()
                 .is_some_and(|parent| parent.owns(syntax))
+    }
+    fn install_live(&self, engine: &mut QueryEngine) {
+        if let Some(parent) = &self.parent {
+            parent.install_live(engine);
+        }
+        for syntax in self.files.values().flatten() {
+            if engine.catalog.body(&syntax.item.definition) == Some(syntax.text_hash)
+                && engine
+                    .catalog
+                    .anchor(&syntax.item.definition, syntax.occurrence)
+                    == Some(syntax.anchor)
+            {
+                let items = engine
+                    .items
+                    .entry(syntax.item.definition.clone())
+                    .or_default();
+                if !items
+                    .iter()
+                    .any(|old| old.anchor == syntax.anchor && old.occurrence == syntax.occurrence)
+                {
+                    items.push(syntax.clone());
+                    items.sort_by_key(|syntax| syntax.occurrence);
+                }
+            }
+        }
     }
     pub(super) fn materialize(
         &self,
@@ -160,17 +277,48 @@ impl HeaderSources {
         for file in files {
             hirsel_intern::timings::count(hirsel_intern::timings::Count::HeaderSourceFiles);
             let mut syntaxes = self.files.get(file).cloned().unwrap_or_default();
-            let indexed = self.indexed.get(file).map(|written| written.iter().map(std::sync::Weak::upgrade).collect::<Option<Vec<_>>>());
+            let indexed = self.indexed.get(file).map(|written| {
+                written
+                    .iter()
+                    .map(std::sync::Weak::upgrade)
+                    .collect::<Option<Vec<_>>>()
+            });
             match indexed {
                 Some(Some(written)) => syntaxes.extend(written),
-                Some(None) if syntaxes.iter().any(|syntax| syntax.item.definition == *path) => {
+                Some(None)
+                    if syntaxes
+                        .iter()
+                        .any(|syntax| syntax.item.definition == *path) =>
+                {
                     engine.materialize_source(*file)?;
-                    syntaxes.extend(engine.items.values().flatten().filter(|syntax| engine.item_file(syntax) == *file).cloned());
+                    syntaxes.extend(
+                        engine
+                            .items
+                            .values()
+                            .flatten()
+                            .filter(|syntax| engine.item_file(syntax) == *file)
+                            .cloned(),
+                    );
                 }
                 Some(None) => return Ok(false),
                 None => {}
             }
-            if syntaxes.is_empty() { return Err(refused()); }
+            if syntaxes.iter().any(|syntax| {
+                syntax.occurrence == 0
+                    && engine
+                        .catalog
+                        .body(&syntax.item.definition)
+                        .is_some_and(|expected| {
+                            syntax.text_hash != expected
+                                || engine.catalog.anchor(&syntax.item.definition, 0)
+                                    != Some(syntax.anchor)
+                        })
+            }) {
+                return Ok(false);
+            }
+            if syntaxes.is_empty() {
+                return Err(refused());
+            }
             for syntax in &syntaxes {
                 let candidates = engine
                     .items

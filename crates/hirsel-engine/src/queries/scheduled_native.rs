@@ -309,21 +309,53 @@ impl FrontNativeDefinitionQueries {
             _owner: self.clone(),
         })
     }
-    pub(crate) fn export_archive(&self, product: &ProductRef, scratch: u64) -> Result<ProductArchive, QueryError> {
-        if !self.completed.lock().unwrap_or_else(|e| e.into_inner()).get(&product.address.0)
-            .is_some_and(|(selected, _)| selected == product) {
+    pub(crate) fn export_archive(
+        &self,
+        product: &ProductRef,
+        scratch: u64,
+    ) -> Result<ProductArchive, QueryError> {
+        if !self
+            .completed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&product.address.0)
+            .is_some_and(|(selected, _)| selected == product)
+        {
             return Err(native_selection_error("native export has another producer"));
         }
-        let live = product.live_value::<LiveDefinition>().ok_or(QueryError::NotImplemented)?;
+        let live = product
+            .live_value::<LiveDefinition>()
+            .ok_or(QueryError::NotImplemented)?;
         let mut cached = live.archive.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(archive) = &*cached { return Ok(archive.clone()); }
-        if live.charge > scratch { return Err(native_selection_error("native export exceeds scratch admission")); }
+        if let Some(archive) = &*cached {
+            return Ok(archive.clone());
+        }
+        if live.charge > scratch {
+            return Err(native_selection_error(
+                "native export exceeds scratch admission",
+            ));
+        }
         let bytes = live.encode().ok_or(QueryError::NotImplemented)?;
-        if bytes.len() as u64 > scratch { return Err(native_selection_error("native export encoding exceeds scratch admission")); }
-        let record = self.store.put_content(OUTPUT, &bytes).ok_or(QueryError::NotImplemented)?;
-        let archive = ProductArchive::from_retained_bytes(record, bytes.into(), self._ownership._allowance.clone(), self.remaining.clone())
-            .map_err(|_| native_selection_error("native export exceeds retained admission"))?;
-        if self.store.persistence().retains() { self.store.associate_product(product.address, product.action, record); }
+        if bytes.len() as u64 > scratch {
+            return Err(native_selection_error(
+                "native export encoding exceeds scratch admission",
+            ));
+        }
+        let record = self
+            .store
+            .put_content(OUTPUT, &bytes)
+            .ok_or(QueryError::NotImplemented)?;
+        let archive = ProductArchive::from_retained_bytes(
+            record,
+            bytes.into(),
+            self._ownership._allowance.clone(),
+            self.remaining.clone(),
+        )
+        .map_err(|_| native_selection_error("native export exceeds retained admission"))?;
+        if self.store.persistence().retains() {
+            self.store
+                .associate_product(product.address, product.action, record);
+        }
         *cached = Some(archive.clone());
         Ok(archive)
     }
@@ -587,7 +619,10 @@ impl Task {
                     self.id.address.0.0.as_slice(),
                     source.source.syntax.text_hash.0.as_slice(),
                     source.signature.fingerprint.0.as_slice(),
-                    source.summary_identity.as_ref().map_or(&[][..], |identity| identity.0.as_slice()),
+                    source
+                        .summary_identity
+                        .as_ref()
+                        .map_or(&[][..], |identity| identity.0.as_slice()),
                     reads.digest().0.as_slice(),
                 ],
             ));

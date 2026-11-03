@@ -347,7 +347,10 @@ impl Task {
             self.definitions.push(output);
             self.cursor += 1;
         }
-        Poll::Ready(self.complete(cx.scratch_bytes()).map_err(|error| owner.fail(error)))
+        Poll::Ready(
+            self.complete(cx.scratch_bytes())
+                .map_err(|error| owner.fail(error)),
+        )
     }
     fn complete(&self, scratch: u64) -> Result<ProductRef, QueryError> {
         let owner = &self.owner;

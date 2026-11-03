@@ -51,8 +51,7 @@ impl SiblingSources {
             .snapshot
             .header_products()
             .ok_or_else(|| refused("missing live header owner"))?;
-        let mut engine = headers.execution();
-        engine.materialize(&syntax.item.definition)?;
+        let mut engine = self.namespace.source_engine(&syntax.item.definition)?;
         let declarations = engine.frozen_declarations();
         let items = declarations
             .siblings(syntax)
@@ -198,6 +197,9 @@ impl QueryEngine {
             })
             .and_then(|bytes| bytes.checked_add(source_rows as u64))
             .and_then(|bytes| bytes.checked_add(sibling_bytes))
+            .and_then(|bytes| {
+                bytes.checked_add(header_products::SourceInputs::metadata_bytes(self)?)
+            })
             .ok_or_else(refused)?;
         let owner_bytes = crate::NativeRecordContext::capture(self)
             .input_bytes()

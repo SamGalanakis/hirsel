@@ -193,10 +193,16 @@ fn full_check_agrees_cold_resident_restarted_store_off_and_remote_restore() {
 fn native_catalogue_is_lazy_and_store_off_archives_require_export() {
     with_compiler_stack(|| {
         let (_directory, manifest) = fixture();
-        let store = Arc::new(Observed {
+        let budget = ProcessBudget::new(1 << 30);
+        let backend = Arc::new(Observed {
             inner: Arc::new(NoneStore),
             syntax_writes: Mutex::default(),
         });
+        let store = Arc::new(RequestStore::new(
+            backend,
+            budget.reserve(16 << 20).unwrap(),
+        ));
+        assert_eq!(store.persistence(), Persistence::Disabled);
         let compiler = COMPILER
             .with_config(CompileConfig {
                 store,
@@ -207,7 +213,6 @@ fn native_catalogue_is_lazy_and_store_off_archives_require_export() {
         let definitions = program.engine.front_source_roots();
         let mut unused = program.entry.clone();
         unused.0.name = "unused".into();
-        let budget = ProcessBudget::new(1 << 30);
         let weight = MemoryWeight {
             retained: 2 << 20,
             scratch: 8 << 20,

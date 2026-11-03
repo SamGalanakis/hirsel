@@ -10,8 +10,8 @@ mod private;
 mod sources;
 pub(crate) use private::AdoptedPrivate;
 pub use private::ModuleProof;
-pub(crate) use sources::CapturedText;
 use sources::HeaderSources;
+pub(crate) use sources::{CapturedText, SourceInputs};
 
 type SignatureOutput = Result<Arc<QueryOutput<hirsel_types::SignatureRef>>, QueryError>;
 pub(crate) struct HeaderProduct {
@@ -262,7 +262,10 @@ impl HeaderProducts {
             private_working: AtomicU64::new(0),
             private_registrations: Default::default(),
             declarations: engine.declarations.header_inputs(),
-            catalog: engine.catalog.source_carry(&engine.sources, &engine.items, &engine.indexed_sources).restore(),
+            catalog: engine
+                .catalog
+                .source_carry(&engine.sources, &engine.items, &engine.indexed_sources)
+                .restore(),
             installed_sources: engine.installed_sources.clone(),
             types: engine.types.clone(),
             memo: engine.memo.clone(),
@@ -377,12 +380,16 @@ impl HeaderProducts {
     }
     pub(crate) fn source_fact_index_bytes(engine: &QueryEngine, private: bool) -> u64 {
         HeaderSources::facts_index_bytes(engine.source_paths().len())
-            .saturating_add(engine.catalog.source_carry_bytes(&engine.items, &engine.indexed_sources))
+            .saturating_add(
+                engine
+                    .catalog
+                    .source_carry_bytes(&engine.items, &engine.indexed_sources),
+            )
             .saturating_add(if private {
-            private::PrivateProducts::index_bytes(engine)
-        } else {
-            0
-        })
+                private::PrivateProducts::index_bytes(engine)
+            } else {
+                0
+            })
     }
     pub(crate) fn source_environment(&self) -> &QueryEnvironment {
         &self.environment

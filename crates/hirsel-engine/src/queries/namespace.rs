@@ -38,6 +38,7 @@ pub(crate) struct HeaderInput {
 /// Successor captures are distinct values, including when they share maps.
 pub struct NamespaceCapture {
     pub(crate) snapshot: Arc<SignatureSnapshot>,
+    inputs: Arc<header_products::SourceInputs>,
     pub(crate) declarations: Arc<crate::snapshot::Declarations>,
     pub(crate) source_paths: Box<[DefId]>,
     pub(crate) roots: Box<[DefId]>,
@@ -178,6 +179,7 @@ impl NamespaceCapture {
             .header_products()
             .ok_or_else(|| refused("missing captured header inputs"))?;
         let mut engine = headers.execution();
+        self.inputs.install(&mut engine);
         engine.adapters = adapters.adapters();
         engine.verify = self.verify;
         engine.sources = self.sources.clone();
@@ -275,17 +277,22 @@ impl NamespaceCapture {
             .bodies
             .get(&DefId::intern(path))
             .ok_or_else(|| refused("body outside capture"))?;
-        let headers = self
-            .snapshot
-            .header_products()
-            .ok_or_else(|| refused("missing captured source owner"))?;
-        let mut engine = headers.execution();
-        engine.materialize(path)?;
+        let engine = self.source_engine(path)?;
         let syntax = engine.snapshot(path)?;
         if syntax.text_hash != input.implementation {
             return Err(refused("captured source binding changed"));
         }
         Ok(syntax)
+    }
+    pub(crate) fn source_engine(&self, path: &DefPath) -> Result<QueryEngine, QueryError> {
+        let headers = self
+            .snapshot
+            .header_products()
+            .ok_or_else(|| refused("missing captured source owner"))?;
+        let mut engine = headers.execution();
+        self.inputs.install(&mut engine);
+        self.inputs.materialize(&mut engine, path)?;
+        Ok(engine)
     }
     pub(crate) fn header(&self, path: &DefPath) -> Result<HeaderInput, QueryError> {
         let id = DefId::intern(path);
@@ -336,10 +343,11 @@ impl NamespaceCapture {
     }
     pub(crate) fn retains_written(&self, syntax: &Arc<ItemSyntax>) -> bool {
         self.admission.get().is_some()
-            && self
-                .snapshot
-                .header_products()
-                .is_some_and(|headers| headers.owns_written(syntax))
+            && (self.inputs.owns_written(syntax)
+                || self
+                    .snapshot
+                    .header_products()
+                    .is_some_and(|headers| headers.owns_written(syntax)))
     }
     pub(crate) fn retained_bytes(&self) -> u64 {
         self.retained
@@ -525,16 +533,25 @@ impl QueryEngine {
         }
         self.prepare_namespace_registrations(registrations)?;
         let snapshot = self.signature_inputs();
+        let inputs = header_products::SourceInputs::capture(self);
         let selected = definitions.iter().cloned().collect::<BTreeSet<_>>();
         let mut instances = self.instance_bodies(&selected);
         for path in definitions {
-            if self.source_facts(path).is_some_and(|facts| facts.instance_bodied) {
+            if self
+                .source_facts(path)
+                .is_some_and(|facts| facts.instance_bodied)
+            {
                 let id = DefId::intern(path);
                 instances.declarations.insert(id);
                 if let Some(bodies) = self.instance_bodies.instances.get(&id) {
-                    let bodies = bodies.iter().filter(|(_, body)| selected.contains(body.definition.path()))
-                        .map(|(key, body)| (*key, body.clone())).collect::<std::collections::HashMap<_, _>>();
-                    if !bodies.is_empty() { instances.instances.insert(id, bodies); }
+                    let bodies = bodies
+                        .iter()
+                        .filter(|(_, body)| selected.contains(body.definition.path()))
+                        .map(|(key, body)| (*key, body.clone()))
+                        .collect::<std::collections::HashMap<_, _>>();
+                    if !bodies.is_empty() {
+                        instances.instances.insert(id, bodies);
+                    }
                 }
             }
         }
@@ -678,12 +695,16 @@ impl QueryEngine {
             .and_then(|bytes| {
                 bytes.checked_add(header_products::HeaderProducts::written_source_bytes(self))
             })
+            .and_then(|bytes| {
+                bytes.checked_add(header_products::SourceInputs::metadata_bytes(self)?)
+            })
             .ok_or_else(|| refused("capture size overflow"))?;
         if retained > limit {
             return Err(refused("capture exceeds admission"));
         }
         Ok(Arc::new(NamespaceCapture {
             snapshot,
+            inputs,
             declarations,
             source_paths,
             roots,
@@ -770,6 +791,9 @@ mod tests {
             assert!(engine.signatures.is_empty());
             let syntax = capture.syntax(&definitions[0]).unwrap();
             assert_eq!(syntax.item.definition, definitions[0]);
+            let demanded = capture.source_engine(&definitions[0]).unwrap();
+            assert!(demanded.items.contains_key(&definitions[0]));
+            assert!(!demanded.items.contains_key(&definitions[1]));
             assert!(
                 engine.items.is_empty(),
                 "demand uses the immutable capture's owner"

@@ -13,7 +13,9 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
+import time
 
 
 TRACE_RECORD = re.compile(r" ?[ILSM] +[0-9a-fA-F]+,[0-9]+$")
@@ -105,8 +107,13 @@ def main():
         environment["XDG_CACHE_HOME"] = str(directory / "cache")
         for shape, width in [("serial", 1), ("pool", 4)]:
             binary = directory / shape
-            run([args.hirsel, "build", "--release", args.source / (shape + ".hir"),
+            started = time.monotonic()
+            print(f"startup_order: building {shape} (570 s timeout)", file=sys.stderr, flush=True)
+            run([args.capped, "--timeout", "570", args.hirsel,
+                 "build", "--release", args.source / (shape + ".hir"),
                  "-o", binary], environment, directory)
+            print(f"startup_order: built {shape} in {time.monotonic() - started:.1f} s",
+                  file=sys.stderr, flush=True)
             rows = symbols(args.llvm, binary, environment, directory,
                            "--numeric-sort", "--print-size")
             grants = {

@@ -846,8 +846,10 @@ def hirsel_runtime_archives(name, crate, crate_root, srcs, features, deps, featu
             configured = "{}-{}".format(library, triple.split("-")[0])
             native.configured_alias(name = configured, actual = ":" + library, platform = RUNTIME_TARGETS[triple])
             archives["{}/{}".format(triple, variant)] = ":" + configured
+    # Local training requires the host executor. Dependency compiles keep
+    # their own remote budget platforms.
     _runtime_archives(name = name, archives = archives, capped = "tools/capped",
-                      exec_compatible_with = [budget_constraint(pool_budget_name(4, 2097152))],
+                      exec_compatible_with = [budget_constraint("host")],
                       visibility = ["PUBLIC"])
 
 def hirsel_tsan_runtime_archives(name):
@@ -966,7 +968,7 @@ def _runtime_archives_impl(ctx):
         )
         for name, dep in ctx.attrs._startup_tools.items():
             command.add("--" + name.replace("_", "-"), dep[DefaultInfo].default_outputs[0])
-        ctx.actions.run(command, category = "startup_order")
+        ctx.actions.run(command, category = "startup_order", local_only = True)
         for path in ctx.attrs.archives:
             entries[path + "/startup.order"] = orders.project(path + "/startup.order")
     # Qualification consumers can request one target/variant without building

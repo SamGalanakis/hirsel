@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Count the compiler corpus, cold and unchanged warm, with Rust pairs.
 
-    tools/compiler-bench/run --toolchain DIR --output results.json [--quick]
+    tools/compiler-bench/run --profile release --toolchain DIR --output results.json [--quick]
 
 Every measurement takes its own tools/capped slot. Default: ten seeded,
 interleaved rounds of check, debug, release and native startup, including the
@@ -489,6 +489,8 @@ def pairs(cells):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--toolchain', required=True, help='directory with hirsel and hirsel-std.products')
+    parser.add_argument('--profile', required=True, choices=('dev', 'release', 'dist', 'profiling'),
+                        help='build profile of the supplied compiler, part of the comparison contract')
     parser.add_argument('--output', required=True, help='result file to write')
     parser.add_argument('--work', default=None, help='corpus and scratch directory (default: a temporary one)')
     parser.add_argument('--groups', help='comma-separated: examples, pairs, conformance, tour, std, stress, scale, edit')
@@ -527,7 +529,7 @@ def main():
     if native and not args.environment:
         say('compiler-bench: building the pinned native toolchains on the pool')
     prepared_environment = json.loads(Path(args.environment).read_text()) if args.environment else environment(native)
-    args.checkpoint_identity = {'commit': commit, 'cpu': args.cpu, 'repeat': args.repeat, 'seed': args.seed,
+    args.checkpoint_identity = {'commit': commit, 'profile': args.profile, 'cpu': args.cpu, 'repeat': args.repeat, 'seed': args.seed,
                                 'work': str(work), 'groups': args.groups, 'select': args.select, 'modes': args.modes,
                                 'jobs': args.jobs, 'hirsel_sha256': file_hash(Path(args.toolchain) / 'hirsel')}
     args.checkpoint = json.loads(Path(args.resume).read_text()) if args.resume else None
@@ -538,6 +540,17 @@ def main():
     rustc = subprocess.run(['rustc', '--version'], capture_output=True, text=True).stdout.strip()
     result = {
         'schema': 1, 'suite': 'compiler-bench', 'commit': commit, 'started': started,
+        'contract': {
+            'profile': args.profile,
+            'counter': 'instructions:u',
+            'workloads': sorted(c['id'] for c in cells),
+            # Compiler and std-product hashes below are observations, not the
+            # pinned build environment: they must change across compiler edits.
+            'toolchain': {'rustc': rustc, 'machine': platform.machine(),
+                          'rust_lock': file_hash(ROOT / 'tools/buck2/toolchain-lock.json'),
+                          'pins': file_hash(ROOT / 'tools/buck2/pins.json'),
+                          'native_lock': file_hash(ROOT / 'tools/native-toolchain/native.lock.json')},
+        },
         'cpu': args.cpu,
         'host': {'machine': platform.machine(), 'cpus': os.cpu_count(), 'load1': os.getloadavg()[0]},
         'toolchain': {'hirsel': str(Path(args.toolchain).resolve() / 'hirsel'), 'rustc': rustc,

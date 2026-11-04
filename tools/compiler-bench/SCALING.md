@@ -78,7 +78,7 @@ reports retained image and engine products.
 ```sh
 .buck2/bin/buck2 build --target-platforms //tools/buck2:release \
   //:hirsel-toolchain --show-full-output
-HIRSEL_DAEMON=off HIRSEL_RESULTS=none@1 tools/compiler-bench/run \
+HIRSEL_DAEMON=off HIRSEL_RESULTS=none@1 tools/compiler-bench/run --profile release \
   --toolchain <bundle> --output stress.json --work <private-work-dir> \
   --groups stress --select 'stress/(inline-constant|record-flow)-' \
   --modes check --cpu 30 --repeat 10 --jobs 1

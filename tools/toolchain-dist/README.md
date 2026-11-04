@@ -12,7 +12,7 @@ tools/toolchain-dist/build --output /tmp/hirsel-dist
 # PGO: instrument, train 24 workloads, merge, rebuild. Use fresh output/work dirs.
 tools/toolchain-dist/build --pgo --output /tmp/hirsel-pgo --work /tmp/hirsel-pgo-work
 # Smoke matrix, one run per cell; instructions and peak RSS in JSON.
-tools/compiler-bench/run --quick --repeat 1 --toolchain /tmp/hirsel-pgo --output /tmp/quick.json
+tools/compiler-bench/run --profile dist --quick --repeat 1 --toolchain /tmp/hirsel-pgo --output /tmp/quick.json
 # Three seeded rounds for instructions/RSS; use --rounds 10 for wall-time ratios.
 tools/toolchain-dist/measure --bundle release=/tmp/hirsel-release \
     --bundle dist=/tmp/hirsel-dist --bundle pgo=/tmp/hirsel-pgo --output /tmp/dist-results

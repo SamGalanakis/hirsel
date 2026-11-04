@@ -44,7 +44,9 @@ def cell(cid, walls, status='ok', phases=None, language='hirsel', mode='check', 
 
 
 def result(*cells):
-    return {'schema': 1, 'suite': 'compiler-bench', 'cells': list(cells), 'pairs': run.pairs(list(cells))}
+    return {'contract': {'profile': 'release', 'workloads': ['fixture'], 'counter': 'instructions:u',
+                         'toolchain': {'rustc': 'fixture'}},
+            'schema': 1, 'suite': 'compiler-bench', 'cells': list(cells), 'pairs': run.pairs(list(cells))}
 
 
 class Verdicts(unittest.TestCase):
@@ -78,6 +80,31 @@ class Verdicts(unittest.TestCase):
         rows, notes = compare.compare(result(cell('c', [1.0] * 3)), result(cell('c', [9.0], status='cap')), BUDGET)
         self.assertEqual([r['metric'] for r in rows if r['regressed']], ['status'])
         self.assertIn('c: status ok -> cap', notes)
+
+    def test_incomplete_and_incompatible_runs_fail_closed(self):
+        baseline = result(cell('c', [1.0]))
+        cases = [result(), result(cell('c', [], status='skipped'))]
+        for field in ('profile', 'workloads', 'counter', 'toolchain'):
+            changed = result(cell('c', [1.0]))
+            changed['contract'][field] = 'different'
+            cases.append(changed)
+        no_metric = result(cell('c', [1.0]))
+        del no_metric['cells'][0]['summary']['instructions_u']
+        cases.append(no_metric)
+        with tempfile.TemporaryDirectory() as scratch:
+            base, current = (Path(scratch) / n for n in ('base.json', 'current.json'))
+            base.write_text(json.dumps(baseline))
+            for changed in cases:
+                with self.subTest(changed=changed):
+                    current.write_text(json.dumps(changed))
+                    self.assertNotEqual(subprocess.run(
+                        [sys.executable, str(BENCH / 'compare'), str(base), str(current)],
+                        capture_output=True).returncode, 0)
+        with self.assertRaisesRegex(ValueError, 'zero compared metrics'):
+            compare.compare(result(cell('c', [], status='skipped')),
+                            result(cell('c', [], status='skipped')), BUDGET)
+        with self.assertRaisesRegex(ValueError, 'required budget cell missing'):
+            compare.compare(baseline, baseline, dict(BUDGET, cells=['required']))
 
     def test_exit_status_follows_the_verdict(self):
         with tempfile.TemporaryDirectory() as scratch:

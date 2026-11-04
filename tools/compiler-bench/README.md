@@ -18,7 +18,7 @@ tools/toolchain-dist/build --pgo --output /tmp/hirsel-dist
 # Developer release bundle (keeps its existing profile):
 .buck2/bin/buck2 build --target-platforms //tools/buck2:release //:hirsel-toolchain --show-full-output
 # The bundle contains hirsel and its sibling hirsel-std.products.
-tools/compiler-bench/run --quick --toolchain <bundle> --output quick.json
+tools/compiler-bench/run --profile release --quick --toolchain <bundle> --output quick.json
 tools/compiler-bench/report quick.json --scoreboard > scoreboard.md
 ```
 
@@ -196,3 +196,12 @@ both processes, and a control/ack pipe enables the server counters only for
 the request. The report retains each sample and medians; compare times only
 as ratios inside that session. `--select` filters oracle programs, and
 `--scale` supplies comma-separated generated scale sizes.
+
+Comparison requires a recorded measurement contract. Pass `--profile` for the
+supplied compiler. The result records that profile, the measured cell set,
+`instructions:u` and the pinned Rust/native build identities. Compiler binary
+and std-product hashes remain provenance and may change between commits.
+An incompatible or missing contract, an empty comparison, or a missing cell or
+metric required by the baseline or budget exits nonzero. A budget may list
+additional required cell IDs in `cells`. Legacy results need a newly measured
+baseline under a declared contract; the comparator never silently adopts them.

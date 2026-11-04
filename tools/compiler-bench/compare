@@ -11,6 +11,7 @@ Exit 0 when nothing regressed, 1 when something did, 2 for unusable input.
 """
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -24,6 +25,10 @@ def load(path):
     data = json.loads(Path(path).read_text())
     if data.get('schema') != 1 or data.get('suite') != 'compiler-bench':
         raise ValueError(f'{path}: not a schema-1 compiler-bench result')
+    if not isinstance(data.get('contract'), dict):
+        raise ValueError(f'{path}: measurement contract missing; record a new baseline')
+    if len({c['id'] for c in data['cells']}) != len(data['cells']):
+        raise ValueError(f'{path}: duplicate cells')
     for cell in data['cells']:
         if cell['status'] == 'ok' and not cell.get('summary', {}).get('instructions_u'):
             raise ValueError(f"{path}: {cell['id']} has no instructions:u; record a new baseline")
@@ -40,6 +45,11 @@ def metrics(cell, budget):
 def compare(baseline, current, budget):
     """Rows for every shared cell and metric, and the cells that changed status
     or appear in only one file."""
+    for field in ('profile', 'workloads', 'counter', 'toolchain'):
+        before = baseline.get('contract', {}).get(field)
+        after = current.get('contract', {}).get(field)
+        if not before or not after or before != after:
+            raise ValueError(f'measurement contract differs or is missing: {field}')
     old = {c['id']: c for c in baseline['cells']}
     new = {c['id']: c for c in current['cells']}
     # An older cold-only baseline names its cells without a temperature.
@@ -47,6 +57,20 @@ def compare(baseline, current, budget):
     for cid in list(old):
         if cid not in new and cid + '/cold' in new:
             old[cid + '/cold'] = old.pop(cid)
+    required = set(budget.get('cells', [])) | {cid for cid, c in old.items() if c['status'] == 'ok'}
+    for cid in sorted(required):
+        if cid not in new:
+            raise ValueError(f'{cid}: required budget cell missing from current run')
+        if cid not in old:
+            raise ValueError(f'{cid}: required budget cell missing from baseline')
+        if old[cid]['status'] == new[cid]['status'] == 'ok':
+            for metric in budget['metrics']:
+                for label, c in (('baseline', old[cid]), ('current', new[cid])):
+                    values = c.get('summary', {}).get(metric['name']) or {}
+                    value = values.get('median')
+                    if (type(value) not in (int, float) or not math.isfinite(value)
+                            or value <= 0 or values.get('n', 0) < 1):
+                        raise ValueError(f"{cid}: {label} has no valid {metric['name']} measurement")
     rows, notes = [], []
     for cid in sorted(old.keys() | new.keys()):
         if cid not in new:
@@ -77,6 +101,8 @@ def compare(baseline, current, budget):
             rows.append({'cell': cid, 'metric': metric['name'], 'unit': metric['unit'], 'before': base['median'],
                          'after': values['median'], 'delta': delta, 'bound': bound, 'regressed': regressed,
                          'improved': improved})
+    if not rows:
+        raise ValueError('zero compared metrics')
     return rows, notes
 
 
@@ -110,10 +136,10 @@ def main():
     try:
         baseline, current = load(args.baseline), load(args.results)
         budget = json.loads(Path(args.budget).read_text())
+        rows, notes = compare(baseline, current, budget)
     except (OSError, ValueError, KeyError) as error:
         print(f'compare: {error}', file=sys.stderr)
         return 2
-    rows, notes = compare(baseline, current, budget)
     print(f"baseline {baseline.get('commit') or '?'} ({baseline.get('started')}), "
           f"current {current.get('commit') or '?'} ({current.get('started')})")
     shown = [r for r in rows if args.all or r['regressed'] or r.get('improved')]

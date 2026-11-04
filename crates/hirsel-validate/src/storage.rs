@@ -2,6 +2,7 @@
 //! or producer behavior participates in reconstruction. Declared profiles are
 //! checked only after the executable fixed point and read obligations settle.
 use crate::{Reader, VRead, typing, validate_structure};
+use hirsel_intern::work::{self, Counter};
 use hirsel_syntax::{ContentHash, DefId, DefPath, NameSite, PassingMode, UnaryOp};
 use hirsel_tir as tir;
 use hirsel_type_analysis::storage::{StorageDomain, program};
@@ -207,6 +208,7 @@ fn reconstruct(
                 declarations: &declarations[index],
                 signatures: reader,
                 constants,
+                binding_places: first_binding_places(body),
             };
             match producer.derive(callable_types.get(&(index as u32)).copied()) {
                 Ok(product) => products.push(product),
@@ -288,6 +290,20 @@ struct Producer<'a> {
     declarations: &'a GenericDeclarations,
     signatures: &'a Reader<'a>,
     constants: &'a BTreeMap<DefPath, tir::Materialized>,
+    binding_places: BTreeMap<Origin, tir::PlaceId>,
+}
+
+fn first_binding_places(body: &tir::Body) -> BTreeMap<Origin, tir::PlaceId> {
+    let mut places = BTreeMap::new();
+    for (index, place) in body.places.iter().enumerate() {
+        work::count(Counter::ValidatePlaceRows);
+        if let Some(origin) = &place.binding {
+            places
+                .entry(origin.clone())
+                .or_insert(tir::PlaceId(index as u32));
+        }
+    }
+    places
 }
 impl Producer<'_> {
     fn callable(&self, body: &tir::Body) -> StorageCallable {
@@ -331,10 +347,12 @@ impl Producer<'_> {
     fn placement(&self, destination: &Destination) -> StoragePlacement {
         match destination {
             Destination::Heap | Destination::Inferred => StoragePlacement::Independent,
-            Destination::Arena(origin) => self.body.places.iter().enumerate()
-                .find(|(_, place)| place.binding.as_ref() == Some(origin))
-                .map(|(index, _)| StoragePlacement::Sources(vec![self.place(tir::PlaceId(index as u32))]))
-                .unwrap_or(StoragePlacement::Unknown),
+            Destination::Arena(origin) => {
+                work::count(Counter::ValidatePlaceRows);
+                self.binding_places.get(origin)
+                    .map(|place| StoragePlacement::Sources(vec![self.place(*place)]))
+                    .unwrap_or(StoragePlacement::Unknown)
+            },
             Destination::Caller(parameters) => parameters.iter().map(|parameter| {
                 if matches!(parameter, ParameterRef::Bound { depth: 0, .. })
                     || matches!(parameter, ParameterRef::Body { scope, .. } if *scope == self.body.parameter_scope)
@@ -1304,5 +1322,64 @@ fn unknown_callee() -> StorageCallee {
         allocations: vec![],
         results: vec![],
         complete: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arena_placement_lookup_is_linear_and_uses_the_first_matching_place() {
+        let measure = |n: usize| {
+            let mut fixture = crate::support::Fixture::unit();
+            let origin = |name: &str| Origin {
+                root: OriginRoot::Definition(crate::support::path(name)),
+                fields: SharedPath::new(),
+            };
+            let arena = origin("arena");
+            let missing = origin("missing");
+            let template = fixture.definition.bodies[0].places[0].clone();
+            fixture.definition.bodies[0].places = (0..n + 2)
+                .map(|i| tir::Place {
+                    binding: Some(if i < n {
+                        origin(&format!("other{i}"))
+                    } else {
+                        arena.clone()
+                    }),
+                    root: tir::LocalId(i as u32),
+                    ..template.clone()
+                })
+                .collect();
+            let declarations = GenericDeclarations::default();
+            let reader = Reader::new(crate::support::interner(), &fixture.signatures);
+            let constants = BTreeMap::new();
+            let body = &fixture.definition.bodies[0];
+            let before = work::read(Counter::ValidatePlaceRows);
+            let producer = Producer {
+                types: crate::support::interner(),
+                definition: &fixture.definition,
+                body,
+                declarations: &declarations,
+                signatures: &reader,
+                constants: &constants,
+                binding_places: first_binding_places(body),
+            };
+            for _ in 0..n {
+                assert_eq!(
+                    producer.placement(&Destination::Arena(arena.clone())),
+                    StoragePlacement::Sources(vec![StoragePlace::root(n as u32)])
+                );
+                assert_eq!(
+                    producer.placement(&Destination::Arena(missing.clone())),
+                    StoragePlacement::Unknown
+                );
+            }
+            work::read(Counter::ValidatePlaceRows) - before
+        };
+        let [small, large] = [64, 512].map(measure);
+        eprintln!("arena placement candidates {small} -> {large}");
+        // One index insertion per place and one candidate per destination.
+        assert!(small > 0 && large <= 16 * small, "{small} -> {large}");
     }
 }

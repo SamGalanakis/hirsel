@@ -165,9 +165,11 @@ pub struct MemoGraph {
     /// Broad V inputs invalidate shared reverse-index groups without
     /// eagerly accessing each subscriber's memo record.
     validation_contexts: HashMap<ReadKey, ContextInvalidation>,
-    /// Current contextual subscriptions, independent of memo records. Old
-    /// pending snapshots are confirmed before these memberships are removed.
+    /// Current contextual subscriptions, built from the forward index at the
+    /// first broad invalidation. Before then no context has pending marks.
+    /// Old pending snapshots are confirmed before memberships are removed.
     contexts_by_memo: HashMap<MemoKey, Vec<ReadKey>>,
+    contexts_indexed: bool,
     by_def: HashMap<DefId, HashSet<MemoKey>, IdHasher>,
     dirty: HashMap<MemoKey, Invalidation>,
     stats: MemoStats,
@@ -183,6 +185,7 @@ impl Default for MemoGraph {
             subscribers: HashMap::new(),
             validation_contexts: HashMap::new(),
             contexts_by_memo: HashMap::new(),
+            contexts_indexed: false,
             by_def: HashMap::default(),
             dirty: HashMap::new(),
             stats: MemoStats::default(),
@@ -343,6 +346,7 @@ impl MemoGraph {
         let Some(subscribers) = self.subscribers.get(&read).cloned() else {
             return;
         };
+        self.index_contexts();
         // Count logical newly dirty members using indices only. Actual memo
         // accesses remain counted by touch at demand, adoption and confirmation.
         let newly_dirty = subscribers
@@ -359,6 +363,19 @@ impl MemoGraph {
         for _ in 0..newly_dirty {
             timings::count(invalidation_count(read.kind()));
         }
+    }
+
+    fn index_contexts(&mut self) {
+        if self.contexts_indexed {
+            return;
+        }
+        for read in self.validation_contexts.keys() {
+            for key in self.subscribers[read].iter() {
+                work::count(Counter::MemoContextVisits);
+                self.contexts_by_memo.entry(*key).or_default().push(*read);
+            }
+        }
+        self.contexts_indexed = true;
     }
 
     fn confirm_contexts(&mut self, key: MemoKey) {
@@ -380,7 +397,9 @@ impl MemoGraph {
             ) {
                 work::count(Counter::MemoContextVisits);
                 self.validation_contexts.entry(*read).or_default();
-                self.contexts_by_memo.entry(key).or_default().push(*read);
+                if self.contexts_indexed {
+                    self.contexts_by_memo.entry(key).or_default().push(*read);
+                }
             }
         }
     }

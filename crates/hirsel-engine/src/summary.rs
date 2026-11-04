@@ -17,6 +17,7 @@
 //! lexical references inside them are qualified by their owner, so they need
 //! no outer context.
 use crate::*;
+use hirsel_intern::IdHasher;
 use hirsel_intern::work::{self, Counter};
 use hirsel_span::Span;
 use hirsel_syntax::{DefId, ExprId, ExprKind, LexicalOwner};
@@ -272,22 +273,28 @@ pub fn summarize<'body>(
         .map(|expression| span(NameSite::Expression(expression)))
         .collect();
     let owning_frames = enclosing_frames(&spans, &call_spans);
-    let mut local_values = HashMap::new();
-    for (expression, name) in &checked.resolution.expressions {
-        work::count(Counter::SummaryComparisons);
-        if let ResolvedName::Local(local) = name {
-            local_values.entry(*expression).or_insert(*local);
+    // Direct definition calls never query local binders. Build both exact
+    // lookup tables together at the first value call, then reuse them.
+    let local_binders = std::cell::LazyCell::new(|| {
+        let mut local_values = HashMap::with_hasher(IdHasher::default());
+        for (expression, name) in &checked.resolution.expressions {
+            work::count(Counter::SummaryComparisons);
+            if let ResolvedName::Local(local) = name {
+                local_values.entry(*expression).or_insert(*local);
+            }
         }
-    }
-    let mut local_functions = HashMap::new();
-    for (statement, local) in &checked.resolution.local_functions {
-        work::count(Counter::SummaryComparisons);
-        local_functions
-            .entry(*local)
-            .or_insert(NameSite::Statement(*statement));
-    }
+        let mut local_functions = HashMap::with_hasher(IdHasher::default());
+        for (statement, local) in &checked.resolution.local_functions {
+            work::count(Counter::SummaryComparisons);
+            local_functions
+                .entry(*local)
+                .or_insert(NameSite::Statement(*statement));
+        }
+        (local_values, local_functions)
+    });
     let local_binder = |value: ExprId| {
         work::count(Counter::SummaryComparisons);
+        let (local_values, local_functions) = &*local_binders;
         local_values
             .get(&value)
             .and_then(|local| local_functions.get(local))
@@ -301,11 +308,12 @@ pub fn summarize<'body>(
     // Written calls first, then the checker's planned instantiations; a
     // planned instance at a written call's own site adds nothing.
     let mut calls: Vec<SummaryCall> = vec![];
-    let mut written = BTreeSet::new();
-    let mut call_members = BTreeSet::new();
+    let mut written = HashSet::with_hasher(IdHasher::default());
+    let mut call_members = HashSet::with_hasher(IdHasher::default());
     // Argument vectors have equality-only TypeIds. Assign exact, local
     // membership ordinals; they never order the published calls.
-    let mut arguments_index: HashMap<&'body [GenericArgument], usize> = HashMap::new();
+    let mut arguments_index: HashMap<&'body [GenericArgument], usize, IdHasher> =
+        HashMap::default();
     let mut push = |calls: &mut Vec<SummaryCall>,
                     expression: ExprId,
                     owning_frame: u32,
@@ -448,7 +456,7 @@ pub fn summarize<'body>(
     }
 
     let mut edges = vec![];
-    let mut edge_members = BTreeSet::new();
+    let mut edge_members = HashSet::with_hasher(IdHasher::default());
     for instance in &checked.instantiations {
         let callee = DefId::intern(&instance.callee);
         let binder = LexicalOwner::first(&instance.callee).site(NameSite::Item);
@@ -523,10 +531,16 @@ pub fn growing_sites(edges: &[GrowthEdge]) -> Vec<Span> {
     sites.into_values().collect()
 }
 
-// The ordered sets are membership indices only. Output vectors always
+// The sets are membership indices only. Output vectors always
 // retain the first occurrence, including its class and target frame.
 #[derive(Eq, PartialEq)]
 struct SummaryKey<T>(T);
+impl<T: std::hash::Hash> std::hash::Hash for SummaryKey<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        work::count(Counter::SummaryComparisons);
+        self.0.hash(state);
+    }
+}
 impl<T: Ord> Ord for SummaryKey<T> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         summary_compare(&self.0, &other.0)

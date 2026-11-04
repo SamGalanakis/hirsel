@@ -248,7 +248,8 @@ impl Store {
         match self.packed_source(tag, key)? {
             Source::Pending(bytes) => Some(bytes),
             Source::File { path, offset, len } => {
-                self.open_segment(&path)?
+                self.open_segment(&path)
+                    .ok()?
                     .range(u64::from(offset), u64::from(len), 8)
             }
         }
@@ -273,20 +274,24 @@ impl Store {
             len: location.len,
         })
     }
-    pub(super) fn open_segment(&self, path: &Path) -> Option<Bytes> {
-        let region = self.open_region(path, Counter::SegmentOpens).ok()?;
-        let bytes = region.bytes();
-        if bytes.len() > LIMIT
-            || bytes.get(..8)? != SEGMENT
-            || number(bytes, 8)? != bytes.len() as u64
-            || bytes.get(24..32)? != [0; 8]
-            || bytes.get(32..64)?
-                != ContentHash::of_parts("hirsel.artifact.pack-header.v2", [&bytes[..32]]).0
-        {
-            return None;
-        }
-        let len = bytes.len();
-        Some(Bytes {
+    pub(super) fn open_segment(&self, path: &Path) -> io::Result<Bytes> {
+        let region = self.open_region(path, Counter::SegmentOpens)?;
+        (|| -> Option<()> {
+            let bytes = region.bytes();
+            if bytes.len() > LIMIT
+                || bytes.get(..8)? != SEGMENT
+                || number(bytes, 8)? != bytes.len() as u64
+                || bytes.get(24..32)? != [0; 8]
+                || bytes.get(32..64)?
+                    != ContentHash::of_parts("hirsel.artifact.pack-header.v2", [&bytes[..32]]).0
+            {
+                return None;
+            }
+            Some(())
+        })()
+        .ok_or_else(invalid)?;
+        let len = region.bytes().len();
+        Ok(Bytes {
             region,
             range: 0..len,
         })

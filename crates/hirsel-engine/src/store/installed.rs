@@ -356,7 +356,7 @@ impl InstalledPackage {
                 }),
                 self.contents.iter().copied(),
             )
-            .ok_or_else(|| "partial or corrupt package product content or row".into())
+            .map_err(|error| format!("partial or corrupt package product content or row: {error}"))
     }
     pub(super) fn open(
         store: &hirsel_artifact_store::Store,

@@ -151,54 +151,58 @@ impl Store {
         &self,
         rows: impl IntoIterator<Item = (Address, Association)>,
         references: impl IntoIterator<Item = Reference>,
-    ) -> Option<VerifiedRecords> {
+    ) -> io::Result<VerifiedRecords> {
         let _scope = self.batch();
-        let mut unique: BTreeSet<_> = references.into_iter().collect();
-        let mut files: BTreeMap<(PathBuf, bool), Vec<(u64, u64, Expected)>> = BTreeMap::new();
-        let mut contents = Vec::new();
-        let mut route = |source, expected: Expected, packed| -> Option<()> {
-            match source {
-                pack::Source::Pending(bytes) => expected.check(bytes, &mut contents, None)?,
-                pack::Source::File { path, offset, len } => {
-                    files.entry((path, packed)).or_default().push((
-                        u64::from(offset),
-                        u64::from(len),
-                        expected,
-                    ));
+        let (files, mut contents) = (|| {
+            let mut unique: BTreeSet<_> = references.into_iter().collect();
+            let mut files: BTreeMap<(PathBuf, bool), Vec<(u64, u64, Expected)>> = BTreeMap::new();
+            let mut contents = Vec::new();
+            let mut route = |source, expected: Expected, packed| -> Option<()> {
+                match source {
+                    pack::Source::Pending(bytes) => expected.check(bytes, &mut contents, None)?,
+                    pack::Source::File { path, offset, len } => {
+                        files.entry((path, packed)).or_default().push((
+                            u64::from(offset),
+                            u64::from(len),
+                            expected,
+                        ));
+                    }
                 }
-            }
-            Some(())
-        };
-        for (address, association) in rows {
-            unique.insert(association.reference);
-            route(
-                self.packed_source(1, address.0)?,
-                Expected::Row(address, association),
-                true,
-            )?;
-        }
-        for reference in unique {
-            let source = if reference.len <= pack::SMALL as u64 {
-                self.packed_source(0, reference.output.0)?
-            } else {
-                pack::Source::File {
-                    path: self.output_path(reference),
-                    offset: 0,
-                    len: u32::try_from(reference.len.checked_add(HEADER as u64)?).ok()?,
-                }
+                Some(())
             };
-            route(
-                source,
-                Expected::Content(reference),
-                reference.len <= pack::SMALL as u64,
-            )?;
-        }
+            for (address, association) in rows {
+                unique.insert(association.reference);
+                route(
+                    self.packed_source(1, address.0)?,
+                    Expected::Row(address, association),
+                    true,
+                )?;
+            }
+            for reference in unique {
+                let source = if reference.len <= pack::SMALL as u64 {
+                    self.packed_source(0, reference.output.0)?
+                } else {
+                    pack::Source::File {
+                        path: self.output_path(reference),
+                        offset: 0,
+                        len: u32::try_from(reference.len.checked_add(HEADER as u64)?).ok()?,
+                    }
+                };
+                route(
+                    source,
+                    Expected::Content(reference),
+                    reference.len <= pack::SMALL as u64,
+                )?;
+            }
+            Some((files, contents))
+        })()
+        .ok_or_else(invalid)?;
         for ((path, packed), mut records) in files {
             records.sort_unstable_by_key(|(offset, _, _)| *offset);
             let bytes = if packed {
                 self.open_segment(&path)?
             } else {
-                let region = self.open_region(&path, Counter::StandaloneOpens).ok()?;
+                let region = self.open_region(&path, Counter::StandaloneOpens)?;
                 let len = region.bytes().len();
                 Bytes {
                     region,
@@ -217,13 +221,17 @@ impl Store {
             let file = None;
             for (offset, len, expected) in records {
                 if !packed && len != bytes.len() as u64 {
-                    return None;
+                    return Err(invalid());
                 }
-                expected.check(
-                    bytes.range(offset, len, if packed { 8 } else { 1 })?,
-                    &mut contents,
-                    file.as_ref(),
-                )?;
+                expected
+                    .check(
+                        bytes
+                            .range(offset, len, if packed { 8 } else { 1 })
+                            .ok_or_else(invalid)?,
+                        &mut contents,
+                        file.as_ref(),
+                    )
+                    .ok_or_else(invalid)?;
             }
         }
         contents.sort_unstable_by_key(|(reference, _)| *reference);
@@ -234,7 +242,7 @@ impl Store {
             .scope
             .get_or_insert_with(|| Arc::new(()))
             .clone();
-        Some(VerifiedRecords {
+        Ok(VerifiedRecords {
             store: self.clone(),
             scope,
             contents: contents.into_boxed_slice(),

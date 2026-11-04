@@ -26,6 +26,11 @@ Instructions preserve written evaluation order, and call/constructor ordinals
 map the evaluated inputs to declaration order. `CheckedBody.calls` supplies exactly one checked mapping for every call, including
 positional named calls. Each source-order argument carries its formal ordinal and
 specialized parameter requirement; recovery is explicit.
+An append of a primitive f-string to an owned local heap byte list formats into that
+list, retaining the source reserve, formatting and empty finish invocations.
+This also covers `bytes.append(..., string.as_bytes(f"..."))`. Holes that can
+observe the destination, custom formatters, and arena, caller or projected storage keep
+their private builder. Padding marks use the destination's current byte offset.
 `Plans.propagation` carries nominal Result ordinals/identity, never guessed from
 spelling. `?` reads both payloads through the Result, so a nonplain payload of a
 borrowed Result keeps its bound (OWN-8, as `box` payloads do), and builds the

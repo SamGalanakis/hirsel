@@ -13,6 +13,7 @@ mod checked;
 mod control;
 mod decisions;
 mod expression;
+mod formats;
 mod iteration;
 mod last_use;
 mod lexical;

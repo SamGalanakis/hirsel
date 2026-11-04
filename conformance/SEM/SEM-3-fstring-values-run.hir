@@ -55,5 +55,39 @@ pub fn main(t: Test) -> Result[(), ()] {
   let mut calls = 0u64
   let text = f"{count(t, mut calls)},{count(t, mut calls)}"
   test.check(t, text == "1,2" && calls == 2)
+  let mut appended: List[u8] = []
+  std@1/text.append(mut appended, "prefix:")
+  let saved = copy appended
+  std@1/text.append(mut appended, f"é{n + 1u64},{-7i64},{true},{'羊'}")
+  test.check(t, std@1/text.finish_valid(copy appended) == "prefix:é4,-7,true,羊")
+  test.check(t, std@1/text.finish_valid(copy saved) == "prefix:")
+  std@1/text.append(mut appended, f"/{n:04}/{name:>8}")
+  test.check(
+    t,
+    std@1/text.finish_valid(copy appended) == "prefix:é4,-7,true,羊/0003/  hirsel"
+  )
+  core@1/bytes.append(
+    mut appended,
+    string.as_bytes(
+      {
+        f"/{n}"
+      }
+    )
+  )
+  test.check(
+    t,
+    std@1/text.finish_valid(copy appended) == "prefix:é4,-7,true,羊/0003/  hirsel/3"
+  )
+  // Later holes read the buffer before the append and run exactly once.
+  let mut observed: List[u8] = [120u8]
+  std@1/text.append(mut observed, f"a{list.len(observed)}b{list.len(observed)}")
+  test.check(t, std@1/text.finish_valid(take observed) == "xa1b1")
+  let mut ordered: List[u8] = []
+  std@1/text.append(mut ordered, f"{count(t, mut calls)},{count(t, mut calls)}")
+  test.check(t, std@1/text.finish_valid(take ordered) == "3,4" && calls == 4)
+  // Appending valid text never validates or freezes an existing byte prefix.
+  let mut raw: List[u8] = [255u8]
+  std@1/text.append(mut raw, f"{n}")
+  test.check(t, list.len(raw) == 2 && raw[0] == 255u8 && raw[1] == 51u8)
   Ok(())
 }

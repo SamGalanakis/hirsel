@@ -15,11 +15,23 @@ fn light_text(light: Light, mut out: List[u8]) -> () uses {} {
   }
 }
 
+@format(offset_text)
+type Offset {}
+
+fn offset_text(value: Offset, mut out: List[u8]) -> () uses {} {
+  u64.format_into(list.len(out), mut out)
+}
+
 pub fn main(t: Test) -> Result[(), ()] {
   let red: Light = Red
   let amber: Light = Amber(2)
   let green: Light = Green(minutes: 5, arrow: true)
   test.check(t, f"{red}, {amber}, {green}" == "red, amber 2, green 5m arrow=true")
   test.check(t, f"<{red:>5}>" == "<  red>")
+  let mut appended: List[u8] = []
+  text.append(mut appended, "prefix:")
+  let offset = Offset()
+  text.append(mut appended, f"p{offset}")
+  test.check(t, text.finish_valid(take appended) == "prefix:p1")
   Ok(())
 }

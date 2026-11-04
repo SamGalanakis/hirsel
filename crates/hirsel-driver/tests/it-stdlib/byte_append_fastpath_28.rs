@@ -169,6 +169,12 @@ let mut history: List[u8] = [97u8,98u8]
 list.reserve(mut history, 64)
 bytes.append_from_history(mut history, 2, 7)
 test.check(t, bytes.from_list(take history) == b"ababababa")
+let mut formatted: List[u8] = []
+text.append(mut formatted, "prefix:")
+for i in 0u64..3u64 { text.append(mut formatted, f"{i},") }
+let formatted_copy = copy formatted
+bytes.append(mut formatted, string.as_bytes(f"<{3u64:04}>"))
+test.check(t, text.finish_valid(take formatted) == "prefix:0,1,2,<0003>" && text.finish_valid(take formatted_copy) == "prefix:0,1,2,")
 "#;
     parity("heap", &body, None);
 }
@@ -211,6 +217,27 @@ test.check(t, outcome == {expected})
 
 #[test]
 fn failure_before_and_after_publication() {
+    parity(
+        "format-arena-source-failure",
+        r#"
+let zero = 0u64
+let _ = arena.bounded(0u64, fn(a: Arena) -> u64 {
+  let mut b: List[u8] in a = []
+  text.append(mut b, f"prefix{1u64 / zero}")
+  0u64
+})
+"#,
+        Some("SEM-1"),
+    );
+    parity(
+        "format-source-failure",
+        r#"
+let mut b: List[u8] = []
+let zero = 0u64
+text.append(mut b, f"prefix{1u64 / zero}")
+"#,
+        Some("SEM-1"),
+    );
     parity(
         "source-failure",
         r#"

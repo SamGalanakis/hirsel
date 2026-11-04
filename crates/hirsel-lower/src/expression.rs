@@ -178,6 +178,10 @@ impl Builder<'_, '_> {
         id: ExprId,
         bodies: &mut Vec<Option<Body>>,
     ) -> Result<Option<Value>> {
+        if let Some(value) = self.format_destinations.get(&id).copied() {
+            self.keep_result = false;
+            return Ok(Some(value));
+        }
         if self.current.is_none() {
             self.keep_result = false;
             return Ok(None);
@@ -1055,6 +1059,18 @@ impl Builder<'_, '_> {
         self.rvalue_with_failure(ty, rv, span, failure)
     }
     fn call(
+        &mut self,
+        id: ExprId,
+        callee_id: ExprId,
+        arguments: Vec<hirsel_syntax::Argument>,
+        bodies: &mut Vec<Option<Body>>,
+    ) -> Result<Option<Value>> {
+        if let Some(result) = self.appended_format(id, bodies)? {
+            return Ok(result);
+        }
+        self.ordinary_call(id, callee_id, arguments, bodies)
+    }
+    pub(super) fn ordinary_call(
         &mut self,
         id: ExprId,
         callee_id: ExprId,

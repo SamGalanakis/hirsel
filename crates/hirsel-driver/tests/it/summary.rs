@@ -548,3 +548,110 @@ fn published_summaries_match_mode_refined_selection_inputs() {
         }
     });
 }
+
+#[test]
+fn summary_membership_and_sibling_frames_have_bounded_scaling() {
+    with_compiler_stack(|| {
+        use hirsel_intern::work::{self, Counter};
+        let source = "fn leaf(x: u8) -> u8 uses {} { x }\nfn probe(x: u8) -> u8 { let f = fn() -> u8 { leaf(x) }; let _ = comptime leaf(1u8); f() }";
+        let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
+        let file = engine
+            .sources
+            .add("summary-nesting.hir", source.into())
+            .unwrap();
+        engine.parse_file(file, &default_context()).unwrap();
+        let output = engine.mode_definition(&path("probe")).unwrap();
+        assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+        let (summary, _) = summarize(engine.types(), &output.value.typed);
+        assert_eq!(
+            summary
+                .frames
+                .iter()
+                .map(|f| (f.kind, f.parent))
+                .collect::<Vec<_>>(),
+            [
+                (FrameKind::Item, None),
+                (FrameKind::Closure, Some(0)),
+                (FrameKind::ComptimeRegion, Some(0)),
+            ]
+        );
+        assert_eq!(
+            summary
+                .calls
+                .iter()
+                .map(|c| (c.owning_frame, c.target_frame, c.class))
+                .collect::<Vec<_>>(),
+            [
+                (1, None, CallClass::Runtime),
+                (2, None, CallClass::ComptimeExecuted),
+                (0, Some(1), CallClass::Runtime),
+            ]
+        );
+        let mut measurements = Vec::new();
+        for family in ["calls", "growth", "frames"] {
+            let mut units = Vec::new();
+            for n in [128, 1024] {
+                let source = match family {
+                    "calls" => format!(
+                        "fn leaf(x: u8) -> u8 {{ x }}\nfn probe(x: u8) -> u8 {{\n{}x\n}}",
+                        "leaf(x)\n".repeat(n)
+                    ),
+                    "growth" => format!(
+                        "fn leaf[T: copyable](x: T) {{ let _ = x }}\nfn probe[T: copyable](x: T) {{\n{}}}",
+                        "leaf(copy x)\n".repeat(n)
+                    ),
+                    _ => format!(
+                        "fn probe(x: u8) -> u8 {{\n{}x\n}}",
+                        (0..n)
+                            .map(|i| format!("let f{i} = fn() -> u8 {{ x }}\n"))
+                            .collect::<String>()
+                    ),
+                };
+                let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
+                let file = engine.sources.add("summary-scale.hir", source).unwrap();
+                let parsed = engine.parse_file(file, &default_context()).unwrap();
+                assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+                let output = engine.mode_definition(&path("probe")).unwrap();
+                assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
+                let before = work::read(Counter::SummaryComparisons);
+                let (summary, growth) = summarize(engine.types(), &output.value.typed);
+                units.push(work::read(Counter::SummaryComparisons) - before);
+                // The source has exactly n independent written sites. Planned
+                // duplicates retain the first written call and its runtime class.
+                if family == "frames" {
+                    assert_eq!(summary.frames.len(), n + 1);
+                    assert!(
+                        summary.frames[1..]
+                            .iter()
+                            .all(|f| f.parent == Some(0) && f.kind == FrameKind::Closure)
+                    );
+                } else {
+                    assert_eq!(summary.calls.len(), n);
+                    assert!(
+                        summary
+                            .calls
+                            .iter()
+                            .all(|c| c.owning_frame == 0 && c.class == CallClass::Runtime)
+                    );
+                    assert!(
+                        summary
+                            .calls
+                            .windows(2)
+                            .all(|c| c[0].site.start < c[1].site.start)
+                    );
+                    assert_eq!(growth.edges.len(), if family == "growth" { n } else { 0 });
+                }
+            }
+            measurements.push((family, units[0], units[1]));
+        }
+        eprintln!("summary comparison work: {measurements:?}");
+        // A nesting sweep is linear; ordered membership adds logarithmic
+        // comparisons, whose growth for these widths is below another 2x.
+        assert!(
+            measurements
+                .iter()
+                .all(|(_, n, eight_n)| *n > 0 && *eight_n <= 16 * n),
+            "{measurements:?}"
+        );
+    });
+}

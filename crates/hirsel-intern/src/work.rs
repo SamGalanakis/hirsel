@@ -100,6 +100,10 @@ pub enum Counter {
     RegistrationValidationViews,
     /// Shadow tree nodes the checked interpreter copies administratively, preserving holders.
     InterpClonedShadowNodes,
+    /// Summary span/order/membership comparisons and argument-index rows.
+    SummaryComparisons,
+    /// Memo validation-context memberships visited, including index construction.
+    MemoContextVisits,
     /// Cached dependency-node inspections.
     CacheValidationRows,
 }

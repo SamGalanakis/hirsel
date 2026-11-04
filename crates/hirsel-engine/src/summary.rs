@@ -17,13 +17,14 @@
 //! lexical references inside them are qualified by their owner, so they need
 //! no outer context.
 use crate::*;
+use hirsel_intern::work::{self, Counter};
 use hirsel_span::Span;
 use hirsel_syntax::{DefId, ExprId, ExprKind, LexicalOwner};
 use hirsel_types::{
     BinderRef, CallTarget, GenericArgument, NameSite, ResolvedName, SharedSlice, SiteRef, Size,
     SizeParamId, SizeParameterRef, TypeId, TypeInterner, TypeKind, TypeParamId, TypeParameterRef,
 };
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 mod facet;
 pub(crate) use facet::SettledSummary;
 pub use facet::SummaryView;
@@ -168,7 +169,10 @@ impl DefinitionSummary {
 }
 
 /// The summary and growth edges of one checked definition.
-pub fn summarize(t: &TypeInterner, typed: &TypedBody) -> (DefinitionSummary, ParameterGrowth) {
+pub fn summarize<'body>(
+    t: &TypeInterner,
+    typed: &'body TypedBody,
+) -> (DefinitionSummary, ParameterGrowth) {
     let syntax = &*typed.syntax;
     let checked = &typed.checked;
     let tree = &syntax.tree;
@@ -181,13 +185,13 @@ pub fn summarize(t: &TypeInterner, typed: &TypedBody) -> (DefinitionSummary, Par
         )
     };
 
-    let generic = |site: NameSite| {
-        checked
-            .resolution
-            .generics
-            .iter()
-            .any(|generic| generic.owner == site)
-    };
+    let generic: BTreeSet<_> = checked
+        .resolution
+        .generics
+        .iter()
+        .map(|g| SummaryKey(g.owner))
+        .collect();
+    let generic = |site| generic.contains(&SummaryKey(site));
 
     // Frames in source order: outer before inner, ties by site.
     let mut sites: BTreeSet<(NameSite, FrameKind)> = BTreeSet::new();
@@ -211,9 +215,13 @@ pub fn summarize(t: &TypeInterner, typed: &TypedBody) -> (DefinitionSummary, Par
         .filter(|(site, _)| *site != NameSite::Item)
         .map(|(site, kind)| (span(site), site, kind))
         .collect();
-    ordered.sort_by_key(|(span, site, _)| (span.start, std::cmp::Reverse(span.end), *site));
-    let item = span(NameSite::Item);
-    let mut spans = vec![item];
+    ordered.sort_by(|(a, sa, _), (b, sb, _)| {
+        summary_compare(&(span_order(*a), *sa), &(span_order(*b), *sb))
+    });
+    let spans: Vec<_> = std::iter::once(span(NameSite::Item))
+        .chain(ordered.iter().map(|(at, _, _)| *at))
+        .collect();
+    let mut nesting = SpanNesting::new(&spans);
     let mut frames = vec![Frame {
         site: NameSite::Item,
         parent: None,
@@ -221,9 +229,8 @@ pub fn summarize(t: &TypeInterner, typed: &TypedBody) -> (DefinitionSummary, Par
         generic: generic(NameSite::Item),
         size_bindings: Box::new([]),
     }];
-    for (at, site, kind) in ordered {
-        let parent = innermost(&spans, at);
-        spans.push(at);
+    for (index, (_, site, kind)) in ordered.into_iter().enumerate() {
+        let parent = nesting.enter(index as u32 + 1);
         frames.push(Frame {
             site,
             parent: Some(parent),
@@ -232,63 +239,124 @@ pub fn summarize(t: &TypeInterner, typed: &TypedBody) -> (DefinitionSummary, Par
             size_bindings: Box::new([]),
         });
     }
+    let mut frame_indices = BTreeMap::new();
+    for (i, frame) in frames.iter().enumerate().skip(1) {
+        frame_indices
+            .entry(SummaryKey(frame.site))
+            .or_insert(i as u32);
+    }
     let frame_of = |site: NameSite| {
-        frames
-            .iter()
-            .position(|frame| frame.site == site)
-            .map(|i| i as u32)
+        if site == NameSite::Item {
+            Some(0)
+        } else {
+            frame_indices.get(&SummaryKey(site)).copied()
+        }
     };
-    let staged_frame = |mut frame: u32| loop {
-        if frames[frame as usize].kind == FrameKind::ComptimeRegion {
-            return true;
+    let mut staged_frames = Vec::with_capacity(frames.len());
+    for frame in &frames {
+        staged_frames.push(
+            frame.kind == FrameKind::ComptimeRegion
+                || frame.parent.is_some_and(|p| staged_frames[p as usize]),
+        );
+    }
+    let call_spans: Vec<_> = checked
+        .calls
+        .iter()
+        .map(|call| call.expression)
+        .chain(
+            checked
+                .instantiations
+                .iter()
+                .map(|instance| instance.expression),
+        )
+        .map(|expression| span(NameSite::Expression(expression)))
+        .collect();
+    let owning_frames = enclosing_frames(&spans, &call_spans);
+    let mut local_values = HashMap::new();
+    for (expression, name) in &checked.resolution.expressions {
+        work::count(Counter::SummaryComparisons);
+        if let ResolvedName::Local(local) = name {
+            local_values.entry(*expression).or_insert(*local);
         }
-        match frames[frame as usize].parent {
-            Some(parent) => frame = parent,
-            None => return false,
-        }
+    }
+    let mut local_functions = HashMap::new();
+    for (statement, local) in &checked.resolution.local_functions {
+        work::count(Counter::SummaryComparisons);
+        local_functions
+            .entry(*local)
+            .or_insert(NameSite::Statement(*statement));
+    }
+    let local_binder = |value: ExprId| {
+        work::count(Counter::SummaryComparisons);
+        local_values
+            .get(&value)
+            .and_then(|local| local_functions.get(local))
+            .copied()
+            .or_else(|| {
+                let site = NameSite::Expression(value);
+                frame_of(site).is_some().then_some(site)
+            })
     };
 
     // Written calls first, then the checker's planned instantiations; a
     // planned instance at a written call's own site adds nothing.
     let mut calls: Vec<SummaryCall> = vec![];
-    let mut written: BTreeSet<(ExprId, DefId)> = BTreeSet::new();
+    let mut written = BTreeSet::new();
+    let mut call_members = BTreeSet::new();
+    // Argument vectors have equality-only TypeIds. Assign exact, local
+    // membership ordinals; they never order the published calls.
+    let mut arguments_index: HashMap<&'body [GenericArgument], usize> = HashMap::new();
     let mut push = |calls: &mut Vec<SummaryCall>,
                     expression: ExprId,
+                    owning_frame: u32,
                     callee: DefId,
                     binder: SiteRef,
-                    arguments: &[GenericArgument],
+                    arguments: &'body [GenericArgument],
                     target_frame: Option<u32>,
                     planned: bool| {
         let site = span(NameSite::Expression(expression));
-        let owning_frame = innermost(&spans, site);
-        let class = if staged_frame(owning_frame) {
+        let class = if staged_frames[owning_frame as usize] {
             CallClass::ComptimeExecuted
-        } else if planned && !written.contains(&(expression, callee)) {
+        } else if planned && !written.contains(&SummaryKey((expression, callee))) {
             CallClass::StaticSelection
         } else {
             CallClass::Runtime
         };
         if !planned {
-            written.insert((expression, callee));
+            written.insert(SummaryKey((expression, callee)));
         }
-        let call = SummaryCall {
+        work::count_by(Counter::SummaryComparisons, arguments.len() as u64 + 1);
+        let arguments_id = if arguments.is_empty() {
+            0
+        } else {
+            let next = arguments_index.len() + 1;
+            *arguments_index.entry(arguments).or_insert(next)
+        };
+        let key = SummaryKey((
+            (site.anchor, site.start, site.end),
             callee,
             binder,
-            arguments: arguments.into(),
             owning_frame,
-            target_frame,
-            class,
-            site,
-        };
-        if !calls.iter().any(|known| same_call(known, &call)) {
-            calls.push(call);
+            arguments_id,
+        ));
+        if call_members.insert(key) {
+            calls.push(SummaryCall {
+                callee,
+                binder,
+                arguments: arguments.into(),
+                owning_frame,
+                target_frame,
+                class,
+                site,
+            });
         }
     };
-    for call in &checked.calls {
+    for (index, call) in checked.calls.iter().enumerate() {
         match &call.target {
             CallTarget::Definition(callee) => push(
                 &mut calls,
                 call.expression,
+                owning_frames[index],
                 DefId::intern(callee),
                 LexicalOwner::first(callee).site(NameSite::Item),
                 &call.generic_arguments,
@@ -296,12 +364,13 @@ pub fn summarize(t: &TypeInterner, typed: &TypedBody) -> (DefinitionSummary, Par
                 false,
             ),
             CallTarget::Value(value) => {
-                let Some(binder) = local_binder(checked, &frame_of, *value) else {
+                let Some(binder) = local_binder(*value) else {
                     continue;
                 };
                 push(
                     &mut calls,
                     call.expression,
+                    owning_frames[index],
                     lexical.def,
                     lexical.site(binder),
                     &call.generic_arguments,
@@ -312,10 +381,11 @@ pub fn summarize(t: &TypeInterner, typed: &TypedBody) -> (DefinitionSummary, Par
             CallTarget::Constructor(_) => (),
         }
     }
-    for instance in &checked.instantiations {
+    for (index, instance) in checked.instantiations.iter().enumerate() {
         push(
             &mut calls,
             instance.expression,
+            owning_frames[checked.calls.len() + index],
             DefId::intern(&instance.callee),
             LexicalOwner::first(&instance.callee).site(NameSite::Item),
             &instance.arguments,
@@ -378,6 +448,7 @@ pub fn summarize(t: &TypeInterner, typed: &TypedBody) -> (DefinitionSummary, Par
     }
 
     let mut edges = vec![];
+    let mut edge_members = BTreeSet::new();
     for instance in &checked.instantiations {
         let callee = DefId::intern(&instance.callee);
         let binder = LexicalOwner::first(&instance.callee).site(NameSite::Item);
@@ -395,7 +466,12 @@ pub fn summarize(t: &TypeInterner, typed: &TypedBody) -> (DefinitionSummary, Par
             };
             for (parameter, grows) in parameters(t, argument, None) {
                 let edge: GrowthEdge = ((lexical.def, parameter), (callee, to), grows, site);
-                if !edges.contains(&edge) {
+                if edge_members.insert(SummaryKey((
+                    edge.0,
+                    edge.1,
+                    edge.2,
+                    (site.anchor, site.start, site.end),
+                ))) {
                     edges.push(edge);
                 }
             }
@@ -447,51 +523,79 @@ pub fn growing_sites(edges: &[GrowthEdge]) -> Vec<Span> {
     sites.into_values().collect()
 }
 
-/// The innermost frame whose span contains `at`; frames are in source order,
-/// so the last containing one is the innermost.
-fn innermost(spans: &[Span], at: Span) -> u32 {
-    spans
-        .iter()
-        .rposition(|span| span.start <= at.start && span.end >= at.end)
-        .unwrap_or(0) as u32
+// The ordered sets are membership indices only. Output vectors always
+// retain the first occurrence, including its class and target frame.
+#[derive(Eq, PartialEq)]
+struct SummaryKey<T>(T);
+impl<T: Ord> Ord for SummaryKey<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        summary_compare(&self.0, &other.0)
+    }
+}
+impl<T: Ord> PartialOrd for SummaryKey<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+fn summary_compare<T: Ord>(a: &T, b: &T) -> std::cmp::Ordering {
+    work::count(Counter::SummaryComparisons);
+    a.cmp(b)
+}
+fn span_order(at: Span) -> (u32, std::cmp::Reverse<u32>) {
+    (at.start, std::cmp::Reverse(at.end))
 }
 
-/// The binder of a call through a value: a local function named by the
-/// callee expression, or a closure frame written at the callee itself.
-fn local_binder(
-    checked: &hirsel_types::CheckedBody,
-    frame_of: &impl Fn(NameSite) -> Option<u32>,
-    value: ExprId,
-) -> Option<NameSite> {
-    let local = checked
-        .resolution
-        .expressions
-        .iter()
-        .find_map(|(id, name)| match name {
-            ResolvedName::Local(local) if *id == value => Some(*local),
-            _ => None,
-        });
-    local
-        .and_then(|local| {
-            checked
-                .resolution
-                .local_functions
-                .iter()
-                .find(|(_, id)| *id == local)
-                .map(|(statement, _)| NameSite::Statement(*statement))
-        })
-        .or_else(|| {
-            let site = NameSite::Expression(value);
-            frame_of(site).is_some().then_some(site)
-        })
+/// Syntax frames and calls form nested or disjoint intervals. Processing
+/// outer spans first lets each frame enter and leave this stack at most once.
+/// Equal spans keep source/site order, matching the previous last match.
+struct SpanNesting<'a> {
+    spans: &'a [Span],
+    stack: Vec<u32>,
 }
-
-fn same_call(a: &SummaryCall, b: &SummaryCall) -> bool {
-    a.site == b.site
-        && a.callee == b.callee
-        && a.binder == b.binder
-        && a.owning_frame == b.owning_frame
-        && a.arguments == b.arguments
+impl<'a> SpanNesting<'a> {
+    fn new(spans: &'a [Span]) -> Self {
+        Self {
+            spans,
+            stack: Vec::new(),
+        }
+    }
+    fn enclosing(&mut self, at: Span) -> u32 {
+        while let Some(&index) = self.stack.last() {
+            let span = self.spans[index as usize];
+            work::count(Counter::SummaryComparisons);
+            if span.start <= at.start && span.end >= at.end {
+                return index;
+            }
+            self.stack.pop();
+        }
+        0
+    }
+    fn enter(&mut self, index: u32) -> u32 {
+        let parent = self.enclosing(self.spans[index as usize]);
+        self.stack.push(index);
+        parent
+    }
+}
+fn enclosing_frames(spans: &[Span], queries: &[Span]) -> Vec<u32> {
+    if spans.len() == 1 {
+        work::count_by(Counter::SummaryComparisons, queries.len() as u64);
+        return vec![0; queries.len()];
+    }
+    let mut ordered: Vec<_> = (0..queries.len()).collect();
+    ordered.sort_by(|&a, &b| summary_compare(&span_order(queries[a]), &span_order(queries[b])));
+    let mut owners = vec![0; queries.len()];
+    let mut nesting = SpanNesting::new(spans);
+    let mut next = 1;
+    for query in ordered {
+        while next < spans.len()
+            && summary_compare(&span_order(spans[next]), &span_order(queries[query])).is_le()
+        {
+            nesting.enter(next as u32);
+            next += 1;
+        }
+        owners[query] = nesting.enclosing(queries[query]);
+    }
+    owners
 }
 
 pub(crate) fn source_site(syntax: &hirsel_syntax::ItemSyntax, site: NameSite) -> Span {

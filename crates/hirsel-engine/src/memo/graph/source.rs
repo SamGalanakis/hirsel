@@ -20,15 +20,7 @@ impl SourceHeaderGraph {
             ..Default::default()
         };
         for (key, record) in self.records {
-            for (read, _) in record.reads.iter() {
-                Arc::make_mut(graph.subscribers.entry(*read).or_default()).insert(key);
-                if matches!(
-                    read,
-                    ReadKey::ValidationUniverse(_) | ReadKey::UniverseErrors | ReadKey::FirstHeap
-                ) {
-                    graph.validation_contexts.entry(*read).or_default();
-                }
-            }
+            graph.subscribe(key, &record.reads);
             graph.by_def.entry(key.def).or_default().insert(key);
             graph.records.insert(key, record);
         }

@@ -16,7 +16,9 @@ at once (docs/landing.md). A waiting ticket landed in a batch exits with its
 own landed commits. A push rejected because main moved goes back to the rebase
 with full jitter and no attempt limit. Row-only main moves reuse a batch's
 passed checks after a clean rebase; every other proposed tree is checked in
-full. A red check refuses the push and prints its first error.
+full. Transient push failures retry the same checked commit up to three times
+while main is unchanged, fetching to resolve ambiguous completion. A red check
+refuses the push and prints its first error.
 
 Land runs no tests: the lane runs the tests its change can break, and
 tools/main-runs runs the full suite on main every hour. Each push is appended
@@ -469,6 +471,24 @@ def backoff(attempt):
     time.sleep(delay)
 
 
+def transient_push(error):
+    """Retry only server/connection failures, never a remote policy or client error."""
+    error = error.lower()
+    if any(marker in error for marker in ('[remote rejected]', 'hook declined', 'hook failed')):
+        return False
+    statuses = re.findall(r'(?:\bhttp(?:/[\d.]+)?(?: code| error| status)?[ :=]*|returned error:\s*|'
+                          r'status(?: code)?[ :=]*)([45]\d\d)\b', error)
+    if any(status.startswith('4') for status in statuses):
+        return False
+    return bool(statuses) or any(marker in error for marker in (
+        'could not resolve host', 'could not resolve proxy', 'failed to connect',
+        'connection reset', 'connection refused', 'connection timed out', 'operation timed out',
+        'remote end hung up unexpectedly', 'unexpected disconnect', 'empty reply from server',
+        'recv failure', 'send failure', 'gnutls_recv error', 'ssl_error_syscall',
+    )) or bool(re.search(r'\brpc failed; curl (?:6|7|16|18|28|35|52|55|56|92)\b|'
+                         r'http/2 stream .*not closed cleanly', error))
+
+
 def rebase(base, *selection):
     """Replay source commits onto `base`; generated conflicts have no hand-written resolution.
 
@@ -635,20 +655,57 @@ class Batch:
             self.red(culprit, report)
             members.remove(culprit)
 
+    def confirm_push(self, tip):
+        """Reconcile a failed push against a fetched remote, never a cached ref."""
+        fetched = git('fetch', '-q', 'origin', 'main')
+        if fetched.returncode:
+            raise Refusal('cannot confirm failed push: git fetch failed\n' + fetched.stderr)
+        remote = revision('origin/main')
+        contains = git('merge-base', '--is-ancestor', tip, remote)
+        if contains.returncode == 0:
+            say(f'origin/main contains {tip[:12]}; the failed push completed')
+            return True
+        if contains.returncode != 1:
+            raise Refusal('cannot determine whether origin/main contains the failed push')
+        if remote != self.pushed:
+            raise Race()
+        return False
+
     def publish(self, tip, landed):
         """Push a green tip at once, and hand each ticket it newly lands its commits."""
         done = {member for member, _ in self.landed}
         fresh = [(member, commits) for member, commits in landed if member not in done]
         if not fresh:
             return
-        # Push the checked commit explicitly; HEAD may never select a new tree.
-        if not self.queue.owns_head():
-            raise Refusal('queue ownership lost; refusing to push')
-        pushed = git('push', 'origin', f'{tip}:refs/heads/main')
-        if pushed.returncode:
+        for attempt in range(3):
+            if attempt:
+                # The same full-jitter algorithm as backoff(), bounded to two
+                # waits of at most 30 and 60 s. Fetch again after waiting: main
+                # or the result of an ambiguous push may have moved meanwhile.
+                delay = random.uniform(0, 30 * 2 ** (attempt - 1))
+                say(f'transient push failure; retry {attempt + 1}/3 after {delay:.2f} s jitter')
+                time.sleep(delay)
+                if self.confirm_push(tip):
+                    break
+            # Push the checked commit explicitly; HEAD may never select a new tree.
+            if not self.queue.owns_head():
+                raise Refusal('queue ownership lost; refusing to push')
+            if not unchanged(tip):
+                raise Refusal('the worktree changed before push; refusing to push')
+            left = [member for member, _ in fresh if member is not self.own]
+            if set(self.queue.live(left)) != set(left):
+                raise Race()
+            pushed = git('push', 'origin', f'{tip}:refs/heads/main')
+            if not pushed.returncode:
+                break
             if any(marker in pushed.stderr for marker in REJECTED):
                 raise Race()
-            raise Refusal('git push failed\n' + pushed.stderr)
+            if not transient_push(pushed.stderr):
+                raise Refusal('git push failed\n' + pushed.stderr)
+            if self.confirm_push(tip):
+                break
+        else:
+            raise Refusal('git push failed after 3 attempts\n' + pushed.stderr)
         common = Path(git('rev-parse', '--path-format=absolute', '--git-common-dir').stdout.strip())
         at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
         with open(common / LANDINGS, 'a') as log:

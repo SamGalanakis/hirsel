@@ -18,11 +18,38 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 # The harness removes the randomized delay only; production always uses jitter.
-DRIVER = '''import os, runpy, sys
+DRIVER = '''import json, os, pathlib, runpy, subprocess, sys
 from unittest.mock import patch
 module = runpy.run_path('tools/land', run_name='land_test')
 module['LandQueue'].HEARTBEAT = .05
 module['main'].__globals__['BATCH'] = int(os.environ.get('FAKE_BATCH', module['BATCH']))
+real_git = module['git']
+pushes = iter(json.loads(os.environ.get('FAKE_PUSH_ERRORS', '[]')))
+fetch_error = None
+def fake_git(*args):
+    global fetch_error
+    if args[0] == 'fetch' and fetch_error:
+        return subprocess.CompletedProcess(args, 128, '', fetch_error)
+    if args[0] == 'push':
+        if os.environ.get('FAKE_PUSH_LOG'):
+            with pathlib.Path(os.environ['FAKE_PUSH_LOG']).open('a') as log:
+                log.write(args[-1] + '\\n')
+        error = next(pushes, None)
+        if error:
+            fetch_error = error.get('fetch_error')
+            if error.pop('accept', False):
+                accepted = real_git(*args)
+                if accepted.returncode:
+                    return accepted
+                if error.get('advance'):
+                    tip = args[-1].split(':')[0]
+                    tree = real_git('rev-parse', tip + '^{tree}').stdout.strip()
+                    remote = ['git', '--git-dir', os.environ['FAKE_ORIGIN']]
+                    child = subprocess.check_output([*remote, 'commit-tree', tree, '-p', tip, '-m', 'other'], text=True).strip()
+                    subprocess.run([*remote, 'update-ref', 'refs/heads/main', child], check=True)
+            return subprocess.CompletedProcess(args, 128, '', error['stderr'])
+    return real_git(*args)
+module['main'].__globals__['git'] = fake_git
 with patch('random.uniform', return_value=0):
     sys.exit(module['main']())
 '''
@@ -243,6 +270,84 @@ Path('.buck2/prepared').write_text(found)
         self.assertEqual(self.main_log(), ['change', 'other', 'base'])
         [row] = [json.loads(line) for line in (self.lane / '.git/hirsel-landings.jsonl').read_text().splitlines()]
         self.assertEqual((row['branch'], row['landed']), ('my-lane', self.git(self.origin, 'rev-parse', 'main').strip()))
+
+    def push_errors(self, errors, **env):
+        log = self.top / 'pushes'
+        result = self.land(FAKE_PUSH_ERRORS=json.dumps(errors), FAKE_PUSH_LOG=str(log), **env)
+        return result, log.read_text().splitlines()
+
+    def test_http_500_then_success_pushes_the_same_checked_tree(self):
+        landed, pushes = self.push_errors([dict(stderr='fatal: The requested URL returned error: 500')])
+        self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
+        self.assertEqual(pushes, [pushes[0], pushes[0]])
+        for stage in ('workspace build', 'Clippy', 'formatting'):
+            self.assertEqual(landed.stdout.count('pass  ' + stage), 1)
+        self.assertEqual(self.main_log(), ['change', 'base'])
+        self.assertEqual(self.queued(), [])
+
+    def test_persistent_http_500_stops_after_three_pushes_without_landing(self):
+        refused, pushes = self.push_errors([dict(stderr='fatal: HTTP 500') for _ in range(3)])
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertEqual(pushes, [pushes[0]] * 3)
+        for stage in ('workspace build', 'Clippy', 'formatting'):
+            self.assertEqual(refused.stdout.count('pass  ' + stage), 1)
+        self.assertEqual(self.main_log(), ['base'])
+        self.assertFalse((self.lane / '.git/hirsel-landings.jsonl').exists())
+        self.assertEqual(self.queued(), [])
+
+    def test_ambiguous_push_fetches_and_records_the_accepted_commit_once(self):
+        landed, pushes = self.push_errors([dict(stderr='fatal: the remote end hung up unexpectedly', accept=True)])
+        self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
+        self.assertEqual(len(pushes), 1)
+        self.assertEqual(self.main_log(), ['change', 'base'])
+        [row] = [json.loads(line) for line in (self.lane / '.git/hirsel-landings.jsonl').read_text().splitlines()]
+        self.assertEqual(row['landed'], self.git(self.origin, 'rev-parse', 'main').strip())
+        self.assertEqual(self.queued(), [])
+
+    def test_http_500_with_moved_main_rebases_and_runs_all_gates_again(self):
+        landed, pushes = self.push_errors([dict(stderr='fatal: HTTP 500')], FAKE_OTHER_LANE=str(self.top / 'other'))
+        self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
+        self.assertEqual(len(pushes), 2)
+        self.assertNotEqual(pushes[0], pushes[1])
+        for stage in ('workspace build', 'Clippy', 'formatting'):
+            self.assertEqual(landed.stdout.count('pass  ' + stage), 2)
+        self.assertEqual(self.main_log(), ['change', 'other', 'base'])
+        self.assertEqual(self.queued(), [])
+
+    def test_connection_reset_retries_and_lands_without_rechecking(self):
+        landed, pushes = self.push_errors([dict(stderr='fatal: unable to access origin: Recv failure: Connection reset by peer')])
+        self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
+        self.assertEqual(pushes, [pushes[0], pushes[0]])
+        for stage in ('workspace build', 'Clippy', 'formatting'):
+            self.assertEqual(landed.stdout.count('pass  ' + stage), 1)
+        self.assertEqual(self.main_log(), ['change', 'base'])
+
+    def test_ambiguous_push_is_landed_when_main_contains_it_as_an_ancestor(self):
+        landed, pushes = self.push_errors([dict(stderr='fatal: HTTP 502', accept=True, advance=True)])
+        self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
+        self.assertEqual(len(pushes), 1)
+        self.assertEqual(self.main_log(), ['other', 'change', 'base'])
+        [row] = [json.loads(line) for line in (self.lane / '.git/hirsel-landings.jsonl').read_text().splitlines()]
+        self.assertEqual(row['landed'], self.git(self.origin, 'rev-parse', 'main^').strip())
+
+    def test_failed_fetch_cannot_confirm_or_retry_an_ambiguous_push(self):
+        refused, pushes = self.push_errors([dict(stderr='fatal: HTTP 500', fetch_error='connection reset')])
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertEqual(len(pushes), 1)
+        self.assertIn('cannot confirm failed push', refused.stdout)
+        self.assertEqual(self.main_log(), ['base'])
+        self.assertFalse((self.lane / '.git/hirsel-landings.jsonl').exists())
+
+    def test_http_4xx_and_hook_failures_do_not_retry_even_with_transport_errors(self):
+        for error in ('fatal: The requested URL returned error: 403\nRecv failure: Connection reset by peer',
+                      'remote: HTTP 500\n! [remote rejected] HEAD -> main (pre-receive hook declined)'):
+            with self.subTest(error=error):
+                (self.top / 'pushes').unlink(missing_ok=True)
+                refused, pushes = self.push_errors([dict(stderr=error)])
+                self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+                self.assertEqual(len(pushes), 1)
+                self.assertEqual(self.main_log(), ['base'])
+                self.assertEqual(self.queued(), [])
 
     def recording_remote(self):
         checks = self.top / 'checks'

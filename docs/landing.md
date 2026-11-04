@@ -77,11 +77,21 @@ commit: a source edit followed by its revert still requires checks.
 Every other retry checks its rebased tree. There is no third-attempt exception,
 no inherited lint environment flag and no attempt limit. Losing a push race waits a
 random duration in `[0, min(30, 2**attempt)]` seconds, then fetches and
-rebases again. Non-race push errors stop with the error. This is the full
+rebases again. HTTP 5xx and connection failures retry the exact checked SHA
+up to three pushes while the fetched remote base is unchanged. After each
+failure, land fetches main and records completion only if main contains the
+proposed SHA, including as an ancestor. A failed fetch refuses the retry;
+it never uses the cached remote ref as proof. If main moved without the SHA,
+the existing rebase and checks path handles it, including row-only reuse above.
+Retries wait with full jitter capped at 30 then 60 seconds and fetch again
+after waiting. Queue ownership, live batch members and the checked worktree
+are verified before each push. HTTP 4xx and hook failures stop; rejected
+non-fast-forward pushes use the existing main-moved path. Other push errors
+stop with the error. This is the full
 jitter algorithm from
 [aws-arch-backoff-simulator](https://github.com/aws-samples/aws-arch-backoff-simulator/blob/master/src/backoff_simulator.py#L40),
-lines 24–25 and 40–43, with a one-second base and a 30-second cap. The
-exponent is bounded before calculation because the number of retries is
+lines 24–25 and 40–43. Main-moved retries use a one-second base and a
+30-second cap. Their exponent is bounded before calculation because the number of retries is
 unbounded. The lane retains its FIFO place during this wait; the short metadata
 lock is released. External writers that do not use the queue can still
 cause a rejected push.
@@ -219,6 +229,9 @@ by an older land is batched and later finds nothing to land.
 Further cases cover
 22 rejected attempts, a red retry in each aggregate, worktree/HEAD edits,
 legacy lint-pass environment variables and an empty build query.
+Fake push responses cover a 500 then success, persistent 500s, connection
+resets, ambiguous completion with main equal to or descending from the pushed
+SHA, failed reconciliation fetches, moved main and permanent 4xx/hook errors.
 
 Only the test harness removes the randomized wait. Barrier waits and child
 processes have bounded deadlines so a broken retry cannot hang the suite.

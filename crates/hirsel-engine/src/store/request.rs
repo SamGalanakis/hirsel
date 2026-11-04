@@ -240,6 +240,14 @@ impl hirsel_validate::VerifierRows for RequestVerifierRows {
     ) -> Result<Option<Arc<dyn Send + Sync>>, hirsel_validate::FactRefusal> {
         let mut bytes = metadata
             .checked_add(
+                crate::runtime::ProductArchive::checked_import_charge(
+                    archive.reference(),
+                    archive.backing(),
+                )
+                .map_err(|_| hirsel_validate::FactRefusal)?,
+            )
+            .ok_or(hirsel_validate::FactRefusal)?
+            .checked_add(
                 archive
                     .frozen_binding_bytes()
                     .ok_or(hirsel_validate::FactRefusal)?,
@@ -1242,6 +1250,58 @@ mod tests {
         }
         drop(rows);
         assert_eq!(admission.used.load(Ordering::Acquire), 0);
+
+        // A selected store may return a small archive slice of a larger
+        // backing. Retention owns that whole allocation, not only its range.
+        let records = hirsel_product_codec::TypeRecords::new(
+            hirsel_types::TypeInterner::new(None),
+            Arc::new(hirsel_artifact_store::Memory::default()),
+        );
+        let definition = hirsel_tir::Definition {
+            inferred_unique: Default::default(),
+            caller_bodies: vec![],
+            protocol_associations: vec![],
+            types: Arc::from([]),
+            path: hirsel_syntax::DefId::intern(&hirsel_syntax::DefPath::core("retained-frame")),
+            signature_hash: ContentHash::default(),
+            bodies: vec![],
+            entry: hirsel_tir::BodyId(0),
+            contracts: vec![],
+        };
+        let encoded = records.encode_tir(&definition, |_| None).unwrap();
+        let reference = hirsel_product_codec::CheckedTir::DOMAIN
+            .reference(&encoded)
+            .unwrap();
+        let archive = |size| {
+            let mut backing = vec![0; size];
+            backing[100..100 + encoded.len()].copy_from_slice(&encoded);
+            hirsel_product_codec::CheckedTir::open(
+                Bytes::from(backing).range(100, encoded.len(), 1).unwrap(),
+                reference,
+                records.clone(),
+                |_, _| None,
+            )
+            .unwrap()
+            .frozen_bindings()
+            .unwrap()
+        };
+        let rows = RequestVerifierRows {
+            backend: Arc::new(NoneStore),
+            admission: admission.clone(),
+            rows: Mutex::new(BTreeMap::new()),
+            metadata: 0,
+        };
+        let retained = rows
+            .retain_replay(&archive(8 << 10), None, 0)
+            .unwrap()
+            .unwrap();
+        assert!(admission.used.load(Ordering::Acquire) >= 8 << 10);
+        drop(retained);
+        assert_eq!(admission.used.load(Ordering::Acquire), 0);
+        assert!(rows.retain_replay(&archive(128 << 10), None, 0).is_err());
+        assert!(admission.exhausted.load(Ordering::Acquire));
+        assert_eq!(admission.used.load(Ordering::Acquire), 0);
+        drop(rows);
         drop(admission);
         assert_eq!(budget.reserved(), 0);
     }

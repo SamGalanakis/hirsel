@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import tempfile
 import time
@@ -114,6 +115,53 @@ class Capped(unittest.TestCase):
             self.assertEqual(capped.main(), 2)
         inside.assert_not_called()
         self.assertIn('width 4 exceeds 2 granted CPUs', stderr.getvalue())
+
+    def test_startup_training_fits_the_inherited_grant_and_keeps_pool_work(self):
+        spec = importlib.util.spec_from_file_location('startup_order', ROOT / 'tools/buck2/startup_order.py')
+        startup = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(startup)
+        arguments = ['startup_order.py', '--capped', str(CAPPED)]
+        for name in ('hirsel', 'products', 'llvm', 'kit', 'linker', 'glibc-floor',
+                     'runtime-auditor', 'valgrind', 'private-native-inputs', 'archives', 'source', 'output'):
+            arguments += ['--' + name, str(self.root / name)]
+        # Hand sums of doubled consecutive jobs beginning at 21.
+        for requested, cpus, workers, total in [(4, 2, 2, b'86\n'), (4, 1, 1, b'42\n'),
+                                                (4, 3, 3, b'132\n'), (4, 4, 4, b'180\n'),
+                                                (1, 4, 1, b'42\n')]:
+            builds, traces = [], []
+
+            def run(command, environment, directory, stderr=None):
+                jobs = int(environment['HIRSEL_JOBS'])
+                self.assertEqual(jobs, min(requested, cpus))
+                self.assertLessEqual(capped.requested_width(list(map(str, command)), environment),
+                                     capped.granted_cpus(jobs))
+                if command[0] == 'python3':
+                    return str(directory / 'llvm').encode()
+                if 'build' in command:
+                    builds.append(Path(command[-1]).name)
+                    return b''
+                grant = json.loads(command[command.index('--hirsel-grants') + 1])
+                shape = command[-3]
+                traces.append(shape)
+                if shape == 'pool':
+                    self.assertEqual(command[-2], str(workers))
+                    self.assertEqual(grant['io']['cpu']['max_workers'], workers)
+                    return total
+                return b'42\n'
+
+            with self.subTest(requested=requested, cpus=cpus), \
+                    patch.object(startup, 'run', side_effect=run), \
+                    patch.object(startup, 'symbols', return_value=[]), \
+                    patch.object(startup, 'demangle', return_value=[]), \
+                    patch.object(runpy, 'run_path', return_value=vars(capped)), \
+                    patch.object(capped.os, 'sched_getaffinity', return_value=set(range(cpus))), \
+                    patch.object(capped, 'own_cgroup', return_value=None), \
+                    patch.dict(os.environ, {'HIRSEL_JOBS': str(requested)}), \
+                    patch.object(startup.sys, 'argv', arguments), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                startup.main()
+                self.assertEqual(builds, ['serial', 'pool'])
+                self.assertEqual(traces, ['serial', 'pool'])
 
     def test_an_unavailable_python_executable_keeps_the_capped_scope(self):
         copied = self.root / 'capped'

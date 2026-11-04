@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -83,13 +84,20 @@ def main():
     for name in tools:
         parser.add_argument("--" + name, required=True, type=lambda p: Path(p).resolve())
     args = parser.parse_args()
+    capped = runpy.run_path(str(args.capped))
+    jobs = int(capped["granted_cpus"](int(os.environ.get("HIRSEL_JOBS") or capped["DEFAULT_JOBS"])))
+    if jobs < 1:
+        raise RuntimeError("startup_order requires at least one granted CPU")
+    # Keep the original training bound while fitting narrower action grants.
+    pool_width = min(4, jobs)
+    print(f"startup_order: jobs={jobs}, pool width={pool_width}", file=sys.stderr, flush=True)
     environment = dict(
         os.environ, LD_LIBRARY_PATH=str(args.llvm / "lib"),
         LLVM_SYS_231_PREFIX=str(args.llvm), HIRSEL_LINK_KIT=str(args.kit),
         HIRSEL_GLIBC_FLOOR=str(args.glibc_floor), HIRSEL_CAPTURE_LINKER=str(args.linker),
         HIRSEL_AUDITOR_PACKAGE=str(args.runtime_auditor),
         HIRSEL_RUNTIME_ARCHIVES=str(args.archives), HIRSEL_PRODUCTS=str(args.products),
-        HIRSEL_JOBS="4", HIRSEL_MEMORY_LIMIT="2G", HIRSEL_DAEMON="off",
+        HIRSEL_JOBS=str(jobs), HIRSEL_MEMORY_LIMIT="2G", HIRSEL_DAEMON="off",
         HIRSEL_RESULTS="none@1", VALGRIND_LIB=str(args.valgrind / "libexec/valgrind"),
         HIRSEL_RT_WORKERS="1",
     )
@@ -105,7 +113,7 @@ def main():
         environment["LLVM_SYS_231_PREFIX"] = str(args.llvm)
         environment["LD_LIBRARY_PATH"] = str(args.llvm / "lib")
         environment["XDG_CACHE_HOME"] = str(directory / "cache")
-        for shape, width in [("serial", 1), ("pool", 4)]:
+        for shape, width in [("serial", 1), ("pool", pool_width)]:
             binary = directory / shape
             started = time.monotonic()
             print(f"startup_order: building {shape} (570 s timeout)", file=sys.stderr, flush=True)
@@ -122,7 +130,7 @@ def main():
             }
             if shape == "pool":
                 grants["io"]["cpu"] = {
-                    "provider": "cpu.scoped@1", "max_workers": 4, "max_domains": 1,
+                    "provider": "cpu.scoped@1", "max_workers": width, "max_domains": 1,
                     "max_physical_bytes": 268435456, "max_batch_bytes": 8388608,
                 }
             trace = directory / (shape + ".trace")
@@ -133,7 +141,8 @@ def main():
                      "--detailed-counts=no", binary, "--hirsel-grants", json.dumps(grants),
                      shape, str(width), "21"], environment, directory, stderr=log,
                 )
-            expected = b"42\n" if shape == "serial" else b"180\n"
+            # One job per worker, doubling 21, 22, ... in input order.
+            expected = b"42\n" if shape == "serial" else f"{width * (41 + width)}\n".encode()
             if output != expected:
                 raise RuntimeError(f"{shape} startup fixture returned {output!r}")
             for name in trace_symbols(trace, rows):

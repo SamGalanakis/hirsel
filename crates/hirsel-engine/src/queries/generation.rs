@@ -38,6 +38,20 @@ pub struct GeneratedSource {
     pub site: Span,
 }
 
+/// A generator consumes its declared header, independently of the private
+/// result-uniqueness proof that checking its generated body will publish.
+pub(super) fn declared_header_read(
+    types: &hirsel_types::TypeInterner,
+    signature: &hirsel_types::Signature,
+) -> Result<ContentHash, QueryError> {
+    memos::declared_signature_value(types, signature).ok_or_else(|| {
+        QueryError::Operational(hirsel_types::OperationalFailure {
+            operation: "generated declaration reads".into(),
+            message: "cannot encode declared signature".into(),
+        })
+    })
+}
+
 /// The `comptime e` body of a generated declaration.
 pub(crate) fn generator(syntax: &ItemSyntax) -> Option<ExprId> {
     match syntax.item.kind {
@@ -407,10 +421,10 @@ impl QueryEngine {
             .reads
             .signatures
             .extend(signature.dependencies.clone());
-        reads.reads.signatures.push(SignatureDependency {
-            definition: DefId::intern(definition),
-            fingerprint: signature.value.fingerprint,
-        });
+        reads.observed.merged.record(
+            ReadKey::DeclaredSignature(DefId::intern(definition)),
+            declared_header_read(&self.types, &signature.value)?,
+        );
         if self.s1.enter(definition.clone(), site) == Entered::Settled {
             // Another worker finished it: its entry is in the memo, or this
             // stack generates it again.
@@ -572,14 +586,15 @@ impl QueryEngine {
             .span;
         let mut generation_detail = product.detail.clone();
         let mut generation_signatures = signature.dependencies.clone();
-        generation_signatures.push(SignatureDependency {
-            definition: DefId::intern(definition),
-            fingerprint: signature.value.fingerprint,
-        });
+
         generation_signatures.append(&mut generation_detail.signatures);
         generation_detail.signatures = generation_signatures;
         if let Ok(text) = &product.text {
-            let observed = Observed::inheriting(Some(&product.reads));
+            let mut observed = Observed::inheriting(Some(&product.reads));
+            observed.merged.record(
+                ReadKey::DeclaredSignature(DefId::intern(definition)),
+                declared_header_read(&self.types, &signature.value)?,
+            );
             if let Ok(reads) = self.typed_reads(definition, &generation_detail, &observed) {
                 self.store_generation(
                     definition,
@@ -609,6 +624,10 @@ impl QueryEngine {
             reads: generation_detail,
             observed: Observed::inheriting(Some(&product.reads)),
         };
+        reads.observed.merged.record(
+            ReadKey::DeclaredSignature(DefId::intern(definition)),
+            declared_header_read(&self.types, &signature.value)?,
+        );
         reads.observed.products = product.products;
         self.execution_stack.push(ReadsBuilder::new());
         let result = self

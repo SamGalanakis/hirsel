@@ -424,6 +424,7 @@ fn frozen_frontier_matches_serial_private_edits_and_tir() {
                                 .installed
                                 .front
                                 .memo_snapshot()
+                                .unwrap()
                                 .into_iter()
                                 .find_map(|(key, reads)| (key
                                     == hirsel_engine::memo::MemoKey::new(

@@ -46,6 +46,33 @@ pub(crate) struct ReadPool {
     charged_bytes: u64,
 }
 impl ReadPool {
+    /// The caller owns this dictionary's retention partition. Arrays retain
+    /// their refundable leases independently; unused rows can now return the
+    /// dictionary's original row and B-tree debits as well.
+    pub(crate) fn reclaim(&mut self) -> u64 {
+        let tree_bytes = |len| {
+            let mut weight = crate::NativeMetadataWeight::default();
+            if len != 0 {
+                weight.tree::<RowRef, ()>(len);
+            }
+            weight.bytes()
+        };
+        let before = tree_bytes(self.rows.len());
+        let mut reclaimed = 0;
+        self.rows.retain(|row| {
+            if Arc::strong_count(&row.0) == 1 {
+                reclaimed += row.0._allowance.bytes();
+                false
+            } else {
+                true
+            }
+        });
+        if self.rows.is_empty() {
+            // Removing the final key can retain an empty B-tree root.
+            self.rows = BTreeSet::new();
+        }
+        reclaimed + before - tree_bytes(self.rows.len())
+    }
     pub(crate) fn charged_bytes(&self) -> u64 {
         self.charged_bytes
     }
@@ -507,8 +534,17 @@ mod tests {
         drop(receipt);
         assert_eq!(*remaining.lock().unwrap(), after);
         assert_eq!(held, reads);
+        assert_eq!(pool.reclaim(), 0, "a held receipt still owns every row");
         drop(held);
         assert_eq!(*remaining.lock().unwrap(), after + array_bytes);
+        let reclaimed = pool.reclaim();
+        *remaining.lock().unwrap() += reclaimed;
+        assert_eq!(
+            *remaining.lock().unwrap(),
+            before,
+            "the last reader and dictionary eviction return the entire original debit"
+        );
+        assert_eq!(pool.reclaim(), 0, "reclamation refunds each row only once");
         drop(pool);
         drop(allowance);
         assert_eq!(budget.reserved(), 0);

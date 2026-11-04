@@ -24,6 +24,7 @@ struct Input {
     site: Span,
     instance_reads: Reads,
     checked_prefix: Vec<SignatureDependency>,
+    declared_header: ContentHash,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Stored {
@@ -201,6 +202,10 @@ impl FrontRegistrationQueries {
                 memos::optional(Some(input.implementation)),
             );
             source.merge(&input.instance_reads);
+            source.record(
+                ReadKey::DeclaredSignature(input.definition),
+                input.declared_header,
+            );
             let mut dependencies = Vec::new();
             let text = if source.depth.borrow().limit() == 0 {
                 Err(source.overflow(input.site))
@@ -460,6 +465,8 @@ impl FrontRegistrationQueries {
         let reads = evidence::current_reads(reads, acceptance.as_ref())?;
         if definition != input.definition
             || text.is_err()
+            || reads.get(&ReadKey::DeclaredSignature(input.definition))
+                != Some(input.declared_header)
             || reads
                 .first_changed(|read| self.observe(input, read))
                 .is_some()
@@ -717,11 +724,8 @@ impl QueryEngine {
             // Generator declarations are absent from the ordinary-body front.
             // Capture their original header requests here, before workers run.
             let signature = self.signature_output(definition)?;
-            let prefix_len = signature
-                .dependencies
-                .len()
-                .checked_add(1)
-                .ok_or_else(refused)?;
+            let prefix_len = signature.dependencies.len();
+            let declared_header = generation::declared_header_read(&self.types, &signature.value)?;
             required = required
                 .checked_add(
                     prefix_len
@@ -734,10 +738,7 @@ impl QueryEngine {
             }
             let mut checked_prefix = Vec::with_capacity(prefix_len);
             checked_prefix.extend_from_slice(&signature.dependencies);
-            checked_prefix.push(SignatureDependency {
-                definition: DefId::intern(definition),
-                fingerprint: signature.value.fingerprint,
-            });
+
             let instance_reads = self.front_instance_reads(definition)?;
             for (_, bytes) in instance_reads.allocations() {
                 required = required.checked_add(bytes as u64).ok_or_else(refused)?;
@@ -755,6 +756,7 @@ impl QueryEngine {
                     site: syntax.item.name_span,
                     instance_reads,
                     checked_prefix,
+                    declared_header,
                 },
             );
         }

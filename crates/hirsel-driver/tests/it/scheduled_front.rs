@@ -46,6 +46,32 @@ pub(super) fn synthetic_fixture(
     imported_fixture(&store, address, action, reference)
 }
 
+struct EvictCompact(QueryId, MemoryWeight);
+impl QueryFactory for EvictCompact {
+    fn create(&self, _: QueryId) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference> {
+        Ok(Box::new(EvictCompact(self.0, self.1)))
+    }
+}
+impl QueryTask for EvictCompact {
+    fn id(&self) -> QueryId {
+        self.0
+    }
+    fn weight(&self) -> MemoryWeight {
+        self.1
+    }
+    fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
+        assert!(cx.evict_body());
+        QueryPoll::Complete(synthetic_fixture(
+            self.0.address,
+            hirsel_engine::store::Action(self.0.address.0),
+            Domain {
+                kind: 0x281,
+                schema: 1,
+            },
+            b"evicted",
+        ))
+    }
+}
 #[test]
 fn admitted_real_front_tasks_match_scalar_modes_and_complete_reads() {
     hirsel_engine::with_compiler_stack(|| {
@@ -270,7 +296,7 @@ fn admitted_lower_saved_work_and_native_metadata_survive_dependency_suspension()
                     assert_eq!(front.recompute_count(path, kind), 1);
                 }
             }
-            let phase_rows = front.memo_snapshot();
+            let phase_rows = front.memo_snapshot().unwrap();
             for path in &definitions {
                 for kind in [QueryKind::Resolve, QueryKind::Check, QueryKind::Modes] {
                     assert!(
@@ -1382,35 +1408,6 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         };
         // The same pressure law applies to compact P owners, including a
         // detached checked-only consumer that does not hold a ProductRef.
-        struct EvictCompact(QueryId, MemoryWeight);
-        impl QueryFactory for EvictCompact {
-            fn create(
-                &self,
-                _: QueryId,
-            ) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference> {
-                Ok(Box::new(EvictCompact(self.0, self.1)))
-            }
-        }
-        impl QueryTask for EvictCompact {
-            fn id(&self) -> QueryId {
-                self.0
-            }
-            fn weight(&self) -> MemoryWeight {
-                self.1
-            }
-            fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
-                assert!(cx.evict_body());
-                QueryPoll::Complete(synthetic_fixture(
-                    self.0.address,
-                    hirsel_engine::store::Action(self.0.address.0),
-                    Domain {
-                        kind: 0x281,
-                        schema: 1,
-                    },
-                    b"evicted",
-                ))
-            }
-        }
         let mut single_compact_limit = 8 << 20;
         let mut compact_limit = 8 << 20;
         for mode in 0..5 {
@@ -1837,5 +1834,90 @@ fn admitted_front_actual_output_debit_refuses_insufficient_producer_allowance() 
             drop(front);
             assert_eq!(budget.reserved(), 0);
         }
+    });
+}
+
+#[test]
+fn archived_front_releases_observation_arrays_when_their_readers_finish() {
+    with_compiler_stack(|| {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("main.hir");
+        std::fs::write(&path, "pub fn main()->u8{1u8}\n").unwrap();
+        let mut program = COMPILER
+            .with_config(CompileConfig {
+                store: Arc::new(MemStore::default().with_installed_products()),
+                hold_bytes: 0,
+                ..Default::default()
+            })
+            .with_owned_engines()
+            .load_program(&path)
+            .unwrap();
+        let budget = ProcessBudget::new(1 << 30);
+        let weight = MemoryWeight {
+            retained: 1 << 20,
+            scratch: 8 << 20,
+            stack: 0,
+        };
+        let front = program
+            .engine
+            .front_body_queries(
+                &[program.entry.clone()],
+                weight,
+                budget.reserve(8 << 20).unwrap(),
+                errors(),
+            )
+            .unwrap();
+        front.compact_retained_reads();
+        let mut runtime = AdmittedRuntime::with_query_capacity(
+            hirsel_intern::jobs::Jobs::ONE,
+            budget.reserve(512 << 20).unwrap(),
+            errors(),
+            2,
+        )
+        .unwrap();
+        runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
+        let evict = QueryId {
+            kind: 0x281,
+            address: front.query(&program.entry).unwrap().address,
+        };
+        runtime
+            .register(
+                evict.kind,
+                Arc::new(EvictCompact(
+                    evict,
+                    MemoryWeight {
+                        scratch: weight.scratch,
+                        ..Default::default()
+                    },
+                )),
+            )
+            .unwrap();
+        let request = runtime.request(&[front.query(&program.entry).unwrap()]);
+        drop(runtime.wait(request).unwrap());
+        let readers = front.memo_snapshot().unwrap();
+        let expected = readers
+            .iter()
+            .map(|(key, reads)| (*key, reads.observed().copied().collect::<Vec<_>>()))
+            .collect::<Vec<_>>();
+        assert!(!expected.is_empty());
+        let request = runtime.request(&[evict]);
+        drop(runtime.wait(request).unwrap());
+        assert_eq!(runtime.stats().body_evictions, 1);
+        let pinned = front.retained_bytes();
+        drop(readers);
+        assert!(
+            front.retained_bytes() < pinned,
+            "archived entries must release their read arrays after the last reader finishes"
+        );
+        let reopened = front.memo_snapshot().unwrap();
+        assert_eq!(
+            reopened
+                .iter()
+                .map(|(key, reads)| { (*key, reads.observed().copied().collect::<Vec<_>>()) })
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(front.recompute_count(&program.entry, QueryKind::Modes), 1);
+        runtime.shutdown();
     });
 }

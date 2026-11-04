@@ -14,6 +14,7 @@ mod carry;
 mod compact_store;
 pub(in crate::queries) use compact_store::load_publication as load_scheduled_publication;
 mod lint_facts;
+mod observations;
 mod retained;
 use carry::CarryChanges;
 pub use carry::FrontCarry;
@@ -147,7 +148,7 @@ struct ArchivedFront {
     observations: Arc<FrontObservations>,
 }
 struct FrontObservations {
-    memos: Box<[(crate::memo::MemoKey, Arc<Reads>)]>,
+    rows: observations::Rows,
     _backing: Arc<LiveSourceBacking>,
 }
 #[derive(Clone, Copy, Debug)]
@@ -614,25 +615,43 @@ impl FrontBodyQueries {
         if Reads::tracked_by(reads, &self.retention) {
             return Some(reads.clone());
         }
-        let mut pool = pool.lock().unwrap_or_else(|e| e.into_inner());
-        let charge = pool.required_tracked_bytes(reads)?;
-        if self.make_room(cx, charge).is_none() {
-            let available = *self.retention.lock().unwrap_or_else(|e| e.into_inner());
-            self.record_refusal("read observations", charge, available);
-            return None;
+        loop {
+            let charge = pool
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .required_tracked_bytes(reads)?;
+            if self.make_room(cx, charge).is_none() {
+                let available = *self.retention.lock().unwrap_or_else(|e| e.into_inner());
+                self.record_refusal("read observations", charge, available);
+                return None;
+            }
+            let mut pool = pool.lock().unwrap_or_else(|e| e.into_inner());
+            let charge = pool.required_tracked_bytes(reads)?;
+            let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
+            if *remaining < charge {
+                continue;
+            }
+            let available = self._allowance.allowance.available_bytes();
+            let mut allowance = self._allowance.allowance.take(available)?;
+            let retained = Arc::new(pool.intern_tracked(
+                reads,
+                &mut allowance,
+                &mut remaining,
+                self.retention.clone(),
+            )?);
+            Reads::bind_tracked_owner(&retained);
+            return Some(retained);
         }
-        let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
-        let available = self._allowance.allowance.available_bytes();
-        let mut allowance = self._allowance.allowance.take(available)?;
-        let retained = Arc::new(pool.intern_tracked(
-            reads,
-            &mut allowance,
-            &mut remaining,
-            self.retention.clone(),
-        )?);
-        Reads::bind_tracked_owner(&retained);
-        Some(retained)
     }
+    fn reclaim_reads(&self) -> bool {
+        let Some(pool) = self.read_pool.get() else {
+            return false;
+        };
+        let reclaimed = pool.lock().unwrap_or_else(|e| e.into_inner()).reclaim();
+        *self.retention.lock().unwrap_or_else(|e| e.into_inner()) += reclaimed;
+        reclaimed != 0
+    }
+
     fn pool_completion_reads(
         &self,
         cx: &mut dyn QueryContext,
@@ -772,6 +791,9 @@ impl FrontBodyQueries {
     }
     fn make_room(&self, cx: &mut dyn QueryContext, charge: u64) -> Option<()> {
         while *self.retention.lock().unwrap_or_else(|e| e.into_inner()) < charge {
+            if self.reclaim_reads() {
+                continue;
+            }
             if self
                 .handoff
                 .lock()
@@ -821,6 +843,8 @@ impl FrontBodyQueries {
             return false;
         };
         slots.insert(key, FrontSlot::Archived(archived));
+        drop(slots);
+        self.reclaim_reads();
         true
     }
     pub fn memory_refusal(&self) -> Option<FrontMemoryRefusal> {
@@ -1247,14 +1271,14 @@ impl FrontBodyQueries {
         {
             match slot {
                 FrontSlot::Archived(archived) => {
-                    keys.extend(archived.observations.memos.iter().map(|(key, _)| *key));
+                    keys.extend(archived.observations.rows.keys());
                 }
                 FrontSlot::Live {
                     outcome,
                     observations,
                 } => {
                     if let Some(observations) = observations {
-                        keys.extend(observations.memos.iter().map(|(key, _)| *key));
+                        keys.extend(observations.rows.keys());
                     }
                     keys.extend(outcome.memos.iter().map(|(key, _)| *key));
                 }
@@ -1262,7 +1286,7 @@ impl FrontBodyQueries {
         }
         keys.into_iter().collect()
     }
-    pub fn memo_snapshot(&self) -> Vec<(crate::memo::MemoKey, Arc<Reads>)> {
+    pub fn memo_snapshot(&self) -> Option<Vec<(crate::memo::MemoKey, Arc<Reads>)>> {
         let mut rows = BTreeMap::new();
         for slot in self
             .slots
@@ -1272,20 +1296,20 @@ impl FrontBodyQueries {
         {
             match slot {
                 FrontSlot::Archived(archived) => {
-                    rows.extend(archived.observations.memos.iter().cloned());
+                    rows.extend(archived.observations.load(&*self.store)?);
                 }
                 FrontSlot::Live {
                     outcome,
                     observations,
                 } => {
                     if let Some(observations) = observations {
-                        rows.extend(observations.memos.iter().cloned());
+                        rows.extend(observations.load(&*self.store)?);
                     }
                     rows.extend(outcome.memos.iter().cloned());
                 }
             }
         }
-        rows.into_iter().collect()
+        Some(rows.into_iter().collect())
     }
     pub fn work_snapshot(&self) -> Vec<(DefPath, QueryKind, u64)> {
         let mut work = self
@@ -1837,6 +1861,8 @@ impl QueryFactory for Factory {
             return false;
         };
         slots.insert(query.address.0, FrontSlot::Archived(archived));
+        drop(slots);
+        self.0.reclaim_reads();
         true
     }
 

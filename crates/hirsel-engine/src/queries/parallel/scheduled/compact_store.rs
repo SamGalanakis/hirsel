@@ -138,25 +138,7 @@ impl FrontBodyQueries {
         let observations = if let Some(existing) = existing {
             existing
         } else {
-            let mut weight = crate::memo::retained::Weight::default();
-            for (_, reads) in &outcome.memos {
-                weight.reads(reads);
-            }
-            let charge = weight
-                .bytes
-                .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                    FrontObservations,
-                >::uninit(
-                )))?
-                .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                    LiveSourceBacking,
-                >::uninit(
-                )))?;
-            let backing = outcome._backing.split(charge)?;
-            Arc::new(FrontObservations {
-                memos: outcome.memos.clone(),
-                _backing: backing,
-            })
+            self.archive_observations(outcome, scratch)?
         };
         // Optional cache publication never consumes the request's required
         // transport. Missing or evicted provider bytes take the ordinary miss.

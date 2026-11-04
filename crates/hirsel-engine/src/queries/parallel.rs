@@ -328,10 +328,21 @@ impl Worker<'_> {
             done.phase = QueryKind::Check;
             initial.signatures.extend(resolution.dependencies.clone());
             initial.signatures.extend(signature.dependencies.clone());
-            initial.signatures.push(SignatureDependency {
-                definition: hirsel_syntax::DefId::intern(&task.definition),
-                fingerprint: signature.value.fingerprint,
-            });
+            let declared_header = if task.registration.is_some() {
+                match generation::declared_header_read(self.types, &signature.value) {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        done.result = Err(error);
+                        return done;
+                    }
+                }
+            } else {
+                initial.signatures.push(SignatureDependency {
+                    definition: hirsel_syntax::DefId::intern(&task.definition),
+                    fingerprint: signature.value.fingerprint,
+                });
+                None
+            };
             let _timing = timings::phase(Phase::Check);
             if !inference {
                 timings::count(Count::Definitions);
@@ -343,6 +354,11 @@ impl Worker<'_> {
                     // The generator's verifier receipt is acceptance evidence,
                     // checked when the view installs, not a Check input.
                     let mut observed = Observed::default();
+                    if let Some(value) = declared_header {
+                        observed
+                            .merged
+                            .record(ReadKey::DeclaredSignature(owner), value);
+                    }
                     for &(key, value) in task.registration.iter().flat_map(|r| r.reads.observed()) {
                         if private_unique::inherited_registration_read(&key) {
                             observed.merged.record(key, value);

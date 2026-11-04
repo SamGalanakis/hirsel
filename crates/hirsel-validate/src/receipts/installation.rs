@@ -243,6 +243,7 @@ impl Installation {
             Mutex::default(),
             Arc::new(()),
             Mutex::default(),
+            Mutex::default(),
         )))
     }
 }

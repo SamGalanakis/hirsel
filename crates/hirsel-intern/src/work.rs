@@ -121,6 +121,8 @@ pub enum Counter {
     SealedReadComparisons,
     ExecutionValidationRequests,
     ExecutionValidationRefusals,
+    /// Optional verifier facts removed under the existing request allowance.
+    VerifierFactEvictions,
     /// Cached dependency-node inspections.
     CacheValidationRows,
 }

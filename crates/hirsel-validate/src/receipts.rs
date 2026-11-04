@@ -426,6 +426,7 @@ pub struct VerifierCache(
     Mutex<Option<Arc<hirsel_product_codec::TypeRecords>>>,
     Arc<()>,
     Mutex<Vec<Arc<DecodedFact>>>,
+    Mutex<Vec<Weak<crate::views::EnvironmentFacts>>>,
 );
 impl std::fmt::Debug for VerifierCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -438,6 +439,7 @@ impl Default for VerifierCache {
             Backend::Memory(Arc::default(), Arc::default()),
             Mutex::default(),
             Arc::new(()),
+            Mutex::default(),
             Mutex::default(),
         )
     }
@@ -452,6 +454,7 @@ impl VerifierCache {
                 Backend::Memory(rows.clone(), contents.clone()),
                 Mutex::default(),
                 Arc::new(()),
+                Mutex::default(),
                 Mutex::default(),
             )),
             Backend::Directory(store) => Arc::new(Self::directory_store(
@@ -479,6 +482,7 @@ impl VerifierCache {
             Mutex::default(),
             Arc::new(()),
             Mutex::default(),
+            Mutex::default(),
         )
     }
     /// Keep rows, receipts and type records in the host's bounded storage.
@@ -487,6 +491,7 @@ impl VerifierCache {
             Backend::Hosted(rows.clone(), rows),
             Mutex::default(),
             Arc::new(()),
+            Mutex::default(),
             Mutex::default(),
         )
     }
@@ -510,9 +515,37 @@ impl VerifierCache {
             Mutex::default(),
             Arc::new(()),
             Mutex::default(),
+            Mutex::default(),
         ))
     }
 
+    fn remember(&self, stamp: &crate::views::EnvironmentStamp) {
+        let mut owners = self.4.lock().unwrap();
+        owners.retain(|owner| owner.strong_count() != 0);
+        let owner = Arc::downgrade(&stamp.facts);
+        if !owners.iter().any(|seen| seen.ptr_eq(&owner)) {
+            owners.push(owner);
+        }
+    }
+    /// Reclaim optional local facts before the host refuses its existing
+    /// request allowance. Durable receipts and original issuance stay intact.
+    /// Active callers retain their own leases until they finish.
+    pub fn evict_facts(&self) {
+        let decoded = std::mem::take(&mut *self.3.lock().unwrap());
+        let mut count = decoded.len() as u64;
+        drop(decoded);
+        let owners = std::mem::take(&mut *self.4.lock().unwrap());
+        for owner in owners.into_iter().filter_map(|owner| owner.upgrade()) {
+            let reads = std::mem::take(&mut *owner.reads.lock().unwrap());
+            let execution = std::mem::take(&mut *owner.execution.lock().unwrap());
+            count += (reads.len() + execution.len()) as u64;
+        }
+        hirsel_intern::work::count_by(hirsel_intern::work::Counter::VerifierFactEvictions, count);
+        hirsel_intern::timings::count_by(
+            hirsel_intern::timings::Count::VerifierFactEvictions,
+            count,
+        );
+    }
     fn retain_fact(&self, bytes: u64) -> Result<Option<Arc<dyn Send + Sync>>, FactRefusal> {
         match &self.0 {
             Backend::Transport(_, rows, _) | Backend::Hosted(rows, _) => rows.retain_fact(bytes),
@@ -538,12 +571,12 @@ impl VerifierCache {
         if !Arc::ptr_eq(&stamp.types, types) {
             return Ok(false);
         }
-        if let Some((holds, _)) = stamp.reads.lock().unwrap().get(read) {
+        if let Some((holds, _)) = stamp.facts.reads.lock().unwrap().get(read) {
             return Ok(*holds);
         }
         let observed = crate::input::observe_read(Some(types), read, signatures.lookup());
         let lease = self.retain_fact((size_of::<VRead>() + 256) as u64)?;
-        let mut reads = stamp.reads.lock().unwrap();
+        let mut reads = stamp.facts.reads.lock().unwrap();
         if let Some((holds, _)) = reads.get(read) {
             return Ok(*holds);
         }
@@ -551,6 +584,9 @@ impl VerifierCache {
         hirsel_intern::timings::count(hirsel_intern::timings::Count::SealedReadComparisons);
         let holds = crate::input::compare_read(read, observed.as_ref());
         if let Some(lease) = lease {
+            if reads.is_empty() {
+                self.remember(stamp);
+            }
             reads.insert(read.clone(), (holds, lease));
         }
         Ok(holds)
@@ -871,6 +907,7 @@ impl VerifierCache {
         }) {
             return Some(fact.replay.clone());
         }
+        drop(resident);
         hirsel_intern::work::count(hirsel_intern::work::Counter::ReplayArtifactDecodes);
         hirsel_intern::timings::count(hirsel_intern::timings::Count::ReplayArtifactDecodes);
         let record: ReplayRecord = self.load(
@@ -911,13 +948,14 @@ impl VerifierCache {
         if identity != Some(accepted.artifact) {
             return None;
         }
-        let replay = Arc::new(ReplayArtifact {
+        let mut replay = ReplayArtifact {
             archive: archive.frozen_bindings()?,
             overlay,
             identity: accepted.artifact,
             policy: accepted.policy,
             owners,
-        });
+            _lease: None,
+        };
         let bindings = replay
             .owners
             .iter()
@@ -937,6 +975,8 @@ impl VerifierCache {
                 .ok()?,
             Backend::Directory(_) | Backend::Registered(..) => None,
         };
+        replay._lease = lease.clone();
+        let replay = Arc::new(replay);
         if let Some(lease) = lease {
             self.3.lock().unwrap().push(Arc::new(DecodedFact {
                 accepted: accepted.clone(),
@@ -1042,6 +1082,7 @@ impl VerifierCache {
                     .flat_map(|(_, input)| {
                         input
                             .stamp()
+                            .facts
                             .execution
                             .lock()
                             .unwrap()
@@ -1213,7 +1254,11 @@ impl VerifierCache {
             return None;
         }
         for (stamp, fact) in pending {
-            stamp.execution.lock().unwrap().push(fact);
+            let mut execution = stamp.facts.execution.lock().unwrap();
+            if execution.is_empty() {
+                self.remember(stamp);
+            }
+            execution.push(fact);
         }
         let receipt = ExecutionReceipt {
             contexts: contexts.into(),
@@ -1387,6 +1432,7 @@ struct ReplayArtifact {
     identity: ContentHash,
     policy: ContentHash,
     owners: std::collections::BTreeMap<Anchor, (DefPath, u32)>,
+    _lease: Option<Arc<dyn Send + Sync>>,
 }
 const EXECUTION_DOMAIN: Domain = Domain {
     kind: 0x5600_0002,
@@ -1771,7 +1817,14 @@ mod tests {
             hirsel_artifact_store::Memory,
             Mutex<HashMap<ContentHash, hirsel_artifact_store::Reference>>,
             std::sync::atomic::AtomicBool,
+            Arc<std::sync::atomic::AtomicUsize>,
         );
+        struct Lease(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Lease {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         impl hirsel_artifact_store::Contents for Rows {
             fn get_content(
                 &self,
@@ -1792,7 +1845,8 @@ mod tests {
                 if self.2.load(std::sync::atomic::Ordering::Relaxed) {
                     Err(FactRefusal)
                 } else {
-                    Ok(Some(Arc::new(())))
+                    self.3.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Ok(Some(Arc::new(Lease(self.3.clone()))))
                 }
             }
             fn retain_replay(
@@ -1868,6 +1922,7 @@ mod tests {
             );
             assert!(
                 crate::CheckedEnvironment::stamp(&table)
+                    .facts
                     .execution
                     .lock()
                     .unwrap()
@@ -1881,6 +1936,17 @@ mod tests {
                 .is_some(),
             "operational refusal remains retryable"
         );
+        let active = cache
+            .replay_artifact(&original.artifacts[0], session(), |_, _| Some(site))
+            .unwrap();
+        cache.evict_facts();
+        assert_eq!(
+            rows.3.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "eviction preserves the active replay's charge"
+        );
+        drop(active);
+        assert_eq!(rows.3.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -2447,6 +2513,19 @@ mod tests {
             VerifierCache::default()
                 .revalidate_execution(&original, session(), |_, _| Some(site), &environment)
                 .is_none()
+        );
+        let before = work::read(Counter::VerifierFactEvictions);
+        cache.evict_facts();
+        assert!(work::read(Counter::VerifierFactEvictions) > before);
+        let before = work::read(Counter::ReplayArtifactDecodes);
+        assert!(
+            cache
+                .revalidate_execution(&original, session(), |_, _| Some(site), &environment)
+                .is_some()
+        );
+        assert_eq!(
+            work::read(Counter::ReplayArtifactDecodes) - before,
+            decoded.len() as u64
         );
         let next = cache.for_operation(None);
         let before = work::read(Counter::ReplayArtifactDecodes);

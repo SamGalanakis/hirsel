@@ -31,21 +31,29 @@ struct Admission {
     used: AtomicU64,
     exhausted: AtomicBool,
     scratch: OnceLock<Arc<dyn Send + Sync>>,
+    verifier: OnceLock<Weak<hirsel_validate::VerifierCache>>,
 }
 impl Admission {
     fn charge(&self, bytes: u64) -> bool {
-        if self
-            .used
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                used.checked_add(bytes)
-                    .filter(|next| *next <= self.memory.bytes())
-            })
-            .is_err()
-        {
-            self.exhausted.store(true, Ordering::Release);
-            return false;
+        let reserve = || {
+            self.used
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                    used.checked_add(bytes)
+                        .filter(|next| *next <= self.memory.bytes())
+                })
+                .is_ok()
+        };
+        if reserve() {
+            return true;
         }
-        true
+        if let Some(verifier) = self.verifier.get().and_then(Weak::upgrade) {
+            verifier.evict_facts();
+            if reserve() {
+                return true;
+            }
+        }
+        self.exhausted.store(true, Ordering::Release);
+        false
     }
     fn release(&self, bytes: u64) {
         let previous = self.used.fetch_sub(bytes, Ordering::AcqRel);
@@ -82,6 +90,7 @@ impl RequestStore {
                 used: AtomicU64::new(0),
                 exhausted: AtomicBool::new(false),
                 scratch: OnceLock::new(),
+                verifier: OnceLock::new(),
             }),
         )
     }
@@ -101,6 +110,7 @@ impl RequestStore {
             used: AtomicU64::new(0),
             exhausted: AtomicBool::new(false),
             scratch: OnceLock::new(),
+            verifier: OnceLock::new(),
         });
         let backend = Arc::new(scratch::ScratchStore::new(
             backend,
@@ -138,6 +148,10 @@ impl RequestStore {
             Some(verifier) => verifier.with_transport(rows),
             None => Arc::new(hirsel_validate::VerifierCache::hosted(rows)),
         });
+        let _ = request
+            .memory
+            .verifier
+            .set(Arc::downgrade(request.verifier.as_ref().unwrap()));
         Ok(request)
     }
     fn admitted(backend: Arc<dyn ResultStore>, memory: Arc<Admission>) -> Self {
@@ -1224,6 +1238,7 @@ mod tests {
             used: AtomicU64::new(0),
             exhausted: AtomicBool::new(false),
             scratch: OnceLock::new(),
+            verifier: OnceLock::new(),
         });
         let reference = domain().reference(b"verifier-owned content").unwrap();
         let (rows, allocated) = crate::test_alloc::measured(|| {

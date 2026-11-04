@@ -766,6 +766,10 @@ pub struct EnvironmentStamp {
     pub(crate) types: Arc<TypeInterner>,
     pub(crate) identity: Arc<()>,
     pub(crate) verifier: std::sync::Weak<crate::VerifierCache>,
+    pub(crate) facts: Arc<EnvironmentFacts>,
+}
+#[derive(Default)]
+pub(crate) struct EnvironmentFacts {
     pub(crate) execution: std::sync::Mutex<Vec<Arc<crate::receipts::ExecutionFact>>>,
     pub(crate) reads:
         std::sync::Mutex<std::collections::BTreeMap<VRead, (bool, Arc<dyn Send + Sync>)>>,
@@ -778,8 +782,7 @@ impl EnvironmentStamp {
             verifier: store
                 .verifier()
                 .map_or_else(std::sync::Weak::new, Arc::downgrade),
-            execution: Default::default(),
-            reads: Default::default(),
+            facts: Arc::default(),
         }
     }
 }

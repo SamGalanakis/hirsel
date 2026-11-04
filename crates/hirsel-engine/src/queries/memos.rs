@@ -700,6 +700,7 @@ impl QueryEngine {
         self.adopt_completed_headers();
         let mut changes = ChangeSet::default();
         let mut any_names_changed = false;
+        let mut private_body_changed = false;
         for path in paths {
             let mut names_changed = false;
             let id = DefId::intern(&path);
@@ -726,6 +727,18 @@ impl QueryEngine {
                         read(ReadKey::LayoutBody(id));
                         read(ReadKey::Representation(id));
                         read(ReadKey::CitedText(id));
+                        private_body_changed |= self
+                            .adapters
+                            .modes
+                            .as_ref()
+                            .is_some_and(|modes| modes.infers_private_unique())
+                            && self.items.get(&path).is_some_and(|items| {
+                                items.first().is_some_and(|syntax| {
+                                    syntax.item.visibility == hirsel_syntax::Visibility::Private
+                                        && matches!(syntax.item.kind, ItemKind::Function { .. })
+                                })
+                            })
+                            && self.private_body_may_change_signature(id);
                     }
                     if b.header != n.header {
                         if hirsel_types::specialization_parts(&path).is_none() {
@@ -809,6 +822,11 @@ impl QueryEngine {
             self.mark_lookups(&mut changes);
         }
         self.apply_changes(&changes);
+        if private_body_changed {
+            // Declared headers can survive a body edit; their immutable
+            // private-proof producer must capture the new body before demand.
+            self.retire_snapshot();
+        }
     }
 
     /// A name appeared, disappeared or changed kind or visibility. Mark only

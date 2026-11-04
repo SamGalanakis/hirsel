@@ -64,6 +64,26 @@ pub(super) fn registrations_covered(
 }
 
 impl QueryEngine {
+    pub(super) fn private_body_may_change_signature(&self, id: DefId) -> bool {
+        let Some(Ok(signature)) = self.unmarked_signature(id) else {
+            return true;
+        };
+        let SignatureKind::Function(function) = &signature.kind else {
+            return false;
+        };
+        let inert = |ty| match &self.types.row(ty).kind {
+            hirsel_types::TypeKind::Primitive(primitive) => !matches!(
+                primitive,
+                hirsel_types::Primitive::String | hirsel_types::Primitive::Bytes
+            ),
+            hirsel_types::TypeKind::Tuple(fields) => fields.is_empty(),
+            _ => false,
+        };
+        function.parameters.iter().any(|parameter| {
+            parameter.passing == hirsel_syntax::PassingMode::Mut
+                || parameter.passing == hirsel_syntax::PassingMode::Borrow && !inert(parameter.ty)
+        }) || !inert(function.result)
+    }
     /// Lend the host's existing partition to demand inference. Installing the
     /// allowance does not normalize a header or compute private facts.
     pub fn admit_private_inference(&mut self, allowance: crate::runtime::MemoryReservation) {

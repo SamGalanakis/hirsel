@@ -283,11 +283,13 @@ pub enum Count {
     StoreModeMisses,
     /// Source files whose item syntax a header product materialized.
     HeaderSourceFiles,
+    /// Full installed validation tables constructed for registration overlays.
+    RegistrationValidationViews,
 }
 
 impl Count {
     /// Every count, in declaration order.
-    pub const ALL: [Count; 70] = [
+    pub const ALL: [Count; 71] = [
         Count::Definitions,
         Count::Units,
         Count::VRuns,
@@ -358,10 +360,12 @@ impl Count {
         Count::StoreModeHits,
         Count::StoreModeMisses,
         Count::HeaderSourceFiles,
+        Count::RegistrationValidationViews,
     ];
     /// The stable name `--timings` prints.
     pub fn name(self) -> &'static str {
         match self {
+            Count::RegistrationValidationViews => "registration validation views",
             Count::ImageRowsDecoded => "image declaration rows decoded",
             Count::ImageRowsAdopted => "image declaration rows adopted",
             Count::DeclarationSiteReads => "declaration site reads",

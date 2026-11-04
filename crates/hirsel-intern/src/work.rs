@@ -92,6 +92,8 @@ pub enum Counter {
     ContentRelationRows,
     /// Full source-text bytes exposed by SourceFile::text, including repeated access.
     SourceTextBytes,
+    /// Full installed signature tables constructed for registration overlays.
+    RegistrationValidationViews,
     /// Cached dependency-node inspections.
     CacheValidationRows,
 }

@@ -155,6 +155,10 @@ struct ValidationState {
     /// its views (its opaque types' private ones) read on demand.
     installed: BTreeMap<PackageId, Arc<ViewTable>>,
     validated: ValidatedSignatures,
+    /// Full installed tables for materialized owners. The snapshot fixes the
+    /// source, registration and verifier inputs; each overlay still gets its
+    /// own replacement verdicts and every execution receipt is replayed.
+    overlay_bases: Mutex<BTreeMap<PackageId, Arc<ViewTable>>>,
 }
 /// A read-only installed dependency's published universe summaries: its own
 /// universe, which its bodies are validated against, and what importers'
@@ -694,6 +698,7 @@ impl SignatureSnapshot {
                 views,
                 bases,
                 packages,
+                overlay_bases: Mutex::default(),
                 installed: installed_universes,
                 validated,
             }))
@@ -1079,33 +1084,63 @@ impl SignatureSnapshot {
         let mut store =
             ValidatedSignatures::with_cache(self.verifier.clone(), self.verifier_policy);
         if state.installed.contains_key(package) {
-            // An installed universe does not know which verdicts read the
-            // replaced owner: check the replacement against its full table.
-            let visible = self
-                .visible(package)
-                .expect("installed closures are complete");
-            let full = ViewTable::from_views(
-                t,
-                self.definitions()
-                    .into_iter()
-                    .filter(|d| visible.contains(&d.path().0.package))
-                    .filter_map(|d| match self.body_view(package, d)? {
-                        Ok(view) => Some(Ok(View::new(t, view, None))),
-                        Err(cause @ QueryError::Operational(_)) => {
-                            Some(Err(hirsel_validate::ViewRefusal::Unreadable {
-                                definition: d,
-                                cause,
-                            }))
-                        }
-                        Err(_) => None,
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-                &mut store,
-                Some(&state.validated),
-            )?;
+            // An installed summary does not retain reverse readers. Materialize
+            // its full table once in this exact immutable snapshot, then check
+            // each replacement and all verdicts that read it against that table.
+            // A refused construction publishes nothing and remains retryable.
+            let mut bases = state
+                .overlay_bases
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let full = match bases.get(package) {
+                Some(full) => full.clone(),
+                None => {
+                    hirsel_intern::timings::count(
+                        hirsel_intern::timings::Count::RegistrationValidationViews,
+                    );
+                    hirsel_intern::work::count(
+                        hirsel_intern::work::Counter::RegistrationValidationViews,
+                    );
+                    let visible = self
+                        .visible(package)
+                        .expect("installed closures are complete");
+                    let full = Arc::new(ViewTable::from_views(
+                        t,
+                        self.definitions()
+                            .into_iter()
+                            .filter(|d| visible.contains(&d.path().0.package))
+                            .filter_map(|d| match self.body_view(package, d)? {
+                                Ok(view) => Some(Ok(
+                                    if package == &d.path().0.package
+                                        && self.private_view(d).is_some()
+                                    {
+                                        View::new(t, view, None)
+                                    } else {
+                                        self.public_views[&d]
+                                            .get_or_init(|| self.view_of(d, &view, None))
+                                            .clone()
+                                    },
+                                )),
+                                Err(cause @ QueryError::Operational(_)) => {
+                                    Some(Err(hirsel_validate::ViewRefusal::Unreadable {
+                                        definition: d,
+                                        cause,
+                                    }))
+                                }
+                                Err(_) => None,
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                        &mut store,
+                        Some(&state.validated),
+                    )?);
+                    bases.insert(package.clone(), full.clone());
+                    full
+                }
+            };
+            drop(bases);
             return PackageViews::new(
                 t,
-                Arc::new(full),
+                full,
                 [View::new(t, signature, None)],
                 &mut store,
                 Some(&state.validated),
@@ -1528,6 +1563,97 @@ mod tests {
                 .is_some(),
             "incomplete package inputs retain full-world validation"
         );
+    }
+
+    #[test]
+    fn installed_registration_overlays_construct_one_table_per_snapshot_and_package() {
+        use hirsel_intern::work::{self, Counter};
+        let types = TypeInterner::new(None);
+        let rows = [
+            constant(&types, "first", hirsel_types::Primitive::U64),
+            constant(&types, "second", hirsel_types::Primitive::U8),
+        ];
+        let package = rows[0].definition.path().0.package.clone();
+        let build = |rows: &[SignatureRef], installed| {
+            SignatureSnapshot::build(
+                Revision::FIRST,
+                types.clone(),
+                rows.iter().map(|row| (row.definition, Ok(row.clone()))),
+                [],
+                None,
+            )
+            .with_lookup(LookupInput {
+                package_dependencies: BTreeMap::from([(package.clone(), vec![])]),
+                installed,
+                ..Default::default()
+            })
+        };
+        let source = build(&rows, BTreeMap::new());
+        let installed = BTreeMap::from([(
+            package.clone(),
+            source.installed_universe(&package).unwrap(),
+        )]);
+        let snapshot = build(&rows, installed.clone());
+        let before = work::read(Counter::RegistrationValidationViews);
+        for row in &rows {
+            // Distinct registrations and repeated receipt replays see the same
+            // base, but each replacement must retain its own actual input.
+            for primitive in [hirsel_types::Primitive::U16, hirsel_types::Primitive::U32] {
+                let mut replacement = (**row).clone();
+                let SignatureKind::Const { ty, .. } = &mut replacement.kind else {
+                    unreachable!()
+                };
+                *ty = types.intern(Type::with_kind(TypeKind::Primitive(primitive)));
+                let replacement = Arc::new(replacement);
+                let expected = View::new(&types, replacement.clone(), None).digest();
+                for _ in 0..2 {
+                    let views = snapshot
+                        .validation_with(&package, replacement.clone())
+                        .unwrap();
+                    assert_eq!(views.view(row.definition).unwrap().digest(), expected);
+                    let other = &rows[usize::from(row.definition == rows[0].definition)];
+                    assert_eq!(
+                        views.view(other.definition).unwrap().digest(),
+                        View::new(&types, other.clone(), None).digest()
+                    );
+                    assert!(views.universe_errors().1.is_empty());
+                }
+            }
+        }
+        let mut invalid = (*rows[0]).clone();
+        invalid.kind = SignatureKind::Const {
+            ty: types.intern(Type::with_kind(TypeKind::Error)),
+            generics: Default::default(),
+        };
+        assert!(
+            !snapshot
+                .validation_with(&package, Arc::new(invalid))
+                .unwrap()
+                .universe_errors()
+                .1
+                .is_empty()
+        );
+        assert!(
+            snapshot
+                .validation_with(&package, rows[0].clone())
+                .unwrap()
+                .universe_errors()
+                .1
+                .is_empty()
+        );
+        assert_eq!(work::read(Counter::RegistrationValidationViews) - before, 1);
+
+        // The producer fingerprint and revision alone cannot identify a scope.
+        let mut changed = (*rows[1]).clone();
+        changed.kind = SignatureKind::Const {
+            ty: types.intern(Type::with_kind(TypeKind::Error)),
+            generics: Default::default(),
+        };
+        assert_eq!(changed.fingerprint, rows[1].fingerprint);
+        let changed = build(&[rows[0].clone(), Arc::new(changed)], installed);
+        let views = changed.validation_with(&package, rows[0].clone()).unwrap();
+        assert!(!views.universe_errors().1.is_empty());
+        assert_eq!(work::read(Counter::RegistrationValidationViews) - before, 2);
     }
 
     #[test]

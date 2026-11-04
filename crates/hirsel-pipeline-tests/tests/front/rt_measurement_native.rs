@@ -77,6 +77,142 @@ fn counter(text: &str, key: &str) -> u64 {
 }
 
 #[test]
+fn free_worker_reports_include_the_allocation_population_at_widths_1_and_8() {
+    with_compiler_stack(|| {
+        let dir = scratch("measurement-free-heaps");
+        let source = dir.join("allocation.hir");
+        std::fs::write(
+            &source,
+            include_str!("../../../../bench/multicore/programs/allocation.hir"),
+        )
+        .unwrap();
+        let std_manifest =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std@1/hirsel.json");
+        std::fs::write(
+            dir.join("hirsel.json"),
+            serde_json::json!({
+                "schema": 1, "package": {"name": "multicore", "version": "1"},
+                "entry": {"module": [], "name": "main"},
+                "sources": [{"path": "allocation.hir", "module": []}],
+                "dependencies": [{"manifest": std_manifest,
+                    "package": {"name": "std", "version": "1"}, "expose": []}],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut loaded = hirsel_driver::load_program(&source).unwrap();
+        loaded.check_for_execution().unwrap();
+        let input = loaded.engine.export_native_input().unwrap();
+        let sources = native::profile_sources(&input);
+        let input = loaded.engine.import_native_input(input).unwrap();
+        let target = TargetSpec::x86_64_unknown_linux_gnu();
+        let ready = native::build(&input, &Options::new(target.clone())).unwrap();
+        let tools = Toolchain::in_tree_with_runtime(
+            &dir.join("runtime"),
+            &[&target],
+            RuntimeBuild {
+                measurement: true,
+                ..RuntimeBuild::default()
+            },
+        )
+        .unwrap();
+        let objects = native::emit_objects(
+            &ready,
+            OptLevel::Speed,
+            Partition::Whole,
+            true,
+            Some(&sources),
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("objects")).unwrap();
+        let exe = native::link_standalone_objects(
+            &ready,
+            &loaded.entry,
+            &objects,
+            &tools,
+            &dir.join("objects"),
+        )
+        .unwrap();
+        let iterations = 7;
+        let mut cooperative = None;
+        for (provider, width, totals) in [
+            ("cooperative", 1, true),
+            ("free", 1, true),
+            ("free", 8, true),
+            ("free", 8, false),
+        ] {
+            let name = format!("{provider}-{width}-{totals}");
+            let grants = dir.join(format!("{name}.json"));
+            std::fs::write(&grants, serde_json::json!({
+                "io": {"stdout": "stdout.bytes@1", "tasks": format!("tasks.{provider}@1"), "dirs": []},
+                "placement": {"cores": width}, "args": [],
+            }).to_string()).unwrap();
+            let report = dir.join(format!("{name}.measurement"));
+            let profile_path = report.with_extension("measurement.sites.json");
+            let mut command = std::process::Command::new(&exe);
+            command
+                .arg("--hirsel-grants")
+                .arg(&grants)
+                .arg(iterations.to_string());
+            if totals {
+                command.env("HIRSEL_RT_MEASUREMENT", &report);
+            } else {
+                command
+                    .env_remove("HIRSEL_RT_MEASUREMENT")
+                    .env("HIRSEL_RT_PROFILE", &profile_path);
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{name}: {output:?}");
+            assert_eq!(output.stdout, format!("{}\n", 8 * iterations).as_bytes());
+            let profile: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&profile_path).unwrap()).unwrap();
+            let allocations = profile["totals"]["allocations"].as_u64().unwrap();
+            if totals {
+                let text = std::fs::read_to_string(&report).unwrap();
+                let class_allocations: u64 = text
+                    .lines()
+                    .filter(|line| line.starts_with("class "))
+                    .map(|line| {
+                        line.split_whitespace()
+                            .nth(2)
+                            .unwrap()
+                            .parse::<u64>()
+                            .unwrap()
+                    })
+                    .sum();
+                assert_eq!(class_allocations, allocations, "{name}");
+            }
+            // Eight tasks each grow one 64-element list per iteration, through
+            // five backing allocations. This count comes from the workload.
+            let at_push: u64 = profile["sites"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|site| {
+                    site["file"].as_str().unwrap().ends_with("allocation.hir") && site["line"] == 15
+                })
+                .map(|site| site["counts"]["allocations"].as_u64().unwrap_or(0))
+                .sum();
+            assert_eq!(at_push, 8 * iterations * 5, "{name}: {profile}");
+            for (kind, total) in profile["totals"].as_object().unwrap() {
+                let attributed: u64 = profile["sites"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|site| site["counts"][kind].as_u64().unwrap_or(0))
+                    .sum();
+                assert_eq!(attributed, total.as_u64().unwrap(), "{name}: {kind}");
+            }
+            if let Some(expected) = cooperative {
+                assert_eq!(allocations, expected, "{name}");
+            } else {
+                cooperative = Some(allocations);
+            }
+        }
+    });
+}
+
+#[test]
 #[ignore = "full gate"]
 fn full_gate_every_native_smoke_case_preserves_its_observation_in_all_runtime_variants() {
     with_compiler_stack(|| {

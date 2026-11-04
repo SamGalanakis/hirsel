@@ -254,6 +254,10 @@ for diagnosis. Native counter launches set `HIRSEL_RT_MEASUREMENT` to a fresh
 admitted file; production timing launches clear it. Runtime class allocations,
 increments/decrements, copies, reuse, live payload and region high-water bytes
 retain their own names and units, separately from reference workload counters.
+Reports snapshot every registered heap once after workers stop. Site counts merge
+by site identity across heaps. High-water gauges sum each heap's peak, so they
+bound simultaneous run usage rather than measure its exact peak. Budget counters
+come from the run-wide meter once.
 The separate `arena_high_water_bytes` gauge remains `unavailable`; actual
 `region_high_water_bytes` counters describe native arena storage. Ordinary
 numeric formatting selects the std@1 source package explicitly; its dependency

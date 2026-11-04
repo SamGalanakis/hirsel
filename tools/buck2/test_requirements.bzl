@@ -25,6 +25,9 @@ EXACT_TEST_CPUS = {
 # width exceeds its action's CPUs. A binary is listed here or in EXACT_TEST_CPUS,
 # never both.
 EXACT_CASE_CPUS = {
+    "hirsel-pipeline-tests-test-front": {
+        "rt_measurement_native::free_worker_reports_include_the_allocation_population_at_widths_1_and_8": 8,
+    },
     "hirsel-cli-test-cli": {
         "chunk_backup_31::chunk_backup_31_scripted_native_record_replay": 4,
         "config_migrate_29::config_migrate_29_native": 4,

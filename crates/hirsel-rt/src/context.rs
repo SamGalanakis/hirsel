@@ -907,29 +907,38 @@ impl TaskCtx {
         #[cfg(not(any(feature = "diagnostic", feature = "measurement")))]
         let audit = Audit::default();
         #[cfg(feature = "measurement")]
-        if let Some(mut output) = self.run().measurement_output.take() {
-            let budget = self.budget_counters();
-            let measurement = &mut self.heap().measurement;
-            measurement.meter_ops = budget.meter_ops;
-            measurement.metered_allocations = budget.allocations;
-            measurement.fuel_refills = budget.fuel_refills;
-            // Snapshot before forced teardown, so leaks remain visible in the counters.
-            self.heap()
-                .measurement
-                .write(&mut output)
-                .unwrap_or_else(|_| crate::environmental("could not write the measurement report"));
-            if let Some(profile) = self.run_ref().mc_profile.as_ref() {
-                profile.write(output).unwrap_or_else(|_| {
-                    crate::environmental("could not write the segment profile")
-                });
+        {
+            let measurement_output = self.run().measurement_output.take();
+            let profile_output = self.run().profile_output.take();
+            if measurement_output.is_some() || profile_output.is_some() {
+                // end_run joined every physical owner. Registry slots name
+                // each heap once, including the home and re-adopted heaps.
+                // Snapshot before forced teardown so leaks stay visible.
+                let mut measurement = crate::measurement::Accounting::default();
+                for heap in self.run_ref().heaps.heaps() {
+                    // SAFETY: registered heaps are live and all workers left.
+                    measurement.merge(unsafe { &(*heap).measurement });
+                }
+                let budget = self.budget_counters();
+                measurement.meter_ops = budget.meter_ops;
+                measurement.metered_allocations = budget.allocations;
+                measurement.fuel_refills = budget.fuel_refills;
+                if let Some(mut output) = measurement_output {
+                    measurement.write(&mut output).unwrap_or_else(|_| {
+                        crate::environmental("could not write the measurement report")
+                    });
+                    if let Some(profile) = self.run_ref().mc_profile.as_ref() {
+                        profile.write(output).unwrap_or_else(|_| {
+                            crate::environmental("could not write the segment profile")
+                        });
+                    }
+                }
+                if let Some(output) = profile_output {
+                    measurement.write_sites(output).unwrap_or_else(|_| {
+                        crate::environmental("could not write the source profile")
+                    });
+                }
             }
-        }
-        #[cfg(feature = "measurement")]
-        if let Some(output) = self.run().profile_output.take() {
-            self.heap()
-                .measurement
-                .write_sites(output)
-                .unwrap_or_else(|_| crate::environmental("could not write the source profile"));
         }
         {
             let mut owners = self

@@ -263,6 +263,49 @@ impl std::ops::DerefMut for Accounting {
     }
 }
 impl Accounting {
+    /// Add one registered heap to an exit snapshot. High-water gauges sum the
+    /// heaps' individual peaks, an upper bound on the run's simultaneous peak.
+    pub(crate) fn merge(&mut self, other: &Self) {
+        let a = &self.totals;
+        let b = &other.totals;
+        self.totals = Counters {
+            allocations: std::array::from_fn(|i| a.allocations[i] + b.allocations[i]),
+            frees: std::array::from_fn(|i| a.frees[i] + b.frees[i]),
+            count_increments: a.count_increments + b.count_increments,
+            count_decrements: a.count_decrements + b.count_decrements,
+            cow_detaches: a.cow_detaches + b.cow_detaches,
+            deep_copies: a.deep_copies + b.deep_copies,
+            copied_blocks: a.copied_blocks + b.copied_blocks,
+            copied_bytes: a.copied_bytes + b.copied_bytes,
+            reuse_hits: a.reuse_hits + b.reuse_hits,
+            reuse_misses: a.reuse_misses + b.reuse_misses,
+            live_bytes: a.live_bytes + b.live_bytes,
+            peak_live_bytes: a.peak_live_bytes + b.peak_live_bytes,
+            region_high_water_bytes: a.region_high_water_bytes + b.region_high_water_bytes,
+            region_pool_high_water_bytes: a.region_pool_high_water_bytes
+                + b.region_pool_high_water_bytes,
+            remote_frees: a.remote_frees + b.remote_frees,
+            remote_collected: a.remote_collected + b.remote_collected,
+            heap_adoptions: a.heap_adoptions + b.heap_adoptions,
+            meter_ops: a.meter_ops + b.meter_ops,
+            metered_allocations: a.metered_allocations + b.metered_allocations,
+            fuel_refills: a.fuel_refills + b.fuel_refills,
+        };
+        for (&id, site) in &other.sites {
+            let merged = self.sites.entry(id).or_default();
+            // A task can resume on a heap that has its active site id but has
+            // not entered that site. Keep metadata from the heap that did.
+            if merged.file.is_empty() {
+                let counts = std::mem::take(&mut merged.counts);
+                *merged = site.clone();
+                merged.counts = counts;
+            }
+            for (&kind, &count) in &site.counts {
+                *merged.counts.entry(kind).or_default() += count;
+            }
+        }
+    }
+
     pub(crate) fn record(&mut self, kind: &'static str, count: u64) {
         let site = self.sites.entry(self.active_site).or_default();
         *site.counts.entry(kind).or_default() += count;

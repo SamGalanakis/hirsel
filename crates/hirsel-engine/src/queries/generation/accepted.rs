@@ -6,6 +6,8 @@ use crate::runtime::{MemoryReservation, MemoryReservationPool};
 /// A rejected registration retains the sources its diagnostics cite without
 /// publishing generated syntax into the engine's accepted namespace.
 pub struct FrontRegistrationFailure {
+    pub definition: DefId,
+    pub span: Option<Span>,
     pub error: QueryError,
     pub sources: SourceMap,
     pub(super) _allowance: Arc<MemoryReservation>,
@@ -575,6 +577,8 @@ impl AcceptanceInputs {
                     self.sources.clone()
                 };
                 Err(FrontRegistrationFailure {
+                    definition: DefId::intern(&definition),
+                    span: Some(self.original.item.name_span),
                     error,
                     sources,
                     _allowance: allowance,
@@ -593,6 +597,7 @@ impl QueryEngine {
     ) -> Result<Arc<AcceptedFrontRegistration>, FrontRegistrationFailure> {
         let definition = output.definition().clone();
         let captured = (|| {
+            self.materialize(&definition)?;
             let original = self.snapshot(&definition)?;
             let mut current = Vec::new();
             for (key, _) in output.reads().observed() {
@@ -638,6 +643,12 @@ impl QueryEngine {
                 Ok(inputs) => inputs,
                 Err(error) => {
                     return Err(FrontRegistrationFailure {
+                        span: self
+                            .declarations
+                            .sites(&definition)
+                            .first()
+                            .map(|site| site.name_span),
+                        definition: DefId::intern(&definition),
                         error,
                         sources: self.sources.clone(),
                         _allowance: Arc::new(allowance),

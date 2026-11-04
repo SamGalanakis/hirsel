@@ -954,6 +954,20 @@ fn todo_api_fixture() -> (PathBuf, PathBuf, PathBuf) {
     )
 }
 
+#[test]
+fn todo_api_checks_as_a_complete_flagship_example() {
+    let (dir, manifest, _) = todo_api_fixture();
+    let checked = Command::new(env!("CARGO_BIN_EXE_hirsel"))
+        .env("HIRSEL_DAEMON", "off")
+        .args(["check", "--json"])
+        .arg(manifest)
+        .output()
+        .unwrap();
+    assert!(checked.status.success(), "{checked:?}");
+    assert!(checked.stdout.is_empty(), "{checked:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Two clients create todos while an incomplete request holds its own task; returns the
 /// list the held request finally received.
 fn todo_api_concurrent_creates(server: &TodoServer, first_id: u64) -> String {

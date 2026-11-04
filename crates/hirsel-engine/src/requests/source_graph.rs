@@ -245,6 +245,17 @@ pub fn retain_error(error: ToolError, owner: Arc<dyn Send + Sync>) -> ToolError 
             phase,
             sources: retain_sources(sources, owner),
         },
+        ToolError::Unsupported {
+            phase,
+            construct,
+            span,
+            sources,
+        } => ToolError::Unsupported {
+            phase,
+            construct,
+            span,
+            sources: retain_sources(sources, owner),
+        },
         other => other,
     }
 }
@@ -1482,9 +1493,16 @@ fn uninstalled() -> ToolError {
 }
 
 fn engine_error(engine: &QueryEngine, error: QueryError) -> ToolError {
+    let phase = engine
+        .unavailable
+        .or(if error == QueryError::NotImplemented {
+            engine.last_phase
+        } else {
+            None
+        });
     ToolError::Query {
         error,
-        phase: engine.unavailable,
+        phase,
         sources: engine.sources.clone(),
     }
 }
@@ -1563,11 +1581,22 @@ fn bootstrap_error(engine: &QueryEngine, error: FrontRegistrationBootstrapError)
             crate::QueryKind::Generate,
             sources.retain_owner(owner),
         ),
-        FrontRegistrationBootstrapError::Acceptance(failure) => language_error(
-            failure.error,
-            crate::QueryKind::GeneratedRegistration,
-            failure.sources,
-        ),
+        FrontRegistrationBootstrapError::Acceptance(failure) => {
+            if failure.error == QueryError::NotImplemented {
+                ToolError::Unsupported {
+                    phase: crate::QueryKind::GeneratedRegistration,
+                    construct: failure.definition,
+                    span: failure.span,
+                    sources: failure.sources,
+                }
+            } else {
+                language_error(
+                    failure.error,
+                    crate::QueryKind::GeneratedRegistration,
+                    failure.sources,
+                )
+            }
+        }
     }
 }
 
@@ -1577,7 +1606,11 @@ fn bootstrap_error(engine: &QueryEngine, error: FrontRegistrationBootstrapError)
 /// keep no phase.
 fn language_error(error: QueryError, phase: crate::QueryKind, sources: SourceMap) -> ToolError {
     ToolError::Query {
-        phase: matches!(error, QueryError::Diagnostics(_)).then_some(phase),
+        phase: matches!(
+            error,
+            QueryError::Diagnostics(_) | QueryError::NotImplemented
+        )
+        .then_some(phase),
         error,
         sources,
     }
@@ -1692,5 +1725,39 @@ fn record_lower_work(
         if lowerings != 0 || initializers != 0 || validation_runs != 0 {
             engine.record_worker_lower_work(&path, lowerings, initializers, validation_runs);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_registration_reports_its_phase_declaration_and_source_location() {
+        let mut sources = SourceMap::default();
+        let file = sources
+            .add("todo-api.hir", "\nfn main() {}".into())
+            .unwrap();
+        let span = hirsel_span::Span::new(sources.file_anchor(file), 4, 8).unwrap();
+        let error = ToolError::Unsupported {
+            phase: crate::QueryKind::GeneratedRegistration,
+            construct: crate::DefId::intern(&crate::entry_path(&crate::default_context())),
+            span: Some(span),
+            sources: sources.clone(),
+        };
+        let missing = language_error(
+            QueryError::NotImplemented,
+            crate::QueryKind::Generate,
+            sources,
+        );
+        assert_eq!(
+            missing.to_string(),
+            "generated source evaluation: unsupported compiler query"
+        );
+        let error = retain_error(error, Arc::new(()));
+        assert_eq!(
+            error.to_string(),
+            "generated instance registration: unsupported declaration `standalone@0/main` at todo-api.hir:2:4"
+        );
     }
 }

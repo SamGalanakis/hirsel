@@ -176,7 +176,7 @@ impl DirStore {
         Some(hirsel_validate::VerifierCache::directory_store(physical))
     }
     /// Installed ordinary products are independent of writable-cache policy.
-    fn installed_root() -> Option<PathBuf> {
+    pub fn installed_root() -> Option<PathBuf> {
         std::env::var_os("HIRSEL_PRODUCTS")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)

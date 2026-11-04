@@ -460,6 +460,18 @@ family expected to fail, with its owner, and an unexpected pass fails until its
 row is removed. The first shard takes about 70 seconds and the others about 40
 each.
 
+Run one family directly from a checkout with a built toolchain:
+
+```sh
+python3 tools/checker-scaling.py --hirsel /path/to/hirsel --family record_fields
+```
+
+The runner asks `hirsel env --json` for the compiler's installed-product location
+before starting Cachegrind's explicit loader. It keeps `HOME` and `XDG_CACHE_HOME`
+for the compiler's existing cache discovery and disables daemon dispatch so the
+checked work runs in the measured process. Explicit `HIRSEL_RESULTS` and
+`HIRSEL_RESULTS_DIR` selections are kept.
+
 Tests that execute the full native matrix or take about a minute or longer
 carry `#[ignore = "full gate"]` and a `full_gate_` name prefix. Keep their
 inputs and assertions intact; add a separate bounded smoke test when useful.

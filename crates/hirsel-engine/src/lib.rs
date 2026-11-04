@@ -105,7 +105,7 @@ pub use tools::*;
 pub struct NotImplemented;
 impl fmt::Display for NotImplemented {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("not implemented yet")
+        f.write_str("compiler execution: unsupported phase adapter")
     }
 }
 impl std::error::Error for NotImplemented {}

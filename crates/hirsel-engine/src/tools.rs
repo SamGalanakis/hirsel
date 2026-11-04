@@ -19,6 +19,12 @@ pub enum ToolError {
     Runtime(String),
     /// Admission refused the run before entry (PROG-3).
     Launch(hirsel_run_schema::RunRefusal),
+    Unsupported {
+        phase: QueryKind,
+        construct: DefId,
+        span: Option<hirsel_span::Span>,
+        sources: SourceMap,
+    },
     Query {
         error: QueryError,
         phase: Option<QueryKind>,
@@ -32,6 +38,32 @@ impl std::fmt::Display for ToolError {
                 error: QueryError::Operational(error),
                 ..
             } => write!(f, "{}: {}", error.operation, error.message),
+            Self::Unsupported {
+                phase,
+                construct,
+                span,
+                sources,
+            } => {
+                write!(
+                    f,
+                    "{}: unsupported declaration `{}`",
+                    phase.phase_name(),
+                    construct.path()
+                )?;
+                if let Some(span) = span
+                    && let Some(location) = sources.location(*span)
+                    && let Some(file) = sources.file(sources.resolve(*span).file)
+                {
+                    write!(
+                        f,
+                        " at {}:{}:{}",
+                        file.path.display(),
+                        location.line,
+                        location.column
+                    )?;
+                }
+                Ok(())
+            }
             Self::Io(error) => error.fmt(f),
             Self::Runtime(message) => f.write_str(message),
             Self::Launch(refusal) => write!(f, "launch: {refusal}"),
@@ -41,8 +73,8 @@ impl std::fmt::Display for ToolError {
                 phase,
                 ..
             } => match phase {
-                Some(phase) => write!(f, "{} is not implemented yet", phase.phase_name()),
-                None => f.write_str("not implemented yet"),
+                Some(phase) => write!(f, "{}: unsupported compiler query", phase.phase_name()),
+                None => f.write_str("source preparation: unsupported compiler query"),
             },
             Self::Query {
                 error: QueryError::Diagnostics(_),

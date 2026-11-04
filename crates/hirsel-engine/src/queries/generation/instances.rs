@@ -197,6 +197,8 @@ impl QueryEngine {
                     self.retire_snapshot();
                 }
                 Err(FrontRegistrationFailure {
+                    definition: DefId::intern(&request.declaration),
+                    span: Some(request.site),
                     error,
                     sources,
                     _allowance: allowance,

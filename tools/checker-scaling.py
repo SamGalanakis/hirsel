@@ -55,11 +55,18 @@ def program(family, n):
     raise ValueError(family)
 
 
-def environment():
+def environment(compiler):
     env = {key: value for key, value in os.environ.items() if key in (
-        'PATH', 'LLVM_SYS_231_PREFIX', 'HIRSEL_PRODUCTS', 'HIRSEL_VALGRIND', 'VALGRIND_LIB',
+        'PATH', 'HOME', 'XDG_CACHE_HOME', 'LLVM_SYS_231_PREFIX', 'HIRSEL_PRODUCTS',
+        'HIRSEL_RESULTS', 'HIRSEL_RESULTS_DIR',
+        'HIRSEL_VALGRIND', 'VALGRIND_LIB',
         'HIRSEL_VALGRIND_RUNTIME', 'LD_LIBRARY_PATH')}
-    env.update(LC_ALL='C', HIRSEL_JOBS='1', HIRSEL_MEMORY_LIMIT=str(DATA_CAP))
+    env.update(LC_ALL='C', HIRSEL_JOBS='1', HIRSEL_MEMORY_LIMIT=str(DATA_CAP), HIRSEL_DAEMON='off')
+    # Query the compiler before the explicit Cachegrind loader changes
+    # current_exe. Product selection stays owned by Hirsel.
+    configured = json.loads(subprocess.check_output([str(compiler), 'env', '--json'], env=env, text=True))
+    if configured['products'] is not None:
+        env['HIRSEL_PRODUCTS'] = configured['products']
     return env
 
 
@@ -162,7 +169,7 @@ def verdict(family, samples, baseline):
 
 
 def run(compiler, families):
-    env = environment()
+    env = environment(compiler)
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix='checker-scaling-') as temporary:
         directory = Path(temporary)

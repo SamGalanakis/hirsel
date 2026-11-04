@@ -10,7 +10,7 @@ use hirsel_driver::CompilerRequestsExt;
 use hirsel_engine::{QueryError, RunOutcome, ToolError, Verify};
 use std::{env, ffi::OsString, path::Path, process::ExitCode};
 
-const USAGE: &str = "usage: hirsel [--verbose] [--timings[=json]] [--mem-usage] check [--verify-cache] [--watch] [--json | --safe] <source|manifest.json> | serve [--stop] [--workspace <dir>] [--idle <seconds>] | test [--no-verify] [--json] [--seed <u64>] [--scheduler <name@1:seed> | --explore <n> [--scheduler <name@1>]] [--race] [--sim-points <root-release,atomic-store>] [--bless | --bench [--bench-time <ms>]] [--max-steps <n|unbounded> | --native [--backend llvm|cranelift]] [--trace-ownership <dir>] <source|manifest.json> [filter...] | run [--verify-cache] [--validate-stages] [--no-verify] [--json] [--native [--backend llvm|cranelift] [--proofs <sidecar> [--trust <tool@version>]...] | --simulation <json>] <source|manifest.json> [(--run <json> | --grants <json>) [--record <tape>] [--revocations <json>] | --replay <tape>] [--max-steps <n|unbounded>] [--cores <n>] [--trace-events <jsonl>] [--trace-ownership <json>] [-- args...] | build [--verify-cache] [--validate-stages] [--no-verify] [--release | --debug] [--lto] [--backend llvm|cranelift] [--fuel] [--target x86_64-linux | aarch64-linux] [--proofs <sidecar> [--trust <tool@version>]...] <source|manifest.json> -o <exe> | new <dir> [--lib] | fmt [--check] <source|manifest.json> | expand <source|manifest.json> | hash <source|manifest.json> | export --tir|--run|--c-header|--native-abi <source|manifest.json> -o <file> | deps card <manifest.json> [--package name@ver[/module]] [--code-store config.json] [--json] | explain RULE [--json] | explain --list [--json] (docs/rule-explain.md) | doc <source|manifest.json> [-o <out.md>] [--json] | view <tape> --capture <id> -o <file> [--perfetto | --source <program> --analysis <id>] [--timing <sidecar>] | precompute <package manifest.json> -o <directory> | tapes check <tape>... | tapes trial <candidate manifest.json> --grants <json> [--from <n>] <tape> | ctl <socket> (cores <n> | metrics) | serve [--no-verify] <source|manifest.json> --host <json>";
+const USAGE: &str = "usage: hirsel [--verbose] [--timings[=json]] [--mem-usage] check [--verify-cache] [--watch] [--json | --safe] <source|manifest.json> | serve [--stop] [--workspace <dir>] [--idle <seconds>] | test [--no-verify] [--json] [--seed <u64>] [--scheduler <name@1:seed> | --explore <n> [--scheduler <name@1>]] [--race] [--sim-points <root-release,atomic-store>] [--bless | --bench [--bench-time <ms>]] [--max-steps <n|unbounded> | --native [--backend llvm|cranelift]] [--trace-ownership <dir>] <source|manifest.json> [filter...] | run [--verify-cache] [--validate-stages] [--no-verify] [--json] [--native [--backend llvm|cranelift] [--proofs <sidecar> [--trust <tool@version>]...] | --simulation <json>] <source|manifest.json> [(--run <json> | --grants <json>) [--record <tape>] [--revocations <json>] | --replay <tape>] [--max-steps <n|unbounded>] [--cores <n>] [--trace-events <jsonl>] [--trace-ownership <json>] [-- args...] | build [--verify-cache] [--validate-stages] [--no-verify] [--release | --debug] [--lto] [--backend llvm|cranelift] [--fuel] [--target x86_64-linux | aarch64-linux] [--proofs <sidecar> [--trust <tool@version>]...] <source|manifest.json> -o <exe> | new <dir> [--lib] | fmt [--check] <source|manifest.json> | expand <source|manifest.json> | hash <source|manifest.json> | export --tir|--run|--c-header|--native-abi <source|manifest.json> -o <file> | deps card <manifest.json> [--package name@ver[/module]] [--code-store config.json] [--json] | explain RULE [--json] | explain --list [--json] (docs/rule-explain.md) | doc <source|manifest.json> [-o <out.md>] [--json] | view <tape> --capture <id> -o <file> [--perfetto | --source <program> --analysis <id>] [--timing <sidecar>] | precompute <package manifest.json> -o <directory> | env --json | tapes check <tape>... | tapes trial <candidate manifest.json> --grants <json> [--from <n>] <tape> | ctl <socket> (cores <n> | metrics) | serve [--no-verify] <source|manifest.json> --host <json>";
 
 const FMT_HELP: &str = "usage: hirsel fmt [--check] <source|manifest.json>\n\nFormat a source file or a package's direct sources.\nExample: hirsel fmt examples/configctl/hirsel.json\n--check reports differences without writing (exit 1; unchanged: 0).\nAll sources are prepared before writing; unchanged files are skipped.\nWrite errors are reported; writes across files are not atomic.";
 
@@ -18,6 +18,7 @@ const FMT_HELP: &str = "usage: hirsel fmt [--check] <source|manifest.json>\n\nFo
 fn command_help(topic: &str) -> Option<&'static str> {
     Some(match topic {
         "fmt" => FMT_HELP,
+        "env" => "usage: hirsel env --json\n\nReport the installed-product location selected by this compiler.\nExample: hirsel env --json",
         "check" => "usage: hirsel check [--verify-cache] [--watch] [--json | --safe] <source|manifest.json>
 
 Check a source file or package without running its entry.
@@ -165,6 +166,7 @@ fn main() -> ExitCode {
 }
 enum Command {
     Help(&'static str),
+    Environment,
     New(hirsel_cli_args::NewOptions),
     Ctl {
         path: OsString,
@@ -388,6 +390,11 @@ fn parse_command(args: Vec<OsString>) -> Result<Command, lexopt::Error> {
     }
     let mut args = Parser::from_args(args);
     let command = match args.next()? {
+        Some(Value(command)) if command == "env" => match args.next()? {
+            Some(Long("json")) => Command::Environment,
+            Some(arg) => return Err(arg.unexpected()),
+            None => return Err("env requires --json".into()),
+        },
         Some(Value(command)) if command == "ctl" => {
             let path = args.value()?;
             let action = args.value()?;
@@ -1247,6 +1254,15 @@ fn execute_command(
         verify_store,
     };
     let (command, flag, file) = match command {
+        Command::Environment => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "products": hirsel_engine::store::DirStore::installed_root(),
+                })
+            );
+            return 0;
+        }
         Command::Ctl { path, cores } => {
             use std::io::{Read, Write};
             let result = (|| -> Result<(), String> {
@@ -1997,7 +2013,11 @@ fn execute_command(
                 if output.diagnostics.is_empty() {
                     if let hirsel_engine::CheckCompletion::Incomplete { phase } = output.completion
                     {
-                        eprintln!("{} is not implemented yet", phase.phase_name());
+                        eprintln!(
+                            "{}: unsupported source program `{}`",
+                            phase.phase_name(),
+                            path.display()
+                        );
                         return 2;
                     }
                 }
@@ -2126,6 +2146,7 @@ fn tool_error(error: ToolError, json: bool) -> u8 {
         );
     }
     if parser_limit
+        || matches!(error, ToolError::Unsupported { .. })
         || matches!(
             error,
             ToolError::Query {

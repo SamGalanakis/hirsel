@@ -1,8 +1,10 @@
 //! DICE 47675948 key_index.rs:35-76 separates interned keys from dense rows.
-//! Like Incremental 98b5750 adjust_heights_heap.ml:137-202, an ordered edge
-//! proves acyclicity without search. Hirsel instead repairs an exact finite
-//! order interval by stable partition of exact reachable successors, retaining
-//! failed and settled reads.
+//! Pearce-Kelly (JEA 2007, doi:10.1145/1187436.1210590) repairs only affected
+//! vertices. Structure follows JGraphT 756d0f29 DirectedAcyclicGraph.java:418-617:
+//! https://github.com/jgrapht/jgrapht/blob/756d0f29419cbe629337ae94e3e8940bd9ced538/jgrapht-core/src/main/java/org/jgrapht/graph/DirectedAcyclicGraph.java#L418
+//! Hirsel uses dense slots, generation-independent visit epochs, iterative
+//! discovery and sorted vectors instead of hash/ordered sets. Historical
+//! reads retain their separate exact cycle authority across slot retirement.
 use super::*;
 use std::ops::{Index, IndexMut};
 
@@ -52,7 +54,6 @@ pub(super) struct Nodes {
     keys: Vec<Option<Key>>,
     rows: Vec<Node>,
     free: Vec<u32>,
-    order: Vec<u32>,
     // Consumed recorded reads use logical identities, never reusable slots.
     // These complement the active edges and retain the same cycle authority.
     history: BTreeMap<Key, Recorded>,
@@ -189,7 +190,6 @@ impl Nodes {
                 node.position = slot;
                 self.rows.push(node);
                 self.keys.push(Some(key));
-                self.order.push(slot);
                 slot
             };
             self.index.insert(key, slot);
@@ -286,54 +286,8 @@ impl Nodes {
         {
             return None;
         }
-        let start = self.rows[target.slot as usize].position as usize;
-        let end = self.rows[source.slot as usize].position as usize;
-        if start <= end {
-            // A path to source cannot leave this closed order interval. Move
-            // only target's reachable successors after source, preserving both
-            // partitions' old topological order. A marked-to-unmarked edge in
-            // the interval is impossible by traversal closure.
-            self.repair_epoch = self.repair_epoch.checked_add(1).unwrap_or_else(|| {
-                for node in &mut self.rows {
-                    node.visited = 0;
-                }
-                1
-            });
-            let epoch = self.repair_epoch;
-            self.rows[target.slot as usize].visited = epoch;
-            let mut pending = vec![target.slot];
-            while let Some(slot) = pending.pop() {
-                self.repair_visits += 1;
-                for i in 0..self.rows[slot as usize].dependencies.len() {
-                    self.repair_visits += 1;
-                    let next = self.rows[slot as usize].dependencies[i].target();
-                    if next == source.slot {
-                        return None;
-                    }
-                    let node = &mut self.rows[next as usize];
-                    if node.position as usize <= end && node.visited != epoch {
-                        node.visited = epoch;
-                        pending.push(next);
-                    }
-                }
-            }
-            // Reuse traversal capacity for the moved suffix. At most two
-            // u32 vectors live here, bounded by twelve bytes per arena row.
-            let mut ordered = Vec::with_capacity(end - start + 1);
-            for &slot in &self.order[start..=end] {
-                self.repair_visits += 1;
-                if self.rows[slot as usize].visited == epoch {
-                    pending.push(slot);
-                } else {
-                    ordered.push(slot);
-                }
-            }
-            ordered.extend(pending);
-            for (offset, &slot) in ordered.iter().enumerate() {
-                self.repair_visits += 1;
-                self.rows[slot as usize].position = (start + offset) as u32;
-            }
-            self.order[start..=end].copy_from_slice(&ordered);
+        if !self.repair_order(source.slot, target.slot) {
+            return None;
         }
         let edge = self.rows[source.slot as usize].dependencies.len();
         self.edges.insert((source.slot, target.slot), edge as u32);
@@ -348,6 +302,92 @@ impl Nodes {
                 edge: edge as u32,
             });
         Some(edge)
+    }
+    fn repair_order(&mut self, source: u32, target: u32) -> bool {
+        let start = self.rows[target as usize].position;
+        let end = self.rows[source as usize].position;
+        self.repair_visits += 1;
+        if start > end {
+            return true;
+        }
+        self.repair_epoch = self.repair_epoch.checked_add(1).unwrap_or_else(|| {
+            self.repair_visits += self.rows.len() as u64;
+            for node in &mut self.rows {
+                node.visited = 0;
+            }
+            1
+        });
+        let epoch = self.repair_epoch;
+        self.rows[target as usize].visited = epoch;
+        let mut affected = vec![target];
+        let mut cursor = 0;
+        while cursor < affected.len() {
+            let slot = affected[cursor];
+            cursor += 1;
+            self.repair_visits += 1;
+            for i in 0..self.rows[slot as usize].dependencies.len() {
+                self.repair_visits += 1;
+                let next = self.rows[slot as usize].dependencies[i].target();
+                if next == source {
+                    return false;
+                }
+                let node = &mut self.rows[next as usize];
+                if node.position <= end && node.visited != epoch {
+                    node.visited = epoch;
+                    affected.push(next);
+                }
+            }
+        }
+        let forward = affected.len();
+        self.rows[source as usize].visited = epoch;
+        affected.push(source);
+        // Reverse subscriptions describe every active read, independently of
+        // its wait token. The two sets are disjoint after the cycle search.
+        while cursor < affected.len() {
+            let slot = affected[cursor];
+            cursor += 1;
+            self.repair_visits += 1;
+            for i in 0..self.rows[slot as usize].subscribers.len() {
+                self.repair_visits += 1;
+                let previous = self.rows[slot as usize].subscribers[i].waiter.slot;
+                let node = &mut self.rows[previous as usize];
+                if node.position >= start && node.visited != epoch {
+                    node.visited = epoch;
+                    affected.push(previous);
+                }
+            }
+        }
+        // Pearce-Kelly: preserve the order within each affected set, then
+        // assign their sorted old labels to predecessors before successors.
+        // Unaffected rows are never scanned or rewritten. The discovery
+        // vector's capacity is at most twice the affected count and the label
+        // vector is exact-sized, within twelve scratch bytes per arena row.
+        let rows = &self.rows;
+        let visits = &mut self.repair_visits;
+        let mut compare = |a: &u32, b: &u32| {
+            *visits += 1;
+            rows[*a as usize].position.cmp(&rows[*b as usize].position)
+        };
+        affected[..forward].sort_unstable_by(&mut compare);
+        affected[forward..].sort_unstable_by(&mut compare);
+        let mut positions: Vec<_> = affected
+            .iter()
+            .map(|&slot| self.rows[slot as usize].position)
+            .collect();
+        self.repair_visits += positions.len() as u64;
+        positions.sort_unstable_by(|a, b| {
+            self.repair_visits += 1;
+            a.cmp(b)
+        });
+        for (&slot, position) in affected[forward..]
+            .iter()
+            .chain(&affected[..forward])
+            .zip(positions)
+        {
+            self.repair_visits += 1;
+            self.rows[slot as usize].position = position;
+        }
+        true
     }
     pub fn cancelled_record_bytes(&self, query: Key) -> u64 {
         if self
@@ -624,10 +664,10 @@ impl Nodes {
         };
         // Include sparse B-tree nodes and hash control/bucket slack, as in
         // MemoGraph::retained_bytes. Vectors use allocated capacities; the
-        // interval repair needs at most twelve extra bytes per arena row.
+        // affected-set repair needs at most twelve extra bytes per arena row.
         let bytes = self.rows.capacity() * size_of::<Node>()
             + self.keys.capacity() * size_of::<Option<Key>>()
-            + (self.free.capacity() + self.order.capacity()) * size_of::<u32>()
+            + self.free.capacity() * size_of::<u32>()
             + tree_bytes::<Key, u32>(self.index.len())
             + self.rows.len() * 12
             + buckets * (size_of::<((u32, u32), u32)>() + 1)

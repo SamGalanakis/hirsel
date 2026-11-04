@@ -1905,6 +1905,36 @@ fn rejected_cycle_path_keeps_only_its_members_and_refuses_a_short_mailbox() {
     assert!(nodes.cycle_path(ids[0], ids[0], 0).is_none());
 }
 #[test]
+fn sparse_producer_order_repair_scales_linearly() {
+    fn visits(n: usize, reverse: bool) -> u64 {
+        let mut nodes = Nodes::default();
+        let ids: Vec<_> = (0..=n)
+            .map(|i| nodes.insert(key(query(i as u64)), bare_node()))
+            .collect();
+        for i in 0..n {
+            let producer = if reverse { n - 1 - i } else { i };
+            assert!(nodes.insert_edge(ids[n], ids[producer]).is_some());
+        }
+        for &producer in &ids[..n] {
+            assert!(nodes.rows_for_test(ids[n]) < nodes.rows_for_test(producer));
+        }
+        nodes.repair_visits
+    }
+    for reverse in [false, true] {
+        let small = visits(1024, reverse);
+        let large = visits(8192, reverse);
+        println!("sparse producers reverse={reverse}: repairs {small} -> {large}");
+        // Each leaf insertion examines one order pair. An unordered pair
+        // visits two vertices, reads two labels, compares the labels once,
+        // and assigns two labels. Thus at most eight units per producer,
+        // independent of the distance between the pair's old labels.
+        assert!(small <= 8 * 1024);
+        assert!(large <= 8 * 8192);
+        assert!(large <= 16 * small);
+    }
+}
+
+#[test]
 fn compact_topology_matches_exact_oracle_across_insertions_and_removals() {
     let mut nodes = Nodes::default();
     let size = 128;

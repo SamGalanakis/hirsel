@@ -17,7 +17,9 @@ pub use scheduled::{
     FrontCheckedOutput, FrontInputFootprint, FrontMemoryRefusal, FrontStorageOutput,
     FrontStorageQueries,
 };
-pub(in crate::queries) use scheduled::{SpecializationDependencies, load_scheduled_publication};
+pub(in crate::queries) use scheduled::{
+    LiveFrontReads, SpecializationDependencies, load_scheduled_publication,
+};
 
 /// One input's outcome, including the phase that completed or stopped it.
 /// A completed body query with its captured reads.

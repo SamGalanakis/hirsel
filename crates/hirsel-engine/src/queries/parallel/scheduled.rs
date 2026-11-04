@@ -6,7 +6,7 @@ use crate::runtime::*;
 use crate::snapshot::OwnedSourceContext;
 use crate::store::{Domain, EntryKey, Reference, ResultStore, VariantRef};
 use std::sync::{
-    Mutex,
+    Mutex, OnceLock,
     atomic::{AtomicU64, Ordering::Relaxed},
 };
 
@@ -64,6 +64,10 @@ struct FrontFacts {
     reads: Arc<Reads>,
     diagnostic_phases: Vec<(Diagnostic, String)>,
     checked: CheckedProduct,
+    checked_reader: OnceLock<(
+        Arc<dyn ResultStore>,
+        crate::queries::reader_receipts::ReaderReceipt,
+    )>,
     /// The package dead-arm lint's facts of a checked body.
     dead_arms: Option<LintFacts>,
     table_keys: Option<Arc<crate::table_keys::TableKeyUse>>,
@@ -86,6 +90,16 @@ pub(crate) struct FrontCheckFacts {
     pub source_rules: bool,
     pub lowering: Option<lowering::LoweringUse>,
     pub dead_arms: Option<crate::tools::DeadArmUse>,
+}
+pub(in crate::queries) struct LiveFrontReads {
+    reads: Arc<Reads>,
+    _facts: Arc<FrontFacts>,
+}
+impl std::ops::Deref for LiveFrontReads {
+    type Target = Reads;
+    fn deref(&self) -> &Self::Target {
+        &self.reads
+    }
 }
 impl FrontOutcome {
     fn failed(record: Reference, error: QueryError, facts: Arc<FrontFacts>) -> Self {
@@ -134,6 +148,7 @@ impl FrontFacts {
             reads,
             diagnostic_phases,
             checked,
+            checked_reader: OnceLock::new(),
             dead_arms: dead_arms.map(LintFacts::capture),
             table_keys,
             memos: memos.into_boxed_slice(),
@@ -1521,6 +1536,100 @@ impl FrontBodyQueries {
     }
     pub fn factory(self: &Arc<Self>) -> Arc<dyn QueryFactory> {
         Arc::new(Factory(self.clone()))
+    }
+    /// Encode an exact checked observation once while its producer is live.
+    /// The receipt owns no read arrays, and its inline cell is charged in the
+    /// existing FrontFacts allocation. Other stores and views encode normally.
+    pub(in crate::queries) fn reader_receipt(
+        &self,
+        query: QueryId,
+        reads: &Reads,
+        store: &Arc<dyn ResultStore>,
+        scratch: u64,
+    ) -> Option<crate::queries::reader_receipts::ReaderReceipt> {
+        use crate::queries::reader_receipts::ReaderReceipt;
+        let key = &query.address.0;
+        let facts = if query.kind == FRONT_BODY_KIND
+            && Arc::ptr_eq(&self.store, store)
+            && !self
+                .forwarded
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(key)
+        {
+            let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+            match slots.get(key) {
+                Some(FrontSlot::Live { outcome, .. }) => Some(outcome.facts.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let cache = facts.as_ref().and_then(|facts| {
+            let expected = &facts.checked.as_ref()?.1;
+            (std::ptr::eq(reads, &**expected)
+                || reads == &**expected && reads.observed().eq(expected.observed()))
+            .then_some(&facts.checked_reader)
+        });
+        if let Some(cache) = cache {
+            if let Some((owner, receipt)) = cache.get()
+                && Arc::ptr_eq(owner, store)
+            {
+                return Some(receipt.clone());
+            }
+            let receipt = ReaderReceipt::capture(&**store, reads, scratch)?;
+            let _ = cache.set((store.clone(), receipt.clone()));
+            return Some(receipt);
+        }
+        ReaderReceipt::capture(&**store, reads, scratch)
+    }
+    /// A hint belongs to this immutable Front view. Eviction removes the live
+    /// slot, and the consumer then uses its exact archived receipt. Delegated
+    /// roots also use their archive rather than another view's live slot.
+    pub(in crate::queries) fn live_reads(
+        &self,
+        definition: DefId,
+        checked: bool,
+    ) -> Option<LiveFrontReads> {
+        let key = index_value(&self.by_definition, &definition)?;
+        self.live_query_reads(
+            QueryId {
+                kind: FRONT_BODY_KIND,
+                address: hirsel_artifact_store::Address(*key),
+            },
+            checked,
+        )
+    }
+    pub(in crate::queries) fn live_query_reads(
+        &self,
+        query: QueryId,
+        checked: bool,
+    ) -> Option<LiveFrontReads> {
+        if query.kind != FRONT_BODY_KIND {
+            return None;
+        }
+        let key = &query.address.0;
+        if self
+            .forwarded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(key)
+        {
+            return None;
+        }
+        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let FrontSlot::Live { outcome, .. } = slots.get(key)? else {
+            return None;
+        };
+        let reads = if checked {
+            outcome.checked.as_ref()?.1.clone()
+        } else {
+            outcome.reads.clone()
+        };
+        Some(LiveFrontReads {
+            reads,
+            _facts: outcome.facts.clone(),
+        })
     }
     /// Inspect compact reads without decoding the checked body.
     pub(crate) fn selected_reads(

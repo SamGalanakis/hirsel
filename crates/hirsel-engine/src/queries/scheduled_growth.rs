@@ -263,13 +263,6 @@ struct FactTask {
     admission: MemoryReservation,
 }
 impl FactTask {
-    fn observe(&mut self, reads: &Reads) -> Result<(), Reference> {
-        self.reads.push(
-            ArchivedReader::capture(self.queries.publication_source()?, reads)
-                .ok_or(self.queries.errors.resource)?,
-        );
-        Ok(())
-    }
     fn input(&self, i: usize) -> QueryId {
         self.component
             .as_ref()
@@ -290,7 +283,19 @@ impl FactTask {
                 Poll::Ready(selected) => selected,
             };
             if let Some(checked) = self.queries.front.checked(selected.clone()) {
-                self.observe(&checked.reads)?;
+                let source = self.queries.publication_source()?;
+                let reader = self
+                    .queries
+                    .front
+                    .reader_receipt(
+                        input,
+                        &checked.reads,
+                        &source.store,
+                        self.queries.weight.scratch,
+                    )
+                    .ok_or(self.queries.errors.resource)?;
+                self.reads
+                    .push(ArchivedReader::from_receipt(source, reader));
                 let observed = selected
                     .as_ref()
                     .map(|p| p.action.0)
@@ -314,7 +319,10 @@ impl FactTask {
             } else if let Some(facts) = self.queries.front.check_facts(selected.clone())
                 && matches!(facts.result, Err(QueryError::Diagnostics(_)))
             {
-                self.observe(&facts.reads)?;
+                self.reads.push(
+                    ArchivedReader::capture(self.queries.publication_source()?, &facts.reads)
+                        .ok_or(self.queries.errors.resource)?,
+                );
             } else {
                 return Poll::Ready(Err(selected.err().unwrap_or(self.queries.errors.protocol)));
             }
@@ -331,10 +339,12 @@ impl FactTask {
         // Reduce one encoded root receipt at a time in this active scratch
         // frame. Suspensions and completed roots retain references only.
         let reads = Arc::new(
-            ReadUnion::reduce(&self.reads, queries.weight.scratch)
-                .ok_or(queries.errors.resource)?
-                .finish()
-                .map_err(|_| queries.errors.protocol)?,
+            ReadUnion::reduce(&self.reads, queries.weight.scratch, |index| {
+                queries.front.live_query_reads(self.input(index), true)
+            })
+            .ok_or(queries.errors.resource)?
+            .finish()
+            .map_err(|_| queries.errors.protocol)?,
         );
         let producer = queries.producer();
         let (identity, data) = if let Some((membership, index)) = &self.component {
@@ -654,10 +664,13 @@ impl Task {
                     checked.summary.summary.owner.path().clone(),
                     checked.table_keys,
                 );
-                self.reads.push(
-                    ArchivedReader::capture(queries.publication_source()?, &checked.reads)
-                        .ok_or(queries.errors.resource)?,
-                );
+                let source = queries.publication_source()?;
+                let reader = queries
+                    .front
+                    .reader_receipt(id, &checked.reads, &source.store, queries.weight.scratch)
+                    .ok_or(queries.errors.resource)?;
+                self.reads
+                    .push(ArchivedReader::from_receipt(source, reader));
             } else if let Some(facts) = queries.front.check_facts(selected.clone())
                 && matches!(facts.result, Err(QueryError::Diagnostics(_)))
             {
@@ -685,8 +698,19 @@ impl Task {
             std::mem::take(&mut self.required),
             &mut |definition| provider.signature(definition).map(Some),
         );
-        let mut union = ReadUnion::reduce(&self.reads, queries.weight.scratch)
-            .ok_or(queries.errors.resource)?;
+        let roots_start = 1 + self
+            .membership
+            .as_ref()
+            .ok_or(queries.errors.protocol)?
+            .components
+            .len();
+        let mut union = ReadUnion::reduce(&self.reads, queries.weight.scratch, |index| {
+            let root = index.checked_sub(roots_start)?;
+            queries
+                .front
+                .live_query_reads(*queries.roots.get(root)?, true)
+        })
+        .ok_or(queries.errors.resource)?;
         union
             .merge(
                 &table_reads.finish().map_err(|_| queries.errors.protocol)?,

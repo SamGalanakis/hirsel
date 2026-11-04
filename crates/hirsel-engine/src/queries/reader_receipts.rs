@@ -26,13 +26,27 @@ fn decoding_bytes(rows: u32, max_key: u32) -> Option<u64> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ReaderReceipt {
-    reference: Reference,
+    output: crate::store::Output,
+    len: u64,
     rows: u32,
     max_key: u32,
+    live: Option<(DefId, bool)>,
 }
 impl ReaderReceipt {
     pub(super) fn capture(store: &dyn ResultStore, reads: &Reads, scratch: u64) -> Option<Self> {
-        let encoded = reads.encoded_bytes()?;
+        let framing = 8u64.checked_add((reads.len() as u64).checked_mul(4)?)?;
+        let (encoded, max_key) =
+            reads
+                .iter()
+                .try_fold((framing, 0usize), |(bytes, max_key), (key, value)| {
+                    let key_bytes = key.encoded_bytes()?;
+                    Some((
+                        bytes
+                            .checked_add(u64::try_from(key_bytes).ok()?)?
+                            .checked_add(value.0.len() as u64)?,
+                        max_key.max(key_bytes),
+                    ))
+                })?;
         let native = (reads.len() as u64)
             .checked_mul((size_of::<(ReadKey, ContentHash)>() + 4) as u64)?
             .checked_add(crate::memo::retained_arc_bytes(reads))?;
@@ -47,16 +61,16 @@ impl ReaderReceipt {
         if bytes.len() as u64 > scratch {
             return None;
         }
+        let reference = store.put_content(READERS, &bytes)?;
+        if reference.domain != READERS {
+            return None;
+        }
         Some(Self {
-            reference: store.put_content(READERS, &bytes)?,
+            output: reference.output,
+            len: reference.len,
             rows: u32::try_from(reads.len()).ok()?,
-            max_key: u32::try_from(
-                reads
-                    .iter()
-                    .map(|(key, _)| key.encoded_bytes())
-                    .try_fold(0usize, |n, next| Some(n.max(next?)))?,
-            )
-            .ok()?,
+            live: None,
+            max_key: u32::try_from(max_key).ok()?,
         })
     }
     pub(super) fn len(&self) -> usize {
@@ -66,9 +80,13 @@ impl ReaderReceipt {
         decoding_bytes(self.rows, self.max_key)
     }
     fn bytes(&self, store: &dyn ResultStore) -> Option<crate::store::Bytes> {
-        let bytes = store.get_content(self.reference)?;
-        (self.reference.domain == READERS && READERS.reference(&bytes)? == self.reference)
-            .then_some(bytes)
+        let reference = Reference {
+            output: self.output,
+            domain: READERS,
+            len: self.len,
+        };
+        let bytes = store.get_content(reference)?;
+        (READERS.reference(&bytes)? == reference).then_some(bytes)
     }
     pub(super) fn load(&self, store: &dyn ResultStore) -> Option<Arc<Reads>> {
         let bytes = self.bytes(store)?;
@@ -100,6 +118,14 @@ impl ReadUnion {
         let held = reads
             .allocations()
             .try_fold(0u64, |sum, (_, bytes)| sum.checked_add(bytes as u64))?;
+        self.merge_rows(reads, scratch, held)
+    }
+    fn merge_live(&mut self, reads: &parallel::LiveFrontReads, scratch: u64) -> Option<()> {
+        // The guard retains Front's original allocation grant throughout this
+        // active reduction, including concurrent eviction of its live slot.
+        self.merge_rows(reads, scratch, 0)
+    }
+    fn merge_rows(&mut self, reads: &Reads, scratch: u64, held: u64) -> Option<()> {
         if self.required(reads)?.checked_add(held)? > scratch {
             return None;
         }
@@ -153,20 +179,20 @@ impl ArchivedReader {
         reads: &Reads,
     ) -> Option<Arc<Self>> {
         let receipt = ReaderReceipt::capture(&*source.store, reads, source.scratch)?;
-        Some(Arc::new(Self {
-            output: receipt.reference.output,
-            len: receipt.reference.len,
-            rows: u32::try_from(reads.len()).ok()?,
-            max_key: u32::try_from(
-                reads
-                    .iter()
-                    .map(|(key, _)| key.encoded_bytes())
-                    .try_fold(0usize, |n, next| Some(n.max(next?)))?,
-            )
-            .ok()?,
+        Some(Self::from_receipt(source, receipt))
+    }
+    pub(super) fn from_receipt(
+        source: Arc<crate::runtime::GrowthPublicationSource>,
+        receipt: ReaderReceipt,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            output: receipt.output,
+            len: receipt.len,
+            rows: receipt.rows,
+            max_key: receipt.max_key,
             source,
             _owned: None,
-        }))
+        })
     }
     pub(crate) fn capture_owned(
         source: Arc<crate::runtime::GrowthPublicationSource>,
@@ -209,17 +235,28 @@ impl ArchivedReader {
 }
 impl serde::Serialize for ArchivedReader {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.load()
-            .ok_or_else(|| serde::ser::Error::custom("unavailable archived reader receipt"))?
-            .serialize(serializer)
+        let bytes = self
+            .bytes()
+            .ok_or_else(|| serde::ser::Error::custom("unavailable archived reader receipt"))?;
+        // Capture validated these exact HRD3 bytes. Authenticate the reference
+        // and preserve the wire bytes without decoding and encoding them again.
+        serializer.serialize_bytes(&bytes)
     }
 }
 impl ReadUnion {
-    pub(super) fn reduce(readers: &[Arc<ArchivedReader>], scratch: u64) -> Option<Self> {
+    pub(super) fn reduce(
+        readers: &[Arc<ArchivedReader>],
+        scratch: u64,
+        mut live: impl FnMut(usize) -> Option<parallel::LiveFrontReads>,
+    ) -> Option<Self> {
         let mut union = Self::default();
-        for reader in readers {
-            let bytes = reader.bytes()?;
-            union.merge_encoded(&bytes, reader.rows, reader.max_key, scratch)?;
+        for (index, reader) in readers.iter().enumerate() {
+            if let Some(reads) = live(index) {
+                union.merge_live(&reads, scratch)?;
+            } else {
+                let bytes = reader.bytes()?;
+                union.merge_encoded(&bytes, reader.rows, reader.max_key, scratch)?;
+            }
         }
         if !union.fits_scratch(scratch)? {
             return None;
@@ -237,7 +274,17 @@ impl ReaderSequence {
         reads: &Reads,
         scratch: u64,
         retained: u64,
-    ) -> Option<()> {
+        live: Option<(DefId, bool)>,
+    ) -> Option<ReaderReceipt> {
+        let reader = ReaderReceipt::capture(store, reads, scratch)?;
+        self.record_receipt(reader, retained, live)
+    }
+    pub(super) fn record_receipt(
+        &mut self,
+        mut reader: ReaderReceipt,
+        retained: u64,
+        live: Option<(DefId, bool)>,
+    ) -> Option<ReaderReceipt> {
         if self.0.len() == self.0.capacity() {
             let slots = usize::try_from(retained / size_of::<ReaderReceipt>() as u64).ok()?;
             let capacity = self.0.len().checked_add(128)?.min(slots);
@@ -246,18 +293,27 @@ impl ReaderSequence {
             }
             self.0.reserve_exact(capacity - self.0.len());
         }
-        self.0.push(ReaderReceipt::capture(store, reads, scratch)?);
-        Some(())
+        reader.live = live;
+        self.0.push(reader.clone());
+        Some(reader)
     }
     pub(super) fn finish(
         self,
         store: &dyn ResultStore,
         scratch: u64,
+        front: &FrontBodyQueries,
     ) -> Option<Result<Reads, crate::memo::Inconsistent>> {
         let mut union = ReadUnion::default();
         for reader in &self.0 {
-            let bytes = reader.bytes(store)?;
-            union.merge_encoded(&bytes, reader.rows, reader.max_key, scratch)?;
+            if let Some(reads) = reader
+                .live
+                .and_then(|(id, checked)| front.live_reads(id, checked))
+            {
+                union.merge_live(&reads, scratch)?;
+            } else {
+                let bytes = reader.bytes(store)?;
+                union.merge_encoded(&bytes, reader.rows, reader.max_key, scratch)?;
+            }
         }
         if !union.fits_scratch(scratch)? {
             return None;

@@ -506,12 +506,21 @@ impl Task {
                         else {
                             return Err(reference.err().unwrap_or(self.queries.errors.protocol));
                         };
-                        self.reads
-                            .record(
-                                &*self.queries.store,
-                                &facts.reads,
-                                self.queries.weight.scratch,
+                        let observed = self
+                            .reads
+                            .record_receipt(
+                                self.queries
+                                    .plan
+                                    .front
+                                    .reader_receipt(
+                                        id,
+                                        &facts.reads,
+                                        &self.queries.store,
+                                        self.queries.weight.scratch,
+                                    )
+                                    .ok_or(self.queries.errors.resource)?,
                                 self.queries.weight.retained,
+                                Some((DefId::intern(path), false)),
                             )
                             .ok_or(self.queries.errors.resource)?;
                         if self
@@ -547,12 +556,6 @@ impl Task {
                             Ok(diagnostics) => {
                                 file.diagnostics.extend(diagnostics);
                                 if let Ok(product) = selected {
-                                    let observed = ReaderReceipt::capture(
-                                        &*self.queries.store,
-                                        &facts.reads,
-                                        self.queries.weight.scratch,
-                                    )
-                                    .ok_or(self.queries.errors.resource)?;
                                     self.front.push((
                                         path.clone(),
                                         FrontObservation {
@@ -617,6 +620,7 @@ impl Task {
                                         &output.reads,
                                         self.queries.weight.scratch,
                                         self.queries.weight.retained,
+                                        None,
                                     )
                                     .ok_or(self.queries.errors.resource)?;
                                 for file in self.files.iter_mut().filter(|file| file.clean()) {
@@ -670,6 +674,7 @@ impl Task {
                                             &output.reads,
                                             self.queries.weight.scratch,
                                             self.queries.weight.retained,
+                                            None,
                                         )
                                         .ok_or(self.queries.errors.resource)?;
                                     for file in self.files.iter_mut().filter(|file| file.clean()) {
@@ -766,6 +771,7 @@ impl Task {
                                         &output.reads,
                                         self.queries.weight.scratch,
                                         self.queries.weight.retained,
+                                        None,
                                     )
                                     .ok_or(self.queries.errors.resource)?;
                                 file.diagnostics.extend(output.output.diagnostics);
@@ -792,6 +798,7 @@ impl Task {
                                         &reads,
                                         self.queries.weight.scratch,
                                         self.queries.weight.retained,
+                                        None,
                                     )
                                     .ok_or(self.queries.errors.resource)?;
                                 self.failed_lowered.push((path.clone(), reference));
@@ -870,6 +877,7 @@ impl Task {
                                 &reads,
                                 self.queries.weight.scratch,
                                 self.queries.weight.retained,
+                                None,
                             )
                             .ok_or(self.queries.errors.resource)?;
                         if selected.is_err() {
@@ -894,7 +902,7 @@ impl Task {
         let queries = &self.queries;
         queries.plan.front.release_handoff();
         let reads = std::mem::take(&mut self.reads)
-            .finish(&*queries.store, queries.weight.scratch)
+            .finish(&*queries.store, queries.weight.scratch, &queries.plan.front)
             .ok_or(queries.errors.resource)?
             .map_err(|_| queries.errors.protocol)?;
         let stopped = self.files.iter().find_map(|file| match &file.error {

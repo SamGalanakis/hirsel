@@ -698,8 +698,9 @@ impl QueryEngine {
             let (_, start, end) = facts.comptime[index];
             let (owner, _) = self.lexical_shape(path).ok_or(QueryError::NotImplemented)?;
             let anchor = self
-                .snapshot(path)
-                .ok()
+                .items
+                .get(path)
+                .and_then(|items| items.first())
                 .map(|syntax| syntax.anchor)
                 .or_else(|| self.catalog.anchor(path, owner.occurrence))
                 .ok_or(QueryError::NotImplemented)?;
@@ -717,9 +718,10 @@ impl QueryEngine {
         &self,
         path: &DefPath,
     ) -> Option<(hirsel_syntax::LexicalOwner, LexicalShape)> {
-        self.snapshot(path)
-            .ok()
-            .map(|syntax| (syntax.owner(), LexicalShape::capture(&syntax)))
+        self.items
+            .get(path)
+            .and_then(|items| items.first())
+            .map(|syntax| (syntax.owner(), LexicalShape::capture(syntax)))
             .or_else(|| self.catalog.lexical(path))
     }
     pub(crate) fn retained_source_syntax(&self, file: FileId) -> Vec<&Arc<ItemSyntax>> {

@@ -30,6 +30,11 @@ cross-file move keeps the same syntax. Ordinary stored products and
 artifacts carry anchors as (source ordinal, base) and are placed on load, never
 rebased.
 
+Item-syntax snapshots materialize the selected declaration before returning its
+owner. Frozen namespace assemblies can retain declaration heads without syntax.
+Header engines preserve the captured Verify policy; changing that policy
+invalidates memo and signature-snapshot identities.
+
 Each revision computes one frozen `SignatureSnapshot` (`snapshot/`): every
 signature by `DefId`, each opaque type's private view (seen only by its own
 package's bodies) and V's verdict on every view. V validates a package's bodies

@@ -1360,6 +1360,7 @@ impl QueryEngine {
             limits: self.comptime_limits,
             manifest: Some(self.declarations.inputs().manifest_revision),
             unavailable: self.unavailable,
+            verify: self.verify,
         }
     }
     /// The explicit inputs of module resolution, to change.
@@ -1390,6 +1391,7 @@ pub(crate) struct SnapshotStamp {
     limits: crate::ComptimeLimits,
     manifest: Option<ContentHash>,
     unavailable: Option<QueryKind>,
+    verify: crate::Verify,
 }
 
 #[cfg(test)]

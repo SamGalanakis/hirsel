@@ -343,7 +343,7 @@ impl Worker<'_> {
                     // The generator's verifier receipt is acceptance evidence,
                     // checked when the view installs, not a Check input.
                     let mut observed = Observed::default();
-                    for &(key, value) in task.registration.iter().flat_map(|r| r.reads.iter()) {
+                    for &(key, value) in task.registration.iter().flat_map(|r| r.reads.observed()) {
                         if private_unique::inherited_registration_read(&key) {
                             observed.merged.record(key, value);
                         }

@@ -701,7 +701,12 @@ impl DemandProducer {
             .unwrap_or_else(|e| e.into_inner())
             .contains(&key)
         {
-            return Ok(None);
+            let current = self.current()?;
+            return if current.capture().identity() == previous.identity() {
+                Ok(None)
+            } else {
+                scheduled_lower::SuccessorCapture::new(previous, current).map(Some)
+            };
         }
         if previous
             .snapshot
@@ -776,22 +781,28 @@ impl DemandProducer {
             .cloned()
             .collect::<Vec<_>>();
         let successor = self.view(&mut engine, &definitions, &registrations)?;
-        let inserted = self
+        let admitted = if successor.capture().identity() == previous.identity() {
+            None
+        } else {
+            Some(scheduled_lower::SuccessorCapture::new(
+                previous,
+                successor.clone(),
+            )?)
+        };
+        // A completed staged demand must expose its owner before the cache
+        // marker: callers suspended in an older capture join that owner too.
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.current = Arc::downgrade(&successor);
+        if self
             .staged
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(key);
-        if inserted {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            .insert(key)
+        {
             state.staged_log.push(key);
             state.charges.push(metadata);
         }
-        if successor.capture().identity() == previous.identity() {
-            return Ok(None);
-        }
-        let admitted = scheduled_lower::SuccessorCapture::new(previous, successor.clone())?;
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).current = Arc::downgrade(&successor);
-        Ok(Some(admitted))
+        Ok(admitted)
     }
     fn current(&self) -> Result<Arc<FrontLowerQueries>, QueryError> {
         self.state

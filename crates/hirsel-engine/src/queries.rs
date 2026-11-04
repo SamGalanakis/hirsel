@@ -356,7 +356,12 @@ pub struct QueryEngine {
     /// Each indexed definition's inputs as last indexed (S0's diff).
     inputs: hirsel_syntax::DefMap<memos::DefInputs>,
     /// The environment and limits the memos were last checked under.
-    environment_seen: Option<(QueryEnvironment, crate::ComptimeLimits, Option<ContentHash>)>,
+    environment_seen: Option<(
+        QueryEnvironment,
+        crate::ComptimeLimits,
+        Option<ContentHash>,
+        Verify,
+    )>,
     /// The manifest revision indexing last published; any other value was
     /// set explicitly by the caller (its build inputs changed).
     published_manifest: Option<ContentHash>,
@@ -945,16 +950,12 @@ impl QueryEngine {
         self.unavailable = Some(kind);
         Err(QueryError::NotImplemented)
     }
-    fn materialized_snapshot(
-        &mut self,
-        definition: &DefPath,
-    ) -> Result<Arc<ItemSyntax>, QueryError> {
+    /// A syntax snapshot always owns a materialized declaration. Namespace
+    /// assemblies may carry only frozen declaration facts until this demand.
+    fn snapshot(&mut self, definition: &DefPath) -> Result<Arc<ItemSyntax>, QueryError> {
         if !self.items.contains_key(definition) {
             self.materialize(definition)?;
         }
-        self.snapshot(definition)
-    }
-    fn snapshot(&self, definition: &DefPath) -> Result<Arc<ItemSyntax>, QueryError> {
         self.items
             .get(definition)
             .and_then(|items| items.first())

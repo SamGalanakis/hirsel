@@ -399,6 +399,7 @@ impl QueryEngine {
                 &self.comptime_limits.budget.to_le_bytes(),
                 &(self.comptime_limits.call_depth as u64).to_le_bytes(),
                 &optional(self.build_inputs_revision()).0,
+                &[u8::from(self.verify == Verify::On)],
             ],
         )
     }
@@ -464,10 +465,11 @@ impl QueryEngine {
     }
 
     pub(super) fn observed_signature(&self, id: DefId) -> Option<hirsel_types::SignatureRef> {
-        let (environment, limits, inputs) = self.environment_seen.as_ref()?;
+        let (environment, limits, inputs, verify) = self.environment_seen.as_ref()?;
         if environment != &self.environment
             || *limits != self.comptime_limits
             || *inputs != self.build_inputs_revision()
+            || *verify != self.verify
         {
             return None;
         }
@@ -916,10 +918,11 @@ impl QueryEngine {
             self.environment.clone(),
             self.comptime_limits,
             self.build_inputs_revision(),
+            self.verify,
         );
         if self.environment_seen.as_ref() != Some(&now) {
             self.selected_instances.clear();
-            if let Some((previous, _, _)) = &self.environment_seen {
+            if let Some((previous, ..)) = &self.environment_seen {
                 let mut changes = ChangeSet::default();
                 changes.read(ReadKey::Environment, Durability::High);
                 if previous.package_manifest_hash != now.0.package_manifest_hash {

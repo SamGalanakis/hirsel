@@ -935,17 +935,16 @@ impl QueryEngine {
         }
         let definitions = self.front_source_roots();
         let generators = self.front_generator_roots(&definitions)?;
-        let missing = generators.iter().any(|path| {
-            self.snapshot(path).is_ok_and(|syntax| {
-                !generation::instance_bodied(&syntax)
-                    && syntax.item.visibility == hirsel_syntax::Visibility::Private
-                    && !self.private_summaries.contains_key(&DefId::intern(path))
-            })
-        });
-        if !missing {
-            return Ok(None);
+        for path in &generators {
+            let syntax = self.snapshot(path)?;
+            if !generation::instance_bodied(&syntax)
+                && syntax.item.visibility == hirsel_syntax::Visibility::Private
+                && !self.private_summaries.contains_key(&DefId::intern(path))
+            {
+                return Ok(Some(reservation));
+            }
         }
-        Ok(Some(reservation))
+        Ok(None)
     }
     fn standalone_demand(&mut self, mut reservation: MemoryReservation) -> Result<(), QueryError> {
         let definitions = self.front_source_roots();
@@ -1023,6 +1022,9 @@ impl QueryEngine {
             .is_none_or(|store| !store.claims_content())
         {
             self.result_store = Some(Arc::new(crate::store::MemStore::default()));
+            // The temporary store supplies V's local authority too. A snapshot
+            // captured before it existed cannot revalidate generator receipts.
+            self.retire_snapshot();
         }
         let result = self
             .demand_front_scope(&definitions, &definitions, &generators, admission, errors)

@@ -19,7 +19,12 @@ pub struct SourceIndexState {
     graph: crate::memo::SourceHeaderGraph,
     front_changes: frontier::FrontTracker,
     inputs: Box<[(DefId, memos::DefInputs)]>,
-    environment_seen: Option<(QueryEnvironment, crate::ComptimeLimits, Option<ContentHash>)>,
+    environment_seen: Option<(
+        QueryEnvironment,
+        crate::ComptimeLimits,
+        Option<ContentHash>,
+        Verify,
+    )>,
     published_manifest: Option<ContentHash>,
     vanished: BTreeSet<DefId>,
     declarations: crate::DeclarationIndex,
@@ -293,7 +298,7 @@ impl QueryEngine {
             w.add(package.version.capacity());
         });
         weight.map(&self.builtins, |w, path, _| w.path(path));
-        if let Some((environment, _, _)) = &self.environment_seen {
+        if let Some((environment, ..)) = &self.environment_seen {
             weight.add(environment.compiler_version.capacity());
         }
         // One prospective source-owner decoration covers its envelope and COW

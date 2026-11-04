@@ -154,7 +154,12 @@ fn diagnostic(rule: &'static str, span: Span, message: impl Into<String>) -> Que
 }
 
 /// Every primary site in generated text also marks the declaration that generated it.
-fn label(mut error: QueryError, engine: &QueryEngine, generated: FileId, site: Span) -> QueryError {
+fn label(
+    mut error: QueryError,
+    engine: &mut QueryEngine,
+    generated: FileId,
+    site: Span,
+) -> QueryError {
     if let QueryError::Diagnostics(diagnostics) = &mut error {
         for d in diagnostics {
             if engine.sources.resolve(d.primary).file == generated {
@@ -201,10 +206,10 @@ impl QueryEngine {
     /// Late mode failures use the same generated-source explanations as checking.
     /// Only diagnostic-bearing results are copied; successful bodies stay shared.
     pub(super) fn label_generated_result<T: Clone>(
-        &self,
+        &mut self,
         result: Result<Arc<QueryOutput<T>>, QueryError>,
     ) -> Result<Arc<QueryOutput<T>>, QueryError> {
-        let label = |diagnostics: &mut [Diagnostic]| {
+        let mut label = |diagnostics: &mut [Diagnostic]| {
             for diagnostic in diagnostics {
                 let file = self.sources.resolve(diagnostic.primary).file;
                 let Some(generated) = self.generated.values().find(|g| g.file == file) else {
@@ -241,7 +246,7 @@ impl QueryEngine {
     /// The std generator emits one breadcrumb and contract before a single-line
     /// converter. They explain diagnostics only: no name resolution, verdict,
     /// primary span or repair is inferred from this generated text.
-    fn schema_hook_context(&self, diagnostic: &mut Diagnostic, generated: FileId) {
+    fn schema_hook_context(&mut self, diagnostic: &mut Diagnostic, generated: FileId) {
         let Some(source) = self.sources.file(generated) else {
             return;
         };
@@ -253,7 +258,9 @@ impl QueryEngine {
         ) else {
             return;
         };
-        let Some(span) = self.schema_member_span(parent, member) else {
+        let (parent, member, contract) =
+            (parent.to_owned(), member.to_owned(), contract.to_owned());
+        let Some(span) = self.schema_member_span(&parent, &member) else {
             return;
         };
         diagnostic.secondary.push(hirsel_diag::Label {
@@ -264,7 +271,7 @@ impl QueryEngine {
 
     /// Resolve the breadcrumb to existing application syntax, retaining item
     /// anchors so relocated and UTF-8 sources use the ordinary source map.
-    fn schema_member_span(&self, parent: &str, member: &str) -> Option<Span> {
+    fn schema_member_span(&mut self, parent: &str, member: &str) -> Option<Span> {
         let (package, path) = parent.split_once('/')?;
         let (name, version) = package.split_once('@')?;
         let path = path.split('[').next()?;
@@ -340,6 +347,13 @@ impl QueryEngine {
             groups: BTreeMap::new(),
         };
         let result = step(&types, &memo, &mut recorder);
+        // The helper's header can probe several signatures after the same
+        // private proof failed. Return that producer's original failure once,
+        // retaining every read the callback recorded before it stopped.
+        let result = match recorder.engine.current_private_summary_failure() {
+            Some(error) => Err(error.clone()),
+            None => result,
+        };
         reads.observed = recorder.observed;
         reads.reads = recorder.reads;
         result

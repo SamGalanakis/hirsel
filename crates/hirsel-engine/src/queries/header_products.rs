@@ -191,6 +191,7 @@ pub(crate) struct HeaderProducts {
     store: Option<Arc<dyn crate::store::ResultStore>>,
     identity: ContentHash,
     verify_store: crate::store::VerifyStore,
+    verify: Verify,
     limits: crate::ComptimeLimits,
     staged: BTreeMap<DefPath, crate::comptime::StagedConstant>,
     summaries: Arc<hirsel_syntax::DefMap<hirsel_types::UniqueSummary>>,
@@ -283,6 +284,7 @@ impl HeaderProducts {
             store: engine.result_store.clone(),
             identity: engine.store_identity,
             verify_store: engine.verify_store,
+            verify: engine.verify,
             limits: engine.comptime_limits,
             staged: engine.staged_constants.clone(),
             summary_reads: Arc::new(
@@ -309,6 +311,7 @@ impl HeaderProducts {
                 })
             })
             && self.environment == engine.environment
+            && self.verify == engine.verify
             && self.limits == engine.comptime_limits
             && self.published_manifest == engine.published_manifest
             && Arc::ptr_eq(&self.types, &engine.types)
@@ -342,6 +345,7 @@ impl HeaderProducts {
         engine.result_store = self.store.clone();
         engine.store_identity = self.identity;
         engine.verify_store = self.verify_store;
+        engine.verify = self.verify;
         engine.comptime_limits = self.limits;
         engine.staged_constants = self.staged.clone();
         engine.header_products = Some(self.clone());

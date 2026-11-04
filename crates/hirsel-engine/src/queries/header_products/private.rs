@@ -683,6 +683,7 @@ impl HeaderProducts {
             store: self.store.clone(),
             identity: self.identity,
             verify_store: self.verify_store,
+            verify: self.verify,
             limits: self.limits,
             staged: self.staged.clone(),
             summaries: self.summaries.clone(),

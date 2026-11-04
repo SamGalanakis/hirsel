@@ -278,7 +278,7 @@ impl NamespaceCapture {
             .bodies
             .get(&DefId::intern(path))
             .ok_or_else(|| refused("body outside capture"))?;
-        let engine = self.source_engine(path)?;
+        let mut engine = self.source_engine(path)?;
         let syntax = engine.snapshot(path)?;
         if syntax.text_hash != input.implementation {
             return Err(refused("captured source binding changed"));

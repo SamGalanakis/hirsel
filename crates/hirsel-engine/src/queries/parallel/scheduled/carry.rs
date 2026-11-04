@@ -419,7 +419,7 @@ impl FrontBodyQueries {
         let diagnostics = facts.diagnostics;
         let owner = FrontFacts::capture(
             self.inputs.get(&key)?.definition.path(),
-            None,
+            Some(QueryKind::Modes),
             reads,
             facts.diagnostic_phases,
             facts.checked,

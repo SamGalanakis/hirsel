@@ -45,9 +45,14 @@ else:
     with open(os.environ['OBSERVED'], 'w') as output:
         json.dump(dict(argv=sys.argv[1:], bootstrap=os.environ.get('RUSTC_BOOTSTRAP'), threads=os.environ.get('RUST_TEST_THREADS'), jobs=os.environ.get('HIRSEL_JOBS'), llvm=os.environ.get('LLVM_SYS_231_PREFIX'), linker=os.environ.get('HIRSEL_CAPTURE_LINKER'), auditor=os.environ.get('HIRSEL_AUDITOR_PACKAGE'), cases=[name for name in selected
                   if args.ignored or args.include_ignored or not cases[name]]), output)
+    if args.format == 'json':
+        print(json.dumps(dict(type='suite', event='started', test_count=len(selected))))
     for name in selected:
         status = 'ok' if args.ignored or args.include_ignored or not cases[name] else 'ignored'
-        print('test ' + name + ' ... ' + status)
+        if args.format == 'json':
+            print(json.dumps(dict(type='test', event=status, name=name)))
+        else:
+            print('test ' + name + ' ... ' + status)
 '''
 
 
@@ -114,7 +119,8 @@ class LauncherFixture(unittest.TestCase):
         self.env = os.environ | dict(
             HIRSEL_TEST_TMPDIR=str(self.root / 'tmp'), HIRSEL_TEST_CWD=str(self.root),
             LLVM_SYS_231_PREFIX=str(self.root / 'llvm'), CASES=json.dumps(CASES),
-            OBSERVED=str(self.observed), HIRSEL_TEST_BINARY='fixture-test-it')
+            OBSERVED=str(self.observed), HIRSEL_TEST_BINARY='fixture-test-it',
+            TEST_TARGET='root//:fixture-test-it')
         for key in ('HIRSEL_TEST_POOL', 'HIRSEL_TEST_CPUS', 'HIRSEL_TEST_EXACT_CPUS', 'TEST_SHARD_INDEX', 'TEST_TOTAL_SHARDS', 'HIRSEL_TEST_HOST_ONLY', 'HIRSEL_TEST_REPORT_ACTIVE', 'HIRSEL_TEST_REPORTER'):
             self.env.pop(key, None)
 
@@ -208,6 +214,35 @@ class LauncherReporting(LauncherFixture):
         return subprocess.run([sys.executable, '-c', code, str(self.reporter()),
                                'sh', str(LAUNCHER), 'harness', *args],
                               cwd=self.root, env=env, capture_output=True, text=True, timeout=10)
+
+    def test_zero_body_pass_is_refused_and_names_target(self):
+        self.env['TEST_TARGET'] = 'root//:fixture-test-it'
+        for cases, args in [({}, ()), ({'host::unsupported': True}, ()),
+                            ({'host::unsupported': True}, ('host::unsupported',)),
+                            ({'pool::only': False}, ('--ignored',))]:
+            with self.subTest(cases=cases, args=args):
+                self.env['CASES'] = json.dumps(cases)
+                result = self.run_report(args, deadline=10)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('root//:fixture-test-it', result.stderr)
+                self.assertIn('executed zero test bodies', result.stderr)
+
+    def test_empty_partitions_and_discovery_keep_their_status(self):
+        self.env['CASES'] = json.dumps({'pool::only': False})
+        self.env.update(TEST_TOTAL_SHARDS='2', TEST_SHARD_INDEX='1')
+        result = self.run_report(deadline=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        selected = json.loads(self.observed.read_text())
+        self.assertEqual(selected['cases'], [])
+        index = selected['argv'].index('--exact')
+        self.assertEqual(selected['argv'][index:index + 2], ['--exact', ''])
+        result = self.run_report(('pool::only',), deadline=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.env.pop('TEST_TOTAL_SHARDS')
+        self.env.pop('TEST_SHARD_INDEX')
+        self.env['CASES'] = '{}'
+        result = self.run_report(('--list',), deadline=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def fixture(self):
         # Same started/result JSON events emitted by pinned libtest. The Rust
@@ -338,6 +373,9 @@ print('fixture all-thread stack for pid=' + pid)
         self.assertIn('test b_fail ... FAILED', result.stdout)
         self.assertIn('fixture failure output', result.stdout)
         self.assertIn('test result: FAILED. 2 passed; 1 failed; 0 ignored;', result.stdout)
+        result = self.run_report(('--exact', 'b_fail'), deadline=10)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('fixture-test-it executed zero test bodies', result.stderr)
         costs = self.root / 'costs.tsv'
         costs.write_text('a_pass\t1\nc_hangs\t1\n')
         self.env['HIRSEL_TEST_COSTS'] = str(costs)
@@ -433,18 +471,13 @@ class LauncherSelection(LauncherFixture):
         self.assertIn('removed_body', run.stderr)
         self.assertFalse(self.observed.exists())
 
-    def test_empty_listing_and_host_empty_harness_keep_their_status(self):
-        run = subprocess.run(['sh', str(LAUNCHER), 'harness', '--list', 'missing_case'],
-                             cwd=self.root, env=self.env, capture_output=True, text=True)
-        self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(run.stdout, '')
-        self.env['CASES'] = '{}'
-        selected, _ = self.run_cases()
-        self.assertEqual(selected['cases'], [])
-        self.env['CASES'] = json.dumps({'host::unsupported': True})
-        selected, output = self.run_cases('host::unsupported')
-        self.assertEqual(selected['cases'], [])
-        self.assertIn('ignored', output)
+    def test_empty_discovery_keeps_its_status(self):
+        for cases in (CASES, {}):
+            self.env['CASES'] = json.dumps(cases)
+            run = subprocess.run(['sh', str(LAUNCHER), 'harness', '--list', 'missing_case'],
+                                 cwd=self.root, env=self.env, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(run.stdout, '')
 
     def test_isolation_preserves_other_partitions_and_explicit_selection(self):
         before = [self.run_cases(shard=f'{i}/2')[0]['cases'] for i in (1, 2)]

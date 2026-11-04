@@ -126,6 +126,7 @@ class Progress:
         self.running = {}
         self.finished = {}
         self.raw_json = raw_json
+        self.empty_partition = False
 
     def unittest_line(self, line):
         # unittest's verbose runner writes the start before calling the body,
@@ -140,6 +141,9 @@ class Progress:
                 self.running.setdefault(name, time.monotonic())
 
     def line(self, line):
+        if line.startswith(b'HIRSEL_TEST_EMPTY_PARTITION '):
+            self.empty_partition = True
+            return
         try:
             event = json.loads(line)
         except (ValueError, UnicodeError):
@@ -244,6 +248,13 @@ def supervise(command, *, deadline=INNER_DEADLINE_SECONDS, raw_json=False):
                     if stream is child.stderr:
                         progress.unittest_line(pending[stream])
             status = child.wait()
+            binary = os.environ.get('HIRSEL_TEST_BINARY')
+            discovery = any(arg in ('--list', '--help', '-h') for arg in command)
+            if (status == 0 and binary and not discovery and not progress.empty_partition
+                    and not any(result in ('ok', 'failed') for result in progress.finished.values())):
+                target = os.environ.get('TEST_TARGET', binary)
+                print(f'test_launcher.sh: {target} executed zero test bodies', file=sys.stderr, flush=True)
+                return 2
             return status if status >= 0 else 128 - status
     finally:
         if child is not None:

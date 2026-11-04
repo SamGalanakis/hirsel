@@ -243,8 +243,11 @@ The selection includes native HTTP/HTTPS/gRPC launches, replay and cpu_pool_*
 when startup, scheduler, pool or Ordered code changes. Native HTTP targets run
 the existing full-gate bodies explicitly. Output stops at 100 targets and names
 truncation on stderr; a truncated list is partial consumer coverage. Discovery
-runs no bodies. A libtest selector that matches no bodies fails before dispatch;
-empty shard partitions, ignored bodies and host-empty binaries keep their status.
+runs no bodies. A libtest selector that matches no bodies fails before dispatch.
+A Rust target that completes no test bodies fails at result classification and
+names the target, including empty binaries and ignored-only runs. Intentional
+empty shard partitions use `--exact ""` and keep their success; discovery keeps
+its status.
 
 Pool test actions reserve 5% of the unchanged 600-second RE limit for reporting.
 At the 570-second inner deadline, `test_report.py` prints

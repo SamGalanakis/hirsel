@@ -266,6 +266,12 @@ if [ -n "${HIRSEL_TEST_BIN_EXES:-}" ]; then
   done
 fi
 cd "$HIRSEL_TEST_CWD"
+# Only the selector can exempt an intentional empty partition from body counts.
+report_empty_partition() {
+  if [ -n "${HIRSEL_TEST_REPORT_ACTIVE:-}" ] && ! "$discovery"; then
+    printf 'HIRSEL_TEST_EMPTY_PARTITION %s\n' "$test_binary"
+  fi
+}
 # Only Rust harness runs use the libtest event protocol. Discovery and help
 # retain their own formats, and scripts keep their original argument surface.
 run_harness() (
@@ -450,7 +456,7 @@ if [ -n "$shard" ]; then
   index="${shard%/*}"
   count="${shard#*/}"
   if "$filtered"; then
-    [ "$index" -eq 1 ] || { echo "shard $shard: arguments select the cases; shard 1 runs them"; exit 0; }
+    [ "$index" -eq 1 ] || { echo "shard $shard: arguments select the cases; shard 1 runs them"; report_empty_partition; exit 0; }
   else
     # Longest-first greedy assignment by measured seconds (HIRSEL_TEST_COSTS:
     # `case<TAB>seconds` rows, tools/buck2/test_costs.py). A case without a
@@ -483,6 +489,7 @@ if [ -n "$cases" ]; then
   # shellcheck disable=SC2086 # Rust case names contain no spaces; globbing is off.
   set -- "$@" --exact $cases
 else
+  report_empty_partition
   set -- "$@" --exact ""
 fi
 literal=false

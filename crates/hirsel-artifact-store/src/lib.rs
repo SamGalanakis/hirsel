@@ -150,7 +150,7 @@ impl Domain {
 enum Region {
     #[cfg(unix)]
     Map {
-        file: Arc<File>,
+        file: Option<Arc<File>>,
         address: *mut libc::c_void,
         len: usize,
     },
@@ -189,7 +189,7 @@ unsafe impl Send for Region {}
 unsafe impl Sync for Region {}
 
 impl Region {
-    fn open(path: &Path) -> io::Result<Self> {
+    fn open(path: &Path, retain_file: bool) -> io::Result<Self> {
         let file = File::open(path)?;
         let len = usize::try_from(file.metadata()?.len()).map_err(|_| invalid())?;
         if !(HEADER..=HEADER + MAX_RECORD).contains(&len) {
@@ -197,11 +197,16 @@ impl Region {
         }
         #[cfg(unix)]
         {
-            Self::map_file(Arc::new(file), len)
+            let mut region = Self::map_file(Arc::new(file), len)?;
+            if !retain_file && let Self::Map { file, .. } = &mut region {
+                *file = None;
+            }
+            Ok(region)
         }
         #[cfg(not(unix))]
         {
             use std::io::Read;
+            let _ = retain_file;
             let mut bytes = Vec::new();
             file.take((HEADER + MAX_RECORD + 1) as u64)
                 .read_to_end(&mut bytes)?;
@@ -231,12 +236,16 @@ impl Region {
         if address == libc::MAP_FAILED {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self::Map { file, address, len })
+        Ok(Self::Map {
+            file: Some(file),
+            address,
+            len,
+        })
     }
     #[cfg(unix)]
     fn file(&self) -> Option<&Arc<File>> {
         match self {
-            Self::Map { file, .. } => Some(file),
+            Self::Map { file, .. } => file.as_ref(),
             Self::Checked(checked) => checked.region.file(),
             Self::Payload(checked) => checked.region.file(),
             Self::Retained { region, .. } => region.file(),
@@ -416,10 +425,12 @@ impl Bytes {
                 #[cfg(unix)]
                 Region::Map { file, address, len } => {
                     visit(*address as usize, *len);
-                    visit(
-                        Arc::as_ptr(file) as usize,
-                        size_of::<File>() + 2 * size_of::<usize>(),
-                    );
+                    if let Some(file) = file {
+                        visit(
+                            Arc::as_ptr(file) as usize,
+                            size_of::<File>() + 2 * size_of::<usize>(),
+                        );
+                    }
                 }
                 Region::Owned(bytes) => visit(
                     bytes.as_ptr() as usize,
@@ -638,7 +649,10 @@ impl Store {
         }
     }
     fn open_region(&self, path: &Path, kind: Counter) -> io::Result<Arc<Region>> {
-        self.load_region(path, kind, None, || Region::open(path))
+        self.load_region(path, kind, None, false, || Region::open(path, false))
+    }
+    fn open_verification_region(&self, path: &Path, kind: Counter) -> io::Result<Arc<Region>> {
+        self.load_region(path, kind, None, true, || Region::open(path, true))
     }
     fn load_region(
         &self,
@@ -646,6 +660,7 @@ impl Store {
         kind: Counter,
         #[cfg(unix)] pinned: Option<(&Arc<File>, &Arc<()>)>,
         #[cfg(not(unix))] _pinned: Option<(&Arc<File>, &Arc<()>)>,
+        require_file: bool,
         load: impl FnOnce() -> io::Result<Region>,
     ) -> io::Result<Arc<Region>> {
         let mut cache = self.regions.lock().unwrap_or_else(|e| e.into_inner());
@@ -663,13 +678,17 @@ impl Store {
         let retain = cache.active && same_scope && !matches!(kind, Counter::IndexOpens);
         if retain && let Some(region) = cache.entries.get(path) {
             #[cfg(unix)]
-            let same_file = pinned.is_none_or(|(file, _)| {
-                region
-                    .file()
-                    .is_some_and(|actual| Arc::ptr_eq(file, actual))
-            });
+            let same_file = (!require_file || region.file().is_some())
+                && pinned.is_none_or(|(file, _)| {
+                    region
+                        .file()
+                        .is_some_and(|actual| Arc::ptr_eq(file, actual))
+                });
             #[cfg(not(unix))]
-            let same_file = true;
+            let same_file = {
+                let _ = require_file;
+                true
+            };
             if same_file {
                 self.count(Counter::RegionCacheHits, 1);
                 return Ok(region.clone());
@@ -736,9 +755,10 @@ impl Store {
         &self.root
     }
     pub fn output_path(&self, reference: Reference) -> PathBuf {
-        if reference.len <= pack::SMALL as u64 {
-            self.packed_path(0, reference.output.0)
-                .unwrap_or_else(|| self.root.join("missing-output"))
+        if let Some(path) = self.packed_path(0, reference.output.0) {
+            path
+        } else if reference.len <= pack::SMALL as u64 {
+            self.root.join("missing-output")
         } else {
             self.private_output_path(reference.output.0)
                 .unwrap_or_else(|| self.path(reference.output.0, "outputs"))
@@ -795,8 +815,10 @@ impl Store {
         checked_container(self.raw_container(reference)?, reference)
     }
     fn raw_container(&self, reference: Reference) -> Option<Bytes> {
-        if reference.len <= pack::SMALL as u64 {
-            self.packed_get(0, reference.output.0)
+        if let Some(source) = self.packed_source(0, reference.output.0) {
+            self.read_packed(source)
+        } else if reference.len <= pack::SMALL as u64 {
+            None
         } else {
             let region = self
                 .open_region(&self.output_path(reference), Counter::StandaloneOpens)

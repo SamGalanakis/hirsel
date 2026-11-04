@@ -245,10 +245,13 @@ impl Store {
             .map(|l| self.path(l.segment, "packs"))
     }
     pub(super) fn packed_get(&self, tag: u8, key: ContentHash) -> Option<Bytes> {
-        match self.packed_source(tag, key)? {
+        self.read_packed(self.packed_source(tag, key)?)
+    }
+    pub(super) fn read_packed(&self, source: Source) -> Option<Bytes> {
+        match source {
             Source::Pending(bytes) => Some(bytes),
             Source::File { path, offset, len } => {
-                self.open_segment(&path)
+                self.open_segment(&path, false)
                     .ok()?
                     .range(u64::from(offset), u64::from(len), 8)
             }
@@ -274,8 +277,12 @@ impl Store {
             len: location.len,
         })
     }
-    pub(super) fn open_segment(&self, path: &Path) -> io::Result<Bytes> {
-        let region = self.open_region(path, Counter::SegmentOpens)?;
+    pub(super) fn open_segment(&self, path: &Path, retain_file: bool) -> io::Result<Bytes> {
+        let region = if retain_file {
+            self.open_verification_region(path, Counter::SegmentOpens)?
+        } else {
+            self.open_region(path, Counter::SegmentOpens)?
+        };
         (|| -> Option<()> {
             let bytes = region.bytes();
             if bytes.len() > LIMIT
@@ -295,6 +302,47 @@ impl Store {
             region,
             range: 0..len,
         })
+    }
+    /// Compact published installation contents through the existing bounded
+    /// epoch writer. Neither the segment, scratch nor record limits change.
+    /// Durable index publication precedes retiring the standalone copies.
+    pub fn pack_contents(&self, references: impl IntoIterator<Item = Reference>) -> io::Result<()> {
+        let store = self.for_operation();
+        let request = store.request();
+        let mut retired = Vec::new();
+        for reference in references
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            if reference.len <= SMALL as u64
+                || reference.len > (LIMIT - 2 * HEADER - 7) as u64
+                || store.packed_source(0, reference.output.0).is_some()
+            {
+                continue;
+            }
+            let path = store.output_path(reference);
+            let bytes = store.container(reference).ok_or_else(invalid)?;
+            store.packed_put(0, reference.output.0, bytes)?;
+            retired.push((reference, path));
+        }
+        request.finish()?;
+        // Cache publication can decline persistence. Observe every new route
+        // through a fresh reader before removing any original sole-copy file.
+        let published = self.for_operation();
+        let _read = published.batch();
+        for (reference, _) in &retired {
+            if published.packed_source(0, reference.output.0).is_none() {
+                return Err(io::Error::other("installation pack was not published"));
+            }
+        }
+        for (_, path) in retired {
+            match fs::remove_file(path) {
+                Ok(()) => (),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
     pub(super) fn packed_put(&self, tag: u8, key: ContentHash, bytes: Bytes) -> io::Result<()> {
         let mut state = self.state();

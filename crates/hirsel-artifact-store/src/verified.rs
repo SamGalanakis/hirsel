@@ -29,6 +29,7 @@ impl VerifiedRecords {
                         &file.path,
                         Counter::RegionRemaps,
                         Some((&file.file, &self.scope)),
+                        true,
                         || Region::map_file(file.file.clone(), file.len),
                     )
                     .ok()?;
@@ -179,20 +180,23 @@ impl Store {
                 )?;
             }
             for reference in unique {
-                let source = if reference.len <= pack::SMALL as u64 {
-                    self.packed_source(0, reference.output.0)?
+                let (source, packed) = if let Some(source) =
+                    self.packed_source(0, reference.output.0)
+                {
+                    (source, true)
+                } else if reference.len > pack::SMALL as u64 {
+                    (
+                        pack::Source::File {
+                            path: self.output_path(reference),
+                            offset: 0,
+                            len: u32::try_from(reference.len.checked_add(HEADER as u64)?).ok()?,
+                        },
+                        false,
+                    )
                 } else {
-                    pack::Source::File {
-                        path: self.output_path(reference),
-                        offset: 0,
-                        len: u32::try_from(reference.len.checked_add(HEADER as u64)?).ok()?,
-                    }
+                    return None;
                 };
-                route(
-                    source,
-                    Expected::Content(reference),
-                    reference.len <= pack::SMALL as u64,
-                )?;
+                route(source, Expected::Content(reference), packed)?;
             }
             Some((files, contents))
         })()
@@ -200,9 +204,9 @@ impl Store {
         for ((path, packed), mut records) in files {
             records.sort_unstable_by_key(|(offset, _, _)| *offset);
             let bytes = if packed {
-                self.open_segment(&path)?
+                self.open_segment(&path, true)?
             } else {
-                let region = self.open_region(&path, Counter::StandaloneOpens)?;
+                let region = self.open_verification_region(&path, Counter::StandaloneOpens)?;
                 let len = region.bytes().len();
                 Bytes {
                     region,

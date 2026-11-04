@@ -932,6 +932,24 @@ fn small_records_share_bounded_atomic_batches_and_survive_relocation() {
         );
         assert_eq!(&*reader.get(*reference).unwrap(), &bytes);
     }
+    let medium: Vec<_> = [5000, 6000]
+        .into_iter()
+        .map(|len| {
+            let bytes = vec![(len / 1000) as u8; len];
+            (store.put(DOMAIN, &bytes).unwrap(), bytes)
+        })
+        .collect();
+    let retired: Vec<_> = medium
+        .iter()
+        .map(|(reference, _)| store.output_path(*reference))
+        .collect();
+    store
+        .pack_contents(medium.iter().map(|(reference, _)| *reference))
+        .unwrap();
+    assert!(retired.iter().all(|path| !path.exists()));
+    for (reference, bytes) in &medium {
+        assert_eq!(&*reader.get(*reference).unwrap(), bytes);
+    }
     let held = reader
         .get(references[599])
         .unwrap()
@@ -939,9 +957,13 @@ fn small_records_share_bounded_atomic_batches_and_survive_relocation() {
     let moved = dir.path().join("moved");
     fs::rename(&root, &moved).unwrap();
     assert_eq!(
-        &*Store::new(moved).get(references[599]).unwrap(),
+        &*Store::new(moved.clone()).get(references[599]).unwrap(),
         &599u32.to_le_bytes()
     );
+    let moved_store = Store::new(moved);
+    for (reference, bytes) in &medium {
+        assert_eq!(&*moved_store.get(*reference).unwrap(), bytes);
+    }
     drop(store);
     drop(reader);
     assert_eq!(&*held, &599u32.to_le_bytes());

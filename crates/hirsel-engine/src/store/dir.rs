@@ -74,10 +74,15 @@ impl DirStore {
             .as_ref()
             .ok_or_else(|| std::io::Error::other("installation was not recorded"))?;
         let store = hirsel_artifact_store::Store::new(self.root.clone());
-        package.publish(
-            &store,
-            &records.lock().unwrap_or_else(|error| error.into_inner()),
-        )
+        let records = records.lock().unwrap_or_else(|error| error.into_inner());
+        store.pack_contents(
+            records
+                .contents
+                .values()
+                .copied()
+                .chain(records.rows.values().map(|(_, reference)| *reference)),
+        )?;
+        package.publish(&store, &records)
     }
     fn record_content(&self, reference: super::Reference) {
         if let Some(records) = &self.installation {
@@ -646,6 +651,15 @@ mod tests {
             }
         }
         let consumed = statistics.snapshot();
+        eprintln!(
+            "INSTALLED_INTEGRITY unique={} open={} consumed={} local={} total={}",
+            checks,
+            opened.counters["ContentChecks"],
+            consumed.counters["ContentChecks"],
+            local_statistics.snapshot().counters["ContentChecks"],
+            consumed.counters["ContentChecks"]
+                + local_statistics.snapshot().counters["ContentChecks"]
+        );
         for counter in ["ContentChecks", "SegmentOpens", "StandaloneOpens"] {
             assert_eq!(
                 consumed.counters[counter], opened.counters[counter],

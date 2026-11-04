@@ -1608,9 +1608,14 @@ impl FrontBodyQueries {
             _ => None,
         })
     }
-    pub(crate) fn completed_failure(&self, path: &DefPath) -> Option<(Reference, QueryError)> {
-        let reference = self.completed_product(self.query(path)?)?.err()?;
-        Some((reference, self.completed_error(path)?))
+    pub(crate) fn completed_front(
+        &self,
+        path: &DefPath,
+    ) -> Option<Result<(), (Reference, QueryError)>> {
+        Some(match self.completed_product(self.query(path)?)? {
+            Ok(_) => Ok(()),
+            Err(reference) => Err((reference, self.completed_error(path)?)),
+        })
     }
     pub(crate) fn completed_error(&self, path: &DefPath) -> Option<QueryError> {
         let query = self.query(path)?;

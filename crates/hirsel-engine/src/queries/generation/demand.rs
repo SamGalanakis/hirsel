@@ -300,15 +300,22 @@ impl DemandProducer {
             .rev()
             .map(|view| view.body_front())
             .chain(std::iter::once(initial.body_front()));
+        let mut checked = BTreeSet::new();
         for front in fronts {
             for path in roots {
-                if let Some((reference, error)) = front.completed_failure(path) {
-                    return Some(scope::FrontDemandError::Front {
-                        reference,
-                        error: Some(error),
-                        sources: front.namespace().sources.clone(),
-                        owner: front.clone(),
-                    });
+                if checked.contains(path) {
+                    continue;
+                }
+                if let Some(result) = front.completed_front(path) {
+                    checked.insert(path.clone());
+                    if let Err((reference, error)) = result {
+                        return Some(scope::FrontDemandError::Front {
+                            reference,
+                            error: Some(error),
+                            sources: front.namespace().sources.clone(),
+                            owner: front.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -939,7 +946,10 @@ impl DemandProducer {
                     let selected = reads.read_consuming(query).await;
                     if let Some(facts) = front.check_facts(selected.clone()) {
                         if let Err(error) = facts.result {
-                            if stop_on_error || !error.cacheable() {
+                            // A generated dependency can supply the private
+                            // result proof this body needs. Discover it before
+                            // treating a cacheable front diagnostic as final.
+                            if !error.cacheable() {
                                 return Err(error);
                             }
                         }
@@ -1033,7 +1043,10 @@ impl DemandProducer {
                 else {
                     continue;
                 };
-                if facts.result.is_err() {
+                if let Err(error) = facts.result {
+                    if stop_on_error {
+                        return Err(error);
+                    }
                     continue;
                 }
                 let executable = owner

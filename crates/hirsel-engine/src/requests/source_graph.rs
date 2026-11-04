@@ -764,6 +764,7 @@ fn plan_source(
     limits: RequestLimits,
     planner: &SourcePlanner<'_>,
     store: &dyn ResultStore,
+    namespace: Option<&Arc<crate::NamespaceCapture>>,
 ) -> Result<SourcePlanning, ToolError> {
     let shape = planner.shape;
     let selection = planner.selection;
@@ -777,7 +778,13 @@ fn plan_source(
             Err(error) => return Err(engine_error(engine, error)),
         };
         let run_inputs = if shape.run {
-            match engine.front_run_inputs(limits.snapshot_bytes) {
+            let captured = match namespace {
+                Some(namespace) => {
+                    engine.front_run_inputs_in(namespace.clone(), limits.snapshot_bytes)
+                }
+                None => engine.front_run_inputs(limits.snapshot_bytes),
+            };
+            match captured {
                 Ok(inputs) => {
                     run_error = None;
                     Some(inputs)
@@ -797,8 +804,16 @@ fn plan_source(
             Ok(generators) => !generators.is_empty(),
             Err(error) => return Err(engine_error(engine, error)),
         };
-        let catalogue = if shape.ownership && !generated {
-            match engine.front_native_definition_inputs(&definitions, limits.snapshot_bytes) {
+        let catalogue = if shape.ownership && (!generated || namespace.is_some()) {
+            let captured = match namespace {
+                Some(namespace) => engine.front_native_definition_inputs_in(
+                    &definitions,
+                    namespace.clone(),
+                    limits.snapshot_bytes,
+                ),
+                None => engine.front_native_definition_inputs(&definitions, limits.snapshot_bytes),
+            };
+            match captured {
                 Ok(inputs) => Some(inputs),
                 Err(error) => return Err(engine_error(engine, error)),
             }
@@ -895,6 +910,7 @@ pub fn prepare_source_scope(
             shape,
         },
         store,
+        None,
     )?;
     let definitions = planned.definitions.clone();
     let plan = planned.plan;
@@ -996,7 +1012,7 @@ pub fn install(
         mut catalogue,
         mut run_error,
         plan: _,
-    } = match plan_source(engine, limits, &planner, store) {
+    } = match plan_source(engine, limits, &planner, store, namespace.as_ref()) {
         Ok(planned) => planned,
         Err(error) => return Err(loading.failed(error)),
     };
@@ -1004,7 +1020,7 @@ pub fn install(
     let registrations = namespace.as_ref().map_or_else(Vec::new, |namespace| {
         namespace.registrations.values().cloned().collect()
     });
-    if shape.run || shape.ownership {
+    if (shape.run || shape.ownership) && namespace.is_none() {
         if let Err(error) = engine.prepare_namespace_registrations(&registrations) {
             return Err(loading.failed(engine_error(engine, error)));
         }

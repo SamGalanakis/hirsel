@@ -774,6 +774,9 @@ conformance/CONC/CONC-5-nested-lock-in-body-ok.hir
 conformance/CONC/CONC-5-owned-payload-mutexes-run.hir
 conformance/CONC/CONC-5-payload-unique-bad.hir
 conformance/CONC/CONC-5-payload-unique-ok.hir
+conformance/CONC/CONC-5-private-result-aliased-body-bad.hir
+conformance/CONC/CONC-5-private-result-payload-bad.hir
+conformance/CONC/CONC-5-private-result-payload-ok.hir
 conformance/CONC/CONC-5-result-local-unique-payload-ok.hir
 conformance/CONC/CONC-5-result-nested-payload-bad.hir
 conformance/CONC/CONC-5-result-nested-payload-ok.hir

@@ -1081,7 +1081,7 @@ impl Frame {
             .ok_or_else(|| invalid("local out of range"))?;
         for &step in indices.iter() {
             while let Shadow::Ownership { content, .. } = node {
-                node = content;
+                node = std::rc::Rc::make_mut(content);
             }
             let index = match step {
                 AccessStep::Field(i)

@@ -202,44 +202,121 @@ pub(crate) enum Shadow {
     /// surviving shadow sharing this block and add a holder to it;
     /// administrative Take preserves it.
     Ownership {
-        content: Box<Shadow>,
+        content: Rc<Shadow>,
         holder: Holder,
     },
-    Parts(Vec<Shadow>),
+    Parts(ShadowParts),
     /// Content reached through storage bounded by `home`: a borrowed capture
     /// (the captured value's bound and the captured slot's home), or a closure
     /// whose environment is region-placed. A call over a global value is
     /// global; the view itself is not.
     View {
-        content: Box<Shadow>,
+        content: Rc<Shadow>,
         home: Bound,
     },
 }
 impl Clone for Shadow {
     #[inline]
     fn clone(&self) -> Self {
-        #[inline]
-        fn clone_node(shadow: &Shadow, nodes: &mut u64) -> Shadow {
-            *nodes += 1;
-            match shadow {
-                Shadow::Uniform(bound) => Shadow::Uniform(bound.clone()),
-                Shadow::Ownership { content, holder } => Shadow::Ownership {
-                    content: Box::new(clone_node(content, nodes)),
-                    holder: holder.clone(),
-                },
-                Shadow::Parts(parts) => {
-                    Shadow::Parts(parts.iter().map(|part| clone_node(part, nodes)).collect())
-                }
-                Shadow::View { content, home } => Shadow::View {
-                    content: Box::new(clone_node(content, nodes)),
-                    home: home.clone(),
-                },
-            }
+        hirsel_intern::work::count(hirsel_intern::work::Counter::InterpClonedShadowNodes);
+        match self {
+            Self::Uniform(bound) => Self::Uniform(bound.clone()),
+            Self::Ownership { content, holder } => Self::Ownership {
+                content: content.clone(),
+                holder: holder.clone(),
+            },
+            Self::Parts(parts) => Self::Parts(parts.clone()),
+            Self::View { content, home } => Self::View {
+                content: content.clone(),
+                home: home.clone(),
+            },
         }
-        let mut nodes = 0;
-        let shadow = clone_node(self, &mut nodes);
-        hirsel_intern::work::count_by(hirsel_intern::work::Counter::InterpClonedShadowNodes, nodes);
-        shadow
+    }
+}
+
+/// Copy-on-write child nodes and their vector. Detaching the vector copies
+/// handles; only a child that is written copies its Shadow and bound storage.
+/// Holder identities remain shared, as with value::Block's snapshots.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ShadowParts(Rc<Vec<Rc<Shadow>>>);
+type ShadowIter<'a> =
+    std::iter::Map<std::slice::Iter<'a, Rc<Shadow>>, fn(&'a Rc<Shadow>) -> &'a Shadow>;
+type ShadowIterMut<'a> =
+    std::iter::Map<std::slice::IterMut<'a, Rc<Shadow>>, fn(&'a mut Rc<Shadow>) -> &'a mut Shadow>;
+impl ShadowParts {
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub(crate) fn get(&self, index: usize) -> Option<&Shadow> {
+        self.0.get(index).map(Rc::as_ref)
+    }
+    pub(crate) fn get_mut(&mut self, index: usize) -> Option<&mut Shadow> {
+        Rc::make_mut(&mut self.0).get_mut(index).map(Rc::make_mut)
+    }
+    fn iter(&self) -> ShadowIter<'_> {
+        self.0.iter().map(Rc::as_ref)
+    }
+    fn iter_mut(&mut self) -> ShadowIterMut<'_> {
+        Rc::make_mut(&mut self.0).iter_mut().map(Rc::make_mut)
+    }
+    fn push(&mut self, part: Shadow) {
+        Rc::make_mut(&mut self.0).push(Rc::new(part));
+    }
+    fn pop(&mut self) -> Option<Shadow> {
+        Rc::make_mut(&mut self.0).pop().map(Rc::unwrap_or_clone)
+    }
+    fn remove(&mut self, index: usize) -> Shadow {
+        Rc::unwrap_or_clone(Rc::make_mut(&mut self.0).remove(index))
+    }
+    fn swap(&mut self, first: usize, second: usize) {
+        Rc::make_mut(&mut self.0).swap(first, second);
+    }
+    fn truncate(&mut self, len: usize) {
+        Rc::make_mut(&mut self.0).truncate(len);
+    }
+}
+impl From<Vec<Shadow>> for ShadowParts {
+    fn from(parts: Vec<Shadow>) -> Self {
+        parts.into_iter().collect()
+    }
+}
+impl FromIterator<Shadow> for ShadowParts {
+    fn from_iter<I: IntoIterator<Item = Shadow>>(parts: I) -> Self {
+        Self(Rc::new(parts.into_iter().map(Rc::new).collect()))
+    }
+}
+impl IntoIterator for ShadowParts {
+    type Item = Shadow;
+    type IntoIter = std::iter::Map<std::vec::IntoIter<Rc<Shadow>>, fn(Rc<Shadow>) -> Shadow>;
+    fn into_iter(self) -> Self::IntoIter {
+        Rc::unwrap_or_clone(self.0)
+            .into_iter()
+            .map(Rc::unwrap_or_clone)
+    }
+}
+impl<'a> IntoIterator for &'a ShadowParts {
+    type Item = &'a Shadow;
+    type IntoIter = ShadowIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+impl<'a> IntoIterator for &'a mut ShadowParts {
+    type Item = &'a mut Shadow;
+    type IntoIter = ShadowIterMut<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+impl std::ops::Index<usize> for ShadowParts {
+    type Output = Shadow;
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.0[index]
+    }
+}
+impl std::ops::IndexMut<usize> for ShadowParts {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        Rc::make_mut(&mut Rc::make_mut(&mut self.0)[index])
     }
 }
 impl Default for Shadow {
@@ -334,6 +411,9 @@ impl Shadow {
         content.total()
     }
     pub fn add_bound(&mut self, bound: &[u32]) {
+        if bound.is_empty() {
+            return;
+        }
         match self {
             Self::Uniform(b) => union(b, bound),
             Self::Parts(parts) => {
@@ -342,7 +422,7 @@ impl Shadow {
                 }
             }
             Self::View { content, .. } | Self::Ownership { content, .. } => {
-                content.add_bound(bound)
+                Rc::make_mut(content).add_bound(bound)
             }
         }
     }
@@ -353,7 +433,9 @@ impl Shadow {
             match s {
                 Self::Uniform(b) => union(b, &[instance]),
                 Self::Parts(p) => work.extend(p.iter_mut()),
-                Self::View { content, .. } | Self::Ownership { content, .. } => work.push(content),
+                Self::View { content, .. } | Self::Ownership { content, .. } => {
+                    work.push(Rc::make_mut(content))
+                }
             }
         }
     }
@@ -367,7 +449,7 @@ impl Shadow {
                 part
             }
             Self::View { content, home } => Self::View {
-                content: Box::new(content.part(index)),
+                content: Rc::new(content.part(index)),
                 home: home.clone(),
             },
             Self::Parts(p) => p.get(index).cloned().unwrap_or_default(),
@@ -440,7 +522,7 @@ impl Shadow {
         }
         for home in views.into_iter().rev() {
             result = Self::View {
-                content: Box::new(result),
+                content: Rc::new(result),
                 home: home.clone(),
             };
         }
@@ -487,29 +569,121 @@ impl Shadow {
         if map.is_empty() {
             return;
         }
-        let mut work = vec![self];
-        while let Some(s) = work.pop() {
-            match s {
-                Self::Uniform(b) => {
-                    if b.iter().any(|i| map.iter().any(|(k, _)| k == i)) {
-                        let mut out = vec![];
-                        for i in b.iter() {
-                            match map.iter().find(|(k, _)| k == i) {
-                                Some((_, to)) => union(&mut out, to),
-                                None => union(&mut out, &[*i]),
-                            }
-                        }
-                        *b = out;
+        fn mapped(bound: &Bound, map: &[(u32, Bound)]) -> Option<Bound> {
+            if !bound.iter().any(|i| map.iter().any(|(k, _)| k == i)) {
+                return None;
+            }
+            let mut out = vec![];
+            for i in bound {
+                match map.iter().find(|(k, _)| k == i) {
+                    Some((_, to)) => union(&mut out, to),
+                    None => union(&mut out, &[*i]),
+                }
+            }
+            (out != *bound).then_some(out)
+        }
+        enum Work<'a> {
+            Enter(&'a Shadow),
+            Finish(&'a Shadow),
+        }
+        enum Edit {
+            Uniform(Bound),
+            Parts(Vec<(usize, usize)>),
+            Ownership(usize),
+            View {
+                child: Option<usize>,
+                home: Option<Bound>,
+            },
+        }
+        // Plan only actual bound changes, then apply them in place. Shared
+        // nodes detach along changed paths; uniquely owned nodes never copy.
+        // Both passes use worklists rather than the host call stack.
+        let mut work = vec![Work::Enter(&*self)];
+        let mut results: Vec<Option<usize>> = vec![];
+        let mut edits: Vec<Option<Edit>> = vec![];
+        while let Some(item) = work.pop() {
+            let edit = match item {
+                Work::Enter(node) => match node {
+                    Self::Uniform(bound) => mapped(bound, map).map(Edit::Uniform),
+                    Self::Parts(parts) => {
+                        work.push(Work::Finish(node));
+                        work.extend(parts.iter().rev().map(Work::Enter));
+                        continue;
+                    }
+                    Self::Ownership { content, .. } | Self::View { content, .. } => {
+                        work.push(Work::Finish(node));
+                        work.push(Work::Enter(content));
+                        continue;
+                    }
+                },
+                Work::Finish(node) => match node {
+                    Self::Parts(parts) => {
+                        let start = results.len() - parts.len();
+                        let children: Vec<_> = results
+                            .drain(start..)
+                            .enumerate()
+                            .filter_map(|(index, edit)| edit.map(|edit| (index, edit)))
+                            .collect();
+                        (!children.is_empty()).then_some(Edit::Parts(children))
+                    }
+                    Self::Ownership { .. } => results.pop().unwrap().map(Edit::Ownership),
+                    Self::View { home, .. } => {
+                        let child = results.pop().unwrap();
+                        let mut home_bound = mapped(home, map).unwrap_or_else(|| home.clone());
+                        // The prior View path always used total(), including
+                        // homes without any substituted instance.
+                        home_bound.sort_unstable();
+                        home_bound.dedup();
+                        let home = (home_bound != *home).then_some(home_bound);
+                        (child.is_some() || home.is_some()).then_some(Edit::View { child, home })
+                    }
+                    Self::Uniform(_) => unreachable!(),
+                },
+            };
+            let id = edit.map(|edit| {
+                let id = edits.len();
+                edits.push(Some(edit));
+                id
+            });
+            results.push(id);
+        }
+        drop(work);
+        let Some(root) = results.pop().unwrap() else {
+            return;
+        };
+        let mut pending = vec![(&mut *self, root)];
+        while let Some((node, id)) = pending.pop() {
+            match (node, edits[id].take().unwrap()) {
+                (Self::Uniform(bound), Edit::Uniform(replacement)) => *bound = replacement,
+                (Self::Parts(parts), Edit::Parts(children)) => {
+                    let mut remaining = Rc::make_mut(&mut parts.0).as_mut_slice();
+                    let mut offset = 0;
+                    for (index, child) in children {
+                        let (_, tail) = remaining.split_at_mut(index - offset);
+                        let (part, tail) = tail.split_first_mut().unwrap();
+                        pending.push((Rc::make_mut(part), child));
+                        remaining = tail;
+                        offset = index + 1;
                     }
                 }
-                Self::Parts(p) => work.extend(p.iter_mut()),
-                Self::Ownership { content, .. } => work.push(content),
-                Self::View { content, home } => {
-                    let mut mapped = Shadow::Uniform(std::mem::take(home));
-                    mapped.substitute(map);
-                    *home = mapped.total();
-                    work.push(content);
+                (Self::Ownership { content, .. }, Edit::Ownership(child)) => {
+                    pending.push((Rc::make_mut(content), child));
                 }
+                (
+                    Self::View { content, home },
+                    Edit::View {
+                        child,
+                        home: replacement,
+                    },
+                ) => {
+                    if let Some(replacement) = replacement {
+                        *home = replacement;
+                    }
+                    if let Some(child) = child {
+                        pending.push((Rc::make_mut(content), child));
+                    }
+                }
+                _ => unreachable!(),
             }
         }
     }
@@ -537,7 +711,7 @@ impl Shadow {
         }
         if let Self::View { content, home } = self {
             return Self::View {
-                content: Box::new(content.ownership(value, unique)),
+                content: Rc::new(Rc::unwrap_or_clone(content).ownership(value, unique)),
                 home,
             };
         }
@@ -574,7 +748,7 @@ impl Shadow {
             );
         }
         Self::Ownership {
-            content: Box::new(self),
+            content: Rc::new(self),
             holder: Holder::new(unique),
         }
     }
@@ -622,7 +796,7 @@ impl Shadow {
                     .collect(),
             ),
             (Self::View { content, home }, _) => Self::View {
-                content: Box::new(content.copy_out(value, state)),
+                content: Rc::new(content.copy_out(value, state)),
                 home: home.clone(),
             },
             _ => {
@@ -636,12 +810,12 @@ impl Shadow {
     pub fn copied(&self) -> Self {
         match self {
             Self::Ownership { content, holder } => Self::Ownership {
-                content: Box::new(content.copied()),
+                content: Rc::new(content.copied()),
                 holder: holder.copy(),
             },
             Self::Parts(parts) => Self::Parts(parts.iter().map(Self::copied).collect()),
             Self::View { content, home } => Self::View {
-                content: Box::new(content.copied()),
+                content: Rc::new(content.copied()),
                 home: home.clone(),
             },
             Self::Uniform(bound) => Self::Uniform(bound.clone()),
@@ -728,7 +902,7 @@ impl Shadow {
     /// actual incoming sharing witness, including a forged Unique row.
     pub fn rebound(&mut self, bound: &Bound) {
         match self {
-            Self::Ownership { content, .. } => content.rebound(bound),
+            Self::Ownership { content, .. } => Rc::make_mut(content).rebound(bound),
             Self::Parts(parts) => {
                 for part in parts {
                     part.rebound(bound);
@@ -743,11 +917,11 @@ impl Shadow {
     pub fn rebound_value(mut self, value: &Value, bound: &Bound) -> Self {
         if matches!(value, Value::Closure { .. }) {
             let content = match self {
-                Self::View { content, .. } => *content,
+                Self::View { content, .. } => Rc::unwrap_or_clone(content),
                 other => other,
             };
             Self::View {
-                content: Box::new(content),
+                content: Rc::new(content),
                 home: bound.clone(),
             }
         } else {
@@ -760,14 +934,14 @@ impl Shadow {
     pub fn fresh_copy(&self, state: &State) -> Self {
         match self {
             Self::Ownership { content, .. } => Self::Ownership {
-                content: Box::new(content.fresh_copy(state)),
+                content: Rc::new(content.fresh_copy(state)),
                 holder: Holder::new(true),
             },
             Self::Parts(parts) => {
                 Self::Parts(parts.iter().map(|part| part.fresh_copy(state)).collect())
             }
             Self::View { content, home } => Self::View {
-                content: Box::new(content.fresh_copy(state)),
+                content: Rc::new(content.fresh_copy(state)),
                 home: state.deep_bound(home),
             },
             Self::Uniform(bound) => Self::of(state.deep_bound(bound)),
@@ -1073,7 +1247,7 @@ impl OperationCheck {
         };
         let mut node = node;
         while let Shadow::Ownership { content, .. } | Shadow::View { content, .. } = node {
-            node = content;
+            node = Rc::make_mut(content);
         }
         let Shadow::Parts(parts) = node else {
             // No structural witness: retain the conservative existing bound.
@@ -1086,7 +1260,7 @@ impl OperationCheck {
             parts.push(input.shadow.clone());
             None
         } else if path.is_core("list.pop") && parts.len() == elements.len() + 1 {
-            parts.pop().map(|part| Shadow::Parts(vec![part]))
+            parts.pop().map(|part| Shadow::Parts(vec![part].into()))
         } else if path.is_core("list.remove") && parts.len() == elements.len() + 1 {
             index(1)
                 .filter(|&i| i < parts.len())
@@ -1139,7 +1313,7 @@ impl OperationCheck {
                         } else {
                             let content = native_shadow(v, arguments, self).for_value(v);
                             Shadow::View {
-                                content: Box::new(content),
+                                content: Rc::new(content),
                                 home: bound.clone(),
                             }
                         }
@@ -1667,7 +1841,7 @@ mod tests {
             result: Shadow::default(),
             updates: vec![],
             inputs: vec![Argument {
-                shadow: Shadow::Parts(vec![Shadow::default(), Shadow::of(vec![borrowed])]),
+                shadow: Shadow::Parts(vec![Shadow::default(), Shadow::of(vec![borrowed])].into()),
                 ..Default::default()
             }],
             callbacks: vec![],
@@ -1698,7 +1872,9 @@ mod tests {
             updates: vec![],
             inputs: [first, second]
                 .map(|borrowed| Argument {
-                    shadow: Shadow::Parts(vec![Shadow::default(), Shadow::of(vec![borrowed])]),
+                    shadow: Shadow::Parts(
+                        vec![Shadow::default(), Shadow::of(vec![borrowed])].into(),
+                    ),
                     ..Default::default()
                 })
                 .into(),
@@ -1780,7 +1956,7 @@ mod tests {
             let arguments = vec![after.clone(), index(0), index(1)];
             let mut check = OperationCheck {
                 result: Shadow::default(),
-                updates: vec![(0, Shadow::Parts(before).ownership(&initial, true))],
+                updates: vec![(0, Shadow::Parts(before.into()).ownership(&initial, true))],
                 inputs: vec![
                     Argument::default(),
                     Argument {
@@ -1845,7 +2021,7 @@ mod tests {
             let element = Shadow::of(vec![access]).ownership(&first, true);
             let mut check = OperationCheck {
                 result: Shadow::default(),
-                updates: vec![(0, Shadow::Parts(vec![element]))],
+                updates: vec![(0, Shadow::Parts(vec![element].into()))],
                 inputs: vec![],
                 callbacks: vec![],
                 task_arguments: None,
@@ -1876,13 +2052,13 @@ mod tests {
     #[test]
     fn a_view_of_a_global_value_lends_no_lifetime() {
         let global = Shadow::View {
-            content: Box::new(Shadow::default()),
+            content: Rc::new(Shadow::default()),
             home: vec![3],
         };
         assert_eq!(global.lifetime(), Vec::<u32>::new());
         assert_eq!(global.total(), vec![3]);
         let local = Shadow::View {
-            content: Box::new(Shadow::of(vec![1])),
+            content: Rc::new(Shadow::of(vec![1])),
             home: vec![3],
         };
         assert_eq!(local.lifetime(), vec![1, 3]);
@@ -1927,13 +2103,16 @@ mod tests {
         // Two borrowed calls obscure the placement behind their own roots.
         let first = state.root(&Shadow::of(vec![binding, region, arena]));
         let second = state.root(&Shadow::of(vec![first]));
-        let source = Shadow::Parts(vec![
-            Shadow::of(vec![binding]),
-            Shadow::View {
-                content: Box::new(Shadow::of(vec![second])),
-                home: vec![binding],
-            },
-        ]);
+        let source = Shadow::Parts(
+            vec![
+                Shadow::of(vec![binding]),
+                Shadow::View {
+                    content: Rc::new(Shadow::of(vec![second])),
+                    home: vec![binding],
+                },
+            ]
+            .into(),
+        );
         let copied = source.fresh_copy(&state);
         assert_eq!(copied.part(0).total(), Vec::<u32>::new());
         assert_eq!(copied.part(1).total(), vec![region, arena]);
@@ -1967,7 +2146,7 @@ mod tests {
         let owned_outer = state.instance(Kind::MutableRoot(vec![]));
         let owned_inner = state.instance(Kind::MutableRoot(vec![owned_outer]));
         let mut displaced = Shadow::View {
-            content: Box::new(Shadow::of(vec![inner])),
+            content: Rc::new(Shadow::of(vec![inner])),
             home: vec![binding],
         };
         let mut owned = Shadow::of(vec![owned_inner]);

@@ -29,7 +29,7 @@ fn old_part(shadow: &Shadow, index: usize) -> Shadow {
         Shadow::View { content, home } => {
             CLONED_NODES.with(|count| count.set(count.get() + 1));
             Shadow::View {
-                content: Box::new(old_part(content, index)),
+                content: Rc::new(old_part(content, index)),
                 home: home.clone(),
             }
         }
@@ -69,13 +69,13 @@ fn identical(actual: &Shadow, expected: &Shadow) {
 }
 fn own(content: Shadow, holder: &Holder) -> Shadow {
     Shadow::Ownership {
-        content: Box::new(content),
+        content: Rc::new(content),
         holder: holder.clone(),
     }
 }
 fn view(content: Shadow, home: u32) -> Shadow {
     Shadow::View {
-        content: Box::new(content),
+        content: Rc::new(content),
         home: vec![home],
     }
 }
@@ -84,18 +84,21 @@ fn trees() -> Vec<Shadow> {
     let mut trees = vec![
         Shadow::default(),
         Shadow::of(vec![1, 4]),
-        Shadow::Parts(vec![]),
+        Shadow::Parts(vec![].into()),
     ];
     for _ in 0..3 {
         let prior = trees.clone();
         for (i, t) in prior.iter().enumerate() {
             trees.push(view(t.clone(), 7));
             trees.push(own(t.clone(), &h));
-            trees.push(Shadow::Parts(vec![
-                t.clone(),
-                own(prior[(i + 1) % prior.len()].clone(), &h),
-                view(Shadow::Parts(vec![]), 9),
-            ]));
+            trees.push(Shadow::Parts(
+                vec![
+                    t.clone(),
+                    own(prior[(i + 1) % prior.len()].clone(), &h),
+                    view(Shadow::Parts(vec![].into()), 9),
+                ]
+                .into(),
+            ));
         }
     }
     trees
@@ -136,7 +139,7 @@ fn nested_trees_and_mixed_paths_match_without_normalizing_holders() {
 fn empty_nodes_discard_deferred_leaf_bounds_but_keep_view_homes() {
     let h = Holder::new(true);
     let tree = own(
-        Shadow::Parts(vec![view(Shadow::Parts(vec![]), 7), Shadow::of(vec![3])]),
+        Shadow::Parts(vec![view(Shadow::Parts(vec![].into()), 7), Shadow::of(vec![3])].into()),
         &h,
     );
     for path in [
@@ -151,10 +154,7 @@ fn empty_nodes_discard_deferred_leaf_bounds_but_keep_view_homes() {
 fn terminal_holders_keep_identity_and_live_counts() {
     let h = Holder::new(true);
     let other = h.copy();
-    let tree = Shadow::Parts(vec![
-        own(Shadow::of(vec![1]), &h),
-        own(Shadow::default(), &h),
-    ]);
+    let tree = Shadow::Parts(vec![own(Shadow::of(vec![1]), &h), own(Shadow::default(), &h)].into());
     assert!(h.shared_by_another());
     let projected = tree.project([(0, false)]);
     identical(&projected, &old(&tree, &[(0, false)]));
@@ -188,7 +188,7 @@ fn displaced_mutable_roots_keep_arena_region_first_error_and_site() {
         end: 23,
     };
     let tree = view(
-        Shadow::Parts(vec![Shadow::of(vec![inner]), Shadow::of(vec![region])]),
+        Shadow::Parts(vec![Shadow::of(vec![inner]), Shadow::of(vec![region])].into()),
         binding,
     );
     let path = [(0, true), (0, false)];
@@ -231,10 +231,48 @@ fn nodes(shadow: &Shadow) -> usize {
     }
 }
 #[test]
+fn snapshots_copy_only_the_written_path_beside_a_growing_subtree() {
+    use hirsel_intern::work::{Counter::InterpClonedShadowNodes, read};
+
+    fn copies(n: usize) -> u64 {
+        let source = Shadow::Parts(
+            vec![
+                Shadow::of(vec![1]),
+                Shadow::Parts(vec![Shadow::of(vec![3]); n].into()),
+            ]
+            .into(),
+        );
+        let before = read(InterpClonedShadowNodes);
+        for _ in 0..n {
+            let mut snapshot = source.clone();
+            let Shadow::Parts(parts) = &mut snapshot else {
+                unreachable!()
+            };
+            parts[0].add_bound(&[2]);
+            snapshot.substitute(&[(4, vec![5])]);
+            snapshot.substitute(&[(2, vec![7])]);
+            assert_eq!(snapshot.part(0).total(), vec![1, 7]);
+            assert_eq!(source.part(0).total(), vec![1]);
+            assert_eq!(snapshot.part(1), source.part(1));
+        }
+        read(InterpClonedShadowNodes) - before
+    }
+
+    // Each iteration copies at most one snapshot root, one written leaf,
+    // two nodes for the changed substitution path, and four projected roots.
+    // The absent substitution and n untouched grandchildren copy no nodes.
+    let small = copies(64);
+    let large = copies(8 * 64);
+    assert!(small <= 8 * 64, "small copied {small} nodes");
+    assert!(large <= 8 * 8 * 64, "large copied {large} nodes");
+    assert!(large <= 8 * small + 8, "{small} -> {large} nodes");
+}
+#[test]
 fn bounded_deep_wide_projection_materializes_only_the_terminal_tree() {
     let mut tree = Shadow::of(vec![1]);
     for _ in 0..24 {
-        tree = Shadow::Parts(vec![tree, Shadow::Parts(vec![Shadow::of(vec![2]); 64])]);
+        tree =
+            Shadow::Parts(vec![tree, Shadow::Parts(vec![Shadow::of(vec![2]); 64].into())].into());
     }
     let steps = vec![(0, false); 24];
     CLONED_NODES.with(|count| count.set(0));
@@ -321,10 +359,13 @@ fn frame(tree: Shadow, projection: Vec<hirsel_tir::Projection>) -> crate::frame:
 fn frame_indices_use_evaluated_slots_and_failed_later_indices_leave_holders_intact() {
     use hirsel_tir::{PlaceId, Projection};
     let h = Holder::new(true);
-    let tree = Shadow::Parts(vec![
-        Shadow::Parts(vec![own(Shadow::of(vec![1]), &h), Shadow::of(vec![2])]),
-        Shadow::Parts(vec![own(Shadow::of(vec![3]), &h), Shadow::of(vec![4])]),
-    ]);
+    let tree = Shadow::Parts(
+        vec![
+            Shadow::Parts(vec![own(Shadow::of(vec![1]), &h), Shadow::of(vec![2])].into()),
+            Shadow::Parts(vec![own(Shadow::of(vec![3]), &h), Shadow::of(vec![4])].into()),
+        ]
+        .into(),
+    );
     let mut f = frame(
         tree.clone(),
         vec![Projection::Index(LocalId(1)), Projection::Index(LocalId(2))],
@@ -368,10 +409,16 @@ fn frame_field_variant_index_and_mut_displacement_agree_with_old_projection() {
     let parameter = check.parameters[0];
     check.originals = vec![(parameter, vec![region, arena])];
     let tree = view(
-        Shadow::Parts(vec![Shadow::Parts(vec![
-            Shadow::default(),
-            Shadow::Parts(vec![Shadow::of(vec![parameter])]),
-        ])]),
+        Shadow::Parts(
+            vec![Shadow::Parts(
+                vec![
+                    Shadow::default(),
+                    Shadow::Parts(vec![Shadow::of(vec![parameter])].into()),
+                ]
+                .into(),
+            )]
+            .into(),
+        ),
         region,
     );
     check.shadows[0] = tree.clone();

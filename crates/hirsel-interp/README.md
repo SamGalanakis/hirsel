@@ -744,7 +744,13 @@ Native operation result derivation borrows argument lifetime summaries. Complete
 mutable updates move their shadows back to caller storage and retain their exact
 lifetime totals for callback propagation. The shared work counter
 `hirsel_intern::work::Counter::InterpClonedShadowNodes` counts administrative shadow
-node copies without changing fuel or semantic observations.
+node copies, including roots detached by a write, without changing fuel or semantic
+observations. Shadow child vectors and ownership/view contents use copy-on-write
+`Rc` storage. Administrative snapshots share descendants and preserve holder tokens;
+semantic copies still create new holders. Projection and list writes detach their
+written paths. This follows `value::Block`'s snapshot/detach structure, using `Rc`
+because checked state stays on the interpreter thread. Lifetime substitution uses
+an iterative edit plan and detaches only shared ancestors of changed bounds.
 
 `Operations::immediate` is an opt-in promise that a primitive produces no task
 rests and needs no completion hook. A fully transferred Complete result with

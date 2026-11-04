@@ -2280,7 +2280,7 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                         let caught = budgets.close(boundary, execution.failures.len());
                         match ending {
                             crate::resources::Ending::Return(value) => {
-                                returned = Shadow::Parts(vec![returned]);
+                                returned = Shadow::Parts(vec![returned].into());
                                 crate::resources::Ending::Return(Value::Variant {
                                     variant: 0,
                                     fields: vec![Some(value)],
@@ -4018,7 +4018,7 @@ async fn rvalue(
                 } else {
                     None
                 };
-                shadow = Shadow::Parts(parts);
+                shadow = Shadow::Parts(parts.into());
                 if let Destination::Arena(origin) = placement {
                     if let Some(arena) = frame.arena_of(origin) {
                         shadow.add_all(arena);
@@ -4158,7 +4158,7 @@ async fn rvalue(
                     // A borrowed capture refers to the captured slot's storage.
                     if let Some(home) = home(frame, operand.place)? {
                         bound = Shadow::View {
-                            content: Box::new(bound),
+                            content: std::rc::Rc::new(bound),
                             home,
                         };
                     }
@@ -4167,13 +4167,13 @@ async fn rvalue(
                 values.push(Some(value));
             }
             let captures = values;
-            shadow = Shadow::Parts(parts);
+            shadow = Shadow::Parts(parts.into());
             if let Some(region) = region {
                 // The environment block lives in the region, so the closure
                 // is reached through it; what a capture holds or views is not
                 // stored there, so a call's result is not bounded by it.
                 shadow = Shadow::View {
-                    content: Box::new(shadow),
+                    content: std::rc::Rc::new(shadow),
                     home: vec![region],
                 };
             }

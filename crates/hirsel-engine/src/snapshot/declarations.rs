@@ -454,10 +454,7 @@ impl DeclarationIndex {
                 old.len() == listed.len() && old.iter().zip(listed).all(|(a, b)| Arc::ptr_eq(a, b))
             })
         };
-        if unchanged(&listed) {
-            return;
-        }
-        listed.sort_by(|a, b| {
+        let order = |a: &Arc<ItemSyntax>, b: &Arc<ItemSyntax>| {
             sources
                 .anchor(a.anchor)
                 .unwrap()
@@ -465,7 +462,11 @@ impl DeclarationIndex {
                 .cmp(&sources.anchor(b.anchor).unwrap().1)
                 .then(a.item.definition.cmp(&b.item.definition))
                 .then(a.occurrence.cmp(&b.occurrence))
-        });
+        };
+        if unchanged(&listed) && listed.is_sorted_by(|a, b| order(a, b).is_le()) {
+            return;
+        }
+        listed.sort_by(order);
         if unchanged(&listed) {
             return;
         }

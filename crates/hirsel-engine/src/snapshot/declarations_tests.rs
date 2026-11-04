@@ -44,6 +44,23 @@ fn unchanged_file_placement_does_no_index_updates() {
                 .collect::<Vec<_>>(),
             ["z", "a", "a"]
         );
+        let second_base = engine.sources.anchor(items[1].anchor).unwrap().1;
+        let last_base = engine.sources.anchor(items[2].anchor).unwrap().1;
+        engine.sources.move_anchor(items[1].anchor, file, last_base);
+        engine
+            .sources
+            .move_anchor(items[2].anchor, file, second_base);
+        index.place_file(file, items.clone(), &engine.sources);
+        assert_eq!(
+            index
+                .frozen()
+                .siblings(&items[0])
+                .iter()
+                .map(|item| item.anchor)
+                .collect::<Vec<_>>(),
+            [items[0].anchor, items[2].anchor, items[1].anchor],
+            "retained syntax still follows moved source anchors"
+        );
         index.place_file(file, vec![], &engine.sources);
         assert!(index.frozen().siblings(&items[0]).is_empty());
         assert!(

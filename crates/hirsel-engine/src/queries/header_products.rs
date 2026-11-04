@@ -968,6 +968,7 @@ impl QueryEngine {
         let Some(headers) = snapshot.header_products().cloned() else {
             return;
         };
+        let snapshot = snapshot.clone();
         if current {
             let _ = headers.adopt_private_products(self);
         }
@@ -983,6 +984,9 @@ impl QueryEngine {
         }
         if current {
             self.adopt_header_products(&headers);
+            // These signatures and private facts came from this exact table.
+            // Their publication advances the engine, not the captured inputs.
+            self.snapshot = Some((self.snapshot_stamp(), snapshot));
         } else {
             for (id, product) in headers.completed() {
                 self.account_header_work(id, &product);

@@ -3175,6 +3175,19 @@ impl QueryEngine {
         };
         let store = self.result_store.clone().ok_or_else(refusal)?;
         let lowering = self.adapters.lowering.clone();
+        // V's consuming universe can differ from Front's captured snapshot.
+        // Its private proofs need the same admitted source owner, working
+        // grant and accepted bodies as Front's own headers.
+        if !front.namespace().registrations.is_empty() {
+            let snapshot = self.signature_inputs();
+            let registrations: Vec<_> = front.namespace().registrations.values().cloned().collect();
+            if let (Some(headers), Some(previous)) = (
+                snapshot.header_products(),
+                front.namespace().snapshot.header_products(),
+            ) {
+                headers.inherit_registration_scope(previous, &registrations);
+            }
+        }
         let mut inputs = Vec::with_capacity(definitions.len());
         for path in definitions {
             if front.query(path).is_none() {

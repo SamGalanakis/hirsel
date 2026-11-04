@@ -233,7 +233,7 @@ Every domain carries its RuleId and is checked in calls and annotations through
 `schema_failure`. Nonempty schemas
 participate in canonical fingerprints; empty-schema vectors remain unchanged.
 
-`shape_equal` compares only reachable type constructors, nominal arguments, generic
+`TypeInterner::shape_eq` compares only reachable type constructors, nominal arguments, generic
 binders, labels, passing conventions and layout flags. H uses it before later
 mode, origin, placement, cleanup and callable-effect judgments. It validates
 reachable edges and ignores unrelated rows; strict semantic equality is unchanged.

@@ -936,13 +936,6 @@ pub fn visit_type_origins_where(
     Ok(())
 }
 
-/// `TypeInterner::shape_eq`, under its pre-interner name until the cutover
-/// removes the last caller.
-#[deprecated(note = "use TypeInterner::shape_eq")]
-pub fn shape_equal(t: &TypeInterner, a: TypeId, b: TypeId) -> Result<bool, GraphError> {
-    t.shape_eq(a, b)
-}
-
 /// Compare known type shape while allowing caller-designated inference holes.
 /// Both complete graphs are still validated; recovery rows and cycles are errors.
 /// This does not bind holes or change strict semantic/receiving comparisons.

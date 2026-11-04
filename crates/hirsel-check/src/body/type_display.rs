@@ -109,7 +109,7 @@ impl Checker<'_, '_> {
         }
         let payload = self
             .shared_payload(actual)
-            .filter(|payload| shape_equal(self.types, *payload, expected).unwrap_or(false));
+            .filter(|payload| self.types.shape_eq(*payload, expected).unwrap_or(false));
         let [expected, actual] = hirsel_type_analysis::spelling::type_spellings_apart(
             self.types,
             [expected, actual],

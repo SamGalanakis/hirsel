@@ -171,7 +171,7 @@ Signature and body checking use shared declaration-based Plain, Copyable and
 Sendable proofs from hirsel-types. Generic substitution derives property summaries
 through the shared normalizer; concrete Plain callback parameters use Global
 borrowing defaults. Bounds still inspect complete actual generic evidence.
-H uses the rooted `shape_equal` relation without manufacturing an erased copy of
+H uses the rooted `TypeInterner::shape_eq` relation without manufacturing an erased copy of
 its type store. The shape relation remains intentional: I/J own mode/provenance
 source diagnostics, while V checks complete published value relations.
 

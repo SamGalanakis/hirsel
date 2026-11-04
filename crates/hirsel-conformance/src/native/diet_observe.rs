@@ -10,7 +10,7 @@ pub(super) type Observed = (BTreeSet<String>, Vec<String>);
 pub(super) fn observe(path: &Path) -> Observed {
     hirsel_engine::with_compiler_stack(|| {
         let observe = || {
-            let mut program = hirsel_driver::load_program(path).map_err(|e| e.to_string())?;
+            let mut program = hirsel_front_phases::load_program(path).map_err(|e| e.to_string())?;
             program.check_for_execution().map_err(|e| e.to_string())?;
             let raw = program
                 .engine
@@ -20,7 +20,7 @@ pub(super) fn observe(path: &Path) -> Observed {
                 .engine
                 .import_native_input(raw)
                 .map_err(|e| format!("{e:?}"))?;
-            Ok::<_, String>(hirsel_driver::native::backend_features(&input))
+            Ok::<_, String>(hirsel_native_testing::backend_features(&input))
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(observe))
             .unwrap_or_else(|panic| {

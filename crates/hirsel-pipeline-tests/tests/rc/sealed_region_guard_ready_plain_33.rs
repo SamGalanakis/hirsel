@@ -1,16 +1,17 @@
-use hirsel_driver::native::{
-    Options, Validation,
-    queries::{
-        InstanceAddress,
-        ready::{EMISSION_CONTEXT_DOMAIN, ReadyMiss, ReadyQueries, ReadySourceFacts},
-        seal_demand::{Input, Plan},
-    },
-};
 use hirsel_engine::{
     runtime::ProductRef,
     store::{Action, Address, Domain, MemStore, ResultStore},
 };
 use hirsel_lir::operation::{NativeType, Primitive};
+use hirsel_native::Options;
+use hirsel_native::Validation;
+use hirsel_native::query_model::InstanceAddress;
+use hirsel_native_cache::ready::EMISSION_CONTEXT_DOMAIN;
+use hirsel_native_cache::ready::ReadyMiss;
+use hirsel_native_cache::ready::ReadyQueries;
+use hirsel_native_cache::ready::ReadySourceFacts;
+use hirsel_native_queries::seal_demand::Input;
+use hirsel_native_queries::seal_demand::Plan;
 use hirsel_rc::seal_demand::equations::LocalDemandEquations;
 use hirsel_syntax::ContentHash;
 use hirsel_types::TypeKind;

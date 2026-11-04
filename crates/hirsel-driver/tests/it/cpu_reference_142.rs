@@ -1,8 +1,9 @@
-use hirsel_driver::{compiler_adapters, native};
+use hirsel_driver::native;
 use hirsel_engine::{
     QueryEngine, RunConfiguration, default_context, default_environment, entry_path,
     run_observed_checked, run_observed_snapshot, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 
 fn grant(workers: u32) -> hirsel_run_schema::CpuGrant {
     hirsel_run_schema::CpuGrant {
@@ -32,7 +33,7 @@ fn agree_in(
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let entry = entry_path(&default_context());
-        let fixture = native::Fixture {
+        let fixture = hirsel_native::Fixture {
             cpu: cpu.clone(),
             tasks_free: free,
             ..Default::default()
@@ -47,7 +48,7 @@ fn agree_in(
             (&fixture).into(),
         )
         .unwrap();
-        let reference = native::Observation::of_reference(run.observation.as_ref().unwrap());
+        let reference = hirsel_native::Observation::of_reference(run.observation.as_ref().unwrap());
         assert_eq!(reference.output, expected);
         assert!(reference.failures.is_empty(), "{reference:?}");
         let checked = run_observed_checked(
@@ -61,26 +62,26 @@ fn agree_in(
         )
         .unwrap();
         assert_eq!(
-            native::Observation::of_reference(checked.observation.as_ref().unwrap()),
+            hirsel_native::Observation::of_reference(checked.observation.as_ref().unwrap()),
             reference
         );
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let program = native::build(
+        let program = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
-        let sites = native::Sites::new(validated.snapshot());
-        let world = native::HeapWorld {
+        let sites = hirsel_native::Sites::new(validated.snapshot());
+        let world = hirsel_native_testing::HeapWorld {
             cpu,
             tasks_free: free,
             ..Default::default()
         };
         let heap = if campaign {
-            native::heap_campaign_in(&program, &entry, &sites, &world)
+            hirsel_native_testing::heap_campaign_in(&program, &entry, &sites, &world)
         } else {
-            native::run_heap_in(&program, &entry, &sites, &world)
+            hirsel_native_testing::run_heap_in(&program, &entry, &sites, &world)
         }
         .unwrap();
         assert_eq!(
@@ -92,35 +93,38 @@ fn agree_in(
             let mut diagnostic_fixture = fixture.clone();
             diagnostic_fixture.trace_roots = true;
             let root = tempfile::tempdir().unwrap();
-            let mut tools = native::Toolchain::in_tree_diagnostic(
+            let mut tools = hirsel_native::Toolchain::in_tree_diagnostic(
                 &root.path().join("runtime"),
                 &[&program.target],
             )
             .unwrap();
-            tools.execution = native::Execution::Executable;
-            for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-                let objects = native::emit_backend_objects(
+            tools.execution = hirsel_native::Execution::Executable;
+            for backend in [
+                hirsel_native::Backend::Llvm,
+                hirsel_native::Backend::Cranelift,
+            ] {
+                let objects = hirsel_native::emit_backend_objects(
                     &program,
                     backend,
-                    native::OptLevel::Default,
-                    native::Partition::Whole,
+                    hirsel_native::OptLevel::Default,
+                    hirsel_native::Partition::Whole,
                     false,
                     None,
                 )
                 .unwrap();
                 let dir = root.path().join(format!("{backend:?}"));
                 std::fs::create_dir_all(&dir).unwrap();
-                let executable = native::link_fixture_runnable(
+                let executable = hirsel_native::link_fixture_runnable(
                     &program, &entry, &objects, &tools, &dir, &fixture,
                 )
                 .unwrap();
-                let launched = native::launch_fixture(
+                let launched = hirsel_native::launch_fixture(
                     &executable,
                     &program.target,
                     &tools,
                     &dir,
                     true,
-                    native::Tape::Live {
+                    hirsel_native::Tape::Live {
                         record: None,
                         revocations: None,
                     },
@@ -128,7 +132,7 @@ fn agree_in(
                 )
                 .unwrap();
                 assert_eq!(
-                    native::observe(&launched, &program, &sites).unwrap_or_else(|error| {
+                    hirsel_native::observe(&launched, &program, &sites).unwrap_or_else(|error| {
                         panic!(
                             "{backend:?} Free={free}: {error}; roots {}",
                             std::fs::read_to_string(dir.join("roots")).unwrap_or_default()
@@ -141,7 +145,7 @@ fn agree_in(
                 );
             }
         }
-        let run = native::fixture_run_record(&program, &entry, &fixture).unwrap();
+        let run = hirsel_native::fixture_run_record(&program, &entry, &fixture).unwrap();
         assert_eq!(run.record().io.as_ref().unwrap().cpu, fixture.cpu);
         assert_eq!(
             run.record().io.as_ref().unwrap().tasks.as_deref(),

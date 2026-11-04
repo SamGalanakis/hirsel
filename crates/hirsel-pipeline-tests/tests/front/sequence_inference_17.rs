@@ -2,7 +2,10 @@
 use hirsel_engine::{QueryEngine, check_snapshot, default_context, default_environment};
 
 fn check(source: &str, rule: Option<&str>) {
-    let mut engine = QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+    let mut engine = QueryEngine::new(
+        default_environment(),
+        hirsel_front_phases::compiler_adapters(),
+    );
     let file = engine.sources.add("sequence.hir", source.into()).unwrap();
     let diagnostics = match check_snapshot(&mut engine, file, &default_context()) {
         Ok(ds) | Err(hirsel_types::QueryError::Diagnostics(ds)) => ds,
@@ -71,8 +74,10 @@ fn contract_boundaries_and_sites() {
         ("[return, 1u64]", "LANG-2", "[return, 1u64]"),
     ] {
         let source = format!("fn probe(c: bool) {{ if c {{ let xs = {expression} }}; () }}");
-        let mut engine =
-            QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+        let mut engine = QueryEngine::new(
+            default_environment(),
+            hirsel_front_phases::compiler_adapters(),
+        );
         let file = engine.sources.add("site.hir", source).unwrap();
         let ds = match check_snapshot(&mut engine, file, &default_context()) {
             Ok(ds) | Err(hirsel_types::QueryError::Diagnostics(ds)) => ds,
@@ -143,8 +148,10 @@ fn element_normalization_preserves_nested_contracts_and_brands() {
             true,
         ),
     ] {
-        let mut engine =
-            QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+        let mut engine = QueryEngine::new(
+            default_environment(),
+            hirsel_front_phases::compiler_adapters(),
+        );
         let file = engine.sources.add("contract.hir", source.into()).unwrap();
         assert!(
             check_snapshot(&mut engine, file, &default_context())
@@ -212,7 +219,10 @@ fn element_normalization_preserves_nested_contracts_and_brands() {
 fn constructors_remain_independently_validated() {
     use hirsel_tir::{Constructor, Rvalue};
     use hirsel_types::{BuiltinType, GenericArgument, Size, TypeKind};
-    let mut engine = QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+    let mut engine = QueryEngine::new(
+        default_environment(),
+        hirsel_front_phases::compiler_adapters(),
+    );
     let file = engine
         .sources
         .add("validate.hir", "fn probe() { let xs = [1u64, 2] }".into())
@@ -290,6 +300,9 @@ fn compare_programs(names: &[&str]) {
         RunConfiguration, entry_path, run_observed_snapshot, source_check_request,
         with_compiler_stack,
     };
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         options.validation = Validation::EveryStage;
@@ -316,13 +329,17 @@ fn compare_programs(names: &[&str]) {
         ];
         let directory =
             std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sequence-inference-17");
-        let toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix)
+                .unwrap();
         let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
         for &name in names {
             let path = format!("conformance/LANG/LANG-2-sequence-inference-17-{name}.hir");
             let source = std::fs::read_to_string(root.join(path)).unwrap();
-            let mut engine =
-                QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+            let mut engine = QueryEngine::new(
+                default_environment(),
+                hirsel_front_phases::compiler_adapters(),
+            );
             let file = engine
                 .sources
                 .add(format!("sequence-{name}.hir"), source)
@@ -380,7 +397,10 @@ fn compare_programs(names: &[&str]) {
 fn v_rejects_resource_copy_in_an_inferred_list() {
     use hirsel_tir::{Constructor, Rvalue};
     use hirsel_types::UseKind;
-    let mut engine = QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+    let mut engine = QueryEngine::new(
+        default_environment(),
+        hirsel_front_phases::compiler_adapters(),
+    );
     let file = engine
         .sources
         .add(

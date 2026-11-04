@@ -176,9 +176,12 @@ fn paired_cursor_recipes_17_bounded_matrix_engines() {
     assert!(interpreted.stdout.is_empty() && interpreted.stderr.is_empty());
     hirsel_engine::with_compiler_stack(|| {
         use hirsel_driver::native::*;
+        use hirsel_native::*;
+        use hirsel_native_batch::*;
+        use hirsel_native_testing::*;
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let file = engine
             .sources

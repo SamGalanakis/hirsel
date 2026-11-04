@@ -57,8 +57,8 @@ REPLAY_ACTIONS = {
 # These Buck proof targets supply their own immutable tool inputs, rather than
 # the archival runner's environment. Each probe checks exact identity/counts.
 PROOFS = {
-    'native::object_queries::platform::closure_tests::selected_virtual_inputs_keep_scripts_thin_members_and_absolute_dso_names': {
-        'source': 'crates/hirsel-driver/tests/native-validation/platform_closure.rs',
+    'object_queries::platform::closure_tests::selected_virtual_inputs_keep_scripts_thin_members_and_absolute_dso_names': {
+        'source': 'crates/hirsel-native/tests/native-validation/platform_closure.rs',
         'target': '//tools/buck2/native-toolchain:platform-closure-proof',
         'probe': 'tools/buck2/native-toolchain/platform_closure_proof.py',
         'arguments': ['/original pinned llvm', '/original packaged linker', '/selected kit', '/selected runtime', '/selected auditors', '/selected floor', '/selected qemu', '/selected harness'],
@@ -90,8 +90,8 @@ PROOFS = {
                         'HIRSEL_AUDITOR_PACKAGE': '/selected auditors', 'HIRSEL_GLIBC_FLOOR': '/selected floor',
                         'HIRSEL_QEMU_AARCH64': '/selected qemu/qemu-aarch64'},
     },
-    'native::object_queries::platform::tests::selected_platform_closes_runtime_before_keys_and_replays_without_originals': {
-        'source': 'crates/hirsel-driver/tests/native-validation/platform_capture.rs',
+    'object_queries::platform::tests::selected_platform_closes_runtime_before_keys_and_replays_without_originals': {
+        'source': 'crates/hirsel-native/tests/native-validation/platform_capture.rs',
         'target': '//tools/buck2/native-toolchain:platform-capture-proof',
         'probe': 'tools/buck2/native-toolchain/platform_capture_proof.py',
         'arguments': ['/original pinned llvm', '/original packaged linker', '/selected kit', '/selected runtime', '/selected auditors', '/selected floor', '/selected qemu', '/selected harness'],
@@ -123,13 +123,13 @@ PROOFS = {
                         'HIRSEL_AUDITOR_PACKAGE': '/selected auditors', 'HIRSEL_GLIBC_FLOOR': '/selected floor',
                         'HIRSEL_QEMU_AARCH64': '/selected qemu/qemu-aarch64'},
     },
-    'native::object_queries::capture::tests::packaged_capture_replays_changed_inputs_without_originals': {
-        'source': 'crates/hirsel-driver/tests/native-validation/link_capture.rs',
+    'object_queries::capture::tests::packaged_capture_replays_changed_inputs_without_originals': {
+        'source': 'crates/hirsel-native/tests/native-validation/link_capture.rs',
         'target': '//tools/buck2/native-toolchain:linker-store-proof',
         'probe': 'tools/buck2/native-toolchain/linker_store_probe.py',
     },
-    'native::kit::tests::stored_linker_replays_shared_executable_plans_for_both_targets': {
-        'source': 'crates/hirsel-driver/src/native/kit.rs',
+    'kit::tests::stored_linker_replays_shared_executable_plans_for_both_targets': {
+        'source': 'crates/hirsel-native/src/kit.rs',
         'target': '//tools/buck2/native-toolchain:executable-plan-proof',
         'probe': 'tools/buck2/native-toolchain/executable_plan_proof.py',
         'arguments': ['/original pinned llvm', '/original packaged linker', '/selected kit', '/selected runtime', '/selected harness'],
@@ -137,34 +137,34 @@ PROOFS = {
                         'HIRSEL_CAPTURE_LINKER': '/original packaged linker',
                         'HIRSEL_LINK_KIT': '/selected kit', 'HIRSEL_RUNTIME_ARCHIVES': '/selected runtime'},
     },
-    'native::kit::tests::frozen_kit_binds_transitive_leaf_edits_and_plans_without_originals': {
-        'source': 'crates/hirsel-driver/src/native/kit.rs',
+    'kit::tests::frozen_kit_binds_transitive_leaf_edits_and_plans_without_originals': {
+        'source': 'crates/hirsel-native/src/kit.rs',
         'target': '//tools/buck2/native-toolchain:frozen-kit-proof',
         'probe': 'tools/buck2/native-toolchain/frozen_kit_proof.py',
     },
-    'native::object_queries::capture::tests::large_tool_snapshots_and_replays_under_none_and_unwritable_with_original_ram_cap': {
-        'source': 'crates/hirsel-driver/tests/native-validation/link_capture.rs',
+    'object_queries::capture::tests::large_tool_snapshots_and_replays_under_none_and_unwritable_with_original_ram_cap': {
+        'source': 'crates/hirsel-native/tests/native-validation/link_capture.rs',
         'target': '//tools/buck2/native-toolchain:scratch-linker-proof',
         'probe': 'tools/buck2/native-toolchain/scratch_linker_proof.py',
     },
-    'native::object_queries::runtime::tests::actual_runtime_products_reopen_changed_leaf_versions_and_refuse_missing_closure': {
-        'source': 'crates/hirsel-driver/tests/native-validation/runtime_products.rs',
+    'object_queries::runtime::tests::actual_runtime_products_reopen_changed_leaf_versions_and_refuse_missing_closure': {
+        'source': 'crates/hirsel-native/tests/native-validation/runtime_products.rs',
         'target': '//tools/buck2/native-toolchain:runtime-store-proof',
         'probe': 'tools/buck2/native-toolchain/runtime_store_proof.py',
         'arguments': ['/original pinned llvm', '/selected auditor', '/selected floor', '/selected qemu', '/selected harness'],
         'environment': {'LLVM_SYS_231_PREFIX': '/original pinned llvm', 'HIRSEL_AUDITOR_PACKAGE': '/selected auditor',
                         'HIRSEL_GLIBC_FLOOR': '/selected floor', 'HIRSEL_QEMU_AARCH64': '/selected qemu/qemu-aarch64'},
     },
-    'native::object_queries::runtime::tests::equal_bytes_keep_distinct_loaded_libraries_and_shared_aliases': {
-        'source': 'crates/hirsel-driver/tests/native-validation/runtime_products.rs',
+    'object_queries::runtime::tests::equal_bytes_keep_distinct_loaded_libraries_and_shared_aliases': {
+        'source': 'crates/hirsel-native/tests/native-validation/runtime_products.rs',
         'target': '//tools/buck2/native-toolchain:runtime-identity-case-proof',
         'probe': 'tools/buck2/native-toolchain/runtime_identity_case_proof.py',
         'arguments': ['/original pinned llvm', '/selected auditor', '/selected floor', '/selected qemu', '/selected harness'],
         'environment': {'LLVM_SYS_231_PREFIX': '/original pinned llvm', 'HIRSEL_AUDITOR_PACKAGE': '/selected auditor',
                         'HIRSEL_GLIBC_FLOOR': '/selected floor', 'HIRSEL_QEMU_AARCH64': '/selected qemu/qemu-aarch64'},
     },
-    'native::object_queries::runtime::tests::actual_loader_discovers_transitive_runtime_inputs_and_closes_replay': {
-        'source': 'crates/hirsel-driver/tests/native-validation/runtime_products.rs',
+    'object_queries::runtime::tests::actual_loader_discovers_transitive_runtime_inputs_and_closes_replay': {
+        'source': 'crates/hirsel-native/tests/native-validation/runtime_products.rs',
         'target': '//tools/buck2/native-toolchain:runtime-discovery-proof',
         'probe': 'tools/buck2/native-toolchain/runtime_discovery_proof.py',
         'arguments': ['/original pinned llvm', '/selected auditor', '/selected floor', '/selected qemu', '/selected harness'],
@@ -315,7 +315,7 @@ class IgnoredTests(unittest.TestCase):
         for case, home in PROOFS.items():
             self.assertIn(case.rsplit('::', 1)[-1], [name for _, name in ignored_declarations((ROOT / home['source']).read_text())])
             self.assertEqual(orphans({home['source']: '#[ignore]\nfn unregistered() {}'}), [(home['source'], 'unregistered')])
-            self.assertIn('tests/native-validation/link_capture.rs', (ROOT / 'crates/hirsel-driver/src/native/object_queries/capture.rs').read_text())
+            self.assertIn('tests/native-validation/link_capture.rs', (ROOT / 'crates/hirsel-native/src/object_queries/capture.rs').read_text())
             target = (ROOT / 'tools/buck2/native-toolchain/BUCK').read_text()
             self.assertIn(f'name = "{home["target"].rsplit(":", 1)[-1]}"', target)
             self.assertIn(f'script = "{Path(home["probe"]).name}", interpreter = "python3"', target)

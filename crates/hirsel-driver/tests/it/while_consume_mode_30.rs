@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 const BATCH: &str = include_str!("../fixtures/while_consume_mode_30/batch.hir");
 const RUNTIME_MAIN: &str = include_str!("../fixtures/while_consume_mode_30/runtime-main.hir");
@@ -52,6 +53,9 @@ fn while_consume_mode_30_original_exports() {
 
 fn runtime(mut engine: QueryEngine) {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let expected = Observation {
         exit_code: Some(0),
         blocked: false,
@@ -106,7 +110,9 @@ fn runtime(mut engine: QueryEngine) {
         .prefix("while-consume-mode-30-")
         .tempdir()
         .unwrap();
-    let toolchain = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+    let toolchain =
+        hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+            .unwrap();
     let outcomes = differential(
         &validated,
         &entry,

@@ -1,5 +1,7 @@
-use hirsel_driver::{COMPILER, CompilerRequestsExt, requests::*};
+use hirsel_driver::CompilerRequestsExt;
+use hirsel_driver::requests::*;
 use hirsel_engine::{CompileConfig, LoweringPolicy, loader_inputs::LoaderInputs, store::*};
+use hirsel_front_phases::COMPILER;
 use hirsel_syntax::{ContentHash, PackageId};
 use std::sync::Arc;
 

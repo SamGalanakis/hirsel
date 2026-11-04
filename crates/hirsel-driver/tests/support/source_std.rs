@@ -93,7 +93,7 @@ fn compiler_for(
         operations: 100_000,
     });
     let (unsafe_ffi, primary) = {
-        let program = hirsel_driver::COMPILER
+        let program = hirsel_front_phases::COMPILER
             .load_program_inputs(path, &capture, false)
             .unwrap();
         (
@@ -129,7 +129,7 @@ fn compiler_for(
         || Arc::new(MemStore::default().with_installed_products()),
         |entry| entry.store.clone(),
     );
-    let compiler = hirsel_driver::COMPILER
+    let compiler = hirsel_front_phases::COMPILER
         .with_owned_engines()
         .with_config(CompileConfig {
             store: store.clone(),
@@ -322,7 +322,7 @@ pub fn tir_memory(
     definition: Option<hirsel_syntax::DefPath>,
 ) -> Result<Arc<hirsel_driver::requests::TirExecution>, ToolError> {
     use hirsel_driver::requests::*;
-    let compiler = hirsel_driver::COMPILER;
+    let compiler = hirsel_front_phases::COMPILER;
     let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
     let request = CompileRequest::source(
         source,
@@ -350,7 +350,7 @@ pub fn tests(
     ToolError,
 > {
     use hirsel_driver::requests::*;
-    let compiler = hirsel_driver::COMPILER;
+    let compiler = hirsel_front_phases::COMPILER;
     let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
     let request = CompileRequest::source(
         source,

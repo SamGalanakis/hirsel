@@ -1,7 +1,8 @@
-use hirsel_driver::{compiler_adapters, native};
+use hirsel_driver::native;
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_lir::ahead::CpuWorkerProtocol;
 
 const SOURCE: &str = r#"
@@ -18,11 +19,11 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 }
 "#;
 
-fn ready(source: &str) -> native::ReadyProgram {
+fn ready(source: &str) -> hirsel_native::ReadyProgram {
     ready_with_regions(source, true)
 }
 
-fn ready_with_regions(source: &str, regions: bool) -> native::ReadyProgram {
+fn ready_with_regions(source: &str, regions: bool) -> hirsel_native::ReadyProgram {
     ready_with_specialization(source, regions, true)
 }
 
@@ -30,17 +31,18 @@ fn ready_with_specialization(
     source: &str,
     regions: bool,
     specialize: bool,
-) -> native::ReadyProgram {
+) -> hirsel_native::ReadyProgram {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("cpu.hir", source.to_owned()).unwrap();
     let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     let input = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(input).unwrap();
-    let mut options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+    let mut options =
+        hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
     options.regions = regions;
     options.scoped_specialization = specialize;
-    native::build(&validated, &options).unwrap()
+    hirsel_native_batch::build(&validated, &options).unwrap()
 }
 
 #[test]
@@ -71,7 +73,7 @@ fn cpu_worker_custody_admits_checked_owned_inputs_and_allocating_results() {
             assert!(hirsel_lir::ahead::cpu_owned_layout(&program.table, layout));
             assert!(!hirsel_lir::ahead::scalar_image(&program.table, layout));
         }
-        let plan = native::ahead_plan(&program);
+        let plan = hirsel_native::ahead_plan(&program);
         assert_eq!(plan.cpu_workers.get(&protocol.worker), Some(&protocol));
         assert!(
             plan.roots
@@ -80,19 +82,22 @@ fn cpu_worker_custody_admits_checked_owned_inputs_and_allocating_results() {
             "{:?}",
             plan.refusals
         );
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-            let objects = native::emit_backend_objects(
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
                 hirsel_lir::emission::OptLevel::Default,
-                native::Partition::Whole,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
             .unwrap();
-            native::check_ahead_objects(&program, &objects).unwrap();
+            hirsel_native::check_ahead_objects(&program, &objects).unwrap();
             assert!(
-                native::continuation::ahead_certificates(&program, &objects)
+                hirsel_native::continuation::ahead_certificates(&program, &objects)
                     .iter()
                     .any(|certificate| certificate.root == protocol.worker)
             );
@@ -148,7 +153,7 @@ fn cpu_worker_ownership_protocol_binds_the_shared_loan_job_move_and_result_sink(
             )
         });
         assert!(protocol.check(worker, &program.table));
-        let plan = hirsel_driver::native::ahead_plan(&program);
+        let plan = hirsel_native::ahead_plan(&program);
         assert!(
             plan.roots.values().any(|root| root.cpu.is_some()),
             "{:?}",
@@ -211,21 +216,20 @@ fn cpu_worker_ownership_protocol_binds_the_shared_loan_job_move_and_result_sink(
             );
         }
         for backend in [
-            hirsel_driver::native::Backend::Llvm,
-            hirsel_driver::native::Backend::Cranelift,
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
         ] {
-            let objects = hirsel_driver::native::emit_backend_objects(
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
                 hirsel_lir::emission::OptLevel::Default,
-                hirsel_driver::native::Partition::Whole,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
             .unwrap();
-            hirsel_driver::native::check_ahead_objects(&program, &objects).unwrap();
-            let certificates =
-                hirsel_driver::native::continuation::ahead_certificates(&program, &objects);
+            hirsel_native::check_ahead_objects(&program, &objects).unwrap();
+            let certificates = hirsel_native::continuation::ahead_certificates(&program, &objects);
             assert!(
                 certificates.iter().any(|certificate| certificate.kind
                     == hirsel_lir::continuation::AheadKind::CpuWorker)
@@ -241,7 +245,7 @@ fn cpu_worker_ownership_protocol_binds_the_shared_loan_job_move_and_result_sink(
                 })
                 .unwrap();
             metadata.bytes[0] ^= 1;
-            assert!(hirsel_driver::native::check_ahead_objects(&program, &damaged).is_err());
+            assert!(hirsel_native::check_ahead_objects(&program, &damaged).is_err());
         }
         let binding = &plan
             .roots
@@ -337,14 +341,14 @@ fn cpu_allocating_mapper_graph_binds_heap_handoffs_cleanup_and_both_final_frames
         let source = SOURCE.replace("job + 7u64", "{ let xs = [job]; xs[0] + 7u64 }");
         let regional = ready(&source);
         assert!(
-            native::ahead_plan(&regional)
+            hirsel_native::ahead_plan(&regional)
                 .roots
                 .values()
                 .any(|root| root.cpu.is_some()),
             "the local region has its checked saved handoff"
         );
         let program = ready_with_regions(&source, false);
-        let plan = native::ahead_plan(&program);
+        let plan = hirsel_native::ahead_plan(&program);
         let (root_id, root) = plan
             .roots
             .iter()
@@ -434,17 +438,20 @@ fn cpu_allocating_mapper_graph_binds_heap_handoffs_cleanup_and_both_final_frames
                 "forged field {field}"
             );
         }
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-            let objects = native::emit_backend_objects(
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
                 hirsel_lir::emission::OptLevel::Default,
-                native::Partition::Whole,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
             .unwrap();
-            native::check_ahead_objects(&program, &objects).unwrap();
+            hirsel_native::check_ahead_objects(&program, &objects).unwrap();
             assert!(
                 objects.iter().any(|o| o
                     .imports
@@ -459,7 +466,7 @@ fn cpu_allocating_mapper_graph_binds_heap_handoffs_cleanup_and_both_final_frames
                     .iter()
                     .any(|(id, n)| id == root_id && *n > 80)
             );
-            let certificates = native::continuation::ahead_certificates(&program, &objects);
+            let certificates = hirsel_native::continuation::ahead_certificates(&program, &objects);
             assert!(certificates.iter().any(|c| c.root == *root_id));
             let mut forged = objects.clone();
             for object in &mut forged {
@@ -467,7 +474,7 @@ fn cpu_allocating_mapper_graph_binds_heap_handoffs_cleanup_and_both_final_frames
                     evidence.frames.pop();
                 }
             }
-            assert!(native::check_ahead_objects(&program, &forged).is_err());
+            assert!(hirsel_native::check_ahead_objects(&program, &forged).is_err());
         }
         assert_eq!(root.handoff_bytes(64), 96);
     });
@@ -482,7 +489,7 @@ fn canonical_caller_keeps_an_ordinary_call_to_a_cpu_mapper() {
             .replace("  let outcome =", "  let probe = fn(take job: u64) -> u64 uses {} { let xs = [job]; xs[0] + 7u64 }(1u64)\n  failure.check(probe == 8u64, Bounds())\n  let outcome =")
             .replace("fn(take job: u64) -> u64 uses {} { job + 7u64 }", "fn(take job: u64) -> u64 uses {} { let xs = [job]; xs[0] + 7u64 }");
         let mut program = ready_with_regions(&source, false);
-        let initial = native::ahead_plan(&program);
+        let initial = hirsel_native::ahead_plan(&program);
         let binding = &initial
             .roots
             .values()
@@ -521,7 +528,7 @@ fn canonical_caller_keeps_an_ordinary_call_to_a_cpu_mapper() {
             memo: Default::default(),
         };
         program.units[index] = hirsel_lir::validate::validate_ready(caller, &inputs).unwrap();
-        let mut plan = native::ahead_plan(&program);
+        let mut plan = hirsel_native::ahead_plan(&program);
         let cpu_root = plan
             .roots
             .values()
@@ -635,9 +642,12 @@ fn canonical_caller_keeps_an_ordinary_call_to_a_cpu_mapper() {
             ahead: Some(&full_plan),
             ..inputs.clone()
         };
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let (cpu, caller) = match backend {
-                native::Backend::Llvm => (
+                hirsel_native::Backend::Llvm => (
                     hirsel_llvm::emit_ahead_object(&cpu_units, &cpu_inputs)
                         .unwrap()
                         .0,
@@ -645,7 +655,7 @@ fn canonical_caller_keeps_an_ordinary_call_to_a_cpu_mapper() {
                         .unwrap()
                         .0,
                 ),
-                native::Backend::Cranelift => (
+                hirsel_native::Backend::Cranelift => (
                     hirsel_cranelift::emit_ahead_object(&cpu_units, &cpu_inputs)
                         .unwrap()
                         .0,
@@ -694,7 +704,7 @@ fn cpu_saved_summary_checks_live_result_ordinal_and_retained_owner_on_both_emitt
                 )
             };
             let program = ready_with_specialization(&source, false, mode != 3);
-            let plan = native::ahead_plan(&program);
+            let plan = hirsel_native::ahead_plan(&program);
             let (&id, root) = plan
                 .roots
                 .iter()
@@ -778,17 +788,20 @@ fn cpu_saved_summary_checks_live_result_ordinal_and_retained_owner_on_both_emitt
                     Err(hirsel_cranelift::CodegenError::Object { message })
                         if message == "invalid CPU result summary recipe"));
             }
-            for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-                let objects = native::emit_backend_objects(
+            for backend in [
+                hirsel_native::Backend::Llvm,
+                hirsel_native::Backend::Cranelift,
+            ] {
+                let objects = hirsel_native::emit_backend_objects(
                     &program,
                     backend,
                     hirsel_lir::emission::OptLevel::Default,
-                    native::Partition::Whole,
+                    hirsel_native::Partition::Whole,
                     false,
                     None,
                 )
                 .unwrap();
-                native::check_ahead_objects(&program, &objects).unwrap();
+                hirsel_native::check_ahead_objects(&program, &objects).unwrap();
                 assert!(objects.iter().any(|object| {
                     object
                         .imports
@@ -836,7 +849,7 @@ fn cpu_saved_summary_checks_live_result_ordinal_and_retained_owner_on_both_emitt
                     evidence.bounds
                 );
                 assert!(
-                    native::continuation::ahead_certificates(&program, &objects)
+                    hirsel_native::continuation::ahead_certificates(&program, &objects)
                         .iter()
                         .any(|certificate| certificate.root == id)
                 );
@@ -867,7 +880,7 @@ fn cpu_saved_summary_checks_live_result_ordinal_and_retained_owner_on_both_emitt
         );
         let captured = ready_with_specialization(&captured, false, false);
         assert!(
-            !native::ahead_plan(&captured)
+            !hirsel_native::ahead_plan(&captured)
                 .roots
                 .values()
                 .any(|root| root.cpu.is_some()),
@@ -883,7 +896,7 @@ fn cpu_saved_summary_checks_live_result_ordinal_and_retained_owner_on_both_emitt
                 "[[[8u64]], [[9u64]], [[10u64]], [[11u64]]]",
             );
         let program = ready_with_regions(&nested, false);
-        let plan = native::ahead_plan(&program);
+        let plan = hirsel_native::ahead_plan(&program);
         assert!(
             plan.roots
                 .values()
@@ -903,7 +916,7 @@ fn cpu_save_roots_check_inputs_mapper_locals_results_and_parent_frames() {
     with_compiler_stack(|| {
         let source = SOURCE.replace("job + 7u64", "{ let kept = [job]; let answer = fn(x: u64) -> u64 uses {} { let child = [x]; child[0] + 7u64 }(job); kept[0] + answer - job }");
         let program = ready_with_specialization(&source, false, false);
-        let plan = native::ahead_plan(&program);
+        let plan = hirsel_native::ahead_plan(&program);
         let (&id, root) = plan
             .roots
             .iter()
@@ -1020,19 +1033,22 @@ fn cpu_save_roots_check_inputs_mapper_locals_results_and_parent_frames() {
             accepted.is_empty(),
             "accepted forged save-root kinds {accepted:?}"
         );
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-            let objects = native::emit_backend_objects(
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
                 hirsel_lir::emission::OptLevel::Default,
-                native::Partition::Whole,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
             .unwrap();
-            native::check_ahead_objects(&program, &objects).unwrap();
+            hirsel_native::check_ahead_objects(&program, &objects).unwrap();
             assert!(
-                native::continuation::ahead_certificates(&program, &objects)
+                hirsel_native::continuation::ahead_certificates(&program, &objects)
                     .iter()
                     .any(|c| c.root == id)
             );
@@ -1050,7 +1066,7 @@ fn cpu_saved_growth_checks_inputs_and_composes_private_helper_frames() {
                 "fn(take job: unique List[u64]) -> unique List[u64] uses {} { let mut out = take job; list.reserve(mut out, 128u64); take out }")
             .replace("[8u64, 9u64, 10u64, 11u64]", "[[1u64], [2u64], [3u64], [4u64]]");
         let program = ready_with_regions(&source, false);
-        let plan = native::ahead_plan(&program);
+        let plan = hirsel_native::ahead_plan(&program);
         let (&id, root) = plan
             .roots
             .iter()
@@ -1158,17 +1174,20 @@ fn cpu_saved_growth_checks_inputs_and_composes_private_helper_frames() {
                 "forged growth {field}"
             );
         }
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-            let objects = native::emit_backend_objects(
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
                 hirsel_lir::emission::OptLevel::Default,
-                native::Partition::Whole,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
             .unwrap();
-            native::check_ahead_objects(&program, &objects).unwrap();
+            hirsel_native::check_ahead_objects(&program, &objects).unwrap();
             let evidence = objects.iter().find_map(|o| o.ahead.as_ref()).unwrap();
             let frames: std::collections::BTreeMap<_, _> =
                 evidence.frames.iter().copied().collect();
@@ -1187,7 +1206,7 @@ fn cpu_saved_growth_checks_inputs_and_composes_private_helper_frames() {
                 "{backend:?}"
             );
             assert!(
-                native::continuation::ahead_certificates(&program, &objects)
+                hirsel_native::continuation::ahead_certificates(&program, &objects)
                     .iter()
                     .any(|c| c.root == id),
                 "{backend:?}"
@@ -1204,7 +1223,7 @@ fn cpu_saved_growth_checks_inputs_and_composes_private_helper_frames() {
   Ok(())"#,
         );
         let mixed = ready_with_regions(&mixed, false);
-        let plan = native::ahead_plan(&mixed);
+        let plan = hirsel_native::ahead_plan(&mixed);
         let offsets: std::collections::BTreeSet<_> = plan
             .cpu_workers
             .values()
@@ -1229,12 +1248,15 @@ fn cpu_saved_growth_checks_inputs_and_composes_private_helper_frames() {
             &plan,
             mixed.fuel
         ));
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-            native::emit_backend_objects(
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
+            hirsel_native::emit_backend_objects(
                 &mixed,
                 backend,
                 hirsel_lir::emission::OptLevel::Default,
-                native::Partition::Whole,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
@@ -1264,7 +1286,7 @@ fn cpu_saved_retained_recipes_cover_multiple_owners_and_active_arms() {
                 &format!("fn(take job: u64) -> {result} uses {{}} {{ {body} }}"),
             ).replace("match outcome {\n    Ok(rows) => failure.check(rows == [8u64, 9u64, 10u64, 11u64], Bounds()),\n    Error(_) => (),\n  }", "let _ = take outcome");
             let program = ready_with_regions(&source, false);
-            let plan = native::ahead_plan(&program);
+            let plan = hirsel_native::ahead_plan(&program);
             let (&id, cpu) = plan
                 .roots
                 .iter()
@@ -1349,19 +1371,22 @@ fn cpu_saved_retained_recipes_cover_multiple_owners_and_active_arms() {
                     })
                 }));
             }
-            for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-                let objects = native::emit_backend_objects(
+            for backend in [
+                hirsel_native::Backend::Llvm,
+                hirsel_native::Backend::Cranelift,
+            ] {
+                let objects = hirsel_native::emit_backend_objects(
                     &program,
                     backend,
                     hirsel_lir::emission::OptLevel::Default,
-                    native::Partition::Whole,
+                    hirsel_native::Partition::Whole,
                     false,
                     None,
                 )
                 .unwrap();
-                native::check_ahead_objects(&program, &objects).unwrap();
+                hirsel_native::check_ahead_objects(&program, &objects).unwrap();
                 assert!(
-                    native::continuation::ahead_certificates(&program, &objects)
+                    hirsel_native::continuation::ahead_certificates(&program, &objects)
                         .iter()
                         .any(|c| c.root == id)
                 );
@@ -1379,7 +1404,7 @@ fn cpu_saved_regional_recipe_is_reconstructed_before_emission() {
     with_compiler_stack(|| {
         let source = SOURCE.replace("job + 7u64", "{ let xs = [job]; xs[0] + 7u64 }");
         let program = ready(&source);
-        let plan = native::ahead_plan(&program);
+        let plan = hirsel_native::ahead_plan(&program);
         let (&id, mapper) = plan
             .roots
             .iter()
@@ -1430,24 +1455,27 @@ fn cpu_saved_regional_recipe_is_reconstructed_before_emission() {
             accepted.is_empty(),
             "accepted regional recipe kinds {accepted:?}"
         );
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-            let objects = native::emit_backend_objects(
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
                 hirsel_lir::emission::OptLevel::Default,
-                native::Partition::Whole,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
             .unwrap();
-            native::check_ahead_objects(&program, &objects).unwrap();
+            hirsel_native::check_ahead_objects(&program, &objects).unwrap();
             assert!(objects.iter().any(|o| {
                 o.imports
                     .iter()
                     .any(|s| s.name == "hirsel_rt_v2_cpu_ahead_grow")
             }));
             assert!(
-                native::continuation::ahead_certificates(&program, &objects)
+                hirsel_native::continuation::ahead_certificates(&program, &objects)
                     .iter()
                     .any(|c| c.root == id)
             );
@@ -1463,7 +1491,7 @@ fn cpu_saved_holder_growth_uses_the_owned_element_recipe() {
             .replace("fn(take job: u64) -> u64 uses {} { job + 7u64 }", "fn(take job: unique List[List[u64]]) -> unique List[List[u64]] uses {} { let mut out = take job; list.reserve(mut out, 128u64); take out }")
             .replace("[8u64, 9u64, 10u64, 11u64]", "[[[1u64]], [[2u64]], [[3u64]], [[4u64]]]");
         let program = ready_with_regions(&source, false);
-        let plan = native::ahead_plan(&program);
+        let plan = hirsel_native::ahead_plan(&program);
         let (&id, mapper) = plan
             .roots
             .iter()
@@ -1485,19 +1513,22 @@ fn cpu_saved_holder_growth_uses_the_owned_element_recipe() {
             &program.table,
             recipe.element
         ));
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-            let objects = native::emit_backend_objects(
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
                 hirsel_lir::emission::OptLevel::Default,
-                native::Partition::Whole,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
             .unwrap();
-            native::check_ahead_objects(&program, &objects).unwrap();
+            hirsel_native::check_ahead_objects(&program, &objects).unwrap();
             assert!(
-                native::continuation::ahead_certificates(&program, &objects)
+                hirsel_native::continuation::ahead_certificates(&program, &objects)
                     .iter()
                     .any(|c| c.root == id)
             );
@@ -1506,7 +1537,7 @@ fn cpu_saved_holder_growth_uses_the_owned_element_recipe() {
 }
 
 fn refresh_cpu_mapper_identity(
-    program: &native::ReadyProgram,
+    program: &hirsel_native::ReadyProgram,
     mapper: &mut hirsel_lir::ahead::CpuMapperGraph,
 ) {
     mapper.graph.identity = hirsel_syntax::ContentHash::of_parts(
@@ -1539,7 +1570,7 @@ fn cpu_allocating_loop_reserve_has_a_complete_start_recipe() {
             "fn(take job: u64) -> unique List[u64] uses {} { let mut out = [job]; list.reserve(mut out, 128u64); let mut x = job; for i in 0u64..2048u64 { x = int.wrapping_add(int.wrapping_mul(x, 6364136223846793005u64), i); x = x ^ (x >> 29u64) }; list.push(mut out, x); take out }",
         ).replace("match outcome {\n    Ok(rows) => failure.check(rows == [8u64, 9u64, 10u64, 11u64], Bounds()),\n    Error(_) => (),\n  }", "let _ = take outcome");
         let program = ready_with_regions(&source, true);
-        let plan = native::ahead_plan(&program);
+        let plan = hirsel_native::ahead_plan(&program);
         assert!(
             program
                 .units

@@ -1,4 +1,5 @@
 use super::*;
+use crate::native;
 use crate::requests::{
     CompileOperation, CompileRequest, CompileResult, CompilerRequests, RequestLimits,
 };
@@ -15,7 +16,10 @@ use std::task::Poll;
 #[ignore = "requires native-selector-proof selected platform inputs"]
 fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_controller() {
     hirsel_engine::with_compiler_stack(|| {
-        for backend in [native::Backend::Cranelift, native::Backend::Llvm] {
+        for backend in [
+            hirsel_native::Backend::Cranelift,
+            hirsel_native::Backend::Llvm,
+        ] {
             let directory = tempfile::tempdir().unwrap();
             let manifest = directory.path().join("hirsel.json");
             std::fs::write(
@@ -25,12 +29,12 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
             .unwrap();
             std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"selected","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
             let store: Arc<dyn ResultStore> = Arc::new(MemStore::default());
-            let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+            let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
             let tools = Arc::new(
-                native::Toolchain::in_tree_with_products(
+                hirsel_native::Toolchain::in_tree_with_products(
                     &directory.path().join("runtime"),
                     &[&target],
-                    &[native::RuntimeBuild::default()],
+                    &[hirsel_native::RuntimeBuild::default()],
                     None,
                     store.clone(),
                 )
@@ -65,8 +69,12 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
             .unwrap();
             loaded.unwrap();
             let mut native = NativeRequest {
-                options: native::BuildProfile::Default
-                    .options(backend, target.clone(), native::Validation::EveryStage)
+                options: hirsel_native::BuildProfile::Default
+                    .options(
+                        backend,
+                        target.clone(),
+                        hirsel_native::Validation::EveryStage,
+                    )
                     .unwrap(),
                 definition: None,
                 test_entries: Vec::new(),
@@ -166,13 +174,13 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
                         native.run.as_ref().unwrap().record().inputs.clone();
                     bound = Some(selected);
                     let runnable = execution.platform.executable(destination.clone()).unwrap();
-                    let child = native::launch_runnable(
+                    let child = hirsel_native::launch_runnable(
                         &runnable,
                         &target,
                         &tools,
                         &directory.path().join("child"),
                         false,
-                        native::Tape::Live {
+                        hirsel_native::Tape::Live {
                             record: None,
                             revocations: None,
                         },
@@ -200,11 +208,11 @@ fn native_test_table_order_seed_and_definition_are_request_inputs() {
     let mut other = path.clone();
     other.0.name = "other".into();
     let mut request = NativeRequest {
-        options: native::BuildProfile::Default
+        options: hirsel_native::BuildProfile::Default
             .options(
-                native::Backend::Cranelift,
-                native::TargetSpec::x86_64_unknown_linux_gnu(),
-                native::Validation::Ready,
+                hirsel_native::Backend::Cranelift,
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                hirsel_native::Validation::Ready,
             )
             .unwrap(),
         definition: Some(path.clone()),
@@ -240,11 +248,11 @@ fn native_test_table_order_seed_and_definition_are_request_inputs() {
 fn native_source_text_context_and_name_are_request_inputs() {
     let path = hirsel_engine::entry_path(&hirsel_engine::default_context());
     let mut request = NativeRequest {
-        options: native::BuildProfile::Default
+        options: hirsel_native::BuildProfile::Default
             .options(
-                native::Backend::Cranelift,
-                native::TargetSpec::x86_64_unknown_linux_gnu(),
-                native::Validation::Ready,
+                hirsel_native::Backend::Cranelift,
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                hirsel_native::Validation::Ready,
             )
             .unwrap(),
         definition: Some(path.clone()),
@@ -296,11 +304,11 @@ fn native_object_roots_and_emission_level_are_request_inputs() {
     let mut other = path.clone();
     other.0.name = "another".into();
     let mut request = NativeRequest {
-        options: native::BuildProfile::Default
+        options: hirsel_native::BuildProfile::Default
             .options(
-                native::Backend::Cranelift,
-                native::TargetSpec::x86_64_unknown_linux_gnu(),
-                native::Validation::Ready,
+                hirsel_native::Backend::Cranelift,
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                hirsel_native::Validation::Ready,
             )
             .unwrap(),
         definition: Some(path.clone()),
@@ -328,7 +336,7 @@ fn native_object_roots_and_emission_level_are_request_inputs() {
         request_key(&request, NativePurpose::Build).unwrap()
     );
     request.output = crate::requests::NativeOutput::Objects { roots: vec![path] };
-    request.options.opt = native::OptLevel::None;
+    request.options.opt = hirsel_native::OptLevel::None;
     assert_ne!(
         objects,
         request_key(&request, NativePurpose::Build).unwrap()

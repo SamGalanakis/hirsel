@@ -220,7 +220,7 @@ fn normalized(syntax: &ItemSyntax) -> (Item, SyntaxTree, u32) {
 pub fn verify_tree(old: &str, new: &str) -> Result<(), String> {
     let mut engine = QueryEngine::new(
         hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
+        hirsel_front_phases::compiler_adapters(),
     );
     let a = parsed(&mut engine, old)?;
     let b = parsed(&mut engine, new)?;
@@ -256,7 +256,7 @@ pub fn verify_tree(old: &str, new: &str) -> Result<(), String> {
 pub fn tokens(source: &str) -> Result<Vec<Token>, String> {
     let mut engine = QueryEngine::new(
         hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
+        hirsel_front_phases::compiler_adapters(),
     );
     let file = engine
         .sources
@@ -967,7 +967,7 @@ mod tests {
                 verify_tree(&a, &b).unwrap();
                 let mut engine = QueryEngine::new(
                     hirsel_engine::default_environment(),
-                    hirsel_driver::compiler_adapters(),
+                    hirsel_front_phases::compiler_adapters(),
                 );
                 let left = engine.sources.add("a.hir", a.clone()).unwrap();
                 let right = engine.sources.add("b.hir", b.clone()).unwrap();
@@ -998,7 +998,7 @@ mod tests {
         on_stack(|| {
             let mut engine = QueryEngine::new(
                 hirsel_engine::default_environment(),
-                hirsel_driver::compiler_adapters(),
+                hirsel_front_phases::compiler_adapters(),
             );
             let text = "fn f(){ () }";
             let file = engine.sources.add("unit.hir", text.into()).unwrap();

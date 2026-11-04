@@ -268,8 +268,8 @@ fn known_rule(value: &str, rules: &Rules) -> Result<RuleId, String> {
 }
 
 /// Explicit harness providers. Script data never grants host authority.
-pub fn fixture(source: &str) -> Result<hirsel_driver::native::Fixture, String> {
-    let mut fixture = hirsel_driver::native::Fixture::default();
+pub fn fixture(source: &str) -> Result<hirsel_native::Fixture, String> {
+    let mut fixture = hirsel_native::Fixture::default();
     for line in source.lines() {
         let line = line.trim();
         if line.is_empty() {

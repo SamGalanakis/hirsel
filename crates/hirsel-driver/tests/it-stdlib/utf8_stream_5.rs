@@ -1,6 +1,7 @@
 //! Streaming UTF-8 lane: Rust validation/error spans, owned output and bounded state.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::{Path, PathBuf};
 
 fn fixture(name: &str) -> PathBuf {
@@ -81,26 +82,34 @@ fn corpus_import_and_error_twins() {
                 checked.outcome,
                 Ok(RunOutcome::Returned(hirsel_run_schema::Returned::Ok))
             ));
-            let expected = native::Observation::of_reference(checked.observation.as_ref().unwrap());
+            let expected =
+                hirsel_native::Observation::of_reference(checked.observation.as_ref().unwrap());
             let input = loaded.engine.export_native_input().unwrap();
             let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-            let ready = native::build(
+            let ready = hirsel_native_batch::build(
                 &validated,
-                &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
             )
             .unwrap();
-            let heap =
-                native::run_heap(&ready, &loaded.entry, &native::Sites::new(&input)).unwrap();
+            let heap = hirsel_native_testing::run_heap(
+                &ready,
+                &loaded.entry,
+                &hirsel_native::Sites::new(&input),
+            )
+            .unwrap();
             assert_eq!(heap.observation, expected);
         }
         // Existing llvm/cranelift tests cover the unchanged corpus original.
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             native_fixture(&errors.0, backend);
         }
     });
 }
 
-fn native_fixture(path: &Path, backend: native::Backend) {
+fn native_fixture(path: &Path, backend: hirsel_native::Backend) {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let outcome = native::run_path_native_backend_with_validation(
@@ -113,7 +122,7 @@ fn native_fixture(path: &Path, backend: native::Backend) {
             stderr: &mut stderr,
         },
         hirsel_driver::session::Policy::default(),
-        native::Validation::EveryStage,
+        hirsel_native::Validation::EveryStage,
     )
     .unwrap()
     .unwrap();
@@ -132,12 +141,12 @@ fn native_fixture(path: &Path, backend: native::Backend) {
 fn llvm() {
     with_compiler_stack(|| {
         for name in ["controls", "vectors"] {
-            native_fixture(&fixture(name), native::Backend::Llvm);
+            native_fixture(&fixture(name), hirsel_native::Backend::Llvm);
         }
         native_fixture(
             &Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../conformance/SEM/SEM-3-utf8-stream-5-run.hir"),
-            native::Backend::Llvm,
+            hirsel_native::Backend::Llvm,
         );
     });
 }
@@ -146,12 +155,12 @@ fn llvm() {
 fn cranelift() {
     with_compiler_stack(|| {
         for name in ["controls", "vectors"] {
-            native_fixture(&fixture(name), native::Backend::Cranelift);
+            native_fixture(&fixture(name), hirsel_native::Backend::Cranelift);
         }
         native_fixture(
             &Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../conformance/SEM/SEM-3-utf8-stream-5-run.hir"),
-            native::Backend::Cranelift,
+            hirsel_native::Backend::Cranelift,
         );
     });
 }
@@ -299,7 +308,10 @@ fn go_vectors_and_seeded_random_rust_oracle() {
         source += "Ok(())\n}\n";
         execute_text(&source, 60_000_000);
         let program = GeneratedProgram::new("oracle", &source);
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             native_fixture(&program.0, backend);
         }
         eprintln!(
@@ -316,9 +328,9 @@ pub(super) fn source_origin() {
             .unwrap_or_else(|e| panic!("{e}"));
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
         for name in ["decoder", "feed", "offset", "status", "pending_bytes"] {
@@ -337,22 +349,22 @@ pub(super) fn source_origin() {
         }
         eprintln!(
             "compiler={:?} llvm={}",
-            hirsel_driver::COMPILER_IDENTITY,
-            native::llvm_version()
+            hirsel_compiler_identity::COMPILER_IDENTITY,
+            hirsel_native::llvm_version()
         );
     });
 }
 
-fn ready_source(source: &str) -> (LoadedProgram, NativeInput, native::ReadyProgram) {
+fn ready_source(source: &str) -> (LoadedProgram, NativeInput, hirsel_native::ReadyProgram) {
     let mut loaded = load_program_source(&fixture("controls"), Some(source)).unwrap();
     loaded
         .check_for_execution()
         .unwrap_or_else(|e| panic!("{e}"));
     let input = loaded.engine.export_native_input().unwrap();
     let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-    let ready = native::build(
+    let ready = hirsel_native_batch::build(
         &validated,
-        &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+        &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
     )
     .unwrap();
     (loaded, input, ready)
@@ -363,8 +375,12 @@ fn heap_ownership_and_injected_cleanup() {
     with_compiler_stack(|| {
         let source = std::fs::read_to_string(fixture("controls")).unwrap();
         let (loaded, input, ready) = ready_source(&source);
-        let run =
-            native::heap_campaign(&ready, &loaded.entry, &native::Sites::new(&input)).unwrap();
+        let run = hirsel_native_testing::heap_campaign(
+            &ready,
+            &loaded.entry,
+            &hirsel_native::Sites::new(&input),
+        )
+        .unwrap();
         assert_eq!(run.observation.exit_code, Some(0));
         assert!(run.sites > 0);
         eprintln!(
@@ -404,7 +420,12 @@ fn state_memory_is_bounded_for_long_one_byte_input() {
                 continue;
             }
             let (loaded, input, ready) = ready_source(&source);
-            let run = native::run_heap(&ready, &loaded.entry, &native::Sites::new(&input)).unwrap();
+            let run = hirsel_native_testing::run_heap(
+                &ready,
+                &loaded.entry,
+                &hirsel_native::Sites::new(&input),
+            )
+            .unwrap();
             assert_eq!(run.observation.exit_code, Some(0));
             peaks.push(run.counters.peak_live_heap_bytes);
             eprintln!(
@@ -454,8 +475,12 @@ fn offset_overflow_poisoning_at_unreachable_stream_size() {
         );
         execute_text(&source, 1_000_000);
         let (loaded, input, ready) = ready_source(&source);
-        let run =
-            native::heap_campaign(&ready, &loaded.entry, &native::Sites::new(&input)).unwrap();
+        let run = hirsel_native_testing::heap_campaign(
+            &ready,
+            &loaded.entry,
+            &hirsel_native::Sites::new(&input),
+        )
+        .unwrap();
         assert_eq!(run.observation.exit_code, Some(0));
     });
 }
@@ -470,7 +495,10 @@ fn existing_utf8_text_controls_both_backends() {
             "SEM-3-sse-run.hir",
             "SEM-1-format-into-appends-run.hir",
         ] {
-            for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+            for backend in [
+                hirsel_native::Backend::Llvm,
+                hirsel_native::Backend::Cranelift,
+            ] {
                 native_fixture(&root.join(name), backend);
             }
         }

@@ -5,6 +5,7 @@
 use crate::source_std::load_program_source;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use serde_json::Value;
 use std::{fmt::Write, path::PathBuf};
 
@@ -247,7 +248,7 @@ for (bits, expected_digits, expected_exponent, expected) in rows {
         }));
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let expected = native::Observation {
+        let expected = hirsel_native::Observation {
             exit_code: Some(0),
             blocked: false,
             budget: None,
@@ -279,28 +280,29 @@ for (bits, expected_digits, expected_exponent, expected) in rows {
                 run.outcome
             );
             assert_eq!(
-                native::Observation::of_reference(run.observation.as_ref().unwrap()),
+                hirsel_native::Observation::of_reference(run.observation.as_ref().unwrap()),
                 expected
             );
             eprintln!(
                 "SHORTEST28 pass interpreter {start} completed_f64={count} completed_f32={narrow_count}"
             );
         }
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let configs = [
-            native::Engine::Heap { campaign: false },
-            native::Engine::Native {
-                opt: native::OptLevel::Speed,
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Heap { campaign: false },
+            hirsel_native_testing::Engine::Native {
+                opt: hirsel_native::OptLevel::Speed,
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
-            native::Engine::Cranelift {
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Cranelift {
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         ]
         .into_iter()
-        .map(|engine| native::Configuration {
+        .map(|engine| hirsel_native_testing::Configuration {
             options: options.clone(),
             engine,
         })
@@ -310,14 +312,15 @@ for (bits, expected_digits, expected_exponent, expected) in rows {
             .tempdir()
             .unwrap();
         let mut tools =
-            native::Toolchain::for_matrix(&scratch.path().join("runtime"), &configs).unwrap();
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &configs)
+                .unwrap();
         tools.launch_timeout = std::time::Duration::from_secs(60);
         for config in configs {
             let name = config.name();
             eprintln!(
                 "SHORTEST28 started {name} {start} selected_f64={count} selected_f32={narrow_count}"
             );
-            let outcomes = native::differential(
+            let outcomes = hirsel_native_testing::differential(
                 &validated,
                 &loaded.entry,
                 &expected,
@@ -328,7 +331,7 @@ for (bits, expected_digits, expected_exponent, expected) in rows {
             assert_eq!(outcomes.len(), 1);
             for (_, outcome) in outcomes {
                 assert!(
-                    matches!(outcome, native::Outcome::Agree),
+                    matches!(outcome, hirsel_native_testing::Outcome::Agree),
                     "{name}: {outcome:?}"
                 );
             }

@@ -1,10 +1,11 @@
 //! Mutations of real source-built Ready cleanup, checked through public C.
-use hirsel_driver::{compiler_adapters, native};
+use hirsel_driver::native;
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
 use hirsel_lir::{ir::*, stage::Ready, validate};
 use std::collections::{BTreeMap, BTreeSet};
 
-fn program() -> native::ReadyProgram {
+fn program() -> hirsel_native::ReadyProgram {
     let source = r#"
 resource type Leaf {n:u64}
 drop(x) {()}
@@ -20,7 +21,7 @@ pub fn main()->Result[(),()] {
     source_program(source)
 }
 
-fn source_program(source: &str) -> native::ReadyProgram {
+fn source_program(source: &str) -> hirsel_native::ReadyProgram {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine
         .sources
@@ -30,14 +31,14 @@ fn source_program(source: &str) -> native::ReadyProgram {
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let input = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(input).unwrap();
-    native::build(
+    hirsel_native_batch::build(
         &validated,
-        &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+        &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
     )
     .unwrap()
 }
 
-fn main_unit(program: &native::ReadyProgram) -> LirUnit<Ready> {
+fn main_unit(program: &hirsel_native::ReadyProgram) -> LirUnit<Ready> {
     program
         .raw_units()
         .into_iter()
@@ -45,7 +46,7 @@ fn main_unit(program: &native::ReadyProgram) -> LirUnit<Ready> {
         .unwrap()
 }
 fn errors(
-    program: &native::ReadyProgram,
+    program: &hirsel_native::ReadyProgram,
     unit: &LirUnit<Ready>,
     operations: &hirsel_layout::operation::OperationRegistry,
 ) -> Vec<validate::Violation> {

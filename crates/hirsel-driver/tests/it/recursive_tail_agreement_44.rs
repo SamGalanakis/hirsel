@@ -1,6 +1,7 @@
 //! Nested let-else cleanup must agree with independently reconstructed tails.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 #[test]
 fn recursive_tail_agreement_44_original_helper() {
@@ -287,7 +288,7 @@ fn four_engines(
     engine: &mut QueryEngine,
     entry: &hirsel_syntax::DefPath,
     oracle: Oracle<'_>,
-    tools: &native::Toolchain,
+    tools: &hirsel_native::Toolchain,
     directory: &std::path::Path,
 ) {
     let Oracle {
@@ -326,7 +327,7 @@ fn four_engines(
     }
     assert_eq!(observed.effects.iter().filter(|e|matches!(&e.effect,hirsel_interp::observation::Effect::ResourceCreated{definition} if definition.0.name=="Stamp")).count(),finalizers,"{name}: owner creation count");
     assert_eq!(observed.effects.iter().filter(|e|matches!(&e.effect,hirsel_interp::observation::Effect::Finalizer{definition} if definition.0.name=="Stamp")).count(),finalizers,"{name}: finalizer count");
-    let reference = native::Observation::of_reference(&observed);
+    let reference = hirsel_native::Observation::of_reference(&observed);
     assert_eq!(reference.output, expected, "{name}");
     assert!(!reference.blocked && reference.budget.is_none() && reference.signaled.is_none());
     if let Some((rule, owner, line, column)) = failure {
@@ -342,12 +343,13 @@ fn four_engines(
         assert_eq!(reference.exit_code, Some(0));
         assert!(reference.failures.is_empty());
     }
-    let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
-    let heap = native::Configuration {
+    let options =
+        hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+    let heap = hirsel_native_testing::Configuration {
         options: options.clone(),
-        engine: native::Engine::Heap { campaign: true },
+        engine: hirsel_native_testing::Engine::Heap { campaign: true },
     };
-    let heap_results = native::differential(
+    let heap_results = hirsel_native_testing::differential(
         &validated,
         entry,
         &reference,
@@ -357,10 +359,10 @@ fn four_engines(
     );
     assert_eq!(heap_results.len(), 1);
     assert!(
-        matches!(heap_results[0].1, native::Outcome::Agree),
+        matches!(heap_results[0].1, hirsel_native_testing::Outcome::Agree),
         "{name}: {heap_results:?}"
     );
-    let ready = native::build(&validated, &options).unwrap();
+    let ready = hirsel_native_batch::build(&validated, &options).unwrap();
     let cell = NativeCell {
         name,
         ready: &ready,
@@ -371,7 +373,10 @@ fn four_engines(
         directory,
         record_effects: !expected.is_empty(),
     };
-    for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+    for backend in [
+        hirsel_native::Backend::Llvm,
+        hirsel_native::Backend::Cranelift,
+    ] {
         cell.run(backend)
     }
     println!(
@@ -381,16 +386,16 @@ fn four_engines(
 
 struct NativeCell<'a> {
     name: &'a str,
-    ready: &'a native::ReadyProgram,
+    ready: &'a hirsel_native::ReadyProgram,
     validated: &'a ValidatedNativeInput,
     entry: &'a hirsel_syntax::DefPath,
-    reference: &'a native::Observation,
-    tools: &'a native::Toolchain,
+    reference: &'a hirsel_native::Observation,
+    tools: &'a hirsel_native::Toolchain,
     directory: &'a std::path::Path,
     record_effects: bool,
 }
 impl NativeCell<'_> {
-    fn run(&self, backend: native::Backend) {
+    fn run(&self, backend: hirsel_native::Backend) {
         let Self {
             name,
             ready,
@@ -403,52 +408,53 @@ impl NativeCell<'_> {
         } = *self;
         let dir = directory.join(format!("{name}-{backend:?}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let objects = native::emit_backend_objects(
+        let objects = hirsel_native::emit_backend_objects(
             ready,
             backend,
-            native::OptLevel::None,
-            native::Partition::Whole,
+            hirsel_native::OptLevel::None,
+            hirsel_native::Partition::Whole,
             false,
             None,
         )
         .unwrap();
-        let runnable = native::link_runnable(ready, entry, &objects, tools, &dir, None).unwrap();
+        let runnable =
+            hirsel_native::link_runnable(ready, entry, &objects, tools, &dir, None).unwrap();
         let roots: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().path())
             .collect();
         let before = native_seal(&roots);
         let tape = dir.join("run.tape");
-        let live = native::launch_runnable(
+        let live = hirsel_native::launch_runnable(
             &runnable,
             &ready.target,
             tools,
             &dir,
             true,
-            native::Tape::Live {
+            hirsel_native::Tape::Live {
                 record: Some(&tape),
                 revocations: None,
             },
         )
         .unwrap();
-        let sites = native::Sites::new(validated.snapshot());
+        let sites = hirsel_native::Sites::new(validated.snapshot());
         assert_eq!(
-            native::observe(&live, ready, &sites).unwrap(),
+            hirsel_native::observe(&live, ready, &sites).unwrap(),
             *reference,
             "{name}/{backend:?}"
         );
         let tape_before = std::fs::read(&tape).unwrap();
-        let replay = native::launch_runnable(
+        let replay = hirsel_native::launch_runnable(
             &runnable,
             &ready.target,
             tools,
             &dir,
             true,
-            native::Tape::Replay(&tape),
+            hirsel_native::Tape::Replay(&tape),
         )
         .unwrap();
         assert_eq!(
-            native::observe(&replay, ready, &sites).unwrap(),
+            hirsel_native::observe(&replay, ready, &sites).unwrap(),
             *reference,
             "{name}/{backend:?}/replay"
         );
@@ -467,19 +473,19 @@ impl NativeCell<'_> {
         bad.run_identity[0] ^= 1;
         let wrong = dir.join("wrong-identity.tape");
         std::fs::write(&wrong, hirsel_rt::launch::render_recording(&bad).unwrap()).unwrap();
-        let refused = native::launch_runnable(
+        let refused = hirsel_native::launch_runnable(
             &runnable,
             &ready.target,
             tools,
             &dir,
             true,
-            native::Tape::Replay(&wrong),
+            hirsel_native::Tape::Replay(&wrong),
         )
         .unwrap();
         assert!(refused.stdout.is_empty());
         assert!(matches!(
-            native::observe_run(&refused, ready, &sites).unwrap(),
-            native::Observed::Refused(_)
+            hirsel_native::observe_run(&refused, ready, &sites).unwrap(),
+            hirsel_native::Observed::Refused(_)
         ));
         if self.record_effects {
             assert!(
@@ -494,18 +500,18 @@ impl NativeCell<'_> {
             bad.events.clear();
             let missing = dir.join("missing-completion.tape");
             std::fs::write(&missing, hirsel_rt::launch::render_recording(&bad).unwrap()).unwrap();
-            let stopped = native::launch_runnable(
+            let stopped = hirsel_native::launch_runnable(
                 &runnable,
                 &ready.target,
                 tools,
                 &dir,
                 true,
-                native::Tape::Replay(&missing),
+                hirsel_native::Tape::Replay(&missing),
             )
             .unwrap();
             assert!(matches!(
-                native::observe_run(&stopped, ready, &sites).unwrap(),
-                native::Observed::Stopped(RunOutcome::Diverged(_))
+                hirsel_native::observe_run(&stopped, ready, &sites).unwrap(),
+                hirsel_native::Observed::Stopped(RunOutcome::Diverged(_))
             ));
         } else {
             assert!(
@@ -582,26 +588,28 @@ fn recursive_tail_agreement_44_four_engines_and_replay() {
         );
         eprintln!("TAIL44_SELECTED {selection}");
         let directory = tempfile::tempdir().unwrap();
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let matrix = [
-            native::Engine::Heap { campaign: true },
-            native::Engine::Native {
-                opt: native::OptLevel::None,
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Heap { campaign: true },
+            hirsel_native_testing::Engine::Native {
+                opt: hirsel_native::OptLevel::None,
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
-            native::Engine::Cranelift {
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Cranelift {
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         ]
-        .map(|engine| native::Configuration {
+        .map(|engine| hirsel_native_testing::Configuration {
             options: options.clone(),
             engine,
         });
         let mut tools =
-            native::Toolchain::for_matrix(&directory.path().join("runtime"), &matrix).unwrap();
-        tools.execution = native::Execution::Executable;
+            hirsel_native_testing::toolchain_for_matrix(&directory.path().join("runtime"), &matrix)
+                .unwrap();
+        tools.execution = hirsel_native::Execution::Executable;
         let mut tool_inputs = vec![
             tools.lld.clone(),
             tools.kit.clone(),
@@ -623,8 +631,8 @@ fn recursive_tail_agreement_44_four_engines_and_replay() {
             original.check_for_execution().unwrap();
             let pure_input = original.engine.export_native_input().unwrap();
             let pure = original.engine.import_native_input(pure_input).unwrap();
-            let ready = native::build(&pure, &options).unwrap();
-            let empty = native::Observation {
+            let ready = hirsel_native_batch::build(&pure, &options).unwrap();
+            let empty = hirsel_native::Observation {
                 exit_code: Some(0),
                 blocked: false,
                 budget: None,
@@ -643,7 +651,7 @@ fn recursive_tail_agreement_44_four_engines_and_replay() {
                 directory: directory.path(),
                 record_effects: false,
             }
-            .run(native::Backend::Cranelift);
+            .run(hirsel_native::Backend::Cranelift);
         }
         let original_text = std::fs::read_to_string(&path).unwrap();
         // The pure helper has no Io events. Keep its observation separate from

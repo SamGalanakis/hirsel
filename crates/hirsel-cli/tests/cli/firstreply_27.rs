@@ -55,7 +55,7 @@ fn firstreply_27_scripted_reference_checked_h() {
             "../../../../examples/firstreply/fixtures/workflows.json"
         ))
         .unwrap();
-        let mut program = hirsel_driver::load_program(&package(scratch.path())).unwrap();
+        let mut program = hirsel_front_phases::load_program(&package(scratch.path())).unwrap();
         program.check_for_execution().unwrap();
         let config = hirsel_engine::RunConfiguration {
             entry: program.entry.clone(),
@@ -171,7 +171,7 @@ fn firstreply_27_caps_reference_checked_and_native() {
             "../../../../examples/firstreply/fixtures/controls.json"
         ))
         .unwrap();
-        let mut program = hirsel_driver::load_program(&manifest).unwrap();
+        let mut program = hirsel_front_phases::load_program(&manifest).unwrap();
         program.check_for_execution().unwrap();
         let config = hirsel_engine::RunConfiguration {
             entry: program.entry.clone(),
@@ -258,7 +258,7 @@ fn firstreply_27_cleanup_finishes_before_output() {
             .iter()
             .find(|row| row["id"] == "loser-blocked-in-read")
             .unwrap();
-        let mut program = hirsel_driver::load_program(&selection).unwrap();
+        let mut program = hirsel_front_phases::load_program(&selection).unwrap();
         program.check_for_execution().unwrap();
         let config = hirsel_engine::RunConfiguration {
             entry: program.entry.clone(),

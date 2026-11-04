@@ -1,18 +1,21 @@
 //! Explicit diagnostic source root. Source V, native instance C and observed
 //! Ready C settle in their own tasks. Host readiness cannot execute a producer.
-use super::{native_lower, native_routing::NativeRouting, ownership_admission::Admission};
-use crate::native::{
-    self,
-    queries::{
-        self, arena_tasks::ArenaTasks, declarations::NativeDeclarations,
-        instance_tasks::InstanceTasks, ownership_compilation::OwnershipCompilation,
-        products::EmissionOptions, source_inputs::NativeInstanceInputs,
-    },
-    root_source::{NativeLinkFacts, NativeLinkSource},
-};
+use super::native_lower;
+use super::native_routing::NativeRouting;
+use super::ownership_admission::Admission;
 use hirsel_engine::{
     FrontLowerQueries, FrontNativeProducts, FrontNativeQueries, runtime::*, store::*,
 };
+use hirsel_native::query_model as model;
+use hirsel_native::root_source::NativeLinkFacts;
+use hirsel_native::root_source::NativeLinkSource;
+use hirsel_native_cache::declarations::NativeDeclarations;
+use hirsel_native_cache::source_inputs::NativeInstanceInputs;
+use hirsel_native_queries as queries;
+use hirsel_native_queries::arena_tasks::ArenaTasks;
+use hirsel_native_queries::instance_tasks::InstanceTasks;
+use hirsel_native_queries::ownership_compilation::OwnershipCompilation;
+use hirsel_native_queries::products::EmissionOptions;
 use hirsel_syntax::{ContentHash, DefPath};
 use std::{
     sync::{Arc, Mutex, OnceLock},
@@ -29,13 +32,13 @@ const FAILURE: Domain = Domain {
     schema: 1,
 };
 pub(super) const KINDS: &[u32] = &[
-    queries::INSTANCE_KIND,
-    queries::instance::CALLABLE_VALUE_KIND,
+    model::INSTANCE_KIND,
+    model::CALLABLE_VALUE_KIND,
     queries::instance_tasks::CALLABLE_GRAPH_KIND,
     queries::instance_tasks::INSTANCE_INPUT_KIND,
     queries::instance_tasks::DISCOVERY_KIND,
-    queries::ARENA_CANDIDATES_KIND,
-    queries::ARENA_CHOSEN_KIND,
+    model::ARENA_CANDIDATES_KIND,
+    model::ARENA_CHOSEN_KIND,
     queries::arena_tasks::ARENA_GRAPH_KIND,
     queries::ownership_compilation::OWNERSHIP_COMPILATION_KIND,
     queries::seal_demand::SEAL_DEMAND_KIND,
@@ -49,7 +52,7 @@ pub(super) struct Source {
     pub store: Arc<dyn ResultStore>,
 }
 pub(super) struct Plan {
-    pub options: native::Options,
+    pub options: hirsel_native::Options,
     pub selection: hirsel_lir::ownership_trace::Selection,
     pub fuel: bool,
     pub policy: ContentHash,
@@ -288,7 +291,7 @@ impl OwnershipBootstrap {
             .map(|(path, context)| (path.clone(), context.entry.0))
             .collect();
         let callees =
-            native::settled_callee_metadata(facts.run.callees.clone(), &facts.run.runtime)
+            hirsel_native::settled_callee_metadata(facts.run.callees.clone(), &facts.run.runtime)
                 .map_err(|error| error.to_string())?;
         let link = Arc::new(
             NativeLinkSource::from_settled(
@@ -351,7 +354,7 @@ impl OwnershipBootstrap {
             plan.selection,
             EmissionOptions::request(
                 input,
-                native::OptLevel::None,
+                hirsel_native::OptLevel::None,
                 false,
                 link.foreign_dispatch(),
                 true,

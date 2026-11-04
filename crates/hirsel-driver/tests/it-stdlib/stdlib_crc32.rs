@@ -2,6 +2,7 @@
 //! These and cutoff/split/list checks run outside the corpus's 1M-step budget.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::Path;
 
 fn execute(source: &str) {

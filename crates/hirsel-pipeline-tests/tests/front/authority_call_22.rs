@@ -1,6 +1,7 @@
 //! CAP/uses call-site controls: no host effects are performed.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_types::QueryError;
 
 fn check(source: &str, expected: Option<&str>) {

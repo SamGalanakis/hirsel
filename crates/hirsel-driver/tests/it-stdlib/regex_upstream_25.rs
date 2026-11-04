@@ -1,6 +1,7 @@
 //! Independent expected literals exercise the public regex operations on real std sources.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -204,7 +205,7 @@ fn run_selection(
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("source rejection {engine}: {e}"));
-        let success = native::Observation {
+        let success = hirsel_native::Observation {
             exit_code: Some(0),
             blocked: false,
             budget: None,
@@ -240,7 +241,7 @@ fn run_selection(
                 "{engine} partition {partition}: {result:?}"
             );
             assert_eq!(
-                native::Observation::of_reference(result.observation.as_ref().unwrap()),
+                hirsel_native::Observation::of_reference(result.observation.as_ref().unwrap()),
                 success,
                 "{engine} partition {partition}"
             );
@@ -253,27 +254,30 @@ fn run_selection(
                 .engine
                 .import_native_input(input)
                 .unwrap_or_else(|e| panic!("V import rejection {engine}: {e:?}"));
-            let configuration = native::Configuration {
-                options: native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            let configuration = hirsel_native_testing::Configuration {
+                options: hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                ),
                 engine: if engine == "LLVM" {
-                    native::Engine::Native {
-                        opt: native::OptLevel::None,
-                        partition: native::Partition::Whole,
-                        runtime: native::Runtime::Diagnostic,
+                    hirsel_native_testing::Engine::Native {
+                        opt: hirsel_native::OptLevel::None,
+                        partition: hirsel_native::Partition::Whole,
+                        runtime: hirsel_native_testing::Runtime::Diagnostic,
                     }
                 } else {
-                    native::Engine::Cranelift {
-                        partition: native::Partition::Whole,
-                        runtime: native::Runtime::Diagnostic,
+                    hirsel_native_testing::Engine::Cranelift {
+                        partition: hirsel_native::Partition::Whole,
+                        runtime: hirsel_native_testing::Runtime::Diagnostic,
                     }
                 },
             };
             let matrix = [configuration];
             let mut toolchain =
-                native::Toolchain::for_matrix(&temp.path().join("runtime"), &matrix).unwrap();
+                hirsel_native_testing::toolchain_for_matrix(&temp.path().join("runtime"), &matrix)
+                    .unwrap();
             toolchain.launch_timeout = std::time::Duration::from_secs(60);
             std::fs::create_dir_all(temp.path().join("launch")).unwrap();
-            let cells = native::differential(
+            let cells = hirsel_native_testing::differential(
                 &validated,
                 &loaded.entry,
                 &success,
@@ -284,7 +288,7 @@ fn run_selection(
             assert_eq!(cells.len(), 1);
             for (name, outcome) in cells {
                 assert!(
-                    matches!(outcome, native::Outcome::Agree),
+                    matches!(outcome, hirsel_native_testing::Outcome::Agree),
                     "{engine} {name} partition {partition}: {outcome:?}"
                 );
             }

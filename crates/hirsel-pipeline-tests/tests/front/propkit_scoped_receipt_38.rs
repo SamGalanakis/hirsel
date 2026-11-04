@@ -1,6 +1,10 @@
 //! The retained four-module Propkit scoped-state witness, without its helper workaround.
-use hirsel_driver::{load_program_source, native::*};
+use hirsel_driver::native::*;
 use hirsel_engine::*;
+use hirsel_front_phases::load_program_source;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_tir::{BodyId, Definition, InstructionKind, PlaceId, Rvalue, Storage};
 use hirsel_types::*;
 use std::path::Path;
@@ -103,7 +107,7 @@ fn provenance() -> &'static serde_json::Value {
                 } else {collect(path,&mut files,&mut seen);}
             }
         }
-        serde_json::json!({"compiler_identity":format!("{:?}",hirsel_driver::COMPILER_IDENTITY),"files_sha256":files,"environment":environment,
+        serde_json::json!({"compiler_identity":format!("{:?}",hirsel_compiler_identity::COMPILER_IDENTITY),"files_sha256":files,"environment":environment,
             "observation_schema":OBSERVATION_SCHEMA,"matrix":MATRIX_VERSION,
             "observation_limits":"Native and H do not expose a separate resource/finalizer/capability event stream or arbitrary returned graph: those fields INCOMPLETE. Here visible destructor order and payload values are explicit output tokens, entry returns unit; roots tracing disabled/empty; no file stages (Pending/AfterWrite N/A)."})
     })
@@ -133,7 +137,10 @@ fn helper_runner() -> String {
 }
 
 fn source_input(source: &str) -> NativeInput {
-    let mut engine = QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+    let mut engine = QueryEngine::new(
+        default_environment(),
+        hirsel_front_phases::compiler_adapters(),
+    );
     let file = engine.sources.add("capture.hir", source.into()).unwrap();
     let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
@@ -241,7 +248,8 @@ fn expected(output: &[u8]) -> Observation {
 fn native_engines(dir: &Path, entry: &hirsel_syntax::DefPath, expected: &Observation) {
     eprintln!("PROPKIT38 TOOLS {}", provenance());
     let configurations = native_matrix();
-    let mut toolchain = Toolchain::for_matrix(&dir.join("runtime"), &configurations).unwrap();
+    let mut toolchain =
+        hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configurations).unwrap();
     toolchain.launch_timeout = std::time::Duration::from_secs(60);
     std::fs::create_dir_all(dir.join("engines")).unwrap();
     let manifest = dir.join("hirsel.json");
@@ -507,8 +515,10 @@ fn counted_local_stale_and_symbolic_source_negatives() {
             ),
         ] {
             let source = format!("{prelude}{probe}\npub fn main(){{}}");
-            let mut engine =
-                QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+            let mut engine = QueryEngine::new(
+                default_environment(),
+                hirsel_front_phases::compiler_adapters(),
+            );
             let file = engine.sources.add("negative.hir", source).unwrap();
             engine.parse_file(file, &default_context()).unwrap();
             let mut path = entry_path(&default_context());
@@ -527,8 +537,10 @@ fn counted_local_stale_and_symbolic_source_negatives() {
                 diagnostics
             );
         }
-        let mut engine =
-            QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+        let mut engine = QueryEngine::new(
+            default_environment(),
+            hirsel_front_phases::compiler_adapters(),
+        );
         let file = engine
             .sources
             .add(

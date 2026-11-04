@@ -1,12 +1,11 @@
 //! Checked cookbook: explicit nested hooks, strict wire errors and owned results.
-use hirsel_driver::{
-    load_program_source,
-    requests::{CompileOperation, CompileResult},
-    session::Session,
-};
+use hirsel_driver::requests::CompileOperation;
+use hirsel_driver::requests::CompileResult;
+use hirsel_driver::session::Session;
 use hirsel_engine::{
     LoweringPolicy, QueryError, RunConfiguration, SimulationConfig, ToolError, with_compiler_stack,
 };
+use hirsel_front_phases::load_program_source;
 use std::path::PathBuf;
 
 fn root() -> PathBuf {
@@ -43,7 +42,7 @@ fn run_recipe(entry: &str) {
         .unwrap();
         let observation = execution.observation.as_ref().unwrap();
         assert!(observation.effects.is_empty(), "{entry}: {observation:?}");
-        let actual = hirsel_driver::native::Observation::of_reference(observation);
+        let actual = hirsel_native::Observation::of_reference(observation);
         assert_eq!(actual.exit_code, Some(0), "{entry}: {actual:?}");
         assert!(actual.failures.is_empty(), "{entry}: {actual:?}");
     });

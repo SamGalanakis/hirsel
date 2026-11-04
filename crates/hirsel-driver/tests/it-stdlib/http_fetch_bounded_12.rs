@@ -3,6 +3,7 @@
 //! Source/license/adaptations: fixtures/http-fetch-bounded-12/REFERENCES.md.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener};
 use std::path::{Path, PathBuf};
@@ -32,12 +33,12 @@ fn checked(path: &Path) -> LoadedProgram {
     });
     loaded
 }
-fn ready(loaded: &mut LoadedProgram) -> native::ReadyProgram {
+fn ready(loaded: &mut LoadedProgram) -> hirsel_native::ReadyProgram {
     let input = loaded.engine.export_native_input().unwrap();
     let validated = loaded.engine.import_native_input(input).unwrap();
-    native::build(
+    hirsel_native_batch::build(
         &validated,
-        &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+        &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
     )
     .unwrap()
 }
@@ -98,15 +99,18 @@ fn scripted_error_precedence_body_send_and_resource_replay() {
         ok(replayed.outcome.unwrap());
         assert_eq!(replayed.observation.as_ref(), Some(&observation));
         let program = ready(&mut loaded);
-        let result = native::run_heap(
+        let result = hirsel_native_testing::run_heap(
             &program,
             &loaded.entry,
-            &native::Sites::new(&loaded.engine.export_native_input().unwrap()),
+            &hirsel_native::Sites::new(&loaded.engine.export_native_input().unwrap()),
         )
         .unwrap();
         assert_eq!(result.observation.exit_code, Some(0));
         assert_eq!(result.counters.live_heap_bytes, 0);
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             ok(native::run_path_native_backend_with_validation(
                 &path,
                 HostLaunch::empty(),
@@ -117,7 +121,7 @@ fn scripted_error_precedence_body_send_and_resource_replay() {
                     stderr: &mut Vec::new(),
                 },
                 hirsel_driver::session::Policy::default(),
-                native::Validation::EveryStage,
+                hirsel_native::Validation::EveryStage,
             )
             .unwrap()
             .unwrap());
@@ -422,29 +426,32 @@ fn loopback_boundaries_decoding_legacy_and_offline_replay() {
                 .map(|backend| PathBuf::from(&prebuilt).join(backend).join("program"))
                 .collect::<Vec<_>>()
         } else {
-            let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-            let tools = native::Toolchain::in_tree_with_runtime(
+            let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+            let tools = hirsel_native::Toolchain::in_tree_with_runtime(
                 &dir.join("runtime"),
                 &[&target],
-                native::RuntimeBuild::default(),
+                hirsel_native::RuntimeBuild::default(),
             )
             .unwrap();
             let mut executables = vec![];
             // Freeze one executable per backend and reuse it across launch inputs.
-            for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+            for backend in [
+                hirsel_native::Backend::Llvm,
+                hirsel_native::Backend::Cranelift,
+            ] {
                 let out = dir.join(format!("{backend:?}"));
                 std::fs::create_dir_all(&out).unwrap();
-                let objects = native::emit_backend_objects(
+                let objects = hirsel_native::emit_backend_objects(
                     &program,
                     backend,
-                    native::OptLevel::Speed,
-                    native::Partition::Whole,
+                    hirsel_native::OptLevel::Speed,
+                    hirsel_native::Partition::Whole,
                     false,
                     None,
                 )
                 .unwrap();
                 executables.push(
-                    native::link_standalone_objects(
+                    hirsel_native::link_standalone_objects(
                         &program,
                         &loaded.entry,
                         &objects,

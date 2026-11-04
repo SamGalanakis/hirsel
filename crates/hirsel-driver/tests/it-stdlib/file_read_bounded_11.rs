@@ -3,6 +3,7 @@
 //! File reads separate data and errors, so scripted tapes use successive events.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_rt::io::{Completion, Event, IoError, Request};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -28,12 +29,12 @@ fn checked(path: &Path) -> LoadedProgram {
     });
     loaded
 }
-fn ready(loaded: &mut LoadedProgram) -> (NativeInput, native::ReadyProgram) {
+fn ready(loaded: &mut LoadedProgram) -> (NativeInput, hirsel_native::ReadyProgram) {
     let input = loaded.engine.export_native_input().unwrap();
     let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-    let ready = native::build(
+    let ready = hirsel_native_batch::build(
         &validated,
-        &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+        &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
     )
     .unwrap();
     (input, ready)
@@ -93,8 +94,12 @@ fn controls_max_u64_errors_and_owned_result() {
         .unwrap());
         let mut loaded = checked(&path);
         let (input, program) = ready(&mut loaded);
-        let result =
-            native::run_heap(&program, &loaded.entry, &native::Sites::new(&input)).unwrap();
+        let result = hirsel_native_testing::run_heap(
+            &program,
+            &loaded.entry,
+            &hirsel_native::Sites::new(&input),
+        )
+        .unwrap();
         assert_eq!(result.observation.exit_code, Some(0));
         assert!(
             result.counters.peak_live_heap_bytes < 65536,
@@ -102,7 +107,10 @@ fn controls_max_u64_errors_and_owned_result() {
             result.counters
         );
         eprintln!("max-u64 tiny-file allocation audit: {:?}", result.counters);
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             ok(native::run_path_native_backend_with_validation(
                 &path,
                 HostLaunch::empty(),
@@ -113,7 +121,7 @@ fn controls_max_u64_errors_and_owned_result() {
                     stderr: &mut Vec::new(),
                 },
                 hirsel_driver::session::Policy::default(),
-                native::Validation::EveryStage,
+                hirsel_native::Validation::EveryStage,
             )
             .unwrap()
             .unwrap());
@@ -136,30 +144,39 @@ fn filesystem_boundaries_cursor_requests_and_cross_engine_replay() {
         std::fs::create_dir_all(dir.join("data")).unwrap();
         // The launcher exposes target scratch through a symlink; grants need its canonical host root.
         let dir = dir.canonicalize().unwrap();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-        let tools = native::Toolchain::in_tree_with_runtime(
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+        let tools = hirsel_native::Toolchain::in_tree_with_runtime(
             &dir.join("runtime"),
             &[&target],
-            native::RuntimeBuild::default(),
+            hirsel_native::RuntimeBuild::default(),
         )
         .unwrap();
         let mut executables = vec![];
         // One standalone build per backend, reused for all launch inputs/tapes.
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let out = dir.join(format!("{backend:?}"));
             std::fs::create_dir_all(&out).unwrap();
-            let objects = native::emit_backend_objects(
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
-                native::OptLevel::Speed,
-                native::Partition::Whole,
+                hirsel_native::OptLevel::Speed,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
             .unwrap();
             executables.push(
-                native::link_standalone_objects(&program, &loaded.entry, &objects, &tools, &out)
-                    .unwrap(),
+                hirsel_native::link_standalone_objects(
+                    &program,
+                    &loaded.entry,
+                    &objects,
+                    &tools,
+                    &out,
+                )
+                .unwrap(),
             );
         }
         let grants = serde_json::json!({"io":{"stdout":"stdout.bytes@1","dirs":[
@@ -427,11 +444,11 @@ fn h_boundary_matrix() {
         let path = fixture("boundaries");
         let mut loaded = checked(&path);
         let (input, program) = ready(&mut loaded);
-        let result = native::run_heap_in(
+        let result = hirsel_native_testing::run_heap_in(
             &program,
             &loaded.entry,
-            &native::Sites::new(&input),
-            &native::HeapWorld {
+            &hirsel_native::Sites::new(&input),
+            &hirsel_native_testing::HeapWorld {
                 steps: Some(20_000_000),
                 ..Default::default()
             },

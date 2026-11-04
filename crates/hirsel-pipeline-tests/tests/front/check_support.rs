@@ -53,7 +53,7 @@ pub fn bits(execution: Execution) -> u128 {
 fn source_engine(source: &str) -> QueryEngine {
     let mut engine = QueryEngine::new(
         hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
+        hirsel_front_phases::compiler_adapters(),
     );
     let context = FileContext {
         package: path("main").0.package,

@@ -1,15 +1,11 @@
-use hirsel_driver::{
-    compiler_adapters,
-    native::{
-        queries::{declarations::NativeDeclarations, recipes::SourceRecipe},
-        receipt_source::{
-            factory::{NamedInput, named_graph},
-            provider::Front,
-        },
-    },
-};
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
 use hirsel_layout::layout::LayoutBuilder;
+use hirsel_native::receipt_source::factory::NamedInput;
+use hirsel_native::receipt_source::factory::named_graph;
+use hirsel_native::receipt_source::provider::Front;
+use hirsel_native_cache::declarations::NativeDeclarations;
+use hirsel_native_cache::recipes::SourceRecipe;
 use hirsel_rc::instance::{Actuals, Instances};
 use std::sync::Arc;
 

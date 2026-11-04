@@ -1,20 +1,26 @@
 //! Capture native source factories at S0, then install one complete dispatch
 //! namespace before the first request. Source bodies, discovery, C and emission
 //! remain producer work; this constructor retains no mutable compiler engine.
-use super::{
-    NativeRequest,
-    native_bootstrap::{NativeAdmission, NativeBootstrap, NativePlan, NativeProofs},
-    native_link::FrozenPlatform,
-    native_products::NativeBuildReadiness,
-    native_routing::NativeRouting,
-};
-use crate::native::{self, object_queries, queries::*};
+use super::NativeRequest;
+use super::native_bootstrap::NativeAdmission;
+use super::native_bootstrap::NativeBootstrap;
+use super::native_bootstrap::NativePlan;
+use super::native_bootstrap::NativeProofs;
+use super::native_link::FrozenPlatform;
+use super::native_products::NativeBuildReadiness;
+use super::native_routing::NativeRouting;
 use hirsel_engine::{
     FrontBodyQueries, FrontLowerQueries, FrontNativePlan, FrontNativeQueries, FrontRunQueries,
     LoadedProgram, ToolError,
     runtime::{MemoryReservation, MemoryWeight, QueryFactory, QueryId, RuntimeErrors},
     store::{Reference, ResultStore},
 };
+use hirsel_native::object_queries;
+use hirsel_native::query_model::{
+    ARENA_CANDIDATES_KIND, ARENA_CHOSEN_KIND, INSTANCE_KIND, READY_KIND, ROOT_KIND,
+};
+use hirsel_native_cache::*;
+use hirsel_native_queries::*;
 use hirsel_syntax::DefPath;
 use std::sync::Arc;
 
@@ -30,7 +36,7 @@ pub(super) struct NativeSourceInputs {
 }
 /// Selected evidence and its partitions of the native snapshot allowance.
 pub(super) struct NativeProofPlan {
-    pub evidence: Arc<native::Evidence>,
+    pub evidence: Arc<hirsel_native::Evidence>,
     pub headers: MemoryReservation,
     pub export: MemoryReservation,
 }
@@ -55,7 +61,7 @@ pub(super) struct NativeAssemblyPlan {
 
 pub(super) const KINDS: &[u32] = &[
     INSTANCE_KIND,
-    crate::native::queries::instance::CALLABLE_VALUE_KIND,
+    hirsel_native::query_model::CALLABLE_VALUE_KIND,
     instance_tasks::CALLABLE_GRAPH_KIND,
     instance_tasks::INSTANCE_INPUT_KIND,
     instance_tasks::DISCOVERY_KIND,
@@ -63,15 +69,15 @@ pub(super) const KINDS: &[u32] = &[
     ARENA_CHOSEN_KIND,
     arena_tasks::ARENA_GRAPH_KIND,
     compilation_tasks::COMPILATION_KIND,
-    crate::native::queries::seal_demand::SEAL_DEMAND_KIND,
+    hirsel_native_queries::seal_demand::SEAL_DEMAND_KIND,
     READY_KIND,
     ROOT_KIND,
     object_queries::CODEGEN_KIND,
     object_queries::LINK_KIND,
     link_tasks::LINK_INPUT_KIND,
     link_tasks::LINK_MANIFEST_KIND,
-    crate::native::queries::execution::EXECUTION_KIND,
-    crate::native::queries::execution::EXECUTION_OBJECTS_KIND,
+    hirsel_native_queries::execution::EXECUTION_KIND,
+    hirsel_native_queries::execution::EXECUTION_OBJECTS_KIND,
 ];
 
 pub(super) struct NativeAssembly {
@@ -220,9 +226,9 @@ impl NativeAssembly {
     pub fn readiness(
         &self,
         request: NativeRequest,
-        tools: Arc<native::Toolchain>,
+        tools: Arc<hirsel_native::Toolchain>,
         platform: Option<Arc<FrozenPlatform>>,
-    ) -> Result<NativeBuildReadiness, native::NativeError> {
+    ) -> Result<NativeBuildReadiness, hirsel_native::NativeError> {
         NativeBuildReadiness::new(self.bootstrap.clone(), request, tools, platform)
     }
     pub fn failure(&self, reference: Reference) -> Option<ToolError> {

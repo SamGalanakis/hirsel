@@ -6,6 +6,9 @@ use hirsel_engine::{
     RunConfiguration, check_snapshot, default_context, entry_path, run_observed_snapshot,
     with_compiler_stack,
 };
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 
 #[test]
 fn value_only_mutation_reference_heap_llvm_cranelift() {
@@ -76,7 +79,9 @@ fn qualify(cases: &[(&str, &str, Option<i32>, &[u8])]) {
                 },
             },
         ];
-        let tools = Toolchain::for_matrix(&root.join("runtime"), &configurations).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &configurations)
+                .unwrap();
         for &(name, source, exit, output) in cases {
             let mut engine = source_std::engine();
             let file = engine

@@ -84,10 +84,10 @@ fn sealed_regions_33_native_grant_cleanup_refuses_unqualified_source_claims() {
 fn check(source: &str, expected: &[(&str, Option<u32>)], elided: &[(&str, bool)]) {
     let program = rc_support::compile(source);
     for target in TargetSpec::executed() {
-        let built = hirsel_driver::native::build_program(
+        let built = hirsel_native_batch::build_program(
             &program,
             rc_support::manifest(&program),
-            &hirsel_driver::native::Options::new(target),
+            &hirsel_native::Options::new(target),
         )
         .unwrap();
         for &(name, claim) in expected {

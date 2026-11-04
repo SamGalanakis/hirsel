@@ -331,6 +331,9 @@ fn borrowed_capture_repairs_19_source_order_preserves_first_rule_and_span() {
 fn borrowed_capture_repairs_19_repaired_nested_copy_on_h_llvm_and_cranelift() {
     with_compiler_stack(|| {
         use hirsel_driver::native::*;
+        use hirsel_native::*;
+        use hirsel_native_batch::*;
+        use hirsel_native_testing::*;
         let source = format!(
             "{}\n{}",
             original(),
@@ -397,7 +400,9 @@ pub fn main() -> Result[(), ()] {
         let scratch = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
             .join("borrowed-capture-repairs-19");
         std::fs::create_dir_all(&scratch).unwrap();
-        let tools = Toolchain::for_matrix(&scratch.join("runtime"), &configurations).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &configurations)
+                .unwrap();
         let outcomes = differential(
             &validated,
             &entry,

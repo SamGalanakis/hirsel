@@ -1,6 +1,7 @@
 //! Independent expected diagnostics and executable repairs for Result-valued tails.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 const UNIT: &str = "fn unit() -> Result[(), ()] {\n  Ok(())\n}\n\npub fn main() -> Result[(), ()] {\n  unit()?\n}\n";
 const TYPES: &str = "type E = Bad(u64)\ntype App = Input(E)\nfn operation(ok: bool) -> Result[u64, E] { if ok { Ok(7) } else { Error(Bad(19)) } }\n";

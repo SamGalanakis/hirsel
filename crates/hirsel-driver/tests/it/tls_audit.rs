@@ -4,14 +4,18 @@
 //! has a TLS section, symbol or relocation (`hirsel_lir::emission::artifact`); this audit
 //! compiles programs that reach every suspending operation family through both emitters, for
 //! both targets and both optimisation levels, and reads each object back.
-use hirsel_driver::compiler_adapters;
-use hirsel_driver::native::{
-    Backend, OptLevel, Options, Partition, TargetSpec, build, emit_backend_objects,
-};
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_lir::object::ObjectFile;
+use hirsel_native::Backend;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::TargetSpec;
+use hirsel_native::emit_backend_objects;
+use hirsel_native_batch::build;
 
 /// Programs whose code suspends in tasks, joins, task sets, channels, mutexes, atomics, frozen
 /// values, arenas, cancellation and finalizers.

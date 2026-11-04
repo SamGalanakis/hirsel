@@ -1,5 +1,6 @@
-use hirsel_driver::{load_program, native};
+use hirsel_driver::native;
 use hirsel_engine::{RunConfiguration, SimulationConfig, with_compiler_stack};
+use hirsel_front_phases::load_program;
 
 #[test]
 fn sealed_heap_107_runs_on_four_engines_and_replays() {
@@ -73,49 +74,52 @@ fn run_sealed_program(name: &str) {
         )
         .unwrap();
         let observation =
-            native::Observation::of_reference(reference.observation.as_ref().unwrap());
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
         assert_eq!(observation.exit_code, Some(0));
         assert!(observation.failures.is_empty());
         eprintln!("{name}: reference PASS");
-        let mut matrix = native::trace_roots_matrix();
-        matrix.push(native::Configuration {
-            options: native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
-            engine: native::Engine::Heap { campaign: false },
+        let mut matrix = hirsel_native_testing::trace_roots_matrix();
+        matrix.push(hirsel_native_testing::Configuration {
+            options: hirsel_native::Options::new(
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+            ),
+            engine: hirsel_native_testing::Engine::Heap { campaign: false },
         });
         let scratch = tempfile::tempdir().unwrap();
         let tools =
-            native::Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+                .unwrap();
         let mut ready = crate::native_ready::supplier(&manifest, None, &run.entry, &tools).unwrap();
-        let outcomes = native::differential_ready(
+        let outcomes = hirsel_native_testing::differential_ready(
             &mut ready,
             &run.entry,
             &observation,
             &matrix,
             &tools,
             scratch.path(),
-            &native::Fixture::default(),
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), matrix.len());
         let mut failures = Vec::new();
         for (configuration, outcome) in outcomes {
             eprintln!("{configuration}: {outcome:?}");
-            if !matches!(outcome, native::Outcome::Agree) {
+            if !matches!(outcome, hirsel_native_testing::Outcome::Agree) {
                 failures.push((configuration, outcome));
             }
         }
-        let replay = native::real_io_replay_ready(
+        let replay = hirsel_native_testing::real_io_replay_ready(
             &mut ready,
             &run.entry,
             &observation,
             &tools,
             scratch.path(),
             Default::default(),
-            &native::Fixture::default(),
+            &hirsel_native::Fixture::default(),
         );
         eprintln!("{name}: replay: {replay:?}");
         assert!(failures.is_empty(), "{failures:#?}; replay: {replay:?}");
         assert!(
-            matches!(replay, native::Outcome::Agree),
+            matches!(replay, hirsel_native_testing::Outcome::Agree),
             "replay: {replay:?}"
         );
     });

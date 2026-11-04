@@ -1,11 +1,12 @@
 # hirsel-driver
 
-The compiler's wiring. `FrontPhases` implements hirsel-engine's `Phases` over
-hirsel-signature, hirsel-check, hirsel-authority, hirsel-ownership and hirsel-lower
-(`pipeline.rs`), and `COMPILER` is the engine's `Compiler` over them; `compiler_adapters()` and the
-path entry points (`check_path`, `run_path`, `format_path`, `load_program*`)
-start sessions from it. `native/` compiles the engine's `ValidatedNativeInput`
-through hirsel-lir, hirsel-rc, hirsel-heapcheck, hirsel-llvm and hirsel-rt.
+Compiler request graphs, source sessions, interpreted execution and host launch entry points.
+`hirsel-front-phases` owns `FrontPhases`, `COMPILER`, `compiler_adapters()` and
+source loading. `hirsel-native-queries` owns native source and instance producers;
+`hirsel-native` owns validated stages, emission and linking; `hirsel-native-testing`
+owns heap execution and differential matrices. `hirsel-host-io` owns interpreted
+host effects. Candidate capture, observation views and package documentation live
+in `hirsel-candidate`, `hirsel-observation-view` and `hirsel-project-info`.
 
 Native builds and runs reserve a private scratch directory per build and remove
 it on drop, including errors and unwinding. Set `HIRSEL_KEEP_NATIVE_SCRATCH=1`
@@ -13,7 +14,7 @@ to retain these directories for debugging; the driver prints each retained path.
 
 Source launch boundaries flush stdout before writing the interpreter's PROG-3 return-payload report. Ready programs retain a checked, layout-derived diagnostic view for the native entry wrapper. Host reports are separate from semantic observations and Io tapes. Native CLI launches inherit the OS output streams, preserving the host report and finalizer order; custom-writer launches retain per-stream forwarding.
 
-`COMPILER` carries the compiler identity `build.rs` computes: a digest of the
+`COMPILER` carries the compiler identity `hirsel-compiler-identity/build.rs` computes: a digest of the
 sources and manifests of this crate and of every workspace crate it depends on,
 with Cargo.lock and the toolchain pin. Std images are keyed by it, so any edit to
 the compiler retires every std image written before it.
@@ -27,21 +28,21 @@ admission and validity; the Session has no semantic program or invalidation cach
 Native build and run use the same Object producers and host launch binding.
 Explicit engine APIs remain available to compiler fixtures and source bootstrap.
 
-`native::backend_features` inventories LIR opcodes with operand representations,
+`hirsel_native_testing::backend_features` inventories LIR opcodes with operand representations,
 arithmetic and conversion modes, projections, layout shapes, validation stage
 outcomes and runtime calls in emitted O0 LLVM IR across both targets and all
 lowering choices. It never links or executes the source. A stage failure is
 returned separately; it is not evidence that the failed stage was covered.
 Individual LIR-validator and heap-checker check kinds are not instrumented.
 
-`native::pairwise_matrix` covers every feasible pair of dimension values in
+`hirsel_native_testing::pairwise_matrix` covers every feasible pair of dimension values in
 its input matrix, including the matrix's constraints on runtime archives and
 pass choices. A per-program rotating anchor visits every input configuration
 within one matrix-length cycle of consecutive seeds. Pair coverage is not a
 proof of equivalent bug-finding power: higher-order interactions are covered
 only by rotation over time and the explicit exhaustive campaign.
 
-`native::Proofs` (`native/proofs.rs`) is the `--proofs` consumer. It builds
+`hirsel_native::Proofs` (`hirsel-native/src/proofs.rs`) is the `--proofs` consumer. It builds
 this compiler's own export of the entry's closure, assesses the sidecar with
 `hirsel_proof_export::sidecar`, and maps each accepted obligation's TIR sites to
 a removal form in a `Discharge` plan carried by `Options::discharge`. Before it
@@ -88,7 +89,7 @@ there is no PATH search or system LLVM fallback. Memcheck launches retain their
 input library path when the child's environment is cleared.
 
 Every executable and program library links with the pinned `ld.lld` and the
-link kit (`native/kit.rs`, built by `tools/buck2/native-toolchain/link_kit.py`):
+link kit (`hirsel-native/src/kit.rs`, built by `tools/buck2/native-toolchain/link_kit.py`):
 no compiler driver, host crt, libgcc or sysroot is on the line, for either
 target. The kit holds, per target, link-only stub DSOs for the glibc 2.28 ABI
 floor (libc, libm, libpthread, libdl, librt, libutil, libresolv and the loader,
@@ -103,7 +104,7 @@ static LLVM libunwind; its `digest` is its identity. An executable's line is
 floor's loader predates DT_RELR. The build ID is a hash of the kit digest, the
 line with every input path replaced by that input's content hash, and those
 contents, so it never depends on a checkout, cache or scratch directory. A
-program image (`native/runner.rs`) links its units, its launcher objects and
+program image (`hirsel-native/src/runner.rs`) links its units, its launcher objects and
 the runtime's compiler builtins (`libhirsel_builtins.a`) `-shared -Bsymbolic`,
 leaving runtime entries to the process that loads it; `link_host`'s host is
 `host.c` compiled without headers by the pinned clang and linked by the same
@@ -158,7 +159,7 @@ recorded Args/Env snapshots use the ordinary Library. `run_path`, `run_path_with
 entry points for semantic fixtures. Production native runs pass the same validated record
 to linking and launch; explicit host runs have streaming stdout and no harness wall-time limit.
 
-Runner calls on the host (`network/runners.rs`): `HostLibrary` keeps the interpreter's runner
+Runner calls on the host (`hirsel-host-io/src/runners.rs`): `HostLibrary` keeps the interpreter's runner
 state, issues each send as a `RunnerCall` request and parks the caller's task on it. At the
 caller's idle point `take_calls` starts each callee as its own admitted run: a call-launch
 record of the callee's entry with the call record, the derived seeds and instance, the
@@ -239,7 +240,7 @@ provider outcomes and elapsed deadlines remain after cancellation.
 Failure observations retain and compare the original operation site independently
 of the primary attribution. Tooling reports render both complete locations.
 
-Conformance `native::Fixture` supplies a virtual monotonic start and validated scripted
+Conformance `hirsel_native::Fixture` supplies a virtual monotonic start and validated scripted
 network/process grants to `differential_ready` and `real_io_replay_ready`. H receives its
 model world; LLVM and Cranelift use the same harness adapter. Production launch
 records and capability seeds remain independent of semantic fixtures.
@@ -250,7 +251,7 @@ all failure causes and source-linked parked waits. Native observation admission
 checks the actual process status against `RunOutcome::exit_code()` before an
 observation may enter differential/agreement comparison.
 
-Runners and program images (`native/runner.rs`, link design §2): `link_runnable`
+Runners and program images (`hirsel-native/src/runner.rs`, link design §2): `link_runnable`
 links a program for a launch as an image of the toolchain's runner unless the
 toolchain selects executables (`Execution::Executable`) or the program needs one
 (any foreign-call surface, memcheck), and `link_tests` links a test package's
@@ -265,7 +266,7 @@ fork-server or exec mode, all recorded in `runners/<build-id>/runner.json`. An
 image's build ID is its key; its imports, needed libraries and segments are
 checked against the runner's exports and the kit's stub versions before it is
 published under `images/`. A refusal or an lld error falls back to an
-executable, counted by reason (`native::counts`). Served runs go to a pool of
+executable, counted by reason (`hirsel_native::counts`). Served runs go to a pool of
 fork servers, one request at a time each over a Unix socket that carries the
 run's streams (`SCM_RIGHTS`); the server replies with the child's process ID and
 then its raw wait status, and a timeout kills the child's process group.
@@ -300,7 +301,7 @@ same program reuses it. `keep_sessions(limit)` raises the per-thread limit
 (`hirsel serve` keeps several for its clients) and drops the oldest sessions over
 it. `opened()` counts the sessions the path entry points opened on this thread.
 
-`native::receipt_source::factory::NamedGraph::declarations` publishes receipt
+`hirsel_native::receipt_source::factory::NamedGraph::declarations` publishes receipt
 source declarations only after reconstructing the graph against the caller's
 current original roots and V provider. It retains complete profiles under the
 aware request identity and preserves ordinary operation, source, descriptor and

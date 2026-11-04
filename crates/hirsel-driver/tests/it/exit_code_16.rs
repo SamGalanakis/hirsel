@@ -1,20 +1,24 @@
 //! PROG-3's return contract on the interpreter, checked interpreter, heap and both emitters.
-use hirsel_driver::{load_program_source, native};
+use hirsel_driver::native;
 use hirsel_engine::{DefinitionQueries, RunConfiguration, SimulationConfig, with_compiler_stack};
+use hirsel_front_phases::load_program_source;
 
 #[test]
 fn exit_code_16_all_entry_shapes_and_status_bytes_agree() {
     with_compiler_stack(|| {
         let fixture =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/std_numeric.hir");
-        let mut matrix = native::trace_roots_matrix();
-        matrix.push(native::Configuration {
-            options: native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
-            engine: native::Engine::Heap { campaign: false },
+        let mut matrix = hirsel_native_testing::trace_roots_matrix();
+        matrix.push(hirsel_native_testing::Configuration {
+            options: hirsel_native::Options::new(
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+            ),
+            engine: hirsel_native_testing::Engine::Heap { campaign: false },
         });
         let scratch = tempfile::tempdir().unwrap();
         let tools =
-            native::Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+                .unwrap();
         for wrapped in [false, true] {
             for code in [0, 1, 2, 255] {
                 let ty = if wrapped {
@@ -58,13 +62,14 @@ fn exit_code_16_all_entry_shapes_and_status_bytes_agree() {
                 )
                 .unwrap();
                 assert_eq!(reference.observation, checked.observation, "{source}");
-                let observation =
-                    native::Observation::of_reference(reference.observation.as_ref().unwrap());
+                let observation = hirsel_native::Observation::of_reference(
+                    reference.observation.as_ref().unwrap(),
+                );
                 let input = program.engine.export_native_input().unwrap();
                 let validated = program.engine.import_native_input(input).unwrap();
                 let directory = scratch.path().join(format!("{wrapped}-{code}"));
                 std::fs::create_dir_all(&directory).unwrap();
-                let outcomes = native::differential(
+                let outcomes = hirsel_native_testing::differential(
                     &validated,
                     &run.entry,
                     &observation,
@@ -75,7 +80,7 @@ fn exit_code_16_all_entry_shapes_and_status_bytes_agree() {
                 assert_eq!(outcomes.len(), 3);
                 for (configuration, outcome) in outcomes {
                     assert!(
-                        matches!(outcome, native::Outcome::Agree),
+                        matches!(outcome, hirsel_native_testing::Outcome::Agree),
                         "{source}: {configuration}: {outcome:?}"
                     );
                 }

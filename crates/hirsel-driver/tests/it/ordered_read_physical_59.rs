@@ -1,6 +1,11 @@
 //! Real stdin is supplied only after the entered read has returned its stack.
-use hirsel_driver::native::{self, Backend, OptLevel, Partition, TargetSpec, Toolchain};
+use hirsel_driver::native;
 use hirsel_engine::*;
+use hirsel_native::Backend;
+use hirsel_native::OptLevel;
+use hirsel_native::Partition;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
 
 #[test]
 fn retained_stdin_pending_releases_its_pooled_stack_and_replays_on_both_backends() {
@@ -11,10 +16,12 @@ fn retained_stdin_pending_releases_its_pooled_stack_and_replays_on_both_backends
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
-        let sites = native::Sites::new(&input);
+        let sites = hirsel_native::Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let program = native::build(&validated, &native::Options::new(target.clone())).unwrap();
+        let program =
+            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
+                .unwrap();
         let root = tempfile::Builder::new()
             .prefix("read59-physical-")
             .tempdir()
@@ -23,7 +30,7 @@ fn retained_stdin_pending_releases_its_pooled_stack_and_replays_on_both_backends
             Toolchain::in_tree_diagnostic(&root.path().join("runtime"), &[&target]).unwrap();
         let entry = entry_path(&default_context());
         for backend in [Backend::Llvm, Backend::Cranelift] {
-            let objects = native::emit_backend_objects(
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
                 OptLevel::Default,
@@ -35,8 +42,10 @@ fn retained_stdin_pending_releases_its_pooled_stack_and_replays_on_both_backends
             for width in [1, 4] {
                 let dir = root.path().join(format!("{backend:?}-{width}"));
                 std::fs::create_dir_all(dir.join("root")).unwrap();
-                let exe = native::link_standalone_objects(&program, &entry, &objects, &tools, &dir)
-                    .unwrap();
+                let exe = hirsel_native::link_standalone_objects(
+                    &program, &entry, &objects, &tools, &dir,
+                )
+                .unwrap();
                 let grants = dir.join("grants.json");
                 std::fs::write(&grants,format!(r#"{{"io":{{"stdout":"stdout.bytes@1","tasks":"tasks.cooperative@1","stdin":"stdin.bytes@1","dirs":[]}},"args":[],"placement":{{"cores":{width}}}}}"#)).unwrap();
                 let tape = dir.join("read.tape");
@@ -90,7 +99,7 @@ fn retained_stdin_pending_releases_its_pooled_stack_and_replays_on_both_backends
                         }
                         finish(process, &cell)
                     };
-                    let launched = native::Launched {
+                    let launched = hirsel_native::Launched {
                         audit_required: true,
                         exit: output.status.code(),
                         signal: None,
@@ -98,7 +107,7 @@ fn retained_stdin_pending_releases_its_pooled_stack_and_replays_on_both_backends
                         stderr: output.stderr,
                         record: std::fs::read_to_string(&observation).unwrap(),
                     };
-                    let actual = native::observe(&launched, &program, &sites).unwrap();
+                    let actual = hirsel_native::observe(&launched, &program, &sites).unwrap();
                     assert_eq!(
                         actual.output,
                         b"7",

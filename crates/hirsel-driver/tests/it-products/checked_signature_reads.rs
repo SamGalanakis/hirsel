@@ -1,5 +1,6 @@
-use hirsel_driver::{COMPILER, requests::*};
+use hirsel_driver::requests::*;
 use hirsel_engine::{CompileConfig, with_compiler_stack};
+use hirsel_front_phases::COMPILER;
 use std::sync::Arc;
 
 #[test]
@@ -13,7 +14,7 @@ fn checked_dependency_readers_preserve_the_complete_generated_signature_sequence
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"standalone","version":"0"},"sources":[{"path":"comptime.hir","module":[]}],"dependencies":[]}"#).unwrap();
         let mut control = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let file = control.sources.add("comptime.hir", source.into()).unwrap();
         control

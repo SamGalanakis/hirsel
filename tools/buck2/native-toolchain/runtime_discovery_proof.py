@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 
-CASE = "native::object_queries::runtime::tests::actual_loader_discovers_transitive_runtime_inputs_and_closes_replay"
+CASE = "object_queries::runtime::tests::actual_loader_discovers_transitive_runtime_inputs_and_closes_replay"
 
 
 def command(arguments, environment):

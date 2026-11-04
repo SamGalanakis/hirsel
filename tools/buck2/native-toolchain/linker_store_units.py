@@ -7,5 +7,5 @@ import sys
 
 llvm, harness = (Path(arg).resolve() for arg in sys.argv[1:])
 env = {**os.environ, "LD_LIBRARY_PATH": str(llvm / "lib")}
-sys.exit(subprocess.run([str(harness), "native::object_queries::capture::tests::",
+sys.exit(subprocess.run([str(harness), "object_queries::capture::tests::",
     "--test-threads=1", "--nocapture"], env=env).returncode)

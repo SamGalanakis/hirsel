@@ -1,6 +1,7 @@
 //! Local replacement preserves fixed storage content independently of access rows.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 const ORIGINAL: &str = include_str!("../fixtures/replace-local-content-33/original.hir");
 
@@ -37,6 +38,9 @@ fn replace_local_content_33_original_generic_body_export() {
 
 fn runtime(source: &str) {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let mut engine = checked(source);
     let expected = Observation {
         exit_code: Some(0),
@@ -92,7 +96,9 @@ fn runtime(source: &str) {
         .prefix("replace-local-content-33-")
         .tempdir()
         .unwrap();
-    let toolchain = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+    let toolchain =
+        hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+            .unwrap();
     let outcomes = differential(
         &validated,
         &entry,

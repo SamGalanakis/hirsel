@@ -6,6 +6,9 @@ use crate::rc_support as support;
 use hirsel_driver::native::*;
 use hirsel_engine::*;
 use hirsel_lir::ir::{Holding, Inst};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 
 // Byte-for-byte retained core-only-loan-original.hir, including its entry type.
 const ORIGINAL: &str = "pub fn main() -> Result[(), u64] {\n  let outer = \"abc\"\n  let mut out: List[u8] = []\n  core@1/bytes.append(mut out, core@1/bytes.slice(core@1/string.as_bytes(outer), 0, core@1/string.byte_len(outer) - 1))\n  Ok(())\n}\n";
@@ -144,7 +147,9 @@ fn nested_and_named_views_agree_on_all_executors() {
             .collect();
         matrix.extend(unspecialized);
         let directory = tempfile::tempdir().unwrap();
-        let toolchain = Toolchain::for_matrix(&directory.path().join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&directory.path().join("runtime"), &matrix)
+                .unwrap();
         let bounds = failure_source("1");
         let arithmetic = failure_source("1u64 / 0u64");
         for (name, source, failure) in [
@@ -153,8 +158,10 @@ fn nested_and_named_views_agree_on_all_executors() {
             ("bounds-before-append", bounds.as_str(), Some("SEM-3")),
             ("argument-before-bounds", arithmetic.as_str(), Some("SEM-1")),
         ] {
-            let mut engine =
-                QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+            let mut engine = QueryEngine::new(
+                default_environment(),
+                hirsel_front_phases::compiler_adapters(),
+            );
             let context = default_context();
             let file = engine.sources.add("byte-view.hir", source.into()).unwrap();
             let checked = source_check_request(&mut engine, file, &context).unwrap();

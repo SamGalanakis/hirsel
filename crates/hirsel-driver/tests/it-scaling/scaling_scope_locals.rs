@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 #[test]
 fn lexical_scope_exits_visit_only_descendant_locals() {
     with_compiler_stack(|| {

@@ -4,6 +4,7 @@
 //! or layout refuses to link.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -130,7 +131,7 @@ impl Fixture {
     fn export(&self, header: bool) -> String {
         native::export_data_abi(
             &self.manifest,
-            native::TargetSpec::x86_64_unknown_linux_gnu(),
+            hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
             header,
         )
         .unwrap_or_else(|e| panic!("{e:?}"))
@@ -141,8 +142,9 @@ impl Fixture {
         let dir = self.root.join("geo");
         std::fs::write(dir.join("geo.h"), header).unwrap();
         std::fs::write(dir.join("lib.c"), C).unwrap();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-        let tools = native::Toolchain::in_tree(&self.root.join("runtime"), &[&target]).unwrap();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+        let tools =
+            hirsel_native::Toolchain::in_tree(&self.root.join("runtime"), &[&target]).unwrap();
         let compiled = std::process::Command::new(&tools.clang)
             .args(["-c", "-O1", "-fPIC", "-D_GNU_SOURCE"])
             .arg(dir.join("lib.c"))
@@ -152,13 +154,13 @@ impl Fixture {
             .unwrap();
         assert!(compiled.status.success(), "{compiled:?}");
     }
-    fn build(&self, backend: native::Backend) -> Result<PathBuf, String> {
+    fn build(&self, backend: hirsel_native::Backend) -> Result<PathBuf, String> {
         let executable = self.root.join(format!("app-{backend:?}"));
         native::build_path_native_backend(
             &self.manifest,
             &executable,
-            native::TargetSpec::x86_64_unknown_linux_gnu(),
-            native::BuildProfile::Default,
+            hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+            hirsel_native::BuildProfile::Default,
             backend,
             None,
             false,
@@ -221,14 +223,20 @@ fn c_code_reads_records_variants_and_flat_extents_through_the_generated_header()
             (Some("Shape"), Some(16))
         );
         assert!(!fixture.root.join("geo/lib.o").exists());
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let refusal = fixture.build(backend).unwrap_err();
             assert!(refusal.contains("No such file"), "{backend:?}: {refusal}");
         }
         fixture.compile(&header);
         assert_eq!(fixture.export(true), header);
         assert_eq!(fixture.export(false), descriptor_text);
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let executable = fixture
                 .build(backend)
                 .unwrap_or_else(|e| panic!("{backend:?}: {e}"));
@@ -247,7 +255,7 @@ fn foreign_code_from_another_abi_version_or_layout_refuses_to_link() {
         let ours = format!("hirsel_data_abi_v{}_", hirsel_rt::ABI_VERSION);
         let older = format!("hirsel_data_abi_v{}_", hirsel_rt::ABI_VERSION - 1);
         stale.compile(&header.replace(&ours, &older));
-        let refusal = stale.build(native::Backend::Llvm).unwrap_err();
+        let refusal = stale.build(hirsel_native::Backend::Llvm).unwrap_err();
         assert!(refusal.starts_with("PROG-4: "), "{refusal}");
         assert!(
             refusal.contains(&format!(
@@ -271,7 +279,9 @@ fn foreign_code_from_another_abi_version_or_layout_refuses_to_link() {
             ("widened", fixture("widened", &widened)),
         ] {
             changed.compile(&header);
-            let refusal = changed.build(native::Backend::Cranelift).unwrap_err();
+            let refusal = changed
+                .build(hirsel_native::Backend::Cranelift)
+                .unwrap_err();
             assert!(
                 refusal.contains("another layout or target of `"),
                 "{name}: {refusal}"
@@ -288,7 +298,7 @@ fn declaration_export_refuses_source_and_manifest_errors_without_link_inputs() {
         let export = |header| {
             native::export_data_abi(
                 &fixture.manifest,
-                native::TargetSpec::x86_64_unknown_linux_gnu(),
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
                 header,
             )
         };
@@ -327,9 +337,10 @@ fn declaration_export_refuses_source_and_manifest_errors_without_link_inputs() {
 #[test]
 fn declaration_export_graph_cannot_supply_a_check_without_foreign_link_inputs() {
     with_compiler_stack(|| {
-        use hirsel_driver::requests::{
-            CompileOperation, CompileRequest, CompileResult, CompilerRequests,
-        };
+        use hirsel_driver::requests::CompileOperation;
+        use hirsel_driver::requests::CompileRequest;
+        use hirsel_driver::requests::CompileResult;
+        use hirsel_driver::requests::CompilerRequests;
         use hirsel_engine::requests::RequestEngine;
         let fixture = fixture("export-graph", LIBRARY);
         let compiler = COMPILER;

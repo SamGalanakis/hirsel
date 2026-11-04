@@ -2,6 +2,7 @@
 //! It keeps its own test binary: its global allocator observes every allocation.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,

@@ -1,9 +1,8 @@
 //! Field-attributed failures, following Serde check.rs:29–53 (MIT OR Apache-2.0).
 //! Expected hook contracts below are written independently of generated text.
-use hirsel_driver::{
-    requests::{CompileOperation, CompileResult},
-    session::Session,
-};
+use hirsel_driver::requests::CompileOperation;
+use hirsel_driver::requests::CompileResult;
+use hirsel_driver::session::Session;
 use hirsel_engine::{LoweringPolicy, with_compiler_stack};
 use std::{fs, path::PathBuf};
 
@@ -358,21 +357,20 @@ pub fn main() -> Result[(), String] uses {} {
             true,
         )
         .unwrap();
-        let observation = hirsel_driver::native::Observation::of_reference(
-            execution.observation.as_ref().unwrap(),
-        );
+        let observation =
+            hirsel_native::Observation::of_reference(execution.observation.as_ref().unwrap());
         assert_eq!(observation.exit_code, Some(0), "{observation:?}");
         assert!(observation.failures.is_empty(), "{observation:?}");
         for backend in [
-            hirsel_driver::native::Backend::Llvm,
-            hirsel_driver::native::Backend::Cranelift,
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
         ] {
             let exe = dir.path().join(format!("repair-{backend:?}"));
             let built = hirsel_driver::native::build_path_native_backend(
                 &path,
                 &exe,
-                hirsel_driver::native::TargetSpec::x86_64_unknown_linux_gnu(),
-                hirsel_driver::native::BuildProfile::Default,
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                hirsel_native::BuildProfile::Default,
                 backend,
                 None,
                 false,

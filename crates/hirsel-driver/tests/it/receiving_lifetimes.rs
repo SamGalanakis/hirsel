@@ -7,7 +7,7 @@ fn a_fresh_global_replacement_keeps_fixed_local_storage_and_current_global_resul
         );
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let context = hirsel_engine::default_context();
         let file = engine.sources.add("receiving.hir", source).unwrap();

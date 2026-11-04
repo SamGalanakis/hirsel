@@ -3,6 +3,7 @@
 //! (3131751e). Hirsel's GEN-1, rather than Rust trait syntax, defines the repairs.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn check(source: &str) -> (QueryEngine, CheckOutput) {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());

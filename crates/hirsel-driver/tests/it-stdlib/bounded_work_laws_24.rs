@@ -1,6 +1,8 @@
 use crate::source_std::load_program_source;
-use hirsel_driver::{native, *};
+use hirsel_driver::native;
+use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::Path;
 
 fn load(source: &str) -> LoadedProgram {
@@ -50,9 +52,11 @@ fn bounded_decoders_and_renderer_do_not_allocate_for_the_rejected_suffix() {
                 let mut program = load(source);
                 let input = program.engine.export_native_input().unwrap();
                 let validated = program.engine.import_native_input(input).unwrap();
-                let ready = native::build(
+                let ready = hirsel_native_batch::build(
                     &validated,
-                    &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+                    &hirsel_native::Options::new(
+                        hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                    ),
                 )
                 .unwrap();
                 let counters = if name == "stdin" {
@@ -76,10 +80,10 @@ fn bounded_decoders_and_renderer_do_not_allocate_for_the_rejected_suffix() {
                     assert_eq!(input.reads, 9, "cap eight plus one overflow probe");
                     result.counters
                 } else {
-                    let result = native::run_heap(
+                    let result = hirsel_native_testing::run_heap(
                         &ready,
                         &program.entry,
-                        &native::Sites::new(validated.snapshot()),
+                        &hirsel_native::Sites::new(validated.snapshot()),
                     )
                     .unwrap();
                     assert_eq!(

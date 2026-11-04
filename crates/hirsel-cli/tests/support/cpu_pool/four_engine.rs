@@ -30,7 +30,7 @@ fn cpu_fixture_four_engine_source(width: u32, source: String, expected_output: &
         expected_output,
         8 << 20,
         &[true, false],
-        &[hirsel_driver::native::Runtime::Diagnostic],
+        &[hirsel_native_testing::Runtime::Diagnostic],
     );
 }
 
@@ -40,9 +40,10 @@ fn cpu_fixture_four_engine_source_grant(
     expected_output: &[u8],
     batch_bytes: u64,
     policies: &[bool],
-    runtimes: &[hirsel_driver::native::Runtime],
+    runtimes: &[hirsel_native_testing::Runtime],
 ) {
-    use hirsel_driver::{compiler_adapters, native};
+    use hirsel_front_phases::compiler_adapters;
+    use hirsel_driver::native;
     use hirsel_engine::{
         QueryEngine, RunConfiguration, source_check_request, default_context, default_environment,
         entry_path, run_observed_checked, run_observed_snapshot, with_compiler_stack,
@@ -59,34 +60,34 @@ fn cpu_fixture_four_engine_source_grant(
             hash_seed: 0,
             inputs: vec![],
         };
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-        let engines = std::iter::once(native::Engine::Heap { campaign: false }).chain(
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+        let engines = std::iter::once(hirsel_native_testing::Engine::Heap { campaign: false }).chain(
             runtimes.iter().flat_map(|&runtime| {
                 [
-                    native::Engine::Native {
-                        opt: native::OptLevel::Default,
-                        partition: native::Partition::Whole,
+                    hirsel_native_testing::Engine::Native {
+                        opt: hirsel_native::OptLevel::Default,
+                        partition: hirsel_native::Partition::Whole,
                         runtime,
                     },
-                    native::Engine::Cranelift {
-                        partition: native::Partition::Whole,
+                    hirsel_native_testing::Engine::Cranelift {
+                        partition: hirsel_native::Partition::Whole,
                         runtime,
                     },
                 ]
             }),
         );
         let matrix: Vec<_> = engines
-            .map(|engine| native::Configuration {
-                options: native::Options::new(target.clone()),
+            .map(|engine| hirsel_native_testing::Configuration {
+                options: hirsel_native::Options::new(target.clone()),
                 engine,
             })
             .collect();
         let root = tempfile::tempdir().unwrap();
         let mut tools =
-            native::Toolchain::for_matrix(&root.path().join("runtime"), &matrix).unwrap();
-        tools.execution = native::Execution::Executable;
+            hirsel_native_testing::toolchain_for_matrix(&root.path().join("runtime"), &matrix).unwrap();
+        tools.execution = hirsel_native::Execution::Executable;
         for &free in policies {
-            let fixture = native::Fixture {
+            let fixture = hirsel_native::Fixture {
                 cpu: Some(hirsel_run_schema::CpuGrant {
                     provider: "cpu.scoped@1".into(),
                     max_workers: width,
@@ -99,7 +100,7 @@ fn cpu_fixture_four_engine_source_grant(
             };
             let run = run_observed_snapshot(&mut engine, &config, (&fixture).into()).unwrap();
             assert!(run.observation.is_some(), "W{width} Free={free}: {run:?}");
-            let reference = native::Observation::of_reference(run.observation.as_ref().unwrap());
+            let reference = hirsel_native::Observation::of_reference(run.observation.as_ref().unwrap());
             assert_eq!(
                 reference.output, expected_output,
                 "W{width} Free={free}: {reference:?}"
@@ -107,19 +108,19 @@ fn cpu_fixture_four_engine_source_grant(
             assert!(reference.failures.is_empty(), "{reference:?}");
             let checked = run_observed_checked(&mut engine, &config, (&fixture).into()).unwrap();
             assert_eq!(
-                native::Observation::of_reference(checked.observation.as_ref().unwrap()),
+                hirsel_native::Observation::of_reference(checked.observation.as_ref().unwrap()),
                 reference,
             );
             let mut ready = native_ready::source_supplier(&source, &entry, &tools).unwrap();
             let dir = root.path().join(if free { "free" } else { "ordered" });
             std::fs::create_dir_all(&dir).unwrap();
-            let outcomes = native::differential_ready(
+            let outcomes = hirsel_native_testing::differential_ready(
                 &mut ready, &entry, &reference, &matrix, &tools, &dir, &fixture,
             );
             assert_eq!(outcomes.len(), matrix.len());
             for (name, outcome) in outcomes {
                 assert!(
-                    matches!(outcome, native::Outcome::Agree),
+                    matches!(outcome, hirsel_native_testing::Outcome::Agree),
                     "W{width} Free={free} {name}: {outcome:?}",
                 );
             }
@@ -184,9 +185,9 @@ fn cpu_fixture_allocating_pressure_four_engine_agreement(width: u32) {
         3 << 20,
         &[false],
         &[
-            hirsel_driver::native::Runtime::Diagnostic,
-            hirsel_driver::native::Runtime::Default,
-            hirsel_driver::native::Runtime::System,
+            hirsel_native_testing::Runtime::Diagnostic,
+            hirsel_native_testing::Runtime::Default,
+            hirsel_native_testing::Runtime::System,
         ],
     );
     cpu_interpreter_matrix_grant(width as usize, false, &source, false, 3 << 20);

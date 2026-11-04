@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::MemStore, *};
+use hirsel_front_phases::*;
 use std::sync::Arc;
 
 fn scope_case(source: &str, failed_front: bool, failed_lower: bool) {

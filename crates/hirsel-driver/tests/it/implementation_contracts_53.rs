@@ -2,12 +2,17 @@
 //! optimization zero, each specialization `f$with$H=impl` calls its
 //! implementation's targets directly on LLVM and Cranelift, as MLton's
 //! defunctorizer leaves only first-order code (defunctorize/defunctorize.sig).
-use hirsel_driver::compiler_adapters;
-use hirsel_driver::native::{OptLevel, Options, TargetSpec, build, emit_clif, emit_ir};
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_lir::emission::symbol_name;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::TargetSpec;
+use hirsel_native::emit_clif;
+use hirsel_native::emit_ir;
+use hirsel_native_batch::build;
 
 const PROGRAM: &str = "signature Source {
   type Item: plain

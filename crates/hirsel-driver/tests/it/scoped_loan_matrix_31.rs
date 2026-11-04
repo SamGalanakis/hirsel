@@ -5,8 +5,13 @@
 //! Hirsel's CLO/OWN/MODE rules, never Rust borrowing, define validity.
 #[path = "../support/history.rs"]
 mod history;
-use hirsel_driver::{native::*, *};
+use hirsel_driver::native::*;
+use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use history::{Category, Cell, Report, Runner, minimize, persist, query_error};
 use std::collections::BTreeSet;
 

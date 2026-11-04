@@ -1,9 +1,13 @@
 //! Fixed inline value construction cannot observe a caller's admission counter.
-use hirsel_driver::compiler_adapters;
-use hirsel_driver::native::{OptLevel, Options, TargetSpec, build, emit_ir};
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::TargetSpec;
+use hirsel_native::emit_ir;
+use hirsel_native_batch::build;
 
 #[test]
 fn inline_record_callee_uses_only_a_room_guard() {
@@ -71,8 +75,10 @@ fn fixed_construction_proof_excludes_box_allocation() {
 
 #[test]
 fn fixed_inline_constructor_keeps_the_exact_last_admissible_depth() {
-    use hirsel_driver::native::{self, Observation, Outcome};
+    use hirsel_driver::native;
     use hirsel_engine::{RunConfiguration, SimulationConfig, entry_path, run_observed_snapshot};
+    use hirsel_native::Observation;
+    use hirsel_native_testing::Outcome;
     with_compiler_stack(|| {
         for (n, succeeds) in [(1021, true), (1022, false)] {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -104,15 +110,18 @@ fn fixed_inline_constructor_keeps_the_exact_last_admissible_depth() {
             }
             let input = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(input).unwrap();
-            let mut matrix = native::trace_roots_matrix();
-            matrix.push(native::Configuration {
+            let mut matrix = hirsel_native_testing::trace_roots_matrix();
+            matrix.push(hirsel_native_testing::Configuration {
                 options: Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
-                engine: native::Engine::Heap { campaign: false },
+                engine: hirsel_native_testing::Engine::Heap { campaign: false },
             });
             let scratch = tempfile::tempdir().unwrap();
-            let tools =
-                native::Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
-            for (configuration, outcome) in native::differential(
+            let tools = hirsel_native_testing::toolchain_for_matrix(
+                &scratch.path().join("runtime"),
+                &matrix,
+            )
+            .unwrap();
+            for (configuration, outcome) in hirsel_native_testing::differential(
                 &validated,
                 &entry,
                 &expected,

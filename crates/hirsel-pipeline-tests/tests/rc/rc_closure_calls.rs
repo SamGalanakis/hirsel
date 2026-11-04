@@ -164,7 +164,7 @@ pub fn main(rt:Io,args:Args)->Result[(),GrantError] {{
         hirsel_engine::with_compiler_stack(move || {
             let mut engine = hirsel_engine::QueryEngine::new(
                 hirsel_engine::default_environment(),
-                hirsel_driver::compiler_adapters(),
+                hirsel_front_phases::compiler_adapters(),
             );
             let file = engine.sources.add("closure.hir", source.clone()).unwrap();
             let checked = hirsel_engine::source_check_request(
@@ -184,15 +184,13 @@ pub fn main(rt:Io,args:Args)->Result[(),GrantError] {{
                 hirsel_engine::run_observed_snapshot(&mut engine, &config, Default::default())
                     .unwrap();
             let reference =
-                hirsel_driver::native::Observation::of_reference(run.observation.as_ref().unwrap());
+                hirsel_native::Observation::of_reference(run.observation.as_ref().unwrap());
             let input = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(input).unwrap();
-            let sites = hirsel_driver::native::Sites::new(validated.snapshot());
-            let ready = hirsel_driver::native::build(
-                &validated,
-                &hirsel_driver::native::Options::new(target()),
-            )
-            .unwrap();
+            let sites = hirsel_native::Sites::new(validated.snapshot());
+            let ready =
+                hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target()))
+                    .unwrap();
             assert!(
                 ready
                     .units
@@ -201,7 +199,7 @@ pub fn main(rt:Io,args:Args)->Result[(),GrantError] {{
                     .count()
                     > 1
             );
-            let heap = hirsel_driver::native::heap_campaign(&ready, &entry, &sites).unwrap();
+            let heap = hirsel_native_testing::heap_campaign(&ready, &entry, &sites).unwrap();
             assert_eq!(heap.observation, reference);
             assert_eq!(
                 reference.output,

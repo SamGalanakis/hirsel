@@ -1,12 +1,14 @@
 //! Readiness adapter controls. The linker returns a tiny script fixture; these
 //! do not stand in for compiler/Cranelift/LLVM conformance or performance gates.
 use hirsel_artifact_store::Domain;
-use hirsel_driver::native::{object_queries::*, queries::*};
 use hirsel_driver::resident::ExecutableOutput;
 use hirsel_engine::{
     requests::OutputReadiness,
     store::{DirStore, ResultStore},
 };
+use hirsel_native::object_queries::*;
+use hirsel_native_cache::*;
+use hirsel_native_queries::*;
 use hirsel_syntax::ContentHash;
 use std::path::Path;
 use std::sync::Arc;

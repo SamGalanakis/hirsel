@@ -39,7 +39,7 @@ const COMMANDS: [&str; 3] = ["check", "build", "run"];
 fn identity() -> String {
     use sha2::Digest;
     let mut hash = sha2::Sha256::new();
-    hash.update(hirsel_driver::COMPILER_IDENTITY);
+    hash.update(hirsel_compiler_identity::COMPILER_IDENTITY);
     hash.update(include_bytes!("main.rs"));
     hash.update(include_bytes!("serve.rs"));
     hash.update(include_bytes!("serve_watch.rs"));
@@ -624,7 +624,7 @@ fn read_wire(stream: &UnixStream) -> Option<([u8; 4], serde_json::Value, Vec<Own
         bytes.extend(&more[..n]);
     }
     let value: serde_json::Value = if &bytes[..4] == candidate::MAGIC {
-        hirsel_driver::candidate::protocol::decode_wire_frame(&bytes[8..8 + length]).ok()?
+        hirsel_candidate::protocol::decode_wire_frame(&bytes[8..8 + length]).ok()?
     } else {
         serde_json::from_slice(&bytes[8..8 + length]).ok()?
     };

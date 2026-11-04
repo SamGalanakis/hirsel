@@ -1,16 +1,28 @@
 //! Every owned Io primitive through compiled calls, C/H validation and exact replay.
 #[path = "../../../hirsel-driver/tests/support/source_std.rs"]
 mod source_std;
-use hirsel_driver::compiler_adapters;
-use hirsel_driver::native::{
-    Configuration, Observation, OptLevel, Options, Outcome, Partition, Sites, Tape, Toolchain,
-    build, differential, full_matrix, launch_with, link, observe, smoke_matrix,
-};
 use hirsel_engine::{
     QueryEngine, RunConfiguration, SimulationConfig, default_context, default_environment,
     entry_path, run_observed_snapshot, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_lir::layout_types::TargetSpec;
+use hirsel_native::Observation;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::Sites;
+use hirsel_native::Tape;
+use hirsel_native::Toolchain;
+use hirsel_native::launch_with;
+use hirsel_native::link;
+use hirsel_native::observe;
+use hirsel_native_batch::build;
+use hirsel_native_testing::Configuration;
+use hirsel_native_testing::Outcome;
+use hirsel_native_testing::differential;
+use hirsel_native_testing::full_matrix;
+use hirsel_native_testing::smoke_matrix;
 use hirsel_rt::{io::Adapter, io_sim::SimIo};
 use std::path::Path;
 
@@ -32,7 +44,8 @@ fn campaign_in(include: fn(&str, bool) -> bool, matrix: Vec<Configuration>, scra
                 targets.push(configuration.options.target.clone());
             }
         }
-        let tools = Toolchain::for_matrix(&scratch.join("runtime"), &matrix).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &matrix).unwrap();
         let mut cases = vec![];
         for name in [
             "io-dir",

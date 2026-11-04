@@ -1,9 +1,9 @@
 //! Constructor names are declarations, while constructed values have actual type arguments.
-use hirsel_driver::compiler_adapters;
 use hirsel_engine::{
     CheckCompletion, QueryEngine, default_context, default_environment, source_check_request,
     with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 
 #[test]
 fn generic_constructor_heads_do_not_enter_value_path_domains() {

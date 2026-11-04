@@ -1,12 +1,12 @@
-use hirsel_driver::native::queries::{
-    INSTANCE_KIND,
-    seal_demand::{GuardTasks, Input, Plan},
-};
 use hirsel_engine::{
     runtime::*,
     store::{Action, Address, Domain, MemStore, ResultStore},
 };
 use hirsel_lir::operation::{NativeType, Primitive};
+use hirsel_native::query_model::INSTANCE_KIND;
+use hirsel_native_queries::seal_demand::GuardTasks;
+use hirsel_native_queries::seal_demand::Input;
+use hirsel_native_queries::seal_demand::Plan;
 use hirsel_rc::seal_demand::equations::LocalDemandEquations;
 use hirsel_syntax::ContentHash;
 use hirsel_types::TypeKind;
@@ -88,7 +88,7 @@ fn original_guard_task_waits_for_dependencies_and_keeps_its_existing_grant_with_
                         let kind = if index % 2 == 0 {
                             INSTANCE_KIND
                         } else {
-                            hirsel_driver::native::queries::instance::CALLABLE_VALUE_KIND
+                            hirsel_native::query_model::CALLABLE_VALUE_KIND
                         };
                         context.inputs.insert(address.0, (kind, product.clone()));
                         Input {
@@ -104,8 +104,12 @@ fn original_guard_task_waits_for_dependencies_and_keeps_its_existing_grant_with_
                         .values()
                         .any(|(kind, _)| *kind == INSTANCE_KIND)
                 );
-                assert!(context.inputs.values().any(|(kind, _)| *kind
-                    == hirsel_driver::native::queries::instance::CALLABLE_VALUE_KIND));
+                assert!(
+                    context
+                        .inputs
+                        .values()
+                        .any(|(kind, _)| *kind == hirsel_native::query_model::CALLABLE_VALUE_KIND)
+                );
                 let root = (
                     originals[entry].header.definition.clone(),
                     originals[entry].header.instance,

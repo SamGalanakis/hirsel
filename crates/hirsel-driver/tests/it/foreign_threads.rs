@@ -4,6 +4,7 @@
 //! whose C code reports the thread ids it ran on. Each program prints one digit per check.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -275,8 +276,8 @@ struct Fixture {
 fn fixture(name: &str, main: &str) -> Fixture {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("foreign-threads-{name}"));
     let _ = std::fs::remove_dir_all(&root);
-    let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-    let tools = native::Toolchain::in_tree(&root.join("runtime"), &[&target]).unwrap();
+    let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+    let tools = hirsel_native::Toolchain::in_tree(&root.join("runtime"), &[&target]).unwrap();
     let mut selected = Vec::new();
     for (package, threads) in [
         ("homelib", None),
@@ -327,13 +328,13 @@ fn fixture(name: &str, main: &str) -> Fixture {
 impl Fixture {
     /// Build the executable with `backend`: the build's verdict, with the check's
     /// diagnostics when the program does not check.
-    fn build(&self, backend: native::Backend) -> Result<PathBuf, String> {
+    fn build(&self, backend: hirsel_native::Backend) -> Result<PathBuf, String> {
         let executable = self.root.join(format!("app-{backend:?}"));
         let built = native::build_path_native_backend(
             &self.manifest,
             &executable,
-            native::TargetSpec::x86_64_unknown_linux_gnu(),
-            native::BuildProfile::Default,
+            hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+            hirsel_native::BuildProfile::Default,
             backend,
             None,
             false,
@@ -363,17 +364,20 @@ impl Fixture {
     }
     /// Build and run on both backends; each run's stdout.
     fn outputs(&self) -> Vec<String> {
-        [native::Backend::Llvm, native::Backend::Cranelift]
-            .into_iter()
-            .map(|backend| {
-                let executable = self
-                    .build(backend)
-                    .unwrap_or_else(|e| panic!("{backend:?}: {e}"));
-                let output = self.run(&executable);
-                assert!(output.status.success(), "{backend:?}: {output:?}");
-                String::from_utf8(output.stdout).unwrap()
-            })
-            .collect()
+        [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ]
+        .into_iter()
+        .map(|backend| {
+            let executable = self
+                .build(backend)
+                .unwrap_or_else(|e| panic!("{backend:?}: {e}"));
+            let output = self.run(&executable);
+            assert!(output.status.success(), "{backend:?}: {output:?}");
+            String::from_utf8(output.stdout).unwrap()
+        })
+        .collect()
     }
 }
 
@@ -520,7 +524,10 @@ fn a_gate_held_across_a_wait_for_its_own_package_blocks_the_run() {
 }
 "#;
         let fixture = fixture("gate-blocked", main);
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let output = fixture.run(&fixture.build(backend).unwrap_or_else(|e| panic!("{e}")));
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(!output.status.success(), "{backend:?}: {output:?}");
@@ -582,15 +589,20 @@ pub fn main(u: Unsafe) -> Result[(), ()] {{
             loaded.check_for_execution().unwrap();
             let input = loaded.engine.export_native_input().unwrap();
             let validated = loaded.engine.import_native_input(input).unwrap();
-            for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-                let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
-                let error = native::build(&validated, &options)
+            for backend in [
+                hirsel_native::Backend::Llvm,
+                hirsel_native::Backend::Cranelift,
+            ] {
+                let options = hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                );
+                let error = hirsel_native_batch::build(&validated, &options)
                     .and_then(|ready| {
-                        native::emit_backend_objects(
+                        hirsel_native::emit_backend_objects(
                             &ready,
                             backend,
-                            native::OptLevel::None,
-                            native::Partition::Singleton,
+                            hirsel_native::OptLevel::None,
+                            hirsel_native::Partition::Singleton,
                             false,
                             None,
                         )
@@ -653,14 +665,19 @@ pub extern "c" fn {package}_deep(
             loaded.check_for_execution().unwrap();
             let input = loaded.engine.export_native_input().unwrap();
             let validated = loaded.engine.import_native_input(input).unwrap();
-            for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-                let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
-                let result = native::build(&validated, &options).and_then(|ready| {
-                    native::emit_backend_objects(
+            for backend in [
+                hirsel_native::Backend::Llvm,
+                hirsel_native::Backend::Cranelift,
+            ] {
+                let options = hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                );
+                let result = hirsel_native_batch::build(&validated, &options).and_then(|ready| {
+                    hirsel_native::emit_backend_objects(
                         &ready,
                         backend,
-                        native::OptLevel::None,
-                        native::Partition::Singleton,
+                        hirsel_native::OptLevel::None,
+                        hirsel_native::Partition::Singleton,
                         false,
                         None,
                     )

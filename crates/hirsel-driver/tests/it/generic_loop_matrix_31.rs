@@ -6,8 +6,12 @@
 #[path = "../support/history.rs"]
 #[allow(dead_code)]
 mod history;
-use hirsel_driver::{compiler_adapters, native::*};
+use hirsel_driver::native::*;
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use std::{collections::BTreeSet, path::Path};
 
 // Greedy lexicographic maximum-uncovered-pairs table, frozen before consumers.
@@ -956,7 +960,7 @@ fn provenance() -> &'static serde_json::Value {
                 } else {collect(path,&mut files,&mut seen);}
             }
         }
-        serde_json::json!({"compiler_identity":format!("{:?}",hirsel_driver::COMPILER_IDENTITY),"files_sha256":files,"environment":environment,
+        serde_json::json!({"compiler_identity":format!("{:?}",hirsel_compiler_identity::COMPILER_IDENTITY),"files_sha256":files,"environment":environment,
             "observation_schema":OBSERVATION_SCHEMA,"matrix":MATRIX_VERSION,
             "observation_limits":"Native and H do not expose a separate resource/finalizer/capability event stream or arbitrary returned graph: those fields INCOMPLETE. Here visible destructor order and payload values are explicit output tokens, entry returns unit; roots tracing disabled/empty; no file stages (Pending/AfterWrite N/A)."})
     })
@@ -969,7 +973,7 @@ fn generic_loop_matrix_31_permanent_manifest_twins() {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/generic_loop_matrix_31");
         for name in ["complete", "incomplete"] {
             let mut program =
-                hirsel_driver::load_program_source(&root.join(format!("{name}.json")), None)
+                hirsel_front_phases::load_program_source(&root.join(format!("{name}.json")), None)
                     .unwrap();
             let checked = program.check(LoweringPolicy::Reachable).unwrap();
             let errors: Vec<_> = checked
@@ -1002,7 +1006,7 @@ fn generic_loop_matrix_31_unique_error_mapper_producer() {
         let directory = artifacts("error-mapper");
         let case = &cases()[0];
         modules.persist(directory.path(),"original",case,"ToyAnalyzer cross-lane minimized witness: source accepts, expect exact mapper result receipt and V accept");
-        let mut program = hirsel_driver::load_program_source(
+        let mut program = hirsel_front_phases::load_program_source(
             &directory.path().join("original/hirsel.json"),
             None,
         )
@@ -1224,7 +1228,7 @@ fn generic_loop_matrix_31_generated_manifest_replay() {
             case,
             "same standalone@0 package/module set as QueryEngine source and native input",
         );
-        let mut program = hirsel_driver::load_program_source(
+        let mut program = hirsel_front_phases::load_program_source(
             &directory.path().join("generated/hirsel.json"),
             None,
         )

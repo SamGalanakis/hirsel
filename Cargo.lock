@@ -523,6 +523,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "hirsel-candidate"
+version = "0.1.0"
+dependencies = [
+ "hirsel-compiler-identity",
+ "hirsel-diag",
+ "hirsel-driver",
+ "hirsel-engine",
+ "hirsel-front-phases",
+ "hirsel-guard",
+ "hirsel-intern",
+ "hirsel-span",
+ "hirsel-syntax",
+ "hirsel-tir",
+ "object",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "hirsel-check"
 version = "0.1.0"
 dependencies = [
@@ -557,14 +576,23 @@ dependencies = [
 name = "hirsel-cli"
 version = "0.1.0"
 dependencies = [
+ "hirsel-candidate",
  "hirsel-cli-args",
+ "hirsel-compiler-identity",
  "hirsel-diag",
  "hirsel-driver",
  "hirsel-engine",
  "hirsel-free",
+ "hirsel-front-phases",
  "hirsel-guard",
  "hirsel-intern",
  "hirsel-interp",
+ "hirsel-native",
+ "hirsel-native-batch",
+ "hirsel-native-queries",
+ "hirsel-native-testing",
+ "hirsel-observation-view",
+ "hirsel-project-info",
  "hirsel-rt",
  "hirsel-run-config",
  "hirsel-run-schema",
@@ -607,16 +635,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "hirsel-compiler-identity"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "hirsel-conformance"
 version = "0.1.0"
 dependencies = [
+ "hirsel-candidate",
  "hirsel-cli-args",
+ "hirsel-compiler-identity",
  "hirsel-diag",
  "hirsel-driver",
  "hirsel-engine",
+ "hirsel-front-phases",
  "hirsel-guard",
  "hirsel-intern",
  "hirsel-interp",
+ "hirsel-native",
+ "hirsel-native-batch",
+ "hirsel-native-queries",
+ "hirsel-native-testing",
  "hirsel-proof-export",
  "hirsel-run-config",
  "hirsel-run-schema",
@@ -669,19 +711,22 @@ dependencies = [
  "base64",
  "bincode",
  "hirsel-artifact-store",
- "hirsel-authority",
+ "hirsel-candidate",
  "hirsel-check",
  "hirsel-check-protocol",
  "hirsel-code-store",
  "hirsel-codec",
+ "hirsel-compiler-identity",
  "hirsel-core-contract",
  "hirsel-cranelift",
  "hirsel-diag",
  "hirsel-engine",
  "hirsel-free",
+ "hirsel-front-phases",
  "hirsel-graph",
  "hirsel-guard",
  "hirsel-heapcheck",
+ "hirsel-host-io",
  "hirsel-intern",
  "hirsel-interp",
  "hirsel-layout",
@@ -689,8 +734,13 @@ dependencies = [
  "hirsel-lir",
  "hirsel-llvm",
  "hirsel-lower",
- "hirsel-ownership",
+ "hirsel-native",
+ "hirsel-native-batch",
+ "hirsel-native-cache",
+ "hirsel-native-queries",
+ "hirsel-native-testing",
  "hirsel-parser",
+ "hirsel-project-info",
  "hirsel-proof-export",
  "hirsel-rc",
  "hirsel-remote",
@@ -776,6 +826,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "hirsel-front-phases"
+version = "0.1.0"
+dependencies = [
+ "hirsel-authority",
+ "hirsel-check",
+ "hirsel-check-protocol",
+ "hirsel-compiler-identity",
+ "hirsel-diag",
+ "hirsel-engine",
+ "hirsel-graph",
+ "hirsel-guard",
+ "hirsel-lower",
+ "hirsel-ownership",
+ "hirsel-signature",
+ "hirsel-span",
+ "hirsel-syntax",
+ "hirsel-tir",
+ "hirsel-types",
+]
+
+[[package]]
 name = "hirsel-graph"
 version = "0.1.0"
 dependencies = [
@@ -807,6 +878,26 @@ version = "0.0.0"
 dependencies = [
  "hirsel-guard",
  "loom",
+]
+
+[[package]]
+name = "hirsel-host-io"
+version = "0.1.0"
+dependencies = [
+ "hirsel-diag",
+ "hirsel-engine",
+ "hirsel-free",
+ "hirsel-guard",
+ "hirsel-interp",
+ "hirsel-remote",
+ "hirsel-rt",
+ "hirsel-run-config",
+ "hirsel-run-schema",
+ "hirsel-span",
+ "hirsel-syntax",
+ "hirsel-tir",
+ "hirsel-types",
+ "sha2",
 ]
 
 [[package]]
@@ -948,13 +1039,186 @@ dependencies = [
 ]
 
 [[package]]
+name = "hirsel-native"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hirsel-artifact-store",
+ "hirsel-codec",
+ "hirsel-compiler-identity",
+ "hirsel-core-contract",
+ "hirsel-cranelift",
+ "hirsel-engine",
+ "hirsel-free",
+ "hirsel-front-phases",
+ "hirsel-graph",
+ "hirsel-guard",
+ "hirsel-heapcheck",
+ "hirsel-intern",
+ "hirsel-interp",
+ "hirsel-layout",
+ "hirsel-lir",
+ "hirsel-llvm",
+ "hirsel-native-queries",
+ "hirsel-proof-export",
+ "hirsel-rc",
+ "hirsel-rt",
+ "hirsel-rt-operations",
+ "hirsel-run-config",
+ "hirsel-run-schema",
+ "hirsel-span",
+ "hirsel-syntax",
+ "hirsel-tir",
+ "hirsel-type-analysis",
+ "hirsel-types",
+ "hirsel-validate",
+ "libc",
+ "object",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+]
+
+[[package]]
+name = "hirsel-native-batch"
+version = "0.1.0"
+dependencies = [
+ "hirsel-artifact-store",
+ "hirsel-codec",
+ "hirsel-compiler-identity",
+ "hirsel-core-contract",
+ "hirsel-engine",
+ "hirsel-front-phases",
+ "hirsel-graph",
+ "hirsel-guard",
+ "hirsel-intern",
+ "hirsel-layout",
+ "hirsel-lir",
+ "hirsel-native",
+ "hirsel-native-batch",
+ "hirsel-native-queries",
+ "hirsel-native-testing",
+ "hirsel-rc",
+ "hirsel-rt",
+ "hirsel-run-config",
+ "hirsel-run-schema",
+ "hirsel-span",
+ "hirsel-syntax",
+ "hirsel-tir",
+ "hirsel-types",
+ "hirsel-validate",
+ "object",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "hirsel-native-build"
 version = "0.1.0"
 dependencies = [
  "hirsel-driver",
  "hirsel-engine",
+ "hirsel-front-phases",
  "hirsel-guard",
+ "hirsel-native",
+ "hirsel-native-batch",
+ "hirsel-native-queries",
+ "hirsel-native-testing",
  "serde_json",
+]
+
+[[package]]
+name = "hirsel-native-cache"
+version = "0.1.0"
+dependencies = [
+ "hirsel-codec",
+ "hirsel-compiler-identity",
+ "hirsel-core-contract",
+ "hirsel-engine",
+ "hirsel-front-phases",
+ "hirsel-graph",
+ "hirsel-guard",
+ "hirsel-intern",
+ "hirsel-layout",
+ "hirsel-lir",
+ "hirsel-native",
+ "hirsel-rc",
+ "hirsel-run-config",
+ "hirsel-run-schema",
+ "hirsel-span",
+ "hirsel-syntax",
+ "hirsel-tir",
+ "hirsel-types",
+ "hirsel-validate",
+ "object",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "hirsel-native-queries"
+version = "0.1.0"
+dependencies = [
+ "hirsel-artifact-store",
+ "hirsel-codec",
+ "hirsel-compiler-identity",
+ "hirsel-core-contract",
+ "hirsel-engine",
+ "hirsel-front-phases",
+ "hirsel-graph",
+ "hirsel-guard",
+ "hirsel-intern",
+ "hirsel-layout",
+ "hirsel-lir",
+ "hirsel-native",
+ "hirsel-native-batch",
+ "hirsel-native-cache",
+ "hirsel-native-testing",
+ "hirsel-rc",
+ "hirsel-rt",
+ "hirsel-run-config",
+ "hirsel-run-schema",
+ "hirsel-span",
+ "hirsel-syntax",
+ "hirsel-tir",
+ "hirsel-types",
+ "hirsel-validate",
+ "object",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "hirsel-native-testing"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hirsel-core-contract",
+ "hirsel-cranelift",
+ "hirsel-engine",
+ "hirsel-front-phases",
+ "hirsel-guard",
+ "hirsel-heapcheck",
+ "hirsel-interp",
+ "hirsel-lir",
+ "hirsel-llvm",
+ "hirsel-native",
+ "hirsel-native-batch",
+ "hirsel-native-queries",
+ "hirsel-rt",
+ "hirsel-rt-operations",
+ "hirsel-run-config",
+ "hirsel-run-schema",
+ "hirsel-syntax",
+ "libc",
+ "object",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -963,6 +1227,23 @@ version = "0.1.0"
 dependencies = [
  "hirsel-guard",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "hirsel-observation-view"
+version = "0.1.0"
+dependencies = [
+ "hirsel-driver",
+ "hirsel-engine",
+ "hirsel-guard",
+ "hirsel-interp",
+ "hirsel-rt",
+ "hirsel-run-schema",
+ "hirsel-syntax",
+ "hirsel-tir",
+ "serde_json",
+ "sha2",
  "tempfile",
 ]
 
@@ -976,6 +1257,7 @@ dependencies = [
  "hirsel-diag",
  "hirsel-driver",
  "hirsel-engine",
+ "hirsel-front-phases",
  "hirsel-guard",
  "hirsel-intern",
  "hirsel-lexer",
@@ -1014,11 +1296,13 @@ dependencies = [
  "hirsel-check-protocol",
  "hirsel-code-store",
  "hirsel-codec",
+ "hirsel-compiler-identity",
  "hirsel-core-contract",
  "hirsel-cranelift",
  "hirsel-diag",
  "hirsel-driver",
  "hirsel-engine",
+ "hirsel-front-phases",
  "hirsel-guard",
  "hirsel-heapcheck",
  "hirsel-intern",
@@ -1027,6 +1311,11 @@ dependencies = [
  "hirsel-lir",
  "hirsel-llvm",
  "hirsel-lower",
+ "hirsel-native",
+ "hirsel-native-batch",
+ "hirsel-native-cache",
+ "hirsel-native-queries",
+ "hirsel-native-testing",
  "hirsel-object-storage",
  "hirsel-proof-export",
  "hirsel-rc",
@@ -1062,6 +1351,22 @@ dependencies = [
  "hirsel-tir",
  "hirsel-types",
  "serde",
+]
+
+[[package]]
+name = "hirsel-project-info"
+version = "0.1.0"
+dependencies = [
+ "hirsel-code-store",
+ "hirsel-engine",
+ "hirsel-front-phases",
+ "hirsel-graph",
+ "hirsel-guard",
+ "hirsel-run-schema",
+ "hirsel-span",
+ "hirsel-syntax",
+ "hirsel-types",
+ "serde_json",
 ]
 
 [[package]]

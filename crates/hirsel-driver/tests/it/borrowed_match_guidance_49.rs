@@ -2,6 +2,7 @@
 //! acceptance and consuming-match expectations are Hirsel LANG-13/OWN-1.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn checked(source: &str) -> CheckOutput {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -314,7 +315,7 @@ fn borrowed_match_guidance_49_independent_twins_execute_and_validate_reachable_v
         )
         .unwrap();
         let observation = execution.observation.as_ref().unwrap();
-        let reference = native::Observation::of_reference(observation);
+        let reference = hirsel_native::Observation::of_reference(observation);
         assert_eq!(reference.exit_code, Some(0), "{reference:?}");
         assert!(reference.failures.is_empty(), "{reference:?}");
         assert_eq!(

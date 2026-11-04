@@ -21,9 +21,11 @@ fn source_replacements_check_current_roots_without_sharing_mutable_requests() {
             source_std::load_program_source(&main, Some("pub fn main() { let value = 1u64 }\n"))
                 .unwrap();
         accepted.check_for_execution().unwrap();
-        let mut fresh =
-            hirsel_driver::load_program_source(&main, Some("pub fn main() { let value = 1u64 }\n"))
-                .unwrap();
+        let mut fresh = hirsel_front_phases::load_program_source(
+            &main,
+            Some("pub fn main() { let value = 1u64 }\n"),
+        )
+        .unwrap();
         fresh.check_for_execution().unwrap();
         assert_eq!(
             accepted

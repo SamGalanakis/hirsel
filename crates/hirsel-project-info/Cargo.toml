@@ -1,0 +1,20 @@
+[package]
+name = "hirsel-project-info"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hirsel-graph = { path = "../hirsel-graph" }
+hirsel-run-schema = { path = "../hirsel-run-schema" }
+hirsel-front-phases = { path = "../hirsel-front-phases" }
+hirsel-code-store = { path = "../hirsel-code-store" }
+hirsel-engine = { path = "../hirsel-engine" }
+hirsel-guard = { path = "../hirsel-guard" }
+hirsel-span = { path = "../hirsel-span" }
+hirsel-syntax = { path = "../hirsel-syntax" }
+hirsel-types = { path = "../hirsel-types" }
+serde_json = "1"
+
+

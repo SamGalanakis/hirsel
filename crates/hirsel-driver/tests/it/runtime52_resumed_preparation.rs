@@ -1,8 +1,12 @@
 //! A resumed state re-runs an address preparation whose failure edge names a
 //! cleanup block the state never emits (resume-coverage-52). Cranelift traps
 //! there as LLVM marks it unreachable: the check passed before the save.
-use hirsel_driver::native::{self, *};
+use hirsel_driver::native;
+use hirsel_driver::native::*;
 use hirsel_engine::*;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 
 use super::runtime50_continuation::ready;
 use super::runtime50_resume::{agree, routing};
@@ -58,8 +62,8 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
 fn runtime52_resumed_preparation_cleanup_emits_on_both_backends() {
     with_compiler_stack(|| {
         let program = ready(DETACHED);
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         assert!(plans.resumable());
         for backend in [Backend::Llvm, Backend::Cranelift] {
             for partition in [Partition::Whole, Partition::Singleton] {

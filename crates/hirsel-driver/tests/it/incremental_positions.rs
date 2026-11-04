@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 fn path(name: &str) -> DefPath {
     let mut p = entry_path(&default_context());
     p.0.name = name.into();

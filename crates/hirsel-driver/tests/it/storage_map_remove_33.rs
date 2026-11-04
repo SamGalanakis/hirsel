@@ -1,6 +1,7 @@
 //! A reviewed map removal preserves possible stored-value producers for a later sealed read.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn check(remove: bool) {
     with_compiler_stack(|| {

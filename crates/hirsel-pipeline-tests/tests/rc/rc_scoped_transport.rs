@@ -202,6 +202,9 @@ fn borrowed_resource_cleanup_survives_success_and_failure() {
 #[test]
 fn heap_callable_representation_survives_both_native_backends() {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     use sha2::{Digest, Sha256};
     let source="@noalloc fn invoke(f:@noalloc fn()->u64 uses {})->u64 uses {f}{f()}\n@noalloc fn value(n:u64)->u64{invoke(fn()->u64 uses {}{n})}\npub fn main(rt:Io,args:Args)->Result[(),u64]{Error(value(3u64))}".to_string();
     let target = target();
@@ -217,7 +220,7 @@ fn heap_callable_representation_survives_both_native_backends() {
     hirsel_engine::with_compiler_stack(move || {
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let file = engine.sources.add("scoped.hir", source).unwrap();
         let checked = hirsel_engine::source_check_request(

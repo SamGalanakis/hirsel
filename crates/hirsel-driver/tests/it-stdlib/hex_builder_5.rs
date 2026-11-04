@@ -1,6 +1,7 @@
 //! Append encoding: independent byte oracle, alias control and audited failure cleanup.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> PathBuf {
@@ -53,11 +54,13 @@ fn check(name: &str, campaign: bool) {
             "{:?}",
             reference.outcome
         );
-        let expected = native::Observation::of_reference(reference.observation.as_ref().unwrap());
+        let expected =
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = native::build(&validated, &options).unwrap();
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
         for name in if name.starts_with("corpus:") || name == "importers" {
             &[][..]
         } else {
@@ -76,15 +79,15 @@ fn check(name: &str, campaign: bool) {
                 hirsel_lir::ir::UnitOrigin::Source
             );
         }
-        let sites = native::Sites::new(validated.snapshot());
+        let sites = hirsel_native::Sites::new(validated.snapshot());
         let heap = if campaign {
-            native::heap_campaign(&ready, &loaded.entry, &sites)
+            hirsel_native_testing::heap_campaign(&ready, &loaded.entry, &sites)
         } else {
-            native::run_heap_in(
+            hirsel_native_testing::run_heap_in(
                 &ready,
                 &loaded.entry,
                 &sites,
-                &native::HeapWorld {
+                &hirsel_native_testing::HeapWorld {
                     steps: importer_steps,
                     ..Default::default()
                 },
@@ -104,29 +107,35 @@ fn check(name: &str, campaign: bool) {
             heap.counters.peak_live_heap_bytes
         );
         let configs = vec![
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
         let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("hex-builder-5-{name}"));
-        let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &configs).unwrap();
-        for (config, outcome) in
-            native::differential(&validated, &loaded.entry, &expected, &configs, &tools, &dir)
-        {
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs).unwrap();
+        for (config, outcome) in hirsel_native_testing::differential(
+            &validated,
+            &loaded.entry,
+            &expected,
+            &configs,
+            &tools,
+            &dir,
+        ) {
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{name}: {config}: {outcome:?}"
             );
         }

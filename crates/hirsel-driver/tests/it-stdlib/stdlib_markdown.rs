@@ -3,6 +3,7 @@
 //! budget and the Buck2 test runner enforces its wall-clock timeout.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn run_vector(name: &str) {

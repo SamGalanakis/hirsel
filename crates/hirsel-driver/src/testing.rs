@@ -14,8 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-mod diff;
-pub mod impact;
+use hirsel_project_info::snapshot_diff as diff;
 mod interpreted;
 mod simulation;
 pub(crate) use interpreted::Executions;

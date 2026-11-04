@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_intern::work::{self, Counter};
 
 #[test]
@@ -25,12 +26,12 @@ fn cleanup_version_joins_share_unchanged_dataflow() {
             assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
             let snapshot = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(snapshot).unwrap();
-            let mut options = native::Options::new(
+            let mut options = hirsel_native::Options::new(
                 hirsel_lir::layout_types::TargetSpec::x86_64_unknown_linux_gnu(),
             );
             options.regions = false;
             let before = work::read(Counter::RcCleanupVersionRows);
-            let program = native::build(&validated, &options).unwrap();
+            let program = hirsel_native_batch::build(&validated, &options).unwrap();
             let rows = work::read(Counter::RcCleanupVersionRows) - before;
             assert!(!program.units.is_empty());
             assert!(rows > 0, "cleanup version work must be measured");

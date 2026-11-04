@@ -4,7 +4,10 @@ use hirsel_engine::{
 };
 
 fn accepts(source: &str) {
-    let mut engine = QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+    let mut engine = QueryEngine::new(
+        default_environment(),
+        hirsel_front_phases::compiler_adapters(),
+    );
     let file = engine
         .sources
         .add("tuple-compare.hir", source.into())
@@ -21,7 +24,10 @@ fn accepts(source: &str) {
 fn tuple_compare_incompatible_nested_rows_are_still_rejected_by_v() {
     use hirsel_tir::Rvalue;
     use hirsel_types::{Relation, TypeKind};
-    let mut engine = QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+    let mut engine = QueryEngine::new(
+        default_environment(),
+        hirsel_front_phases::compiler_adapters(),
+    );
     let file = engine.sources.add("tuple-compare.hir", "fn visible(p:(u64,List[u64]),take expected:List[(u64,List[u64])])->bool { let(k,v)=p; (k,v)==expected[0] }".into()).unwrap();
     assert!(
         check_snapshot(&mut engine, file, &default_context())
@@ -81,6 +87,9 @@ fn tuple_compare_matches_reference_heap_llvm_and_cranelift() {
         RunConfiguration, entry_path, run_observed_snapshot, source_check_request,
         with_compiler_stack,
     };
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         options.validation = Validation::EveryStage;
@@ -106,13 +115,17 @@ fn tuple_compare_matches_reference_heap_llvm_and_cranelift() {
             },
         ];
         let directory = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("tuple-compare");
-        let toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix)
+                .unwrap();
         let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
         for name in ["loop", "equal", "nested", "field"] {
             let path = format!("conformance/MODE/MODE-2-tuple-compare-{name}-run.hir");
             let source = std::fs::read_to_string(root.join(path)).unwrap();
-            let mut engine =
-                QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+            let mut engine = QueryEngine::new(
+                default_environment(),
+                hirsel_front_phases::compiler_adapters(),
+            );
             let file = engine
                 .sources
                 .add(format!("tuple-{name}.hir"), source)
@@ -166,8 +179,10 @@ fn tuple_compare_ordering_stays_rejected() {
             let source = format!(
                 "fn visible(p:(u64,List[u64]),take expected:List[(u64,List[u64])])->bool {{ let(k,v)=p; {left}{op}{right} }}"
             );
-            let mut engine =
-                QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+            let mut engine = QueryEngine::new(
+                default_environment(),
+                hirsel_front_phases::compiler_adapters(),
+            );
             let file = engine.sources.add("tuple-order.hir", source).unwrap();
             let diagnostics = match check_snapshot(&mut engine, file, &default_context()) {
                 Ok(diagnostics) | Err(hirsel_types::QueryError::Diagnostics(diagnostics)) => {

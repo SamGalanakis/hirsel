@@ -1,0 +1,51 @@
+[package]
+name = "hirsel-native"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+native-tsan = ["hirsel-llvm/native-tsan", "hirsel-cranelift/native-tsan"]
+
+[dependencies]
+hirsel-compiler-identity = { path = "../hirsel-compiler-identity" }
+base64 = "=0.22.1"
+hirsel-artifact-store = { path = "../hirsel-artifact-store" }
+hirsel-codec = { path = "../hirsel-codec" }
+hirsel-core-contract = { path = "../hirsel-core-contract" }
+hirsel-cranelift = { path = "../hirsel-cranelift" }
+hirsel-engine = { path = "../hirsel-engine" }
+hirsel-free = { path = "../hirsel-free" }
+hirsel-graph = { path = "../hirsel-graph" }
+hirsel-guard = { path = "../hirsel-guard" }
+hirsel-heapcheck = { path = "../hirsel-heapcheck" }
+hirsel-intern = { path = "../hirsel-intern" }
+hirsel-interp = { path = "../hirsel-interp" }
+hirsel-layout = { path = "../hirsel-layout" }
+hirsel-lir = { path = "../hirsel-lir" }
+hirsel-llvm = { path = "../hirsel-llvm" }
+hirsel-proof-export = { path = "../hirsel-proof-export" }
+hirsel-rc = { path = "../hirsel-rc" }
+hirsel-rt = { path = "../hirsel-rt" }
+hirsel-rt-operations = { path = "../hirsel-rt-operations" }
+hirsel-run-config = { path = "../hirsel-run-config" }
+hirsel-run-schema = { path = "../hirsel-run-schema" }
+hirsel-span = { path = "../hirsel-span" }
+hirsel-syntax = { path = "../hirsel-syntax" }
+hirsel-tir = { path = "../hirsel-tir" }
+hirsel-type-analysis = { path = "../hirsel-type-analysis" }
+hirsel-types = { path = "../hirsel-types" }
+hirsel-validate = { path = "../hirsel-validate" }
+libc = { version = "0.2", default-features = false }
+object = { version = "=0.40.0", default-features = false, features = ["archive", "elf", "read_core", "std", "write"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = { version = "=0.4.46", default-features = false }
+tempfile = "3"
+
+
+[dev-dependencies]
+hirsel-native-queries = { path = "../hirsel-native-queries" }
+hirsel-front-phases = { path = "../hirsel-front-phases" }

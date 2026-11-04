@@ -4,6 +4,7 @@
 //! contextual bare variants; no Rust resolution rules or implementation is copied.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use serde_json::{Value, json};
 use std::path::Path;
 

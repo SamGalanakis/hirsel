@@ -1,6 +1,7 @@
 //! Feed-oriented binary lines: Go vectors, independent oracle and ownership.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::{Path, PathBuf};
 
 fn source_error(error: ToolError) -> ! {
@@ -40,7 +41,7 @@ fn interpret(path: &Path) {
         "{outcome:?}"
     );
 }
-fn native_fixture(path: &Path, backend: native::Backend) {
+fn native_fixture(path: &Path, backend: hirsel_native::Backend) {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let outcome = native::run_path_native_backend_with_validation(
@@ -53,7 +54,7 @@ fn native_fixture(path: &Path, backend: native::Backend) {
             stderr: &mut stderr,
         },
         hirsel_driver::session::Policy::default(),
-        native::Validation::EveryStage,
+        hirsel_native::Validation::EveryStage,
     )
     .unwrap()
     .unwrap();
@@ -79,7 +80,7 @@ fn controls_and_vectors() {
 fn llvm() {
     with_compiler_stack(|| {
         for name in ["controls", "vectors"] {
-            native_fixture(&fixture(name), native::Backend::Llvm);
+            native_fixture(&fixture(name), hirsel_native::Backend::Llvm);
         }
     });
 }
@@ -87,21 +88,21 @@ fn llvm() {
 fn cranelift() {
     with_compiler_stack(|| {
         for name in ["controls", "vectors"] {
-            native_fixture(&fixture(name), native::Backend::Cranelift);
+            native_fixture(&fixture(name), hirsel_native::Backend::Cranelift);
         }
     });
 }
 
-fn ready(source: &str) -> (LoadedProgram, NativeInput, native::ReadyProgram) {
+fn ready(source: &str) -> (LoadedProgram, NativeInput, hirsel_native::ReadyProgram) {
     let mut loaded = load_program_source(&fixture("controls"), Some(source)).unwrap();
     loaded
         .check_for_execution()
         .unwrap_or_else(|error| source_error(error));
     let input = loaded.engine.export_native_input().unwrap();
     let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-    let ready = native::build(
+    let ready = hirsel_native_batch::build(
         &validated,
-        &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+        &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
     )
     .unwrap();
     (loaded, input, ready)
@@ -125,8 +126,12 @@ fn heap_ownership_and_failure_cleanup() {
                 hirsel_lir::ir::UnitOrigin::Source
             );
         }
-        let result =
-            native::heap_campaign(&ready, &loaded.entry, &native::Sites::new(&input)).unwrap();
+        let result = hirsel_native_testing::heap_campaign(
+            &ready,
+            &loaded.entry,
+            &hirsel_native::Sites::new(&input),
+        )
+        .unwrap();
         assert_eq!(result.observation.exit_code, Some(0));
         assert!(result.sites > 0);
         eprintln!(
@@ -153,8 +158,12 @@ fn one_byte_feeds_read_linear_bytes() {
             }}"#
             );
             let (loaded, input, ready) = ready(&source);
-            let result =
-                native::run_heap(&ready, &loaded.entry, &native::Sites::new(&input)).unwrap();
+            let result = hirsel_native_testing::run_heap(
+                &ready,
+                &loaded.entry,
+                &hirsel_native::Sites::new(&input),
+            )
+            .unwrap();
             assert_eq!(result.observation.exit_code, Some(0));
             assert!(
                 result.counters.indexed_byte_reads <= 3 * n + 8,
@@ -293,7 +302,10 @@ fn rust_oracle_all_partitions_and_raw_limits() {
             ),
             "{outcome:?}"
         );
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             native_fixture(&generated, backend);
         }
         std::fs::remove_dir_all(dir).unwrap();
@@ -314,11 +326,11 @@ fn ndjson_example_fixed_stdin_and_errors() {
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join(format!("line-scan-7-ndjson-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-        let tools = native::Toolchain::in_tree_with_runtime(
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+        let tools = hirsel_native::Toolchain::in_tree_with_runtime(
             &dir.join("runtime"),
             &[&target],
-            native::RuntimeBuild::default(),
+            hirsel_native::RuntimeBuild::default(),
         )
         .unwrap();
         let cases: &[(&[u8], &[u8], Option<&str>)] = &[
@@ -351,19 +363,27 @@ fn ndjson_example_fixed_stdin_and_errors() {
             );
         }
         let grants = r#"{"io":{"stdin":"stdin.bytes@1","stdout":"stdout.bytes@1","stderr":"stderr.bytes@1","dirs":[]}}"#;
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-            let objects = native::emit_backend_objects(
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
+            let objects = hirsel_native::emit_backend_objects(
                 &ready,
                 backend,
-                native::OptLevel::Speed,
-                native::Partition::Whole,
+                hirsel_native::OptLevel::Speed,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
             .unwrap();
-            let executable =
-                native::link_standalone_objects(&ready, &loaded.entry, &objects, &tools, &dir)
-                    .unwrap();
+            let executable = hirsel_native::link_standalone_objects(
+                &ready,
+                &loaded.entry,
+                &objects,
+                &tools,
+                &dir,
+            )
+            .unwrap();
             for (input, expected, error) in cases {
                 let mut child = Command::new(&executable)
                     .args(["--hirsel-grants", grants])
@@ -462,8 +482,12 @@ fn absolute_offset_overflow_poisoning() {
             observed.outcome,
             Ok(RunOutcome::Returned(hirsel_run_schema::Returned::Ok))
         ));
-        let result =
-            native::heap_campaign(&ready, &loaded.entry, &native::Sites::new(&input)).unwrap();
+        let result = hirsel_native_testing::heap_campaign(
+            &ready,
+            &loaded.entry,
+            &hirsel_native::Sites::new(&input),
+        )
+        .unwrap();
         assert_eq!(result.observation.exit_code, Some(0));
     });
 }

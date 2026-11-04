@@ -1,5 +1,6 @@
 use hirsel_driver::{requests::*, session::Session, *};
 use hirsel_engine::{store::MemStore, *};
+use hirsel_front_phases::COMPILER;
 use std::sync::Arc;
 
 #[test]

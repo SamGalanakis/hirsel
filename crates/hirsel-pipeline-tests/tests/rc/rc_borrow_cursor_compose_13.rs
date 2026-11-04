@@ -87,6 +87,10 @@ fn native_parity(cases: &[(&str, &str)]) {
     use hirsel_driver::native::*;
     use hirsel_driver::*;
     use hirsel_engine::*;
+    use hirsel_front_phases::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let options = Options::new(target());
     let matrix = vec![
         Configuration {
@@ -112,7 +116,8 @@ fn native_parity(cases: &[(&str, &str)]) {
     let directory =
         std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("borrow-cursor-compose-13");
     std::fs::create_dir_all(&directory).unwrap();
-    let toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
+    let toolchain =
+        hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix).unwrap();
     for &(name, source) in cases {
         with_compiler_stack(|| {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -346,6 +351,9 @@ fn compose_13_object_native_parity() {
 fn compose_13_rebind_keeps_only_the_result_count() {
     use hirsel_driver::native::*;
     use hirsel_engine::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let mut counts = vec![];
         for rounds in [0, 64] {
@@ -362,8 +370,10 @@ pub fn main() -> Result[(), u64] {{
 }}
 "#
             );
-            let mut engine =
-                QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+            let mut engine = QueryEngine::new(
+                default_environment(),
+                hirsel_front_phases::compiler_adapters(),
+            );
             let context = default_context();
             let file = engine.sources.add("result-count.hir", source).unwrap();
             let checked = source_check_request(&mut engine, file, &context).unwrap();
@@ -410,8 +420,10 @@ fn compose_13_checked_interpreter_retains_underlying_bounds() {
         ("object", OBJECT),
     ] {
         with_compiler_stack(|| {
-            let mut engine =
-                QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+            let mut engine = QueryEngine::new(
+                default_environment(),
+                hirsel_front_phases::compiler_adapters(),
+            );
             let file = engine
                 .sources
                 .add("checked-compose.hir", source.into())
@@ -438,7 +450,7 @@ fn compose_13_checked_interpreter_retains_underlying_bounds() {
                 .as_ref()
                 .unwrap_or_else(|| panic!("{name}: {execution:?}"));
             assert_eq!(
-                hirsel_driver::native::Observation::of_reference(observation).exit_code,
+                hirsel_native::Observation::of_reference(observation).exit_code,
                 Some(0),
                 "{name}: {execution:?}"
             );
@@ -587,8 +599,10 @@ fn compose_14_mutable_alias_checked_interpreter() {
     use hirsel_engine::*;
     for source in [MUT_ALIAS, MUT_ALIAS_BRANCHES] {
         with_compiler_stack(|| {
-            let mut engine =
-                QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+            let mut engine = QueryEngine::new(
+                default_environment(),
+                hirsel_front_phases::compiler_adapters(),
+            );
             let file = engine
                 .sources
                 .add("mutable-alias.hir", source.into())
@@ -611,7 +625,7 @@ fn compose_14_mutable_alias_checked_interpreter() {
                 .as_ref()
                 .unwrap_or_else(|| panic!("{execution:?}"));
             assert_eq!(
-                hirsel_driver::native::Observation::of_reference(observation).exit_code,
+                hirsel_native::Observation::of_reference(observation).exit_code,
                 Some(0),
                 "{execution:?}"
             );

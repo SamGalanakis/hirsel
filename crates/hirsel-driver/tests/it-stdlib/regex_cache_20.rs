@@ -1,6 +1,7 @@
 //! Private engine differential checks run without exporting selectors from std.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::{Path, PathBuf};
 
 fn private_fixture(directory: &Path) -> PathBuf {
@@ -73,16 +74,16 @@ fn check_entry(engine: u8, entry: &str, additional: &str) {
             loaded.check_for_execution().unwrap();
             let input = loaded.engine.export_native_input().unwrap();
             let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-            let ready = native::build(
+            let ready = hirsel_native_batch::build(
                 &validated,
-                &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
             )
             .unwrap();
-            let run = native::run_heap_in(
+            let run = hirsel_native_testing::run_heap_in(
                 &ready,
                 &loaded.entry,
-                &native::Sites::new(&input),
-                &native::HeapWorld {
+                &hirsel_native::Sites::new(&input),
+                &hirsel_native_testing::HeapWorld {
                     steps: Some(100_000_000),
                     ..Default::default()
                 },
@@ -106,9 +107,9 @@ fn check_entry(engine: u8, entry: &str, additional: &str) {
                     HostLaunch::empty(),
                     None,
                     if engine == 2 {
-                        native::Backend::Cranelift
+                        hirsel_native::Backend::Cranelift
                     } else {
-                        native::Backend::Llvm
+                        hirsel_native::Backend::Llvm
                     },
                     native::Output::Streams {
                         stdout: &mut Vec::new(),

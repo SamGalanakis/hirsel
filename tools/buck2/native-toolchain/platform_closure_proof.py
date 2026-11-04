@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 
-CASE = 'native::object_queries::platform::closure_tests::selected_virtual_inputs_keep_scripts_thin_members_and_absolute_dso_names'
+CASE = 'object_queries::platform::closure_tests::selected_virtual_inputs_keep_scripts_thin_members_and_absolute_dso_names'
 
 
 def command(arguments, environment):

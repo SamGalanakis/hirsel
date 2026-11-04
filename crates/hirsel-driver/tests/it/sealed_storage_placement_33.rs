@@ -1,6 +1,7 @@
 //! Placement regressions established by the bare-unique and helper witnesses.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn rejected(source: &str, primary: &str) {
     rejected_by(source, "MODE-1", primary);

@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn keyed_work(kind: &str, count: u64) -> (u64, u64) {
     let dir_scratch = tempfile::Builder::new()

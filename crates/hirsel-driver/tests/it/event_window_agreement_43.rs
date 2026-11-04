@@ -2,6 +2,7 @@
 //! real source/export/import and four-engine runner (own-selector-27).
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_tir::*;
 use hirsel_types::*;
 
@@ -348,6 +349,9 @@ fn tool_seal(directory: &std::path::Path, phase: &str) {
 #[test]
 fn replay_mutable_handback_and_generic_cursor() {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let source = r#"
 fn keep[T: plain](take xs: unique List[T])->unique List[T] uses {xs} {
@@ -395,7 +399,9 @@ pub fn main()->Result[(),u64] uses {} {
                 },
             },
         ];
-        let toolchain = Toolchain::for_matrix(&directory.path().join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&directory.path().join("runtime"), &matrix)
+                .unwrap();
         let entry = entry_path(&default_context());
         let mut ready = crate::native_ready::supplier(
             &directory.path().join("main.hir"),

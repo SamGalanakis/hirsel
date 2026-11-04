@@ -1009,7 +1009,7 @@ pub(super) fn install(
     carry: Option<&Carry>,
     source_index: &Arc<Mutex<SourceIndexSlot>>,
     scratch_parent: &std::path::Path,
-    toolchain: Option<&Arc<crate::native::Toolchain>>,
+    toolchain: Option<&Arc<hirsel_native::Toolchain>>,
     host_toolchain: bool,
     #[cfg(test)] before_check: Option<fn(&mut LoadedProgram)>,
 ) -> Result<Arc<InstalledGraph>, ToolError> {
@@ -1101,7 +1101,7 @@ pub(super) fn install(
             CompileOperation::NativeBuild(native) | CompileOperation::NativeRun(native),
             None,
             true,
-        ) => match crate::native::Toolchain::for_host_request(
+        ) => match hirsel_native::Toolchain::for_host_request(
             &native.options.passes.target,
             store.clone(),
         ) {

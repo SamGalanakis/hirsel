@@ -52,10 +52,10 @@ fn check(source: &str) {
         }
     }
     assert!(hirsel_lir::structural_access::check_key_order(&missing).is_err());
-    hirsel_driver::native::build_program(
+    hirsel_native_batch::build_program(
         &program,
         manifest(&program),
-        &hirsel_driver::native::Options::new(target()),
+        &hirsel_native::Options::new(target()),
     )
     .unwrap();
 }

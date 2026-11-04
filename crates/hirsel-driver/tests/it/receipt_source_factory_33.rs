@@ -1,6 +1,7 @@
 //! Actual original-Lower/V observations; no receipt-aware native activation.
-use hirsel_driver::{compiler_adapters, native::receipt_source};
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::receipt_source;
 use hirsel_rc::instance::{Actuals, key_of};
 use hirsel_rc::sealed_source::SourceError;
 use hirsel_types::{GenericArgument, Primitive, Type, TypeKind, TypeMemo, Uniqueness};
@@ -198,13 +199,12 @@ fn unavailable_v_output_is_not_an_expected_empty_source_observation() {
 
 #[test]
 fn sealed_callback_capture_129_original_graph_declares_owning_complete_profiles() {
-    use hirsel_driver::load_program;
+    use hirsel_front_phases::load_program;
     with_compiler_stack(|| {
-        use hirsel_driver::native::receipt_source::{
-            factory::{NamedInput, named_graph},
-            provider::Front,
-        };
         use hirsel_lir::sealed_payload_source::{ReceiptMode, ReceiptPort};
+        use hirsel_native::receipt_source::factory::NamedInput;
+        use hirsel_native::receipt_source::factory::named_graph;
+        use hirsel_native::receipt_source::provider::Front;
         for name in [
             "MEM-4-sealed-callback-failure-run.hir",
             "MEM-4-sealed-callback-drop-cause-run.hir",
@@ -224,13 +224,12 @@ fn sealed_callback_capture_129_original_graph_declares_owning_complete_profiles(
                 budget.reserve(64 << 20).unwrap(),
             ));
             let mut discovery = NativeDiscoveryCache::new(program.engine.types().clone(), store);
-            let declarations =
-                hirsel_driver::native::queries::declarations::NativeDeclarations::collect(
-                    &mut program.engine,
-                    &mut discovery,
-                    &[],
-                )
-                .unwrap();
+            let declarations = hirsel_native_cache::declarations::NativeDeclarations::collect(
+                &mut program.engine,
+                &mut discovery,
+                &[],
+            )
+            .unwrap();
             let owners = hirsel_rc::library::owners(
                 &declarations.program.types,
                 &declarations.program.signatures,
@@ -311,7 +310,7 @@ fn sealed_callback_capture_129_original_graph_declares_owning_complete_profiles(
                     assert_eq!(capture.ty.profile, profile.content().unwrap());
                     owned += usize::from(mode == ReceiptMode::Take);
                 }
-                use hirsel_driver::native::receipt_source::provider::Provider;
+                use hirsel_native::receipt_source::provider::Provider;
                 let original = provider
                     .original(request.ordinary_key().definition())
                     .unwrap();

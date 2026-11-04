@@ -62,8 +62,8 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 fn ordered_sleep_certificate_refuses_forged_cells_and_both_emitters_import_the_helper() {
     with_compiler_stack(|| {
         let program = super::runtime50_continuation::ready(CERTIFIED_SOURCE);
-        let plans = hirsel_driver::native::continuation::plans(&program);
-        hirsel_driver::native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let units: Vec<_> = program.units.iter().collect();
         let check = |p: &hirsel_lir::continuation::ContinuationPlans| {
             hirsel_lir::continuation::validate_runtime_operations(
@@ -146,14 +146,14 @@ fn ordered_sleep_certificate_refuses_forged_cells_and_both_emitters_import_the_h
             assert!(check(&bad).is_err(), "imported forged sleep field {field}");
         }
         for backend in [
-            hirsel_driver::native::Backend::Llvm,
-            hirsel_driver::native::Backend::Cranelift,
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
         ] {
-            let objects = hirsel_driver::native::emit_backend_objects(
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
-                hirsel_driver::native::OptLevel::Default,
-                hirsel_driver::native::Partition::Whole,
+                hirsel_native::OptLevel::Default,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
@@ -174,7 +174,7 @@ fn ordered_sleep_and_separate_join_agree_with_checked_h_and_replay() {
     with_compiler_stack(|| {
         super::runtime50_resume::agree_on(
             SOURCE,
-            &hirsel_driver::native::Fixture {
+            &hirsel_native::Fixture {
                 monotonic: Some(0),
                 migrate: true,
                 ..Default::default()
@@ -191,7 +191,7 @@ fn ordered_certified_sleep_and_join_agree_with_checked_h_and_replay() {
     with_compiler_stack(|| {
         super::runtime50_resume::agree_on(
             CERTIFIED_SOURCE,
-            &hirsel_driver::native::Fixture {
+            &hirsel_native::Fixture {
                 monotonic: Some(0),
                 migrate: true,
                 ..Default::default()

@@ -1,6 +1,6 @@
 //! Documentation coverage is checked independently against the compiler's exports.
-use hirsel_driver::api_index;
 use hirsel_engine::{DefinitionQueries, registry::BuiltinRegistry};
+use hirsel_project_info::api_index;
 use hirsel_syntax::{ItemKind, TypeBody, Visibility};
 use hirsel_types::{SignatureKind, TypeKind};
 use std::{collections::BTreeSet, path::Path};
@@ -59,7 +59,7 @@ fn published_index_matches_every_core_and_std_export() {
             }
         }
         // Use the real package loader, independently of the generator's manifest reader.
-        let program = hirsel_driver::load_program_source(
+        let program = hirsel_front_phases::load_program_source(
             &root.join("crates/hirsel-driver/tests/fixtures/std_source/main.hir"),
             Some(""),
         )

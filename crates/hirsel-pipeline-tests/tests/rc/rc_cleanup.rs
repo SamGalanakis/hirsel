@@ -92,12 +92,12 @@ fn validate_driver_ready(source: &'static str) {
     let rows = hirsel_engine::with_compiler_stack(move || {
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let file = engine.sources.add("test.hir", source.to_string()).unwrap();
         hirsel_engine::source_check_request(&mut engine, file, &hirsel_engine::default_context())
             .unwrap();
-        hirsel_driver::native::manifest(&engine.export_native_input().unwrap()).unwrap()
+        hirsel_native::manifest(&engine.export_native_input().unwrap()).unwrap()
     });
     let target = target();
     let inputs = Inputs {

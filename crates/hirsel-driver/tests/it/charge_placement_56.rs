@@ -1,10 +1,14 @@
 //! CT-4 loop entries with live rebinding and incoming loan ends.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 #[test]
 fn loop_entry_charges_precede_rebinding_and_loan_ends_on_four_engines() {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     use hirsel_tir::{InstructionKind, SourceEventKind};
     with_compiler_stack(|| {
         let source = include_str!("../../../../conformance/CT/CT-4-loop-entry-charge-56-run.hir");
@@ -85,7 +89,9 @@ fn loop_entry_charges_precede_rebinding_and_loan_ends_on_four_engines() {
             .prefix("charge-placement-56-")
             .tempdir()
             .unwrap();
-        let toolchain = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+                .unwrap();
         let outcomes = differential(
             &validated,
             &entry,

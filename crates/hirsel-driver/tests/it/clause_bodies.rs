@@ -4,7 +4,7 @@ fn executable_clauses_have_one_capture_free_borrowed_producer_across_early_retur
     let source = "fn probe(take x:u32, c:bool)->u32 requires x>0u32 ensures result==before(x) {if c {return x}; x}";
     let mut engine = hirsel_engine::QueryEngine::new(
         hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
+        hirsel_front_phases::compiler_adapters(),
     );
     let context = hirsel_engine::default_context();
     let file = engine.sources.add("clauses.hir", source.into()).unwrap();

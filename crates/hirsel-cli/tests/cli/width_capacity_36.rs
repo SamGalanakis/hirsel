@@ -1,5 +1,8 @@
 //! Shared exact-capacity launch and evidence transport for dogfood tests.
 use hirsel_driver::native::*;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -66,7 +69,7 @@ fn capacity(
     let (backend, width, host) = cell;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
-    let mut loaded = hirsel_driver::load_program(manifest).unwrap();
+    let mut loaded = hirsel_front_phases::load_program(manifest).unwrap();
     loaded.check_for_execution().unwrap();
     let input = loaded.engine.export_native_input().unwrap();
     let input = loaded.engine.import_native_input(input).unwrap();
@@ -79,7 +82,8 @@ fn capacity(
             runtime: Runtime::Diagnostic,
         },
     }];
-    let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+    let mut tools =
+        hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
     tools.execution = Execution::Executable;
     tools.launch_timeout = std::time::Duration::from_secs(60);
     let ready = build(&input, &options).unwrap();

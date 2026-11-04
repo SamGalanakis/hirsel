@@ -26,7 +26,7 @@ fn std_catalogue_signatures_match_the_complete_ordinary_source_contracts() {
             .unwrap();
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/std_source/main.hir");
-        let mut loaded = hirsel_driver::load_program_source(&root, Some("")).unwrap();
+        let mut loaded = hirsel_front_phases::load_program_source(&root, Some("")).unwrap();
         let registry = BuiltinRegistry::new();
         let mut metadata = Metadata {
             unsafe_capability: nominal_roles().unsafe_capability,
@@ -334,7 +334,7 @@ fn declaration_body_and_builtin_cleanup_agree_on_owned_aggregate_results() {
     ] {
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let source = format!("fn probe() -> {result} {{ {body} }}");
         let file = engine.sources.add("cleanup.hir", source).unwrap();

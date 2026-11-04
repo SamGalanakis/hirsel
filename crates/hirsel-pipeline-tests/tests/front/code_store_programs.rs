@@ -5,6 +5,7 @@
 use hirsel_code_store::*;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_object_storage::{DirObjects, MemoryObjects, ObjectStorage};
 use hirsel_proof_export::DefinitionGroup;
 use hirsel_syntax::ContentHash;

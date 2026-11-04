@@ -1,4 +1,7 @@
-use hirsel_driver::requests::{CompileOperation, CompileRequest, CompileResult, CompilerRequests};
+use hirsel_driver::requests::CompileOperation;
+use hirsel_driver::requests::CompileRequest;
+use hirsel_driver::requests::CompileResult;
+use hirsel_driver::requests::CompilerRequests;
 use hirsel_engine::{
     requests::{OutputReadiness, RequestEngine, observe_inputs},
     runtime::QueryRuntime,
@@ -27,7 +30,7 @@ impl LoweringPhase for GuardedLowering {
             self.0.load(Ordering::Acquire),
             "fresh native fixture attempted lowering instead of reading its product"
         );
-        hirsel_driver::LowerAdapter.lower(types, memo, body, comptime, signature)
+        hirsel_front_phases::LowerAdapter.lower(types, memo, body, comptime, signature)
     }
     fn lower_evaluation(
         &self,
@@ -44,12 +47,12 @@ impl LoweringPhase for GuardedLowering {
             self.0.load(Ordering::Acquire),
             "fresh native fixture attempted evaluation lowering instead of reading its product"
         );
-        hirsel_driver::LowerAdapter.lower_evaluation(
+        hirsel_front_phases::LowerAdapter.lower_evaluation(
             types, memo, body, staged, signature, expression, ty, constants,
         )
     }
     fn entry_body(&self) -> hirsel_tir::BodyId {
-        hirsel_driver::LowerAdapter.entry_body()
+        hirsel_front_phases::LowerAdapter.entry_body()
     }
 }
 struct Host {
@@ -66,7 +69,7 @@ pub(super) fn release_host() {
 }
 
 fn guarded_adapters() -> PhaseAdapters {
-    let mut adapters = hirsel_driver::compiler_adapters();
+    let mut adapters = hirsel_front_phases::compiler_adapters();
     adapters.lowering = Some(Arc::new(GuardedLowering(LOWERING_ALLOWED.with(Arc::clone))));
     adapters
 }
@@ -139,10 +142,13 @@ pub(super) fn products(
         if slot.as_ref().is_none_or(|host| {
             !Arc::ptr_eq(&host.store, &config.store) || host.verify != config.verify
         }) {
-            let compiler = hirsel_driver::COMPILER
+            let compiler = hirsel_front_phases::COMPILER
                 .with_config(config.clone())
                 .with_owned_engines()
-                .with_phase_adapters(guarded_adapters, hirsel_driver::COMPILER_IDENTITY);
+                .with_phase_adapters(
+                    guarded_adapters,
+                    hirsel_compiler_identity::COMPILER_IDENTITY,
+                );
             *slot = Some(Host {
                 store: config.store.clone(),
                 verify: config.verify,
@@ -188,18 +194,14 @@ pub(super) fn products(
 pub(super) fn inputs(
     engine: &mut QueryEngine,
     requested: &[DefPath],
-) -> Arc<hirsel_driver::native::queries::source_inputs::NativeInstanceInputs> {
+) -> Arc<hirsel_native_cache::source_inputs::NativeInstanceInputs> {
     let facts = products(engine, requested).unwrap();
     let reader = facts
         .original_context
         .reader(facts.originals.iter().map(|product| (**product).clone()))
         .unwrap();
     let declarations =
-        hirsel_driver::native::queries::declarations::NativeDeclarations::from_front(facts)
-            .unwrap();
-    hirsel_driver::native::queries::source_inputs::NativeInstanceInputs::from_products(
-        declarations,
-        reader,
-    )
-    .unwrap()
+        hirsel_native_cache::declarations::NativeDeclarations::from_front(facts).unwrap();
+    hirsel_native_cache::source_inputs::NativeInstanceInputs::from_products(declarations, reader)
+        .unwrap()
 }

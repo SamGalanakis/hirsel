@@ -1,6 +1,11 @@
 //! Bounded full-entry state-graph workflows, closure oracle, checked witnesses and replay.
-use hirsel_driver::{native::*, replay_observations, replay_observations_checked};
+use hirsel_driver::native::*;
+use hirsel_driver::replay_observations;
+use hirsel_driver::replay_observations_checked;
 use hirsel_engine::{RunConfiguration, SimulationConfig};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use serde_json::{Value, json};
 use std::{
@@ -270,7 +275,7 @@ fn state_model_checker_34_reference_checked_workflows() {
     hirsel_engine::with_compiler_stack(|| {
         let root = root("simulation-");
         let path = package(&root);
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -369,7 +374,7 @@ fn state_model_checker_34_native_full_entry_replay() {
         let recovery = root.join(format!("consumer-{}", std::process::id()));
         fs::create_dir_all(&recovery).unwrap();
         let receipts_path = root.join("receipts.json");
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -393,7 +398,8 @@ fn state_model_checker_34_native_full_entry_replay() {
                 },
             },
         ];
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.launch_timeout = std::time::Duration::from_secs(70);
         tools.execution = Execution::Executable;
         tools.wrapper = vec![
@@ -818,7 +824,7 @@ fn ordered(backend: Backend) {
         let root = root(&format!("ordered-{backend:?}-"));
         let _evidence = super::width_capacity_36::Evidence(root.clone());
         let path = package(&root);
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let input = loaded.engine.import_native_input(input).unwrap();
@@ -831,7 +837,8 @@ fn ordered(backend: Backend) {
                 runtime: Runtime::Diagnostic,
             },
         }];
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.execution = Execution::Executable;
         tools.launch_timeout = std::time::Duration::from_secs(60);
         let ready = build(&input, &options).unwrap();
@@ -1029,7 +1036,7 @@ fn state_model_checker_34_file_faults_reference_checked() {
     hirsel_engine::with_compiler_stack(|| {
         let root = root("fault-simulation-");
         let path = package(&root);
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));

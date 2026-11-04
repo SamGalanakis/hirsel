@@ -1,6 +1,7 @@
 //! Every declaration recipe has a checked edited twin and an unsafe witness.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn checked(engine: &mut QueryEngine, source: &str) -> CheckOutput {
     let file = engine.sources.add("recipes.hir", source.into()).unwrap();

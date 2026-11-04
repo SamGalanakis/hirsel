@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 const MINIMAL: &str = "fn probe(files:List[String]) {let f=fn(){for name in files {}};f()}\npub fn main()->Result[(),()] {probe([\"a\"]);Ok(())}";
 const MATRIX: &str =
@@ -18,6 +19,9 @@ fn checked(source: &str) -> QueryEngine {
 
 fn runtime(source: &str) {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let mut engine = checked(source);
     let expected = Observation {
         exit_code: Some(0),
@@ -73,7 +77,9 @@ fn runtime(source: &str) {
         .prefix("scope-closure-origin-27-")
         .tempdir()
         .unwrap();
-    let toolchain = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+    let toolchain =
+        hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+            .unwrap();
     let outcomes = differential(
         &validated,
         &entry,

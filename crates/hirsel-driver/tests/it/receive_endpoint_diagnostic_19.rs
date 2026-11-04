@@ -1,6 +1,7 @@
 //! Context-fixed invariant operands keep MODE-2 but explain the endpoint contract.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 const DIRECT: &str = "// café 🐑\npub type Status { url: String }\npub fn main(tasks: Tasks, mut incoming: Receiver[unique Status], mut rows: List[Status]) -> Result[(), ChannelError] {\n  list.push(mut rows, channel.receive(tasks, mut incoming)?)\n  Ok(())\n}\n";
 
@@ -178,7 +179,7 @@ pub fn main(t: Test) -> Result[(), ChannelError] {
         )
         .unwrap();
         let observation =
-            native::Observation::of_reference(execution.observation.as_ref().unwrap());
+            hirsel_native::Observation::of_reference(execution.observation.as_ref().unwrap());
         assert_eq!(observation.exit_code, Some(0), "{observation:?}");
         assert!(observation.failures.is_empty(), "{observation:?}");
         let input = engine.export_native_input().unwrap();

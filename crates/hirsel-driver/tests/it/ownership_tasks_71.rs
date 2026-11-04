@@ -1,6 +1,9 @@
 //! Child-local resources bind to actual native task paths, with no payload identity.
-use hirsel_driver::{COMPILER, native, requests::*, resident::ObservedSession};
+use hirsel_driver::native;
+use hirsel_driver::requests::*;
+use hirsel_driver::resident::ObservedSession;
 use hirsel_engine::{CompileConfig, runtime::ProcessBudget, store::MemStore};
+use hirsel_front_phases::COMPILER;
 use std::sync::Arc;
 
 #[test]
@@ -87,13 +90,13 @@ fn child_local_source(source_text: &str, expected_tasks: usize, require_spawn_bi
         );
         let limits = selector.input_limits();
         let mut session = ObservedSession::new(path, compiler, config, selector, limits, 3);
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
         let output = session
             .request(CompileOperation::NativeOwnership(OwnershipRequest {
                 selection: hirsel_lir::ownership_trace::Selection::Resources,
                 definition: None,
                 target: target.clone(),
-                validation: native::Validation::EveryStage,
+                validation: hirsel_native::Validation::EveryStage,
                 launch: Default::default(),
                 fuel: false,
             }))
@@ -104,17 +107,20 @@ fn child_local_source(source_text: &str, expected_tasks: usize, require_spawn_bi
         let execution = execution.clone();
         drop(output);
         drop(session);
-        let tools = native::Toolchain::in_tree_with_runtime(
+        let tools = hirsel_native::Toolchain::in_tree_with_runtime(
             &directory.path().join("tools"),
             &[&target],
-            native::RuntimeBuild {
+            hirsel_native::RuntimeBuild {
                 ownership_trace: true,
                 ..Default::default()
             },
         )
         .unwrap();
         let mut traces = vec![];
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let objects = execution.emit(backend).unwrap();
             if require_spawn_binding {
                 assert!(
@@ -147,7 +153,8 @@ fn child_local_source(source_text: &str, expected_tasks: usize, require_spawn_bi
                 )
                 .unwrap();
             if require_spawn_binding {
-                use hirsel_run_schema::ownership_trace::native::{Log, Row};
+                use hirsel_run_schema::ownership_trace::native::Log;
+                use hirsel_run_schema::ownership_trace::native::Row;
                 let rows: Log = serde_json::from_slice(
                     &std::fs::read(
                         directory

@@ -1,6 +1,7 @@
 //! Enumeration stays ordinary source, with the existing Pike VM and no host hook.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 #[test]
@@ -44,7 +45,10 @@ fn regex_all_5_logtail_importer_on_interpreter_llvm_and_cranelift() {
             results.iter().all(|result| result.failure.is_none()),
             "{results:?}"
         );
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let results = native::test_path(
                 &path,
                 &[],

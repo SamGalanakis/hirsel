@@ -159,7 +159,7 @@ fn filemanifest_23_checked_h_pure_model_and_upstream_vectors() {
             .into();
         let selection = root.join("hirsel.json");
         fs::write(&selection, manifest.to_string()).unwrap();
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|error| panic!("{error}"));

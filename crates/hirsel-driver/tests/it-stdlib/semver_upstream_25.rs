@@ -1,6 +1,9 @@
 //! Pinned semver oracle fixtures, projected independently onto all four engines.
-use hirsel_driver::{native, *};
+use hirsel_compiler_identity::COMPILER_IDENTITY;
+use hirsel_driver::native;
+use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -68,11 +71,11 @@ fn partition(start: usize, end: usize) {
         eprintln!(
             "SEMVER_IDENTITY compiler={:?} llvm={} source={:?} input={:?}",
             COMPILER_IDENTITY,
-            native::llvm_version(),
+            hirsel_native::llvm_version(),
             hirsel_syntax::ContentHash::of_bytes(source.as_bytes()),
-            native::input_identity(validated.snapshot())
+            hirsel_native::input_identity(validated.snapshot())
         );
-        let oracle = native::Observation {
+        let oracle = hirsel_native::Observation {
             exit_code: Some(0),
             blocked: false,
             budget: None,
@@ -91,7 +94,8 @@ fn partition(start: usize, end: usize) {
             SimulationConfig::default(),
         )
         .unwrap();
-        let observed = native::Observation::of_reference(reference.observation.as_ref().unwrap());
+        let observed =
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
         let mut failures = vec![];
         eprintln!(
             "SEMVER_CELL reference {start}..{end} exit={:?} output={}",
@@ -102,27 +106,30 @@ fn partition(start: usize, end: usize) {
             failures.push(format!("reference: expected {oracle:?}, got {observed:?}"));
         }
         let configurations: Vec<_> = [
-            native::Engine::Heap { campaign: false },
-            native::Engine::Native {
-                opt: native::OptLevel::None,
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Heap { campaign: false },
+            hirsel_native_testing::Engine::Native {
+                opt: hirsel_native::OptLevel::None,
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
-            native::Engine::Cranelift {
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Cranelift {
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         ]
         .into_iter()
-        .map(|engine| native::Configuration {
-            options: native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+        .map(|engine| hirsel_native_testing::Configuration {
+            options: hirsel_native::Options::new(
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+            ),
             engine,
         })
         .collect();
         let scratch = tempfile::tempdir().unwrap();
-        let mut toolchain = native::Toolchain::for_matrix(scratch.path(), &configurations).unwrap();
+        let mut toolchain =
+            hirsel_native_testing::toolchain_for_matrix(scratch.path(), &configurations).unwrap();
         toolchain.launch_timeout = std::time::Duration::from_secs(60);
-        for (engine, result) in native::differential(
+        for (engine, result) in hirsel_native_testing::differential(
             &validated,
             &loaded.entry,
             &oracle,
@@ -131,7 +138,7 @@ fn partition(start: usize, end: usize) {
             scratch.path(),
         ) {
             eprintln!("SEMVER_CELL {engine} {start}..{end} {result:?}");
-            if !matches!(result, native::Outcome::Agree) {
+            if !matches!(result, hirsel_native_testing::Outcome::Agree) {
                 failures.push(format!("{engine}: {result:?}"));
             }
         }

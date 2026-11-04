@@ -55,14 +55,14 @@ fn receipt(row: &Value, engine: &str, extra: Value) {
         json!({"id":row["id"],"engine":engine,"started":1,"completed":1,"passed":1,
         "source_sha256":format!("{:x}",Sha256::digest(include_bytes!("../../../../examples/parhash/main.hir"))),
         "cases_sha256":format!("{:x}",Sha256::digest(include_bytes!("../support/parhash_27/cases.json"))),
-        "compiler":hirsel_driver::COMPILER_IDENTITY,"extra":extra})
+        "compiler":hirsel_compiler_identity::COMPILER_IDENTITY,"extra":extra})
     );
 }
 fn simulated(part: bool, only: Option<&str>) {
     hirsel_engine::with_compiler_stack(|| {
         let root = scratch("simulation");
         let selection = package(&root);
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|error| panic!("{error}"));
@@ -294,7 +294,7 @@ fn digest_vectors_and_split_update() {
             ));
             source.push_str("Ok(())\n}\n");
             fs::write(root.join("main.hir"), source).unwrap();
-            let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+            let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
             loaded
                 .check_for_execution()
                 .unwrap_or_else(|error| panic!("{error}"));
@@ -346,20 +346,24 @@ fn varied_completion_and_cleanup() {
 // the existing measurement runtime, with no engine or runtime implementation here.
 #[test]
 fn measured_copy_cost() {
-    use hirsel_driver::native::{
-        self, OptLevel, Options, Partition, RuntimeBuild, TargetSpec, Toolchain,
-    };
+    use hirsel_driver::native;
+    use hirsel_native::OptLevel;
+    use hirsel_native::Options;
+    use hirsel_native::Partition;
+    use hirsel_native::RuntimeBuild;
+    use hirsel_native::TargetSpec;
+    use hirsel_native::Toolchain;
     hirsel_engine::with_compiler_stack(|| {
         let root = scratch("copies");
         let selection = package(&root);
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|error| panic!("{error}"));
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let ready = native::build(&validated, &Options::new(target.clone())).unwrap();
+        let ready = hirsel_native_batch::build(&validated, &Options::new(target.clone())).unwrap();
         let tools = Toolchain::in_tree_with_runtime(
             &root.join("runtime"),
             &[&target],
@@ -370,9 +374,10 @@ fn measured_copy_cost() {
         )
         .unwrap();
         let objects =
-            native::emit_objects(&ready, OptLevel::Speed, Partition::Whole, true, None).unwrap();
+            hirsel_native::emit_objects(&ready, OptLevel::Speed, Partition::Whole, true, None)
+                .unwrap();
         let executable =
-            native::link_standalone_objects(&ready, &loaded.entry, &objects, &tools, &root)
+            hirsel_native::link_standalone_objects(&ready, &loaded.entry, &objects, &tools, &root)
                 .unwrap();
         fs::create_dir(root.join("fixtures")).unwrap();
         fs::write(root.join("fixtures/abc"), b"abc").unwrap();

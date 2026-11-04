@@ -1,9 +1,10 @@
 //! Compare every capture resolver with the unchanged ordered PikeVM.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
-fn engines_for(backend: Option<native::Backend>, entries: &[&str]) {
+fn engines_for(backend: Option<hirsel_native::Backend>, entries: &[&str]) {
     with_compiler_stack(|| {
         let temp = tempfile::tempdir().unwrap();
         let path = super::regex_capture_span_17::private_fixture(temp.path(), false);
@@ -82,7 +83,7 @@ fn engines_for(backend: Option<native::Backend>, entries: &[&str]) {
     });
 }
 
-fn engines(backend: Option<native::Backend>) {
+fn engines(backend: Option<hirsel_native::Backend>) {
     engines_for(
         backend,
         &[
@@ -98,8 +99,8 @@ fn engines(backend: Option<native::Backend>) {
 fn capture_engines_composed_all_four() {
     for backend in [
         None,
-        Some(native::Backend::Llvm),
-        Some(native::Backend::Cranelift),
+        Some(hirsel_native::Backend::Llvm),
+        Some(hirsel_native::Backend::Cranelift),
     ] {
         engines_for(backend, &["capture_engines_composed"]);
     }
@@ -126,11 +127,11 @@ fn capture_engines_interpreter_plan_limits() {
 }
 #[test]
 fn capture_engines_llvm() {
-    engines(Some(native::Backend::Llvm));
+    engines(Some(hirsel_native::Backend::Llvm));
 }
 #[test]
 fn capture_engines_cranelift() {
-    engines(Some(native::Backend::Cranelift));
+    engines(Some(hirsel_native::Backend::Cranelift));
 }
 
 // A bounded entry selector also supports completing an interrupted matrix
@@ -138,11 +139,14 @@ fn capture_engines_cranelift() {
 #[test]
 fn capture_engines_llvm_plan_patterns() {
     engines_for(
-        Some(native::Backend::Llvm),
+        Some(hirsel_native::Backend::Llvm),
         &["capture_engines_plan_patterns"],
     );
 }
 #[test]
 fn capture_engines_llvm_plan_slots() {
-    engines_for(Some(native::Backend::Llvm), &["capture_engines_plan_slots"]);
+    engines_for(
+        Some(hirsel_native::Backend::Llvm),
+        &["capture_engines_plan_slots"],
+    );
 }

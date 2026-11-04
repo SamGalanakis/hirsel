@@ -1,9 +1,13 @@
 //! Entered intrinsic actions bind to the wrapper's exact post-callback state.
 use super::runtime50_continuation::ready;
 use super::runtime50_resume::{compact_runs_with, routing};
-use hirsel_driver::native::{self, *};
+use hirsel_driver::native;
+use hirsel_driver::native::*;
 use hirsel_engine::with_compiler_stack;
 use hirsel_lir::continuation::{Representation, ResumeAction};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 
 const PUT: &str = r#"
 pub fn main(rt:Io)->Result[(),GrantError] {
@@ -26,8 +30,8 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 fn runtime57_good_owned_mutex_tail_certifies_exact_intrinsics_and_emits_on_both_backends() {
     with_compiler_stack(|| {
         let program = ready(PUT);
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let wrappers: Vec<_> = plans
             .plans
             .values()
@@ -59,7 +63,7 @@ fn runtime57_good_owned_mutex_tail_certifies_exact_intrinsics_and_emits_on_both_
 fn runtime57_bad_owned_mutex_tail_import_rejects_reissue_skipped_effect_and_forged_custody() {
     with_compiler_stack(|| {
         let program = ready(PUT);
-        let original = native::continuation::plans(&program);
+        let original = hirsel_native::continuation::plans(&program);
         let (&id, p) = original
             .plans
             .iter()
@@ -91,7 +95,7 @@ fn runtime57_bad_owned_mutex_tail_import_rejects_reissue_skipped_effect_and_forg
                 _ => unreachable!(),
             }
             assert!(
-                native::continuation::validate(&program, &plans).is_err(),
+                hirsel_native::continuation::validate(&program, &plans).is_err(),
                 "mutation {mutation} accepted"
             );
         }

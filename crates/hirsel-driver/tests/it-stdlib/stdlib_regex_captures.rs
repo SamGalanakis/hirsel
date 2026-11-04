@@ -1,6 +1,7 @@
 //! Captures, flags and substitution stay ordinary bounded source code.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 #[test]
@@ -24,7 +25,10 @@ fn regex_captures_deep_groups_and_exhausted_work_are_bounded() {
             ),
             "{result:?}"
         );
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let outcome = native::run_path_native_backend(
                 &path,
                 HostLaunch::empty(),

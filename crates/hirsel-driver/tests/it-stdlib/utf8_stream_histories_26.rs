@@ -6,6 +6,7 @@
 //! Existing vector/overflow/ownership controls remain in utf8_stream_5.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -336,7 +337,7 @@ fn execute(batch: usize, engine: &str) {
             hash_seed: 0,
             inputs: vec![],
         };
-        let expected = native::Observation {
+        let expected = hirsel_native::Observation {
             exit_code: Some(0),
             blocked: false,
             budget: None,
@@ -366,42 +367,43 @@ fn execute(batch: usize, engine: &str) {
                 run.outcome
             );
             assert_eq!(
-                native::Observation::of_reference(run.observation.as_ref().unwrap()),
+                hirsel_native::Observation::of_reference(run.observation.as_ref().unwrap()),
                 expected
             );
         } else {
             let input = loaded.engine.export_native_input().unwrap();
             let validated = loaded.engine.import_native_input(input).unwrap();
-            let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+            let options =
+                hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
             if engine == "heap" {
-                let ready = native::build(&validated, &options).unwrap();
-                let world = native::HeapWorld {
+                let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+                let world = hirsel_native_testing::HeapWorld {
                     steps: Some(1_000_000),
                     ..Default::default()
                 };
-                let run = native::run_heap_in(
+                let run = hirsel_native_testing::run_heap_in(
                     &ready,
                     &loaded.entry,
-                    &native::Sites::new(validated.snapshot()),
+                    &hirsel_native::Sites::new(validated.snapshot()),
                     &world,
                 )
                 .unwrap();
                 assert_eq!(run.observation, expected);
                 assert_eq!(run.counters.live_heap_bytes, 0);
             } else {
-                let configuration = native::Configuration {
+                let configuration = hirsel_native_testing::Configuration {
                     options,
                     engine: if engine == "llvm" {
-                        native::Engine::Native {
-                            opt: native::OptLevel::Speed,
-                            partition: native::Partition::Whole,
-                            runtime: native::Runtime::Diagnostic,
+                        hirsel_native_testing::Engine::Native {
+                            opt: hirsel_native::OptLevel::Speed,
+                            partition: hirsel_native::Partition::Whole,
+                            runtime: hirsel_native_testing::Runtime::Diagnostic,
                         }
                     } else {
                         assert_eq!(engine, "cranelift");
-                        native::Engine::Cranelift {
-                            partition: native::Partition::Whole,
-                            runtime: native::Runtime::Diagnostic,
+                        hirsel_native_testing::Engine::Cranelift {
+                            partition: hirsel_native::Partition::Whole,
+                            runtime: hirsel_native_testing::Runtime::Diagnostic,
                         }
                     },
                 };
@@ -410,10 +412,13 @@ fn execute(batch: usize, engine: &str) {
                     .tempdir_in(PathBuf::from(env!("CARGO_TARGET_TMPDIR")))
                     .unwrap();
                 let configs = [configuration];
-                let tools =
-                    native::Toolchain::for_matrix(&dir.path().join("runtime"), &configs).unwrap();
+                let tools = hirsel_native_testing::toolchain_for_matrix(
+                    &dir.path().join("runtime"),
+                    &configs,
+                )
+                .unwrap();
                 let mut count = 0;
-                for (config, outcome) in native::differential(
+                for (config, outcome) in hirsel_native_testing::differential(
                     &validated,
                     &loaded.entry,
                     &expected,
@@ -422,7 +427,7 @@ fn execute(batch: usize, engine: &str) {
                     dir.path(),
                 ) {
                     assert!(
-                        matches!(outcome, native::Outcome::Agree),
+                        matches!(outcome, hirsel_native_testing::Outcome::Agree),
                         "{config}: {outcome:?}"
                     );
                     count += 1;

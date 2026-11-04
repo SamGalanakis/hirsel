@@ -1,7 +1,9 @@
 //! Shared, bounded-source batches of ordinary Hirsel assertions, without a step budget.
-use crate::source_std::{load_program_source, tir};
+use crate::source_std::load_program_source;
+use crate::source_std::tir;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::{fmt::Write, path::Path};
 
 pub struct Case {
@@ -80,7 +82,11 @@ fn run_selected(
                 loaded
                     .check_for_execution()
                     .unwrap_or_else(|error| panic!("{suite} {ids:?}: {error:?}\n{source}"));
-                use hirsel_driver::native::{OptLevel, Options, Partition, TargetSpec, Toolchain};
+                use hirsel_native::OptLevel;
+                use hirsel_native::Options;
+                use hirsel_native::Partition;
+                use hirsel_native::TargetSpec;
+                use hirsel_native::Toolchain;
                 let dir_scratch = tempfile::Builder::new()
                     .prefix("hirsel-vectors-")
                     .tempdir()
@@ -89,10 +95,10 @@ fn run_selected(
                 let input = loaded.engine.export_native_input().unwrap();
                 let validated = loaded.engine.import_native_input(input).unwrap();
                 let target = TargetSpec::x86_64_unknown_linux_gnu();
-                let ready = native::build(&validated, &Options::new(target.clone()))
+                let ready = hirsel_native_batch::build(&validated, &Options::new(target.clone()))
                     .unwrap_or_else(|error| panic!("{suite} {ids:?}: {error:?}"));
                 let tools = Toolchain::in_tree(&dir.join("runtime"), &[&target]).unwrap();
-                let exe = native::link(
+                let exe = hirsel_native::link(
                     &ready,
                     &loaded.entry,
                     OptLevel::Speed,

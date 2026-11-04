@@ -8,6 +8,7 @@
 //! or mut parameter is separately rejected: the help must name the declaration.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn diagnostics(source: &str) -> Vec<hirsel_diag::Diagnostic> {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());

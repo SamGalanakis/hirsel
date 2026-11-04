@@ -1,13 +1,20 @@
 //! SEM-3 string views through the validated compiler and executed native ABI.
-use hirsel_driver::native::{
-    Configuration, Engine, Observation, OptLevel, Options, Outcome, Partition, Runtime, TargetSpec,
-    Toolchain, differential,
-};
 use hirsel_engine::{
     InterpreterAdapter, RunConfiguration, RunOutcome, SimulationConfig, default_context,
     entry_path, run_observed_snapshot, source_check_request, with_compiler_stack,
 };
 use hirsel_interp::Limits;
+use hirsel_native::Observation;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
+use hirsel_native_testing::Configuration;
+use hirsel_native_testing::Engine;
+use hirsel_native_testing::Outcome;
+use hirsel_native_testing::Runtime;
+use hirsel_native_testing::differential;
 use std::path::PathBuf;
 
 fn agree(source: String, configurations: Vec<Configuration>, name: &str, limits: Limits) {
@@ -15,7 +22,7 @@ fn agree(source: String, configurations: Vec<Configuration>, name: &str, limits:
     with_compiler_stack(move || {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../hirsel-driver/tests/fixtures/std_source/main.hir");
-        let mut engine = hirsel_driver::load_program_source(&path, Some(""))
+        let mut engine = hirsel_front_phases::load_program_source(&path, Some(""))
             .unwrap()
             .engine;
         let context = default_context();
@@ -80,7 +87,7 @@ fn agree(source: String, configurations: Vec<Configuration>, name: &str, limits:
 
 pub(super) fn four_engines(source: String, name: &str) {
     let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
-    options.validation = hirsel_driver::native::Validation::EveryStage;
+    options.validation = hirsel_native::Validation::EveryStage;
     let configurations = vec![
         Configuration {
             options: options.clone(),
@@ -325,7 +332,7 @@ fn encoding_audit(source: &str, name: &str) {
     with_compiler_stack(move || {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../hirsel-driver/tests/fixtures/std_source/main.hir");
-        let mut loaded = hirsel_driver::load_program_source(&path, Some(&source)).unwrap();
+        let mut loaded = hirsel_front_phases::load_program_source(&path, Some(&source)).unwrap();
         loaded.check_for_execution().unwrap();
         let entry = loaded.entry.clone();
         let run = run_observed_snapshot(
@@ -522,13 +529,14 @@ fn transient_encoding_subslice_has_no_temporary_finite_credit() {
     let manifest = with_compiler_stack(move || {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../hirsel-driver/tests/fixtures/std_source/main.hir");
-        let mut loaded = hirsel_driver::load_program_source(&path, Some(&manifest_source)).unwrap();
+        let mut loaded =
+            hirsel_front_phases::load_program_source(&path, Some(&manifest_source)).unwrap();
         loaded.check_for_execution().unwrap();
-        hirsel_driver::native::manifest(&loaded.engine.export_native_input().unwrap()).unwrap()
+        hirsel_native::manifest(&loaded.engine.export_native_input().unwrap()).unwrap()
     });
     for target in TargetSpec::executed() {
         let ready =
-            hirsel_driver::native::build_program(&program, manifest.clone(), &Options::new(target))
+            hirsel_native_batch::build_program(&program, manifest.clone(), &Options::new(target))
                 .unwrap();
         let emit = ready
             .units

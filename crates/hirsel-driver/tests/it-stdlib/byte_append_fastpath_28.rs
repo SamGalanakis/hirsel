@@ -3,6 +3,7 @@
 //! MIT/Apache-2.0; adapted to borrowed bytes, COW and MEM-6 charging.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn details(e: &ToolError) -> String {
     match e {
@@ -76,34 +77,35 @@ fn parity(label: &str, body: &str, rule: Option<&str>) {
             Some(&observation),
             "{label}: replay"
         );
-        let expected = native::Observation::of_reference(&observation);
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let expected = hirsel_native::Observation::of_reference(&observation);
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let matrix = vec![
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Heap { campaign: true },
+                engine: hirsel_native_testing::Engine::Heap { campaign: true },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::None,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::None,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Default,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Default,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
@@ -111,24 +113,25 @@ fn parity(label: &str, body: &str, rule: Option<&str>) {
             .join("byte-append-fastpath-28")
             .join(label);
         std::fs::create_dir_all(&dir).unwrap();
-        let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &matrix).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &matrix).unwrap();
         let mut ready =
             crate::native_ready::supplier(&path, Some(&source), &program.entry, &tools).unwrap();
-        let outcomes = native::differential_ready(
+        let outcomes = hirsel_native_testing::differential_ready(
             &mut ready,
             &program.entry,
             &expected,
             &matrix,
             &tools,
             &dir,
-            &native::Fixture::default(),
+            &hirsel_native::Fixture::default(),
         );
         assert_eq!(outcomes.len(), 4);
         for (name, result) in outcomes {
             eprintln!("{label}: {name}: {result:?}");
             assert_eq!(
                 result,
-                native::Outcome::Agree,
+                hirsel_native_testing::Outcome::Agree,
                 "{label}: {name}: {result:?}"
             );
         }

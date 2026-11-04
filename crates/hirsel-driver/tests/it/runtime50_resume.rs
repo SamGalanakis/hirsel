@@ -4,12 +4,16 @@
 //! or moving the task to another worker at every suspension, changes no
 //! observation. Under the shared dispatcher a saved compact frame leaves its
 //! stack and activates on another worker's (resume-dispatch-51).
-use hirsel_driver::native::{self, *};
+use hirsel_driver::native;
+use hirsel_driver::native::*;
 use hirsel_engine::*;
 use hirsel_lir::continuation::{
     ContinuationError, ContinuationPlan, ContinuationPlans, RegionKind, RegionTokenLayout,
     Representation,
 };
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 
 use hirsel_syntax::ContentHash;
 
@@ -132,7 +136,7 @@ pub(crate) fn routing(
     backend: Backend,
     partition: Partition,
 ) -> (usize, bool) {
-    let objects = native::emit_backend_objects(
+    let objects = hirsel_native::emit_backend_objects(
         program,
         backend,
         hirsel_lir::emission::OptLevel::Default,
@@ -222,8 +226,11 @@ pub(crate) fn agree_on(
         .prefix("runtime50-resume-")
         .tempdir()
         .unwrap();
-    let toolchain =
-        Toolchain::for_matrix(&scratch.path().join("runtime"), &configurations).unwrap();
+    let toolchain = hirsel_native_testing::toolchain_for_matrix(
+        &scratch.path().join("runtime"),
+        &configurations,
+    )
+    .unwrap();
     let mut ready = crate::native_ready::supplier(
         &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/std_source/main.hir"),
@@ -266,7 +273,7 @@ pub(crate) fn agree_on(
 fn runtime50_two_boundary_unique_region_continuation() {
     with_compiler_stack(|| {
         let program = ready(TWO_BOUNDARY);
-        let plans = native::continuation::plans(&program);
+        let plans = hirsel_native::continuation::plans(&program);
         assert_eq!(child(&plans).representation, Representation::Resumable);
         for backend in [Backend::Llvm, Backend::Cranelift] {
             for partition in [Partition::Whole, Partition::Singleton] {
@@ -325,7 +332,11 @@ pub(crate) fn checked_heap_agrees(source: &str) {
         engine: Engine::Heap { campaign: false },
     }];
     let scratch = tempfile::tempdir().unwrap();
-    let tools = Toolchain::for_matrix(&scratch.path().join("runtime"), &configurations).unwrap();
+    let tools = hirsel_native_testing::toolchain_for_matrix(
+        &scratch.path().join("runtime"),
+        &configurations,
+    )
+    .unwrap();
     let mut ready = crate::native_ready::supplier(
         &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/std_source/main.hir"),
@@ -397,10 +408,10 @@ pub(crate) fn compact_runs_recording(
     .unwrap();
     let expected = Observation::of_reference(reference.observation.as_ref().unwrap());
     let input = engine.export_native_input().unwrap();
-    let sites = native::Sites::new(&input);
+    let sites = hirsel_native::Sites::new(&input);
     let validated = engine.import_native_input(input.clone()).unwrap();
     let target = TargetSpec::x86_64_unknown_linux_gnu();
-    let ready = native::build(&validated, &Options::new(target.clone())).unwrap();
+    let ready = hirsel_native_batch::build(&validated, &Options::new(target.clone())).unwrap();
     let root = tempfile::Builder::new()
         .prefix("runtime50-compact-")
         .tempdir()
@@ -410,7 +421,7 @@ pub(crate) fn compact_runs_recording(
     for backend in [Backend::Llvm, Backend::Cranelift] {
         let dir = root.path().join(format!("{backend:?}"));
         std::fs::create_dir_all(dir.join("root")).unwrap();
-        let objects = native::emit_backend_objects(
+        let objects = hirsel_native::emit_backend_objects(
             &ready,
             backend,
             hirsel_lir::emission::OptLevel::Default,
@@ -419,7 +430,8 @@ pub(crate) fn compact_runs_recording(
             None,
         )
         .unwrap();
-        let exe = native::link_standalone_objects(&ready, &entry, &objects, &tools, &dir).unwrap();
+        let exe =
+            hirsel_native::link_standalone_objects(&ready, &entry, &objects, &tools, &dir).unwrap();
         let grants = dir.join("grants.json");
         std::fs::write(
             &grants,
@@ -471,7 +483,7 @@ pub(crate) fn compact_runs_recording(
             };
             #[cfg(not(unix))]
             let signal = None;
-            let launched = native::Launched {
+            let launched = hirsel_native::Launched {
                 audit_required: true,
                 exit: output.status.code(),
                 signal,
@@ -480,7 +492,7 @@ pub(crate) fn compact_runs_recording(
                 record: observation,
             };
             assert_eq!(
-                native::observe(&launched, &ready, &sites).unwrap(),
+                hirsel_native::observe(&launched, &ready, &sites).unwrap(),
                 expected,
                 "{cell}: {}",
                 String::from_utf8_lossy(&launched.stderr)
@@ -634,8 +646,8 @@ fn parameterized(plans: &ContinuationPlans) -> (&ContinuationPlan, &Continuation
 fn runtime51_parameterized_region_continuation() {
     with_compiler_stack(|| {
         let program = ready(&parameterized_source(false));
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let (relay, child) = parameterized(&plans);
         assert_eq!(child.representation, Representation::Resumable);
         // Every declared parameter is a frame record under its ownership
@@ -679,7 +691,8 @@ fn runtime51_parameterized_region_continuation() {
         let refused = |edit: &dyn Fn(&mut ContinuationPlan)| {
             let mut bad = plans.clone();
             edit(bad.plans.get_mut(&relay.body).unwrap());
-            native::continuation::validate(&program, &bad).expect_err("a forged plan was imported")
+            hirsel_native::continuation::validate(&program, &bad)
+                .expect_err("a forged plan was imported")
         };
         let checks: Vec<(&str, ContinuationError, fn(&ContinuationError) -> bool)> = vec![
             (
@@ -777,7 +790,7 @@ fn runtime51_parameterized_region_continuation() {
         let mut bad = plans.clone();
         bad.identity = ContentHash::of_bytes(b"other partition");
         assert_eq!(
-            native::continuation::validate(&program, &bad),
+            hirsel_native::continuation::validate(&program, &bad),
             Err(ContinuationError::Identity)
         );
 

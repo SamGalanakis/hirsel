@@ -1,6 +1,7 @@
 //! Executable NetPeer repair recipe. Payload equality is not a lifetime proof.
-use hirsel_driver::{load_program, native};
+use hirsel_driver::native;
 use hirsel_engine::{LoweringPolicy, RunConfiguration, SimulationConfig, with_compiler_stack};
+use hirsel_front_phases::load_program;
 use std::path::PathBuf;
 
 fn root() -> PathBuf {
@@ -91,30 +92,31 @@ fn ownership_repairs_payloads_and_lifetimes_agree_on_h_llvm_and_cranelift() {
             observation.effects.is_empty(),
             "fixture must have no capability effects"
         );
-        let reference = native::Observation::of_reference(observation);
+        let reference = hirsel_native::Observation::of_reference(observation);
         assert_eq!(reference.exit_code, Some(0), "{reference:?}");
         assert!(reference.failures.is_empty());
         let input = program.engine.export_native_input().unwrap();
         let validated = program.engine.import_native_input(input).unwrap();
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let configurations = vec![
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Heap { campaign: false },
+                engine: hirsel_native_testing::Engine::Heap { campaign: false },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
@@ -122,8 +124,9 @@ fn ownership_repairs_payloads_and_lifetimes_agree_on_h_llvm_and_cranelift() {
         let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ownership-repairs-6");
         std::fs::create_dir_all(&scratch).unwrap();
         let toolchain =
-            native::Toolchain::for_matrix(&scratch.join("runtime"), &configurations).unwrap();
-        let outcomes = native::differential(
+            hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &configurations)
+                .unwrap();
+        let outcomes = hirsel_native_testing::differential(
             &validated,
             &program.entry,
             &reference,
@@ -135,7 +138,7 @@ fn ownership_repairs_payloads_and_lifetimes_agree_on_h_llvm_and_cranelift() {
         for (configuration, outcome) in outcomes {
             eprintln!("ownership-repairs-6: {configuration}: {outcome:?}");
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{}: {outcome:?}",
                 configuration
             );
@@ -407,31 +410,34 @@ pub fn main()->Result[(),()] {
             SimulationConfig::default(),
         )
         .unwrap();
-        let reference = native::Observation::of_reference(execution.observation.as_ref().unwrap());
+        let reference =
+            hirsel_native::Observation::of_reference(execution.observation.as_ref().unwrap());
         assert_eq!(reference.exit_code, Some(0), "{reference:?}");
         assert!(reference.failures.is_empty());
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let configurations = vec![
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Heap { campaign: false },
+                engine: hirsel_native_testing::Engine::Heap { campaign: false },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
         let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mutable-capture-repairs-20");
         std::fs::create_dir_all(&scratch).unwrap();
         let toolchain =
-            native::Toolchain::for_matrix(&scratch.join("runtime"), &configurations).unwrap();
-        let outcomes = native::differential(
+            hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &configurations)
+                .unwrap();
+        let outcomes = hirsel_native_testing::differential(
             &validated,
             &entry,
             &reference,
@@ -442,7 +448,7 @@ pub fn main()->Result[(),()] {
         assert_eq!(outcomes.len(), 2);
         for (configuration, outcome) in outcomes {
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{configuration}: {outcome:?}"
             );
         }

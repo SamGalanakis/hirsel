@@ -160,8 +160,10 @@ fn seal_inventory_92_source_heap_sum_executes_with_independent_inventory_in_h() 
     let text = "pub fn value() -> u64 { arena.with(fn(a: Arena) -> u64 { let retained: List[u64] in a = [11u64, 12u64]; retained[0u64] + retained[1u64] }) }\npub fn main() -> Result[(), u64] { let n = value(); if n == 23u64 { Ok(()) } else { Error(n) } }";
     hirsel_engine::with_compiler_stack(move || {
         use hirsel_engine::*;
-        let mut engine =
-            QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+        let mut engine = QueryEngine::new(
+            default_environment(),
+            hirsel_front_phases::compiler_adapters(),
+        );
         let file = engine
             .sources
             .add("inventory.hir", text.to_string())
@@ -184,7 +186,7 @@ fn seal_inventory_92_source_heap_sum_executes_with_independent_inventory_in_h() 
             .unwrap();
             let observation = run.observation.unwrap();
             assert!(observation.failures.is_empty());
-            let outcome = hirsel_driver::native::Observation::of_reference(&observation);
+            let outcome = hirsel_native::Observation::of_reference(&observation);
             assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
             observations.push(observation);
         }

@@ -4,6 +4,7 @@
 //! Hirsel retains owned decoded keys and rejects aliases even in ignored values.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn source_error(error: ToolError) -> ! {
@@ -164,35 +165,37 @@ fn json_skip_small_keys_32_four_engines() {
         eprintln!(
             "json_skip_small_keys_32 reference outcome: {:?}; observation: {:#?}",
             reference.outcome,
-            native::Observation::of_reference(reference.observation.as_ref().unwrap())
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap())
         );
         assert!(matches!(
             reference.outcome,
             Ok(RunOutcome::Returned(hirsel_run_schema::Returned::Ok))
         ));
-        let expected = native::Observation::of_reference(reference.observation.as_ref().unwrap());
+        let expected =
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let mut options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
-        options.validation = native::Validation::EveryStage;
+        let mut options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+        options.validation = hirsel_native::Validation::EveryStage;
         let configs = vec![
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Heap { campaign: false },
+                engine: hirsel_native_testing::Engine::Heap { campaign: false },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
@@ -201,8 +204,9 @@ fn json_skip_small_keys_32_four_engines() {
             .tempdir()
             .unwrap();
         let tools =
-            native::Toolchain::for_matrix(&scratch.path().join("runtime"), &configs).unwrap();
-        let outcomes = native::differential(
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &configs)
+                .unwrap();
+        let outcomes = hirsel_native_testing::differential(
             &validated,
             &loaded.entry,
             &expected,
@@ -214,7 +218,7 @@ fn json_skip_small_keys_32_four_engines() {
         for (config, outcome) in outcomes {
             eprintln!("json_skip_small_keys_32 {config}: {outcome:#?}; expected {expected:#?}");
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{config}: {outcome:?}"
             );
         }

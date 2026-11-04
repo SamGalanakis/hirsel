@@ -6,6 +6,9 @@
 use crate::rc_support::target;
 use hirsel_driver::native::*;
 use hirsel_engine::*;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use std::collections::BTreeMap;
 
 const SOURCE: &str = r#"resource type First { stdout: Stdout, text: String, zero: u64, parent_zero: u64, payload: box u64 }
@@ -197,8 +200,10 @@ fn assert_oracle(case: Case, observation: &Observation) {
 #[test]
 fn bounded_order_and_failure_chain_on_h() {
     with_compiler_stack(|| {
-        let mut engine =
-            QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+        let mut engine = QueryEngine::new(
+            default_environment(),
+            hirsel_front_phases::compiler_adapters(),
+        );
         let file = engine
             .sources
             .add("destructure.hir", SOURCE.into())
@@ -237,8 +242,10 @@ fn bounded_order_and_failure_chain_on_h() {
 fn bounded_order_and_failure_chain_on_both_backends() {
     use std::os::unix::process::ExitStatusExt;
     with_compiler_stack(|| {
-        let mut engine =
-            QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+        let mut engine = QueryEngine::new(
+            default_environment(),
+            hirsel_front_phases::compiler_adapters(),
+        );
         let file = engine
             .sources
             .add("destructure.hir", SOURCE.into())
@@ -324,8 +331,10 @@ pub fn main() -> Result[(), ()] {{
 "#
         );
         with_compiler_stack(|| {
-            let mut engine =
-                QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+            let mut engine = QueryEngine::new(
+                default_environment(),
+                hirsel_front_phases::compiler_adapters(),
+            );
             let file = engine.sources.add("guard.hir", source).unwrap();
             let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);

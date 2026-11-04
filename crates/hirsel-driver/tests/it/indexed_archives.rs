@@ -1,10 +1,10 @@
 //! Actual compiler products read through the same typed live/archive contract.
-use hirsel_driver::COMPILER;
 use hirsel_engine::{
     CheckedTir, CompileConfig, DefinitionQueries, NativeRecordContext, NativeRecords, TirView,
     store::{MemStore, ResultStore},
     with_compiler_stack,
 };
+use hirsel_front_phases::COMPILER;
 use std::sync::Arc;
 
 #[test]

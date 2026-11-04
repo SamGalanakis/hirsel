@@ -1,6 +1,7 @@
 //! Independent RFC7396 vectors and depth/ownership controls on all three engines.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::{Path, PathBuf};
 
 fn fixture(name: &str) -> PathBuf {
@@ -32,7 +33,7 @@ fn interpreter() {
     });
 }
 
-fn native(backend: native::Backend) {
+fn native(backend: hirsel_native::Backend) {
     with_compiler_stack(|| {
         for name in ["vectors", "controls"] {
             let mut stdout = Vec::new();
@@ -47,7 +48,7 @@ fn native(backend: native::Backend) {
                     stderr: &mut stderr,
                 },
                 hirsel_driver::session::Policy::default(),
-                native::Validation::EveryStage,
+                hirsel_native::Validation::EveryStage,
             )
             .unwrap_or_else(|error| panic!("{error}"))
             .unwrap_or_else(|error| panic!("{error}"));
@@ -66,9 +67,9 @@ fn native(backend: native::Backend) {
 
 #[test]
 fn llvm() {
-    native(native::Backend::Llvm);
+    native(hirsel_native::Backend::Llvm);
 }
 #[test]
 fn cranelift() {
-    native(native::Backend::Cranelift);
+    native(hirsel_native::Backend::Cranelift);
 }

@@ -1,0 +1,24 @@
+[package]
+name = "hirsel-host-io"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hirsel-engine = { path = "../hirsel-engine" }
+hirsel-run-config = { path = "../hirsel-run-config" }
+hirsel-run-schema = { path = "../hirsel-run-schema" }
+hirsel-remote = { path = "../hirsel-remote" }
+hirsel-diag = { path = "../hirsel-diag" }
+hirsel-span = { path = "../hirsel-span" }
+hirsel-syntax = { path = "../hirsel-syntax" }
+hirsel-types = { path = "../hirsel-types" }
+hirsel-tir = { path = "../hirsel-tir" }
+hirsel-interp = { path = "../hirsel-interp" }
+hirsel-free = { path = "../hirsel-free" }
+hirsel-rt = { path = "../hirsel-rt" }
+sha2 = "0.10"
+
+[dev-dependencies]
+hirsel-guard = { path = "../hirsel-guard" }

@@ -1,13 +1,10 @@
 //! Current-source factory assembly. These are original graph/profile controls;
 //! no receipt-aware ABI, Some native provider or public seal is activated here.
-use hirsel_driver::{
-    compiler_adapters,
-    native::receipt_source::{
-        factory::{closure as factory_closure, *},
-        provider::*,
-    },
-};
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::receipt_source::factory::closure as factory_closure;
+use hirsel_native::receipt_source::factory::*;
+use hirsel_native::receipt_source::provider::*;
 use hirsel_rc::{
     instance::{Actuals, key_of},
     sealed_source::SourceError,

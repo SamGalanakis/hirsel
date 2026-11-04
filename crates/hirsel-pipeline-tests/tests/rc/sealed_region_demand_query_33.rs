@@ -1,9 +1,10 @@
-use hirsel_driver::native::queries::seal_demand::{Input, Plan};
 use hirsel_engine::{
     runtime::ProductRef,
     store::{Action, Address, Domain, MemStore, ResultStore},
 };
 use hirsel_lir::operation::{NativeType, Primitive};
+use hirsel_native_queries::seal_demand::Input;
+use hirsel_native_queries::seal_demand::Plan;
 use hirsel_rc::seal_demand::equations::LocalDemandEquations;
 use hirsel_syntax::ContentHash;
 use hirsel_types::TypeKind;

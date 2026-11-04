@@ -139,7 +139,7 @@ pub(super) fn test(
 pub(super) fn run_native(
     path: &Path,
     launch: hirsel_driver::HostLaunch<'_>,
-    backend: hirsel_driver::native::Backend,
+    backend: hirsel_native::Backend,
     policy: hirsel_driver::session::Policy,
     sidecar: &Path,
     json: bool,

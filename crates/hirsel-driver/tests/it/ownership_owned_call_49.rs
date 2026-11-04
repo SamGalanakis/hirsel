@@ -1,6 +1,9 @@
 //! Original Value plans across graph-owned source, call transport and execution.
-use hirsel_driver::{COMPILER, native, requests::*, resident::ObservedSession};
+use hirsel_driver::native;
+use hirsel_driver::requests::*;
+use hirsel_driver::resident::ObservedSession;
 use hirsel_engine::{CompileConfig, runtime::ProcessBudget, store::MemStore};
+use hirsel_front_phases::COMPILER;
 use hirsel_run_schema::ownership_trace::{Action, Trace};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -115,13 +118,13 @@ fn source_calls_selected(
         );
         let limits = selector.input_limits();
         let mut host = ObservedSession::new(manifest, compiler, config, selector, limits, 3);
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
         let output = host
             .request(CompileOperation::NativeOwnership(OwnershipRequest {
                 selection,
                 definition: None,
                 target: target.clone(),
-                validation: native::Validation::EveryStage,
+                validation: hirsel_native::Validation::EveryStage,
                 launch: Default::default(),
                 fuel: false,
             }))
@@ -160,17 +163,20 @@ fn source_calls_selected(
         }
         drop(output);
         drop(host);
-        let runtime = native::RuntimeBuild {
+        let runtime = hirsel_native::RuntimeBuild {
             ownership_trace: true,
             ..Default::default()
         };
-        let tools = native::Toolchain::in_tree_with_runtime(
+        let tools = hirsel_native::Toolchain::in_tree_with_runtime(
             &directory.path().join("tools"),
             &[&target],
             runtime,
         )
         .unwrap();
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let objects = execution
                 .emit(backend)
                 .unwrap_or_else(|error| panic!("{backend:?} original plan emission: {error}"));

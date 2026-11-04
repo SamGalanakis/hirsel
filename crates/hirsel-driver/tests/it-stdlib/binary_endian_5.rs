@@ -3,6 +3,7 @@
 //! commit ebe2feefc400f813aefdc8a036e66d2619da6649. No roundtrip-only oracle.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::{fmt::Write, path::PathBuf};
 
 fn literal(bytes: &[u8]) -> String {

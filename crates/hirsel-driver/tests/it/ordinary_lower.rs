@@ -2,6 +2,7 @@
 use hirsel_driver::requests::*;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_syntax::{DefPath, ItemPath, PackageId};
 use std::sync::Arc;
 

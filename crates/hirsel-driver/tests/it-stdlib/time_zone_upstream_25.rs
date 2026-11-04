@@ -188,26 +188,26 @@ fn partition(zone: &str, operation: &str, part: usize) {
             SimulationConfig::default(),
         )
         .unwrap();
-        let observation = native::Observation::of_reference(
+        let observation = hirsel_native::Observation::of_reference(
             run.observation.as_ref().expect("reference observation"),
         );
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
         let matrix = [
-            native::Engine::Heap { campaign: false },
-            native::Engine::Native {
-                opt: native::OptLevel::None,
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Heap { campaign: false },
+            hirsel_native_testing::Engine::Native {
+                opt: hirsel_native::OptLevel::None,
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
-            native::Engine::Cranelift {
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Cranelift {
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         ]
         .into_iter()
-        .map(|engine| native::Configuration {
+        .map(|engine| hirsel_native_testing::Configuration {
             engine,
-            options: native::Options::new(target.clone()),
+            options: hirsel_native::Options::new(target.clone()),
         })
         .collect();
         let runner = history::Runner::with_matrix(dir.path(), matrix)

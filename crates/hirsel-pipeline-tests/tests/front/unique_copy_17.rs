@@ -3,7 +3,10 @@ use hirsel_engine::{DefinitionQueries, QueryEngine, default_context, default_env
 
 #[test]
 fn copied_unique_local_survives_mutable_handback() {
-    let mut engine = QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+    let mut engine = QueryEngine::new(
+        default_environment(),
+        hirsel_front_phases::compiler_adapters(),
+    );
     let context = default_context();
     let file = engine
         .sources

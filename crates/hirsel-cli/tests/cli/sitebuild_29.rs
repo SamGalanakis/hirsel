@@ -95,7 +95,8 @@ fn scripted_cases(selected: Vec<Value>) {
     hirsel_engine::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let selection = package(scratch.path());
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded =
+            hirsel_front_phases::load_program(&selection).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -570,7 +571,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
             let left = 2_097_152 - encoded.len() - if asset { 3 } else { 0 };
             expected.push_str(&format!("{left}\n"));
         }
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));

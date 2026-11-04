@@ -1,12 +1,12 @@
 //! Iterator closures are checked through the production pipeline and failure audits.
 use crate::rc_support as support;
-use hirsel_driver::compiler_adapters;
 use hirsel_engine::{
     QueryEngine, RunConfiguration, default_context, default_environment, entry_path,
     run_observed_snapshot, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use support::*;
-fn observed_heap(source: &str) -> hirsel_driver::native::HeapRun {
+fn observed_heap(source: &str) -> hirsel_native_testing::HeapRun {
     let source = source.to_owned();
     with_compiler_stack(move || {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -19,20 +19,17 @@ fn observed_heap(source: &str) -> hirsel_driver::native::HeapRun {
             inputs: vec![],
         };
         let run = run_observed_snapshot(&mut engine, &config, Default::default()).unwrap();
-        let reference = hirsel_driver::native::Observation::of_reference(
+        let reference = hirsel_native::Observation::of_reference(
             run.observation
                 .as_ref()
                 .unwrap_or_else(|| panic!("{source}\n{run:?}")),
         );
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let sites = hirsel_driver::native::Sites::new(validated.snapshot());
-        let ready = hirsel_driver::native::build(
-            &validated,
-            &hirsel_driver::native::Options::new(target()),
-        )
-        .unwrap_or_else(|e| panic!("{source}\n{e}"));
-        let heap = hirsel_driver::native::heap_campaign(&ready, &entry, &sites)
+        let sites = hirsel_native::Sites::new(validated.snapshot());
+        let ready = hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target()))
+            .unwrap_or_else(|e| panic!("{source}\n{e}"));
+        let heap = hirsel_native_testing::heap_campaign(&ready, &entry, &sites)
             .unwrap_or_else(|e| panic!("{source}\n{e}"));
         assert_eq!(heap.observation, reference, "{source}");
         heap
@@ -204,10 +201,10 @@ sorted_map.insert(by,mut m,4,4)
 Ok(())
 }"#;
     let program = compile(source);
-    let ready = hirsel_driver::native::build_program(
+    let ready = hirsel_native_batch::build_program(
         &program,
         manifest(&program),
-        &hirsel_driver::native::Options::new(target()),
+        &hirsel_native::Options::new(target()),
     )
     .unwrap();
     let mut units = ready.raw_units();
@@ -404,6 +401,9 @@ Ok(())
 }
 fn native_cases(cases: Vec<(&str, String)>, large: bool) {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(if large {
         "sorted-large"
     } else {
@@ -413,7 +413,8 @@ fn native_cases(cases: Vec<(&str, String)>, large: bool) {
     if large {
         matrix.retain(|c| matches!(c.engine, Engine::Native { .. }));
     }
-    let toolchain = Toolchain::for_matrix(&dir.join("runtime"), &matrix).unwrap();
+    let toolchain =
+        hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &matrix).unwrap();
     for (name, source) in cases {
         let directory = dir.join(name);
         std::fs::create_dir_all(&directory).unwrap();

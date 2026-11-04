@@ -66,7 +66,8 @@ fn scripted(caps: bool) {
     hirsel_engine::with_compiler_stack(|| {
         let tmp = scratch("packtree-script-");
         let selection = package(tmp.path());
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded =
+            hirsel_front_phases::load_program(&selection).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));

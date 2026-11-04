@@ -452,7 +452,7 @@ fn check_root_and_dependency_cache(
         // publication, replacing the unproved 4240 literal. Checked
         // summaries are embedded in Modes, not separate physical store products.
         let inventory = hirsel_engine::with_compiler_stack(|| {
-            let mut declarations = hirsel_driver::COMPILER
+            let mut declarations = hirsel_front_phases::COMPILER
                 .with_owned_engines()
                 .load_package_declarations(library)
                 .unwrap();

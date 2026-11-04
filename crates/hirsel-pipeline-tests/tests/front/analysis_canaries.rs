@@ -6,6 +6,7 @@
 
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_proof_export::findings::Findings;
 
 fn fixture(name: &str) -> &'static str {

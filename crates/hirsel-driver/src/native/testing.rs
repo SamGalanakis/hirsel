@@ -63,7 +63,7 @@ pub fn bench_path(
 struct Executable {
     execution: Arc<NativeExecution>,
     runnable: super::Runnable,
-    scratch: super::executable::Scratch,
+    scratch: hirsel_native::Scratch,
 }
 
 impl Executable {
@@ -146,7 +146,7 @@ impl Executable {
         Ok(Self {
             execution,
             runnable,
-            scratch: super::executable::Scratch::new()?,
+            scratch: hirsel_native::Scratch::new()?,
         })
     }
 

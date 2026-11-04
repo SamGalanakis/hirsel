@@ -3,6 +3,9 @@ use hirsel_driver::native::*;
 use hirsel_engine::{
     RunConfiguration, run_observed_checked_bounded, run_observed_snapshot_bounded,
 };
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use serde_json::{Value, json};
 use std::{
@@ -176,7 +179,7 @@ fn toy_analyzer_31_reference_checked_oracle_and_session() {
     hirsel_engine::with_compiler_stack(|| {
         let scratch = scratch();
         let path = package(scratch.path());
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -255,7 +258,7 @@ fn toy_analyzer_31_caps_denial_and_pending_cancellation() {
     hirsel_engine::with_compiler_stack(|| {
         let scratch = scratch();
         let path = package(scratch.path());
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -353,16 +356,17 @@ fn scripted_native(group: u8) {
         let path = package(scratch.path());
         // Each body owns one compiled fixture; replay providers and tape state
         // are fresh on every call.
-        let compiler = hirsel_driver::COMPILER
-            .clone()
-            .with_config(hirsel_engine::CompileConfig {
-                store: hirsel_engine::store::store_by_name(
-                    "dir@1",
-                    Some(scratch.path().join("products")),
-                )
-                .unwrap(),
-                ..hirsel_driver::COMPILER.configuration()
-            });
+        let compiler =
+            hirsel_front_phases::COMPILER
+                .clone()
+                .with_config(hirsel_engine::CompileConfig {
+                    store: hirsel_engine::store::store_by_name(
+                        "dir@1",
+                        Some(scratch.path().join("products")),
+                    )
+                    .unwrap(),
+                    ..hirsel_front_phases::COMPILER.configuration()
+                });
         let mut loaded = compiler.load_program(&path).unwrap();
         loaded
             .check_for_execution()
@@ -387,7 +391,9 @@ fn scripted_native(group: u8) {
                 },
             },
         ];
-        let tools = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+                .unwrap();
         let ready = build(&input, &options).unwrap();
         let sites = Sites::new(input.snapshot());
         let objects: Vec<_> = [Backend::Llvm, Backend::Cranelift]
@@ -686,7 +692,7 @@ fn toy_analyzer_31_host_tapes_checked_replay_and_controls() {
         let mut count = 0;
         for directory in directories.split(',').map(PathBuf::from) {
             let path = directory.join("hirsel.json");
-            let mut program = hirsel_driver::load_program(&path).unwrap();
+            let mut program = hirsel_front_phases::load_program(&path).unwrap();
             let mut tapes: Vec<_> = fs::read_dir(&directory)
                 .unwrap()
                 .map(|p| p.unwrap().path())
@@ -703,7 +709,7 @@ fn toy_analyzer_31_host_tapes_checked_replay_and_controls() {
                 source.replace("(\"schema\", number(1))", "(\"schema\", number(2))"),
             )
             .unwrap();
-            let mut source_program = hirsel_driver::load_program(&changed_path).unwrap();
+            let mut source_program = hirsel_front_phases::load_program(&changed_path).unwrap();
             let mut source_control_done = false;
             for tape in tapes {
                 let name = tape.file_stem().unwrap().to_str().unwrap();

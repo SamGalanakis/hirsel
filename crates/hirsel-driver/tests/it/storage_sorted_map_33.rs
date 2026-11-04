@@ -1,6 +1,7 @@
 //! Ordered storage recipes execute actual comparator code and retain stored producers.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 #[test]
 fn sealed_sorted_map_lookup_has_complete_provenance() {

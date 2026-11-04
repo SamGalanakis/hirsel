@@ -3,7 +3,10 @@
 //! remain executable pending obligations, checked for changed and stale reasons.
 use super::{Case, CaseResult, Class, Exclusions};
 use hirsel_cli_args::Shard;
-use hirsel_driver::native::{Configuration, Outcome, TargetSpec, Toolchain};
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
+use hirsel_native_testing::Configuration;
+use hirsel_native_testing::Outcome;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -103,7 +106,7 @@ pub fn matrix(id: &str, rotation: u64, pending: &Exclusions) -> Vec<Configuratio
         })
         .holds(id)
     {
-        both.retain(|c| matches!(c.engine, hirsel_driver::native::Engine::Cranelift { .. }));
+        both.retain(|c| matches!(c.engine, hirsel_native_testing::Engine::Cranelift { .. }));
     }
     both
 }

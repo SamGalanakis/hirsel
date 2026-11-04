@@ -1,5 +1,7 @@
-use hirsel_driver::{COMPILER, CompilerRequestsExt, requests::*};
+use hirsel_driver::CompilerRequestsExt;
+use hirsel_driver::requests::*;
 use hirsel_engine::{CompileConfig, QueryError, ToolError, store::DirStore, with_compiler_stack};
+use hirsel_front_phases::COMPILER;
 use std::sync::Arc;
 
 #[test]

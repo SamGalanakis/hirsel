@@ -23,10 +23,10 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
             table: &program.table,
             target: &program.target,
             environments: &program.ahead_environments,
-            runtime: native::continuation::runtime_identity(),
-            classify: &native::continuation::classify,
+            runtime: hirsel_native::continuation::runtime_identity(),
+            classify: &hirsel_native::continuation::classify,
         };
-        let plans = native::continuation::plans(&program);
+        let plans = hirsel_native::continuation::plans(&program);
         let (&root, _) = program
             .finalizers
             .iter()

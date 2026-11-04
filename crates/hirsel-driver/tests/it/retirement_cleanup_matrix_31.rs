@@ -5,8 +5,12 @@
 //! Builtin borrowed cursor drops are silent. Source-triggered Trace failures
 //! exercise resource cleanup beside retirement, not arbitrary native faults
 //! inside the cursor drop; that unavailable injection cell remains incomplete.
-use hirsel_driver::{compiler_adapters, native::*};
+use hirsel_driver::native::*;
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_tir::*;
 use std::{collections::BTreeSet, path::PathBuf};
 
@@ -345,7 +349,7 @@ fn tool_receipt() {
     );
     eprintln!(
         "RETIREMENT_TOOLS {}",
-        serde_json::json!({"compiler":hirsel_driver::COMPILER_IDENTITY,"files":files,"configurations":format!("{:?}",matrix()),"reference_step_limit":1000000,"native_timeout_seconds":60})
+        serde_json::json!({"compiler":hirsel_compiler_identity::COMPILER_IDENTITY,"files":files,"configurations":format!("{:?}",matrix()),"reference_step_limit":1000000,"native_timeout_seconds":60})
     );
 }
 
@@ -818,7 +822,7 @@ fn permanent_manifest_twins() {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("hirsel.json"), manifest).unwrap();
             std::fs::write(dir.join("main.hir"), source).unwrap();
-            hirsel_driver::load_program_source(&dir.join("hirsel.json"), None).unwrap();
+            hirsel_front_phases::load_program_source(&dir.join("hirsel.json"), None).unwrap();
             history::persist(
                 &dir,
                 "manifest-control",

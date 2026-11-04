@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 
-CASE = 'native::object_queries::platform::tests::selected_platform_closes_runtime_before_keys_and_replays_without_originals'
+CASE = 'object_queries::platform::tests::selected_platform_closes_runtime_before_keys_and_replays_without_originals'
 
 
 def command(arguments, environment):

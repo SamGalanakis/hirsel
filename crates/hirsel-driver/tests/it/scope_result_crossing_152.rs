@@ -1,6 +1,6 @@
 //! An async child returns a unique result through nested scoped callbacks.
-use hirsel_driver::COMPILER;
 use hirsel_engine::*;
+use hirsel_front_phases::COMPILER;
 
 #[test]
 fn unique_result_from_nested_scope_is_validated_before_async_crossing() {

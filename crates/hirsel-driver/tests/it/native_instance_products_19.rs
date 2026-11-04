@@ -1,9 +1,12 @@
 use hirsel_artifact_store::Action;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_layout::layout::LayoutBuilder;
+use hirsel_native::query_model::InstanceAddress;
+use hirsel_native_cache::instance::*;
+use hirsel_native_cache::source_inputs::NativeSourceProvider;
 use hirsel_syntax::ContentHash;
-use native::queries::{InstanceAddress, instance::*, source_inputs::NativeSourceProvider};
 use std::sync::Arc;
 
 #[test]
@@ -27,7 +30,7 @@ fn native_instance_product_hits_require_current_c_without_value_materialization(
         let source_inputs = crate::native_front_fixture::inputs(&mut engine, &[]);
         let declarations = &source_inputs.declarations;
         let mut source = source_inputs.provider();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
         let owners = hirsel_rc::library::owners(
             &declarations.program.types,
             &declarations.program.signatures,

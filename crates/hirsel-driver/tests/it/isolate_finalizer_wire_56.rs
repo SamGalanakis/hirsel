@@ -33,8 +33,8 @@ fn source_finalizer_resolver_is_checked_at_both_native_entry_points() {
         use hirsel_lir::emission::{EmitInputs, OptLevel};
         let program = super::runtime50_continuation::ready(SOURCE);
         let units: Vec<_> = program.units.iter().collect();
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let (body, ordinal, coverage) = plans
             .plans
             .iter()
@@ -122,7 +122,7 @@ fn source_finalizer_resolver_is_checked_at_both_native_entry_points() {
                 _ => unreachable!(),
             }
             assert!(
-                native::continuation::validate(&program, &bad).is_err(),
+                hirsel_native::continuation::validate(&program, &bad).is_err(),
                 "mutation {mutation}"
             );
             emit(&bad, false);

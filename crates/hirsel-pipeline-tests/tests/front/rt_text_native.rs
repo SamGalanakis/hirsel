@@ -1,13 +1,19 @@
 //! Compiled text calls, failure anchors and generated drop glue on both targets.
-use hirsel_driver::native::{
-    Observation, OptLevel, Options, Outcome, Toolchain, build, c_call, differential, emit,
-    full_matrix,
-};
 use hirsel_engine::{
     RunConfiguration, SimulationConfig, default_context, entry_path, run_observed_snapshot,
     with_compiler_stack,
 };
 use hirsel_lir::layout_types::TargetSpec;
+use hirsel_native::Observation;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Toolchain;
+use hirsel_native::c_call;
+use hirsel_native::emit;
+use hirsel_native_batch::build;
+use hirsel_native_testing::Outcome;
+use hirsel_native_testing::differential;
+use hirsel_native_testing::full_matrix;
 use std::path::Path;
 use std::process::Command;
 
@@ -77,7 +83,7 @@ fn checked(
     hirsel_syntax::DefPath,
     Observation,
 ) {
-    let mut loaded = hirsel_driver::load_program_source(
+    let mut loaded = hirsel_front_phases::load_program_source(
         &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../hirsel-driver/tests/fixtures/std_numeric.hir"),
         Some(source),
@@ -180,7 +186,8 @@ fn full_gate_text_calls_failures_c_abi_and_compiled_drops_agree_on_both_targets(
         let scratch = Path::new(env!("CARGO_TARGET_TMPDIR")).join("text-native");
         std::fs::create_dir_all(&scratch).unwrap();
         let matrix = full_matrix();
-        let tools = Toolchain::for_matrix(&scratch.join("runtime"), &matrix).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &matrix).unwrap();
         for (name, source) in [
             ("success", SUCCESS),
             ("replace-failure", REPLACE_FAIL),

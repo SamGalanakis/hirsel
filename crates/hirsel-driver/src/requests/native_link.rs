@@ -1,20 +1,18 @@
 //! Host Link executor over a selected stored tool, pre-codegen kit snapshot and
 //! ordinary archive references. The shared native planner owns launcher/glue,
 //! manifest and ABI checks; this adapter owns neither compiler bodies nor caches.
-use crate::native::{
-    self, Backend,
-    object_queries::{
-        capture::CaptureLimits,
-        platform::CapturedPlatform,
-        runtime::{RuntimeFiles, RuntimeLimits},
-    },
-    queries::{
-        compilation_tasks::CompilationBackend,
-        link_tasks::{CodegenPartition, LinkExecution, NativeLinkExecutor},
-        roots::{RootCapturedExecutableInputs, RootProducts},
-    },
-};
 use hirsel_engine::{runtime::MemoryReservation, store::ResultStore};
+use hirsel_native::Backend;
+use hirsel_native::object_queries::capture::CaptureLimits;
+use hirsel_native::object_queries::platform::CapturedPlatform;
+use hirsel_native::object_queries::runtime::RuntimeFiles;
+use hirsel_native::object_queries::runtime::RuntimeLimits;
+use hirsel_native_queries::compilation_tasks::CompilationBackend;
+use hirsel_native_queries::link_tasks::CodegenPartition;
+use hirsel_native_queries::link_tasks::LinkExecution;
+use hirsel_native_queries::link_tasks::NativeLinkExecutor;
+use hirsel_native_queries::roots::RootCapturedExecutableInputs;
+use hirsel_native_queries::roots::RootProducts;
 use hirsel_syntax::{ContentHash, DefPath};
 use std::{
     io::Read,
@@ -37,8 +35,8 @@ pub(crate) struct FrozenPlatform {
     inputs: LinkInputs,
     entry: DefPath,
     backend: Backend,
-    partition: native::Partition,
-    target: native::TargetSpec,
+    partition: hirsel_native::Partition,
+    target: hirsel_native::TargetSpec,
     requested: Option<Arc<hirsel_run_config::ValidatedRun>>,
     linker_options: ContentHash,
     _allowance: Arc<MemoryReservation>,
@@ -49,8 +47,8 @@ impl FrozenPlatform {
         inputs: LinkInputs,
         entry: DefPath,
         backend: Backend,
-        partition: native::Partition,
-        target: native::TargetSpec,
+        partition: hirsel_native::Partition,
+        target: hirsel_native::TargetSpec,
         requested: Option<Arc<hirsel_run_config::ValidatedRun>>,
         allowance: impl Into<Arc<MemoryReservation>>,
     ) -> Result<Arc<Self>, String> {
@@ -121,9 +119,9 @@ impl FrozenPlatform {
             self.inputs.runtime_limits,
         )
     }
-    pub fn executable(&self, path: PathBuf) -> Result<native::Runnable, String> {
+    pub fn executable(&self, path: PathBuf) -> Result<hirsel_native::Runnable, String> {
         let runtime = self.runtime_files(&path)?;
-        Ok(native::Runnable::closed(
+        Ok(hirsel_native::Runnable::closed(
             path,
             runtime,
             self.inputs.emulator.clone(),
@@ -180,7 +178,7 @@ impl NativeLinkExecutor for FrozenPlatform {
             directory: scratch.path(),
             requested: self.requested.as_deref(),
             standalone: self.requested.is_none(),
-            platform: native::CapturedExecutableLinkInputs {
+            platform: hirsel_native::CapturedExecutableLinkInputs {
                 store: self.store.as_ref(),
                 platform: &self.inputs.platform,
                 loader: None,

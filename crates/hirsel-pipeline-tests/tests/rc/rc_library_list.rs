@@ -2,11 +2,11 @@
 //! heap audits on every injected failure, and executed native targets.
 use crate::rc_support as support;
 
-use hirsel_driver::compiler_adapters;
 use hirsel_engine::{
     QueryEngine, RunConfiguration, default_context, default_environment, entry_path,
     run_observed_snapshot, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_heapcheck::{Config, NoOperations, Observed};
 use hirsel_interp::observation::ObservedNode;
 use hirsel_lir::ir::{Callee, Inst, LirUnit, ProjectionStep, Terminator, UnitOrigin};
@@ -397,11 +397,20 @@ fn list_push_body_writes_through_slots_and_p4_detaches_it() {
 #[test]
 #[ignore = "native: run by tools/check-native.sh"]
 fn list_push_agrees_natively_on_both_targets() {
-    use hirsel_driver::native::{
-        Observation, OptLevel, Options, Partition, Sites, TargetSpec, Toolchain, build_program,
-        launch, link, manifest, observe, program,
-    };
     use hirsel_engine::SimulationConfig;
+    use hirsel_native::Observation;
+    use hirsel_native::OptLevel;
+    use hirsel_native::Options;
+    use hirsel_native::Partition;
+    use hirsel_native::Sites;
+    use hirsel_native::TargetSpec;
+    use hirsel_native::Toolchain;
+    use hirsel_native::launch;
+    use hirsel_native::link;
+    use hirsel_native::manifest;
+    use hirsel_native::observe;
+    use hirsel_native::program;
+    use hirsel_native_batch::build_program;
     let targets = TargetSpec::executed();
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("library-native");
     let toolchain =
@@ -518,7 +527,7 @@ fn list_push_agrees_natively_on_both_targets() {
 
 /// Use the production pipeline and Io model, including every injected failure
 /// site's terminal audit, for programs whose finalizers make ownership visible.
-fn observed_heap(source: &str) -> hirsel_driver::native::HeapRun {
+fn observed_heap(source: &str) -> hirsel_native_testing::HeapRun {
     let source = source.to_owned();
     with_compiler_stack(move || {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -531,20 +540,17 @@ fn observed_heap(source: &str) -> hirsel_driver::native::HeapRun {
             inputs: vec![],
         };
         let run = run_observed_snapshot(&mut engine, &config, Default::default()).unwrap();
-        let reference = hirsel_driver::native::Observation::of_reference(
+        let reference = hirsel_native::Observation::of_reference(
             run.observation
                 .as_ref()
                 .unwrap_or_else(|| panic!("{source}\n{run:?}")),
         );
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let sites = hirsel_driver::native::Sites::new(validated.snapshot());
-        let ready = hirsel_driver::native::build(
-            &validated,
-            &hirsel_driver::native::Options::new(target()),
-        )
-        .unwrap_or_else(|e| panic!("{source}\n{e}"));
-        let heap = hirsel_driver::native::heap_campaign(&ready, &entry, &sites)
+        let sites = hirsel_native::Sites::new(validated.snapshot());
+        let ready = hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target()))
+            .unwrap_or_else(|e| panic!("{source}\n{e}"));
+        let heap = hirsel_native_testing::heap_campaign(&ready, &entry, &sites)
             .unwrap_or_else(|e| panic!("{source}\n{e}"));
         assert_eq!(heap.observation, reference, "{source}");
         heap
@@ -676,6 +682,9 @@ int32_t __wrap_hirsel_rt_v2_main(const hirsel_rt_v2_program_descriptor *program,
 
 fn list_counter_run(source: &str, name: &str) -> Vec<u64> {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     std::fs::create_dir_all(&dir).unwrap();
     let target = target();
@@ -689,11 +698,9 @@ fn list_counter_run(source: &str, name: &str) -> Vec<u64> {
     let input = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(input).unwrap();
     let entry = entry_path(&default_context());
-    let ready = hirsel_driver::native::build(
-        &validated,
-        &hirsel_driver::native::Options::new(target.clone()),
-    )
-    .unwrap();
+    let ready =
+        hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
+            .unwrap();
     let wrapper = dir.join("count.c");
     std::fs::write(&wrapper, LIST_COUNTER_WRAPPER).unwrap();
     let mut grows = Vec::new();

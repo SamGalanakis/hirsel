@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 #[test]
 fn closure_validation_inspects_definition_inputs_once() {

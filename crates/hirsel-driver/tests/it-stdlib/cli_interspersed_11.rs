@@ -1,6 +1,7 @@
 //! Interspersed parsing, exact errors and unchanged stop-at-positional controls.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> PathBuf {
@@ -33,31 +34,37 @@ fn all_engines(name: &str) {
             "{name}: {:?}",
             reference.outcome
         );
-        let expected = native::Observation::of_reference(reference.observation.as_ref().unwrap());
+        let expected =
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = native::build(&validated, &options).unwrap();
-        let sites = native::Sites::new(validated.snapshot());
-        let heap =
-            native::run_heap_in(&ready, &loaded.entry, &sites, &native::HeapWorld::default())
-                .unwrap();
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let sites = hirsel_native::Sites::new(validated.snapshot());
+        let heap = hirsel_native_testing::run_heap_in(
+            &ready,
+            &loaded.entry,
+            &sites,
+            &hirsel_native_testing::HeapWorld::default(),
+        )
+        .unwrap();
         assert_eq!(heap.observation, expected);
         assert_eq!(heap.counters.live_heap_bytes, 0);
         let configs = [
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
@@ -65,13 +72,19 @@ fn all_engines(name: &str) {
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
         let dir = evidence.join(format!("cli-interspersed-11-{}-{name}", std::process::id()));
-        let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &configs).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs).unwrap();
         let mut count = 0;
-        for (config, outcome) in
-            native::differential(&validated, &loaded.entry, &expected, &configs, &tools, &dir)
-        {
+        for (config, outcome) in hirsel_native_testing::differential(
+            &validated,
+            &loaded.entry,
+            &expected,
+            &configs,
+            &tools,
+            &dir,
+        ) {
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{name}: {config}: {outcome:?}"
             );
             count += 1;

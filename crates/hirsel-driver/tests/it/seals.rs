@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_types::{AuthoritySummary, AuthorityTerm, SignatureKind};
 
 fn checked(source: &str) -> QueryEngine {

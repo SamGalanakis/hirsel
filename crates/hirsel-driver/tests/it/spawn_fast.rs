@@ -1,10 +1,16 @@
 //! L2's ordered store/load gate, including byte-equal host tapes with the
 //! compiler's private spawn hints present or cleared after Ready validation.
-use hirsel_driver::native::{self, Backend, OptLevel, Options, Partition, TargetSpec, Toolchain};
+use hirsel_driver::native;
 use hirsel_lir::ir::{ArgumentValue, Callee, ConstantValue, Inst};
 use hirsel_lir::validate::{Inputs, validate_ready};
+use hirsel_native::Backend;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
 
-fn clear_spawn_hints(program: &mut native::ReadyProgram) {
+fn clear_spawn_hints(program: &mut hirsel_native::ReadyProgram) {
     let inputs = Inputs {
         target: &program.target,
         layouts: &program.table,
@@ -79,12 +85,13 @@ fn spawn_await_preserves_the_queued_sibling_load_and_ordered_tape_in_both_backen
             .unwrap(),
         )
         .unwrap();
-        let mut loaded = hirsel_driver::load_program(&source).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&source).unwrap();
         loaded.check_for_execution().unwrap();
         let snapshot = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(snapshot).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let mut ready = native::build(&validated, &Options::new(target.clone())).unwrap();
+        let mut ready =
+            hirsel_native_batch::build(&validated, &Options::new(target.clone())).unwrap();
         let tools = Toolchain::in_tree(&dir.join("runtime"), &[&target]).unwrap();
         let mut tapes = Vec::new();
         for fast in [true, false] {
@@ -93,7 +100,7 @@ fn spawn_await_preserves_the_queued_sibling_load_and_ordered_tape_in_both_backen
             }
             let mut engines = Vec::new();
             for backend in [Backend::Llvm, Backend::Cranelift] {
-                let objects = native::emit_backend_objects(
+                let objects = hirsel_native::emit_backend_objects(
                     &ready,
                     backend,
                     OptLevel::Default,
@@ -103,7 +110,8 @@ fn spawn_await_preserves_the_queued_sibling_load_and_ordered_tape_in_both_backen
                 )
                 .unwrap();
                 let executable =
-                    native::link_objects(&ready, &loaded.entry, &objects, &tools, &output).unwrap();
+                    hirsel_native::link_objects(&ready, &loaded.entry, &objects, &tools, &output)
+                        .unwrap();
                 let tape = dir.join(format!("tape-{fast}-{backend:?}"));
                 let result = std::process::Command::new(executable)
                     .env_clear()

@@ -1,6 +1,12 @@
 //! Pinned google/uuid, uuid-rs and RFC 9562 expectations on four engines.
-use hirsel_driver::{native::*, *};
+use hirsel_compiler_identity::COMPILER_IDENTITY;
+use hirsel_driver::native::*;
+use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_rt::io::{Completion, Event, Request};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -173,7 +179,7 @@ fn partition(group: &str, start: usize, end: usize) {
         })
         .collect();
         let dir = tempfile::tempdir().unwrap();
-        let mut tools = Toolchain::for_matrix(dir.path(), &matrix).unwrap();
+        let mut tools = hirsel_native_testing::toolchain_for_matrix(dir.path(), &matrix).unwrap();
         tools.launch_timeout = std::time::Duration::from_secs(60);
         let outcomes = differential(
             &validated,

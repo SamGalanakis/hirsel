@@ -1,7 +1,11 @@
 //! Nested projected writes preserve ownership through native list builder edits.
 use crate::rc_support::target;
-use hirsel_driver::{compiler_adapters, native::*};
+use hirsel_driver::native::*;
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 
 #[test]
 fn nested_unique_projection_engines() {
@@ -26,7 +30,9 @@ fn nested_unique_projection_engines() {
         })
         .collect();
         let directory = tempfile::tempdir().unwrap();
-        let tools = Toolchain::for_matrix(&directory.path().join("runtime"), &matrix).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&directory.path().join("runtime"), &matrix)
+                .unwrap();
         let mut failures = vec![];
         for (name, source) in [
             (

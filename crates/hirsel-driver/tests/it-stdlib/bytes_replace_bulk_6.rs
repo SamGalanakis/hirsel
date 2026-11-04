@@ -3,6 +3,7 @@
 //! (BSD-3-Clause; third-party/NOTICES.md). Empty old fails SEM-3 in Hirsel.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::{Path, PathBuf};
 
 struct Program(PathBuf);
@@ -150,7 +151,7 @@ fn interpret(path: &Path) -> RunOutcome {
     )
     .unwrap_or_else(|error| panic!("{error}"))
 }
-fn native(path: &Path, backend: native::Backend) -> RunOutcome {
+fn native(path: &Path, backend: hirsel_native::Backend) -> RunOutcome {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let outcome = native::run_path_native_backend_with_validation(
@@ -170,7 +171,7 @@ fn native(path: &Path, backend: native::Backend) -> RunOutcome {
             stderr: &mut stderr,
         },
         hirsel_driver::session::Policy::default(),
-        native::Validation::EveryStage,
+        hirsel_native::Validation::EveryStage,
     )
     .unwrap()
     .unwrap();
@@ -198,14 +199,14 @@ fn interpreter_vectors() {
 fn llvm_vectors() {
     with_compiler_stack(|| {
         let p = Program::new("llvm", &vectors());
-        ok(native(&p.0, native::Backend::Llvm));
+        ok(native(&p.0, hirsel_native::Backend::Llvm));
     });
 }
 #[test]
 fn cranelift_vectors() {
     with_compiler_stack(|| {
         let p = Program::new("cranelift", &vectors());
-        ok(native(&p.0, native::Backend::Cranelift));
+        ok(native(&p.0, hirsel_native::Backend::Cranelift));
     });
 }
 #[test]
@@ -220,8 +221,8 @@ fn empty_old_fails() {
             );
             for outcome in [
                 interpret(&p.0),
-                native(&p.0, native::Backend::Llvm),
-                native(&p.0, native::Backend::Cranelift),
+                native(&p.0, hirsel_native::Backend::Llvm),
+                native(&p.0, hirsel_native::Backend::Cranelift),
             ] {
                 assert!(
                     matches!(outcome, RunOutcome::Failed { primary: hirsel_run_schema::Failure { ref rule, .. }, .. } if rule.as_str() == "SEM-3"),
@@ -262,13 +263,17 @@ fn heap_failure_cleanup_and_backing() {
             loaded.check_for_execution().unwrap();
             let input = loaded.engine.export_native_input().unwrap();
             let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-            let ready = native::build(
+            let ready = hirsel_native_batch::build(
                 &validated,
-                &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
             )
             .unwrap();
-            let run =
-                native::heap_campaign(&ready, &loaded.entry, &native::Sites::new(&input)).unwrap();
+            let run = hirsel_native_testing::heap_campaign(
+                &ready,
+                &loaded.entry,
+                &hirsel_native::Sites::new(&input),
+            )
+            .unwrap();
             assert_eq!(run.observation.exit_code, Some(0));
             assert_eq!(run.counters.live_heap_bytes, 0);
             assert_eq!(run.counters.allocations, run.counters.frees);
@@ -307,19 +312,23 @@ pub fn main() -> Result[(), ()] {
 "#;
         let p = Program::new("low-memory", source);
         ok(interpret(&p.0));
-        ok(native(&p.0, native::Backend::Llvm));
-        ok(native(&p.0, native::Backend::Cranelift));
+        ok(native(&p.0, hirsel_native::Backend::Llvm));
+        ok(native(&p.0, hirsel_native::Backend::Cranelift));
         let mut loaded = load_program(&p.0).unwrap();
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
-        let run =
-            native::heap_campaign(&ready, &loaded.entry, &native::Sites::new(&input)).unwrap();
+        let run = hirsel_native_testing::heap_campaign(
+            &ready,
+            &loaded.entry,
+            &hirsel_native::Sites::new(&input),
+        )
+        .unwrap();
         assert_eq!(run.observation.exit_code, Some(0));
         assert_eq!(run.counters.live_heap_bytes, 0);
         eprintln!(

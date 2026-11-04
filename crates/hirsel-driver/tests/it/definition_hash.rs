@@ -3,6 +3,7 @@
 //! names, and identical definitions share a hash wherever they live.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_proof_export::{CallSiteKind, DefinitionContent};
 use hirsel_syntax::ContentHash;
 use hirsel_types::SignatureKind;

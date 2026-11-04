@@ -1,7 +1,8 @@
-use hirsel_driver::{compiler_adapters, native};
+use hirsel_driver::native;
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_lir::ahead::{Refusal, ScalarGraph, scalar_graph};
 use hirsel_syntax::ContentHash;
 
@@ -13,8 +14,10 @@ fn analyze(source: &str, name: &str) -> Result<ScalarGraph, Refusal> {
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-        let ready = native::build(&validated, &native::Options::new(target.clone())).unwrap();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+        let ready =
+            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
+                .unwrap();
         let root = ready
             .units
             .iter()
@@ -100,9 +103,9 @@ fn scalar_alternate_loop_ir() {
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let program = native::build(
+        let program = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
         let units = program.units.iter().collect::<Vec<_>>();

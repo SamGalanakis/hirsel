@@ -1,13 +1,16 @@
 //! Explicit immutable request selection shared by fresh and resident callers.
 //! The engine installs factories; these descriptors select operations and never
 //! accept caller-supplied tasks, caches, verifier receipts or mutable programs.
-use crate::native::{BuildOptions, LaunchInputs, TargetSpec, Validation};
 use hirsel_engine::{
     LoweringPolicy,
     loader_inputs::{
         DirectoryEntry, FrozenInputs, InputKind, LoaderInputs, namespace::NamespaceLease,
     },
 };
+use hirsel_native::BuildOptions;
+use hirsel_native::LaunchInputs;
+use hirsel_native::TargetSpec;
+use hirsel_native::Validation;
 use hirsel_syntax::DefPath;
 use std::io;
 use std::path::PathBuf;
@@ -37,8 +40,8 @@ mod source_graph;
 mod tir_products;
 pub use output::{
     CompileInspection, CompileOutput, CompileResult, CompilerReadiness, DefinitionWork,
-    NativeExecution, NativeObjectOutput, NativeObservation, NativeReady, PrecomputedSources,
-    RequestWork, TirBatchExecution, TirExecution, TirProducts,
+    NativeExecution, NativeObjectOutput, NativeReady, PrecomputedSources, RequestWork,
+    TirBatchExecution, TirExecution, TirProducts,
 };
 pub use ownership_selection::{OwnershipExecution, OwnershipObjects};
 pub(crate) use selector::host_budget;
@@ -238,7 +241,7 @@ pub struct NativeRequest {
     pub fuel: bool,
     /// Independently assessed source evidence; its selected discharge policy
     /// participates in native actions, never a launch-time fallback.
-    pub evidence: Option<std::sync::Arc<crate::native::Evidence>>,
+    pub evidence: Option<std::sync::Arc<hirsel_native::Evidence>>,
 }
 
 /// Immutable source input, never a body, task, or validation capability.
@@ -271,3 +274,5 @@ pub enum NativeOutput {
     /// validated execution view (`NativeReady`); no Codegen or Link runs.
     Ready,
 }
+
+use hirsel_native::NativeObservation;

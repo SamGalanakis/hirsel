@@ -1,18 +1,25 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::ResultStore, *};
-use native::queries::{
-    ARENA_CANDIDATES_KIND, ARENA_CHOSEN_KIND, INSTANCE_KIND, READY_KIND,
-    arena_tasks::{ARENA_GRAPH_KIND, ArenaTaskFactory, ArenaTasks},
-    declarations::NativeDeclarations,
-    instance::CALLABLE_VALUE_KIND,
-    instance_tasks::{
-        CALLABLE_GRAPH_KIND, DISCOVERY_KIND, INSTANCE_INPUT_KIND, InstanceTaskFactory,
-        InstanceTasks,
-    },
-    products::{EmissionOptions, NativeSnapshot},
-    source_inputs::NativeInstanceInputs,
-    tasks::{NativeTaskFactory, NativeTasks},
-};
+use hirsel_front_phases::*;
+use hirsel_native::query_model::ARENA_CANDIDATES_KIND;
+use hirsel_native::query_model::ARENA_CHOSEN_KIND;
+use hirsel_native::query_model::CALLABLE_VALUE_KIND;
+use hirsel_native::query_model::INSTANCE_KIND;
+use hirsel_native::query_model::READY_KIND;
+use hirsel_native_cache::declarations::NativeDeclarations;
+use hirsel_native_cache::source_inputs::NativeInstanceInputs;
+use hirsel_native_queries::arena_tasks::ARENA_GRAPH_KIND;
+use hirsel_native_queries::arena_tasks::ArenaTaskFactory;
+use hirsel_native_queries::arena_tasks::ArenaTasks;
+use hirsel_native_queries::instance_tasks::CALLABLE_GRAPH_KIND;
+use hirsel_native_queries::instance_tasks::DISCOVERY_KIND;
+use hirsel_native_queries::instance_tasks::INSTANCE_INPUT_KIND;
+use hirsel_native_queries::instance_tasks::InstanceTaskFactory;
+use hirsel_native_queries::instance_tasks::InstanceTasks;
+use hirsel_native_queries::products::EmissionOptions;
+use hirsel_native_queries::products::NativeSnapshot;
+use hirsel_native_queries::tasks::NativeTaskFactory;
+use hirsel_native_queries::tasks::NativeTasks;
 use std::{
     sync::{Arc, atomic::Ordering},
     task::Poll,
@@ -62,7 +69,7 @@ fn native_ready_tasks_reuse_specialized_callable_dependencies_without_materializ
         false,
         false,
         false,
-        native::Validation::Ready,
+        hirsel_native::Validation::Ready,
         store::VerifyStore::Off,
         0,
         0,
@@ -85,7 +92,10 @@ fn native_ready_tasks_preserve_actual_materialized_adapter_inventory_on_cold_and
 }
 #[test]
 fn every_stage_recomputes_instance_and_ready_hits_in_fresh_snapshots() {
-    for validation in [native::Validation::Ready, native::Validation::EveryStage] {
+    for validation in [
+        hirsel_native::Validation::Ready,
+        hirsel_native::Validation::EveryStage,
+    ] {
         ready_case_policy(
             "fn other()->u64{9u64}\npub fn main()->u64{7u64}",
             false,
@@ -104,7 +114,7 @@ fn explicit_store_verification_recomputes_instance_hits_under_boundary_validatio
         false,
         false,
         false,
-        native::Validation::Ready,
+        hirsel_native::Validation::Ready,
         store::VerifyStore::Recompute,
     );
 }
@@ -115,7 +125,7 @@ pub(super) fn ready_case(source: &str, adapter: bool, missing_inventory: bool, a
         adapter,
         missing_inventory,
         assemble,
-        native::Validation::Ready,
+        hirsel_native::Validation::Ready,
         store::VerifyStore::Off,
     );
 }
@@ -127,7 +137,7 @@ fn ownership_ready_query_keeps_value_identities_and_refuses_stale_dependencies()
         false,
         false,
         false,
-        native::Validation::Ready,
+        hirsel_native::Validation::Ready,
         store::VerifyStore::Off,
         1,
     );
@@ -140,7 +150,7 @@ fn ownership_compilation_root_discovers_source_and_arena_before_diagnostics() {
         false,
         false,
         false,
-        native::Validation::Ready,
+        hirsel_native::Validation::Ready,
         store::VerifyStore::Off,
         3,
     );
@@ -153,7 +163,7 @@ fn ownership_graph_binding_emits_original_value_plans_on_both_backends() {
         false,
         false,
         false,
-        native::Validation::Ready,
+        hirsel_native::Validation::Ready,
         store::VerifyStore::Off,
         4,
     );
@@ -164,7 +174,7 @@ fn ready_case_policy(
     adapter: bool,
     missing_inventory: bool,
     assemble: bool,
-    validation: native::Validation,
+    validation: hirsel_native::Validation,
     verify_store: store::VerifyStore,
 ) {
     ready_case_inner(
@@ -184,7 +194,7 @@ fn ready_case_inner(
     adapter: bool,
     missing_inventory: bool,
     assemble: bool,
-    validation: native::Validation,
+    validation: hirsel_native::Validation,
     verify_store: store::VerifyStore,
     ownership: u8,
 ) {
@@ -207,7 +217,7 @@ fn ready_case_inner_mutation(
     adapter: bool,
     missing_inventory: bool,
     assemble: bool,
-    validation: native::Validation,
+    validation: hirsel_native::Validation,
     verify_store: store::VerifyStore,
     ownership: u8,
     mutation: u8,
@@ -223,9 +233,9 @@ fn ready_case_inner_mutation(
         let target = hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu();
         let policy =
             hirsel_syntax::ContentHash::of_bytes(b"native demand task current source control");
-        let mut options = native::Options::new(target.clone());
+        let mut options = hirsel_native::Options::new(target.clone());
         options.validation = validation;
-        let recompute = validation == native::Validation::EveryStage;
+        let recompute = validation == hirsel_native::Validation::EveryStage;
         let recompute_instances = recompute || verify_store == store::VerifyStore::Recompute;
         let mut expected = None;
         for fresh in [false, true] {
@@ -355,8 +365,9 @@ fn ready_case_inner_mutation(
                 runtime.register(kind, arena_factory.clone()).unwrap();
             }
             if ownership == 3 {
-                use native::queries::ownership_compilation::OwnershipCompilation;
-                use native::queries::ownership_tasks::{OWNERSHIP_READY_KIND, OWNERSHIP_ROOT_KIND};
+                use hirsel_native_queries::ownership_compilation::OwnershipCompilation;
+                use hirsel_native_queries::ownership_tasks::OWNERSHIP_READY_KIND;
+                use hirsel_native_queries::ownership_tasks::OWNERSHIP_ROOT_KIND;
                 let compilation = OwnershipCompilation::new(
                     tasks.clone(),
                     arenas.clone(),
@@ -381,7 +392,8 @@ fn ready_case_inner_mutation(
                 let factories = compilation.factories();
                 assert_eq!(tasks.imports.load(Ordering::Relaxed), 0);
                 for (kind, factory) in factories {
-                    if kind == native::queries::ownership_compilation::OWNERSHIP_COMPILATION_KIND
+                    if kind
+                        == hirsel_native_queries::ownership_compilation::OWNERSHIP_COMPILATION_KIND
                         || kind == OWNERSHIP_READY_KIND
                         || kind == OWNERSHIP_ROOT_KIND
                     {
@@ -515,8 +527,10 @@ fn ready_case_inner_mutation(
             }
             let snapshot = snapshot.unwrap();
             if ownership == 1 {
-                use hirsel_lir::ownership_trace::{Kind, native::LeafPlan};
-                use native::queries::{NativeProducts, products::DemandProducts};
+                use hirsel_lir::ownership_trace::Kind;
+                use hirsel_lir::ownership_trace::native::LeafPlan;
+                use hirsel_native::query_model::NativeProducts;
+                use hirsel_native_queries::products::DemandProducts;
                 let mut products = DemandProducts::new(snapshot.clone());
                 // Settle an ordinary Ready hit first: it must never replace
                 // the Value producer and every checked diagnostic recipe.
@@ -621,9 +635,9 @@ fn ready_case_inner_mutation(
                 ready_runtime.register(kind, ready_factory.clone()).unwrap();
             }
             if ownership == 2 || ownership == 4 {
-                use native::queries::ownership_tasks::{
-                    OWNERSHIP_READY_KIND, OWNERSHIP_ROOT_KIND, OwnershipTasks,
-                };
+                use hirsel_native_queries::ownership_tasks::OWNERSHIP_READY_KIND;
+                use hirsel_native_queries::ownership_tasks::OWNERSHIP_ROOT_KIND;
+                use hirsel_native_queries::ownership_tasks::OwnershipTasks;
                 let roots = OwnershipTasks::new(
                     ready_tasks.clone(),
                     MemoryWeight {
@@ -727,8 +741,9 @@ fn ready_case_inner_mutation(
                         )
                     });
                 }
-                use native::queries::NativeProducts;
-                let mut products = native::queries::products::DemandProducts::new(snapshot.clone());
+                use hirsel_native::query_model::NativeProducts;
+                let mut products =
+                    hirsel_native_queries::products::DemandProducts::new(snapshot.clone());
                 let selected = tasks
                     .completed_instances((result[0]).clone())
                     .unwrap()
@@ -808,7 +823,7 @@ fn original_inventory_mutation(mutation: u8) {
         true,
         true,
         false,
-        native::Validation::Ready,
+        hirsel_native::Validation::Ready,
         store::VerifyStore::Off,
         0,
         mutation,

@@ -1,6 +1,7 @@
 //! Compile and execute the published Markdown, with handwritten value oracles.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 const RECIPES: &str = include_str!("../../../../docs/std-api-recipes.md");
@@ -72,24 +73,25 @@ fn recipe(name: &str) {
             "{name}: {:?}",
             reference.outcome
         );
-        let expected = native::Observation::of_reference(reference.observation.as_ref().unwrap());
+        let expected =
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
         assert_eq!(expected.exit_code, Some(0));
         assert!(expected.output.is_empty());
         assert!(expected.failures.is_empty());
         // Reachable export/import independently validates the execution input.
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
-        let sites = native::Sites::new(validated.snapshot());
-        let heap = native::run_heap_in(
+        let sites = hirsel_native::Sites::new(validated.snapshot());
+        let heap = hirsel_native_testing::run_heap_in(
             &ready,
             &loaded.entry,
             &sites,
-            &native::HeapWorld {
+            &hirsel_native_testing::HeapWorld {
                 steps: Some(1_000_000),
                 ..Default::default()
             },

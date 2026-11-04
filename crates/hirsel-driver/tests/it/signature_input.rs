@@ -1,6 +1,7 @@
 //! Owner bodies validate against the private signature input of their own package.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_span::Span;
 use hirsel_tir::*;
 use hirsel_types::{Destination, Primitive, SignatureKind, Type, TypeKind, UseKind};

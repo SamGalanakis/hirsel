@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 
-CASE = "native::object_queries::runtime::tests::equal_bytes_keep_distinct_loaded_libraries_and_shared_aliases"
+CASE = "object_queries::runtime::tests::equal_bytes_keep_distinct_loaded_libraries_and_shared_aliases"
 
 
 def command(arguments, environment):

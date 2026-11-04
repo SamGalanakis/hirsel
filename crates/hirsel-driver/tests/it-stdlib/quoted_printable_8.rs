@@ -1,6 +1,7 @@
 //! Go binary writer/compatible reader vectors plus independent byte and offset controls.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn check(name: &str, cases: usize) {
@@ -39,47 +40,50 @@ fn check(name: &str, cases: usize) {
             "{name}: {:?}",
             reference.outcome
         );
-        let expected = native::Observation::of_reference(reference.observation.as_ref().unwrap());
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let expected =
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let configs = vec![
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Heap { campaign: false },
+                engine: hirsel_native_testing::Engine::Heap { campaign: false },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
         let dir =
             PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("quoted-printable-8-{name}"));
-        let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &configs).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs).unwrap();
         let mut ready = crate::native_ready::supplier(&path, None, &loaded.entry, &tools).unwrap();
-        for (config, outcome) in native::differential_ready(
+        for (config, outcome) in hirsel_native_testing::differential_ready(
             &mut ready,
             &loaded.entry,
             &expected,
             &configs,
             &tools,
             &dir,
-            &native::Fixture {
+            &hirsel_native::Fixture {
                 steps: Some(20_000_000),
                 ..Default::default()
             },
         ) {
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{name}: {config}: {outcome:?}"
             );
         }

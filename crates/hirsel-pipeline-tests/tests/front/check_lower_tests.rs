@@ -11,7 +11,7 @@ fn copies_of_flat_indexed_elements_remain_copies_across_iterations() {
     ] {
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let file = engine
             .sources
@@ -39,7 +39,7 @@ fn scoped_captures_retain_external_origins_without_duplicate_owner_slots() {
     ] {
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let file = engine.sources.add("capture.hir", source.into()).unwrap();
         let diagnostics =

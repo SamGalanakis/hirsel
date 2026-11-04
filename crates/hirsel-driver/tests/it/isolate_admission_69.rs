@@ -1,8 +1,10 @@
 //! Generated isolate cleanup keeps its closure and protected result until catch.
 use super::runtime50_continuation::ready;
 use super::runtime50_resume::{compact_runs_with, exact_compact_custody};
-use hirsel_driver::native::{self, Backend, Partition};
+use hirsel_driver::native;
 use hirsel_engine::with_compiler_stack;
+use hirsel_native::Backend;
+use hirsel_native::Partition;
 
 const CAPTURE_RESULT: &str = r#"
 resource type Guard { output: Stdout, n: u64 }
@@ -48,8 +50,8 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 fn physical(tasks: &str) {
     with_compiler_stack(|| {
         let program = ready(CAPTURE_RESULT);
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let wrappers: Vec<_> = plans
             .plans
             .values()
@@ -151,13 +153,13 @@ fn isolate_cleanup_cancellation_preserves_failure_and_capture_disposal() {
     with_compiler_stack(|| {
         eprintln!("isolate cancellation: source and plans");
         let program = ready(CANCELED);
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         assert!(plans.plans.values().any(|p| p.isolate.is_some()));
         eprintln!("isolate cancellation: reference, heap, native and replay");
         super::runtime50_resume::agree_on(
             CANCELED,
-            &native::Fixture::default(),
+            &hirsel_native::Fixture::default(),
             "isolate canceled",
             true,
             &[false],
@@ -192,8 +194,8 @@ fn isolate_cleanup_source_and_cursor_forgeries_refuse_both_emitters() {
         use hirsel_lir::emission::{EmitInputs, OptLevel};
         let program = ready(CAPTURE_RESULT);
         let units: Vec<_> = program.units.iter().collect();
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let (&body, original) = plans
             .plans
             .iter()
@@ -310,7 +312,7 @@ fn isolate_cleanup_source_and_cursor_forgeries_refuse_both_emitters() {
                 _ => unreachable!(),
             }
             assert!(
-                native::continuation::validate(&program, &bad).is_err(),
+                hirsel_native::continuation::validate(&program, &bad).is_err(),
                 "mutation {mutation}"
             );
             emit(&bad, false);
@@ -322,20 +324,20 @@ fn isolate_cleanup_source_and_cursor_forgeries_refuse_both_emitters() {
 fn isolate_cleanup_source_edits_invalidate_cached_continuation_evidence() {
     with_compiler_stack(|| {
         let original = ready(CAPTURE_RESULT);
-        let original_plans = native::continuation::plans(&original);
-        native::continuation::validate(&original, &original_plans).unwrap();
+        let original_plans = hirsel_native::continuation::plans(&original);
+        hirsel_native::continuation::validate(&original, &original_plans).unwrap();
         assert!(original_plans.plans.values().any(|p| p.isolate.is_some()));
         let changed = ready(&CAPTURE_RESULT.replacen(
             "failure.check(false, Bounds())",
             "failure.check(false, Arithmetic())",
             1,
         ));
-        let changed_plans = native::continuation::plans(&changed);
-        native::continuation::validate(&changed, &changed_plans).unwrap();
+        let changed_plans = hirsel_native::continuation::plans(&changed);
+        hirsel_native::continuation::validate(&changed, &changed_plans).unwrap();
         assert!(changed_plans.plans.values().any(|p| p.isolate.is_some()));
         assert_ne!(original_plans.identity, changed_plans.identity);
-        assert!(native::continuation::validate(&changed, &original_plans).is_err());
-        assert!(native::continuation::validate(&original, &changed_plans).is_err());
+        assert!(hirsel_native::continuation::validate(&changed, &original_plans).is_err());
+        assert!(hirsel_native::continuation::validate(&original, &changed_plans).is_err());
     });
 }
 
@@ -428,12 +430,12 @@ fn stopped(phase: usize) {
     with_compiler_stack(|| {
         let (source, prefix) = stop_source(phase);
         let program = ready(&source);
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         assert!(plans.plans.values().any(|p| p.isolate.is_some()));
         let observation = super::runtime50_resume::agree_on(
             &source,
-            &native::Fixture {
+            &hirsel_native::Fixture {
                 migrate: true,
                 ..Default::default()
             },
@@ -498,7 +500,7 @@ fn isolate_cancellation_is_observed_and_capture_drop_remains_shielded() {
     with_compiler_stack(|| {
         let observation = super::runtime50_resume::agree_on(
             &canceled_receive_source(),
-            &native::Fixture {
+            &hirsel_native::Fixture {
                 migrate: true,
                 ..Default::default()
             },

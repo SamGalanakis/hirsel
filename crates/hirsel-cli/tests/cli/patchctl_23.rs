@@ -128,7 +128,10 @@ fn patchctl_23_pure_model_checked_heap() {
     .unwrap();
     hirsel_engine::with_compiler_stack(|| {
         use hirsel_driver::native::*;
-        let mut loaded = hirsel_driver::load_program(&package_manifest).unwrap();
+        use hirsel_native::*;
+        use hirsel_native_batch::*;
+        use hirsel_native_testing::*;
+        let mut loaded = hirsel_front_phases::load_program(&package_manifest).unwrap();
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();

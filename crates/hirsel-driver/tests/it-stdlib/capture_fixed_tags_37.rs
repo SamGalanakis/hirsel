@@ -1,13 +1,18 @@
 //! Compare every capture resolver with the unchanged ordered PikeVM.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
-fn fixed_for(backend: Option<native::Backend>, entries: &[&str]) {
+fn fixed_for(backend: Option<hirsel_native::Backend>, entries: &[&str]) {
     fixed_for_mode(backend, entries, None);
 }
 
-fn fixed_for_mode(backend: Option<native::Backend>, entries: &[&str], checked_only: Option<bool>) {
+fn fixed_for_mode(
+    backend: Option<hirsel_native::Backend>,
+    entries: &[&str],
+    checked_only: Option<bool>,
+) {
     with_compiler_stack(|| {
         let temp = tempfile::tempdir().unwrap();
         let path = super::regex_capture_span_17::private_fixture(temp.path(), false);
@@ -109,28 +114,36 @@ macro_rules! fixed_test {
     };
 }
 fixed_test!(vectors_reference_checked, None, "fixed37_vectors");
-fixed_test!(vectors_llvm, Some(native::Backend::Llvm), "fixed37_vectors");
+fixed_test!(
+    vectors_llvm,
+    Some(hirsel_native::Backend::Llvm),
+    "fixed37_vectors"
+);
 fixed_test!(
     vectors_cranelift,
-    Some(native::Backend::Cranelift),
+    Some(hirsel_native::Backend::Cranelift),
     "fixed37_vectors"
 );
 fixed_test!(generated_reference_checked, None, "fixed37_generated");
 fixed_test!(
     generated_llvm,
-    Some(native::Backend::Llvm),
+    Some(hirsel_native::Backend::Llvm),
     "fixed37_generated"
 );
 fixed_test!(
     generated_cranelift,
-    Some(native::Backend::Cranelift),
+    Some(hirsel_native::Backend::Cranelift),
     "fixed37_generated"
 );
 fixed_test!(limits_reference_checked, None, "fixed37_limits");
-fixed_test!(limits_llvm, Some(native::Backend::Llvm), "fixed37_limits");
+fixed_test!(
+    limits_llvm,
+    Some(hirsel_native::Backend::Llvm),
+    "fixed37_limits"
+);
 fixed_test!(
     limits_cranelift,
-    Some(native::Backend::Cranelift),
+    Some(hirsel_native::Backend::Cranelift),
     "fixed37_limits"
 );
 // The combined work cell exceeded RE600. Each engine retains the complete
@@ -162,10 +175,14 @@ fn work_checked_public() {
     fixed_for_mode(None, &["fixed37_work_public"], Some(true));
 }
 
-fixed_test!(work_llvm, Some(native::Backend::Llvm), "fixed37_work");
+fixed_test!(
+    work_llvm,
+    Some(hirsel_native::Backend::Llvm),
+    "fixed37_work"
+);
 fixed_test!(
     work_cranelift,
-    Some(native::Backend::Cranelift),
+    Some(hirsel_native::Backend::Cranelift),
     "fixed37_work"
 );
 
@@ -176,14 +193,17 @@ macro_rules! backtrack_control {
         #[test]
         #[ignore = "bounded recovery selector; original aggregates remain registered"]
         fn $name() {
-            super::regex_backtrack_25::engines_for(Some(native::Backend::$backend), &[$entry]);
+            super::regex_backtrack_25::engines_for(
+                Some(hirsel_native::Backend::$backend),
+                &[$entry],
+            );
         }
     };
 }
 
 // Exercise public package import, nonzero String views and caught callback
 // cleanup on the remaining engines. Corpus already supplies the reference run.
-fn public_case(file: &str, backend: Option<native::Backend>) {
+fn public_case(file: &str, backend: Option<hirsel_native::Backend>) {
     with_compiler_stack(|| {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")

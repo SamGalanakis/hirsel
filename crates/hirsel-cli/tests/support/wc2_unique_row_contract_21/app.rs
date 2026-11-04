@@ -1,9 +1,15 @@
 //! Dogfood of the existing strong element contract; no ownership rule changes.
 use super::super::*;
-use hirsel_driver::native::{
-    Configuration, Engine, Observation, OptLevel, Options, Partition, Runtime, TargetSpec,
-    Toolchain, differential,
-};
+use hirsel_native::Observation;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
+use hirsel_native_testing::Configuration;
+use hirsel_native_testing::Engine;
+use hirsel_native_testing::Runtime;
+use hirsel_native_testing::differential;
 
 const APP: &str = include_str!("../../../../../examples/wc2/main.hir");
 
@@ -89,11 +95,14 @@ fn wc2_contract_original_and_strong_all_engines() {
             engine,
         })
         .collect();
-        let toolchain = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+                .unwrap();
         let mut original = None;
         for (name, source) in [("weak", weak_app()), ("strong", APP.to_owned())] {
             let fixture = Fixture::new("wc2_contract", &driven(&source));
-            let mut program = hirsel_driver::load_program(&fixture.0.join("hirsel.json")).unwrap();
+            let mut program =
+                hirsel_front_phases::load_program(&fixture.0.join("hirsel.json")).unwrap();
             program.check_for_execution().unwrap();
             let mut simulation = hirsel_engine::SimulationConfig::default();
             simulation.grants = ["Io"].map(String::from).into();
@@ -135,7 +144,7 @@ fn wc2_contract_original_and_strong_all_engines() {
             assert_eq!(results.len(), 3);
             for (configuration, outcome) in results {
                 eprintln!("wc2 {name}/{configuration}: {outcome:?}");
-                assert!(matches!(outcome, hirsel_driver::native::Outcome::Agree));
+                assert!(matches!(outcome, hirsel_native_testing::Outcome::Agree));
             }
         }
     });
@@ -198,7 +207,9 @@ fn wc2_contract_error_exits_all_engines() {
             engine,
         })
         .collect();
-        let toolchain = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+                .unwrap();
         for (case, args) in [
             ("flags", r#"["--unknown"]"#),
             ("missing", r#"["--unique", "left", "missing"]"#),
@@ -225,7 +236,7 @@ pub fn main(rt: Io) -> Result[(), AppError] {{
                 let source = driven(&source).replace(DRIVER, &driver);
                 let fixture = Fixture::new("wc2_error_exit", &source);
                 let mut program =
-                    hirsel_driver::load_program(&fixture.0.join("hirsel.json")).unwrap();
+                    hirsel_front_phases::load_program(&fixture.0.join("hirsel.json")).unwrap();
                 program.check_for_execution().unwrap();
                 let mut simulation = hirsel_engine::SimulationConfig::default();
                 simulation.grants = ["Io"].map(String::from).into();
@@ -267,7 +278,7 @@ pub fn main(rt: Io) -> Result[(), AppError] {{
                 assert_eq!(results.len(), 3);
                 for (configuration, outcome) in results {
                     eprintln!("wc2 {case}/{name}/{configuration}: {outcome:?}");
-                    assert!(matches!(outcome, hirsel_driver::native::Outcome::Agree));
+                    assert!(matches!(outcome, hirsel_native_testing::Outcome::Agree));
                 }
             }
         }

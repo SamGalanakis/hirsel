@@ -1,6 +1,8 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
-use native::queries::{declarations::NativeDeclarations, source_inputs::*};
+use hirsel_front_phases::*;
+use hirsel_native_cache::declarations::NativeDeclarations;
+use hirsel_native_cache::source_inputs::*;
 use std::sync::Arc;
 
 #[test]

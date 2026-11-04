@@ -3,10 +3,10 @@
 //! replays. These controls read the Ready units of the whole native pipeline:
 //! the scoped kernel's loops hold no RC instruction, while an escaping
 //! closure and a callee replaced during its arguments keep theirs.
-use hirsel_driver::compiler_adapters;
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_lir::ir::{Inst, LirUnit, Terminator};
 use hirsel_lir::{Ready, TargetSpec};
 
@@ -20,8 +20,8 @@ fn ready(source: &str) -> Vec<LirUnit<Ready>> {
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let raw = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(raw).unwrap();
-        let options = hirsel_driver::native::Options::new(TargetSpec::x86_64_unknown_linux_gnu());
-        hirsel_driver::native::build(&validated, &options)
+        let options = hirsel_native::Options::new(TargetSpec::x86_64_unknown_linux_gnu());
+        hirsel_native_batch::build(&validated, &options)
             .unwrap()
             .raw_units()
     })

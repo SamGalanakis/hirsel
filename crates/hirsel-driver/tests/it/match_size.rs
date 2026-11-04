@@ -1,6 +1,7 @@
 //! Match-specific R4 gate, including arena payloads and shared path retention.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_tir::*;
 use hirsel_types::{SharedPath, Type, TypeId};
 use std::{collections::HashSet, mem::size_of};

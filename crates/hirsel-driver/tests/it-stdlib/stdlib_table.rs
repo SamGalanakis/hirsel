@@ -2,6 +2,7 @@
 //! the real durable store/checksum implementation. Keep them bounded here.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn execute(name: &str) {

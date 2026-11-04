@@ -1,6 +1,7 @@
 //! Source-origin checks cannot be expressed by a conformance program.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_lir::ir::UnitOrigin;
 use std::path::PathBuf;
 
@@ -20,9 +21,9 @@ fn source_codec(name: &str, module: &str, functions: &[&str]) {
             });
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
         for function in functions {
@@ -232,13 +233,13 @@ fn full_gate_deflate_matches_zlib_native() {
             &path,
             hirsel_driver::HostLaunch::empty(),
             None,
-            native::Backend::Llvm,
+            hirsel_native::Backend::Llvm,
             native::Output::Streams {
                 stdout: &mut stdout,
                 stderr: &mut stderr,
             },
             hirsel_driver::session::Policy::default(),
-            native::Validation::EveryStage,
+            hirsel_native::Validation::EveryStage,
         )
         .unwrap()
         .unwrap();
@@ -611,7 +612,10 @@ fn telemetry_limits_agree_on_both_native_backends() {
         // The telemetry corpus cases (SEM-3-telemetry-run, -context-run, SEM-3-log-run)
         // run on both backends in the Cranelift parity set; the limits fixture,
         // past the corpus step budget, runs natively only here.
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let outcome = native::run_path_native_backend_with_validation(
@@ -631,7 +635,7 @@ fn telemetry_limits_agree_on_both_native_backends() {
                     stderr: &mut stderr,
                 },
                 hirsel_driver::session::Policy::default(),
-                hirsel_driver::native::Validation::EveryStage,
+                hirsel_native::Validation::EveryStage,
             )
             .unwrap()
             .unwrap();

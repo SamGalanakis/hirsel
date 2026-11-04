@@ -1,6 +1,7 @@
 //! SEM-4 loans projected loop places, preserving MODE-2 without snapshots.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn vector(name: &str) -> String {
     std::fs::read_to_string(
@@ -13,6 +14,9 @@ fn vector(name: &str) -> String {
 
 fn runtime(source: &str) {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let mut engine = crate::source_std::engine();
     let file = engine
         .sources
@@ -78,7 +82,9 @@ fn runtime(source: &str) {
         .prefix("loop-place-52-")
         .tempdir()
         .unwrap();
-    let toolchain = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+    let toolchain =
+        hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+            .unwrap();
     let outcomes = differential(
         &validated,
         &entry,

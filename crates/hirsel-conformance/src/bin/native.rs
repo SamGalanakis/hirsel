@@ -15,11 +15,22 @@ use hirsel_cli_args::{
     lexopt::{Arg::*, Parser, ValueExt},
     parse_or_exit,
 };
-use hirsel_conformance::native::{self, Case, Class, artifact};
-use hirsel_driver::native::{
-    Configuration, Engine, OptLevel, Options, Outcome, Partition, Runtime, TargetSpec, Toolchain,
-    full_matrix, smoke_matrix, topology_matrix,
-};
+use hirsel_conformance::native;
+use hirsel_conformance::native::Case;
+use hirsel_conformance::native::Class;
+use hirsel_conformance::native::artifact;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
+use hirsel_native_testing::Configuration;
+use hirsel_native_testing::Engine;
+use hirsel_native_testing::Outcome;
+use hirsel_native_testing::Runtime;
+use hirsel_native_testing::full_matrix;
+use hirsel_native_testing::smoke_matrix;
+use hirsel_native_testing::topology_matrix;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -78,7 +89,8 @@ impl Filter {
 }
 
 fn toolchain(matrix: &[Configuration]) -> Result<Toolchain, String> {
-    Toolchain::for_matrix(&native::runtime_cache()?, matrix).map_err(|e| e.to_string())
+    hirsel_native_testing::toolchain_for_matrix(&hirsel_native::runtime_cache()?, matrix)
+        .map_err(|e| e.to_string())
 }
 
 /// `toolchain` launching every executable through the glibc 2.28 floor
@@ -130,7 +142,7 @@ fn generated_cases(seed: u64, count: u64, filter: &Filter) -> Vec<Case> {
 /// executable. A program that calls C or runs under memcheck runs as an executable by design;
 /// any other fallback (an lld error, a refused image) fails the campaign.
 fn runner_counts(campaign: &str) -> bool {
-    let counts = hirsel_driver::native::counts();
+    let counts = hirsel_native::counts();
     let fallbacks: Vec<String> = counts
         .fallbacks
         .iter()
@@ -236,7 +248,7 @@ fn worker_count(explicit: Option<usize>) -> usize {
 /// The interpreter's trace is the reference; optimized LLVM and Cranelift executables on
 /// the diagnostic archive agree only when their traces (and observations) equal it.
 fn trace_roots(root: &Path, jobs: usize, filter: &Filter, hash_seed: u64) -> Result<bool, String> {
-    let matrix = seeded(hirsel_driver::native::trace_roots_matrix(), hash_seed);
+    let matrix = seeded(hirsel_native_testing::trace_roots_matrix(), hash_seed);
     let all = native::baseline(root)?;
     let cases: Vec<Case> = all
         .iter()
@@ -280,7 +292,7 @@ fn trace_roots(root: &Path, jobs: usize, filter: &Filter, hash_seed: u64) -> Res
 /// workers with every task moving to another worker at every suspension. A configuration
 /// agrees only when its observation equals the interpreter's, as without migration.
 fn migrate(root: &Path, jobs: usize, filter: &Filter, hash_seed: u64) -> Result<bool, String> {
-    let matrix = seeded(hirsel_driver::native::migrate_matrix(), hash_seed);
+    let matrix = seeded(hirsel_native_testing::migrate_matrix(), hash_seed);
     let all = native::baseline(root)?;
     let cases: Vec<Case> = all
         .iter()
@@ -442,7 +454,11 @@ fn run() -> Result<bool, String> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| {
-            u64::from_le_bytes(hirsel_driver::COMPILER_IDENTITY[..8].try_into().unwrap())
+            u64::from_le_bytes(
+                hirsel_compiler_identity::COMPILER_IDENTITY[..8]
+                    .try_into()
+                    .unwrap(),
+            )
         });
     let mut engine = None;
     let mut common = CommonOptions::default();
@@ -474,7 +490,7 @@ fn run() -> Result<bool, String> {
                 Long("filter") => filter.0.push(args.value()?.string()?),
                 Long("case") => filter.2.push(args.value()?.string()?),
                 Long("engine") => {
-                    use hirsel_driver::native::Runtime;
+                    use hirsel_native_testing::Runtime;
                     let (class, runtime) = match args.value()?.string()?.as_str() {
                         "heap" => (Class::Heap, None),
                         "llvm" => (Class::Llvm, None),
@@ -639,7 +655,7 @@ fn run() -> Result<bool, String> {
         "--std-compile" => {
             let started = std::time::Instant::now();
             let mut surface =
-                hirsel_driver::native::StdSurface::load(&root.join("stdlib/std@1/hirsel.json"))?;
+                hirsel_native_batch::StdSurface::load(&root.join("stdlib/std@1/hirsel.json"))?;
             for name in &surface.compile_time {
                 eprintln!(
                     "std compile: {name}: comptime generator: native generated body for NativeCoverageSample {{ count: u64, name: String, flag: bool }}"
@@ -997,7 +1013,8 @@ fn cranelift(
 
 /// `--cranelift-times`: emission wall time per case and backend, and the totals.
 fn cranelift_times(root: &Path, jobs: usize, filter: &Filter) -> Result<bool, String> {
-    use native::cranelift::{self, BACKENDS};
+    use native::cranelift;
+    use native::cranelift::BACKENDS;
     let mut cases = cranelift::cases(root)?;
     cases.retain(|c| filter.keeps(&c.id));
     let times = std::sync::Mutex::new(Vec::new());
@@ -1061,14 +1078,14 @@ fn cranelift_times(root: &Path, jobs: usize, filter: &Filter) -> Result<bool, St
 #[derive(Clone, Copy)]
 struct Selected {
     class: Class,
-    runtime: Option<hirsel_driver::native::Runtime>,
+    runtime: Option<hirsel_native_testing::Runtime>,
 }
 
 impl Selected {
     fn keeps(self, c: &Configuration) -> bool {
         Class::of(c) == self.class
             && self.runtime.is_none_or(|r| {
-                matches!(c.engine, hirsel_driver::native::Engine::Native { runtime, .. } if runtime == r)
+                matches!(c.engine, hirsel_native_testing::Engine::Native { runtime, .. } if runtime == r)
             })
     }
 }
@@ -1448,7 +1465,11 @@ fn hash_sweep(root: &Path, jobs: usize, filter: &Filter, hash_seed: u64) -> Resu
 /// of a freed slab slot or a reset token, a read past a reservation and a use
 /// after a region or arena exits, with regions, as `hirsel run --native` ships.
 fn sanitize_matrix(hash_seed: u64) -> Vec<Configuration> {
-    use hirsel_driver::native::{Engine, OptLevel, Options, Partition, Runtime};
+    use hirsel_native::OptLevel;
+    use hirsel_native::Options;
+    use hirsel_native::Partition;
+    use hirsel_native_testing::Engine;
+    use hirsel_native_testing::Runtime;
     let mut matrix = Vec::new();
     for (runtime, regions) in [
         (Runtime::System, true),
@@ -1473,7 +1494,10 @@ fn sanitize_matrix(hash_seed: u64) -> Vec<Configuration> {
 }
 
 fn hash_sweep_matrix(hash_seed: u64) -> Vec<Configuration> {
-    use hirsel_driver::native::{Engine, OptLevel, Partition, Runtime};
+    use hirsel_native::OptLevel;
+    use hirsel_native::Partition;
+    use hirsel_native_testing::Engine;
+    use hirsel_native_testing::Runtime;
     seeded(
         full_matrix()
             .into_iter()
@@ -1498,7 +1522,10 @@ mod tests {
     use super::*;
     #[test]
     fn memcheck_runs_whole_x86_executables_on_the_system_and_memcheck_archives() {
-        use hirsel_driver::native::{Engine, OptLevel, Partition, Runtime};
+        use hirsel_native::OptLevel;
+        use hirsel_native::Partition;
+        use hirsel_native_testing::Engine;
+        use hirsel_native_testing::Runtime;
         let matrix = sanitize_matrix(0);
         let names: Vec<_> = matrix.iter().map(Configuration::name).collect();
         assert_eq!(names.len(), 6, "{names:?}");
@@ -1653,17 +1680,17 @@ mod tests {
             assert!(c.options.regions && c.options.elide && c.options.reuse && c.options.flat_walk);
             assert_eq!(
                 c.options.launch,
-                hirsel_driver::native::LaunchInputs {
+                hirsel_native::LaunchInputs {
                     hash_seed: 1,
                     ..Default::default()
                 }
             );
             assert!(matches!(
                 c.engine,
-                hirsel_driver::native::Engine::Native {
-                    opt: hirsel_driver::native::OptLevel::Speed,
-                    partition: hirsel_driver::native::Partition::Whole,
-                    runtime: hirsel_driver::native::Runtime::Default
+                hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Default
                 }
             ));
         }

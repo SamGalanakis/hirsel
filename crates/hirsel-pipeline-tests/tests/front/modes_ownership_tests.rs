@@ -10,7 +10,7 @@ fn dependent_getters_preserve_selected_arena_placements() {
     ] {
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let file = engine.sources.add("getter.hir", source.into()).unwrap();
         let diagnostics =
@@ -25,7 +25,7 @@ fn iteration_bindings_use_element_evidence_instead_of_container_uniqueness() {
     use hirsel_engine::DefinitionQueries;
     let mut engine = hirsel_engine::QueryEngine::new(
         hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
+        hirsel_front_phases::compiler_adapters(),
     );
     let source = "resource type Token { number:u8 }\ndrop(x) {}\nfn probe() { let xs:Array[Token]=[Token(number:1u8)]; for item in take xs { let _ = take item } }";
     let context = hirsel_engine::default_context();
@@ -48,7 +48,7 @@ fn nested_generic_plain_bound_cannot_copy_a_mixed_outer_payload() {
     let source = "fn outer[T:copyable](x:T)->(){fn inner[U:plain](take y:U)->(){let pair=(copy x,y);let a=pair;let b=pair};()}";
     let mut engine = hirsel_engine::QueryEngine::new(
         hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
+        hirsel_front_phases::compiler_adapters(),
     );
     let context = hirsel_engine::default_context();
     let file = engine.sources.add("mixed.hir", source.into()).unwrap();
@@ -76,7 +76,7 @@ fn a_value_borrowed_on_any_path_is_published_as_a_borrow() {
     let source = "fn one(s:String)->u64 {1}\nfn probe(s:String,xs:Array[String],n:u64)->u64 {one(if n==0 {s} else {\"other\"})+one(if n==0 {\"other\"} else {s})+one(match n {0=>\"x\",_=>s})+one(match n {0=>s,_=>\"x\"})+one({xs}[0])+one(if n==0 {\"a\"} else {\"b\"})}";
     let mut engine = hirsel_engine::QueryEngine::new(
         hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
+        hirsel_front_phases::compiler_adapters(),
     );
     let context = hirsel_engine::default_context();
     let file = engine.sources.add("joins.hir", source.into()).unwrap();
@@ -138,7 +138,7 @@ fn exclusive_and_moving_operands_cannot_be_borrowed_computed_values() {
         );
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let context = hirsel_engine::default_context();
         let file = engine.sources.add("operand.hir", source.clone()).unwrap();
@@ -171,7 +171,7 @@ fn destructured_parts_keep_physical_modes_and_receive_deep_uniqueness() {
     let source = "type Rec {items:Bytes,n:u64}\nfn probe(take r:unique Rec)->Bytes {let Rec(items:items,..)=take r\n take items}";
     let mut engine = hirsel_engine::QueryEngine::new(
         hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
+        hirsel_front_phases::compiler_adapters(),
     );
     let context = hirsel_engine::default_context();
     let file = engine.sources.add("parts.hir", source.into()).unwrap();
@@ -229,7 +229,7 @@ fn every_step_over_a_computed_root_publishes_its_physical_row() {
     let source = "type R{name:String}\nfn view(x:String)->String in x{copy x}\nfn probe(s:String)->u64{let xs:List[R]=[R(name:view(s))]\n string.byte_len((fn(){xs})()[0].name)}";
     let mut engine = hirsel_engine::QueryEngine::new(
         hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
+        hirsel_front_phases::compiler_adapters(),
     );
     let context = hirsel_engine::default_context();
     let file = engine.sources.add("computed.hir", source.into()).unwrap();
@@ -285,7 +285,7 @@ fn physical_pattern_modes_are_distinct_from_the_bound_values_modes() {
     ] {
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let context = hirsel_engine::default_context();
         let file = engine.sources.add("physical.hir", source.into()).unwrap();
@@ -386,7 +386,7 @@ fn local_temporary_views_require_a_receiving_lexical_scope() {
         let source = format!("fn view(x:Bytes)->Bytes in x{{copy x}}\n{body}");
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let context = hirsel_engine::default_context();
         let file = engine
@@ -430,7 +430,7 @@ fn constant_field_receipts_preserve_the_physical_declaration() {
         );
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let context = hirsel_engine::default_context();
         let file = engine
@@ -490,7 +490,7 @@ fn illegal_taken_result_origins_reach_the_declaration_diagnostic() {
     ] {
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let context = hirsel_engine::default_context();
         let file = engine

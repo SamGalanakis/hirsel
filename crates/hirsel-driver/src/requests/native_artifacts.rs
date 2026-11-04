@@ -1,7 +1,10 @@
 //! Oracle artifacts depend on the accepted export and ordinary native producers.
-use super::{host_selector, native_assembly::NativeAssembly, proof_export::ProofExport};
-use crate::native::{Backend, object_queries};
+use super::host_selector;
+use super::native_assembly::NativeAssembly;
+use super::proof_export::ProofExport;
 use hirsel_engine::{CheckCompletion, ToolError, runtime::*, store::*};
+use hirsel_native::Backend;
+use hirsel_native::object_queries;
 use hirsel_syntax::ContentHash;
 use std::{
     collections::BTreeMap,

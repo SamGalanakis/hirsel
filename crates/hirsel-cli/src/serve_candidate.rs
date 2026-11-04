@@ -1,10 +1,11 @@
 //! Structured serial candidates on the existing resident socket. Framing is
 //! serve.rs's bounded split-frame JSON, without the chg descriptor adapter.
 use super::*;
-use hirsel_driver::candidate::{
-    CandidateWorkspace, Limits,
-    protocol::{self, Connection, FRAME_BYTES},
-};
+use hirsel_candidate::CandidateWorkspace;
+use hirsel_candidate::Limits;
+use hirsel_candidate::protocol;
+use hirsel_candidate::protocol::Connection;
+use hirsel_candidate::protocol::FRAME_BYTES;
 use serde_json::{Value, json};
 
 pub(super) const MAGIC: &[u8; 4] = b"HRC1";

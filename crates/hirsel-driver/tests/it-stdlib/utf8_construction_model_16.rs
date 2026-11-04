@@ -3,6 +3,7 @@
 //! independently checked before any Hirsel source is generated (NOTICES.md).
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -205,20 +206,21 @@ fn all_engines(name: &str, source: Option<&str>, failure: bool, campaign: bool) 
     }
     let observation = reference.observation.as_ref().unwrap();
     assert!(observation.output.is_empty());
-    let expected = native::Observation::of_reference(observation);
+    let expected = hirsel_native::Observation::of_reference(observation);
     let input = loaded.engine.export_native_input().unwrap();
     let validated = loaded.engine.import_native_input(input).unwrap();
-    let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
-    let ready = native::build(&validated, &options).unwrap();
-    let sites = native::Sites::new(validated.snapshot());
-    let world = native::HeapWorld {
+    let options =
+        hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+    let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+    let sites = hirsel_native::Sites::new(validated.snapshot());
+    let world = hirsel_native_testing::HeapWorld {
         steps: Some(100_000_000),
         ..Default::default()
     };
     let heap = if campaign {
-        native::heap_campaign_in(&ready, &loaded.entry, &sites, &world).unwrap()
+        hirsel_native_testing::heap_campaign_in(&ready, &loaded.entry, &sites, &world).unwrap()
     } else {
-        native::run_heap_in(&ready, &loaded.entry, &sites, &world).unwrap()
+        hirsel_native_testing::run_heap_in(&ready, &loaded.entry, &sites, &world).unwrap()
     };
     assert_eq!(heap.observation, expected);
     assert_eq!(heap.counters.live_heap_bytes, 0);
@@ -230,27 +232,27 @@ fn all_engines(name: &str, source: Option<&str>, failure: bool, campaign: bool) 
         heap.counters.allocations, heap.sites
     );
     let configs = [
-        native::Configuration {
+        hirsel_native_testing::Configuration {
             options: options.clone(),
-            engine: native::Engine::Native {
-                opt: native::OptLevel::None,
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            engine: hirsel_native_testing::Engine::Native {
+                opt: hirsel_native::OptLevel::None,
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         },
-        native::Configuration {
+        hirsel_native_testing::Configuration {
             options: options.clone(),
-            engine: native::Engine::Native {
-                opt: native::OptLevel::Default,
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            engine: hirsel_native_testing::Engine::Native {
+                opt: hirsel_native::OptLevel::Default,
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         },
-        native::Configuration {
+        hirsel_native_testing::Configuration {
             options,
-            engine: native::Engine::Cranelift {
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            engine: hirsel_native_testing::Engine::Cranelift {
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         },
     ];
@@ -258,9 +260,10 @@ fn all_engines(name: &str, source: Option<&str>, failure: bool, campaign: bool) 
         .prefix("utf8-construction-model-16-")
         .tempdir_in(Path::new(env!("CARGO_TARGET_TMPDIR")))
         .unwrap();
-    let tools = native::Toolchain::for_matrix(&dir.path().join("runtime"), &configs).unwrap();
+    let tools =
+        hirsel_native_testing::toolchain_for_matrix(&dir.path().join("runtime"), &configs).unwrap();
     let mut count = 0;
-    for (config, outcome) in native::differential(
+    for (config, outcome) in hirsel_native_testing::differential(
         &validated,
         &loaded.entry,
         &expected,
@@ -269,7 +272,7 @@ fn all_engines(name: &str, source: Option<&str>, failure: bool, campaign: bool) 
         dir.path(),
     ) {
         assert!(
-            matches!(outcome, native::Outcome::Agree),
+            matches!(outcome, hirsel_native_testing::Outcome::Agree),
             "{name}: {config}: {outcome:?}"
         );
         count += 1;

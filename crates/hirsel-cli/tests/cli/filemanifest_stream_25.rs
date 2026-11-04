@@ -162,7 +162,7 @@ fn receipt(vector: &Vector, engine: &str, projection: &Value) {
     let row = check_hashes(vector);
     eprintln!(
         "FILEMANIFEST_STREAM_25 {}",
-        json!({"id":vector.id,"engine":engine,"selected":1,"started":1,"completed":1,"passed":1,"failed":0,"unrun":0,"input_sha256":row["input_sha256"],"expected_sha256":row["expected_sha256"],"source_sha256":hash(include_bytes!("../../../../examples/filemanifest/main.hir")),"compiler":hirsel_driver::COMPILER_IDENTITY,"projection":projection})
+        json!({"id":vector.id,"engine":engine,"selected":1,"started":1,"completed":1,"passed":1,"failed":0,"unrun":0,"input_sha256":row["input_sha256"],"expected_sha256":row["expected_sha256"],"source_sha256":hash(include_bytes!("../../../../examples/filemanifest/main.hir")),"compiler":hirsel_compiler_identity::COMPILER_IDENTITY,"projection":projection})
     );
 }
 // Each canonical argument is length-prefixed. The Path is argument 1;
@@ -228,7 +228,7 @@ fn simulated(caps: bool) {
     hirsel_engine::with_compiler_stack(|| {
         let root = scratch();
         let selection = package(&root);
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded.check_for_execution().unwrap();
         let config = RunConfiguration {
             entry: loaded.entry.clone(),

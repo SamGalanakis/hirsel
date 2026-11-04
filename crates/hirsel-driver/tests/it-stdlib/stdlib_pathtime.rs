@@ -1,6 +1,7 @@
 //! Chrono-free independent integer/calendar vectors for ordinary std source.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_lir::ir::UnitOrigin;
 use std::{collections::BTreeSet, path::PathBuf};
 

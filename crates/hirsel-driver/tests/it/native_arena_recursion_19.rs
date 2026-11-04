@@ -1,15 +1,19 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::ResultStore, *};
-use native::queries::{
-    ARENA_CANDIDATES_KIND, ARENA_CHOSEN_KIND, INSTANCE_KIND,
-    arena_tasks::{ARENA_GRAPH_KIND, ArenaTaskFactory, ArenaTasks},
-    instance::CALLABLE_VALUE_KIND,
-    instance_tasks::{
-        CALLABLE_GRAPH_KIND, DISCOVERY_KIND, INSTANCE_INPUT_KIND, InstanceTaskFactory,
-        InstanceTasks,
-    },
-    source_inputs::NativeSourceProvider,
-};
+use hirsel_front_phases::*;
+use hirsel_native::query_model::ARENA_CANDIDATES_KIND;
+use hirsel_native::query_model::ARENA_CHOSEN_KIND;
+use hirsel_native::query_model::CALLABLE_VALUE_KIND;
+use hirsel_native::query_model::INSTANCE_KIND;
+use hirsel_native_cache::source_inputs::NativeSourceProvider;
+use hirsel_native_queries::arena_tasks::ARENA_GRAPH_KIND;
+use hirsel_native_queries::arena_tasks::ArenaTaskFactory;
+use hirsel_native_queries::arena_tasks::ArenaTasks;
+use hirsel_native_queries::instance_tasks::CALLABLE_GRAPH_KIND;
+use hirsel_native_queries::instance_tasks::DISCOVERY_KIND;
+use hirsel_native_queries::instance_tasks::INSTANCE_INPUT_KIND;
+use hirsel_native_queries::instance_tasks::InstanceTaskFactory;
+use hirsel_native_queries::instance_tasks::InstanceTasks;
 use std::{
     collections::BTreeMap,
     sync::{Arc, atomic::Ordering},
@@ -89,8 +93,9 @@ fn observe(store: Arc<dyn ResultStore>, text: &str, fresh: bool, jobs: usize) ->
     };
     // This witness measures ordinary production hits. EveryStage deliberately
     // reconstructs warm Values and has its own recomputation control.
-    let mut options = native::Options::new(hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu());
-    options.validation = native::Validation::Ready;
+    let mut options =
+        hirsel_native::Options::new(hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu());
+    options.validation = hirsel_native::Validation::Ready;
     let tasks = InstanceTasks::new(
         inputs,
         store.clone(),
@@ -177,7 +182,7 @@ fn observe(store: Arc<dyn ResultStore>, text: &str, fresh: bool, jobs: usize) ->
             "the actual two-node SCC must remain one component in each stratum"
         );
     }
-    let rows = |summaries: &[Arc<native::queries::ArenaSummary>]| {
+    let rows = |summaries: &[Arc<hirsel_native::query_model::ArenaSummary>]| {
         summaries
             .iter()
             .flat_map(|summary| {

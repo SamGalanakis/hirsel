@@ -1,6 +1,7 @@
 //! Bounded shadow oracle: explicit graph edits plus fresh checked executions.
-use hirsel_driver::{compiler_adapters, testing::impact::*};
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
+use hirsel_project_info::impact::*;
 use hirsel_run_schema::ProgramNode;
 use hirsel_syntax::ContentHash;
 use std::collections::{BTreeMap, BTreeSet};
@@ -515,6 +516,9 @@ fn source_finalizer_private_representation_generator_and_callable_matrix() {
 #[test]
 fn source_native_and_interpreter_fresh_observations_agree() {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let config = Configuration {
             options: Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
@@ -526,7 +530,8 @@ fn source_native_and_interpreter_fresh_observations_agree() {
         let matrix = [config];
         let root =
             std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("shadow-test-impact-native");
-        let toolchain = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         for (index, source) in [
             PURE.to_owned(),
             PURE.replacen("{ 1u64 }", "{ 3u64 }", 1),

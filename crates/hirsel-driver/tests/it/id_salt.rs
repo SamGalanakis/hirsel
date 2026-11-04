@@ -1,6 +1,7 @@
 //! Oracle O1's salt half: what the compiler prints does not depend on how
 //! session ids (Symbol, DefId) were assigned. Each salt runs in its own process.
 use hirsel_driver::*;
+use hirsel_front_phases::*;
 use std::path::{Path, PathBuf};
 
 /// Every 149th corpus program in path order: a fixed sample across every chapter.

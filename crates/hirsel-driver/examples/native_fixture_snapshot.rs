@@ -2,10 +2,10 @@
 
 hirsel_guard::install!();
 
-use hirsel_driver::compiler_adapters;
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_lir::validate::{Inputs, validate};
 use hirsel_lir::{LayoutTable, LirUnit, Rc, Ready, TargetSpec};
 use hirsel_rc::instance::InstanceId;
@@ -21,8 +21,8 @@ fn main() {
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let raw = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(raw).unwrap();
-        let program = hirsel_driver::native::program(&validated);
-        let manifest = hirsel_driver::native::manifest(validated.snapshot()).unwrap();
+        let program = hirsel_native::program(&validated);
+        let manifest = hirsel_native::manifest(validated.snapshot()).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
         let lower = hirsel_rc::import::lower(&program, &target).unwrap();
         let operations = lower.operation_registry(&program);
@@ -67,8 +67,7 @@ fn main() {
         )
         .unwrap();
         let built =
-            hirsel_driver::native::build(&validated, &hirsel_driver::native::Options::new(target))
-                .unwrap();
+            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target)).unwrap();
         let ready: hirsel_heapcheck::Program<Ready> = built.heap_program();
         std::fs::write(
             format!("{}.ready.lir", arguments[1]),

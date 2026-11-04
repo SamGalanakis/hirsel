@@ -1,6 +1,6 @@
 //! Explicit CT-5 registration rounds, independent of the host bootstrap.
-use hirsel_driver::COMPILER;
 use hirsel_engine::{runtime::*, store::MemStore, *};
+use hirsel_front_phases::COMPILER;
 use std::sync::Arc;
 
 const SOURCE: &str = r#"
@@ -1036,7 +1036,9 @@ fn instance_bootstrap_keeps_ordinary_failure_local_until_selected_front_demand()
 
 #[test]
 fn source_requests_install_nested_instance_views_for_check_run_and_native_ownership() {
-    use hirsel_driver::{native, requests::*, resident::ObservedSession};
+    use hirsel_driver::native;
+    use hirsel_driver::requests::*;
+    use hirsel_driver::resident::ObservedSession;
     with_compiler_stack(|| {
         for jobs in [1, 2] {
             let directory = tempfile::tempdir().unwrap();
@@ -1164,8 +1166,8 @@ fn source_requests_install_nested_instance_views_for_check_run_and_native_owners
                 .request(CompileOperation::NativeOwnership(OwnershipRequest {
                     selection: hirsel_lir::ownership_trace::Selection::Resources,
                     definition: None,
-                    target: native::TargetSpec::x86_64_unknown_linux_gnu(),
-                    validation: native::Validation::EveryStage,
+                    target: hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                    validation: hirsel_native::Validation::EveryStage,
                     launch: Default::default(),
                     fuel: false,
                 }))

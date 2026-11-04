@@ -50,7 +50,8 @@ fn watchfiles_27_scripted_interpreter_and_checked_h() {
         assert!(oracle.status.success(), "{oracle:?}");
         let cases: Vec<serde_json::Value> = serde_json::from_slice(&oracle.stdout).unwrap();
         assert_eq!(cases.len(), 12);
-        let mut loaded = hirsel_driver::load_program(&scratch.path().join("hirsel.json")).unwrap();
+        let mut loaded =
+            hirsel_front_phases::load_program(&scratch.path().join("hirsel.json")).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|error| panic!("{error}"));
@@ -180,7 +181,8 @@ fn watchfiles_27_real_files() {
 fn watchfiles_27_argument_and_snapshot_boundaries() {
     hirsel_engine::with_compiler_stack(|| {
         let scratch = prepare(false);
-        let mut loaded = hirsel_driver::load_program(&scratch.path().join("hirsel.json")).unwrap();
+        let mut loaded =
+            hirsel_front_phases::load_program(&scratch.path().join("hirsel.json")).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|error| panic!("{error}"));
@@ -293,7 +295,8 @@ fn watchfiles_27_argument_and_snapshot_boundaries() {
 fn watchfiles_27_clock_errors_and_overflow() {
     hirsel_engine::with_compiler_stack(|| {
         let scratch = prepare(false);
-        let mut loaded = hirsel_driver::load_program(&scratch.path().join("hirsel.json")).unwrap();
+        let mut loaded =
+            hirsel_front_phases::load_program(&scratch.path().join("hirsel.json")).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|error| panic!("{error}"));

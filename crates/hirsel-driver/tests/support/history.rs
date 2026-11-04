@@ -1,7 +1,11 @@
 //! Test-only shared runner for bounded ownership, placement, cleanup and scalar histories.
 //! Uses only public driver adapters; unavailable tools never count as agreement.
-use hirsel_driver::{compiler_adapters, native::*};
+use hirsel_driver::native::*;
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,7 +202,8 @@ impl Runner {
 
     pub fn with_matrix(directory: &Path, matrix: Vec<Configuration>) -> Result<Self, NativeError> {
         std::fs::create_dir_all(directory).unwrap();
-        let mut toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix)?;
+        let mut toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix)?;
         toolchain.launch_timeout = std::time::Duration::from_secs(60);
         Ok(Self {
             matrix,

@@ -1,13 +1,16 @@
 //! Compiled laws inspect the private index directly; source has no bucket API.
-use hirsel_driver::compiler_adapters;
 use hirsel_driver::native::*;
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_lir::layout::sequence_elements_offset;
 use hirsel_lir::layout_types::{
     FieldLayout, LayoutId, LayoutKind, LayoutTable, ScalarKind, SizeSpec,
 };
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 
 /// Reuse seed.c's private context seed injection and exit audit for mixed traces.
 pub(super) fn model_seed_harness(source: &str, traces: &[super::map_seed_model_16::model::Trace]) {
@@ -16,7 +19,7 @@ pub(super) fn model_seed_harness(source: &str, traces: &[super::map_seed_model_1
     with_compiler_stack(|| {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../hirsel-driver/tests/fixtures/std_source/main.hir");
-        let mut loaded = hirsel_driver::load_program_source(&path, Some(source)).unwrap();
+        let mut loaded = hirsel_front_phases::load_program_source(&path, Some(source)).unwrap();
         loaded.check_for_execution().unwrap_or_else(|e| match e {
             hirsel_engine::ToolError::Query { error, .. } => panic!("{error:?}"),
             e => panic!("{e}"),

@@ -1,6 +1,7 @@
 //! CLO-2/CLO-4: selectors bind to each callable's own declaration slots.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn check(source: &str, expected: Option<&str>) {
     with_compiler_stack(|| {

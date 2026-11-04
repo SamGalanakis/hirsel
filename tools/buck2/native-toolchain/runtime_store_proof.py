@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 
-CASE = "native::object_queries::runtime::tests::actual_runtime_products_reopen_changed_leaf_versions_and_refuse_missing_closure"
+CASE = "object_queries::runtime::tests::actual_runtime_products_reopen_changed_leaf_versions_and_refuse_missing_closure"
 
 
 def command(arguments, environment):

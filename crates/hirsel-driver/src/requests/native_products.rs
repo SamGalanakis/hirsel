@@ -1,9 +1,13 @@
 //! Build readiness over the bootstrap's exact completed native dependency
 //! scope. Reopening descriptors and publishing an executable invoke no source,
 //! Instance, Ready or Codegen producer and convey no new V/C authority.
-use super::{NativeExecution, NativeRequest, native_bootstrap::NativeBootstrap};
-use crate::native::{self, NativeError, StageName, object_queries};
+use super::NativeExecution;
+use super::NativeRequest;
+use super::native_bootstrap::NativeBootstrap;
 use hirsel_engine::{FrontNativeProducts, runtime::ProductRef, store::ResultStore};
+use hirsel_native::NativeError;
+use hirsel_native::StageName;
+use hirsel_native::object_queries;
 use hirsel_syntax::{ContentHash, DefId};
 use std::sync::{Arc, Mutex};
 
@@ -11,7 +15,7 @@ struct OutputOwner {
     _allowance: hirsel_engine::runtime::MemoryReservation,
     _directory: tempfile::TempDir,
     _bootstrap: Arc<NativeBootstrap>,
-    _compilation: Arc<native::queries::compilation_tasks::CompilationTasks>,
+    _compilation: Arc<hirsel_native_queries::compilation_tasks::CompilationTasks>,
     _source: Arc<FrontNativeProducts>,
     _platform: Arc<super::native_link::FrozenPlatform>,
 }
@@ -22,7 +26,7 @@ pub(super) struct NativeBuildReadiness {
     bootstrap: Arc<NativeBootstrap>,
     request: NativeRequest,
     store: Arc<dyn ResultStore>,
-    toolchain: Arc<native::Toolchain>,
+    toolchain: Arc<hirsel_native::Toolchain>,
     platform: Option<Arc<super::native_link::FrozenPlatform>>,
     completed: Mutex<Option<Arc<NativeExecution>>>,
     objects: Mutex<Option<Arc<super::NativeObjectOutput>>>,
@@ -32,7 +36,7 @@ impl NativeBuildReadiness {
     pub fn new(
         bootstrap: Arc<NativeBootstrap>,
         request: NativeRequest,
-        toolchain: Arc<native::Toolchain>,
+        toolchain: Arc<hirsel_native::Toolchain>,
         platform: Option<Arc<super::native_link::FrozenPlatform>>,
     ) -> Result<Self, NativeError> {
         let store = bootstrap.selected_store();
@@ -299,7 +303,7 @@ impl NativeBuildReadiness {
 
 /// Canonical identity of selected evidence: every record field in sidecar
 /// order and the trusted checkers. Equal identities assess equal sidecars.
-pub(super) fn evidence_identity(evidence: &native::Evidence) -> ContentHash {
+pub(super) fn evidence_identity(evidence: &hirsel_native::Evidence) -> ContentHash {
     let records = evidence
         .records
         .iter()

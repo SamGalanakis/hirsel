@@ -322,7 +322,7 @@ resolves `LLVM_SYS_231_PREFIX` and each variable of
 `HIRSEL_VALGRIND_RUNTIME`, `HIRSEL_LINK_KIT`, `HIRSEL_GLIBC_FLOOR`: a path inside
 one toolchain) to absolute input paths before changing directory;
 `bench/native/suite.py` sets the same table. The driver links with the input
-`ld.lld` and the link kit's line (`crates/hirsel-driver/src/native/kit.rs`),
+`ld.lld` and the link kit's line (`crates/hirsel-native/src/kit.rs`),
 never a compiler driver. Native launches preserve the selected
 Valgrind support directory when clearing the child's environment.
 

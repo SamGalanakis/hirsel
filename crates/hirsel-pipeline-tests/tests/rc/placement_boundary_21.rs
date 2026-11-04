@@ -6,6 +6,9 @@
 use crate::rc_support::{self as support, history};
 use hirsel_driver::native::*;
 use hirsel_lir::ir::{Inst, Placement, StorageOwner, ValueRepr};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 
 const PRELUDE: &str = r#"
 type Empty {}
@@ -189,8 +192,8 @@ fn matrix() -> Vec<Configuration> {
 
 #[test]
 fn generated_siblings_all_engines() {
-    use hirsel_driver::compiler_adapters;
     use hirsel_engine::*;
+    use hirsel_front_phases::compiler_adapters;
     let directory =
         std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("placement-boundary-21");
     let runner = history::Runner::with_matrix(&directory, matrix())

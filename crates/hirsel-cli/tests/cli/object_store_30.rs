@@ -100,7 +100,8 @@ fn scripted(boundaries: bool) {
         let manifest = package(root);
         let cases = oracle(root);
         tool_seal(root);
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded =
+            hirsel_front_phases::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));

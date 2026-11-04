@@ -66,7 +66,8 @@ fn cron_state_30_reference_checked() {
     hirsel_engine::with_compiler_stack(|| {
         let temp = scratch();
         let selection = package(temp.path());
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded =
+            hirsel_front_phases::load_program(&selection).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -387,10 +388,13 @@ fn cron_state_30_ordered_cranelift() {
 #[ignore = "full gate: original application audit"]
 fn full_gate_cron_state_30_public_fixture_witness() {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     hirsel_engine::with_compiler_stack(|| {
         let temp = scratch();
         let selection = package(temp.path());
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -412,7 +416,11 @@ fn full_gate_cron_state_30_public_fixture_witness() {
                 },
             },
         ];
-        let tools = Toolchain::for_matrix(&temp.path().join("runtime"), &configurations).unwrap();
+        let tools = hirsel_native_testing::toolchain_for_matrix(
+            &temp.path().join("runtime"),
+            &configurations,
+        )
+        .unwrap();
         // This is the independently fixed pending-config observation, already
         // completed on R/H. No helper program replaces the actual main entry.
         let expected = Observation {
@@ -465,6 +473,9 @@ fn full_gate_cron_state_30_public_fixture_witness() {
 #[test]
 fn cron_state_30_crash_boundaries() {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     hirsel_engine::with_compiler_stack(|| {
         let temp = scratch();
         let selection = package(temp.path());
@@ -480,7 +491,8 @@ fn cron_state_30_crash_boundaries() {
             .push(json!({"path":"crash.hir","module":[]}));
         manifest["entry"]["name"] = json!("crash_trial");
         fs::write(&selection, manifest.to_string()).unwrap();
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded =
+            hirsel_front_phases::load_program(&selection).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -532,7 +544,9 @@ fn cron_state_30_crash_boundaries() {
                 },
             },
         ];
-        let tools = Toolchain::for_matrix(&temp.path().join("runtime"), &matrix).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&temp.path().join("runtime"), &matrix)
+                .unwrap();
         let fixture = Fixture {
             steps: Some(STEPS),
             ..Default::default()

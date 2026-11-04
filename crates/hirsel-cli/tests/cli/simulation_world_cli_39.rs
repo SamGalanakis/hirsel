@@ -237,7 +237,7 @@ fn simulation_world_cli_39_worlds_match_typed_and_real_cli() {
             let world_path = scratch.path().join(format!("{id}.json"));
             fs::write(&world_path, fixture_text(id)).unwrap();
             let mut loaded =
-                hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{id}: {e}"));
+                hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{id}: {e}"));
             loaded
                 .check_for_execution()
                 .unwrap_or_else(|e| panic!("{id}: {e}"));

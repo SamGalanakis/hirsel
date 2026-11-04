@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 #[test]
 #[ignore = "full gate"]
 fn full_gate_deepest_supported_sources_lower_and_validate_successfully() {

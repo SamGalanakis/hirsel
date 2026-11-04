@@ -4,7 +4,10 @@ use hirsel_engine::{
 };
 
 fn checked(source: &str) -> QueryEngine {
-    let mut engine = QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+    let mut engine = QueryEngine::new(
+        default_environment(),
+        hirsel_front_phases::compiler_adapters(),
+    );
     let file = engine
         .sources
         .add("generic-result.hir", source.into())
@@ -67,7 +70,10 @@ fn generic_result_v_21_source_and_validation_agree() {
 #[test]
 fn generic_result_v_21_unbounded_retained_still_requires_cleanup_bound() {
     let source = "@noalloc fn wrap[R](read:@noalloc fn()->R uses {}, divisor:u64)->R uses {}{let output=read();let _=1u64/divisor;take output}";
-    let mut engine = QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+    let mut engine = QueryEngine::new(
+        default_environment(),
+        hirsel_front_phases::compiler_adapters(),
+    );
     let file = engine.sources.add("unbounded.hir", source.into()).unwrap();
     let ds = match check_snapshot(&mut engine, file, &default_context()) {
         Ok(ds) | Err(hirsel_types::QueryError::Diagnostics(ds)) => ds,
@@ -86,6 +92,9 @@ fn generic_result_v_21_unbounded_retained_still_requires_cleanup_bound() {
 fn generic_result_v_21_matches_reference_h_llvm_cranelift() {
     use hirsel_driver::native::*;
     use hirsel_engine::{RunConfiguration, run_observed_snapshot, with_compiler_stack};
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         options.validation = Validation::EveryStage;
@@ -112,7 +121,9 @@ fn generic_result_v_21_matches_reference_h_llvm_cranelift() {
         ];
         let directory =
             std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("generic-result-v-21");
-        let toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix)
+                .unwrap();
         let mut agreements = 0;
         for failure in [false, true] {
             let mut source = String::from("type Packet[T]=Packet(T)\n");

@@ -3,11 +3,15 @@
 //! alloc postcondition, so the uniqueness tests and the release fold, and the
 //! allocation goes with its free, as clang deletes C's malloc/free pair. A list
 //! that is returned keeps its allocation.
-use hirsel_driver::compiler_adapters;
-use hirsel_driver::native::{OptLevel, Options, TargetSpec, build, emit_ir};
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::TargetSpec;
+use hirsel_native::emit_ir;
+use hirsel_native_batch::build;
 
 const KERNEL: &str = "pub type Resource { id: u8, closed: bool }
 pub fn kernel(n: u64) -> u64 {

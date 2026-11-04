@@ -1,7 +1,9 @@
 use crate::*;
-use hirsel_driver::requests::{
-    CompileOperation, CompileOutput, CompileRequest, CompileResult, CompilerRequests,
-};
+use hirsel_driver::requests::CompileOperation;
+use hirsel_driver::requests::CompileOutput;
+use hirsel_driver::requests::CompileRequest;
+use hirsel_driver::requests::CompileResult;
+use hirsel_driver::requests::CompilerRequests;
 use hirsel_engine::{QueryError, ToolError};
 
 struct RequestedProgram {
@@ -46,7 +48,7 @@ impl RequestedProgram {
 pub(crate) fn verifying_compiler() -> hirsel_engine::Compiler {
     let config = hirsel_engine::CompileConfig::default();
     let cache_bytes = usize::try_from(config.hold_bytes).unwrap_or(usize::MAX);
-    hirsel_driver::COMPILER.with_config(hirsel_engine::CompileConfig {
+    hirsel_front_phases::COMPILER.with_config(hirsel_engine::CompileConfig {
         retention: hirsel_engine::memo::Retention::Batch,
         store: std::sync::Arc::new(
             hirsel_engine::store::MemStore::bounded(cache_bytes).with_installed_products(),

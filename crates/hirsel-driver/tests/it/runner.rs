@@ -4,16 +4,31 @@
 //! observation record, on both targets and backends, for consecutive runs of one server. A
 //! failure before the program's code ran is a tooling outcome, and a program with a
 //! foreign-call surface runs as an executable.
-use hirsel_driver::compiler_adapters;
-use hirsel_driver::native::{
-    Backend, Execution, Launched, Mode, OptLevel, Options, Partition, ReadyProgram, Runnable,
-    RuntimeBuild, Tape, TargetSpec, Toolchain, build, counts, emit_backend_objects,
-    launch_runnable, link_objects, link_runnable, runner,
-};
 use hirsel_engine::{
     DefPath, QueryEngine, default_context, default_environment, entry_path, source_check_request,
     with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::Backend;
+use hirsel_native::Execution;
+use hirsel_native::Launched;
+use hirsel_native::Mode;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::ReadyProgram;
+use hirsel_native::Runnable;
+use hirsel_native::RuntimeBuild;
+use hirsel_native::Tape;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
+use hirsel_native::counts;
+use hirsel_native::emit_backend_objects;
+use hirsel_native::launch_runnable;
+use hirsel_native::link_objects;
+use hirsel_native::link_runnable;
+use hirsel_native::runner;
+use hirsel_native_batch::build;
 use std::path::{Path, PathBuf};
 
 /// Output without a final newline, then a failure with its exit report.
@@ -256,7 +271,7 @@ fn a_standalone_scalar_preserves_events_with_and_without_dispatch_observers() {
             for backend in [Backend::Llvm, Backend::Cranelift] {
                 let dir = scratch(&format!("scalar-roots/{}-{backend:?}", target.triple));
                 let compiled = compiled(PARTIAL, &target, backend);
-                let executable = hirsel_driver::native::link_standalone_objects(
+                let executable = hirsel_native::link_standalone_objects(
                     &compiled.program,
                     &compiled.entry,
                     &compiled.objects,
@@ -554,16 +569,16 @@ fn failures_before_the_program_runs_are_tooling_outcomes() {
                 ..toolchain.clone()
             };
             // Another runner's image is refused before it is loaded.
-            let foreign = Runnable::Image(hirsel_driver::native::Image {
+            let foreign = Runnable::Image(hirsel_native::Image {
                 runner: diagnostic.clone(),
                 ..image.clone()
             });
             // A damaged image fails to load.
-            let damaged = Runnable::Image(hirsel_driver::native::Image {
+            let damaged = Runnable::Image(hirsel_native::Image {
                 path: truncated.clone(),
                 ..image.clone()
             });
-            let refused = Runnable::Image(hirsel_driver::native::Image {
+            let refused = Runnable::Image(hirsel_native::Image {
                 path: executable.clone(),
                 ..image.clone()
             });
@@ -614,7 +629,7 @@ pub fn main(rt: Io, u: Unsafe) -> Result[(), GrantError] {
             "dependencies":[],
             "unsafe_ffi":{"link":[],"headers_checked":false,"wrappers":[]}});
         std::fs::write(dir.join("hirsel.json"), manifest.to_string()).unwrap();
-        let mut loaded = hirsel_driver::load_program(&dir.join("hirsel.json")).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&dir.join("hirsel.json")).unwrap();
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();

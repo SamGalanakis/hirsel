@@ -17,7 +17,7 @@ fn match_coverage_22_finite_source_truth_tables() {
         let source = case.source();
         let mut engine = QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let file = engine
             .sources
@@ -118,7 +118,7 @@ fn match_coverage_22_enclosing_alternatives_claim_values_first() {
         "type Choice=A(bool)|B\nfn main(x:Choice)->u32{match x{A(false) | A(false | true) | B=>1}}";
     let mut engine = QueryEngine::new(
         hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
+        hirsel_front_phases::compiler_adapters(),
     );
     let file = engine
         .sources

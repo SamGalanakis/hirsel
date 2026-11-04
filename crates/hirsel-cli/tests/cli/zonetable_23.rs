@@ -135,7 +135,7 @@ pub fn main() -> Result[(), ()] uses {} {
             source.replace("TZ_BYTES", &literal),
         )
         .unwrap();
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&manifest).unwrap();
         loaded.check_for_execution().unwrap();
         let config = hirsel_engine::RunConfiguration {
             entry: loaded.entry.clone(),

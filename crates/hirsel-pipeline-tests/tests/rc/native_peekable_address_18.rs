@@ -87,6 +87,9 @@ fn original_cleanup_and_upstream_vectors_on_all_engines() {
     use hirsel_engine::{
         RunConfiguration, SimulationConfig, run_observed_snapshot, with_compiler_stack,
     };
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let options = Options::new(target());
     let matrix: Vec<_> = [
         Engine::Heap { campaign: true },
@@ -114,7 +117,8 @@ fn original_cleanup_and_upstream_vectors_on_all_engines() {
     let directory =
         std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("native-peekable-address-18");
     std::fs::create_dir_all(&directory).unwrap();
-    let toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
+    let toolchain =
+        hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix).unwrap();
     // Original files and sidecars, including exact failure coordinates and
     // ordered finalizer output. No resource is replaced with a plain value.
     let cases: &[(&str, &[u8], bool)] = &[
@@ -148,13 +152,12 @@ fn original_cleanup_and_upstream_vectors_on_all_engines() {
         // A scoped contents view ends before the cached item is transferred.
         ("OWN/OWN-3-iter-peekable-7-scoped-run.hir", b"", false),
     ];
-    let compiler =
-        hirsel_driver::COMPILER
-            .with_owned_engines()
-            .with_config(hirsel_engine::CompileConfig {
-                store: hirsel_engine::store::MemStore::shared(),
-                ..Default::default()
-            });
+    let compiler = hirsel_front_phases::COMPILER
+        .with_owned_engines()
+        .with_config(hirsel_engine::CompileConfig {
+            store: hirsel_engine::store::MemStore::shared(),
+            ..Default::default()
+        });
     let mut executions = 0;
     for &(relative, output, fails) in cases {
         with_compiler_stack(|| {

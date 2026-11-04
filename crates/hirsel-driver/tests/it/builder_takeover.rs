@@ -5,15 +5,22 @@
 //! record is constructed and loses it after, on the normal and the failure path, which C
 //! seals like any unit. Both programs must build the same record as an ordinary list, under
 //! the diagnostic and the production runtime.
-use hirsel_driver::compiler_adapters;
-use hirsel_driver::native::{
-    OptLevel, Options, Partition, ReadyProgram, TargetSpec, Toolchain, build, emit_ir, launch, link,
-};
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, entry_path, source_check_request,
     with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_lir::ir::*;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::ReadyProgram;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
+use hirsel_native::emit_ir;
+use hirsel_native::launch;
+use hirsel_native::link;
+use hirsel_native_batch::build;
 use std::path::PathBuf;
 
 const SOURCE: &str = "flat type Message { id: u64, tags: List[u64], payload: Bytes }

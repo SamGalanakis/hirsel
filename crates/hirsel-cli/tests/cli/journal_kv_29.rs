@@ -58,7 +58,7 @@ fn append_fixture(root: &std::path::Path) -> PathBuf {
 fn journal_kv_29_open_append_reference_checked() {
     hirsel_engine::with_compiler_stack(|| {
         let root = Scratch::new();
-        let mut loaded = hirsel_driver::load_program(&append_fixture(root.path())).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&append_fixture(root.path())).unwrap();
         loaded.check_for_execution().unwrap();
         let config = hirsel_engine::RunConfiguration {
             entry: loaded.entry.clone(),
@@ -205,7 +205,7 @@ fn journal_kv_29_open_append_crash_modes_checked() {
         // The public execution adapter requires a public root entry. Keep the
         // native fixture unchanged and expose only this scratch test selection.
         fs::write(&source, APPEND.replace("@test\nfn ", "@test\npub fn ")).unwrap();
-        let mut loaded = hirsel_driver::load_program(&source).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&source).unwrap();
         loaded.check_for_execution().unwrap();
         for name in ["crash_reopen", "create_still_truncates_and_path_refusals"] {
             let mut entry = loaded.entry.clone();
@@ -390,7 +390,7 @@ fn reference_cases(mut selected: Vec<serde_json::Value>, boundaries: bool) {
     hirsel_engine::with_compiler_stack(|| {
         let root = Scratch::new();
         let selection = app_package(root.path());
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded.check_for_execution().unwrap();
         let config = hirsel_engine::RunConfiguration {
             entry: loaded.entry.clone(),
@@ -587,7 +587,7 @@ fn journal_kv_29_crash_cancellation_integration() {
             .unwrap()
             .push(json!({"path":"integration.hir","module":["checks"]}));
         fs::write(&selection, manifest.to_string()).unwrap();
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded.check_for_execution().unwrap();
         for name in [
             "crash_append_and_compaction",

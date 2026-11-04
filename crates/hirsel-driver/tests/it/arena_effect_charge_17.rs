@@ -1,6 +1,7 @@
 //! MEM-6 histories derived from memory.md, not allocator sizes or runtime results.
-use hirsel_driver::{compiler_adapters, native};
+use hirsel_driver::native;
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
 use hirsel_interp::observation::Effect;
 
 const CORPUS: &str =
@@ -133,7 +134,7 @@ fn file_histories_and_offline_replay() {
         let observed =
             run_observed_snapshot(&mut engine, &run, SimulationConfig::default()).unwrap();
         let observation = observed.observation.as_ref().unwrap();
-        let reference = native::Observation::of_reference(observation);
+        let reference = hirsel_native::Observation::of_reference(observation);
         assert_eq!(reference.exit_code, Some(0), "{:?}", observed.outcome);
         assert!(reference.output.is_empty(), "{:?}", reference.output);
         assert!(reference.failures.is_empty());
@@ -157,44 +158,52 @@ fn file_histories_and_offline_replay() {
         assert_eq!(replay.observation, observed.observation);
 
         let input = engine.export_native_input().unwrap();
-        let sites = native::Sites::new(&input);
+        let sites = hirsel_native::Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-        let ready = native::build(&validated, &native::Options::new(target.clone())).unwrap();
-        let heap = native::run_heap(&ready, &entry, &sites).unwrap();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+        let ready =
+            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
+                .unwrap();
+        let heap = hirsel_native_testing::run_heap(&ready, &entry, &sites).unwrap();
         assert_eq!(heap.observation, reference);
         assert_eq!(heap.counters.live_heap_bytes, 0);
         let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("arena-effect-charge-17");
-        let tools =
-            native::Toolchain::in_tree_diagnostic(&root.join("runtime"), &[&target]).unwrap();
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        let tools = hirsel_native::Toolchain::in_tree_diagnostic(&root.join("runtime"), &[&target])
+            .unwrap();
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let dir = root.join(format!("{backend:?}"));
             std::fs::create_dir_all(&dir).unwrap();
-            let objects = native::emit_backend_objects(
+            let objects = hirsel_native::emit_backend_objects(
                 &ready,
                 backend,
-                native::OptLevel::Speed,
-                native::Partition::Whole,
+                hirsel_native::OptLevel::Speed,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
             .unwrap();
-            let exe = native::link_objects(&ready, &entry, &objects, &tools, &dir).unwrap();
+            let exe = hirsel_native::link_objects(&ready, &entry, &objects, &tools, &dir).unwrap();
             let tape = dir.join("io-tape");
             let _ = std::fs::remove_file(&tape);
-            let live = native::launch_with(
+            let live = hirsel_native::launch_with(
                 &exe,
                 &target,
                 &tools,
                 &dir,
                 true,
-                native::Tape::Live {
+                hirsel_native::Tape::Live {
                     record: Some(&tape),
                     revocations: None,
                 },
             )
             .unwrap();
-            assert_eq!(native::observe(&live, &ready, &sites).unwrap(), reference);
+            assert_eq!(
+                hirsel_native::observe(&live, &ready, &sites).unwrap(),
+                reference
+            );
             let record = hirsel_rt::launch::parse_recording(
                 &hirsel_rt::launch::read_recording_text(&tape).unwrap(),
             )
@@ -208,16 +217,19 @@ fn file_histories_and_offline_replay() {
                 })
                 .collect();
             assert_eq!(actual, requests, "{backend:?}");
-            let replay = native::launch_with(
+            let replay = hirsel_native::launch_with(
                 &exe,
                 &target,
                 &tools,
                 &dir,
                 true,
-                native::Tape::Replay(&tape),
+                hirsel_native::Tape::Replay(&tape),
             )
             .unwrap();
-            assert_eq!(native::observe(&replay, &ready, &sites).unwrap(), reference);
+            assert_eq!(
+                hirsel_native::observe(&replay, &ready, &sites).unwrap(),
+                reference
+            );
         }
     });
 }
@@ -337,16 +349,18 @@ fn stdin_histories_and_offline_replay() {
                 cases.push((
                     data.to_vec(),
                     config.args,
-                    native::Observation::of_reference(observation),
+                    hirsel_native::Observation::of_reference(observation),
                     expected_requests,
                 ));
             }
         }
         let input = engine.export_native_input().unwrap();
-        let sites = native::Sites::new(&input);
+        let sites = hirsel_native::Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-        let ready = native::build(&validated, &native::Options::new(target.clone())).unwrap();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+        let ready =
+            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
+                .unwrap();
         // The production H fixture has EOF-only stdin. Supply a small
         // explicit scripted provider through H's existing Operations seam.
         let heap = ready.heap_program();
@@ -381,22 +395,26 @@ fn stdin_histories_and_offline_replay() {
         }
         let root =
             std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("arena-effect-charge-17-stdin");
-        let tools =
-            native::Toolchain::in_tree_diagnostic(&root.join("runtime"), &[&target]).unwrap();
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        let tools = hirsel_native::Toolchain::in_tree_diagnostic(&root.join("runtime"), &[&target])
+            .unwrap();
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let dir = root.join(format!("{backend:?}"));
             std::fs::create_dir_all(dir.join("root")).unwrap();
-            let objects = native::emit_backend_objects(
+            let objects = hirsel_native::emit_backend_objects(
                 &ready,
                 backend,
-                native::OptLevel::Speed,
-                native::Partition::Whole,
+                hirsel_native::OptLevel::Speed,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
             .unwrap();
-            let exe = native::link_standalone_objects(&ready, &run.entry, &objects, &tools, &dir)
-                .unwrap();
+            let exe =
+                hirsel_native::link_standalone_objects(&ready, &run.entry, &objects, &tools, &dir)
+                    .unwrap();
             let grants = dir.join("grants.json");
             std::fs::write(&grants, r#"{"io":{"stdin":"stdin.bytes@1","stdout":"stdout.bytes@1","tasks":"tasks.cooperative@1","dirs":[]},"args":[]}"#).unwrap();
             for (index, (data, args, expected, requests)) in cases.iter().enumerate() {
@@ -434,7 +452,7 @@ fn stdin_histories_and_offline_replay() {
                         stdin.write_all(data).unwrap();
                     }
                     let output = child.wait_with_output().unwrap();
-                    let launched = native::Launched {
+                    let launched = hirsel_native::Launched {
                         audit_required: true,
                         exit: output.status.code(),
                         signal: None,
@@ -443,7 +461,7 @@ fn stdin_histories_and_offline_replay() {
                         record: std::fs::read_to_string(&record).unwrap(),
                     };
                     assert_eq!(
-                        native::observe(&launched, &ready, &sites).unwrap(),
+                        hirsel_native::observe(&launched, &ready, &sites).unwrap(),
                         *expected,
                         "{backend:?} case={index} replay={replay}"
                     );

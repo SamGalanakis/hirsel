@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 
-CASE = "native::kit::tests::stored_linker_replays_shared_executable_plans_for_both_targets"
+CASE = "kit::tests::stored_linker_replays_shared_executable_plans_for_both_targets"
 
 
 def command(arguments, environment):

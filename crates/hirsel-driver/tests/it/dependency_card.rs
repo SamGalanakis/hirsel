@@ -1,6 +1,7 @@
 use hirsel_driver::CompilerRequestsExt;
-use hirsel_driver::{COMPILER, dependency_card};
 use hirsel_engine::{DefinitionQueries, QueryKind, with_compiler_stack};
+use hirsel_front_phases::COMPILER;
+use hirsel_project_info::dependency_card;
 use serde_json::json;
 use std::path::Path;
 

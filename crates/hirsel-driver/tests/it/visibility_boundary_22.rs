@@ -7,6 +7,7 @@
 //! the public manifest loader; expected answers below use only PROG-2's table.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_syntax::{DefPath, ItemPath, PackageId};
 use serde_json::json;
 

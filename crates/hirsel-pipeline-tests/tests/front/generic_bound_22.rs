@@ -41,8 +41,10 @@ fn generic_bound_22_source_forms_match_bounded_model() {
                 let source = format!(
                     "{declarations}{generic}{dictionary}fn probe(value:{actual},marker:Inline[u8,2])->bool uses {{}} {{{body}}}\npub fn main(){{}}"
                 );
-                let mut engine =
-                    QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+                let mut engine = QueryEngine::new(
+                    default_environment(),
+                    hirsel_front_phases::compiler_adapters(),
+                );
                 let file = engine
                     .sources
                     .add("generic-bound-22.hir", source.clone())

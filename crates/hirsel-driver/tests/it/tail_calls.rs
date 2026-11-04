@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_interp::{Execution, Limits, Outcome, TraceEvent, Value};
 use hirsel_tir::{DefinitionRef, RunConfiguration};
 

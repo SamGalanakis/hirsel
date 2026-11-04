@@ -1,6 +1,9 @@
 //! Full Io+Args entry, independent frozen SQLite/model vectors, immutable tapes.
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, SimulationConfig};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use serde_json::{Value, json};
 use std::{
@@ -192,7 +195,8 @@ fn relation_query_33_reference_checked_vectors() {
     hirsel_engine::with_compiler_stack(|| {
         let root = root("simulation");
         let manifest = package(&root);
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded =
+            hirsel_front_phases::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -304,7 +308,8 @@ fn relation_query_33_full_entry_native_replay() {
             .ok()
             .map(|v| serde_json::from_slice(&v).unwrap())
             .unwrap_or_default();
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded =
+            hirsel_front_phases::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -328,7 +333,8 @@ fn relation_query_33_full_entry_native_replay() {
                 },
             },
         ];
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         // Embed the reviewed helper so remote and host executions use identical bytes.
         tools.wrapper = vec![
             "env".into(),

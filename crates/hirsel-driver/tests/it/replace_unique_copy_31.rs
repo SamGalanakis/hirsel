@@ -1,6 +1,7 @@
 //! A generic deep copy retains source bounds; replace checks receiving storage.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn checked(source: &str) -> QueryEngine {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -15,6 +16,9 @@ fn checked(source: &str) -> QueryEngine {
 
 fn runtime(source: &str) {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let mut engine = checked(source);
     let expected = Observation {
         exit_code: Some(0),
@@ -70,7 +74,9 @@ fn runtime(source: &str) {
         .prefix("replace-unique-copy-31-29-")
         .tempdir()
         .unwrap();
-    let toolchain = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+    let toolchain =
+        hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+            .unwrap();
     let outcomes = differential(
         &validated,
         &entry,

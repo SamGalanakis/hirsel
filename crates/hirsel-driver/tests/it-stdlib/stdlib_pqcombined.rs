@@ -1,6 +1,7 @@
 //! CPython 938144ef Lib/heapq.py:148-169 and Lib/test/test_heapq.py:134-185,243-262.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_interp::observation::Effect;
 use hirsel_lir::ir::UnitOrigin;
 use std::{collections::BTreeSet, path::PathBuf};

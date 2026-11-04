@@ -112,7 +112,7 @@ fn cases(root: &Path, boundaries: bool) -> Vec<Value> {
     assert!(!selected.is_empty(), "zero selected fixtures");
     selected
 }
-fn fixture(case: &Value) -> hirsel_driver::native::Fixture {
+fn fixture(case: &Value) -> hirsel_native::Fixture {
     let mut mounts: BTreeMap<_, _> = [
         ("source".into(), Access::Read),
         ("chunks".into(), Access::ReadWrite),
@@ -147,7 +147,7 @@ fn fixture(case: &Value) -> hirsel_driver::native::Fixture {
     } else {
         Default::default()
     };
-    hirsel_driver::native::Fixture {
+    hirsel_native::Fixture {
         file_faults,
         args: case["args"]
             .as_array()
@@ -381,6 +381,9 @@ fn chunk_backup_31_scripted_native_record_replay() {
     }
     cap_fixture_process();
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     if std::env::var_os("CHUNK_BACKUP_31_PRODUCTION_TAPES").is_some() {
         production_tapes_host_replay();
         return;
@@ -394,7 +397,7 @@ fn chunk_backup_31_scripted_native_record_replay() {
             &root,
             std::env::var_os("CHUNK_BACKUP_31_BOUNDARY").is_some(),
         );
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         check_program(&mut loaded);
         let input = loaded.engine.export_native_input().unwrap();
         let input = loaded.engine.import_native_input(input).unwrap();
@@ -416,7 +419,8 @@ fn chunk_backup_31_scripted_native_record_replay() {
                 },
             },
         ];
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.wrapper = vec![
             "/usr/bin/env".into(),
             "PATH=/usr/bin:/bin".into(),

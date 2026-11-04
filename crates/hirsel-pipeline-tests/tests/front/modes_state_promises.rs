@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn check(source: &str, expected: Option<&str>) {
     with_compiler_stack(|| {

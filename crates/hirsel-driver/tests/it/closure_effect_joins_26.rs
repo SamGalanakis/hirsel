@@ -4,6 +4,7 @@
 //! determine these finite expectations; no Koka handler semantics are used.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn checked(id: &str, source: &str, expected: Option<&str>) -> QueryEngine {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -506,6 +507,9 @@ fn closure_effect_joins_26_source_40() {
 
 fn runtime(index: usize, allocates: bool) {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let c = &CASES[index];
     let mut engine = checked(c.id, c.source, None);
     // The finite source model expects scalar 37; main maps only that to exit 0.
@@ -577,7 +581,9 @@ fn runtime(index: usize, allocates: bool) {
         .prefix("closure-effect-joins-26-")
         .tempdir()
         .unwrap();
-    let toolchain = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+    let toolchain =
+        hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+            .unwrap();
     let outcomes = differential(
         &validated,
         &entry,

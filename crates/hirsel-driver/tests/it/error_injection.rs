@@ -3,6 +3,7 @@
 //! the `? Arm` it replaces, and unconstructed private error arms warn.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},

@@ -211,10 +211,10 @@ fn callback_recipe_c_rejects_dispatch_and_both_events_erased() {
 fn callback_recipe_h_rejects_dispatch_and_both_events_erased() {
     hirsel_engine::with_compiler_stack(|| {
         let program = support::compile(CALLBACK_SOURCE);
-        let ready = hirsel_driver::native::build_program(
+        let ready = hirsel_native_batch::build_program(
             &program,
             support::manifest(&program),
-            &hirsel_driver::native::Options::new(support::target()),
+            &hirsel_native::Options::new(support::target()),
         )
         .unwrap();
         let mut heap = hirsel_heapcheck::Program {
@@ -515,10 +515,10 @@ pub fn main()->Result[(),()] {
  Ok(())
 }"#;
         let program = support::compile(source);
-        let ready = hirsel_driver::native::build_program(
+        let ready = hirsel_native_batch::build_program(
             &program,
             support::manifest(&program),
-            &hirsel_driver::native::Options::new(support::target()),
+            &hirsel_native::Options::new(support::target()),
         )
         .unwrap();
         assert!(

@@ -7,9 +7,9 @@
 //!
 //! Connections run on their own threads; the callee runs run one at a time on the calling
 //! thread, which owns the program. A cancellation a caller forwards reaches the running
-//! callee through its [`ExternalCancel`](crate::network::ExternalCancel).
-use crate::network::{CancelHandle, ExternalCancel};
+//! callee through its [`ExternalCancel`](hirsel_host_io::ExternalCancel).
 use crate::{HostLaunch, ToolError};
+use hirsel_host_io::{CancelHandle, ExternalCancel};
 use hirsel_remote::frame::Call;
 use hirsel_remote::host::{
     ABANDONED, Action, Caller, Host, Limits, Place, Refusal, RunId, SessionId, Start,
@@ -149,7 +149,7 @@ pub fn serve(
     let entries = input.entries.clone();
     let runtime = input.runtime.clone();
     let wire = Arc::new(
-        crate::network::remote_wire(&runtime, config.frame_bytes())
+        hirsel_host_io::remote_wire(&runtime, config.frame_bytes())
             .map_err(|e| host_error("the frame codec", e))?,
     );
     let fresh: [u8; 16] = hirsel_rt::io::RandomSource::System

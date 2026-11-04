@@ -2,6 +2,7 @@
 use crate::image_fixture::*;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_syntax::{DefId, DefPath, ItemPath};
 #[path = "../support/canonical_debug.rs"]
 mod canonical_debug;

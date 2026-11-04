@@ -1,6 +1,7 @@
 //! The public GEN-5 classifier must preserve the old ordered diagnostic sites.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_span::{Anchor, Span};
 use hirsel_syntax::{DefId, DefPath, LexicalOwner, StmtId};
 use hirsel_types::{NameSite, SizeParamId, SizeParameterRef, TypeParamId, TypeParameterRef};

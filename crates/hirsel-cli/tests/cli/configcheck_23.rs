@@ -104,6 +104,7 @@ fn configcheck_23_cli_three_engines_and_independent_oracles() {
 fn configcheck_23_pure_reference_vectors_checked_h() {
     use hirsel_driver::*;
     use hirsel_engine::*;
+    use hirsel_front_phases::*;
 
     with_compiler_stack(|| {
         let scratch = package();
@@ -135,16 +136,16 @@ fn configcheck_23_pure_reference_vectors_checked_h() {
         assert_eq!(plain.observation, checked.observation);
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
-        let heap = native::run_heap_in(
+        let heap = hirsel_native_testing::run_heap_in(
             &ready,
             &loaded.entry,
-            &native::Sites::new(validated.snapshot()),
-            &native::HeapWorld {
+            &hirsel_native::Sites::new(validated.snapshot()),
+            &hirsel_native_testing::HeapWorld {
                 steps: Some(10_000_000),
                 ..Default::default()
             },
@@ -152,7 +153,7 @@ fn configcheck_23_pure_reference_vectors_checked_h() {
         .unwrap();
         assert_eq!(
             heap.observation,
-            native::Observation::of_reference(plain.observation.as_ref().unwrap())
+            hirsel_native::Observation::of_reference(plain.observation.as_ref().unwrap())
         );
         assert_eq!(heap.counters.live_heap_bytes, 0);
     });

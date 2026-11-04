@@ -1,6 +1,7 @@
 //! Private engine differential checks run without exporting selectors from std.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::{Path, PathBuf};
 
 fn private_fixture(directory: &Path) -> PathBuf {
@@ -53,7 +54,7 @@ fn private_fixture(directory: &Path) -> PathBuf {
     path
 }
 
-fn check_subject(backend: Option<native::Backend>, entries: &[&str]) {
+fn check_subject(backend: Option<hirsel_native::Backend>, entries: &[&str]) {
     with_compiler_stack(|| {
         let temp = tempfile::tempdir().unwrap();
         let path = private_fixture(temp.path());
@@ -104,11 +105,11 @@ fn subject_cost_interpreter() {
 }
 #[test]
 fn subject_cost_llvm() {
-    check_subject(Some(native::Backend::Llvm), &["subject_search"]);
+    check_subject(Some(hirsel_native::Backend::Llvm), &["subject_search"]);
 }
 #[test]
 fn subject_cost_cranelift() {
-    check_subject(Some(native::Backend::Cranelift), &["subject_search"]);
+    check_subject(Some(hirsel_native::Backend::Cranelift), &["subject_search"]);
 }
 
 // Keep construction independent so a search-only repair need not repeat the
@@ -120,14 +121,14 @@ fn subject_constructor_interpreter() {
 #[test]
 fn subject_constructor_llvm() {
     check_subject(
-        Some(native::Backend::Llvm),
+        Some(hirsel_native::Backend::Llvm),
         &["subject_small", "subject_bounds"],
     );
 }
 #[test]
 fn subject_constructor_cranelift() {
     check_subject(
-        Some(native::Backend::Cranelift),
+        Some(hirsel_native::Backend::Cranelift),
         &["subject_small", "subject_bounds"],
     );
 }

@@ -8,6 +8,9 @@
 mod model;
 use crate::rc_support::history::{Category, Runner, persist};
 use hirsel_driver::native::*;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use model::{Arm, Domain, Pattern, Value};
 use std::fmt::Write;
 

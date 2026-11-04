@@ -130,7 +130,7 @@ fn retryrun_23_virtual_clock_vectors_checked_h() {
         let selection = root.join("hirsel.json");
         fs::write(&selection, manifest().to_string()).unwrap();
         let mut loaded =
-            hirsel_driver::load_program(&selection).unwrap_or_else(|error| panic!("{error}"));
+            hirsel_front_phases::load_program(&selection).unwrap_or_else(|error| panic!("{error}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|error| panic!("{error}"));

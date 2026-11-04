@@ -1,20 +1,20 @@
 //! Compiler-owned selection of the diagnostic source/native root. Ordinary
 //! native builds retain their existing factories, products and byte encodings.
-use super::{
-    OwnershipRequest,
-    native_routing::NativeRouting,
-    ownership_admission::{Admission, Footprint, SourceInputs},
-    ownership_bootstrap::{self, OwnershipBootstrap},
-};
-use crate::native::{
-    self,
-    queries::{ownership_tasks::OwnershipTasks, ready::ObservedReady},
-};
+use super::OwnershipRequest;
+use super::native_routing::NativeRouting;
+use super::ownership_admission::Admission;
+use super::ownership_admission::Footprint;
+use super::ownership_admission::SourceInputs;
+use super::ownership_bootstrap;
+use super::ownership_bootstrap::OwnershipBootstrap;
+use crate::native;
 use hirsel_engine::{
     FrontNativeProducts, FrontNativeQueries, LoadedProgram, ToolError,
     runtime::*,
     store::{Reference, VerifyStore},
 };
+use hirsel_native_cache::ready::ObservedReady;
+use hirsel_native_queries::ownership_tasks::OwnershipTasks;
 use hirsel_syntax::{ContentHash, DefPath};
 use std::sync::{Arc, OnceLock};
 
@@ -26,7 +26,7 @@ pub struct OwnershipExecution {
     units: Vec<ProductRef>,
     tasks: Arc<OwnershipTasks>,
     root: ProductRef,
-    link: Arc<native::root_source::NativeLinkSource>,
+    link: Arc<hirsel_native::root_source::NativeLinkSource>,
     _owner: Arc<OutputOwner>,
 }
 struct OutputOwner {
@@ -37,7 +37,7 @@ struct OutputOwner {
 /// Objects remain bound to one selected diagnostic completion and retain its
 /// original owners and an independent debit from the existing output grant.
 pub struct OwnershipObjects {
-    objects: native::ownership_trace::LeafObjects,
+    objects: hirsel_native_testing::ownership_trace::LeafObjects,
     root: ProductRef,
     _owner: Arc<OwnershipExecution>,
     _allowance: ownership_bootstrap::OutputReservation,
@@ -57,13 +57,16 @@ impl OwnershipExecution {
     /// Emit from the exact source/instance/arena diagnostic closure, preserving
     /// original Value marker ids through checked rebinding. Ordinary objects
     /// and a second source compilation cannot substitute for these products.
-    pub fn emit(self: &Arc<Self>, backend: native::Backend) -> Result<OwnershipObjects, String> {
+    pub fn emit(
+        self: &Arc<Self>,
+        backend: hirsel_native::Backend,
+    ) -> Result<OwnershipObjects, String> {
         let objects = self.tasks.with_execution_context(
             self.root.clone(),
             &self.link,
             &self.entry,
             |program, units, inputs, plans| {
-                native::ownership_trace::emit_relocated(
+                hirsel_native_testing::ownership_trace::emit_relocated(
                     program,
                     &self.entry,
                     units,
@@ -93,10 +96,10 @@ impl OwnershipExecution {
     pub fn launch(
         &self,
         objects: &OwnershipObjects,
-        tools: &native::Toolchain,
+        tools: &hirsel_native::Toolchain,
         directory: &std::path::Path,
         event_limit: usize,
-    ) -> Result<native::ownership_trace::LeafExecution, String> {
+    ) -> Result<hirsel_native_testing::ownership_trace::LeafExecution, String> {
         if objects.root != self.root || !std::ptr::eq(&*objects._owner, self) {
             return Err("ownership objects belong to another selected completion".into());
         }
@@ -117,11 +120,11 @@ impl OwnershipExecution {
     pub fn launch_with(
         &self,
         objects: &OwnershipObjects,
-        tools: &native::Toolchain,
+        tools: &hirsel_native::Toolchain,
         directory: &std::path::Path,
         event_limit: usize,
         launch: crate::HostLaunch<'_>,
-    ) -> Result<native::ownership_trace::LeafExecution, String> {
+    ) -> Result<hirsel_native_testing::ownership_trace::LeafExecution, String> {
         let selection = crate::launch_binding::LaunchSelection::read(launch)
             .map_err(|error| error.to_string())?;
         self.launch_with_selection(objects, tools, directory, event_limit, launch, selection)
@@ -129,12 +132,12 @@ impl OwnershipExecution {
     pub(crate) fn launch_with_selection(
         &self,
         objects: &OwnershipObjects,
-        tools: &native::Toolchain,
+        tools: &hirsel_native::Toolchain,
         directory: &std::path::Path,
         event_limit: usize,
         launch: crate::HostLaunch<'_>,
         selection: crate::launch_binding::LaunchSelection,
-    ) -> Result<native::ownership_trace::LeafExecution, String> {
+    ) -> Result<hirsel_native_testing::ownership_trace::LeafExecution, String> {
         if objects.root != self.root || !std::ptr::eq(&*objects._owner, self) {
             return Err("ownership objects belong to another selected completion".into());
         }
@@ -164,12 +167,12 @@ impl OwnershipExecution {
     pub(crate) fn launch_bound(
         &self,
         objects: &OwnershipObjects,
-        tools: &native::Toolchain,
+        tools: &hirsel_native::Toolchain,
         directory: &std::path::Path,
         event_limit: usize,
         launch: crate::HostLaunch<'_>,
         bound: crate::BoundHostRun,
-    ) -> Result<native::ownership_trace::LeafExecution, String> {
+    ) -> Result<hirsel_native_testing::ownership_trace::LeafExecution, String> {
         use crate::BoundHostRun;
         if objects.root != self.root || !std::ptr::eq(&*objects._owner, self) {
             return Err("ownership objects belong to another selected completion".into());
@@ -187,14 +190,14 @@ impl OwnershipExecution {
                     .map_err(|e| e.to_string())?;
                 (
                     bound.into_run(),
-                    native::Tape::Live {
+                    hirsel_native::Tape::Live {
                         record,
                         revocations,
                     },
                 )
             }
             (BoundHostRun::Replay { run, .. }, crate::HostLaunch::Replay(path)) => {
-                (run, native::Tape::Replay(path))
+                (run, hirsel_native::Tape::Replay(path))
             }
             _ => return Err("ownership launch binding changed form".into()),
         };
@@ -216,7 +219,7 @@ impl OwnershipExecution {
     pub fn observe_run(
         &self,
         objects: &OwnershipObjects,
-        launched: &native::Launched,
+        launched: &hirsel_native::Launched,
     ) -> Result<hirsel_run_schema::RunOutcome, String> {
         if objects.root != self.root || !std::ptr::eq(&*objects._owner, self) {
             return Err("ownership objects belong to another selected completion".into());
@@ -227,16 +230,16 @@ impl OwnershipExecution {
             &self.entry,
             |program, _, _, _| {
                 let sites = self.link.sites();
-                match native::observe_run(launched, program, &sites)
+                match hirsel_native::observe_run(launched, program, &sites)
                     .map_err(|error| error.to_string())?
                 {
-                    native::Observed::Ran(observation, waits) => observation
+                    hirsel_native::Observed::Ran(observation, waits) => observation
                         .outcome(&sites, waits)
                         .map_err(|error| error.to_string()),
-                    native::Observed::Refused(reason) => {
+                    hirsel_native::Observed::Refused(reason) => {
                         Ok(hirsel_run_schema::RunOutcome::Refused(reason))
                     }
-                    native::Observed::Stopped(outcome) => Ok(outcome),
+                    hirsel_native::Observed::Stopped(outcome) => Ok(outcome),
                 }
             },
         )
@@ -331,7 +334,7 @@ impl OwnershipSelection {
             split(Footprint::ROUTING)?,
         )
         .map_err(|error| ToolError::Runtime(error.into()))?;
-        let mut options = native::Options::new(request.target.clone());
+        let mut options = hirsel_native::Options::new(request.target.clone());
         options.validation = request.validation;
         options.launch = request.launch.clone();
         let request_key = request_key(request)?;

@@ -200,8 +200,8 @@ impl OutputReadiness for ExecutableOutput {
             return Err("executable request requires exactly one linked root".into());
         };
         let linked =
-            crate::native::object_queries::linked_product(self.store.as_ref(), product.clone())?;
-        crate::native::object_queries::materialize_executable(
+            hirsel_native::object_queries::linked_product(self.store.as_ref(), product.clone())?;
+        hirsel_native::object_queries::materialize_executable(
             self.store.as_ref(),
             &linked,
             &self.destination,

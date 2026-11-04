@@ -1,13 +1,18 @@
 //! Native smoke and hand-counted programs against independently built runtime variants.
-use hirsel_driver::compiler_adapters;
-use hirsel_driver::native::{
-    self, Observation, OptLevel, Options, Partition, RuntimeBuild, TargetSpec, Toolchain,
-};
+use hirsel_driver::native;
 use hirsel_engine::{
     QueryEngine, RunConfiguration, SimulationConfig, ValidatedNativeInput, default_context,
     default_environment, entry_path, run_observed_snapshot, source_check_request,
     with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::Observation;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::RuntimeBuild;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
 use std::path::{Path, PathBuf};
 
 fn checked(source: &str) -> (ValidatedNativeInput, hirsel_engine::DefPath, Observation) {
@@ -100,13 +105,13 @@ fn free_worker_reports_include_the_allocation_population_at_widths_1_and_8() {
             .to_string(),
         )
         .unwrap();
-        let mut loaded = hirsel_driver::load_program(&source).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&source).unwrap();
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
-        let sources = native::profile_sources(&input);
+        let sources = hirsel_native::profile_sources(&input);
         let input = loaded.engine.import_native_input(input).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let ready = native::build(&input, &Options::new(target.clone())).unwrap();
+        let ready = hirsel_native_batch::build(&input, &Options::new(target.clone())).unwrap();
         let tools = Toolchain::in_tree_with_runtime(
             &dir.join("runtime"),
             &[&target],
@@ -116,7 +121,7 @@ fn free_worker_reports_include_the_allocation_population_at_widths_1_and_8() {
             },
         )
         .unwrap();
-        let objects = native::emit_objects(
+        let objects = hirsel_native::emit_objects(
             &ready,
             OptLevel::Speed,
             Partition::Whole,
@@ -125,7 +130,7 @@ fn free_worker_reports_include_the_allocation_population_at_widths_1_and_8() {
         )
         .unwrap();
         std::fs::create_dir_all(dir.join("objects")).unwrap();
-        let exe = native::link_standalone_objects(
+        let exe = hirsel_native::link_standalone_objects(
             &ready,
             &loaded.entry,
             &objects,
@@ -226,8 +231,9 @@ fn full_gate_every_native_smoke_case_preserves_its_observation_in_all_runtime_va
         {
             let source = std::fs::read_to_string(root.join(path)).unwrap();
             let (input, entry, reference) = checked(&source);
-            let program = native::build(&input, &Options::new(target.clone())).unwrap();
-            let sites = native::Sites::new(input.snapshot());
+            let program =
+                hirsel_native_batch::build(&input, &Options::new(target.clone())).unwrap();
+            let sites = hirsel_native::Sites::new(input.snapshot());
             for tools in &variants {
                 let name = format!(
                     "runtime-smoke-{}-{}-{}",
@@ -238,7 +244,7 @@ fn full_gate_every_native_smoke_case_preserves_its_observation_in_all_runtime_va
                 // Each variant toolchain links its own archive, the optimized
                 // executable as one object, under the diagnostic checks.
                 let dir = scratch(&name);
-                let observed = native::link(
+                let observed = hirsel_native::link(
                     &program,
                     &entry,
                     OptLevel::Speed,
@@ -246,8 +252,8 @@ fn full_gate_every_native_smoke_case_preserves_its_observation_in_all_runtime_va
                     tools,
                     &dir,
                 )
-                .and_then(|exe| native::launch(&exe, &target, tools, &dir, true))
-                .and_then(|launched| native::observe(&launched, &program, &sites));
+                .and_then(|exe| hirsel_native::launch(&exe, &target, tools, &dir, true))
+                .and_then(|launched| hirsel_native::observe(&launched, &program, &sites));
                 assert!(
                     observed.as_ref() == Ok(&reference),
                     "{path}, {:?}: {observed:?}",
@@ -276,8 +282,8 @@ fn trees_and_inline_counts(target: TargetSpec, name: &str) {
             assert_eq!(reference.output, b"nine\n");
             let mut options = Options::new(target.clone());
             options.regions = false;
-            let program = native::build(&input, &options).unwrap();
-            let default_object = native::emit(&program, OptLevel::Speed, |_| true).unwrap();
+            let program = hirsel_native_batch::build(&input, &options).unwrap();
+            let default_object = hirsel_native::emit(&program, OptLevel::Speed, |_| true).unwrap();
             assert!(
                 !default_object
                     .imports
@@ -289,7 +295,7 @@ fn trees_and_inline_counts(target: TargetSpec, name: &str) {
                     "{name}-{case}-{}-{}",
                     tools.runtime_build.system_allocator, tools.runtime_build.measurement
                 ));
-                let exe = native::link(
+                let exe = hirsel_native::link(
                     &program,
                     &entry,
                     OptLevel::Speed,
@@ -298,7 +304,7 @@ fn trees_and_inline_counts(target: TargetSpec, name: &str) {
                     &dir,
                 )
                 .unwrap();
-                let launched = native::launch(&exe, &target, tools, &dir, false).unwrap();
+                let launched = hirsel_native::launch(&exe, &target, tools, &dir, false).unwrap();
                 assert_eq!(launched.exit, Some(0), "{:?}", launched);
                 assert_eq!(launched.stdout, reference.output);
                 assert!(
@@ -409,12 +415,12 @@ fn production_corpus_object_keeps_its_uninstrumented_bytes() {
         let (input, _, _) = checked(include_str!(
             "../../../../conformance/PROV/PROV-1-copied-prefix-write-run.hir"
         ));
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &input,
             &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
-        let object = native::emit(&ready, OptLevel::Speed, |_| true).unwrap();
+        let object = hirsel_native::emit(&ready, OptLevel::Speed, |_| true).unwrap();
         assert!(
             !object
                 .imports
@@ -436,7 +442,7 @@ fn diagnostic_launch_rejects_one_leaked_block_and_accepts_its_freed_twin() {
         let cache = Path::new(env!("CARGO_TARGET_TMPDIR")).join("measurement-runtime-cache");
         let tools = Toolchain::in_tree_diagnostic(&cache, &[&target]).unwrap();
         let (input, _, _) = checked(LEAF);
-        let ready = native::build(&input, &Options::new(target.clone())).unwrap();
+        let ready = hirsel_native_batch::build(&input, &Options::new(target.clone())).unwrap();
         let dir = scratch("measurement-leak-control");
         let source = dir.join("control.c");
         std::fs::write(&source, r#"#include "hirsel_rt_v2.h"
@@ -481,9 +487,12 @@ int main(void) { hirsel_rt_v2_launch_config config = {0}; return hirsel_rt_v2_la
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            let launched = native::launch(&exe, &target, &tools, &dir, false).unwrap();
-            let observation =
-                native::observe(&launched, &ready, &native::Sites::new(input.snapshot()));
+            let launched = hirsel_native::launch(&exe, &target, &tools, &dir, false).unwrap();
+            let observation = hirsel_native::observe(
+                &launched,
+                &ready,
+                &hirsel_native::Sites::new(input.snapshot()),
+            );
             if free {
                 assert!(observation.is_ok(), "{observation:?}");
             } else {
@@ -503,8 +512,12 @@ int main(void) { hirsel_rt_v2_launch_config config = {0}; return hirsel_rt_v2_la
                     .record
                     .replace("audit 1 16 0 0 0", "audit unavailable");
                 assert!(
-                    native::observe(&forged, &ready, &native::Sites::new(input.snapshot()))
-                        .is_err()
+                    hirsel_native::observe(
+                        &forged,
+                        &ready,
+                        &hirsel_native::Sites::new(input.snapshot())
+                    )
+                    .is_err()
                 );
             }
         }
@@ -631,7 +644,8 @@ fn system_bare_blocks_are_counted_returned_at_exit_and_moved_by_a_dynamic_reuse(
             for poison in [false, true] {
                 let launch = run.join(if poison { "poison" } else { "plain" });
                 std::fs::create_dir_all(&launch).unwrap();
-                let launched = native::launch(&exe, &target, &tools, &launch, poison).unwrap();
+                let launched =
+                    hirsel_native::launch(&exe, &target, &tools, &launch, poison).unwrap();
                 // The leaked twin's one bare node is audited, then returned at exit.
                 let audit = if leak {
                     "audit 1 16 0 0 0"

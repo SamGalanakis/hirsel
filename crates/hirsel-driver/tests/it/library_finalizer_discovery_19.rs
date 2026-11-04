@@ -1,15 +1,16 @@
 //! Library-created message storage retains exact source finalizer instances.
-use hirsel_driver::{
-    native::{self, Backend},
-    requests::{
-        CompileOperation, CompileRequest, CompileResult, CompilerRequests, NativeOutput,
-        NativeRequest,
-    },
-};
+use hirsel_driver::native;
+use hirsel_driver::requests::CompileOperation;
+use hirsel_driver::requests::CompileRequest;
+use hirsel_driver::requests::CompileResult;
+use hirsel_driver::requests::CompilerRequests;
+use hirsel_driver::requests::NativeOutput;
+use hirsel_driver::requests::NativeRequest;
 use hirsel_engine::{
     requests::{OutputReadiness, RequestEngine, observe_inputs},
     runtime::QueryRuntime,
 };
+use hirsel_native::Backend;
 use std::sync::Arc;
 
 #[test]
@@ -39,10 +40,10 @@ fn compile_objects(source: &str) {
         let manifest = directory.path().join("hirsel.json");
         std::fs::write(directory.path().join("main.hir"), source).unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"channel_message","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
-        let compiler = hirsel_driver::COMPILER.with_owned_engines();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+        let compiler = hirsel_front_phases::COMPILER.with_owned_engines();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
         let tools = Arc::new(
-            native::Toolchain::in_tree(&directory.path().join("tools"), &[&target]).unwrap(),
+            hirsel_native::Toolchain::in_tree(&directory.path().join("tools"), &[&target]).unwrap(),
         );
         let mut expected = None;
         for backend in [Backend::Cranelift, Backend::Llvm] {
@@ -63,10 +64,14 @@ fn compile_objects(source: &str) {
                 inputs: inputs.into(),
                 operation: CompileOperation::NativeBuild(NativeRequest {
                     options: {
-                        let mut options = native::BuildProfile::Default
-                            .options(backend, target.clone(), native::Validation::EveryStage)
+                        let mut options = hirsel_native::BuildProfile::Default
+                            .options(
+                                backend,
+                                target.clone(),
+                                hirsel_native::Validation::EveryStage,
+                            )
                             .unwrap();
-                        options.opt = native::OptLevel::None;
+                        options.opt = hirsel_native::OptLevel::None;
                         options
                     },
                     definition: Some(first.clone()),
@@ -105,18 +110,23 @@ fn compile_objects(source: &str) {
             }
             assert!(!objects.products.is_empty());
             for product in &objects.products {
-                let fragment = native::object_queries::fragment_product(
+                let fragment = hirsel_native::object_queries::fragment_product(
                     objects.store.as_ref(),
                     product.clone(),
                 )
                 .unwrap();
-                let object =
-                    native::object_queries::load_object(objects.store.as_ref(), fragment.object)
-                        .unwrap();
+                let object = hirsel_native::object_queries::load_object(
+                    objects.store.as_ref(),
+                    fragment.object,
+                )
+                .unwrap();
                 assert!(object.bytes.starts_with(b"\x7fELF"));
                 assert!(
-                    native::object_queries::linked_product(objects.store.as_ref(), product.clone())
-                        .is_err(),
+                    hirsel_native::object_queries::linked_product(
+                        objects.store.as_ref(),
+                        product.clone()
+                    )
+                    .is_err(),
                     "a Codegen output cannot supply an executable"
                 );
             }

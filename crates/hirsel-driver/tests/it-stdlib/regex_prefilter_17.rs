@@ -2,6 +2,7 @@
 //! selectors alongside the unmodified ordered VM on all execution engines.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 #[test]
@@ -63,28 +64,29 @@ fn regex_prefilter_17_forced_candidates_preserve_vm_results_and_work_limits() {
         let path = directory.path().join("main.hir");
         std::fs::write(directory.path().join("main.hir.json"), program.to_string()).unwrap();
         std::fs::write(&path, &groups[0]).unwrap();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-        let mut options = native::Options::new(target);
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+        let mut options = hirsel_native::Options::new(target);
         options.scoped_specialization = false;
         let matrix = [
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Default,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Default,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Default,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Default,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Default,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Default,
                 },
             },
         ];
         let tools =
-            native::Toolchain::for_matrix(&directory.path().join("runtime"), &matrix).unwrap();
+            hirsel_native_testing::toolchain_for_matrix(&directory.path().join("runtime"), &matrix)
+                .unwrap();
         for (index, source) in groups.iter().enumerate() {
             eprintln!("regex prefilter group {index}: interpreter, LLVM, Cranelift");
             let mut loaded = crate::source_std::load_program_source(&path, Some(source)).unwrap();
@@ -110,17 +112,23 @@ fn regex_prefilter_17_forced_candidates_preserve_vm_results_and_work_limits() {
                 "{outcome:?}"
             );
             let observation =
-                native::Observation::of_reference(reference.observation.as_ref().unwrap());
+                hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
             let snapshot = loaded.engine.export_native_input().unwrap();
             let input = loaded.engine.import_native_input(snapshot).unwrap();
             let scratch = directory.path().join(format!("group-{index}"));
             std::fs::create_dir_all(&scratch).unwrap();
-            let outcomes =
-                native::differential(&input, &run.entry, &observation, &matrix, &tools, &scratch);
+            let outcomes = hirsel_native_testing::differential(
+                &input,
+                &run.entry,
+                &observation,
+                &matrix,
+                &tools,
+                &scratch,
+            );
             assert_eq!(outcomes.len(), 2);
             for (backend, outcome) in outcomes {
                 assert!(
-                    matches!(outcome, native::Outcome::Agree),
+                    matches!(outcome, hirsel_native_testing::Outcome::Agree),
                     "{backend:?}: {outcome:?}"
                 );
             }
@@ -149,7 +157,10 @@ fn regex_prefilter_17_admitted_unicode_folds_after_ascii_skip() {
             ),
             "{outcome:?}"
         );
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let outcome = native::run_path_native_backend(
                 &path,
                 HostLaunch::empty(),
@@ -220,7 +231,10 @@ fn byte_candidate(entry: &str) {
                 ),
                 "{entry}: {outcome:?}"
             );
-            for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+            for backend in [
+                hirsel_native::Backend::Llvm,
+                hirsel_native::Backend::Cranelift,
+            ] {
                 let outcome = native::run_path_native_backend(
                     &path,
                     HostLaunch::empty(),

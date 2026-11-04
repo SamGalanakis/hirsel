@@ -181,7 +181,7 @@ fn reference_and_checked_replay(
     status: i32,
 ) {
     hirsel_engine::with_compiler_stack(|| {
-        let mut loaded = hirsel_driver::load_program(source).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(source).unwrap();
         loaded.check_for_execution().unwrap();
         let mut run = hirsel_engine::RunConfiguration {
             entry: loaded.entry.clone(),

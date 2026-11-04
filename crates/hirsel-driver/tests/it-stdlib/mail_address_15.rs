@@ -1,6 +1,7 @@
 //! Go net/mail and mime vectors plus bounded hostile inputs.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> PathBuf {
@@ -8,7 +9,7 @@ fn fixture(name: &str) -> PathBuf {
         .join(format!("tests/fixtures/mail-address-15/{name}.hir"))
 }
 
-fn run(name: &str, backend: Option<native::Backend>) {
+fn run(name: &str, backend: Option<hirsel_native::Backend>) {
     with_compiler_stack(|| {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -23,7 +24,7 @@ fn run(name: &str, backend: Option<native::Backend>) {
                     stderr: &mut stderr,
                 },
                 hirsel_driver::session::Policy::default(),
-                native::Validation::EveryStage,
+                hirsel_native::Validation::EveryStage,
             )
             .unwrap_or_else(|error| match error {
                 ToolError::Query { error, .. } => panic!("{error:?}"),
@@ -77,8 +78,8 @@ macro_rules! cases {
 }
 
 cases!(interpreter, None);
-cases!(llvm, Some(native::Backend::Llvm));
-cases!(cranelift, Some(native::Backend::Cranelift));
+cases!(llvm, Some(hirsel_native::Backend::Llvm));
+cases!(cranelift, Some(hirsel_native::Backend::Cranelift));
 
 mod h {
     use super::*;
@@ -97,16 +98,16 @@ mod h {
                 });
             let input = loaded.engine.export_native_input().unwrap();
             let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-            let ready = native::build(
+            let ready = hirsel_native_batch::build(
                 &validated,
-                &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
             )
             .unwrap();
-            let run = native::run_heap_in(
+            let run = hirsel_native_testing::run_heap_in(
                 &ready,
                 &loaded.entry,
-                &native::Sites::new(&input),
-                &native::HeapWorld {
+                &hirsel_native::Sites::new(&input),
+                &hirsel_native_testing::HeapWorld {
                     steps: Some(50_000_000),
                     ..Default::default()
                 },

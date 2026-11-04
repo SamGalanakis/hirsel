@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::with_compiler_stack;
+use hirsel_front_phases::*;
 use hirsel_lir::ir::UnitOrigin;
 use std::{collections::BTreeSet, path::PathBuf};
 
@@ -23,9 +24,9 @@ fn integer_policies_and_radices_are_ordinary_source_native_units() {
                 .unwrap_or_else(|error| panic!("{error}"));
             let input = loaded.engine.export_native_input().unwrap();
             let validated = loaded.engine.import_native_input(input).unwrap();
-            let ready = native::build(
+            let ready = hirsel_native_batch::build(
                 &validated,
-                &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
             )
             .unwrap();
             for unit in &ready.units {

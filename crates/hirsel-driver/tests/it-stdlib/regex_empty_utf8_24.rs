@@ -1,9 +1,10 @@
 //! Compare every capture resolver with the unchanged ordered PikeVM.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
-fn engines_for(backend: Option<native::Backend>, entries: &[&str]) {
+fn engines_for(backend: Option<hirsel_native::Backend>, entries: &[&str]) {
     with_compiler_stack(|| {
         let temp = tempfile::tempdir().unwrap();
         let path = super::regex_capture_span_17::private_fixture(temp.path(), false);
@@ -94,8 +95,8 @@ fn engines_for(backend: Option<native::Backend>, entries: &[&str]) {
 fn empty_snowman_all_four() {
     for backend in [
         None,
-        Some(native::Backend::Llvm),
-        Some(native::Backend::Cranelift),
+        Some(hirsel_native::Backend::Llvm),
+        Some(hirsel_native::Backend::Cranelift),
     ] {
         engines_for(backend, &["empty_snowman"]);
     }
@@ -104,8 +105,8 @@ fn empty_snowman_all_four() {
 fn nonword_delta_all_four() {
     for backend in [
         None,
-        Some(native::Backend::Llvm),
-        Some(native::Backend::Cranelift),
+        Some(hirsel_native::Backend::Llvm),
+        Some(hirsel_native::Backend::Cranelift),
     ] {
         engines_for(backend, &["nonword_delta"]);
     }
@@ -125,9 +126,9 @@ fn differential_interpreter_and_checked_h() {
 }
 #[test]
 fn differential_llvm() {
-    engines_for(Some(native::Backend::Llvm), &["empty_utf8_all"]);
+    engines_for(Some(hirsel_native::Backend::Llvm), &["empty_utf8_all"]);
 }
 #[test]
 fn differential_cranelift() {
-    engines_for(Some(native::Backend::Cranelift), &["empty_utf8_all"]);
+    engines_for(Some(hirsel_native::Backend::Cranelift), &["empty_utf8_all"]);
 }

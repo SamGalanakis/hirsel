@@ -1,11 +1,14 @@
 //! Original source through independently checked Ready, real backend objects,
 //! and the real runtime. The two component bodies remain unregistered.
 use super::sealed_region_h_source_33::original;
-use hirsel_driver::native::{Backend, RuntimeBuild, Toolchain, c_call};
 use hirsel_lir::emission::{EmitInputs, GlueInputs, OptLevel};
 use hirsel_lir::layout_types::SizeSpec;
 use hirsel_lir::operation::{NativeType, Primitive};
 use hirsel_lir::stage::InputIdentity;
+use hirsel_native::Backend;
+use hirsel_native::RuntimeBuild;
+use hirsel_native::Toolchain;
+use hirsel_native::c_call;
 use hirsel_types::TypeKind;
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;

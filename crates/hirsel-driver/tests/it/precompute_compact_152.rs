@@ -1,9 +1,11 @@
-use hirsel_driver::{COMPILER, CompilerRequestsExt, requests::*};
+use hirsel_driver::CompilerRequestsExt;
+use hirsel_driver::requests::*;
 use hirsel_engine::{
     CheckCompletion, CompileConfig, LoweringPolicy, QueryError, QueryKind, ToolError,
     store::{self, ResultStore},
     with_compiler_stack,
 };
+use hirsel_front_phases::COMPILER;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},

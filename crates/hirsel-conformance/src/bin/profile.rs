@@ -7,12 +7,20 @@ use hirsel_cli_args::{
     lexopt::{self, Arg::*, Parser},
     parse_or_exit,
 };
-use hirsel_driver::native::{
-    self, BuildOptions, OptLevel, Options, Partition, RuntimeBuild, TargetSpec, Toolchain,
-};
-use hirsel_driver::requests::{
-    CompileOperation, CompileResult, CompilerRequests, NativeOutput, NativeReady, NativeRequest,
-};
+use hirsel_driver::native;
+use hirsel_driver::requests::CompileOperation;
+use hirsel_driver::requests::CompileResult;
+use hirsel_driver::requests::CompilerRequests;
+use hirsel_driver::requests::NativeOutput;
+use hirsel_driver::requests::NativeReady;
+use hirsel_driver::requests::NativeRequest;
+use hirsel_native::BuildOptions;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::RuntimeBuild;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -82,7 +90,7 @@ fn ready_view(
     options: BuildOptions,
     tools: &Toolchain,
 ) -> Result<std::sync::Arc<NativeReady>, Box<dyn std::error::Error>> {
-    let compiler = hirsel_driver::COMPILER.clone();
+    let compiler = hirsel_front_phases::COMPILER.clone();
     let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration())
         .with_toolchain(std::sync::Arc::new(tools.clone()));
     let output = requests.execute(
@@ -162,7 +170,7 @@ fn profile() -> Result<(), Box<dyn std::error::Error>> {
         BuildOptions {
             partition: Partition::Whole,
             debug_tables: true,
-            ..BuildOptions::new(passes, native::Backend::Llvm, OptLevel::Speed)
+            ..BuildOptions::new(passes, hirsel_native::Backend::Llvm, OptLevel::Speed)
         },
         &tools,
     )?;
@@ -181,7 +189,7 @@ fn profile() -> Result<(), Box<dyn std::error::Error>> {
     }
     let measured = output.join("measurement-objects");
     std::fs::create_dir_all(&measured)?;
-    let executable = native::link_profile(
+    let executable = hirsel_native::link_profile(
         &ready.program,
         &ready.entry,
         OptLevel::Speed,
@@ -218,7 +226,7 @@ fn profile() -> Result<(), Box<dyn std::error::Error>> {
             let tools = Toolchain::in_tree(&output.join("runtime"), &[&target])?;
             let timing = output.join("cycles-objects");
             std::fs::create_dir_all(&timing)?;
-            let executable = native::link_profile(
+            let executable = hirsel_native::link_profile(
                 &ready.program,
                 &ready.entry,
                 OptLevel::Speed,

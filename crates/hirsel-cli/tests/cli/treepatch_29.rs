@@ -86,7 +86,7 @@ fn treepatch_29_scripted_reference_checked_h() {
     hirsel_engine::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let selection = package(scratch.path());
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded.check_for_execution().unwrap();
         let config = hirsel_engine::RunConfiguration {
             entry: loaded.entry.clone(),

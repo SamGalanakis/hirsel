@@ -4,11 +4,11 @@
 //! ordinary, and C and H reject forged appends and builder sources.
 use crate::rc_support as support;
 
-use hirsel_driver::compiler_adapters;
 use hirsel_engine::{
     QueryEngine, RunConfiguration, default_context, default_environment, entry_path,
     run_observed_snapshot, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_heapcheck::{Config, NoOperations, Observed};
 use hirsel_interp::observation::ObservedNode;
 use hirsel_lir::ir::{Inst, LirUnit};

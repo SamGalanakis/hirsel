@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_lir::ir::UnitOrigin;
 use std::{collections::BTreeSet, path::PathBuf};
 
@@ -55,9 +56,9 @@ fn std_algorithms_are_ordinary_source_native_units(name: &str, functions: &[(&st
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
         for unit in &ready.units {
@@ -155,9 +156,9 @@ fn a_package_program_exports_only_the_dependency_definitions_it_reaches() {
         assert_eq!(selected, expected);
         // The pruned selection imports and builds.
         let validated = loaded.engine.import_native_input(input).unwrap();
-        native::build(
+        hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
         std::fs::remove_dir_all(&dir).unwrap();

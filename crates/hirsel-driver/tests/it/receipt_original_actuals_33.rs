@@ -1,15 +1,22 @@
 //! Real source/V and ordinary execution controls for the receipt factory seam.
 //! No receipt-aware entry, provider authority or public seal is activated here.
-use hirsel_driver::compiler_adapters;
-use hirsel_driver::native::{
-    self, Configuration, Engine, Observation, OptLevel, Options, Outcome, Partition, Runtime,
-    TargetSpec, Toolchain,
-};
+use hirsel_driver::native;
 use hirsel_engine::{
     QueryEngine, RunConfiguration, SimulationConfig, ValidatedNativeInput, Verify, default_context,
     default_environment, entry_path, run_observed_snapshot, source_check_request,
     with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::Observation;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
+use hirsel_native_testing::Configuration;
+use hirsel_native_testing::Engine;
+use hirsel_native_testing::Outcome;
+use hirsel_native_testing::Runtime;
 use hirsel_rc::instance::{Actuals, key_of};
 use hirsel_rc::sealed_source::contract::registry::{Context, Registry};
 use hirsel_rc::sealed_source::contract::{self, Input, Port};
@@ -372,7 +379,7 @@ fn agree_source(source: &'static str, scratch_name: &'static str) {
         assert_eq!(reference.exit_code, Some(0), "{}", reference.render());
         assert!(reference.failures.is_empty());
         let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
-        options.validation = native::Validation::EveryStage;
+        options.validation = hirsel_native::Validation::EveryStage;
         let configurations = [
             Engine::Heap { campaign: false },
             Engine::Native {
@@ -394,8 +401,10 @@ fn agree_source(source: &'static str, scratch_name: &'static str) {
         let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(scratch_name);
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let toolchain = Toolchain::for_matrix(&root.join("runtime"), &configurations).unwrap();
-        let outcomes = native::differential(
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &configurations)
+                .unwrap();
+        let outcomes = hirsel_native_testing::differential(
             &validated,
             &entry,
             &reference,

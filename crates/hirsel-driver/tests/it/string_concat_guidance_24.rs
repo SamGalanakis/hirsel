@@ -1,6 +1,7 @@
 //! Operand identity, error recovery and independent checked-heap value controls.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn check(engine: &mut QueryEngine, source: &str) -> CheckOutput {
     let file = engine.sources.add("concat.hir", source.into()).unwrap();
@@ -213,13 +214,17 @@ fn string_concat_guidance_24_checked_heap_values_and_order() {
         let entry = entry_path(&default_context());
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
-        let heap =
-            native::run_heap(&ready, &entry, &native::Sites::new(validated.snapshot())).unwrap();
+        let heap = hirsel_native_testing::run_heap(
+            &ready,
+            &entry,
+            &hirsel_native::Sites::new(validated.snapshot()),
+        )
+        .unwrap();
         assert_eq!(
             heap.observation.exit_code,
             Some(0),

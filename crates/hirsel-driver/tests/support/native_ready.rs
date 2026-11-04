@@ -1,11 +1,18 @@
-use hirsel_driver::{
-    native::{Backend, BuildOptions, NativeError, OptLevel, Options, StageName, Toolchain},
-    requests::{
-        CompileOperation, CompileRequest, CompileResult, CompilerRequests, NativeOutput,
-        NativeReady, NativeRequest,
-    },
-};
+use hirsel_driver::requests::CompileOperation;
+use hirsel_driver::requests::CompileRequest;
+use hirsel_driver::requests::CompileResult;
+use hirsel_driver::requests::CompilerRequests;
+use hirsel_driver::requests::NativeOutput;
+use hirsel_driver::requests::NativeReady;
+use hirsel_driver::requests::NativeRequest;
 use hirsel_engine::{ToolError, requests::observe_inputs};
+use hirsel_native::Backend;
+use hirsel_native::BuildOptions;
+use hirsel_native::NativeError;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::StageName;
+use hirsel_native::Toolchain;
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 pub fn supplier(
@@ -17,7 +24,7 @@ pub fn supplier(
     impl FnMut(&Options) -> Result<Arc<NativeReady>, NativeError> + 'static + use<>,
     ToolError,
 > {
-    let compiler = hirsel_driver::COMPILER;
+    let compiler = hirsel_front_phases::COMPILER;
     let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration())
         .with_toolchain(Arc::new(toolchain.clone()));
     let path = path.to_path_buf();

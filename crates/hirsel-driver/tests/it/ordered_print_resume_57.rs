@@ -27,8 +27,8 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 fn ordered_print_certificate_refuses_forged_cells_and_both_emitters_import_the_helper() {
     with_compiler_stack(|| {
         let program = super::runtime50_continuation::ready(CERTIFIED_SOURCE);
-        let plans = hirsel_driver::native::continuation::plans(&program);
-        hirsel_driver::native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let units: Vec<_> = program.units.iter().collect();
         let check = |p: &hirsel_lir::continuation::ContinuationPlans| {
             hirsel_lir::continuation::validate_runtime_operations(
@@ -111,14 +111,14 @@ fn ordered_print_certificate_refuses_forged_cells_and_both_emitters_import_the_h
             assert!(check(&bad).is_err(), "imported forged print field {field}");
         }
         for backend in [
-            hirsel_driver::native::Backend::Llvm,
-            hirsel_driver::native::Backend::Cranelift,
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
         ] {
-            let objects = hirsel_driver::native::emit_backend_objects(
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
-                hirsel_driver::native::OptLevel::Default,
-                hirsel_driver::native::Partition::Whole,
+                hirsel_native::OptLevel::Default,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
@@ -139,7 +139,7 @@ fn ordered_certified_print_and_join_agree_with_checked_h_and_replay() {
     with_compiler_stack(|| {
         super::runtime50_resume::agree_on(
             CERTIFIED_SOURCE,
-            &hirsel_driver::native::Fixture {
+            &hirsel_native::Fixture {
                 migrate: true,
                 ..Default::default()
             },
@@ -152,8 +152,12 @@ fn ordered_certified_print_and_join_agree_with_checked_h_and_replay() {
 
 #[test]
 fn entered_print_and_join_preserve_canonical_charges_ordinals_and_first_stop() {
-    use hirsel_driver::native::{self, *};
+    use hirsel_driver::native;
+    use hirsel_driver::native::*;
     use hirsel_engine::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let source = r#"
 pub fn main(rt:Io)->Result[(),GrantError] {
@@ -198,14 +202,15 @@ pub fn main(rt:Io)->Result[(),GrantError] {
         let sites = Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let mut program = native::build(&validated, &Options::new(target.clone())).unwrap();
+        let mut program =
+            hirsel_native_batch::build(&validated, &Options::new(target.clone())).unwrap();
         program.fuel = true;
         let root = tempfile::tempdir().unwrap();
         let configuration = Configuration {
             options: Options::new(target.clone()),
             engine: Engine::Heap { campaign: false },
         };
-        let tools = Toolchain::for_matrix(
+        let tools = hirsel_native_testing::toolchain_for_matrix(
             &root.path().join("runtime"),
             std::slice::from_ref(&configuration),
         )
@@ -232,7 +237,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
         let mut baselines = std::collections::BTreeMap::new();
         let mut stop_fuel = None;
         for backend in [Backend::Llvm, Backend::Cranelift] {
-            let objects = native::emit_backend_objects(
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
                 OptLevel::Default,
@@ -244,7 +249,8 @@ pub fn main(rt:Io)->Result[(),GrantError] {
             let dir = root.path().join(format!("{backend:?}"));
             std::fs::create_dir_all(&dir).unwrap();
             let executable =
-                native::link_standalone_objects(&program, &entry, &objects, &tools, &dir).unwrap();
+                hirsel_native::link_standalone_objects(&program, &entry, &objects, &tools, &dir)
+                    .unwrap();
             for width in [1, 4] {
                 for stopped in [false, true] {
                     let mut grants = serde_json::json!({"args":[], "io":{"stdout":"stdout.bytes@1","tasks":"tasks.cooperative@1","dirs":[]},"placement":{"cores":width}});
@@ -277,8 +283,8 @@ pub fn main(rt:Io)->Result[(),GrantError] {
                             stderr: output.stderr,
                             record: std::fs::read_to_string(&observation).unwrap(),
                         };
-                        let observed =
-                            native::observe(&launched, &program, &sites).unwrap_or_else(|error| {
+                        let observed = hirsel_native::observe(&launched, &program, &sites)
+                            .unwrap_or_else(|error| {
                                 panic!(
                                     "{backend:?}/{width}/{stopped}/{mode}: {error:?} {launched:?}"
                                 )

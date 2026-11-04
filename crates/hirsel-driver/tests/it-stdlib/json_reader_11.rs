@@ -1,6 +1,7 @@
 //! Strict Reader vectors adapted from serde_json 20572a6d (MIT/Apache-2.0).
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn source_error(error: ToolError) -> ! {
@@ -215,24 +216,26 @@ fn strict_vectors_on_h_llvm_and_cranelift() {
             "{:?}",
             reference.outcome
         );
-        let expected = native::Observation::of_reference(reference.observation.as_ref().unwrap());
+        let expected =
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let configs = vec![
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
@@ -241,8 +244,9 @@ fn strict_vectors_on_h_llvm_and_cranelift() {
             .tempdir()
             .unwrap();
         let tools =
-            native::Toolchain::for_matrix(&scratch.path().join("runtime"), &configs).unwrap();
-        for (config, outcome) in native::differential(
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &configs)
+                .unwrap();
+        for (config, outcome) in hirsel_native_testing::differential(
             &validated,
             &loaded.entry,
             &expected,
@@ -251,7 +255,7 @@ fn strict_vectors_on_h_llvm_and_cranelift() {
             scratch.path(),
         ) {
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{config}: {outcome:?}"
             );
         }

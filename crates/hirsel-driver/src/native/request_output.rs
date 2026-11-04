@@ -1,9 +1,13 @@
 //! Host use of a completed immutable native request. Build destinations use
 //! the selected ordinary provider; runs share the existing process launcher
 //! and observation decoder without reconstructing a native program.
-use super::{NativeError, StageName, executable::Scratch, link, object_queries};
 use crate::requests::NativeExecution;
 use crate::{BoundHostRun, HostLaunch, RunOutcome, ToolError, launch_binding::LaunchSelection};
+use hirsel_native::NativeError;
+use hirsel_native::Scratch;
+use hirsel_native::StageName;
+use hirsel_native::link;
+use hirsel_native::object_queries;
 use std::{io::Write, path::Path};
 
 pub(crate) fn materialize_output(
@@ -187,7 +191,7 @@ pub(crate) fn run_bound_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::requests::NativeObservation;
+    use hirsel_native::NativeObservation;
     use hirsel_run_schema::{BudgetKind, Returned};
 
     fn launched(body: &str, exit: i32) -> link::Launched {

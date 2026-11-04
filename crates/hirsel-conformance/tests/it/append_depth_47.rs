@@ -1,7 +1,12 @@
 //! An append producer must finish before the caller's list changes, even
 //! when a source call inside the producer fails at the exact depth boundary.
 use hirsel_conformance::native;
-use hirsel_driver::native::{Configuration, Engine, Options, Outcome, TargetSpec, Toolchain};
+use hirsel_native::Options;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
+use hirsel_native_testing::Configuration;
+use hirsel_native_testing::Engine;
+use hirsel_native_testing::Outcome;
 
 #[test]
 fn append_depth_failure_preserves_the_callers_cleanup_observation() {
@@ -15,7 +20,11 @@ fn append_depth_failure_preserves_the_callers_cleanup_observation() {
                 engine: Engine::Heap { campaign: false },
             },
         );
-        let tools = Toolchain::for_matrix(&native::runtime_cache().unwrap(), &matrix).unwrap();
+        let tools = hirsel_native_testing::toolchain_for_matrix(
+            &hirsel_native::runtime_cache().unwrap(),
+            &matrix,
+        )
+        .unwrap();
         let scratch = native::scratch::RunRoot::create_in(
             &std::env::temp_dir().join("hirsel-append-depth-47"),
         )

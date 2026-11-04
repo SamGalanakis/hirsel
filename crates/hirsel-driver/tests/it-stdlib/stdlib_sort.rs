@@ -1,6 +1,7 @@
 //! Zig sort.zig:225-252 fuzz trials and block boundaries beyond corpus fuel.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn execute(name: &str) {

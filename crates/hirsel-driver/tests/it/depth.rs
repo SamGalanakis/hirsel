@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 mod shapes {
     include!("../../../hirsel-parser/tests/support/depth.rs");
 }

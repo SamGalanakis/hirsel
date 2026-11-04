@@ -1,10 +1,14 @@
 //! A release resumes its exact instruction; no source owner is consumed twice.
 use super::runtime50_continuation::ready;
 use super::runtime50_resume::{compact_runs_with, routing};
-use hirsel_driver::native::{self, *};
+use hirsel_driver::native;
+use hirsel_driver::native::*;
 use hirsel_engine::with_compiler_stack;
 use hirsel_lir::continuation::ResumeAction;
 use hirsel_lir::ir::CallId;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 
 const NESTED: &str = r#"
 resource type Leaf { tasks:Tasks, done:Atomic[u64], id:u64 }
@@ -29,8 +33,8 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 fn runtime57_cleanup_good_mutex_root_drop_has_instruction_custody_on_both_backends() {
     with_compiler_stack(|| {
         let program = ready(NESTED);
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let count = plans.plans.values().flat_map(|p| &p.cleanups).count();
         assert!(count > 0, "no instruction cleanup states: {plans:#?}");
         for state in plans.plans.values().flat_map(|p| &p.cleanups) {
@@ -57,7 +61,7 @@ fn runtime57_cleanup_good_mutex_root_drop_has_instruction_custody_on_both_backen
 fn runtime57_cleanup_bad_instruction_call_confusion_wrong_suffix_and_missing_owner_are_refused() {
     with_compiler_stack(|| {
         let program = ready(NESTED);
-        let original = native::continuation::plans(&program);
+        let original = hirsel_native::continuation::plans(&program);
         let (&body, _) = original
             .plans
             .iter()
@@ -77,7 +81,7 @@ fn runtime57_cleanup_bad_instruction_call_confusion_wrong_suffix_and_missing_own
                 _ => unreachable!(),
             }
             assert!(
-                native::continuation::validate(&program, &plans).is_err(),
+                hirsel_native::continuation::validate(&program, &plans).is_err(),
                 "mutation {mutation} accepted"
             );
         }
@@ -113,8 +117,8 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 fn runtime57_cleanup_sender_payload_runs_nested_close_on_both_backends() {
     with_compiler_stack(|| {
         let program = ready(CHANNEL);
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         assert!(
             plans.plans.values().any(|p| !p.cleanups.is_empty()),
             "no instruction custody: {plans:#?}"
@@ -148,8 +152,8 @@ pub fn main(rt:Io)->Result[(),GrantError] {
     with_compiler_stack(|| {
         use hirsel_lir::{ir::ValueRepr, layout_types::LayoutKind};
         let program = ready(CONTAINER);
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let mut counted = 0;
         let mut inline = 0;
         for unit in &program.units {

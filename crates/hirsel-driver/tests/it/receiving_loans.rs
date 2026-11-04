@@ -19,7 +19,7 @@ fn a_stored_local_result_keeps_its_call_loan_until_the_receiving_scope_ends() {
                 );
                 let mut engine = hirsel_engine::QueryEngine::new(
                     hirsel_engine::default_environment(),
-                    hirsel_driver::compiler_adapters(),
+                    hirsel_front_phases::compiler_adapters(),
                 );
                 let context = hirsel_engine::default_context();
                 let file = engine.sources.add("loans.hir", source).unwrap();
@@ -49,7 +49,7 @@ fn replacing_result_holders_releases_only_their_displaced_source_loans() {
         );
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let context = hirsel_engine::default_context();
         let file = engine.sources.add("holder.hir", source.clone()).unwrap();
@@ -77,7 +77,7 @@ fn loop_feedback_preserves_permissions_on_continue_break_and_condition_calls() {
         );
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let context = hirsel_engine::default_context();
         let file = engine.sources.add("feedback.hir", source.clone()).unwrap();

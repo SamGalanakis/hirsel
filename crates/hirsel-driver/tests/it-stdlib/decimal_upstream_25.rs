@@ -1,7 +1,8 @@
 //! Independent finite-decimal expectations; each partition executes identical
 //! source and expected bytes on reference, checked H, LLVM and Cranelift.
-use hirsel_driver::{load_program_source, native};
+use hirsel_driver::native;
 use hirsel_engine::*;
+use hirsel_front_phases::load_program_source;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{fmt::Write, path::Path};
@@ -131,22 +132,25 @@ fn partition(name: &str, file: &str, fixture: &str) {
             SimulationConfig::default(),
         )
         .unwrap();
-        let reference = native::Observation::of_reference(reference.observation.as_ref().unwrap());
+        let reference =
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
         let matrix = [
-            native::Engine::Heap { campaign: false },
-            native::Engine::Native {
-                opt: native::OptLevel::None,
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Heap { campaign: false },
+            hirsel_native_testing::Engine::Native {
+                opt: hirsel_native::OptLevel::None,
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
-            native::Engine::Cranelift {
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Cranelift {
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         ]
         .into_iter()
-        .map(|engine| native::Configuration {
-            options: native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+        .map(|engine| hirsel_native_testing::Configuration {
+            options: hirsel_native::Options::new(
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+            ),
             engine,
         })
         .collect();

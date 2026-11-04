@@ -1,8 +1,13 @@
 //! Full Io+Args fixture launches and exact stop diagnostics through public APIs.
-use hirsel_driver::{native::*, replay_observations, replay_observations_checked};
+use hirsel_driver::native::*;
+use hirsel_driver::replay_observations;
+use hirsel_driver::replay_observations_checked;
 use hirsel_engine::{
     RunConfiguration, run_observed_checked, run_observed_snapshot, with_compiler_stack,
 };
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use std::collections::BTreeMap;
 
@@ -117,7 +122,7 @@ fn campaign(source: &str, gate: FileReadScript, expected: &[u8]) {
             file_reads: BTreeMap::from([("input/a".into(), gate)]),
             ..Default::default()
         };
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded.check_for_execution().unwrap();
         let run = RunConfiguration {
             entry: loaded.entry.clone(),
@@ -163,7 +168,9 @@ fn campaign(source: &str, gate: FileReadScript, expected: &[u8]) {
                 },
             },
         ];
-        let tools = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+                .unwrap();
         let mut ready = crate::native_ready::supplier(&path, None, &loaded.entry, &tools).unwrap();
         for (name, outcome) in differential_ready(
             &mut ready,
@@ -339,7 +346,7 @@ fn fixture_keeps_root_free_entries_and_validates_snapshot_paths() {
         let scratch = tempfile::tempdir().unwrap();
         let path = scratch.path().join("main.hir");
         std::fs::write(&path, "pub fn main() -> Result[(), ()] { Ok(()) }").unwrap();
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded.check_for_execution().unwrap();
         let run = RunConfiguration {
             entry: loaded.entry.clone(),
@@ -350,7 +357,9 @@ fn fixture_keeps_root_free_entries_and_validates_snapshot_paths() {
             run_observed_snapshot(&mut loaded.engine, &run, Default::default()).unwrap();
         let observation = Observation::of_reference(reference.observation.as_ref().unwrap());
         let matrix = smoke_matrix();
-        let tools = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+                .unwrap();
         let mut ready = crate::native_ready::supplier(&path, None, &loaded.entry, &tools).unwrap();
         for (name, outcome) in differential_ready(
             &mut ready,

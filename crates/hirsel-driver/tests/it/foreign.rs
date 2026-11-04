@@ -2,6 +2,7 @@
 //! rule, wrapper declarations, the check report and the interpreter refusal.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -67,22 +68,25 @@ fn foreign_dispatch_ordinals_are_bound_in_glue_in_both_backends() {
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-            let mut ready = native::build(
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
+            let mut ready = hirsel_native_batch::build(
                 &validated,
-                &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
             )
             .unwrap();
             let registry = hirsel_lir::descriptor_registry::DescriptorRegistry::new(
                 &ready.table,
                 &ready.finalizers,
             );
-            let objects = |ready: &native::ReadyProgram| {
-                native::partition_backend_objects_with_jobs(
+            let objects = |ready: &hirsel_native::ReadyProgram| {
+                hirsel_native::partition_backend_objects_with_jobs(
                     ready,
                     backend,
-                    native::OptLevel::None,
-                    native::Partition::Singleton,
+                    hirsel_native::OptLevel::None,
+                    hirsel_native::Partition::Singleton,
                     &registry,
                     false,
                     None,
@@ -452,25 +456,25 @@ fn counted(u: Unsafe) -> i32 {
 /// Builds `main` against the demo library, compiled with the pinned clang;
 /// returns the directory, its launch manifest and the executable.
 fn native_demo(name: &str, main: &str) -> (PathBuf, PathBuf, PathBuf) {
-    native_demo_backend(name, main, native::Backend::Llvm)
+    native_demo_backend(name, main, hirsel_native::Backend::Llvm)
 }
 fn native_demo_backend(
     name: &str,
     main: &str,
-    backend: native::Backend,
+    backend: hirsel_native::Backend,
 ) -> (PathBuf, PathBuf, PathBuf) {
     native_demo_target(
         name,
         main,
         backend,
-        native::TargetSpec::x86_64_unknown_linux_gnu(),
+        hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
     )
 }
 fn native_demo_target(
     name: &str,
     main: &str,
-    backend: native::Backend,
-    target: native::TargetSpec,
+    backend: hirsel_native::Backend,
+    target: hirsel_native::TargetSpec,
 ) -> (PathBuf, PathBuf, PathBuf) {
     let wrappers: Vec<_> = [
         "add",
@@ -496,8 +500,8 @@ fn native_demo_target(
 fn native_c_fixture(
     name: &str,
     main: &str,
-    backend: native::Backend,
-    target: native::TargetSpec,
+    backend: hirsel_native::Backend,
+    target: hirsel_native::TargetSpec,
     c: &str,
     library: &str,
     wrappers: Vec<serde_json::Value>,
@@ -506,7 +510,7 @@ fn native_c_fixture(
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("foreign-{name}"));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("lib")).unwrap();
-    let tools = native::Toolchain::in_tree(&root.join("runtime"), &[&target]).unwrap();
+    let tools = hirsel_native::Toolchain::in_tree(&root.join("runtime"), &[&target]).unwrap();
     std::fs::write(root.join("lib/demo.c"), c).unwrap();
     let cc = if target.triple.starts_with("aarch64") {
         tools.aarch64_cc.as_ref().unwrap()
@@ -534,12 +538,12 @@ fn native_c_fixture(
         &path,
         &executable,
         target,
-        native::BuildProfile::Default,
+        hirsel_native::BuildProfile::Default,
         backend,
         None,
         false,
         hirsel_driver::session::Policy::default(),
-        hirsel_driver::native::Validation::EveryStage,
+        hirsel_native::Validation::EveryStage,
     )
     .unwrap();
     assert!(built.is_ok(), "{built:?}");
@@ -587,13 +591,13 @@ fn native_calls_c_with_scalars_a_byte_view_and_a_released_handle() {
             &path,
             launch,
             None,
-            native::Backend::Llvm,
+            hirsel_native::Backend::Llvm,
             native::Output::Streams {
                 stdout: &mut Vec::new(),
                 stderr: &mut Vec::new(),
             },
             hirsel_driver::session::Policy::default(),
-            native::Validation::EveryStage,
+            hirsel_native::Validation::EveryStage,
         );
         let Err(ToolError::Runtime(message)) = refused else {
             panic!(
@@ -614,10 +618,11 @@ fn native_calls_c_with_scalars_a_byte_view_and_a_released_handle() {
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = native::build(&validated, &options).unwrap();
-        let sites = native::Sites::new(validated.snapshot());
-        let Err(error) = native::run_heap(&ready, &loaded.entry, &sites) else {
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let sites = hirsel_native::Sites::new(validated.snapshot());
+        let Err(error) = hirsel_native_testing::run_heap(&ready, &loaded.entry, &sites) else {
             panic!("expected H to refuse the extern call");
         };
         assert!(error.to_string().contains("H does not run C"), "{error}");
@@ -673,11 +678,14 @@ fn native_c_callbacks_follow_library_and_inline_definitions() {
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-        let tools = native::Toolchain::in_tree(&root.join("runtime"), &[&target]).unwrap();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+        let tools = hirsel_native::Toolchain::in_tree(&root.join("runtime"), &[&target]).unwrap();
         for library in [true, false] {
-            let mut ready =
-                native::build(&validated, &native::Options::new(target.clone())).unwrap();
+            let mut ready = hirsel_native_batch::build(
+                &validated,
+                &hirsel_native::Options::new(target.clone()),
+            )
+            .unwrap();
             let index = ready
                 .units
                 .iter()
@@ -704,27 +712,42 @@ fn native_c_callbacks_follow_library_and_inline_definitions() {
                     .inline_instances
                     .insert(ready.units[index].unit().header.instance);
             }
-            for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-                for opt in [native::OptLevel::None, native::OptLevel::Speed] {
-                    for partition in [native::Partition::Whole, native::Partition::Singleton] {
+            for backend in [
+                hirsel_native::Backend::Llvm,
+                hirsel_native::Backend::Cranelift,
+            ] {
+                for opt in [
+                    hirsel_native::OptLevel::None,
+                    hirsel_native::OptLevel::Speed,
+                ] {
+                    for partition in [
+                        hirsel_native::Partition::Whole,
+                        hirsel_native::Partition::Singleton,
+                    ] {
                         let dir = root.join(format!("{library}-{backend:?}-{opt:?}-{partition:?}"));
                         std::fs::create_dir_all(&dir).unwrap();
                         let registry = hirsel_lir::descriptor_registry::DescriptorRegistry::new(
                             &ready.table,
                             &ready.finalizers,
                         );
-                        let objects = native::partition_backend_objects(
+                        let objects = hirsel_native::partition_backend_objects(
                             &ready, backend, opt, partition, &registry, false, None,
                         )
                         .unwrap();
-                        let exe =
-                            native::link_objects(&ready, &loaded.entry, &objects, &tools, &dir)
-                                .unwrap();
-                        let launched = native::launch(&exe, &target, &tools, &dir, false).unwrap();
-                        let observation = native::observe(
+                        let exe = hirsel_native::link_objects(
+                            &ready,
+                            &loaded.entry,
+                            &objects,
+                            &tools,
+                            &dir,
+                        )
+                        .unwrap();
+                        let launched =
+                            hirsel_native::launch(&exe, &target, &tools, &dir, false).unwrap();
+                        let observation = hirsel_native::observe(
                             &launched,
                             &ready,
-                            &native::Sites::new(validated.snapshot()),
+                            &hirsel_native::Sites::new(validated.snapshot()),
                         )
                         .unwrap();
                         assert_eq!(observation.exit_code, Some(0), "{observation:?}");
@@ -739,7 +762,7 @@ fn native_c_callbacks_follow_library_and_inline_definitions() {
 #[test]
 fn cranelift_calls_c_and_c_callbacks_with_the_same_observations_as_llvm() {
     with_compiler_stack(|| {
-        for target in native::TargetSpec::executed() {
+        for target in hirsel_native::TargetSpec::executed() {
             let execute_target = |root: &Path, executable: &Path| {
                 if target.triple.starts_with("aarch64") {
                     std::process::Command::new(std::env::var_os("HIRSEL_QEMU_AARCH64").unwrap())
@@ -765,7 +788,10 @@ fn cranelift_calls_c_and_c_callbacks_with_the_same_observations_as_llvm() {
                     diagnostic.push_str(part);
                 }
             }
-            for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+            for backend in [
+                hirsel_native::Backend::Llvm,
+                hirsel_native::Backend::Cranelift,
+            ] {
                 let (root, _, executable) = native_demo_target(
                     &format!("parity-{backend:?}-{}", target.triple),
                     &diagnostic,
@@ -832,8 +858,11 @@ fn native_null_pointer_boundaries_match_on_both_backends() {
             }
         }
         main.push_str("    _ => Error(()),\n  }\n}\n");
-        for target in native::TargetSpec::executed() {
-            for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for target in hirsel_native::TargetSpec::executed() {
+            for backend in [
+                hirsel_native::Backend::Llvm,
+                hirsel_native::Backend::Cranelift,
+            ] {
                 let wrappers = cases
                     .iter()
                     .map(|(name, _)| {

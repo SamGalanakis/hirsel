@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::*, *};
+use hirsel_front_phases::*;
 use std::sync::{Arc, Mutex};
 
 struct Observed {

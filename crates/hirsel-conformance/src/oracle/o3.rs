@@ -6,7 +6,8 @@
 //! Raw memo operations are reported independently. An independent cold check
 //! supplies current read values; missing/conflicting observations fail closed.
 use super::{Report, Verdict, edits::Scenario};
-use hirsel_driver::session::{FileChange, Session};
+use hirsel_driver::session::FileChange;
+use hirsel_driver::session::Session;
 use hirsel_engine::{DefinitionQueries, QueryEngine, QueryKind};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -285,7 +286,7 @@ fn changed_items(before: &str, after: &str) -> Result<BTreeSet<hirsel_engine::De
     let parse = |text: &str| -> Result<BTreeMap<_, _>, String> {
         let mut engine = QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let file = engine
             .sources

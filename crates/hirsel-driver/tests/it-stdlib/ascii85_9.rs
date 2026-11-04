@@ -1,6 +1,7 @@
 //! Bounded Go ASCII85 vectors, run on H, LLVM and Cranelift with stage validation.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn fixture(name: &str) {
@@ -29,7 +30,10 @@ fn fixture(name: &str) {
                 "{outcome:?}"
             );
         }
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let outcome = native::run_path_native_backend_with_validation(
@@ -49,7 +53,7 @@ fn fixture(name: &str) {
                     stderr: &mut stderr,
                 },
                 hirsel_driver::session::Policy::default(),
-                native::Validation::EveryStage,
+                hirsel_native::Validation::EveryStage,
             )
             .unwrap()
             .unwrap();

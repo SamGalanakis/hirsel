@@ -1,0 +1,13 @@
+[package]
+name = "hirsel-compiler-identity"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[build-dependencies]
+sha2 = "0.10"
+
+
+[lib]
+test = false

@@ -1,10 +1,11 @@
 //! Stop gate for the isolated row-text experiment: ordinary indexed carriers
 //! must contain independent MEM-12 owners without an importer extension.
-use hirsel_driver::{compiler_adapters, native};
+use hirsel_driver::native;
 use hirsel_engine::{
     QueryEngine, RunConfiguration, SimulationConfig, default_context, default_environment,
     entry_path, run_observed_snapshot, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 
 // The historical helper fixture stays byte-for-byte intact. Only direct field
 // projections covered by 063cbde7 change in this current-main counterpart;
@@ -50,7 +51,7 @@ fn ordinary_indexed_rows_with_nested_text_owners() {
             SimulationConfig::default(),
         )
         .unwrap();
-        let reference = native::Observation::of_reference(
+        let reference = hirsel_native::Observation::of_reference(
             observed
                 .observation
                 .as_ref()
@@ -58,14 +59,14 @@ fn ordinary_indexed_rows_with_nested_text_owners() {
         );
         assert_eq!(reference.output, b"ok\n");
         let input = engine.export_native_input().unwrap();
-        let sites = native::Sites::new(&input);
+        let sites = hirsel_native::Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
-        let heap = native::run_heap(&ready, &entry, &sites).unwrap();
+        let heap = hirsel_native_testing::run_heap(&ready, &entry, &sites).unwrap();
         assert_eq!(heap.observation, reference);
         // An ordinary list stores fixed carriers, with a distinct counted
         // FlatBytes owner in each Row. This is not a sequential flat list.
@@ -88,21 +89,24 @@ fn ordinary_indexed_rows_with_nested_text_owners() {
             })
             .expect("a fixed Row containing a flat text owner");
         assert_eq!(carrier.fields[1].offset, 8);
-        let mut configs = native::smoke_matrix();
-        configs.push(native::Configuration {
-            options: native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
-            engine: native::Engine::Cranelift {
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+        let mut configs = hirsel_native_testing::smoke_matrix();
+        configs.push(hirsel_native_testing::Configuration {
+            options: hirsel_native::Options::new(
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+            ),
+            engine: hirsel_native_testing::Engine::Cranelift {
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         });
         let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("row-text-shape");
-        let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &configs).unwrap();
-        for (config, outcome) in
-            native::differential(&validated, &entry, &reference, &configs, &tools, &dir)
-        {
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs).unwrap();
+        for (config, outcome) in hirsel_native_testing::differential(
+            &validated, &entry, &reference, &configs, &tools, &dir,
+        ) {
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{config}: {outcome:?}"
             );
         }
@@ -115,7 +119,7 @@ fn adapter_matches_ordinary_items_and_encoded_snapshots() {
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/row-text.hir");
         let mut loaded =
-            hirsel_driver::load_program_source(&path, Some(&projected_source())).unwrap();
+            hirsel_front_phases::load_program_source(&path, Some(&projected_source())).unwrap();
         loaded.check_for_execution().unwrap_or_else(|error| {
             if let hirsel_engine::ToolError::Query {
                 error: hirsel_types::QueryError::Diagnostics(diagnostics),
@@ -131,7 +135,7 @@ fn adapter_matches_ordinary_items_and_encoded_snapshots() {
         // the existing model and store encoder, including retained versions.
         // Its stress case exceeds the interpreter's fixed million-step limit;
         // run it from Rust on H and the two native backends instead.
-        let reference = native::Observation {
+        let reference = hirsel_native::Observation {
             exit_code: Some(0),
             blocked: false,
             budget: None,
@@ -142,23 +146,26 @@ fn adapter_matches_ordinary_items_and_encoded_snapshots() {
         };
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let mut configs = native::smoke_matrix();
+        let mut configs = hirsel_native_testing::smoke_matrix();
         // H runs the bounded ownership twin below, without full JSON stress.
         configs.remove(0);
-        configs.push(native::Configuration {
-            options: native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
-            engine: native::Engine::Cranelift {
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+        configs.push(hirsel_native_testing::Configuration {
+            options: hirsel_native::Options::new(
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+            ),
+            engine: hirsel_native_testing::Engine::Cranelift {
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         });
         let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("row-text-adapter");
-        let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &configs).unwrap();
-        for (config, outcome) in
-            native::differential(&validated, &entry, &reference, &configs, &tools, &dir)
-        {
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs).unwrap();
+        for (config, outcome) in hirsel_native_testing::differential(
+            &validated, &entry, &reference, &configs, &tools, &dir,
+        ) {
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{config}: {outcome:?}"
             );
         }
@@ -198,40 +205,43 @@ fn detached_title_minimal_probe_and_ordinary_twin() {
             )
             .unwrap();
             let reference =
-                native::Observation::of_reference(observed.observation.as_ref().unwrap());
+                hirsel_native::Observation::of_reference(observed.observation.as_ref().unwrap());
             assert_eq!(reference.output, b"abc");
             let input = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(input).unwrap();
-            let ready = native::build(
+            let ready = hirsel_native_batch::build(
                 &validated,
-                &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+                &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
             )
             .unwrap_or_else(|error| {
                 panic!("{kind} must compile after the projection fix: {error}")
             });
-            let sites = native::Sites::new(validated.snapshot());
+            let sites = hirsel_native::Sites::new(validated.snapshot());
             assert_eq!(
-                native::heap_campaign(&ready, &entry, &sites)
+                hirsel_native_testing::heap_campaign(&ready, &entry, &sites)
                     .unwrap()
                     .observation,
                 reference
             );
-            let mut configs = native::smoke_matrix();
-            configs.push(native::Configuration {
-                options: native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+            let mut configs = hirsel_native_testing::smoke_matrix();
+            configs.push(hirsel_native_testing::Configuration {
+                options: hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                ),
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             });
             let dir =
                 std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("row-title-{kind}"));
-            let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &configs).unwrap();
-            for (config, outcome) in
-                native::differential(&validated, &entry, &reference, &configs, &tools, &dir)
-            {
+            let tools = hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs)
+                .unwrap();
+            for (config, outcome) in hirsel_native_testing::differential(
+                &validated, &entry, &reference, &configs, &tools, &dir,
+            ) {
                 assert!(
-                    matches!(outcome, native::Outcome::Agree),
+                    matches!(outcome, hirsel_native_testing::Outcome::Agree),
                     "{config}: {outcome:?}"
                 );
             }
@@ -282,17 +292,17 @@ fn heap_checks_owned_snapshots_updates_and_both_release_orders() {
                 "store.encode(snapshot(rows)) == store.encode(board)",
                 "snapshot(rows) == board",
             );
-        let mut loaded = hirsel_driver::load_program_source(&path, Some(&source)).unwrap();
+        let mut loaded = hirsel_front_phases::load_program_source(&path, Some(&source)).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
         let entry = loaded.entry.clone();
         let input = loaded.engine.export_native_input().unwrap();
-        let sites = native::Sites::new(&input);
+        let sites = hirsel_native::Sites::new(&input);
         let validated = loaded.engine.import_native_input(input.clone()).unwrap();
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
         use hirsel_lir::layout_types::{CopyRecipe, LayoutKind, SizeSpec};
@@ -316,7 +326,7 @@ fn heap_checks_owned_snapshots_updates_and_both_release_orders() {
             "full Row C layout: size {:?}, align {}, text offset {}",
             carrier.size, carrier.align, carrier.fields[4].offset
         );
-        let heap = native::run_heap(&ready, &entry, &sites).unwrap();
+        let heap = hirsel_native_testing::run_heap(&ready, &entry, &sites).unwrap();
         assert_eq!(
             heap.observation.output,
             b"ok\n",
@@ -356,14 +366,15 @@ fn exact10k_owned_and_direct_builders_keep_the_fixture_bytes() {
                 original.split("pub fn main(").next().unwrap(),
                 include_str!("../fixtures/row-text-tenk.hir")
             );
-            let mut loaded = hirsel_driver::load_program_source(&path, Some(&source)).unwrap();
+            let mut loaded =
+                hirsel_front_phases::load_program_source(&path, Some(&source)).unwrap();
             loaded
                 .check_for_execution()
                 .unwrap_or_else(|e| panic!("{e}"));
             let entry = loaded.entry.clone();
             let input = loaded.engine.export_native_input().unwrap();
             let validated = loaded.engine.import_native_input(input).unwrap();
-            let reference = native::Observation {
+            let reference = hirsel_native::Observation {
                 exit_code: Some(0),
                 blocked: false,
                 budget: None,
@@ -372,13 +383,15 @@ fn exact10k_owned_and_direct_builders_keep_the_fixture_bytes() {
                 failures: vec![],
                 roots: vec![],
             };
-            let mut configs = native::smoke_matrix();
+            let mut configs = hirsel_native_testing::smoke_matrix();
             configs.remove(0);
-            configs.push(native::Configuration {
-                options: native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+            configs.push(hirsel_native_testing::Configuration {
+                options: hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                ),
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             });
             let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(
@@ -388,14 +401,17 @@ fn exact10k_owned_and_direct_builders_keep_the_fixture_bytes() {
                     "row-tenk-direct"
                 },
             );
-            let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &configs).unwrap();
-            for (config, outcome) in
-                native::differential(&validated, &entry, &reference, &configs, &tools, &dir)
-            {
+            let tools = hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs)
+                .unwrap();
+            for (config, outcome) in hirsel_native_testing::differential(
+                &validated, &entry, &reference, &configs, &tools, &dir,
+            ) {
                 match outcome {
-                    native::Outcome::Agree => {}
-                    native::Outcome::Unavailable(e) => panic!("{builder}: {config}: {e}"),
-                    native::Outcome::Mismatch(actual) => panic!(
+                    hirsel_native_testing::Outcome::Agree => {}
+                    hirsel_native_testing::Outcome::Unavailable(e) => {
+                        panic!("{builder}: {config}: {e}")
+                    }
+                    hirsel_native_testing::Outcome::Mismatch(actual) => panic!(
                         "{builder}: {config}: output length {}, sha256 {:x}, exit {:?}",
                         actual.output.len(),
                         Sha256::digest(&actual.output),
@@ -469,9 +485,11 @@ pub fn main() -> Result[(), ()] {{
                 );
                 let input = engine.export_native_input().unwrap();
                 let validated = engine.import_native_input(input).unwrap();
-                let ready = native::build(
+                let ready = hirsel_native_batch::build(
                     &validated,
-                    &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+                    &hirsel_native::Options::new(
+                        hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                    ),
                 )
                 .unwrap();
                 let program = ready.heap_program();

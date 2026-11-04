@@ -2,11 +2,15 @@
 //! scalar returns `{ value, status }` in registers, so the erased stage loop of
 //! `bench/native/programs/closure-iter-erased.hir` calls through its code
 //! pointers with no out-cell, on both targets.
-use hirsel_driver::compiler_adapters;
-use hirsel_driver::native::{OptLevel, Options, TargetSpec, build, emit_ir};
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::TargetSpec;
+use hirsel_native::emit_ir;
+use hirsel_native_batch::build;
 
 /// The optimized IR of the definition whose link name contains every part of
 /// `name`: a function-reference thunk (`_H1T`) only when `name` asks for one.

@@ -1,8 +1,9 @@
-use hirsel_driver::{compiler_adapters, native};
+use hirsel_driver::native;
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, entry_path, source_check_request,
     with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use std::{fs, process::Command};
 
 fn matrix(mapper: &str, stopped: bool) {
@@ -31,15 +32,20 @@ pub fn main(rt: Io) -> Result[(), GrantError] {{
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-        let program = native::build(&validated, &native::Options::new(target.clone())).unwrap();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+        let program =
+            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
+                .unwrap();
         let root = tempfile::tempdir().unwrap();
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-            let objects = native::emit_backend_objects(
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
-                native::OptLevel::Default,
-                native::Partition::Whole,
+                hirsel_native::OptLevel::Default,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
@@ -50,17 +56,17 @@ pub fn main(rt: Io) -> Result[(), GrantError] {{
                         "{backend:?}-diagnostic{diagnostic}-system{system_allocator}"
                     ));
                     fs::create_dir_all(&dir).unwrap();
-                    let tools = native::Toolchain::in_tree_with_runtime(
+                    let tools = hirsel_native::Toolchain::in_tree_with_runtime(
                         &dir,
                         &[&target],
-                        native::RuntimeBuild {
+                        hirsel_native::RuntimeBuild {
                             diagnostic,
                             system_allocator,
                             ..Default::default()
                         },
                     )
                     .unwrap();
-                    let executable = native::link_standalone_objects(
+                    let executable = hirsel_native::link_standalone_objects(
                         &program,
                         &entry_path(&context),
                         &objects,

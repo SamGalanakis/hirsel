@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 #[test]
 fn cleanup_compilation_inspects_only_changed_live_roots() {
     with_compiler_stack(|| {

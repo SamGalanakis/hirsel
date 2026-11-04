@@ -2,6 +2,7 @@
 //! executes; run, test and build lower every reachable body.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::{
     collections::BTreeSet,
     path::PathBuf,

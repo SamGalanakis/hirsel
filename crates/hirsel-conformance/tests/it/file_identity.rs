@@ -1,7 +1,10 @@
 //! The archived unlink disagreement and its controls use the native agreement
 //! classifier, as well as real Io recording and exact runtime replay.
-use hirsel_conformance::{agree, native};
-use hirsel_driver::native::{Outcome, Toolchain, smoke_matrix};
+use hirsel_conformance::agree;
+use hirsel_conformance::native;
+use hirsel_native::Toolchain;
+use hirsel_native_testing::Outcome;
+use hirsel_native_testing::smoke_matrix;
 use std::path::Path;
 
 #[test]
@@ -11,7 +14,8 @@ fn opened_file_identity_agrees_natively_and_replays_real_io_for_every_control() 
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("file-identity");
         std::fs::create_dir_all(&dir).unwrap();
         let matrix = smoke_matrix();
-        let tools = Toolchain::for_matrix(&dir.join("runtime"), &matrix).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &matrix).unwrap();
         let native = agree::Native::new(
             matrix.clone(),
             tools,

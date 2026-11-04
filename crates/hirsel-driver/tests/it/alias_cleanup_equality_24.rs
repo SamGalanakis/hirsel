@@ -1,6 +1,7 @@
 //! Nominal alias cleanup equality preserves the actual's declaring binder.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 const SHAPES: [(&str, &str, &str); 5] = [
     ("direct", "", "R"),

@@ -35,8 +35,8 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 fn owning_await_result_survives_yielding_child_cleanup_and_two_failures() {
     with_compiler_stack(|| {
         let program = super::runtime50_continuation::ready(SOURCE);
-        let plans = hirsel_driver::native::continuation::plans(&program);
-        hirsel_driver::native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         assert!(
             program.units.iter().any(|unit| {
                 unit.unit().header.definition.is_core("task.await")
@@ -52,7 +52,7 @@ fn owning_await_result_survives_yielding_child_cleanup_and_two_failures() {
         );
         let observed = super::runtime50_resume::agree_on(
             SOURCE,
-            &hirsel_driver::native::Fixture {
+            &hirsel_native::Fixture {
                 migrate: true,
                 ..Default::default()
             },

@@ -4,6 +4,7 @@ use hirsel_engine::{
     store::{MemStore, ResultStore},
     *,
 };
+use hirsel_front_phases::*;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,

@@ -1,6 +1,7 @@
 use crate::source_std;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_interp::{Integer, Outcome, Value, library::Library};
 
 fn engine(source: &str) -> QueryEngine {
@@ -159,9 +160,9 @@ fn signed_differences_and_comparisons_execute_source_units_without_wrapper_alloc
         }
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
         for unit in &ready.units {
@@ -174,7 +175,7 @@ fn signed_differences_and_comparisons_execute_source_units_without_wrapper_alloc
                 );
             }
         }
-        native::check_runtime_calls(&ready).unwrap();
+        hirsel_native::check_runtime_calls(&ready).unwrap();
     });
 }
 
@@ -186,9 +187,12 @@ fn full_gate_native_instant_arithmetic_matches_direct_code() {
         let mut engine = engine(ARITHMETIC);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-        let ready = native::build(&validated, &native::Options::new(target.clone())).unwrap();
-        let artifact = native::emit(&ready, native::OptLevel::Speed, |_| true).unwrap();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+        let ready =
+            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
+                .unwrap();
+        let artifact =
+            hirsel_native::emit(&ready, hirsel_native::OptLevel::Speed, |_| true).unwrap();
         let symbol = &artifact
             .exports
             .iter()
@@ -198,7 +202,8 @@ fn full_gate_native_instant_arithmetic_matches_direct_code() {
         let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("instant-arithmetic");
         std::fs::create_dir_all(&scratch).unwrap();
         std::fs::write(scratch.join("time.o"), &artifact.bytes).unwrap();
-        let tools = native::Toolchain::in_tree(&scratch.join("runtime"), &[&target]).unwrap();
+        let tools =
+            hirsel_native::Toolchain::in_tree(&scratch.join("runtime"), &[&target]).unwrap();
         let harness = format!(
             r#"
 #include <stdint.h>

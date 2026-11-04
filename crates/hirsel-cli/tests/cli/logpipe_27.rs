@@ -1,8 +1,16 @@
 //! Three real stages on the reference interpreter, checked H and both native adapters.
-use hirsel_driver::native::{
-    Configuration, Engine, Fixture, Observation, OptLevel, Options, Outcome, Partition, Runtime,
-    TargetSpec, Toolchain, differential_ready,
-};
+use hirsel_native::Fixture;
+use hirsel_native::Observation;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
+use hirsel_native_testing::Configuration;
+use hirsel_native_testing::Engine;
+use hirsel_native_testing::Outcome;
+use hirsel_native_testing::Runtime;
+use hirsel_native_testing::differential_ready;
 use serde_json::Value;
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
@@ -212,7 +220,7 @@ fn partition(ids: &[&str]) {
             serde_json::to_vec_pretty(&selected).unwrap(),
         )
         .unwrap();
-        let mut loaded = hirsel_driver::load_program(&root.join("hirsel.json"))
+        let mut loaded = hirsel_front_phases::load_program(&root.join("hirsel.json"))
             .unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
@@ -318,7 +326,8 @@ fn partition(ids: &[&str]) {
             engine,
         })
         .collect();
-        let toolchain = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         fs::create_dir(root.join("native")).unwrap();
         let results = differential_ready(
             &mut crate::native_ready::supplier(

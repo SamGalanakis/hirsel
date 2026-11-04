@@ -1,6 +1,8 @@
-use hirsel_driver::native::{Evidence, Proofs};
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::ResultStore, *};
+use hirsel_front_phases::*;
+use hirsel_native::Evidence;
+use hirsel_native::Proofs;
 use std::sync::Arc;
 
 #[test]
@@ -200,7 +202,7 @@ pub fn main()->Result[(),()] {let n=bump([1u32,2u32],1u64,3u32);Ok(())}
             trusted: vec![checker],
         };
         let actual = source.outcome(completed.clone()).unwrap().products;
-        let declarations = native::queries::declarations::NativeDeclarations::from_settled(
+        let declarations = hirsel_native_cache::declarations::NativeDeclarations::from_settled(
             &actual.signatures,
             actual.roots.clone(),
             actual.catalogue.iter().map(|p| (**p).clone()),
@@ -212,7 +214,7 @@ pub fn main()->Result[(),()] {let n=bump([1u32,2u32],1u64,3u32);Ok(())}
             .original_context
             .reader(actual.originals.iter().map(|p| (**p).clone()))
             .unwrap();
-        let inputs = native::queries::source_inputs::NativeInstanceInputs::from_products(
+        let inputs = hirsel_native_cache::source_inputs::NativeInstanceInputs::from_products(
             declarations,
             original,
         )
@@ -264,10 +266,11 @@ pub fn main()->Result[(),()] {let n=bump([1u32,2u32],1u64,3u32);Ok(())}
         assert!(
             Proofs::assess_native(&export, &source, completed, &duplicate, store.clone()).is_err()
         );
-        let mut options = native::Options::new(hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu());
-        options.validation = native::Validation::Ready;
+        let mut options =
+            hirsel_native::Options::new(hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu());
+        options.validation = hirsel_native::Validation::Ready;
         options.discharge = proofs.discharge.clone();
-        let tasks = native::queries::instance_tasks::InstanceTasks::new(
+        let tasks = hirsel_native_queries::instance_tasks::InstanceTasks::new(
             inputs,
             store.clone(),
             options,
@@ -282,15 +285,15 @@ pub fn main()->Result[(),()] {let n=bump([1u32,2u32],1u64,3u32);Ok(())}
             errors,
         )
         .unwrap();
-        let factory = Arc::new(native::queries::instance_tasks::InstanceTaskFactory::new(
-            tasks.clone(),
-        ));
+        let factory = Arc::new(
+            hirsel_native_queries::instance_tasks::InstanceTaskFactory::new(tasks.clone()),
+        );
         for kind in [
-            native::queries::INSTANCE_KIND,
-            native::queries::instance_tasks::INSTANCE_INPUT_KIND,
-            native::queries::instance_tasks::DISCOVERY_KIND,
-            native::queries::instance_tasks::CALLABLE_GRAPH_KIND,
-            native::queries::instance::CALLABLE_VALUE_KIND,
+            hirsel_native::query_model::INSTANCE_KIND,
+            hirsel_native_queries::instance_tasks::INSTANCE_INPUT_KIND,
+            hirsel_native_queries::instance_tasks::DISCOVERY_KIND,
+            hirsel_native_queries::instance_tasks::CALLABLE_GRAPH_KIND,
+            hirsel_native::query_model::CALLABLE_VALUE_KIND,
         ] {
             runtime.register(kind, factory.clone()).unwrap();
         }

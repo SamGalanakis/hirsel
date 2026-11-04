@@ -158,7 +158,7 @@ fn execute_recipe(root: &Path, source: &str, expected_output: &[u8]) {
     assert!(exported.status.success(), "{exported:?}");
     assert!(fs::metadata(root.join("reachable.tir")).unwrap().len() > 0);
     hirsel_engine::with_compiler_stack(|| {
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&manifest).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -193,7 +193,7 @@ fn execute_recipe(root: &Path, source: &str, expected_output: &[u8]) {
         }
         assert_eq!(plain.observation, checked.observation);
         let observed =
-            hirsel_driver::native::Observation::of_reference(checked.observation.as_ref().unwrap());
+            hirsel_native::Observation::of_reference(checked.observation.as_ref().unwrap());
         assert_eq!(observed.output, expected_output);
     });
 }

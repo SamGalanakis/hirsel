@@ -1,7 +1,7 @@
 //! IBM decTest's directive/row runner (CPython Lib/test/test_decimal.py),
 //! specialized to the finite, unbounded coefficient API. See the vector README.
-use hirsel_driver::load_program_source;
 use hirsel_engine::with_compiler_stack;
+use hirsel_front_phases::load_program_source;
 use hirsel_interp::{Integer, Limits, Outcome, Value};
 use hirsel_types::Primitive;
 use std::path::Path;

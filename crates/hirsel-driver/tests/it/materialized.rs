@@ -1,6 +1,7 @@
 //! Reified compile-time values keep their checked types and identities.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_interp::Value;
 use hirsel_span::Span;
 use hirsel_tir::{Constant, Constructor, ValueKind};

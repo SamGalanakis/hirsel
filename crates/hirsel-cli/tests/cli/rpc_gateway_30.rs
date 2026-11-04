@@ -99,7 +99,7 @@ fn scripted(group: &str) {
     with_compiler_stack(|| {
         let root = evidence("rpcgate-script-");
         let manifest = package(&root);
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&manifest).unwrap();
         loaded.check_for_execution().unwrap();
         let run = RunConfiguration {
             entry: loaded.entry.clone(),
@@ -386,7 +386,7 @@ fn rpc_gateway_30_pending_config_read_parent_cancellation() {
             .unwrap();
         let manifest = wrapper.join("hirsel.json");
         fs::write(&manifest,json!({"schema":1,"package":{"name":"rpcgate_parent","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[{"manifest":std,"package":{"name":"std","version":"1"},"expose":[]},{"manifest":application,"package":{"name":"rpcgate","version":"1"},"expose":[]}],"entry":{"module":[],"name":"main"}}).to_string()).unwrap();
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&manifest).unwrap();
         loaded.check_for_execution().unwrap();
         let run = RunConfiguration {
             entry: loaded.entry.clone(),

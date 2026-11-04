@@ -1,6 +1,7 @@
 //! Explicit Writer admission and flush retain only uncommitted bytes.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 #[test]

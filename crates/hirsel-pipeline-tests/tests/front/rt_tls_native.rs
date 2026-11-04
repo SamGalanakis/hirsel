@@ -3,11 +3,17 @@
 //! the provider records plaintext and replays with the local server gone.
 #[path = "../../../hirsel-driver/tests/support/source_std.rs"]
 mod source_std;
-use hirsel_driver::native::{
-    Launched, OptLevel, Options, Partition, Sites, Toolchain, build, link, observe,
-};
 use hirsel_engine::{default_context, entry_path, source_check_request, with_compiler_stack};
 use hirsel_lir::layout_types::TargetSpec;
+use hirsel_native::Launched;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::Sites;
+use hirsel_native::Toolchain;
+use hirsel_native::link;
+use hirsel_native::observe;
+use hirsel_native_batch::build;
 use hirsel_rt::io::Request;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use std::io::{Read, Write};

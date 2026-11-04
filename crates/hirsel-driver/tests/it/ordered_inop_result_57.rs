@@ -83,7 +83,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 "#,
         ] {
             let program = super::runtime50_continuation::ready(source);
-            let plans = hirsel_driver::native::continuation::plans(&program);
+            let plans = hirsel_native::continuation::plans(&program);
             let mut proved = 0;
             for unit in &program.units {
                 let u = unit.unit();
@@ -182,7 +182,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 }
 "#,
         );
-        let plans = hirsel_driver::native::continuation::plans(&program);
+        let plans = hirsel_native::continuation::plans(&program);
         let mut proved = 0;
         for unit in &program.units {
             let u = unit.unit();
@@ -249,8 +249,8 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 }
 "#;
         let program = super::runtime50_continuation::ready(source);
-        let plans = hirsel_driver::native::continuation::plans(&program);
-        hirsel_driver::native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let (&id, wrapper) = plans
             .plans
             .iter()
@@ -291,17 +291,17 @@ pub fn main(rt:Io)->Result[(),GrantError] {
                     )
                 }
             }
-            assert!(hirsel_driver::native::continuation::validate(&program, &bad).is_err());
+            assert!(hirsel_native::continuation::validate(&program, &bad).is_err());
         }
         for backend in [
-            hirsel_driver::native::Backend::Llvm,
-            hirsel_driver::native::Backend::Cranelift,
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
         ] {
-            let objects = hirsel_driver::native::emit_backend_objects(
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
-                hirsel_driver::native::OptLevel::Default,
-                hirsel_driver::native::Partition::Whole,
+                hirsel_native::OptLevel::Default,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
@@ -339,8 +339,8 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 }
 "#;
         let program = super::runtime50_continuation::ready(source);
-        let plans = hirsel_driver::native::continuation::plans(&program);
-        hirsel_driver::native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         assert!(
             program
                 .units
@@ -353,7 +353,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
         );
         super::runtime50_resume::agree_on(
             source,
-            &hirsel_driver::native::Fixture {
+            &hirsel_native::Fixture {
                 migrate: true,
                 ..Default::default()
             },

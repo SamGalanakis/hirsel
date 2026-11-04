@@ -3,6 +3,7 @@
 //! Hirsel instead uses a bounded callback and consuming freeze/thaw; no Weak.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn rendered(output: &CheckOutput, expected: &[(&str, &str)]) -> Vec<serde_json::Value> {

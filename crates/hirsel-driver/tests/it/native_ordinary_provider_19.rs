@@ -1,10 +1,11 @@
 //! Ordinary local library donor vectors from the former plan/seed controls.
-use hirsel_driver::native::{self, Backend};
+use hirsel_driver::native;
 use hirsel_engine::{
     runtime,
     store::{DirStore, RequestStore, ResultStore, VerifyStore},
     *,
 };
+use hirsel_native::Backend;
 use std::sync::Arc;
 fn compile(
     engine: &mut QueryEngine,
@@ -14,11 +15,12 @@ fn compile(
     backend: Backend,
     verification: VerifyStore,
 ) -> crate::native_object_products_19::Objects {
-    let mut options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+    let mut options =
+        hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
     options.validation = if verification == VerifyStore::Recompute {
-        native::Validation::EveryStage
+        hirsel_native::Validation::EveryStage
     } else {
-        native::Validation::Ready
+        hirsel_native::Validation::Ready
     };
     crate::native_object_products_19::compile_roots(
         engine,
@@ -26,7 +28,7 @@ fn compile(
         selected,
         requested,
         backend,
-        native::OptLevel::None,
+        hirsel_native::OptLevel::None,
         options,
         false,
         hirsel_intern::jobs::Jobs::ONE,
@@ -66,11 +68,11 @@ fn ordinary_provider(backend: Backend) {
                 open_store(),
                 budget.reserve(24 << 20).unwrap(),
             ));
-            let mut config = hirsel_driver::COMPILER.configuration();
+            let mut config = hirsel_front_phases::COMPILER.configuration();
             config.store = store.clone();
             config.verify = Verify::On;
             config.verify_store = VerifyStore::Off;
-            let mut package = hirsel_driver::COMPILER
+            let mut package = hirsel_front_phases::COMPILER
                 .with_config(config)
                 .with_owned_engines()
                 .load_package_declarations(&library)
@@ -99,11 +101,11 @@ fn ordinary_provider(backend: Backend) {
                 store,
                 transport_budget.reserve(24 << 20).unwrap(),
             ));
-            let mut config = hirsel_driver::COMPILER.configuration();
+            let mut config = hirsel_front_phases::COMPILER.configuration();
             config.store = store.clone();
             config.verify = Verify::On;
             config.verify_store = VerifyStore::Off;
-            let mut loaded = hirsel_driver::COMPILER
+            let mut loaded = hirsel_front_phases::COMPILER
                 .with_config(config)
                 .with_owned_engines()
                 .load_program(&application)

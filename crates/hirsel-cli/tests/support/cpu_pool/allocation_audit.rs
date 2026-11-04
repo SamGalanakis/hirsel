@@ -20,9 +20,13 @@ fn typed_prefix_allocation_audit(width: usize) {
 }
 
 fn cpu_owned_allocation_audit(width: usize, source: &str, provider: &str, label: &str) {
-    use hirsel_driver::native::{
-        self, Backend, OptLevel, Options, Partition, TargetSpec, Toolchain,
-    };
+    use hirsel_driver::native;
+    use hirsel_native::Backend;
+    use hirsel_native::OptLevel;
+    use hirsel_native::Options;
+    use hirsel_native::Partition;
+    use hirsel_native::TargetSpec;
+    use hirsel_native::Toolchain;
     let _compiler = QUAL_COMPILER.lock().unwrap_or_else(|e| e.into_inner());
     hirsel_engine::with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
@@ -32,15 +36,15 @@ fn cpu_owned_allocation_audit(width: usize, source: &str, provider: &str, label:
         let mut authority = qual_grants(width);
         authority["io"]["tasks"] = serde_json::json!(provider);
         fs::write(&grants, authority.to_string()).unwrap();
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&manifest).unwrap();
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let program = native::build(&validated, &Options::new(target.clone())).unwrap();
+        let program = hirsel_native_batch::build(&validated, &Options::new(target.clone())).unwrap();
         let toolchain = Toolchain::in_tree_diagnostic(&root.join("runtime"), &[&target]).unwrap();
         for backend in [Backend::Llvm, Backend::Cranelift] {
-            let objects = native::emit_backend_objects(
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
                 OptLevel::Speed,
@@ -49,7 +53,7 @@ fn cpu_owned_allocation_audit(width: usize, source: &str, provider: &str, label:
                 None,
             )
             .unwrap();
-            let executable = native::link_standalone_objects(
+            let executable = hirsel_native::link_standalone_objects(
                 &program,
                 &loaded.entry,
                 &objects,

@@ -1,9 +1,12 @@
 //! Native physical MEM-12 evidence. Expected bytes are handwritten; only the
 //! function calling convention and descriptor registry come from the compiler.
 use crate::rc_support::target;
-use hirsel_driver::compiler_adapters;
 use hirsel_driver::native::*;
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 
 const TYPES: &str = "pub flat type Item { text: String, n: u64 }\npub flat type Batch { items: List[Item] @ growable }\n";
 

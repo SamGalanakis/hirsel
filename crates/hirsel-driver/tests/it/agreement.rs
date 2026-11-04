@@ -3,6 +3,7 @@
 //! universe or a body the source phases would have rejected.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_validate::{ViolationKind, validate};
 use std::collections::BTreeMap;
 
@@ -1398,12 +1399,13 @@ pub fn main() -> Result[(), ()] { probe(); Ok(()) }
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
-        native::build(&validated, &options).unwrap();
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+        hirsel_native_batch::build(&validated, &options).unwrap();
 
         // A whole forwarding chain supplies no permission for an ordinary
         // counted-storage read whose original loan evidence is missing.
-        let mut forged = native::program(&validated);
+        let mut forged = hirsel_native::program(&validated);
         for definition in forged.definitions.values_mut() {
             for body in &mut std::sync::Arc::make_mut(definition).bodies {
                 for place in &mut body.places {

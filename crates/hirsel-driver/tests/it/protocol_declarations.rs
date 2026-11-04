@@ -39,7 +39,8 @@ fn a_broken_dependency_association_is_reported_before_client_body_planning() {
             (&api.replace("open(v: View)", "open(take v: View)"), false),
         ] {
             std::fs::write(dir.0.join("api.hir"), text).unwrap();
-            let mut program = hirsel_driver::load_program(&dir.0.join("client.json")).unwrap();
+            let mut program =
+                hirsel_front_phases::load_program(&dir.0.join("client.json")).unwrap();
             let association_file = program
                 .files
                 .iter()

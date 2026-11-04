@@ -1,6 +1,9 @@
 //! Full entry fixtures; each bounded cell runs in its own capped child process.
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, SimulationConfig};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileFault, FileFaultError, FileOperation, FileReadScript};
 use serde_json::{Value, json};
 use std::{
@@ -377,7 +380,8 @@ fn native(
             },
         },
     ];
-    let tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+    let tools =
+        hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
     let scripted_width = std::env::var("DECISION_TREE_35_SCRIPTED_WIDTH").ok();
     let prepare_only = std::env::var_os("DECISION_TREE_35_PREPARE_ONLY").is_some();
     if !prepare_only && scripted_width.is_none() && !accepted(root, "h-differential") {
@@ -685,7 +689,7 @@ fn prepare_product_inputs(root: &Path, manifest: &Path) -> PathBuf {
     // qualification closure use the same tree before bounded cells start.
     let products = PathBuf::from(std::env::var_os("HIRSEL_PRODUCTS").unwrap());
     hirsel_engine::with_compiler_stack(|| {
-        hirsel_driver::load_program_source(manifest, None)
+        hirsel_front_phases::load_program_source(manifest, None)
             .unwrap_or_else(|e| panic!("ordinary package setup: {e}"));
     });
     let closure = Command::new("python3")
@@ -796,7 +800,8 @@ fn decision_tree_35_cell() {
         )
         .unwrap();
         let manifest = package(&root);
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded =
+            hirsel_front_phases::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));

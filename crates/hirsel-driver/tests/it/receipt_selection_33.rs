@@ -1,9 +1,8 @@
 //! Original direct-call discovery through current source/V and CT-5 providers.
-use hirsel_driver::{
-    compiler_adapters,
-    native::receipt_source::{provider::*, selection::*},
-};
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::receipt_source::provider::*;
+use hirsel_native::receipt_source::selection::*;
 use hirsel_rc::instance::{Actuals, key_of};
 use hirsel_rc::sealed_source::{SourceError, closed_storage_type};
 use hirsel_syntax::{DefId, DefPath};

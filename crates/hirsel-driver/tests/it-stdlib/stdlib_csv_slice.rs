@@ -1,9 +1,14 @@
 //! The borrowed CSV cursor's differential and allocation contracts.
-use hirsel_driver::native::{
-    self, OptLevel, Options, Partition, RuntimeBuild, TargetSpec, Toolchain,
-};
+use hirsel_driver::native;
 use hirsel_driver::*;
 use hirsel_engine::with_compiler_stack;
+use hirsel_front_phases::*;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::RuntimeBuild;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
 use std::{path::PathBuf, process::Command};
 
 fn measured(source: &str, label: &str) -> String {
@@ -14,7 +19,7 @@ fn measured(source: &str, label: &str) -> String {
     let input = loaded.engine.export_native_input().unwrap();
     let validated = loaded.engine.import_native_input(input).unwrap();
     let target = TargetSpec::x86_64_unknown_linux_gnu();
-    let ready = native::build(&validated, &Options::new(target.clone())).unwrap();
+    let ready = hirsel_native_batch::build(&validated, &Options::new(target.clone())).unwrap();
     let dir = std::env::temp_dir().join(format!("hirsel-csv-{label}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let tools = Toolchain::in_tree_with_runtime(
@@ -26,7 +31,7 @@ fn measured(source: &str, label: &str) -> String {
         },
     )
     .unwrap();
-    let exe = native::link(
+    let exe = hirsel_native::link(
         &ready,
         &loaded.entry,
         OptLevel::Speed,

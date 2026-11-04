@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 #[test]
 fn bounded_source_shapes_use_indexed_rows() {
     with_compiler_stack(|| {

@@ -1,10 +1,17 @@
 //! Actual serial candidate versus independently materialized cold trees.
 //! No skipped resident switch is evidence for this path.
 use super::{Artifacts, Config};
-use hirsel_driver::candidate::{
-    BaseLease, ByteEdit, CandidateId, CandidateRequest, CandidateResult, CandidateWorkspace,
-    Completion, FileEdit, Limits as TransactionLimits, Priority, Verdict,
-};
+use hirsel_candidate::BaseLease;
+use hirsel_candidate::ByteEdit;
+use hirsel_candidate::CandidateId;
+use hirsel_candidate::CandidateRequest;
+use hirsel_candidate::CandidateResult;
+use hirsel_candidate::CandidateWorkspace;
+use hirsel_candidate::Completion;
+use hirsel_candidate::FileEdit;
+use hirsel_candidate::Limits as TransactionLimits;
+use hirsel_candidate::Priority;
+use hirsel_candidate::Verdict;
 use hirsel_engine::{CheckCompletion, CompileConfig, LoweringPolicy, Verify};
 use std::path::Path;
 
@@ -34,7 +41,9 @@ pub fn bounded_package(entry: &Path) -> Result<(), String> {
 /// reuse. The caller independently materializes this tree (Scenario::write),
 /// not from a candidate input map.
 pub fn cold(path: &Path, config: &Config) -> Result<Artifacts, String> {
-    use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
+    use hirsel_driver::requests::CompileOperation;
+    use hirsel_driver::requests::CompileResult;
+    use hirsel_driver::requests::CompilerRequests;
     let compiler = compiler(config);
     hirsel_engine::with_compiler_stack(|| {
         // The loader alone selects the package scope; it checks nothing.
@@ -139,7 +148,7 @@ fn limits(config: &Config) -> hirsel_engine::ComptimeLimits {
     config.limits.map(Into::into).unwrap_or_default()
 }
 fn compiler(config: &Config) -> hirsel_engine::Compiler {
-    hirsel_driver::COMPILER
+    hirsel_front_phases::COMPILER
         .clone()
         .with_config(compile_config(config))
         .with_comptime_limits(limits(config))
@@ -151,7 +160,7 @@ pub fn submit(
     base: &BaseLease,
     id: u64,
     after: &std::collections::BTreeMap<String, String>,
-) -> Result<hirsel_driver::candidate::CandidateLease, String> {
+) -> Result<hirsel_candidate::CandidateLease, String> {
     let mut edits = vec![];
     for (key, old, expected) in base.sources() {
         let path = base.source_path(key).ok_or("unknown source key")?;
@@ -190,7 +199,7 @@ pub fn submit(
 }
 pub fn result(
     w: &CandidateWorkspace,
-    lease: &hirsel_driver::candidate::CandidateLease,
+    lease: &hirsel_candidate::CandidateLease,
     entry: &Path,
 ) -> Result<Artifacts, String> {
     let CandidateResult::Ready(receipt) = w.result(lease).map_err(|e| format!("result: {e:?}"))?
@@ -451,8 +460,7 @@ fn eight_candidates(
     else {
         return Err("cancelled waiter pending".into());
     };
-    if cancelled.completion
-        != Completion::Incomplete(hirsel_driver::candidate::IncompleteReason::Cancelled)
+    if cancelled.completion != Completion::Incomplete(hirsel_candidate::IncompleteReason::Cancelled)
     {
         return Err("cancelled C8 got a verdict".into());
     }

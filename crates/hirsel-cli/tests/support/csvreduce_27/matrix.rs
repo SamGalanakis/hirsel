@@ -1,8 +1,14 @@
 use super::cases;
-use hirsel_driver::native::{
-    self, Configuration, Engine, Observation, OptLevel, Options, Partition, Runtime, TargetSpec,
-    Toolchain,
-};
+use hirsel_driver::native;
+use hirsel_native::Observation;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
+use hirsel_native_testing::Configuration;
+use hirsel_native_testing::Engine;
+use hirsel_native_testing::Runtime;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -56,7 +62,7 @@ pub fn partition(part: usize) {
             .unwrap();
         let manifest = scratch.path().join("hirsel.json");
         std::fs::write(&manifest, serde_json::json!({"schema":1,"package":{"name":"csvreduce_test","version":"1"},"entry":{"module":[],"name":"main"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[{"manifest":stdlib,"package":{"name":"std","version":"1"},"expose":[]}]}).to_string()).unwrap();
-        let mut program = hirsel_driver::load_program(&manifest).unwrap();
+        let mut program = hirsel_front_phases::load_program(&manifest).unwrap();
         program.check_for_execution().unwrap();
         // Bounded Rust harness partitions, not corpus fixtures: the record-cap
         // and 1024-vector lanes have explicit initial 20M-step limits.
@@ -140,12 +146,14 @@ pub fn partition(part: usize) {
             engine,
         })
         .collect();
-        let toolchain = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
-        let fixture = native::Fixture {
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+                .unwrap();
+        let fixture = hirsel_native::Fixture {
             steps: Some(steps),
             ..Default::default()
         };
-        let results = native::differential_ready(
+        let results = hirsel_native_testing::differential_ready(
             &mut crate::native_ready::supplier(&manifest, &program.entry, &toolchain),
             &program.entry,
             &expected,
@@ -159,7 +167,7 @@ pub fn partition(part: usize) {
             eprintln!("csvreduce completed part={part} engine={engine} {outcome:?}");
             assert_eq!(
                 outcome,
-                native::Outcome::Agree,
+                hirsel_native_testing::Outcome::Agree,
                 "part={part} engine={engine}"
             );
         }

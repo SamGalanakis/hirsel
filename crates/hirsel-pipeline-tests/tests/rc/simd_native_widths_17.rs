@@ -8,8 +8,12 @@
 //! SER-2 input envelopes because source SIMD has no lane setter. Neither the
 //! interpreter's arithmetic kernel nor legalization generates expected sums.
 use crate::rc_support::target;
-use hirsel_driver::{compiler_adapters, native::*};
+use hirsel_driver::native::*;
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use std::fmt::Write as _;
 
 #[derive(Clone, Copy)]
@@ -297,8 +301,11 @@ fn parity(source: &str, expected_failure: Option<u32>, output: &[u8], name: &str
             .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
             .unwrap();
         std::fs::write(directory.path().join("simd.hir"), source).unwrap();
-        let toolchain =
-            Toolchain::for_matrix(&directory.path().join("runtime"), &configurations).unwrap();
+        let toolchain = hirsel_native_testing::toolchain_for_matrix(
+            &directory.path().join("runtime"),
+            &configurations,
+        )
+        .unwrap();
         let program = build(&validated, &Options::new(target())).unwrap();
         let sites = Sites::new(validated.snapshot());
         let heap = run_heap(&program, &entry, &sites).unwrap();

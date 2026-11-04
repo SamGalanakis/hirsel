@@ -10,9 +10,14 @@
 //! passes all fail the gate, so parity only grows.
 
 use super::{Case, CaseResult, Class, Exclusions, exclusion};
-use hirsel_driver::native::{
-    Configuration, Engine, OptLevel, Options, Outcome, Partition, Runtime, TargetSpec,
-};
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::TargetSpec;
+use hirsel_native_testing::Configuration;
+use hirsel_native_testing::Engine;
+use hirsel_native_testing::Outcome;
+use hirsel_native_testing::Runtime;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -214,13 +219,14 @@ pub fn clif(case: &Case) -> Result<String, String> {
         .ready(&Options::new(TargetSpec::x86_64_unknown_linux_gnu()))
         .map_err(|error| error.to_string())?;
     let program = &ready.program;
-    hirsel_driver::native::emit_clif(&program).map_err(|e| e.to_string())
+    hirsel_native::emit_clif(&program).map_err(|e| e.to_string())
 }
 
 /// One case's emission wall time per backend, in the order `BACKENDS` names
 /// them: the same Ready program lowered to one object by each.
 pub fn compile_times(case: &Case) -> Result<Vec<std::time::Duration>, String> {
-    use hirsel_driver::native::{Backend, emit_backend_objects};
+    use hirsel_native::Backend;
+    use hirsel_native::emit_backend_objects;
     let prepared = super::checked(None, &case.id, &case.source, case.path.as_deref())?;
     let ready = prepared
         .input
@@ -239,20 +245,12 @@ pub fn compile_times(case: &Case) -> Result<Vec<std::time::Duration>, String> {
 }
 
 /// The backends `compile_times` times.
-pub const BACKENDS: [(&str, hirsel_driver::native::Backend, OptLevel); 3] = [
+pub const BACKENDS: [(&str, hirsel_native::Backend, OptLevel); 3] = [
     (
         "cranelift",
-        hirsel_driver::native::Backend::Cranelift,
+        hirsel_native::Backend::Cranelift,
         OptLevel::None,
     ),
-    (
-        "llvm-O0",
-        hirsel_driver::native::Backend::Llvm,
-        OptLevel::None,
-    ),
-    (
-        "llvm-O2",
-        hirsel_driver::native::Backend::Llvm,
-        OptLevel::Default,
-    ),
+    ("llvm-O0", hirsel_native::Backend::Llvm, OptLevel::None),
+    ("llvm-O2", hirsel_native::Backend::Llvm, OptLevel::Default),
 ];

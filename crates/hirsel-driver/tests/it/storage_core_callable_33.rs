@@ -1,6 +1,7 @@
 //! A reviewed integer comparison is a bodyless primitive, not a missing source body.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn check(primitive: bool, kind: &str) {
     with_compiler_stack(|| {

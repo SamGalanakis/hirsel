@@ -4,6 +4,9 @@ use hirsel_engine::{
     QueryEngine, RunConfiguration, check_snapshot, default_context, default_environment,
     entry_path, run_observed_snapshot, with_compiler_stack,
 };
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 
 #[test]
 fn alias_cleanup_equality_24_reference_h_llvm_cranelift() {
@@ -33,7 +36,9 @@ fn alias_cleanup_equality_24_reference_h_llvm_cranelift() {
         ];
         let directory =
             std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("alias-cleanup-equality-24");
-        let toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix)
+                .unwrap();
         let mut agreements = 0;
         let mut references = 0;
         for (name, source) in [
@@ -68,8 +73,10 @@ fn alias_cleanup_equality_24_reference_h_llvm_cranelift() {
                 } else {
                     source.into()
                 };
-                let mut engine =
-                    QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+                let mut engine = QueryEngine::new(
+                    default_environment(),
+                    hirsel_front_phases::compiler_adapters(),
+                );
                 let file = engine
                     .sources
                     .add("alias-cleanup.hir", source.clone())

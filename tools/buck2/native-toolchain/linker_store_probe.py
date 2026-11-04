@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 
-CASE = "native::object_queries::capture::tests::packaged_capture_replays_changed_inputs_without_originals"
+CASE = "object_queries::capture::tests::packaged_capture_replays_changed_inputs_without_originals"
 
 
 def command(arguments, environment):

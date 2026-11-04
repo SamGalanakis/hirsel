@@ -1,6 +1,7 @@
 //! Independent expected diagnostics and executable repairs for LANG-2 sequence prefixes.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn checked(source: &str) -> CheckOutput {
     let mut engine = crate::source_std::engine();

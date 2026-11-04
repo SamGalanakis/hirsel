@@ -3,6 +3,7 @@
 use crate::source_std::TirFixture;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 pub(super) fn execute(body: &str) {
     execute_text(&format!(

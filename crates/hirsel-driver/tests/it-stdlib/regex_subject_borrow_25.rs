@@ -1,6 +1,7 @@
 //! Borrowed UTF-8 subjects agree with the frozen materializing implementation.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -85,9 +86,9 @@ fn run(engine: &str, partition: usize) {
                 HostLaunch::empty(),
                 None,
                 if engine == "LLVM" {
-                    native::Backend::Llvm
+                    hirsel_native::Backend::Llvm
                 } else {
-                    native::Backend::Cranelift
+                    hirsel_native::Backend::Cranelift
                 },
                 native::Output::Streams {
                     stdout: &mut Vec::new(),

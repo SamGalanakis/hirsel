@@ -1,6 +1,7 @@
 //! Whole transfers retain expiry; independent validation judges every later use.
-use hirsel_driver::{compiler_adapters, native};
+use hirsel_driver::native;
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
 use hirsel_types::{Signature, SignatureProvider, TypeInterner, TypeMemo};
 use std::sync::{Arc, Mutex};
 
@@ -219,25 +220,26 @@ fn whole_transfers_and_expired_reads_agree_with_independent_validation() {
 #[test]
 fn whole_transfers_execute_on_h_llvm_and_cranelift() {
     with_compiler_stack(|| {
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let configurations = vec![
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Heap { campaign: false },
+                engine: hirsel_native_testing::Engine::Heap { campaign: false },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
@@ -245,7 +247,8 @@ fn whole_transfers_execute_on_h_llvm_and_cranelift() {
             std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("expired-whole-transfer-15");
         std::fs::create_dir_all(&scratch).unwrap();
         let tools =
-            native::Toolchain::for_matrix(&scratch.join("runtime"), &configurations).unwrap();
+            hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &configurations)
+                .unwrap();
         for &(name, source) in POSITIVES {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let source = format!(
@@ -267,14 +270,14 @@ fn whole_transfers_execute_on_h_llvm_and_cranelift() {
             let execution =
                 run_observed_checked(&mut engine, &config, SimulationConfig::default()).unwrap();
             let reference =
-                native::Observation::of_reference(execution.observation.as_ref().unwrap());
+                hirsel_native::Observation::of_reference(execution.observation.as_ref().unwrap());
             assert_eq!(reference.exit_code, Some(0), "{name}: {reference:?}");
             assert!(reference.failures.is_empty());
             let input = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(input).unwrap();
             let case_dir = scratch.join(name);
             std::fs::create_dir_all(&case_dir).unwrap();
-            let outcomes = native::differential(
+            let outcomes = hirsel_native_testing::differential(
                 &validated,
                 &entry,
                 &reference,
@@ -285,7 +288,7 @@ fn whole_transfers_execute_on_h_llvm_and_cranelift() {
             assert_eq!(outcomes.len(), 3);
             for (configuration, outcome) in outcomes {
                 assert!(
-                    matches!(outcome, native::Outcome::Agree),
+                    matches!(outcome, hirsel_native_testing::Outcome::Agree),
                     "{name}/{configuration}: {outcome:?}"
                 );
                 eprintln!("{name}/{configuration}: agree");

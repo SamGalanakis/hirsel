@@ -1,7 +1,11 @@
 //! Copying an owner ends uniqueness of its nested counted components (MODE-2).
 use crate::rc_support::target;
-use hirsel_driver::{compiler_adapters, native::*};
+use hirsel_driver::native::*;
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 
 const WITNESS: &str = r#"
 fn alter(mut row: unique List[u64]) { row[0] = 9 }
@@ -73,7 +77,9 @@ fn parity(source: &str, native: bool) {
             })
             .collect();
         let directory = tempfile::tempdir().unwrap();
-        let toolchain = Toolchain::for_matrix(&directory.path().join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&directory.path().join("runtime"), &matrix)
+                .unwrap();
         let outcomes = differential(
             &validated,
             &entry,

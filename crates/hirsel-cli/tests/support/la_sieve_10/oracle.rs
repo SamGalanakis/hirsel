@@ -113,9 +113,13 @@ fn la_sieve_10_flags_cranelift() {
 #[test]
 fn la_sieve_10_allocations() {
     hirsel_engine::with_compiler_stack(|| {
-        use hirsel_driver::native::{
-            self, OptLevel, Options, Partition, RuntimeBuild, TargetSpec, Toolchain,
-        };
+        use hirsel_driver::native;
+        use hirsel_native::OptLevel;
+        use hirsel_native::Options;
+        use hirsel_native::Partition;
+        use hirsel_native::RuntimeBuild;
+        use hirsel_native::TargetSpec;
+        use hirsel_native::Toolchain;
         let fixture = Fixture::new(&[1000]);
         // Keep one checksum output but omit flag formatting from this diagnostic.
         let path = fixture.0.join("main.hir");
@@ -124,13 +128,14 @@ fn la_sieve_10_allocations() {
         let end = text.find("  state.value_out =").unwrap();
         text.replace_range(start..end, "");
         std::fs::write(&path, text).unwrap();
-        let mut loaded = hirsel_driver::load_program(&fixture.0.join("hirsel.json")).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&fixture.0.join("hirsel.json")).unwrap();
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
-        let sources = native::profile_sources(&input);
+        let sources = hirsel_native::profile_sources(&input);
         let validated = loaded.engine.import_native_input(input).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let program = native::build(&validated, &Options::new(target.clone())).unwrap();
+        let program =
+            hirsel_native_batch::build(&validated, &Options::new(target.clone())).unwrap();
         let toolchain = Toolchain::in_tree_with_runtime(
             &fixture.0.join("runtime"),
             &[&target],
@@ -141,7 +146,7 @@ fn la_sieve_10_allocations() {
         )
         .unwrap();
         std::fs::create_dir(fixture.0.join("measured")).unwrap();
-        let objects = native::emit_objects(
+        let objects = hirsel_native::emit_objects(
             &program,
             OptLevel::Speed,
             Partition::Whole,
@@ -149,7 +154,7 @@ fn la_sieve_10_allocations() {
             Some(&sources),
         )
         .unwrap();
-        let exe = native::link_standalone_objects(
+        let exe = hirsel_native::link_standalone_objects(
             &program,
             &loaded.entry,
             &objects,

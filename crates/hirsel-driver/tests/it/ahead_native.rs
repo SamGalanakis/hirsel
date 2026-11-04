@@ -2,6 +2,7 @@
 use hirsel_driver::native;
 use hirsel_engine::{QueryEngine, default_context, source_check_request, with_compiler_stack};
 use hirsel_lir::emission::{EmitInputs, OptLevel};
+use hirsel_native::query_model::NativeRootKey;
 use hirsel_syntax::ContentHash;
 use std::collections::BTreeSet;
 
@@ -41,34 +42,46 @@ fn checked() -> (QueryEngine, hirsel_engine::ValidatedNativeInput) {
 }
 
 fn request_objects(
-    backend: native::Backend,
-    partition: native::Partition,
-) -> (native::ReadyProgram, Vec<hirsel_lir::stage::ObjectArtifact>) {
+    backend: hirsel_native::Backend,
+    partition: hirsel_native::Partition,
+) -> (
+    hirsel_native::ReadyProgram,
+    Vec<hirsel_lir::stage::ObjectArtifact>,
+) {
     use hirsel_engine::{
         runtime::*,
         store::{self, ResultStore},
     };
-    use native::queries::{
-        arena_tasks::ArenaTasks,
-        compilation_tasks::{CompilationBackend, CompilationTasks},
-        declarations::NativeDeclarations,
-        instance_tasks::InstanceTasks,
-        link_tasks::{CodegenPartition, LinkExecution, NativeLinkExecutor},
-        products::EmissionOptions,
-        source_inputs::NativeInstanceInputs,
-        *,
-    };
+    use hirsel_native_cache::declarations::NativeDeclarations;
+    use hirsel_native_cache::source_inputs::NativeInstanceInputs;
+    use hirsel_native_cache::*;
+    use hirsel_native_queries::arena_tasks::ArenaTasks;
+    use hirsel_native_queries::compilation_tasks::CompilationBackend;
+    use hirsel_native_queries::compilation_tasks::CompilationTasks;
+    use hirsel_native_queries::instance_tasks::InstanceTasks;
+    use hirsel_native_queries::link_tasks::CodegenPartition;
+    use hirsel_native_queries::link_tasks::LinkExecution;
+    use hirsel_native_queries::link_tasks::NativeLinkExecutor;
+    use hirsel_native_queries::products::EmissionOptions;
+    use hirsel_native_queries::*;
     use std::sync::{Arc, Mutex};
     struct Capture {
-        partition: native::Partition,
-        output: Arc<Mutex<Option<(native::ReadyProgram, Vec<hirsel_lir::stage::ObjectArtifact>)>>>,
+        partition: hirsel_native::Partition,
+        output: Arc<
+            Mutex<
+                Option<(
+                    hirsel_native::ReadyProgram,
+                    Vec<hirsel_lir::stage::ObjectArtifact>,
+                )>,
+            >,
+        >,
     }
     impl NativeLinkExecutor for Capture {
         fn codegen_partition(&self) -> CodegenPartition {
             match self.partition {
-                native::Partition::Whole => CodegenPartition::WholeModule,
-                native::Partition::Singleton => CodegenPartition::PerInstance,
-                native::Partition::Random(seed) => CodegenPartition::Seeded(seed),
+                hirsel_native::Partition::Whole => CodegenPartition::WholeModule,
+                hirsel_native::Partition::Singleton => CodegenPartition::PerInstance,
+                hirsel_native::Partition::Random(seed) => CodegenPartition::Seeded(seed),
             }
         }
         fn link(
@@ -133,8 +146,8 @@ fn request_objects(
     let entries = declarations.context.sources.iter().filter(|(path,_)| matches!(&declarations.program.signatures[*path].kind, hirsel_types::SignatureKind::Function(f) if f.generics.is_empty())).map(|(p,s)| (p.clone(),s.entry.0)).collect();
     let main = hirsel_engine::entry_path(&default_context());
     let source = Arc::new(
-        native::root_source::NativeLinkSource::from_settled(
-            native::root_source::NativeLinkFacts {
+        hirsel_native::root_source::NativeLinkSource::from_settled(
+            hirsel_native::root_source::NativeLinkFacts {
                 program: &declarations.program,
                 operations: Arc::new(declarations.program.operation_registry()),
                 roots: &declarations.roots,
@@ -150,7 +163,7 @@ fn request_objects(
         )
         .unwrap(),
     );
-    let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+    let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
     let emission = EmissionOptions::request(
         declarations.program.input.clone(),
         OptLevel::Default,
@@ -170,7 +183,7 @@ fn request_objects(
     let instances = InstanceTasks::new(
         inputs,
         store.clone(),
-        native::Options::new(target.clone()),
+        hirsel_native::Options::new(target.clone()),
         policy,
         weight,
         budget.reserve(24 << 20).unwrap(),
@@ -241,12 +254,12 @@ fn request_objects(
 }
 
 fn metadata(
-    program: &native::ReadyProgram,
+    program: &hirsel_native::ReadyProgram,
     plan: &hirsel_lir::ahead::AheadPlan,
     bounds: &std::collections::BTreeMap<ContentHash, u64>,
 ) -> hirsel_lir::stage::ObjectArtifact {
     let empty = BTreeSet::new();
-    let continuations = native::continuation::plans(program);
+    let continuations = hirsel_native::continuation::plans(program);
     let inputs = EmitInputs {
         ahead: Some(plan),
         continuation: Some(&continuations),
@@ -279,26 +292,29 @@ fn metadata(
 fn both_backends_emit_real_alternate_dags_across_partitions_and_reject_corruption() {
     with_compiler_stack(|| {
         let (_, validated) = checked();
-        let program = native::build(
+        let program = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
-        let plan = native::ahead_plan(&program);
+        let plan = hirsel_native::ahead_plan(&program);
         assert_eq!(plan.roots.len(), 1, "{:?}", plan.refusals);
         assert_eq!(plan.bodies.len(), 3);
         assert_eq!(plan.spawns.len(), 1);
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             for partition in [
-                native::Partition::Whole,
-                native::Partition::Singleton,
-                native::Partition::Random(37),
+                hirsel_native::Partition::Whole,
+                hirsel_native::Partition::Singleton,
+                hirsel_native::Partition::Random(37),
             ] {
                 eprintln!("request ahead fixture {backend:?} {partition:?}");
                 let (program, objects) = request_objects(backend, partition);
-                let plan = native::ahead_plan(&program);
+                let plan = hirsel_native::ahead_plan(&program);
                 assert_eq!(plan.roots.len(), 1, "{:?}", plan.refusals);
-                native::check_ahead_objects(&program, &objects).unwrap();
+                hirsel_native::check_ahead_objects(&program, &objects).unwrap();
                 let code = objects
                     .iter()
                     .position(|o| {
@@ -392,7 +408,7 @@ fn both_backends_emit_real_alternate_dags_across_partitions_and_reject_corruptio
                         }
                     }
                     assert!(
-                        native::check_ahead_objects(&program, &bad).is_err(),
+                        hirsel_native::check_ahead_objects(&program, &bad).is_err(),
                         "{backend:?}/{partition:?}/{mutation}"
                     );
                 }
@@ -404,14 +420,14 @@ fn both_backends_emit_real_alternate_dags_across_partitions_and_reject_corruptio
                 refused[code].ahead = Some(evidence.clone());
                 refused[meta] = metadata(&program, &plan, &Default::default());
                 refused[meta].ahead = Some(evidence);
-                native::check_ahead_objects(&program, &refused).unwrap();
+                hirsel_native::check_ahead_objects(&program, &refused).unwrap();
                 assert!(
                     !refused[meta]
                         .imports
                         .iter()
                         .any(|s| s.name.ends_with("_ahead"))
                 );
-                if matches!(backend, native::Backend::Llvm) {
+                if matches!(backend, hirsel_native::Backend::Llvm) {
                     // Strip only the evidence section's name in a real emitted
                     // object. Missing records are refusal, malformed bytes error.
                     let mut missing = refused.clone();
@@ -447,7 +463,7 @@ fn both_backends_emit_real_alternate_dags_across_partitions_and_reject_corruptio
                             .unwrap()
                             .is_empty()
                     );
-                    native::check_ahead_objects(&program, &missing).unwrap();
+                    hirsel_native::check_ahead_objects(&program, &missing).unwrap();
                 }
             }
         }
@@ -469,44 +485,55 @@ fn bounded_ordinary_spawn_twin_agrees_on_reference_checked_heap_and_both_natives
             Default::default(),
         )
         .unwrap();
-        let reference = native::Observation::of_reference(run.observation.as_ref().unwrap());
+        let reference = hirsel_native::Observation::of_reference(run.observation.as_ref().unwrap());
         assert_eq!(reference.output, b"18226251250264336309\n");
-        let matrix = [native::Engine::Heap { campaign: false }]
+        let matrix = [hirsel_native_testing::Engine::Heap { campaign: false }]
             .into_iter()
-            .map(|engine| native::Configuration {
-                options: native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            .map(|engine| hirsel_native_testing::Configuration {
+                options: hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                ),
                 engine,
             })
             .collect::<Vec<_>>();
         let dir = tempfile::tempdir().unwrap();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
         let tools =
-            native::Toolchain::in_tree_diagnostic(&dir.path().join("runtime"), &[&target]).unwrap();
-        for (configuration, outcome) in
-            native::differential(&validated, &entry, &reference, &matrix, &tools, dir.path())
-        {
+            hirsel_native::Toolchain::in_tree_diagnostic(&dir.path().join("runtime"), &[&target])
+                .unwrap();
+        for (configuration, outcome) in hirsel_native_testing::differential(
+            &validated,
+            &entry,
+            &reference,
+            &matrix,
+            &tools,
+            dir.path(),
+        ) {
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{configuration}: {outcome:?}"
             );
         }
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-            let (program, mut objects) = request_objects(backend, native::Partition::Whole);
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
+            let (program, mut objects) = request_objects(backend, hirsel_native::Partition::Whole);
             let registry = hirsel_lir::descriptor_registry::DescriptorRegistry::new(
                 &program.table,
                 &program.finalizers,
             );
-            objects.push(native::emit_glue(&program, backend, &registry).unwrap());
+            objects.push(hirsel_native::emit_glue(&program, backend, &registry).unwrap());
             let cell = dir.path().join(backend.name());
             std::fs::create_dir_all(&cell).unwrap();
             let executable =
-                native::link_objects(&program, &entry, &objects, &tools, &cell).unwrap();
+                hirsel_native::link_objects(&program, &entry, &objects, &tools, &cell).unwrap();
             let launched =
-                native::launch(&executable, &program.target, &tools, &cell, true).unwrap();
-            let observed = native::observe(
+                hirsel_native::launch(&executable, &program.target, &tools, &cell, true).unwrap();
+            let observed = hirsel_native::observe(
                 &launched,
                 &program,
-                &native::Sites::new(validated.snapshot()),
+                &hirsel_native::Sites::new(validated.snapshot()),
             )
             .unwrap();
             assert_eq!(observed, reference, "{backend:?}");
@@ -517,13 +544,16 @@ fn bounded_ordinary_spawn_twin_agrees_on_reference_checked_heap_and_both_natives
 #[test]
 fn certificates_bind_transitive_bodies_layouts_fuel_helpers_and_target_options() {
     with_compiler_stack(|| {
-        let (mut program, _) = request_objects(native::Backend::Llvm, native::Partition::Singleton);
+        let (mut program, _) = request_objects(
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Partition::Singleton,
+        );
         let helper = ContentHash::of_bytes(b"helper assembly v1");
-        let proposed = |p: &native::ReadyProgram,
+        let proposed = |p: &hirsel_native::ReadyProgram,
                         fuel,
                         helpers,
                         table: &hirsel_lir::layout_types::LayoutTable,
-                        target: &native::TargetSpec| {
+                        target: &hirsel_native::TargetSpec| {
             hirsel_lir::ahead::AheadPlan::build(
                 &p.units.iter().collect::<Vec<_>>(),
                 table,
@@ -561,7 +591,7 @@ fn certificates_bind_transitive_bodies_layouts_fuel_helpers_and_target_options()
         let refused = proposed(&program, false, helper, &program.table, &target);
         assert!(refused.roots.is_empty());
         assert_ne!(original.identity, refused.identity);
-        target = native::TargetSpec::aarch64_unknown_linux_gnu();
+        target = hirsel_native::TargetSpec::aarch64_unknown_linux_gnu();
         assert!(
             proposed(&program, false, helper, &program.table, &target)
                 .roots
@@ -608,9 +638,9 @@ fn certificates_bind_transitive_bodies_layouts_fuel_helpers_and_target_options()
 #[test]
 fn depth_helpers_have_the_certified_fixed_machine_extent_in_every_runtime_variant() {
     use std::collections::BTreeMap;
-    let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+    let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
     let variants = (0..8)
-        .map(|mask| native::RuntimeBuild {
+        .map(|mask| hirsel_native::RuntimeBuild {
             diagnostic: mask & 1 != 0,
             system_allocator: mask & 2 != 0,
             measurement: mask & 4 != 0,
@@ -620,7 +650,8 @@ fn depth_helpers_have_the_certified_fixed_machine_extent_in_every_runtime_varian
         .collect::<Vec<_>>();
     let scratch = tempfile::tempdir().unwrap();
     let tools =
-        native::Toolchain::in_tree_with_runtimes(scratch.path(), &[&target], &variants).unwrap();
+        hirsel_native::Toolchain::in_tree_with_runtimes(scratch.path(), &[&target], &variants)
+            .unwrap();
     let helpers = [
         "hirsel_rt_v2_depth_enter_at_site",
         "hirsel_rt_v2_depth_leave",
@@ -724,9 +755,10 @@ fn depth_helpers_have_the_certified_fixed_machine_extent_in_every_runtime_varian
 #[test]
 fn cli_request_builds_define_and_adopt_ahead_on_both_backends() {
     with_compiler_stack(|| {
-        use hirsel_driver::requests::{
-            CompileOperation, CompileResult, NativeOutput, NativeRequest,
-        };
+        use hirsel_driver::requests::CompileOperation;
+        use hirsel_driver::requests::CompileResult;
+        use hirsel_driver::requests::NativeOutput;
+        use hirsel_driver::requests::NativeRequest;
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("main.hir");
         std::fs::write(&source, SOURCE.replace("..64u64", "..1000000u64")).unwrap();
@@ -734,15 +766,18 @@ fn cli_request_builds_define_and_adopt_ahead_on_both_backends() {
             &source,
             hirsel_driver::session::Policy::default(),
         );
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let selected = session
                 .request(CompileOperation::NativeBuild(NativeRequest {
                     options: {
-                        let mut options = native::BuildProfile::Default
+                        let mut options = hirsel_native::BuildProfile::Default
                             .options(
                                 backend,
-                                native::TargetSpec::x86_64_unknown_linux_gnu(),
-                                native::Validation::Ready,
+                                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                                hirsel_native::Validation::Ready,
                             )
                             .unwrap();
                         options.opt = OptLevel::Default;

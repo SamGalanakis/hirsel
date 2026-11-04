@@ -2,9 +2,14 @@
 #[test]
 #[ignore = "native: full matrix"]
 fn a_match_that_moves_only_the_ok_payload_agrees_in_all_configurations() {
-    use hirsel_driver::native::{Observation, Outcome, Toolchain, differential, full_matrix};
     use hirsel_driver::*;
     use hirsel_engine::*;
+    use hirsel_front_phases::*;
+    use hirsel_native::Observation;
+    use hirsel_native::Toolchain;
+    use hirsel_native_testing::Outcome;
+    use hirsel_native_testing::differential;
+    use hirsel_native_testing::full_matrix;
     with_compiler_stack(|| {
         let source = r#"pub fn main(rt: Io, args: Args) -> Result[(), LaunchError] {
   let text: String = match string.from_bytes(b"ok") { Ok(s) => take s, Error(_) => "bad" }
@@ -36,7 +41,9 @@ pub type LaunchError = Grant(GrantError) | Output(OutputError)
         assert_eq!(configurations.len(), 50);
         let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cleanup-native");
         std::fs::create_dir_all(&dir).unwrap();
-        let toolchain = Toolchain::for_matrix(&dir.join("runtime"), &configurations).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configurations)
+                .unwrap();
         for (name, outcome) in differential(
             &validated,
             &entry,

@@ -1,6 +1,7 @@
 //! Named borrow-only scope callbacks receive their arena through the usual ABI.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_interp::{Outcome, library::Library};
 
 const SOURCE: &str = r#"

@@ -1,21 +1,18 @@
-use hirsel_driver::native::queries::{
-    declarations::NativeDeclarations,
-    demand::DemandInstances,
-    instance::InstanceQueries,
-    recipes::SourceRecipe,
-    source_inputs::{NativeInstanceInputs, NativeSourceProvider},
-};
-use hirsel_driver::{
-    compiler_adapters,
-    native::receipt_source::{
-        factory::{NamedInput, named_graph},
-        provider::{Front, Provider},
-    },
-};
 use hirsel_engine::store::ResultStore;
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
 use hirsel_layout::layout::LayoutBuilder;
 use hirsel_lir::validate::{Inputs, NativeEnvironment};
+use hirsel_native::receipt_source::factory::NamedInput;
+use hirsel_native::receipt_source::factory::named_graph;
+use hirsel_native::receipt_source::provider::Front;
+use hirsel_native::receipt_source::provider::Provider;
+use hirsel_native_cache::declarations::NativeDeclarations;
+use hirsel_native_cache::instance::InstanceQueries;
+use hirsel_native_cache::recipes::SourceRecipe;
+use hirsel_native_cache::source_inputs::NativeInstanceInputs;
+use hirsel_native_cache::source_inputs::NativeSourceProvider;
+use hirsel_native_queries::demand::DemandInstances;
 use hirsel_rc::instance::Actuals;
 use hirsel_rc::instance::Instances;
 use hirsel_syntax::ContentHash;
@@ -204,10 +201,10 @@ pub fn inspect(root: List[u64]) -> u64 { forward(root)+forward_again(root) }
         drop(front);
         let inputs = NativeInstanceInputs::from_products(declarations, reader).unwrap();
         if forward {
-            use hirsel_driver::native::queries::instance_tasks::{
-                INSTANCE_INPUT_KIND, InstanceTaskFactory, InstanceTasks,
-            };
-            use hirsel_driver::native::queries::source_inputs::NativeFrontLower;
+            use hirsel_native_cache::source_inputs::NativeFrontLower;
+            use hirsel_native_queries::instance_tasks::INSTANCE_INPUT_KIND;
+            use hirsel_native_queries::instance_tasks::InstanceTaskFactory;
+            use hirsel_native_queries::instance_tasks::InstanceTasks;
             use runtime::{MemoryWeight, ProcessBudget, QueryFactory, QueryId, QueryPoll};
             let bindings = products
                 .iter()
@@ -235,7 +232,7 @@ pub fn inspect(root: List[u64]) -> u64 { forward(root)+forward_again(root) }
             let tasks = InstanceTasks::new(
                 inputs.clone(),
                 store.clone(),
-                hirsel_driver::native::Options::new(target.clone()),
+                hirsel_native::Options::new(target.clone()),
                 ContentHash::of_bytes(b"receipt worker source dependencies"),
                 MemoryWeight {
                     scratch: 16 << 20,
@@ -271,8 +268,8 @@ pub fn inspect(root: List[u64]) -> u64 { forward(root)+forward_again(root) }
             assert_eq!(tasks.imports.load(std::sync::atomic::Ordering::Relaxed), 0);
         }
         let mut source = inputs.provider();
-        let mut options = hirsel_driver::native::Options::new(target.clone());
-        options.validation = hirsel_driver::native::Validation::Ready;
+        let mut options = hirsel_native::Options::new(target.clone());
+        options.validation = hirsel_native::Validation::Ready;
         let mut demand = DemandInstances::new_from_source(
             &source,
             store.clone(),
@@ -423,7 +420,7 @@ pub fn inspect(root:List[u64])->u64 {forward(root)+forward_again(root)}
 }
 
 struct LowerRows(std::collections::BTreeMap<DefPath, (runtime::ProductRef, NativeOriginalProduct)>);
-impl hirsel_driver::native::queries::source_inputs::NativeLowerProducts for LowerRows {
+impl hirsel_native_cache::source_inputs::NativeLowerProducts for LowerRows {
     fn lower_product(
         &self,
         path: &DefPath,

@@ -1,6 +1,7 @@
 //! Scheduler-directed custody of a completed, unjoined Region result.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_interp::{
     Error, OperationCall, OperationContext, OperationId, OperationResult, Operations,
     OperationsAdapter, Outcome, Value, library::Library,

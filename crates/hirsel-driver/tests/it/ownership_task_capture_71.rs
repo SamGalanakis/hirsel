@@ -1,6 +1,9 @@
 //! Captured resources transfer at the actual committed child creation.
-use hirsel_driver::{COMPILER, native, requests::*, resident::ObservedSession};
+use hirsel_driver::native;
+use hirsel_driver::requests::*;
+use hirsel_driver::resident::ObservedSession;
 use hirsel_engine::{CompileConfig, runtime::ProcessBudget, store::MemStore};
+use hirsel_front_phases::COMPILER;
 use std::sync::Arc;
 
 #[test]
@@ -94,13 +97,13 @@ fn capture_with_tasks(source_text: &str, expected_exit: i32, tasks: &str) {
         );
         let limits = selector.input_limits();
         let mut session = ObservedSession::new(path, compiler, config, selector, limits, 3);
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
         let output = session
             .request(CompileOperation::NativeOwnership(OwnershipRequest {
                 selection: hirsel_lir::ownership_trace::Selection::Resources,
                 definition: None,
                 target: target.clone(),
-                validation: native::Validation::EveryStage,
+                validation: hirsel_native::Validation::EveryStage,
                 launch: Default::default(),
                 fuel: false,
             }))
@@ -111,17 +114,20 @@ fn capture_with_tasks(source_text: &str, expected_exit: i32, tasks: &str) {
         let execution = execution.clone();
         drop(output);
         drop(session);
-        let tools = native::Toolchain::in_tree_with_runtime(
+        let tools = hirsel_native::Toolchain::in_tree_with_runtime(
             &directory.path().join("tools"),
             &[&target],
-            native::RuntimeBuild {
+            hirsel_native::RuntimeBuild {
                 ownership_trace: true,
                 ..Default::default()
             },
         )
         .unwrap();
         let mut traces = vec![];
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let objects = execution.emit(backend).unwrap();
             let run = execution
                 .launch_with(

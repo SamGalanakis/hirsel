@@ -5,6 +5,9 @@ use hirsel_lir::ir::{
     ArgumentValue, Inst, LirUnit, Placement, StorageOwner, Terminator, ValueRepr,
 };
 use hirsel_lir::stage::Value;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_rc::placement::{Options as PlaceOptions, PlaceError, place};
 
 const ORIGINAL: &str = r#"
@@ -130,11 +133,13 @@ fn region_count<S>(unit: &LirUnit<S>) -> usize {
 fn parity(cases: &[(&str, &str)]) {
     use hirsel_driver::*;
     use hirsel_engine::*;
+    use hirsel_front_phases::*;
     let matrix = matrix();
     let directory =
         std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("native-noalloc-list-19");
     std::fs::create_dir_all(&directory).unwrap();
-    let toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
+    let toolchain =
+        hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix).unwrap();
     for &(name, source) in cases {
         with_compiler_stack(|| {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -605,12 +610,14 @@ fn cleanup_dispose_still_prevents_localization() {
 fn capacity_and_hash_native_controls() {
     use hirsel_driver::*;
     use hirsel_engine::*;
+    use hirsel_front_phases::*;
     use hirsel_lir::validate::{Inputs, validate};
     let matrix = matrix();
     let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("native-noalloc-observer-controls-19");
     std::fs::create_dir_all(&root).unwrap();
-    let tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+    let tools =
+        hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let context = default_context();
@@ -830,6 +837,7 @@ pub fn main() -> Result[(), u64] {
 fn empty_variant_observers_preserve_regional_construction_provenance() {
     use hirsel_driver::*;
     use hirsel_engine::*;
+    use hirsel_front_phases::*;
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let context = default_context();
@@ -865,7 +873,11 @@ fn empty_variant_observers_preserve_regional_construction_provenance() {
         let directory = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
             .join("empty-variant-observers-20");
         std::fs::create_dir_all(&directory).unwrap();
-        let tools = Toolchain::for_matrix(&directory.join("runtime"), &configurations).unwrap();
+        let tools = hirsel_native_testing::toolchain_for_matrix(
+            &directory.join("runtime"),
+            &configurations,
+        )
+        .unwrap();
         let mut executions = 0;
         for (configuration, outcome) in differential(
             &validated,

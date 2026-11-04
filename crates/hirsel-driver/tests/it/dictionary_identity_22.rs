@@ -4,6 +4,7 @@
 //! GEN-6 brands and type/size actuals, rather than reexports or effect rows.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_tir::ValueKind;
 use hirsel_types::{GenericArgument, Primitive, Size, TypeKind};
 use std::path::{Path, PathBuf};

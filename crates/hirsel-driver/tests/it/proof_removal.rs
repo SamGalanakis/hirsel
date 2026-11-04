@@ -2,13 +2,19 @@
 //! checks from the native program, and every missing, stale, rejected or
 //! unreplayable record keeps its check. `bump` has a bounds check (MEM-14),
 //! an overflow check (SEM-1) and an `ensures` check (FACT-1).
-use hirsel_driver::compiler_adapters;
-use hirsel_driver::native::{
-    Checker, Evidence, OptLevel, Options, Proofs, ReadyProgram, TargetSpec, build, emit_ir,
-    parse_sidecar,
-};
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
 use hirsel_lir::Opcode;
+use hirsel_native::Checker;
+use hirsel_native::Evidence;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Proofs;
+use hirsel_native::ReadyProgram;
+use hirsel_native::TargetSpec;
+use hirsel_native::emit_ir;
+use hirsel_native::parse_sidecar;
+use hirsel_native_batch::build;
 use std::collections::BTreeMap;
 
 const BUMP: &str = "fn bump(xs: List[u32], i: u64, y: u32) -> u32
@@ -237,10 +243,10 @@ fn an_accepted_bounds_check_removes_only_its_projection_guard() {
         let mut engine = engine(BUMP);
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let sites = hirsel_driver::native::Sites::new(validated.snapshot());
+        let sites = hirsel_native::Sites::new(validated.snapshot());
         let entry = entry_path(&default_context());
-        let before_heap = hirsel_driver::native::run_heap(&reference, &entry, &sites).unwrap();
-        let after_heap = hirsel_driver::native::run_heap(&ready, &entry, &sites).unwrap();
+        let before_heap = hirsel_native_testing::run_heap(&reference, &entry, &sites).unwrap();
+        let after_heap = hirsel_native_testing::run_heap(&ready, &entry, &sites).unwrap();
         assert_eq!(before_heap.observation, after_heap.observation);
         assert_eq!(before_heap.sites, after_heap.sites + 1);
         let before = bump_ir(&reference);
@@ -253,7 +259,7 @@ fn an_accepted_bounds_check_removes_only_its_projection_guard() {
         // Previously Cranelift emitted the guard even though Ready licensed
         // its removal, so the two Ready programs produced identical bounds IR.
         let bump_clif = |program: &ReadyProgram| {
-            hirsel_driver::native::emit_clif(program)
+            hirsel_native::emit_clif(program)
                 .unwrap()
                 .split("; _H")
                 .find(|function| {
@@ -430,7 +436,7 @@ fn the_discharge_validator_refuses_any_difference_from_the_plan() {
             &evidence,
         )
         .unwrap();
-        let program = hirsel_driver::native::program(&validated);
+        let program = hirsel_native::program(&validated);
         let lowered = hirsel_rc::import::lower_discharging(
             &program,
             &TargetSpec::x86_64_unknown_linux_gnu(),
@@ -637,9 +643,14 @@ fn append_fusion_keeps_original_sites_in_callers_and_derived_builders() {
 /// and on both native targets at O0 and O3, retaining main's result checks.
 #[test]
 fn accepted_removal_forms_run_on_heap_and_both_native_targets() {
-    use hirsel_driver::native::{
-        Observation, Partition, Sites, Toolchain, launch, link, observe, run_heap,
-    };
+    use hirsel_native::Observation;
+    use hirsel_native::Partition;
+    use hirsel_native::Sites;
+    use hirsel_native::Toolchain;
+    use hirsel_native::launch;
+    use hirsel_native::link;
+    use hirsel_native::observe;
+    use hirsel_native_testing::run_heap;
     with_compiler_stack(|| {
         let mut engine = engine(FORMS);
         let entry = entry_path(&default_context());
@@ -869,13 +880,14 @@ fn settled_original_assessment_binds_exported_bodies_without_a_native_snapshot()
 
 #[test]
 fn native_discovery_reports_actual_removals_on_cold_and_body_free_fresh_hits() {
-    use hirsel_driver::native::queries::{
-        INSTANCE_KIND,
-        declarations::NativeDeclarations,
-        instance_tasks::{DISCOVERY_KIND, INSTANCE_INPUT_KIND, InstanceTaskFactory, InstanceTasks},
-        source_inputs::NativeInstanceInputs,
-    };
     use hirsel_engine::runtime::*;
+    use hirsel_native::query_model::INSTANCE_KIND;
+    use hirsel_native_cache::declarations::NativeDeclarations;
+    use hirsel_native_cache::source_inputs::NativeInstanceInputs;
+    use hirsel_native_queries::instance_tasks::DISCOVERY_KIND;
+    use hirsel_native_queries::instance_tasks::INSTANCE_INPUT_KIND;
+    use hirsel_native_queries::instance_tasks::InstanceTaskFactory;
+    use hirsel_native_queries::instance_tasks::InstanceTasks;
     use std::sync::{Arc, atomic::Ordering};
     with_compiler_stack(|| {
         let text = sidecar(BUMP, &[(ENSURES, "proved"), (OVERFLOW, "proved")], |_| {});
@@ -911,7 +923,7 @@ fn native_discovery_reports_actual_removals_on_cold_and_body_free_fresh_hits() {
             assert!(!proofs.discharge.is_empty());
             let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
             options.discharge = proofs.discharge.clone();
-            options.validation = hirsel_driver::native::Validation::Ready;
+            options.validation = hirsel_native::Validation::Ready;
             if mode == 2 {
                 // This licensed site never becomes a native check. Discovery
                 // must refuse before exposing any completed report product.
@@ -995,8 +1007,8 @@ fn native_discovery_reports_actual_removals_on_cold_and_body_free_fresh_hits() {
                 INSTANCE_KIND,
                 INSTANCE_INPUT_KIND,
                 DISCOVERY_KIND,
-                hirsel_driver::native::queries::instance_tasks::CALLABLE_GRAPH_KIND,
-                hirsel_driver::native::queries::instance::CALLABLE_VALUE_KIND,
+                hirsel_native_queries::instance_tasks::CALLABLE_GRAPH_KIND,
+                hirsel_native::query_model::CALLABLE_VALUE_KIND,
             ] {
                 runtime.register(kind, factory.clone()).unwrap();
             }

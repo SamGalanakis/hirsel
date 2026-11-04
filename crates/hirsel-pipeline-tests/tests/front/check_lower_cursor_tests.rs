@@ -4,7 +4,7 @@
 fn borrowed_aggregate_aliases_keep_the_permission_for_sibling_identity_proofs() {
     let mut engine = hirsel_engine::QueryEngine::new(
         hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
+        hirsel_front_phases::compiler_adapters(),
     );
     let file = engine.sources.add("borrowed-alias.hir", String::from(
         "type Log {dir:Dir,file:File of .dir}\nfn inspect(d:Dir,f:File of d) {}\nfn probe(log:Log) {let alias=log; inspect(alias.dir,alias.file)}",
@@ -32,7 +32,7 @@ fn cursor_retirement_after_initialization_cleans_the_new_owner_on_failure() {
         );
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let context = hirsel_engine::default_context();
         let file = engine.sources.add("cursor-cleanup.hir", source).unwrap();

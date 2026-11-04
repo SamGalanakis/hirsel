@@ -1,7 +1,12 @@
 //! Native source attribution against a hand-counted program, not compiler IR dumps.
-use hirsel_driver::native::{
-    self, Backend, OptLevel, Options, Partition, RuntimeBuild, TargetSpec, Toolchain,
-};
+use hirsel_driver::native;
+use hirsel_native::Backend;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::RuntimeBuild;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
 use serde_json::Value;
 
 #[test]
@@ -25,17 +30,17 @@ fn check_source_profile(backend: Backend) {
         std::fs::create_dir_all(&root).unwrap();
         let source = dir.join("known.hir");
         std::fs::write(&source, "fn first(b: Bytes) -> () { let x = copy b }\nfn second(b: Bytes) -> () { let y = copy b }\npub fn main(rt: Io) -> Result[(), GrantError] {\n  for i in 0u64..3u64 { first(b\"a\") }\n  for j in 0u64..5u64 { second(b\"b\") }\n  let tasks = io.tasks(rt)?\n  let stdout = io.stdout(rt)?\n  task.scope(tasks, fn(s: Scope) {\n    let mut set: TaskSet[u64] of s = task.set(s)\n    for i in 0u64..6u64 {\n      task.add(s, mut set, task.async(s, fn() -> u64 { i + 1u64 }))\n    }\n    task.cancel_all(s, take set)\n  })\n  let _ = out.print(stdout, \"done\\n\")\n  Ok(())\n}\n").unwrap();
-        let mut loaded = hirsel_driver::load_program(&source).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&source).unwrap();
         loaded.check_for_execution().unwrap();
         let snapshot = loaded.engine.export_native_input().unwrap();
-        let sources = native::profile_sources(&snapshot);
+        let sources = hirsel_native::profile_sources(&snapshot);
         let validated = loaded.engine.import_native_input(snapshot).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
         let mut options = Options::new(target.clone());
         options.elide = false;
         options.reuse = false;
         options.regions = false;
-        let ready = native::build(&validated, &options).unwrap();
+        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
         let tools = Toolchain::in_tree_with_runtimes(
             &dir.join("runtime"),
             &[&target],
@@ -48,7 +53,7 @@ fn check_source_profile(backend: Backend) {
             ],
         )
         .unwrap();
-        let objects = native::emit_backend_objects(
+        let objects = hirsel_native::emit_backend_objects(
             &ready,
             backend,
             OptLevel::None,
@@ -57,7 +62,8 @@ fn check_source_profile(backend: Backend) {
             Some(&sources),
         )
         .unwrap();
-        let exe = native::link_objects(&ready, &loaded.entry, &objects, &tools, &dir).unwrap();
+        let exe =
+            hirsel_native::link_objects(&ready, &loaded.entry, &objects, &tools, &dir).unwrap();
         let json = dir.join("profile.json");
         let result = std::process::Command::new(&exe)
             .env_clear()
@@ -169,7 +175,7 @@ fn check_source_profile(backend: Backend) {
             "profiling changed stdout, stderr or tape"
         );
         if backend == Backend::Cranelift {
-            let normal = native::emit_backend_objects(
+            let normal = hirsel_native::emit_backend_objects(
                 &ready,
                 backend,
                 OptLevel::None,
@@ -187,13 +193,13 @@ fn check_source_profile(backend: Backend) {
                         .any(|s| s == b"hirsel.profile.site.")
                 );
             }
-            let clif = native::emit_clif(&ready).unwrap();
+            let clif = hirsel_native::emit_clif(&ready).unwrap();
             assert!(!clif.contains("hirsel_rt_v2_profile_"), "{clif}");
             // The fixture run binds its mount to the link directory. Keep that
             // directory identical, so tape identity stays identical as well.
             let measured_exe = dir.join("measured");
             std::fs::rename(&exe, &measured_exe).unwrap();
-            let normal_exe = native::link_objects(
+            let normal_exe = hirsel_native::link_objects(
                 &ready,
                 &loaded.entry,
                 &normal,
@@ -274,18 +280,18 @@ pub fn main() -> Result[(), ()] { probe(false); Ok(()) }
 "#,
         )
         .unwrap();
-        let mut loaded = hirsel_driver::load_program(&source).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&source).unwrap();
         loaded.check_for_execution().unwrap();
         let snapshot = loaded.engine.export_native_input().unwrap();
-        let sources = native::profile_sources(&snapshot);
+        let sources = hirsel_native::profile_sources(&snapshot);
         let validated = loaded.engine.import_native_input(snapshot).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
         let mut options = Options::new(target.clone());
         options.elide = false;
         options.reuse = false;
         options.regions = false;
-        let ready = native::build(&validated, &options).unwrap();
-        let objects = native::emit_backend_objects(
+        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let objects = hirsel_native::emit_backend_objects(
             &ready,
             backend,
             OptLevel::None,
@@ -294,7 +300,7 @@ pub fn main() -> Result[(), ()] { probe(false); Ok(()) }
             Some(&sources),
         )
         .unwrap();
-        let clif = native::emit_clif(&ready).unwrap();
+        let clif = hirsel_native::emit_clif(&ready).unwrap();
         assert!(clif.contains("call_indirect"), "{clif}");
         let registry = DescriptorRegistry::new(&ready.table, &ready.finalizers);
         let probe = ready
@@ -321,7 +327,7 @@ pub fn main() -> Result[(), ()] { probe(false); Ok(()) }
             } else {
                 source.anchors[0].1 = invalid; // Mapped byte range overflows its file.
             }
-            let error = native::emit_backend_objects(
+            let error = hirsel_native::emit_backend_objects(
                 &ready,
                 backend,
                 OptLevel::None,
@@ -374,12 +380,13 @@ pub fn main() -> Result[(), ()] { probe(false); Ok(()) }
         }
         let exe = dir.join("context");
         tools.link_executable(&target, &paths, &exe).unwrap();
-        let output = native::launch(&exe, &target, &tools, &dir, false).unwrap();
+        let output = hirsel_native::launch(&exe, &target, &tools, &dir, false).unwrap();
         assert_eq!(output.exit, Some(0), "{output:?}");
         assert_eq!(output.stdout, b"3 restored contexts; no live blocks\n");
         // The launcher exposes the existing runtime report, including the drop
         // callback; the C control above also exercised its failed-call cleanup.
-        let exe = native::link_objects(&ready, &loaded.entry, &objects, &tools, &dir).unwrap();
+        let exe =
+            hirsel_native::link_objects(&ready, &loaded.entry, &objects, &tools, &dir).unwrap();
         let json = dir.join("profile.json");
         let output = Command::new(&exe)
             .env_clear()
@@ -481,18 +488,18 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 }
 "#;
         std::fs::write(&source, text).unwrap();
-        let mut loaded = hirsel_driver::load_program(&source).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&source).unwrap();
         loaded.check_for_execution().unwrap();
         let snapshot = loaded.engine.export_native_input().unwrap();
-        let sources = native::profile_sources(&snapshot);
+        let sources = hirsel_native::profile_sources(&snapshot);
         let validated = loaded.engine.import_native_input(snapshot).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
         let mut options = Options::new(target.clone());
         options.elide = false;
         options.reuse = false;
         options.regions = false;
-        let ready = native::build(&validated, &options).unwrap();
-        let objects = native::emit_backend_objects(
+        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let objects = hirsel_native::emit_backend_objects(
             &ready,
             backend,
             OptLevel::None,
@@ -510,7 +517,8 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
             },
         )
         .unwrap();
-        let exe = native::link_objects(&ready, &loaded.entry, &objects, &tools, &dir).unwrap();
+        let exe =
+            hirsel_native::link_objects(&ready, &loaded.entry, &objects, &tools, &dir).unwrap();
         let json = dir.join("profile.json");
         let output = std::process::Command::new(&exe)
             .env_clear()

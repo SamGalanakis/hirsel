@@ -2,6 +2,7 @@ use hirsel_driver::*;
 use hirsel_engine::{
     RunConfiguration, RunOutcome, SimulationConfig, run_observed_checked, with_compiler_stack,
 };
+use hirsel_front_phases::*;
 use hirsel_lir::ir::UnitOrigin;
 use std::{collections::BTreeSet, path::PathBuf};
 

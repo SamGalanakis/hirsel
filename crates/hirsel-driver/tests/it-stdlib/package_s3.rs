@@ -35,8 +35,8 @@ fn published_aws_sigv4_vectors_execute_package_source() {
 
 #[test]
 fn client_facets_confine_authority_before_effects() {
-    use hirsel_driver::load_program_source;
     use hirsel_engine::{InterpreterAdapter, RunConfiguration, run_observed_snapshot};
+    use hirsel_front_phases::load_program_source;
     use hirsel_interp::observation::Effect;
 
     with_compiler_stack(|| {
@@ -122,7 +122,7 @@ fn opaque_client_examples_typecheck() {
             let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../packages/s3@1/e2e")
                 .join(example);
-            hirsel_driver::load_program_source(&path, None)
+            hirsel_front_phases::load_program_source(&path, None)
                 .unwrap()
                 .check_for_execution()
                 .unwrap();

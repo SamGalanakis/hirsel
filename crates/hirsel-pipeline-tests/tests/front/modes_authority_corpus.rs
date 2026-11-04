@@ -24,7 +24,7 @@ fn divergent_alias_joins_publish_fresh_identities_and_preserve_original_owners()
             );
             let mut engine = hirsel_engine::QueryEngine::new(
                 hirsel_engine::default_environment(),
-                hirsel_driver::compiler_adapters(),
+                hirsel_front_phases::compiler_adapters(),
             );
             let context = hirsel_engine::default_context();
             let file = engine

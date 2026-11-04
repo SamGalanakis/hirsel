@@ -244,10 +244,14 @@ fn durable_queue_31_fixture_native_live() {
 
 fn fixture_campaign(replay_network: bool) {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let root = evidence();
         let manifest = package(&root);
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded =
+            hirsel_front_phases::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -279,7 +283,8 @@ fn fixture_campaign(replay_network: bool) {
                 },
             },
         ];
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.wrapper = vec![
             "/usr/bin/env".into(),
             "HIRSEL_MEMORY_LIMIT=2G".into(),
@@ -542,6 +547,9 @@ fn fixture_bytes(value: &Value) -> Vec<u8> {
 fn durable_queue_31_crash_cuts() {
     with_compiler_stack(|| {
         use hirsel_driver::native::*;
+        use hirsel_native::*;
+        use hirsel_native_batch::*;
+        use hirsel_native_testing::*;
         let root = evidence();
         let manifest = package(&root);
         fs::write(
@@ -556,7 +564,8 @@ fn durable_queue_31_crash_cuts() {
             .push(json!({"path":"crash.hir","module":["crash"]}));
         value["entry"] = json!({"module":["crash"],"name":"trial"});
         fs::write(&manifest, value.to_string()).unwrap();
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded =
+            hirsel_front_phases::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -606,7 +615,8 @@ fn durable_queue_31_crash_cuts() {
                 },
             },
         ];
-        let tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         let fixture = Fixture {
             steps: Some(10_000_000),
             ..Default::default()

@@ -33,21 +33,12 @@ fn fixture_product_bytes(
     fixture_product(&store, address, action, reference)
 }
 
-use hirsel_engine::{
-    CheckOutput, Compiler, LoadedProgram, NotImplemented, PhaseAdapters, RunOutcome,
-    SimulationConfig, ToolError,
-};
-pub mod api_index;
-pub mod candidate;
+use hirsel_engine::{CheckOutput, NotImplemented, RunOutcome, SimulationConfig, ToolError};
 mod compiler_requests;
 pub use compiler_requests::CompilerRequestsExt;
-pub mod dependency_card;
 mod launch_binding;
 pub mod native;
-mod network;
-pub mod observation_view;
 pub mod ownership_trace;
-mod pipeline;
 #[cfg(test)]
 mod prepared_host_152;
 pub mod requests;
@@ -57,29 +48,14 @@ pub mod session;
 pub mod testing;
 mod tir_execution;
 mod trial;
-pub use pipeline::{BodyAdapter, FrontPhases, LowerAdapter, ModeAdapter};
 use std::{io::Write, path::Path};
 pub use trial::{TrialCall, trial_tapes};
 
-/// The complete compiler over the front phases in [`FrontPhases`].
-include!(concat!(env!("OUT_DIR"), "/compiler_identity.rs"));
-pub const COMPILER: Compiler = Compiler::new(FrontPhases::shared, COMPILER_IDENTITY);
+use hirsel_compiler_identity::COMPILER_IDENTITY;
+use hirsel_front_phases::COMPILER;
+use hirsel_front_phases::compiler_adapters;
+use hirsel_front_phases::load_program;
 
-pub fn compiler_adapters() -> PhaseAdapters {
-    COMPILER.adapters()
-}
-/// `.json` selects a launch manifest; `.hir` selects its exact `.hir.json`
-/// sidecar if present, otherwise standalone@0 with the toolchain std@1.
-pub fn load_program(path: &Path) -> Result<LoadedProgram, ToolError> {
-    COMPILER.load_program(path)
-}
-/// Corpus transformations replace only the primary source, retaining its package graph.
-pub fn load_program_source(
-    path: &Path,
-    replacement: Option<&str>,
-) -> Result<LoadedProgram, ToolError> {
-    COMPILER.load_program_source(path, replacement)
-}
 /// A partial pipeline can produce rejection diagnostics, but never a clean acceptance.
 pub fn check_path(path: &Path, policy: session::Policy) -> Result<CheckOutput, ToolError> {
     session::with_session(path, policy, session::Session::check)
@@ -474,7 +450,7 @@ pub(crate) fn admit_bound_host_run(
                     .map_err(|e| ToolError::Runtime(format!("launch: {e}")))?;
             }
             let admitted = bound
-                .admit(&mut host, admission_time()?)
+                .admit(&mut host, hirsel_host_io::admission_time()?)
                 .map_err(ToolError::Launch)?;
             let mut io = host.into_io();
             // The interpreter reaches every operation, so it takes the host network and
@@ -592,7 +568,7 @@ pub fn replay_observations_checked(
 pub fn record_fixture_observations(
     path: &Path,
     run: &Path,
-    fixture: &native::Fixture,
+    fixture: &hirsel_native::Fixture,
     tape: &Path,
     checked: bool,
 ) -> Result<hirsel_interp::observation::Observable, ToolError> {
@@ -609,7 +585,7 @@ pub fn record_fixture_observations(
 pub fn record_prepared_fixture_observations(
     input: &requests::TirExecution,
     run: &Path,
-    fixture: &native::Fixture,
+    fixture: &hirsel_native::Fixture,
     tape: &Path,
     checked: bool,
 ) -> Result<hirsel_interp::observation::Observable, ToolError> {
@@ -665,7 +641,7 @@ pub fn replay_prepared_observations(
 pub fn record_loaded_fixture_observations(
     program: &mut LoadedProgram,
     run: &Path,
-    fixture: &native::Fixture,
+    fixture: &hirsel_native::Fixture,
     tape: &Path,
     checked: bool,
 ) -> Result<hirsel_interp::observation::Observable, ToolError> {
@@ -757,7 +733,7 @@ pub(crate) fn run_request_on_host(
     launch: HostLaunch<'_>,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    cancel: Option<network::ExternalCancel>,
+    cancel: Option<hirsel_host_io::ExternalCancel>,
     checked: bool,
 ) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
     let selection = launch_binding::LaunchSelection::read(launch)?;
@@ -828,12 +804,6 @@ pub fn end_by_signal(kind: hirsel_run_schema::SignalKind) -> u8 {
     }
     hirsel_run_schema::RunOutcome::Signaled(kind).exit_code() as u8
 }
-pub(crate) fn admission_time() -> Result<i64, ToolError> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| ToolError::Runtime(e.to_string()))?;
-    i64::try_from(now.as_nanos()).map_err(|e| ToolError::Runtime(e.to_string()))
-}
 
 /// `hirsel tapes check`: the joined check over linked tapes (RUN-11).
 pub fn check_tapes(
@@ -853,3 +823,14 @@ pub fn check_tapes(
     }
     hirsel_rt::tape_links::check(&tapes)
 }
+
+use hirsel_engine::LoadedProgram;
+
+#[cfg(test)]
+extern crate self as hirsel_driver;
+#[cfg(test)]
+#[path = "../../hirsel-candidate/src/lib.rs"]
+mod candidate;
+#[cfg(test)]
+#[path = "../../hirsel-observation-view/src/lib.rs"]
+mod observation_view;

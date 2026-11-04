@@ -91,7 +91,7 @@ fn simulated(large: bool) {
     hirsel_engine::with_compiler_stack(|| {
         let root = scratch("simulation");
         let selection = package(&root);
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -272,13 +272,17 @@ fn pnm_tiles_30_native_record_replay() {
             root
         };
         let manifest = root.join("hirsel.json");
-        let compiler = hirsel_driver::COMPILER
-            .clone()
-            .with_config(hirsel_engine::CompileConfig {
-                store: hirsel_engine::store::store_by_name("dir@1", Some(root.join("products")))
+        let compiler =
+            hirsel_front_phases::COMPILER
+                .clone()
+                .with_config(hirsel_engine::CompileConfig {
+                    store: hirsel_engine::store::store_by_name(
+                        "dir@1",
+                        Some(root.join("products")),
+                    )
                     .unwrap(),
-                ..hirsel_driver::COMPILER.configuration()
-            });
+                    ..hirsel_front_phases::COMPILER.configuration()
+                });
         let record_path = std::env::var_os("PNM_TILES_30_RECORDS")
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join("tapes.json"));

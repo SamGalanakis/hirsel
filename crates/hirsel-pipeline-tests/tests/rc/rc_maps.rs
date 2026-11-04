@@ -2,12 +2,16 @@
 #[path = "../../../hirsel-driver/tests/support/source_std.rs"]
 mod source_std;
 use crate::rc_support as support;
-use hirsel_driver::compiler_adapters;
-use hirsel_driver::native::{Options, TargetSpec, build_program, manifest, program};
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_heapcheck::{Config, NoOperations, Observed};
+use hirsel_native::Options;
+use hirsel_native::TargetSpec;
+use hirsel_native::manifest;
+use hirsel_native::program;
+use hirsel_native_batch::build_program;
 
 fn execute(body: &str, expected: u64) {
     execute_with_collisions(body, expected, false);
@@ -205,7 +209,7 @@ fn heap_independently_rejects_undeclared_borrowed_returns_and_early_loan_end() {
         source_check_request(&mut engine, file, &default_context()).unwrap();
         let input = engine.export_native_input().unwrap();
         let input = engine.import_native_input(input).unwrap();
-        let ready = hirsel_driver::native::build(
+        let ready = hirsel_native_batch::build(
             &input,
             &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
         )

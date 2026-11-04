@@ -7,6 +7,7 @@ mod history;
 
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::sync::Arc;
 fn engine(text: &str) -> QueryEngine {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -268,7 +269,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {{
                 assert_eq!(observation.failures[0].cause_indices, [1]);
                 assert!(observation.failures[1].cause_indices.is_empty());
             }
-            let reference = hirsel_driver::native::Observation::of_reference(&observation);
+            let reference = hirsel_native::Observation::of_reference(&observation);
             let name = format!("call-{call_fails}-drop-{bad}");
             let report = runner.compare(
                 &validated,

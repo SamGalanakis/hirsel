@@ -38,7 +38,7 @@ fn shardsearch_27_reference_and_checked_application() {
     hirsel_engine::with_compiler_stack(|| {
         let scratch = scratch();
         let selection = package(scratch.path());
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));

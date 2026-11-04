@@ -1,9 +1,10 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
+use hirsel_native_cache::declarations::NativeDeclarations;
+use hirsel_native_cache::recipes::SourceRecipe;
+use hirsel_native_cache::source_inputs::NativeSourceProvider;
 use hirsel_rc::instance::{Actuals, InstanceRole};
-use native::queries::{
-    declarations::NativeDeclarations, recipes::SourceRecipe, source_inputs::NativeSourceProvider,
-};
 use std::sync::Arc;
 
 #[test]
@@ -188,7 +189,7 @@ fn source_recipes_restore_generic_closures_and_finalizers_without_ancestor_value
 
 #[test]
 fn library_recipe_rebinds_its_environment_without_reconstructing_the_requiring_value() {
-    use native::queries::recipes::LibraryRecipe;
+    use hirsel_native_cache::recipes::LibraryRecipe;
     with_compiler_stack(|| {
         const SOURCE: &str = "fn step(mut n:u64)->Option[u64] {if n==2u64 {None} else {let x=n;n+=1u64;Some(x)}}\npub fn main()->u64 {let state=0u64;let mut it=iter.from(take state,step);let _=iter.next(mut it);0u64}";
         let store = Arc::new(store::MemStore::default());
@@ -419,7 +420,7 @@ fn source_operations(
 
 #[test]
 fn library_recipes_share_a_key_across_erased_actual_modes() {
-    use hirsel_driver::native::queries::recipes::LibraryRecipe;
+    use hirsel_native_cache::recipes::LibraryRecipe;
     use hirsel_types::{GenericArgument, Primitive, Type, TypeKind, Uniqueness};
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
@@ -478,7 +479,7 @@ fn library_recipes_share_a_key_across_erased_actual_modes() {
 
 #[test]
 fn library_recipe_preserves_the_declared_borrowed_result_contract() {
-    use hirsel_driver::native::queries::recipes::LibraryRecipe;
+    use hirsel_native_cache::recipes::LibraryRecipe;
     use hirsel_rc::instance::Instances;
     with_compiler_stack(|| {
         let store = Arc::new(store::MemStore::default());
@@ -554,8 +555,8 @@ fn library_recipe_preserves_the_declared_borrowed_result_contract() {
 
 #[test]
 fn synthesized_cursor_finalizer_recipes_share_erased_actual_modes() {
+    use hirsel_native_cache::recipes::LibraryRecipe;
     use hirsel_types::{GenericArgument, Primitive, Type, TypeKind, Uniqueness};
-    use native::queries::recipes::LibraryRecipe;
     with_compiler_stack(|| {
         let store = Arc::new(store::MemStore::default());
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
@@ -646,7 +647,7 @@ fn keyed_value_import_retains_the_original_pretransfer_cleanup() {
         let inputs = crate::native_front_fixture::inputs(&mut engine, &[]);
         let mut source = inputs.provider();
         let target = hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu();
-        let mut demand = native::queries::demand::DemandInstances::new_from_source(
+        let mut demand = hirsel_native_queries::demand::DemandInstances::new_from_source(
             &source,
             store.clone(),
             target.clone(),
@@ -658,7 +659,11 @@ fn keyed_value_import_retains_the_original_pretransfer_cleanup() {
             .find(|key| key.instance.definition().0.name == "main")
             .unwrap();
         let output = demand
-            .instance_from(&mut source, main, &native::Options::new(target.clone()))
+            .instance_from(
+                &mut source,
+                main,
+                &hirsel_native::Options::new(target.clone()),
+            )
             .unwrap();
         assert_eq!(
             output.facts.source.adapters.len(),

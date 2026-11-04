@@ -47,12 +47,16 @@ pub fn main() -> Result[(),u64] { Error(wildcard(Tick) + exhaustive(Tick) + nest
 
 #[test]
 fn a_borrowed_soa_list_count_reaches_the_vectorizer_before_unrolling() {
-    use hirsel_driver::compiler_adapters;
-    use hirsel_driver::native::{OptLevel, Options, TargetSpec, build, emit_ir};
     use hirsel_engine::{
         QueryEngine, default_context, default_environment, source_check_request,
         with_compiler_stack,
     };
+    use hirsel_front_phases::compiler_adapters;
+    use hirsel_native::OptLevel;
+    use hirsel_native::Options;
+    use hirsel_native::TargetSpec;
+    use hirsel_native::emit_ir;
+    use hirsel_native_batch::build;
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine

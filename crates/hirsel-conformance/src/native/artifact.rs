@@ -4,10 +4,14 @@
 //! input digest, and both observations as text). Neither holds a path, an
 //! arena index or an address, so it replays from any directory and in an
 //! engine whose arenas are numbered differently.
-use hirsel_driver::native::{
-    Configuration, MATRIX_VERSION, OBSERVATION_SCHEMA, Observation, Outcome, Toolchain,
-    full_matrix, topology_matrix,
-};
+use hirsel_native::OBSERVATION_SCHEMA;
+use hirsel_native::Observation;
+use hirsel_native::Toolchain;
+use hirsel_native_testing::Configuration;
+use hirsel_native_testing::MATRIX_VERSION;
+use hirsel_native_testing::Outcome;
+use hirsel_native_testing::full_matrix;
+use hirsel_native_testing::topology_matrix;
 use hirsel_run_schema::hex;
 use std::path::Path;
 
@@ -70,8 +74,8 @@ pub fn reference_status(source: &str, warm: Option<&str>) -> Result<(Observation
     let prepared = prepare_reference(source, warm)?;
     let ready = prepared
         .input
-        .ready(&hirsel_driver::native::Options::new(
-            hirsel_driver::native::TargetSpec::x86_64_unknown_linux_gnu(),
+        .ready(&hirsel_native::Options::new(
+            hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
         ))
         .map_err(|error| error.to_string())?;
     let sites = ready.sites();
@@ -114,14 +118,14 @@ impl Probe for NativeProbe<'_> {
             false,
         )
         .ok()?;
-        let outcomes = hirsel_driver::native::differential_ready(
+        let outcomes = hirsel_native_testing::differential_ready(
             &mut |options| validated.ready(options),
             &entry,
             &reference,
             std::slice::from_ref(&self.configuration),
             self.toolchain,
             self.dir,
-            &hirsel_driver::native::Fixture::default(),
+            &hirsel_native::Fixture::default(),
         );
         match outcomes.into_iter().next()?.1 {
             Outcome::Agree => Some((reference.clone(), reference)),
@@ -134,7 +138,7 @@ impl Probe for NativeProbe<'_> {
 /// The configuration a stored name denotes, in this matrix version.
 pub fn configuration(name: &str) -> Option<Configuration> {
     let mut base = name;
-    let mut launch = hirsel_driver::native::LaunchInputs::default();
+    let mut launch = hirsel_native::LaunchInputs::default();
     while let Some((prefix, field)) = base.rsplit_once('/') {
         if let Some(value) = field.strip_prefix("hash-") {
             launch.hash_seed = value.parse().ok()?;
@@ -151,10 +155,10 @@ pub fn configuration(name: &str) -> Option<Configuration> {
         .into_iter()
         .chain(topology_matrix(20))
         .chain(super::cranelift::matrix(
-            hirsel_driver::native::TargetSpec::x86_64_unknown_linux_gnu(),
+            hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
         ))
         .chain(super::cranelift::matrix(
-            hirsel_driver::native::TargetSpec::aarch64_unknown_linux_gnu(),
+            hirsel_native::TargetSpec::aarch64_unknown_linux_gnu(),
         ))
         .find(|c| c.name() == base)?;
     config.options.launch = launch;
@@ -182,7 +186,7 @@ pub fn write(
             "case {case}\nconfiguration {configuration}\nmatrix {MATRIX_VERSION}\n\
              observation-schema {OBSERVATION_SCHEMA}\nllvm {}\nsource-digest {}\n\
              --- expected\n{}--- actual\n{}",
-            hirsel_driver::native::llvm_version(),
+            hirsel_native::llvm_version(),
             hex(&hirsel_syntax::ContentHash::of_bytes(source.as_bytes()).0),
             expected.render(),
             actual.render()

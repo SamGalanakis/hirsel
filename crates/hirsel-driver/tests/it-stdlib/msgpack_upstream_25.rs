@@ -1,7 +1,8 @@
 //! Frozen rmpv Value expectations for the JSON-domain MessagePack policy.
 //! Each bounded partition runs the same IDs through all four public engines.
-use hirsel_driver::{load_program_source, native};
+use hirsel_driver::native;
 use hirsel_engine::*;
+use hirsel_front_phases::load_program_source;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{fmt::Write, path::Path};
@@ -248,7 +249,7 @@ fn partition(name: &str, file: &str, fixture: &str) {
             value => panic!("invalid native retry selector: {value:?}"),
         };
         let reference = if native_only {
-            native::Observation {
+            hirsel_native::Observation {
                 exit_code: Some(0),
                 blocked: false,
                 budget: None,
@@ -268,26 +269,29 @@ fn partition(name: &str, file: &str, fixture: &str) {
                 SimulationConfig::default(),
             )
             .unwrap();
-            native::Observation::of_reference(reference.observation.as_ref().unwrap())
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap())
         };
         let matrix = [
-            native::Engine::Heap { campaign: false },
-            native::Engine::Native {
-                opt: native::OptLevel::None,
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Heap { campaign: false },
+            hirsel_native_testing::Engine::Native {
+                opt: hirsel_native::OptLevel::None,
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
-            native::Engine::Cranelift {
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Cranelift {
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         ]
         .into_iter()
-        .filter(|engine| !native_only || !matches!(engine, native::Engine::Heap { .. }))
+        .filter(|engine| {
+            !native_only || !matches!(engine, hirsel_native_testing::Engine::Heap { .. })
+        })
         .map(|engine| {
-            let mut options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+            let mut options =
+                hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
             options.launch.hash_seed = hash_seed;
-            native::Configuration { options, engine }
+            hirsel_native_testing::Configuration { options, engine }
         })
         .collect();
         let runner = history::Runner::with_matrix(scratch.path(), matrix).unwrap();

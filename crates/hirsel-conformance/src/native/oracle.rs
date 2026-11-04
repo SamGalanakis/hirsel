@@ -1,6 +1,6 @@
 //! Explicit expected stdout for compiled-only library evidence. Ordinary
 //! corpus and regression programs always retain their interpreter reference.
-use hirsel_driver::native::Observation;
+use hirsel_native::Observation;
 use std::path::{Component, Path};
 
 pub(super) fn expected_stdout(

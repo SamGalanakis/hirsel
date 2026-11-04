@@ -63,8 +63,12 @@ fn reachable_unreachable_placeholder_is_rejected() {
 
 #[test]
 fn proven_match_native_parity() {
-    use hirsel_driver::{compiler_adapters, native::*};
+    use hirsel_driver::native::*;
     use hirsel_engine::*;
+    use hirsel_front_phases::compiler_adapters;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
 
     with_compiler_stack(|| {
         let matrix = [
@@ -84,7 +88,9 @@ fn proven_match_native_parity() {
             engine,
         });
         let directory = tempfile::tempdir().unwrap();
-        let toolchain = Toolchain::for_matrix(&directory.path().join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&directory.path().join("runtime"), &matrix)
+                .unwrap();
         for (name, source) in cases() {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let context = default_context();

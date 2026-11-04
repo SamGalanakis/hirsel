@@ -1,6 +1,7 @@
 //! Authority regression reduced from the std-store compaction callers.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 #[test]
 fn store_authority_14_mutable_generic_receiver_keeps_its_authority() {

@@ -7,6 +7,10 @@ fn borrow_cursor_8_projection_native_parity() {
     use hirsel_driver::native::*;
     use hirsel_driver::*;
     use hirsel_engine::*;
+    use hirsel_front_phases::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let mut matrix: Vec<_> = full_matrix()
         .into_iter()
         .filter(|configuration| {
@@ -40,7 +44,8 @@ fn borrow_cursor_8_projection_native_parity() {
     let directory =
         std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("borrow-cursor-8-projections");
     std::fs::create_dir_all(&directory).unwrap();
-    let toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
+    let toolchain =
+        hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix).unwrap();
     for (name, source) in [
         (
             "loop-protocol",
@@ -604,6 +609,10 @@ fn cursor_native_parity_with_stack(cases: &[(&str, &str)], stack: Option<u64>) {
     use hirsel_driver::native::*;
     use hirsel_driver::*;
     use hirsel_engine::*;
+    use hirsel_front_phases::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let options = Options::new(target());
     let matrix = vec![
         Configuration {
@@ -629,7 +638,8 @@ fn cursor_native_parity_with_stack(cases: &[(&str, &str)], stack: Option<u64>) {
     let directory =
         std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("borrow-cursor-8-source");
     std::fs::create_dir_all(&directory).unwrap();
-    let mut toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
+    let mut toolchain =
+        hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix).unwrap();
     if let Some(bytes) = stack {
         toolchain.wrapper = vec![
             "/usr/bin/prlimit".into(),
@@ -799,7 +809,11 @@ fn borrow_cursor_8_native_cost_evidence() {
     use hirsel_driver::native::*;
     use hirsel_driver::*;
     use hirsel_engine::*;
+    use hirsel_front_phases::*;
     use hirsel_lir::ir::Inst;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let dir = std::path::PathBuf::from("/tmp/borrow-cursor-impl-8-cost-artifacts");
         std::fs::create_dir_all(&dir).unwrap();

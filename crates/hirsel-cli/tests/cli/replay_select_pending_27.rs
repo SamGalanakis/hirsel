@@ -52,7 +52,7 @@ fn verify(name: &str, source: String, expected: &str) {
         ))
         .unwrap();
         grants["io"]["monotonic_clock"] = "clock.monotonic.ns@1".into();
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&manifest).unwrap();
         loaded.check_for_execution().unwrap();
         let run = hirsel_engine::RunConfiguration {
             entry: loaded.entry.clone(),

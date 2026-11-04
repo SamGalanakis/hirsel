@@ -3,6 +3,7 @@
 mod model;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 #[test]
 fn ordered_vector_traces_interpreted_and_checked_heap() {
@@ -43,13 +44,14 @@ fn ordered_vector_traces_interpreted_and_checked_heap() {
                 run.outcome,
                 report(run.observation.as_ref(), &traces)
             );
-            let observation = native::Observation::of_reference(run.observation.as_ref().unwrap());
+            let observation =
+                hirsel_native::Observation::of_reference(run.observation.as_ref().unwrap());
             assert!(observation.failures.is_empty(), "{observation:?}");
             let checked =
                 run_observed_checked(&mut loaded.engine, &config, SimulationConfig::default())
                     .unwrap();
             assert_eq!(
-                native::Observation::of_reference(checked.observation.as_ref().unwrap()),
+                hirsel_native::Observation::of_reference(checked.observation.as_ref().unwrap()),
                 observation
             );
             if let Some(expected) = &expected {
@@ -60,16 +62,16 @@ fn ordered_vector_traces_interpreted_and_checked_heap() {
         }
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
-        let heap = native::run_heap_in(
+        let heap = hirsel_native_testing::run_heap_in(
             &ready,
             &loaded.entry,
-            &native::Sites::new(validated.snapshot()),
-            &native::HeapWorld {
+            &hirsel_native::Sites::new(validated.snapshot()),
+            &hirsel_native_testing::HeapWorld {
                 steps: Some(10_000_000),
                 ..Default::default()
             },
@@ -128,46 +130,54 @@ fn all_engines(name: &str, source: &str, returned: hirsel_run_schema::Returned) 
             "{name}: {:?}",
             run.outcome
         );
-        let expected = native::Observation::of_reference(run.observation.as_ref().unwrap());
+        let expected = hirsel_native::Observation::of_reference(run.observation.as_ref().unwrap());
         assert!(expected.failures.is_empty(), "{expected:?}");
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = native::build(&validated, &options).unwrap();
-        let heap = native::run_heap(
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let heap = hirsel_native_testing::run_heap(
             &ready,
             &loaded.entry,
-            &native::Sites::new(validated.snapshot()),
+            &hirsel_native::Sites::new(validated.snapshot()),
         )
         .unwrap();
         assert_eq!(heap.observation, expected);
         assert_eq!(heap.counters.live_heap_bytes, 0);
         let configs = [
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
         let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
             .join(format!("map-seed-model-16-{name}"));
-        let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &configs).unwrap();
-        let outcomes =
-            native::differential(&validated, &loaded.entry, &expected, &configs, &tools, &dir);
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs).unwrap();
+        let outcomes = hirsel_native_testing::differential(
+            &validated,
+            &loaded.entry,
+            &expected,
+            &configs,
+            &tools,
+            &dir,
+        );
         assert_eq!(outcomes.len(), 2);
         for (config, outcome) in outcomes {
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{name}: {config}: {outcome:?}"
             );
         }

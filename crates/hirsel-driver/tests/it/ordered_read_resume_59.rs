@@ -49,8 +49,8 @@ fn ordered_reads_prove_mutable_storage_and_both_emitters_import_typed_helpers() 
             ),
         ] {
             let program = super::runtime50_continuation::ready(source);
-            let plans = hirsel_driver::native::continuation::plans(&program);
-            hirsel_driver::native::continuation::validate(&program, &plans).unwrap();
+            let plans = hirsel_native::continuation::plans(&program);
+            hirsel_native::continuation::validate(&program, &plans).unwrap();
             let units: Vec<_> = program.units.iter().collect();
             let check = |p: &hirsel_lir::continuation::ContinuationPlans| {
                 hirsel_lir::continuation::validate_runtime_operations(
@@ -160,14 +160,14 @@ fn ordered_reads_prove_mutable_storage_and_both_emitters_import_typed_helpers() 
                 );
             }
             for backend in [
-                hirsel_driver::native::Backend::Llvm,
-                hirsel_driver::native::Backend::Cranelift,
+                hirsel_native::Backend::Llvm,
+                hirsel_native::Backend::Cranelift,
             ] {
-                let objects = hirsel_driver::native::emit_backend_objects(
+                let objects = hirsel_native::emit_backend_objects(
                     &program,
                     backend,
-                    hirsel_driver::native::OptLevel::Default,
-                    hirsel_driver::native::Partition::Whole,
+                    hirsel_native::OptLevel::Default,
+                    hirsel_native::Partition::Whole,
                     false,
                     None,
                 )
@@ -188,7 +188,7 @@ fn ordered_stdin_and_join_agree_with_checked_h_and_replay() {
     with_compiler_stack(|| {
         super::runtime50_resume::agree_on(
             STDIN,
-            &hirsel_driver::native::Fixture {
+            &hirsel_native::Fixture {
                 stdin: b"G\0\xff".to_vec(),
                 migrate: true,
                 ..Default::default()

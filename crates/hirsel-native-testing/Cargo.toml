@@ -1,0 +1,30 @@
+[package]
+name = "hirsel-native-testing"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hirsel-run-config = { path = "../hirsel-run-config" }
+serde_json = "1"
+hirsel-llvm = { path = "../hirsel-llvm" }
+hirsel-cranelift = { path = "../hirsel-cranelift" }
+hirsel-native-batch = { path = "../hirsel-native-batch" }
+hirsel-front-phases = { path = "../hirsel-front-phases" }
+hirsel-native = { path = "../hirsel-native" }
+hirsel-native-queries = { path = "../hirsel-native-queries" }
+base64 = "=0.22.1"
+hirsel-core-contract = { path = "../hirsel-core-contract" }
+hirsel-engine = { path = "../hirsel-engine" }
+hirsel-guard = { path = "../hirsel-guard" }
+hirsel-heapcheck = { path = "../hirsel-heapcheck" }
+hirsel-interp = { path = "../hirsel-interp" }
+hirsel-lir = { path = "../hirsel-lir" }
+hirsel-rt = { path = "../hirsel-rt" }
+hirsel-rt-operations = { path = "../hirsel-rt-operations" }
+hirsel-run-schema = { path = "../hirsel-run-schema" }
+hirsel-syntax = { path = "../hirsel-syntax" }
+libc = { version = "0.2", default-features = false }
+object = { version = "=0.40.0", default-features = false, features = ["archive", "elf", "read_core", "std", "write"] }
+sha2 = "0.10"

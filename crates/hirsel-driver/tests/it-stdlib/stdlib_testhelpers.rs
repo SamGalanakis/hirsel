@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_interp::observation::Effect;
 use hirsel_lir::ir::UnitOrigin;
 use std::{collections::BTreeSet, path::PathBuf};
@@ -52,12 +53,12 @@ pub fn trial(t: Test) -> Result[(), ()] {
         assert!(reference.outcome.is_ok(), "{:?}", reference.outcome);
         let observation = reference.observation.as_ref().unwrap();
         assert_eq!(observation.effects.iter().filter(|effect| matches!(&effect.effect, Effect::Finalizer { definition } if definition.0.name == "Watch")).count(), 100);
-        let expected = native::Observation::of_reference(observation);
+        let expected = hirsel_native::Observation::of_reference(observation);
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
         let found: BTreeSet<_> = ready
@@ -90,10 +91,10 @@ pub fn trial(t: Test) -> Result[(), ()] {
                     .is_none()
             );
         }
-        let actual = native::heap_campaign(
+        let actual = hirsel_native_testing::heap_campaign(
             &ready,
             &loaded.entry,
-            &native::Sites::new(validated.snapshot()),
+            &hirsel_native::Sites::new(validated.snapshot()),
         )
         .unwrap();
         assert_eq!(actual.observation, expected);
@@ -124,7 +125,8 @@ fn property_reports_use_the_recorded_test_seed_and_first_failing_case(seed: u64)
             },
         )
         .unwrap();
-        let expected = native::Observation::of_reference(reference.observation.as_ref().unwrap());
+        let expected =
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
         assert_eq!(
             expected.output,
             format!("test log: counterexample: 0\ntest failure: seed={seed} case=0\n").as_bytes()
@@ -138,15 +140,16 @@ fn property_reports_use_the_recorded_test_seed_and_first_failing_case(seed: u64)
         let operation = expected.failures[0].operation.as_ref().unwrap();
         assert_eq!(operation.definition.0.package.name, "std");
         assert_eq!(operation.definition.0.name, "property_cases");
-        let mut options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let mut options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         options.launch.test_seed = seed;
         options.launch.random_seed = 17;
         options.launch.hash_seed = 91;
-        let ready = native::build(&validated, &options).unwrap();
-        let actual = native::run_heap(
+        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let actual = hirsel_native_testing::run_heap(
             &ready,
             &loaded.entry,
-            &native::Sites::new(validated.snapshot()),
+            &hirsel_native::Sites::new(validated.snapshot()),
         )
         .unwrap();
         assert_eq!(actual.observation, expected);
@@ -200,18 +203,18 @@ fn failed_resource_laws_release_the_current_case_before_reporting(name: &str) {
             assert_eq!(finalizers.len(), 1, "{name}");
         }
         assert_eq!(observation.failures.len(), 1);
-        let expected = native::Observation::of_reference(observation);
+        let expected = hirsel_native::Observation::of_reference(observation);
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
-        let actual = native::heap_campaign(
+        let actual = hirsel_native_testing::heap_campaign(
             &ready,
             &loaded.entry,
-            &native::Sites::new(validated.snapshot()),
+            &hirsel_native::Sites::new(validated.snapshot()),
         )
         .unwrap();
         assert_eq!(actual.observation, expected, "{name}");

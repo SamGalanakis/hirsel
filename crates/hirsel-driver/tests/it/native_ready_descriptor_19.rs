@@ -1,11 +1,13 @@
 //! Original plan forgery vectors applied to actual root and Ready descriptors.
-use hirsel_driver::{compiler_adapters, native};
+use hirsel_driver::native;
 use hirsel_engine::{
     runtime::*,
     store::{self, ResultStore, VerifyStore},
     *,
 };
-use native::queries::{self, NativeRoots};
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::query_model::NativeRoots;
+use hirsel_native_queries as queries;
 use std::sync::Arc;
 
 #[test]
@@ -37,9 +39,9 @@ fn actual_root_rejects_changed_owner_policy_and_c_bound_ready_summary() {
             crate::native_front_fixture::products(&mut engine, &[]).unwrap(),
             store.clone(),
             &[main.clone()],
-            native::Backend::Cranelift,
-            native::OptLevel::None,
-            native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            hirsel_native::Backend::Cranelift,
+            hirsel_native::OptLevel::None,
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
             false,
             hirsel_intern::jobs::Jobs::ONE,
             VerifyStore::Off,
@@ -78,7 +80,8 @@ fn actual_root_rejects_changed_owner_policy_and_c_bound_ready_summary() {
                     .iter()
                     .position(|owner| owner.instance.definition().0.name == "main")
                     .unwrap();
-                let address = root.instances[selected].address(queries::READY_KIND);
+                let address =
+                    root.instances[selected].address(hirsel_native::query_model::READY_KIND);
                 let selected = readies
                     .iter()
                     .position(|ready| ready.product.address == address)
@@ -109,7 +112,7 @@ fn actual_root_rejects_changed_owner_policy_and_c_bound_ready_summary() {
                     let keys = hirsel_lir::LayoutKeys::new(&table);
                     let bytes = summary.encode(&table, &keys).unwrap();
                     let reference = store
-                        .put_content(queries::ready::UNIT_SUMMARY_DOMAIN, &bytes)
+                        .put_content(hirsel_native_cache::ready::UNIT_SUMMARY_DOMAIN, &bytes)
                         .unwrap();
                     assert_ne!(reference, readies[selected].unit_summary);
                     let mut forged = readies.to_vec();

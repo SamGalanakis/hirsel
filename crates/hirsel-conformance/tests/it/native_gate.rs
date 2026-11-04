@@ -2,9 +2,18 @@
 //! replay from another path and another arena numbering, and a reducer that
 //! keeps the same discrepancy. The discrepancy is synthetic, so these hold
 //! when no engine disagrees.
-use hirsel_conformance::native::artifact::{self, Discrepancy, Probe};
-use hirsel_conformance::native::{self, CaseResult, Class, Exclusion, Exclusions};
-use hirsel_driver::native::{NativeError, Observation, Outcome, StageName};
+use hirsel_conformance::native;
+use hirsel_conformance::native::CaseResult;
+use hirsel_conformance::native::Class;
+use hirsel_conformance::native::Exclusion;
+use hirsel_conformance::native::Exclusions;
+use hirsel_conformance::native::artifact;
+use hirsel_conformance::native::artifact::Discrepancy;
+use hirsel_conformance::native::artifact::Probe;
+use hirsel_native::NativeError;
+use hirsel_native::Observation;
+use hirsel_native::StageName;
+use hirsel_native_testing::Outcome;
 use std::path::{Path, PathBuf};
 
 fn root() -> PathBuf {
@@ -112,10 +121,7 @@ fn an_artifact_of_another_schema_version_is_refused() {
     std::fs::write(
         dir.join("case.txt"),
         case.replace(
-            &format!(
-                "observation-schema {}",
-                hirsel_driver::native::OBSERVATION_SCHEMA
-            ),
+            &format!("observation-schema {}", hirsel_native::OBSERVATION_SCHEMA),
             "observation-schema 0",
         ),
     )
@@ -347,7 +353,9 @@ fn the_checked_in_lists_are_well_formed() {
 /// directed failure fails by its rule after output.
 #[test]
 fn generated_programs_are_valid_and_directed_failures_fail_by_their_rule() {
-    use hirsel_conformance::native::generate::{FAULTS, Fault, program};
+    use hirsel_conformance::native::generate::FAULTS;
+    use hirsel_conformance::native::generate::Fault;
+    use hirsel_conformance::native::generate::program;
     on_compiler(|| {
         for seed in 0..12 {
             let source = program(seed, None);
@@ -450,19 +458,19 @@ fn requires_reference_controls() {
 
 #[test]
 fn stored_configuration_retains_independent_seeds_and_baseline_names() {
-    for config in hirsel_driver::native::full_matrix()
+    for config in hirsel_native_testing::full_matrix()
         .into_iter()
-        .chain(hirsel_driver::native::topology_matrix(20))
+        .chain(hirsel_native_testing::topology_matrix(20))
     {
         let baseline = config.name();
         assert!(!baseline.contains("/hash-"));
         assert_eq!(artifact::configuration(&baseline).unwrap().name(), baseline);
         for launch in [
-            hirsel_driver::native::LaunchInputs {
+            hirsel_native::LaunchInputs {
                 hash_seed: u64::MAX,
                 ..Default::default()
             },
-            hirsel_driver::native::LaunchInputs {
+            hirsel_native::LaunchInputs {
                 hash_seed: 2,
                 random_seed: 3,
                 test_seed: 5,
@@ -541,9 +549,9 @@ fn clock_fixture_recordings_replay_timer_and_script_waits() {
     // Corpus execution checks results; this control checks the launcher's fixture
     // forwarding and the completion tape's park/ready protocol independently.
     on_compiler(|| {
-        let matrix = hirsel_driver::native::smoke_matrix();
-        let toolchain = hirsel_driver::native::Toolchain::for_matrix(
-            &native::runtime_cache().unwrap(),
+        let matrix = hirsel_native_testing::smoke_matrix();
+        let toolchain = hirsel_native_testing::toolchain_for_matrix(
+            &hirsel_native::runtime_cache().unwrap(),
             &matrix,
         )
         .unwrap();
@@ -755,17 +763,16 @@ fn stdout_oracles_reject_wrong_native_answers_and_keep_unmarked_references() {
             source: std::fs::read_to_string(&path).unwrap(),
             path: Some(path),
         };
-        let matrix = native::cranelift::matrix(
-            hirsel_driver::native::TargetSpec::x86_64_unknown_linux_gnu(),
-        );
-        let toolchain = hirsel_driver::native::Toolchain::for_matrix(
-            &native::runtime_cache().unwrap(),
+        let matrix =
+            native::cranelift::matrix(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+        let toolchain = hirsel_native_testing::toolchain_for_matrix(
+            &hirsel_native::runtime_cache().unwrap(),
             &matrix,
         )
         .unwrap();
         let scratch =
             native::scratch::RunRoot::create_in(&fresh_parent("oracle-controls")).unwrap();
-        let heap = [hirsel_driver::native::smoke_matrix().remove(0)];
+        let heap = [hirsel_native_testing::smoke_matrix().remove(0)];
         let unrun = case.run(&heap, &toolchain, &scratch.join("heap-only").unwrap());
         assert!(
             unrun
@@ -885,9 +892,9 @@ fn feature_collection_releases_each_cases_process_and_retains_check_errors() {
 #[test]
 fn safe_runner_replay_preserves_the_prepared_callee_facts() {
     on_compiler(|| {
-        let matrix = hirsel_driver::native::smoke_matrix();
-        let toolchain = hirsel_driver::native::Toolchain::for_matrix(
-            &native::runtime_cache().unwrap(),
+        let matrix = hirsel_native_testing::smoke_matrix();
+        let toolchain = hirsel_native_testing::toolchain_for_matrix(
+            &hirsel_native::runtime_cache().unwrap(),
             &matrix,
         )
         .unwrap();

@@ -1,6 +1,7 @@
 //! Bounded std-store success/failure vectors from the original DET crash cases.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 #[test]
@@ -23,38 +24,41 @@ fn compaction_success_and_injected_failure_agree_on_h_llvm_and_cranelift() {
             SimulationConfig::default(),
         )
         .unwrap();
-        let reference = native::Observation::of_reference(execution.observation.as_ref().unwrap());
+        let reference =
+            hirsel_native::Observation::of_reference(execution.observation.as_ref().unwrap());
         assert_eq!(reference.exit_code, Some(0), "{reference:?}");
         assert!(reference.failures.is_empty(), "{reference:?}");
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let configurations = vec![
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Heap { campaign: false },
+                engine: hirsel_native_testing::Engine::Heap { campaign: false },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
         let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("store-authority-14");
         std::fs::create_dir_all(&scratch).unwrap();
         let toolchain =
-            native::Toolchain::for_matrix(&scratch.join("runtime"), &configurations).unwrap();
-        let outcomes = native::differential(
+            hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &configurations)
+                .unwrap();
+        let outcomes = hirsel_native_testing::differential(
             &validated,
             &loaded.entry,
             &reference,
@@ -68,7 +72,7 @@ fn compaction_success_and_injected_failure_agree_on_h_llvm_and_cranelift() {
         }
         for (configuration, outcome) in outcomes {
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{configuration}: {outcome:?}"
             );
         }

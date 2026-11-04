@@ -1,6 +1,7 @@
 //! Temporary packages loaded through the ordinary product provider.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_syntax::PackageId;
 use std::{
     path::{Path, PathBuf},

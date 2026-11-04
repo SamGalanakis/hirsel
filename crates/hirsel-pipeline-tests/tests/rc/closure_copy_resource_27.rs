@@ -1,7 +1,11 @@
 //! A many-callable borrows its environment on each invocation (CLO-4, MODE-2).
 use crate::rc_support::target;
-use hirsel_driver::{compiler_adapters, native::*};
+use hirsel_driver::native::*;
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 
 // Keep the compact call-site spelling for the independently shrunk variants.
 const WITNESS: &str = r#"
@@ -146,8 +150,11 @@ fn reference_checked_h_llvm_cranelift() {
             engine,
         });
         let directory = tempfile::tempdir().unwrap();
-        let tools =
-            Toolchain::for_matrix(&directory.path().join("runtime"), &configurations).unwrap();
+        let tools = hirsel_native_testing::toolchain_for_matrix(
+            &directory.path().join("runtime"),
+            &configurations,
+        )
+        .unwrap();
         let expected = Observation {
             exit_code: Some(0),
             blocked: false,

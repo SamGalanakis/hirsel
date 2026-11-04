@@ -1,8 +1,9 @@
-use hirsel_driver::native::Observation;
 use hirsel_driver::*;
 use hirsel_engine::{
     LoweringPolicy, RunConfiguration, SimulationConfig, run_observed_snapshot, with_compiler_stack,
 };
+use hirsel_front_phases::*;
+use hirsel_native::Observation;
 
 #[test]
 fn related_result_loop_source_v_agreement() {

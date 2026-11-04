@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 #[test]
 fn repeated_parameter_reads_use_exact_scoped_storage_lookup() {
     with_compiler_stack(|| {

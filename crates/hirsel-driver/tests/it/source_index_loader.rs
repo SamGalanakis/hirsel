@@ -1,6 +1,7 @@
 //! Fresh request loading from admitted source-only carry.
 use hirsel_driver::*;
 use hirsel_engine::{runtime::ProcessBudget, *};
+use hirsel_front_phases::*;
 use hirsel_syntax::{DefId, DefPath, ItemPath, PackageId};
 use std::sync::Arc;
 

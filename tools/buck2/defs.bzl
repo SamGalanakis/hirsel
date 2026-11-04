@@ -795,7 +795,7 @@ def hirsel_build_script(name, crate_root, srcs, deps, inputs, features, manifest
     )
 
 # The runtime archive variants `RuntimeBuild::variant` names
-# (crates/hirsel-driver/src/native/link.rs), in its feature order: every subset
+# (crates/hirsel-native/src/link.rs), in its feature order: every subset
 # of RUNTIME_FEATURES for every target, and each RUNTIME_SOLO_VARIANTS feature
 # alone for the targets it lists (memcheck runs only x86-64 executables).
 RUNTIME_FEATURES = ["diagnostic", "system-allocator", "measurement"]

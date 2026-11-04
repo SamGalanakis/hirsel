@@ -1,6 +1,7 @@
 //! Primitive work is part of both interpreter step limits and fuel budgets.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_interp::{Execution, Limits, Outcome, RunBudgets};
 use hirsel_tir::RunConfiguration;
 
@@ -152,24 +153,26 @@ fn clinger_exact_bits_and_fallback_twins_on_four_engines() {
             );
         }
         assert_eq!(plain.observation, checked.observation);
-        let expected = native::Observation::of_reference(plain.observation.as_ref().unwrap());
+        let expected =
+            hirsel_native::Observation::of_reference(plain.observation.as_ref().unwrap());
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let configs = vec![
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
@@ -178,8 +181,9 @@ fn clinger_exact_bits_and_fallback_twins_on_four_engines() {
             .tempdir()
             .unwrap();
         let tools =
-            native::Toolchain::for_matrix(&scratch.path().join("runtime"), &configs).unwrap();
-        for (config, outcome) in native::differential(
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &configs)
+                .unwrap();
+        for (config, outcome) in hirsel_native_testing::differential(
             &validated,
             &loaded.entry,
             &expected,
@@ -188,7 +192,7 @@ fn clinger_exact_bits_and_fallback_twins_on_four_engines() {
             scratch.path(),
         ) {
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{config}: {outcome:?}"
             );
         }
@@ -221,22 +225,26 @@ fn numeric_decimal_oracle_runs_heap_with_fault_injection() {
             "{:?}",
             reference.outcome
         );
-        let expected = native::Observation::of_reference(reference.observation.as_ref().unwrap());
+        let expected =
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
         let snapshot = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(snapshot).unwrap();
         // Precisely the failed smoke configuration; native/Cranelift and Io
         // replay greens are retained separately, without another whole matrix.
-        let configs = vec![native::Configuration {
-            options: native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
-            engine: native::Engine::Heap { campaign: true },
+        let configs = vec![hirsel_native_testing::Configuration {
+            options: hirsel_native::Options::new(
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+            ),
+            engine: hirsel_native_testing::Engine::Heap { campaign: true },
         }];
         let scratch = tempfile::Builder::new()
             .prefix("numeric-heap-38-")
             .tempdir()
             .unwrap();
         let tools =
-            native::Toolchain::for_matrix(&scratch.path().join("runtime"), &configs).unwrap();
-        for (config, outcome) in native::differential(
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &configs)
+                .unwrap();
+        for (config, outcome) in hirsel_native_testing::differential(
             &validated,
             &loaded.entry,
             &expected,
@@ -245,7 +253,7 @@ fn numeric_decimal_oracle_runs_heap_with_fault_injection() {
             scratch.path(),
         ) {
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{config}: {outcome:?}"
             );
         }
@@ -309,27 +317,28 @@ fn short_decimal_appends_agree_on_four_engines() {
             "{:?}",
             reference.outcome
         );
-        let expected = native::Observation::of_reference(reference.observation.as_ref().unwrap());
+        let expected =
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
         let snapshot = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(snapshot).unwrap();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-        let mut configs = vec![native::Configuration {
-            options: native::Options::new(target.clone()),
-            engine: native::Engine::Heap { campaign: false },
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+        let mut configs = vec![hirsel_native_testing::Configuration {
+            options: hirsel_native::Options::new(target.clone()),
+            engine: hirsel_native_testing::Engine::Heap { campaign: false },
         }];
-        configs.push(native::Configuration {
-            options: native::Options::new(target.clone()),
-            engine: native::Engine::Native {
-                opt: native::OptLevel::Speed,
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Default,
+        configs.push(hirsel_native_testing::Configuration {
+            options: hirsel_native::Options::new(target.clone()),
+            engine: hirsel_native_testing::Engine::Native {
+                opt: hirsel_native::OptLevel::Speed,
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Default,
             },
         });
-        configs.push(native::Configuration {
-            options: native::Options::new(target),
-            engine: native::Engine::Cranelift {
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Default,
+        configs.push(hirsel_native_testing::Configuration {
+            options: hirsel_native::Options::new(target),
+            engine: hirsel_native_testing::Engine::Cranelift {
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Default,
             },
         });
         let scratch = tempfile::Builder::new()
@@ -337,8 +346,9 @@ fn short_decimal_appends_agree_on_four_engines() {
             .tempdir()
             .unwrap();
         let tools =
-            native::Toolchain::for_matrix(&scratch.path().join("runtime"), &configs).unwrap();
-        let outcomes = native::differential(
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &configs)
+                .unwrap();
+        let outcomes = hirsel_native_testing::differential(
             &validated,
             &loaded.entry,
             &expected,
@@ -349,7 +359,7 @@ fn short_decimal_appends_agree_on_four_engines() {
         assert_eq!(outcomes.len(), 3);
         for (config, outcome) in outcomes {
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{config}: {outcome:?}"
             );
         }

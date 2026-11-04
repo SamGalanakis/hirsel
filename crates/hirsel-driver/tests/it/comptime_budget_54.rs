@@ -7,6 +7,7 @@
 //! lib/AST/ExprConstant.cpp:969-980), restated in Hirsel's charge units.
 use hirsel_driver::*;
 use hirsel_engine::{store::MemStore, *};
+use hirsel_front_phases::*;
 use std::sync::Arc;
 
 /// A diagnostic as lines: rule, primary line, secondary lines and notes.

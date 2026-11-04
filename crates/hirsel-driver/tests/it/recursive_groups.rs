@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_syntax::ContentHash;
 fn path(name: &str) -> DefPath {
     let mut p = entry_path(&default_context());

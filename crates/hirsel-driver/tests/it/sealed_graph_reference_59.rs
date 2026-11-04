@@ -2,6 +2,7 @@
 //! reference/checked reference; they make no public native/H activation claim.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_interp::{Outcome, library::Library};
 
 #[test]

@@ -390,24 +390,28 @@ fn cranelift_debug_lines_match_llvm_per_function_on_both_targets() {
             "fn step(x: u64) -> u64 {\n  let mut n = x\n  for i in 0u64..3u64 {\n    n = n + i\n  }\n  n\n}\npub fn main() -> Result[(), ()] {\n  let n = step(0u64)\n  failure.check(n == 3u64, Arithmetic())\n  Ok(())\n}\n",
         ] {
             let source = super::file(program);
-            let mut loaded = hirsel_driver::load_program(&source).unwrap();
+            let mut loaded = hirsel_front_phases::load_program(&source).unwrap();
             loaded.check_for_execution().unwrap();
             let input = loaded.engine.export_native_input().unwrap();
-            let sources = hirsel_driver::native::profile_sources(&input);
+            let sources = hirsel_native::profile_sources(&input);
             let validated = loaded.engine.import_native_input(input).unwrap();
             for target in ["x86_64-linux", "aarch64-linux"] {
-                use hirsel_driver::native::{
-                    self, Backend, OptLevel, Options, Partition, TargetSpec,
-                };
+                use hirsel_driver::native;
+                use hirsel_native::Backend;
+                use hirsel_native::OptLevel;
+                use hirsel_native::Options;
+                use hirsel_native::Partition;
+                use hirsel_native::TargetSpec;
                 let target_spec = if target == "aarch64-linux" {
                     TargetSpec::aarch64_unknown_linux_gnu()
                 } else {
                     TargetSpec::x86_64_unknown_linux_gnu()
                 };
-                let ready = native::build(&validated, &Options::new(target_spec)).unwrap();
+                let ready =
+                    hirsel_native_batch::build(&validated, &Options::new(target_spec)).unwrap();
                 let mut expected = None;
                 for backend in ["llvm", "cranelift"] {
-                    let objects = native::emit_backend_objects(
+                    let objects = hirsel_native::emit_backend_objects(
                         &ready,
                         if backend == "llvm" {
                             Backend::Llvm
@@ -494,7 +498,7 @@ fn a_generated_body_is_reported_in_its_generated_source() {
         match pair_json_into(Pair(a: 1, b: \"x\"), mut out, 0) {\n    Ok(()) => Ok(()),\n    \
         Error(_) => Error(()),\n  }\n}\n";
         let source = super::std_file(program);
-        let mut loaded = hirsel_driver::load_program(&source).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&source).unwrap();
         loaded.check_for_execution().unwrap();
         let generated = loaded
             .engine
@@ -621,7 +625,12 @@ pub fn value() -> u64 { failure.check(false, Arithmetic()); 0u64 }
         }
         // Measurement emits ProfileSite.file in rodata as well as DWARF.
         // Compare both backends' actual objects, including generated-body source ownership.
-        use hirsel_driver::native::{self, Backend, OptLevel, Options, Partition, TargetSpec};
+        use hirsel_driver::native;
+        use hirsel_native::Backend;
+        use hirsel_native::OptLevel;
+        use hirsel_native::Options;
+        use hirsel_native::Partition;
+        use hirsel_native::TargetSpec;
         for backend in [Backend::Llvm, Backend::Cranelift] {
             let mut measured = Vec::new();
             for tree in &roots {
@@ -629,7 +638,7 @@ pub fn value() -> u64 { failure.check(false, Arithmetic()); 0u64 }
                 // adopt source products from the other root's package cache.
                 // Lane pkgcache-comptime owns generated token sources on cache adoption.
                 let mut loaded =
-                    hirsel_driver::load_program_source(&tree.join("app/hirsel.json"), None)
+                    hirsel_front_phases::load_program_source(&tree.join("app/hirsel.json"), None)
                         .unwrap();
                 loaded.check_for_execution().unwrap();
                 let generated = loaded
@@ -644,14 +653,14 @@ pub fn value() -> u64 { failure.check(false, Arithmetic()); 0u64 }
                     Some("<generated:helper@2/generated>")
                 );
                 let input = loaded.engine.export_native_input().unwrap();
-                let sources = native::profile_sources(&input);
+                let sources = hirsel_native::profile_sources(&input);
                 let validated = loaded.engine.import_native_input(input).unwrap();
-                let ready = native::build(
+                let ready = hirsel_native_batch::build(
                     &validated,
                     &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
                 )
                 .unwrap();
-                let objects = native::emit_backend_objects(
+                let objects = hirsel_native::emit_backend_objects(
                     &ready,
                     backend,
                     OptLevel::None,

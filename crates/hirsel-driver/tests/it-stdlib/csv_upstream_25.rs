@@ -1,7 +1,10 @@
 //! Frozen Go strict-reader expectations; csv-core corroborates common valid chunks.
 use crate::source_std::load_program_source;
-use hirsel_driver::{native, *};
+use hirsel_compiler_identity::COMPILER_IDENTITY;
+use hirsel_driver::native;
+use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -89,7 +92,7 @@ fn expected_hash(value: &Value) -> String {
     format!("{:x}", Sha256::digest(ascii.as_bytes()))
 }
 
-fn program(part: usize, only: Option<usize>) -> (String, native::Observation, usize) {
+fn program(part: usize, only: Option<usize>) -> (String, hirsel_native::Observation, usize) {
     let manifest: Value =
         serde_json::from_str(include_str!("../fixtures/csv-upstream-25/vectors.json")).unwrap();
     let mut source = include_str!("../fixtures/csv-upstream-25/helpers.hir").to_string();
@@ -213,7 +216,7 @@ fn program(part: usize, only: Option<usize>) -> (String, native::Observation, us
     let count = labels.len();
     (
         source,
-        native::Observation {
+        hirsel_native::Observation {
             exit_code: Some(0),
             blocked: false,
             budget: None,
@@ -313,7 +316,7 @@ fn partition(part: usize) {
                 Ok(run) => {
                     match run.observation {
                         Some(observation) => {
-                            let observed = native::Observation::of_reference(&observation);
+                            let observed = hirsel_native::Observation::of_reference(&observation);
                             executed += observed
                                 .output
                                 .split(|b| *b == b'\n')
@@ -357,21 +360,22 @@ fn partition(part: usize) {
         }
         // Each engine compares directly with the host-built independent expectation.
         // No reference observation is passed to this adapter.
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let matrix = [
-            native::Engine::Heap { campaign: false },
-            native::Engine::Native {
-                opt: native::OptLevel::None,
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Heap { campaign: false },
+            hirsel_native_testing::Engine::Native {
+                opt: hirsel_native::OptLevel::None,
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
-            native::Engine::Cranelift {
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Cranelift {
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         ]
         .into_iter()
-        .map(|engine| native::Configuration {
+        .map(|engine| hirsel_native_testing::Configuration {
             options: options.clone(),
             engine,
         })
@@ -379,9 +383,9 @@ fn partition(part: usize) {
         let scratch =
             PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("csv-upstream-25-{part}"));
         let mut toolchain =
-            native::Toolchain::for_matrix(&scratch.join("runtime"), &matrix).unwrap();
+            hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &matrix).unwrap();
         toolchain.launch_timeout = std::time::Duration::from_secs(60);
-        let outcomes = native::differential(
+        let outcomes = hirsel_native_testing::differential(
             &validated,
             &loaded.entry,
             &expected,
@@ -392,10 +396,10 @@ fn partition(part: usize) {
         assert_eq!(outcomes.len(), 3, "all required engines must execute");
         for (engine, outcome) in outcomes {
             match outcome {
-                native::Outcome::Agree => eprintln!(
+                hirsel_native_testing::Outcome::Agree => eprintln!(
                     "csv-upstream-25 part={part} engine={engine} selected={selected} executed={selected} passed=true"
                 ),
-                native::Outcome::Mismatch(observation) => {
+                hirsel_native_testing::Outcome::Mismatch(observation) => {
                     let completed = observation
                         .output
                         .split(|b| *b == b'\n')
@@ -408,7 +412,7 @@ fn partition(part: usize) {
                     );
                     failures.push(format!("{engine} observation: {observation:?}"))
                 }
-                native::Outcome::Unavailable(error) => {
+                hirsel_native_testing::Outcome::Unavailable(error) => {
                     let cell = history::native_error(&engine, error);
                     eprintln!(
                         "csv-upstream-25 part={part} engine={engine} selected={selected} executed=unknown passed=false category={:?}",

@@ -3,6 +3,9 @@ use hirsel_driver::native::*;
 use hirsel_engine::{
     RunConfiguration, run_observed_checked_bounded, run_observed_snapshot_bounded,
 };
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use serde_json::{Value, json};
 use std::{
@@ -135,7 +138,7 @@ fn sheet_eval_31_scripted_reference_checked_entry() {
     hirsel_engine::with_compiler_stack(|| {
         let scratch = scratch("sheet-scripted-");
         let path = package(scratch.path());
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|error| panic!("{error}"));
@@ -228,7 +231,7 @@ fn native_cases(selected: Vec<Value>) {
                 .push(json!({"path":"release.hir","module":[]}));
             fs::write(&path, manifest.to_string()).unwrap();
         }
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|error| panic!("{error}"));
@@ -542,7 +545,7 @@ fn sheet_eval_31_additional_bounds_entry() {
     hirsel_engine::with_compiler_stack(|| {
         let scratch = scratch("sheet-additional-");
         let path = package(scratch.path());
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|error| panic!("{error}"));
@@ -607,7 +610,7 @@ fn sheet_eval_31_repl_cancel_output_entry() {
     hirsel_engine::with_compiler_stack(|| {
         let scratch = scratch("sheet-repl-");
         let path = package(scratch.path());
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|error| panic!("{error}"));
@@ -724,7 +727,7 @@ fn sheet_eval_31_dense_reference_boundary() {
     hirsel_engine::with_compiler_stack(|| {
         let scratch = scratch("sheet-dense-");
         let path = package(scratch.path());
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -766,7 +769,7 @@ fn sheet_eval_31_production_host_replay() {
             std::env::var_os("SHEET_EVAL_31_PRODUCTION").expect("production evidence root"),
         );
         let path = evidence.join("qualified-app/hirsel.json");
-        let mut program = hirsel_driver::load_program(&path).unwrap();
+        let mut program = hirsel_front_phases::load_program(&path).unwrap();
         let fresh = std::env::var_os("SHEET_EVAL_31_FRESH_CANCEL").is_some();
         let mut rows = vec![];
         let mut incomplete = vec![];
@@ -927,7 +930,7 @@ fn sheet_eval_31_ast_preflight_reference_checked() {
     hirsel_engine::with_compiler_stack(|| {
         let scratch = scratch("sheet-ast-");
         let path = package(scratch.path());
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -982,7 +985,7 @@ fn sheet_eval_31_reduced_dense_entry() {
     hirsel_engine::with_compiler_stack(|| {
         let scratch = scratch("sheet-reduced-");
         let path = package(scratch.path());
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -1024,7 +1027,7 @@ fn sheet_eval_31_unicode_formula_bounds() {
     hirsel_engine::with_compiler_stack(|| {
         let scratch = scratch("sheet-unicode-");
         let path = package(scratch.path());
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -1071,7 +1074,7 @@ fn sheet_eval_31_remaining_dense_native_replay() {
         let evidence =
             PathBuf::from(std::env::var_os("SHEET_EVAL_31_PRODUCTION").expect("evidence"));
         let path = evidence.join("qualified-app/hirsel.json");
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -1142,7 +1145,7 @@ fn sheet_eval_31_real_output_error_replay() {
     hirsel_engine::with_compiler_stack(|| {
         let root = PathBuf::from(std::env::var_os("SHEET_EVAL_31_PRODUCTION").expect("evidence"));
         let path = root.join("qualified-app/hirsel.json");
-        let mut program = hirsel_driver::load_program(&path).unwrap();
+        let mut program = hirsel_front_phases::load_program(&path).unwrap();
         for recorder in ["llvm", "cranelift"] {
             let tape = root.join(format!("output-fault-{recorder}/recording"));
             let bytes = fs::read(&tape).unwrap();

@@ -1,6 +1,9 @@
 //! Full property-kit entry: independent fixtures, four engines and immutable replay.
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, with_compiler_stack};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use serde_json::Value;
 use std::{
@@ -135,7 +138,7 @@ fn property_kit_31_reference_checked_full_entry() {
     with_compiler_stack(|| {
         let temp = scratch("propkit-reference-");
         let selection = package(temp.path());
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap_or_else(problem);
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap_or_else(problem);
         loaded.check_for_execution().unwrap_or_else(problem);
         let config = RunConfiguration {
             entry: loaded.entry.clone(),
@@ -199,7 +202,7 @@ fn property_kit_31_native_full_entry_and_four_engine_replay() {
     with_compiler_stack(|| {
         let temp = scratch("propkit-native-");
         let selection = package(temp.path());
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap_or_else(problem);
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap_or_else(problem);
         loaded.check_for_execution().unwrap_or_else(problem);
         let input = loaded.engine.export_native_input().unwrap();
         let input = loaded.engine.import_native_input(input).unwrap();
@@ -219,7 +222,9 @@ fn property_kit_31_native_full_entry_and_four_engine_replay() {
             options: options.clone(),
             engine,
         });
-        let mut tools = Toolchain::for_matrix(&temp.path().join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&temp.path().join("runtime"), &matrix)
+                .unwrap();
         tools.launch_timeout = std::time::Duration::from_secs(60);
         capped_tools(&mut tools, temp.path());
         let ready = build(&input, &options).unwrap();
@@ -359,7 +364,7 @@ fn property_kit_31_independent_generic_contract_vectors() {
             .push(serde_json::json!({"path":"contracts.hir","module":["contracts"]}));
         manifest["entry"]["module"] = serde_json::json!(["contracts"]);
         fs::write(&selection, manifest.to_string()).unwrap();
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap_or_else(problem);
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap_or_else(problem);
         loaded.check_for_execution().unwrap_or_else(problem);
         let config = RunConfiguration {
             entry: loaded.entry.clone(),
@@ -409,7 +414,9 @@ fn property_kit_31_independent_generic_contract_vectors() {
             options: options.clone(),
             engine,
         });
-        let mut tools = Toolchain::for_matrix(&temp.path().join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&temp.path().join("runtime"), &matrix)
+                .unwrap();
         capped_tools(&mut tools, temp.path());
         let fixture = Fixture {
             steps: Some(STEPS),
@@ -424,7 +431,7 @@ fn property_kit_31_independent_generic_contract_vectors() {
             temp.path(),
             &fixture,
         ) {
-            assert_eq!(outcome, hirsel_driver::native::Outcome::Agree, "{engine}");
+            assert_eq!(outcome, hirsel_native_testing::Outcome::Agree, "{engine}");
             eprintln!("PROPERTY_KIT_31_PASS contracts/{engine}");
         }
     });

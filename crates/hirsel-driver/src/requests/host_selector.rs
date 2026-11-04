@@ -454,7 +454,7 @@ impl GraphSelections {
 /// their ordinary selected producers; formatting opens no compiler bodies.
 pub(super) struct NativeArtifacts {
     pub receipts: Vec<u8>,
-    pub objects: Vec<(super::super::native::Backend, Result<Vec<Vec<u8>>, String>)>,
+    pub objects: Vec<(hirsel_native::Backend, Result<Vec<Vec<u8>>, String>)>,
 }
 pub(super) fn completed_artifacts(
     checked: &CheckOutput,
@@ -1055,9 +1055,9 @@ mod tests {
             Some(NativeArtifacts {
                 receipts: b"canonical receipts\n".to_vec(),
                 objects: vec![
-                    (crate::native::Backend::Llvm, Ok(vec![vec![1, 2], vec![3]])),
+                    (hirsel_native::Backend::Llvm, Ok(vec![vec![1, 2], vec![3]])),
                     (
-                        crate::native::Backend::Cranelift,
+                        hirsel_native::Backend::Cranelift,
                         Err("unsupported operation".into()),
                     ),
                 ],

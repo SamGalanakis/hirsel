@@ -21,8 +21,8 @@ fn isolate_returns_unique_bytes() {
 
 #[test]
 fn isolate_rejects_borrowed_counted_capture_once() {
-    use hirsel_driver::compiler_adapters;
     use hirsel_engine::*;
+    use hirsel_front_phases::compiler_adapters;
     with_compiler_stack(|| {
         let source =
             include_str!("../../../../conformance/CLO/CLO-3-isolate-unique-bytes-borrow-bad.hir");
@@ -38,6 +38,10 @@ fn native_parity(cases: &[(&str, &str)]) {
     use hirsel_driver::native::*;
     use hirsel_driver::*;
     use hirsel_engine::*;
+    use hirsel_front_phases::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let options = Options::new(target());
     let matrix = vec![
         Configuration {
@@ -63,7 +67,8 @@ fn native_parity(cases: &[(&str, &str)]) {
     let directory =
         std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("isolate-bytes-leak-17");
     std::fs::create_dir_all(&directory).unwrap();
-    let toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
+    let toolchain =
+        hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix).unwrap();
     for &(name, source) in cases {
         with_compiler_stack(|| {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());

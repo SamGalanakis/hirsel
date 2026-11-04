@@ -31,11 +31,12 @@ pub fn main() -> Result[(), u64] uses {} {
 
 #[test]
 fn direct_and_wrapper_calls_preserve_arena_and_shared_owners() {
-    use hirsel_driver::{compiler_adapters, native};
+    use hirsel_driver::native;
     use hirsel_engine::{
         QueryEngine, RunConfiguration, default_context, default_environment, entry_path,
         run_observed_snapshot, source_check_request, with_compiler_stack,
     };
+    use hirsel_front_phases::compiler_adapters;
     let shared = SOURCE
         .replace(" in a = ", " = ")
         .replace(
@@ -59,13 +60,17 @@ fn direct_and_wrapper_calls_preserve_arena_and_shared_owners() {
                 Default::default(),
             )
             .unwrap();
-            let reference = native::Observation::of_reference(run.observation.as_ref().unwrap());
+            let reference =
+                hirsel_native::Observation::of_reference(run.observation.as_ref().unwrap());
             let input = engine.export_native_input().unwrap();
             let validated = engine.import_native_input(input).unwrap();
-            let sites = native::Sites::new(validated.snapshot());
-            let ready =
-                native::build(&validated, &native::Options::new(support::target())).unwrap();
-            let heap = native::heap_campaign(&ready, &entry, &sites).unwrap();
+            let sites = hirsel_native::Sites::new(validated.snapshot());
+            let ready = hirsel_native_batch::build(
+                &validated,
+                &hirsel_native::Options::new(support::target()),
+            )
+            .unwrap();
+            let heap = hirsel_native_testing::heap_campaign(&ready, &entry, &sites).unwrap();
             assert_eq!(heap.observation, reference, "{source}");
         });
     }

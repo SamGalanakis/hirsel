@@ -1,6 +1,7 @@
 //! Source Lower records never authorize private evaluation artifacts.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_types::Signature;
 use std::sync::{
     Arc,

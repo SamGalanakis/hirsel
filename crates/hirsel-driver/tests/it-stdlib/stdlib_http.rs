@@ -3,6 +3,7 @@
 //! follows lib/std/http.zig Reader.State. Scripted peers replace Zig's Io.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn execute_text(source: &str) {
     with_compiler_stack(|| {
@@ -849,7 +850,10 @@ fn http2_250_concurrent_streams_and_refusals_agree_on_all_engines() {
         }
         // Release the completed interpreter graph before admitting a native graph.
         drop(prepared);
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let outcome = native::run_path_native_backend(
@@ -1067,47 +1071,53 @@ if http.server_request_target(r) == "/{i}" {{
         )
         .unwrap();
         assert_eq!(replayed.observation.as_ref(), Some(&observation));
-        let expected = native::Observation::of_reference(&observation);
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let expected = hirsel_native::Observation::of_reference(&observation);
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let matrix = vec![
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Heap { campaign: false },
+                engine: hirsel_native_testing::Engine::Heap { campaign: false },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
         let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("http1-output-boundary");
         std::fs::create_dir_all(&dir).unwrap();
-        let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &matrix).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &matrix).unwrap();
         let mut ready =
             crate::native_ready::supplier(&path, Some(&source), &program.entry, &tools).unwrap();
-        for (name, result) in native::differential_ready(
+        for (name, result) in hirsel_native_testing::differential_ready(
             &mut ready,
             &program.entry,
             &expected,
             &matrix,
             &tools,
             &dir,
-            &native::Fixture {
+            &hirsel_native::Fixture {
                 steps: Some(16_000_000),
                 ..Default::default()
             },
         ) {
-            assert_eq!(result, native::Outcome::Agree, "{name}: {result:?}");
+            assert_eq!(
+                result,
+                hirsel_native_testing::Outcome::Agree,
+                "{name}: {result:?}"
+            );
         }
     });
 }

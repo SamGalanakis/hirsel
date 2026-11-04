@@ -1,11 +1,13 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::ResultStore, *};
-use native::queries::{
-    INSTANCE_KIND,
-    declarations::NativeDeclarations,
-    instance_tasks::{DISCOVERY_KIND, INSTANCE_INPUT_KIND, InstanceTaskFactory, InstanceTasks},
-    source_inputs::NativeInstanceInputs,
-};
+use hirsel_front_phases::*;
+use hirsel_native::query_model::INSTANCE_KIND;
+use hirsel_native_cache::declarations::NativeDeclarations;
+use hirsel_native_cache::source_inputs::NativeInstanceInputs;
+use hirsel_native_queries::instance_tasks::DISCOVERY_KIND;
+use hirsel_native_queries::instance_tasks::INSTANCE_INPUT_KIND;
+use hirsel_native_queries::instance_tasks::InstanceTaskFactory;
+use hirsel_native_queries::instance_tasks::InstanceTasks;
 use std::{
     sync::{Arc, atomic::Ordering},
     task::Poll,
@@ -88,8 +90,8 @@ fn native_demand_tasks_import_and_reuse_actual_settled_source_without_a_controll
             let _observe = trace.enter();
             // This control exercises production hit admission; EveryStage
             // intentionally recomputes instead of consuming stored Values.
-            let mut options = native::Options::new(target.clone());
-            options.validation = native::Validation::Ready;
+            let mut options = hirsel_native::Options::new(target.clone());
+            options.validation = hirsel_native::Validation::Ready;
             let tasks = InstanceTasks::new(
                 inputs,
                 store.clone(),
@@ -136,8 +138,8 @@ fn native_demand_tasks_import_and_reuse_actual_settled_source_without_a_controll
                 INSTANCE_KIND,
                 INSTANCE_INPUT_KIND,
                 DISCOVERY_KIND,
-                hirsel_driver::native::queries::instance_tasks::CALLABLE_GRAPH_KIND,
-                hirsel_driver::native::queries::instance::CALLABLE_VALUE_KIND,
+                hirsel_native_queries::instance_tasks::CALLABLE_GRAPH_KIND,
+                hirsel_native::query_model::CALLABLE_VALUE_KIND,
             ] {
                 runtime.register(kind, traced.clone()).unwrap();
             }
@@ -227,7 +229,7 @@ fn native_source_metadata_debits_one_grant_and_outlives_the_instance_registry() 
             InstanceTasks::new(
                 inputs.clone(),
                 store.clone(),
-                native::Options::new(hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu()),
+                hirsel_native::Options::new(hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu()),
                 hirsel_syntax::ContentHash::of_bytes(b"metadata-admission"),
                 MemoryWeight {
                     scratch: 16 << 20,

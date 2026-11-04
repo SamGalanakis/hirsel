@@ -80,7 +80,7 @@ BUILD_SCRIPT_INPUTS = {
     "hirsel-rt-operations": ["native-tests/library/operations.tsv"],
     "hirsel-engine": [
         "crates/hirsel-engine/src/registry/**",
-        "crates/hirsel-driver/src/network.rs",
+        "crates/hirsel-host-io/src/**",
         "crates/hirsel-interp/src/**",
         "crates/hirsel-interp/Cargo.toml",
         "crates/hirsel-rt/src/**",
@@ -143,6 +143,15 @@ RUNTIME_DATA = {
     "hirsel-conformance": [*CORPUS_DATA, "bench/native/programs/**", "crates/hirsel-conformance/oracles/**", "docs/spec/**", "native-tests/**"],
     "hirsel-engine": ["stdlib/**"],
     "hirsel-driver": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
+    "hirsel-candidate": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
+    "hirsel-observation-view": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
+    "hirsel-project-info": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
+    "hirsel-native": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
+    "hirsel-native-queries": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
+    "hirsel-native-cache": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
+    "hirsel-native-batch": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
+    "hirsel-native-testing": [*CORPUS_DATA, "docs/spec/**", "native-tests/**"],
+    "hirsel-host-io": [*CORPUS_DATA],
     "hirsel-heapcheck": ["native-tests/**", "stdlib/**"],
     "hirsel-interp": [*CORPUS_DATA],
     "hirsel-lexer": [*CORPUS_DATA],
@@ -192,13 +201,13 @@ TEST_DATA["hirsel-driver-test-it"].append("examples/ownership-repairs/**")
 
 # Crates whose tests link native programs: they get the runtime archives
 # (HIRSEL_RUNTIME_ARCHIVES) instead of building them with Cargo.
-NATIVE_TESTS = {"hirsel-cranelift", "hirsel-cli", "hirsel-conformance", "hirsel-driver", "hirsel-llvm", "hirsel-pipeline-tests", "hirsel-rc", "hirsel-rt"}
+NATIVE_TESTS = {"hirsel-native-batch", "hirsel-native-queries", "hirsel-cranelift", "hirsel-cli", "hirsel-conformance", "hirsel-driver", "hirsel-native", "hirsel-native-testing", "hirsel-llvm", "hirsel-pipeline-tests", "hirsel-rc", "hirsel-rt"}
 RUNTIME_ARCHIVES = "//:hirsel-rt-archives"
 
 # Ordinary std products: precomputed once by the built CLI,
 # then loaded by the tests and campaigns that run std programs (HIRSEL_PRODUCTS).
 PRODUCTS = "//:hirsel-std-products"
-PRODUCT_TESTS = {"hirsel-cli", "hirsel-conformance", "hirsel-driver", "hirsel-ownership", "hirsel-pipeline-tests"}
+PRODUCT_TESTS = {"hirsel-native-cache", "hirsel-native-batch", "hirsel-native", "hirsel-native-queries", "hirsel-native-testing", "hirsel-candidate", "hirsel-observation-view", "hirsel-project-info", "hirsel-front-phases", "hirsel-cli", "hirsel-conformance", "hirsel-driver", "hirsel-ownership", "hirsel-pipeline-tests"}
 
 # Cases that call full_matrix (44 configurations) for toolchain or configuration
 # discovery: every run outside the full gate skips them by name, and
@@ -248,6 +257,12 @@ def seeded(source_dir: pathlib.Path, crate_root: pathlib.Path) -> bool:
 # keeps every test target near two minutes.
 SHARDED = [
     "hirsel-driver-unittest",
+    "hirsel-host-io-unittest",
+    "hirsel-native-queries-unittest",
+    "hirsel-native-cache-unittest",
+    "hirsel-native-batch-unittest",
+    "hirsel-native-testing-unittest",
+    "hirsel-native-unittest",
     "hirsel-cli-test-cli",
     "hirsel-driver-test-it",
     "hirsel-driver-test-it-stdlib",
@@ -865,7 +880,7 @@ def feature_deps(package: dict) -> dict[str, list[str]]:
 
 def compiler_identity_inputs(meta: dict) -> list[str]:
     """What the driver's build script hashes into its compiler identity
-    (crates/hirsel-driver/build.rs): every workspace crate in its normal
+    (crates/hirsel-compiler-identity/build.rs): every workspace crate in its normal
     dependency closure, the lockfile and the toolchain pin."""
     packages = {p["name"]: p for p in meta["packages"] if p["id"] in set(meta["workspace_members"])}
     closure, todo = set(), ["hirsel-driver"]
@@ -887,7 +902,7 @@ def first_party(meta: dict) -> str:
     packages = {p["id"]: p for p in meta["packages"]}
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
     members = set(meta["workspace_members"])
-    BUILD_SCRIPT_INPUTS["hirsel-driver"] = compiler_identity_inputs(meta)
+    BUILD_SCRIPT_INPUTS["hirsel-compiler-identity"] = compiler_identity_inputs(meta)
     opt_levels = dev_opt_levels()
     unguarded = []
     out = [
@@ -900,7 +915,7 @@ def first_party(meta: dict) -> str:
                             script="tools/tests/native_startup_layout.py", full=False,
                             data=Raw('glob(["stdlib/**", "native-tests/**"])'),
                             runtime_archives=RUNTIME_ARCHIVES, products=PRODUCTS,
-                            files_env={"HIRSEL_STARTUP_DRIVER_TESTS": "//:hirsel-driver-unittest-harness"}))
+                            files_env={"HIRSEL_STARTUP_DRIVER_TESTS": "//:hirsel-driver-unittest-harness", "HIRSEL_STARTUP_NATIVE_TESTS": "//:hirsel-native-unittest-harness"}))
     out.append("\n" + call("hirsel_script_test", name="test-native-scratch-tools", script="tools/tests/buck2_sync.py", full=False,
                            args=["AtomicScratch"],
                            data=["//tools/buck2:sync.py", "//tools/buck2:generated.py",

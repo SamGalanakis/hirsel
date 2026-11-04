@@ -1,8 +1,13 @@
 //! Go bufio.go:338-386 and bufio_test.go:918-1021, ebe2feef (BSD-3-Clause
 //! (Go), NOTICES). Owned text, retained LF/CR and consumed overflow probe:
 //! see fixtures/stdin-line-bound-35/README.md for the semantic adaptations.
-use hirsel_driver::{native::*, *};
+use hirsel_driver::native::*;
+use hirsel_driver::*;
 use hirsel_engine::{LoadedProgram, RunConfiguration, ToolError, with_compiler_stack};
+use hirsel_front_phases::*;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_rt::io::{Completion, Event, Request};
 use std::path::{Path, PathBuf};
 

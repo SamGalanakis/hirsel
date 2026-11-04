@@ -2,9 +2,10 @@
 //! whole-program replay provider is removed.
 use hirsel_driver::*;
 use hirsel_engine::{store::ResultStore, *};
-use native::queries::{
-    declarations::NativeDeclarations, demand::DemandInstances, source_inputs::*,
-};
+use hirsel_front_phases::*;
+use hirsel_native_cache::declarations::NativeDeclarations;
+use hirsel_native_cache::source_inputs::*;
+use hirsel_native_queries::demand::DemandInstances;
 use std::{collections::BTreeMap, sync::Arc};
 
 type Bodies = BTreeMap<Vec<u8>, (Vec<u8>, Vec<u8>)>;
@@ -33,14 +34,14 @@ fn import_engine(
     roots: &[DefPath],
     store: Arc<dyn ResultStore>,
 ) -> (Bodies, u64, u64) {
-    import_engine_with_validation(engine, roots, store, native::Validation::Ready)
+    import_engine_with_validation(engine, roots, store, hirsel_native::Validation::Ready)
 }
 
 fn import_engine_with_validation(
     mut engine: QueryEngine,
     roots: &[DefPath],
     store: Arc<dyn ResultStore>,
-    validation: native::Validation,
+    validation: hirsel_native::Validation,
 ) -> (Bodies, u64, u64) {
     let budget = runtime::ProcessBudget::new(64 << 20);
     let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
@@ -57,13 +58,13 @@ fn import_engine_with_validation(
     let inputs = NativeInstanceInputs::from_products(declarations, reader).unwrap();
     drop(engine);
     let mut source = inputs.provider();
-    let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+    let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
     let policy = hirsel_syntax::ContentHash::of_bytes(b"native import cutover control");
     let mut producer =
         DemandInstances::new_from_source(&source, store.clone(), target.clone(), policy);
     let mut pending = producer.roots_from(&source).unwrap();
     let mut bodies = BTreeMap::new();
-    let mut options = native::Options::new(target);
+    let mut options = hirsel_native::Options::new(target);
     options.validation = validation;
     while let Some(key) = pending.pop() {
         if bodies.contains_key(key.instance.encoding()) {
@@ -333,7 +334,7 @@ fn demand_import_corruption_misses_then_overwrites_and_reopens() {
                 .unwrap()
                 .iter()
                 .copied()
-                .filter(|r| r.domain == native::queries::instance::INSTANCE_RECORD_DOMAIN)
+                .filter(|r| r.domain == hirsel_native_cache::instance::INSTANCE_RECORD_DOMAIN)
                 .collect::<Vec<_>>();
             assert!(!records.is_empty());
             for kind in 0..9 {
@@ -401,7 +402,7 @@ fn demand_import_malformed_descriptor_is_not_native_authority() {
             .unwrap()
             .iter()
             .copied()
-            .filter(|r| r.domain == native::queries::instance::INSTANCE_RECORD_DOMAIN)
+            .filter(|r| r.domain == hirsel_native_cache::instance::INSTANCE_RECORD_DOMAIN)
             .collect::<Vec<_>>();
         assert!(!records.is_empty());
         for malformed in [
@@ -466,8 +467,12 @@ fn demand_import_every_stage_reimports_warm_products() {
         let file = engine.sources.add("imports.hir", source.into()).unwrap();
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
-        let forced =
-            import_engine_with_validation(engine, &[], store, native::Validation::EveryStage);
+        let forced = import_engine_with_validation(
+            engine,
+            &[],
+            store,
+            hirsel_native::Validation::EveryStage,
+        );
         assert_eq!(forced.0, expected);
         assert_eq!(
             forced.1,
@@ -495,7 +500,7 @@ pub(crate) fn assert_retired_import_payloads(payloads: &[Vec<u8>]) {
             .lock()
             .unwrap()
             .iter()
-            .find(|r| r.domain == native::queries::instance::INSTANCE_RECORD_DOMAIN)
+            .find(|r| r.domain == hirsel_native_cache::instance::INSTANCE_RECORD_DOMAIN)
             .unwrap();
         for payload in payloads {
             store

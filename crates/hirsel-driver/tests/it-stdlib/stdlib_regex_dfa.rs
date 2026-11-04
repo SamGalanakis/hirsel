@@ -1,6 +1,7 @@
 //! Private engine differential checks run without exporting selectors from std.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::{Path, PathBuf};
 
 fn private_fixture(directory: &Path, interpreter: bool) -> PathBuf {
@@ -67,7 +68,7 @@ fn private_fixture(directory: &Path, interpreter: bool) -> PathBuf {
     path
 }
 
-fn private_check(backend: Option<native::Backend>) {
+fn private_check(backend: Option<hirsel_native::Backend>) {
     with_compiler_stack(|| {
         let temp = tempfile::tempdir().unwrap();
         let path = private_fixture(temp.path(), backend.is_none());
@@ -132,12 +133,12 @@ fn regex_dfa_private_interpreter() {
 
 #[test]
 fn regex_dfa_private_llvm() {
-    private_check(Some(native::Backend::Llvm));
+    private_check(Some(hirsel_native::Backend::Llvm));
 }
 
 #[test]
 fn regex_dfa_private_cranelift() {
-    private_check(Some(native::Backend::Cranelift));
+    private_check(Some(hirsel_native::Backend::Cranelift));
 }
 
 #[test]
@@ -163,7 +164,7 @@ fn regex_dfa_corpus_llvm() {
                 &path,
                 HostLaunch::empty(),
                 None,
-                native::Backend::Llvm,
+                hirsel_native::Backend::Llvm,
                 native::Output::Streams {
                     stdout: &mut Vec::new(),
                     stderr: &mut Vec::new(),

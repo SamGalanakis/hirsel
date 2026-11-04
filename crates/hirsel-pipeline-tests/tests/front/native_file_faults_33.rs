@@ -6,10 +6,15 @@
 //! May you do good and not evil.
 //! May you find forgiveness for yourself and forgive others.
 //! May you share freely, never taking more than you give.
-use hirsel_driver::{native::*, replay_observations, replay_observations_checked};
+use hirsel_driver::native::*;
+use hirsel_driver::replay_observations;
+use hirsel_driver::replay_observations_checked;
 use hirsel_engine::{
     RunConfiguration, run_observed_checked, run_observed_snapshot, with_compiler_stack,
 };
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileFault, FileFaultError as E, FileFaults, FileOperation as O};
 use std::collections::{BTreeMap, VecDeque};
 
@@ -79,7 +84,7 @@ fn campaign_output(
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>()
         );
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -167,7 +172,8 @@ fn campaign_output(
                 },
             },
         ];
-        let tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         let ready = build(&input, &options).unwrap();
         let sites = Sites::new(input.snapshot());
         let mut runnables = vec![];
@@ -768,14 +774,14 @@ fn suffix_recovery(source: &str, fixture: &Fixture) {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("main.hir");
         std::fs::write(&path, source).unwrap();
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
         let input = loaded.engine.export_native_input().unwrap();
         let input = loaded.engine.import_native_input(input).unwrap();
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
-        let tools = Toolchain::for_matrix(
+        let tools = hirsel_native_testing::toolchain_for_matrix(
             &root.path().join("runtime"),
             &[
                 Configuration {

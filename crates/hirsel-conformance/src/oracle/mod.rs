@@ -127,7 +127,7 @@ impl Config {
     }
 
     fn compiler(&self, store: Arc<dyn ResultStore>) -> hirsel_engine::Compiler {
-        let compiler = hirsel_driver::COMPILER.with_config(self.compile(store));
+        let compiler = hirsel_front_phases::COMPILER.with_config(self.compile(store));
         match self.limits {
             Some(limits) => compiler.with_comptime_limits(limits.into()),
             None => compiler,

@@ -1,9 +1,10 @@
 //! Exact settled front descriptors for native source tasks. Query demand and
 //! V/native C admission remain with their respective producers.
-use crate::native::queries::source_inputs::{NativeFrontLower, NativeLowerProducts};
 use hirsel_engine::{
     FrontLowerQueries, NativeOriginalContext, NativeOriginalProduct, runtime::ProductRef,
 };
+use hirsel_native_cache::source_inputs::NativeFrontLower;
+use hirsel_native_cache::source_inputs::NativeLowerProducts;
 use hirsel_syntax::DefPath;
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -26,19 +27,6 @@ pub(super) fn inputs(
         bindings,
         products: lower,
     })
-}
-impl NativeLowerProducts for FrontLowerQueries {
-    fn lower_product(
-        &self,
-        definition: &DefPath,
-        selected: ProductRef,
-    ) -> Result<NativeOriginalProduct, String> {
-        self.native_product(selected)
-            .filter(|product| &product.definition == definition)
-            .ok_or_else(|| {
-                format!("settled native source differs from selected Lower: {definition}")
-            })
-    }
 }
 
 #[cfg(test)]

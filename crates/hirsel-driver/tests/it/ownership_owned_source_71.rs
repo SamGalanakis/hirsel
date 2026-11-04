@@ -14,8 +14,11 @@ fn source_owned_string_and_byte_leaves_keep_their_original_lifetimes() {
 
 #[test]
 fn source_owned_and_resource_selections_keep_distinct_products_in_the_same_session() {
-    use hirsel_driver::{COMPILER, native, requests::*, resident::ObservedSession};
+    use hirsel_driver::native;
+    use hirsel_driver::requests::*;
+    use hirsel_driver::resident::ObservedSession;
     use hirsel_engine::{CompileConfig, runtime::ProcessBudget, store::MemStore};
+    use hirsel_front_phases::COMPILER;
     use hirsel_lir::ownership_trace::{Kind, Selection};
     use std::{collections::BTreeSet, sync::Arc};
 
@@ -49,8 +52,8 @@ fn source_owned_and_resource_selections_keep_distinct_products_in_the_same_sessi
                 .request(CompileOperation::NativeOwnership(OwnershipRequest {
                     selection,
                     definition: None,
-                    target: native::TargetSpec::x86_64_unknown_linux_gnu(),
-                    validation: native::Validation::EveryStage,
+                    target: hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                    validation: hirsel_native::Validation::EveryStage,
                     launch: Default::default(),
                     fuel: false,
                 }))

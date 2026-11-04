@@ -101,8 +101,10 @@ fn evidence_cases(pair: bool, cases: &[Case], crossing: bool) {
                     case.body,
                 )
             };
-            let mut strict =
-                QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+            let mut strict = QueryEngine::new(
+                default_environment(),
+                hirsel_front_phases::compiler_adapters(),
+            );
             let file = strict
                 .sources
                 .add(
@@ -134,8 +136,10 @@ fn evidence_cases(pair: bool, cases: &[Case], crossing: bool) {
             // Lower the permissive source twin, then strengthen only the
             // untrusted consumer signature. J never supplied a unique-call
             // receipt to V for this twin; V must reconstruct the whole history.
-            let mut relaxed =
-                QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+            let mut relaxed = QueryEngine::new(
+                default_environment(),
+                hirsel_front_phases::compiler_adapters(),
+            );
             let file = relaxed
                 .sources
                 .add(format!("{}-v.hir", case.name), source(""))

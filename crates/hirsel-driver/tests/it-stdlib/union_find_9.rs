@@ -1,9 +1,10 @@
 //! rustc union-find vectors and an independent adjacency reachability oracle.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
-fn fixture(name: &str, backend: Option<native::Backend>) {
+fn fixture(name: &str, backend: Option<hirsel_native::Backend>) {
     with_compiler_stack(|| {
         let relative = format!("tests/fixtures/union-find-9/{name}.hir");
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative);
@@ -27,7 +28,7 @@ fn fixture(name: &str, backend: Option<native::Backend>) {
                     stderr: &mut stderr,
                 },
                 hirsel_driver::session::Policy::default(),
-                native::Validation::EveryStage,
+                hirsel_native::Validation::EveryStage,
             )
             .unwrap_or_else(|error| panic!("{error}"))
             .unwrap_or_else(|error| panic!("{error}"));
@@ -76,11 +77,11 @@ macro_rules! cases {
         }
         #[test]
         fn $llvm() {
-            fixture($fixture, Some(native::Backend::Llvm));
+            fixture($fixture, Some(hirsel_native::Backend::Llvm));
         }
         #[test]
         fn $cl() {
-            fixture($fixture, Some(native::Backend::Cranelift));
+            fixture($fixture, Some(hirsel_native::Backend::Cranelift));
         }
     };
 }

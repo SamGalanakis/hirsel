@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 
-CASE = "native::kit::tests::frozen_kit_binds_transitive_leaf_edits_and_plans_without_originals"
+CASE = "kit::tests::frozen_kit_binds_transitive_leaf_edits_and_plans_without_originals"
 
 
 def command(arguments, environment):

@@ -1,9 +1,12 @@
 use super::*;
-use crate::native::{object_queries, queries::*};
+use crate::native;
 use hirsel_engine::{
     CompileConfig, DefinitionQueries, FrontCheckPlan, FrontNativePlan, LoweringPolicy,
 };
 use hirsel_intern::jobs::Jobs;
+use hirsel_native::object_queries;
+use hirsel_native_cache::*;
+use hirsel_native_queries::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 struct StopLink(Arc<AtomicU64>, Vec<(DefPath, u64)>);
@@ -198,7 +201,7 @@ fn bootstrap_link_refusal(test_table: bool, emit_only: bool) {
             )
             .unwrap();
             let calls = Arc::new(AtomicU64::new(0));
-            let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+            let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
             let bootstrap = NativeBootstrap::new(
                 source.clone(),
                 lower.clone(),
@@ -206,7 +209,7 @@ fn bootstrap_link_refusal(test_table: bool, emit_only: bool) {
                 routing.clone(),
                 store.clone(),
                 NativePlan {
-                    options: native::Options::new(target.clone()),
+                    options: hirsel_native::Options::new(target.clone()),
                     policy: ContentHash::of_bytes(b"bootstrap control"),
                     verify_store: hirsel_engine::store::VerifyStore::Off,
                     opt: hirsel_lir::emission::OptLevel::None,
@@ -388,7 +391,10 @@ impl link_tasks::NativeLinkExecutor for CountLink {
 #[ignore = "requires native-bootstrap-link-proof selected linker inputs"]
 fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop() {
     hirsel_engine::with_compiler_stack(|| {
-        for backend in [native::Backend::Cranelift, native::Backend::Llvm] {
+        for backend in [
+            hirsel_native::Backend::Cranelift,
+            hirsel_native::Backend::Llvm,
+        ] {
             let jobs = 1;
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("main.hir");
@@ -523,9 +529,12 @@ fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop()
             )
             .unwrap();
             let calls = Arc::new(AtomicU64::new(0));
-            let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-            use crate::requests::native_link::{FrozenPlatform, LinkInputs};
-            use object_queries::capture::{CaptureLimits, FrozenLinkKit, FrozenLinker};
+            let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+            use crate::requests::native_link::FrozenPlatform;
+            use crate::requests::native_link::LinkInputs;
+            use object_queries::capture::CaptureLimits;
+            use object_queries::capture::FrozenLinkKit;
+            use object_queries::capture::FrozenLinker;
             let limits = CaptureLimits {
                 archive_bytes: 64 << 20,
                 files: 256,
@@ -551,10 +560,10 @@ fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop()
             std::os::unix::fs::symlink(original_archive, &archive).unwrap();
             let order = package.join("startup.order");
             std::fs::write(&order, b"hirsel_rt_v2_main\n").unwrap();
-            use object_queries::{
-                platform::{CapturedPlatform, PlatformCaptureInputs, RuntimeSelection},
-                runtime::RuntimeLimits,
-            };
+            use object_queries::platform::CapturedPlatform;
+            use object_queries::platform::PlatformCaptureInputs;
+            use object_queries::platform::RuntimeSelection;
+            use object_queries::runtime::RuntimeLimits;
             let runtime_limits = RuntimeLimits {
                 aliases: 128,
                 name_bytes: 64 << 10,
@@ -598,8 +607,8 @@ fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop()
                 entry.clone(),
                 backend,
                 match backend {
-                    native::Backend::Llvm => native::Partition::Whole,
-                    native::Backend::Cranelift => native::Partition::Singleton,
+                    hirsel_native::Backend::Llvm => hirsel_native::Partition::Whole,
+                    hirsel_native::Backend::Cranelift => hirsel_native::Partition::Singleton,
                 },
                 target.clone(),
                 None,
@@ -623,7 +632,7 @@ fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop()
                 routing.clone(),
                 store.clone(),
                 NativePlan {
-                    options: native::Options::new(target.clone()),
+                    options: hirsel_native::Options::new(target.clone()),
                     policy: ContentHash::of_bytes(b"bootstrap control"),
                     verify_store: hirsel_engine::store::VerifyStore::Off,
                     opt: hirsel_lir::emission::OptLevel::None,
@@ -764,7 +773,10 @@ fn actual_native_bootstrap_binds_run_identity_and_delivers_live_output() {
 }
 fn native_bootstrap_policy_case(bind_run: bool) {
     hirsel_engine::with_compiler_stack(|| {
-        for backend in [native::Backend::Cranelift, native::Backend::Llvm] {
+        for backend in [
+            hirsel_native::Backend::Cranelift,
+            hirsel_native::Backend::Llvm,
+        ] {
             let jobs = 1;
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("main.hir");
@@ -962,19 +974,17 @@ fn native_bootstrap_policy_case(bind_run: bool) {
             )
             .unwrap();
             let calls = Arc::new(AtomicU64::new(0));
-            let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-            use crate::requests::{
-                NativeRequest,
-                native_platform::{
-                    NativePlatformInputs, NativePlatformPolicy, NativePlatformSelection,
-                    NativePurpose,
-                },
-            };
+            let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+            use crate::requests::NativeRequest;
+            use crate::requests::native_platform::NativePlatformInputs;
+            use crate::requests::native_platform::NativePlatformPolicy;
+            use crate::requests::native_platform::NativePlatformSelection;
+            use crate::requests::native_platform::NativePurpose;
             let tools = Arc::new(
-                native::Toolchain::in_tree_with_products(
+                hirsel_native::Toolchain::in_tree_with_products(
                     &directory.path().join("runtime"),
                     &[&target],
-                    &[native::RuntimeBuild::default()],
+                    &[hirsel_native::RuntimeBuild::default()],
                     None,
                     store.clone(),
                 )
@@ -984,14 +994,18 @@ fn native_bootstrap_policy_case(bind_run: bool) {
             let request = NativeRequest {
                 options: {
                     let mut options = if bind_run {
-                        native::BuildProfile::run_options(
+                        hirsel_native::BuildProfile::run_options(
                             backend,
                             target.clone(),
-                            native::Validation::EveryStage,
+                            hirsel_native::Validation::EveryStage,
                         )
                     } else {
-                        native::BuildProfile::Default
-                            .options(backend, target.clone(), native::Validation::EveryStage)
+                        hirsel_native::BuildProfile::Default
+                            .options(
+                                backend,
+                                target.clone(),
+                                hirsel_native::Validation::EveryStage,
+                            )
                             .unwrap()
                     };
                     options.passes.launch = validated_run
@@ -1203,13 +1217,13 @@ fn native_bootstrap_policy_case(bind_run: bool) {
                 drop(execution);
             } else {
                 let runnable = platform.executable(output.clone()).unwrap();
-                let first = native::launch_runnable(
+                let first = hirsel_native::launch_runnable(
                     &runnable,
                     &target,
                     &tools,
                     &directory.path().join("first"),
                     false,
-                    native::Tape::Live {
+                    hirsel_native::Tape::Live {
                         record: None,
                         revocations: None,
                     },
@@ -1219,13 +1233,13 @@ fn native_bootstrap_policy_case(bind_run: bool) {
                 std::fs::remove_file(&output).unwrap();
                 object_queries::materialize_executable(store.as_ref(), &artifact, &output).unwrap();
                 let restored = platform.executable(output.clone()).unwrap();
-                let second = native::launch_runnable(
+                let second = hirsel_native::launch_runnable(
                     &restored,
                     &target,
                     &tools,
                     &directory.path().join("second"),
                     false,
-                    native::Tape::Live {
+                    hirsel_native::Tape::Live {
                         record: None,
                         revocations: None,
                     },
@@ -1415,7 +1429,7 @@ fn proof_graph(
 }
 
 /// Evidence for the export's two `bump` obligations, signed by `prover@1`.
-fn proof_evidence(graph: &mut ProofGraph) -> native::Evidence {
+fn proof_evidence(graph: &mut ProofGraph) -> hirsel_native::Evidence {
     let request = graph.runtime.request(&[graph.source.query()]);
     let completed = graph.runtime.wait(request).unwrap()[0].clone();
     let input = graph
@@ -1445,7 +1459,7 @@ fn proof_evidence(graph: &mut ProofGraph) -> native::Evidence {
         })
         .collect::<Vec<_>>();
     assert_eq!(records.len(), 2);
-    native::Evidence {
+    hirsel_native::Evidence {
         records,
         trusted: vec![checker],
     }
@@ -1489,9 +1503,9 @@ fn native_bootstrap_assesses_evidence_against_its_settled_source_root_before_ins
         };
         let mut untrusted = evidence.clone();
         untrusted.trusted.clear();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
         let plan = |calls: &Arc<AtomicU64>| NativePlan {
-            options: native::Options::new(target.clone()),
+            options: hirsel_native::Options::new(target.clone()),
             policy: ContentHash::of_bytes(b"proof bootstrap control"),
             verify_store: hirsel_engine::store::VerifyStore::Off,
             opt: hirsel_lir::emission::OptLevel::None,
@@ -1776,10 +1790,10 @@ fn original_plan_inputs_bind_source_edits_membership_options_and_foreign_bytes()
         .unwrap();
         let graph = proof_graph(&manifest, &store, &budget, errors, weight);
         assert_eq!(graph.paths.len(), 2);
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
         let calls = Arc::new(AtomicU64::new(0));
         let query = |case: u8, foreign: Vec<Reference>| {
-            let mut options = native::Options::new(target.clone());
+            let mut options = hirsel_native::Options::new(target.clone());
             if case == 1 {
                 options.flat_walk = !options.flat_walk;
             }
@@ -1854,9 +1868,9 @@ fn original_plan_inputs_bind_source_edits_membership_options_and_foreign_bytes()
         let before = query(0, vec![capture()]);
         std::fs::write(&foreign, b"two").unwrap();
         assert_ne!(before, query(0, vec![capture()]));
-        let tools = native::Toolchain::in_tree(directory.path(), &[&target]).unwrap();
+        let tools = hirsel_native::Toolchain::in_tree(directory.path(), &[&target]).unwrap();
         assert!(
-            native::selected_foreign_inputs(
+            hirsel_native::selected_foreign_inputs(
                 &tools,
                 &target,
                 &[hirsel_engine::LinkInput::Library("unknown".into())]

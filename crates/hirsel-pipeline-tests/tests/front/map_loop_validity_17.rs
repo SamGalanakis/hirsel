@@ -56,7 +56,10 @@ fn main()->u64 { run_scalar([(2,4,0),(2,99,0)], [None,None], [[],[]], 1) }
 "#;
 
 fn checked(source: &str) -> QueryEngine {
-    let mut engine = QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+    let mut engine = QueryEngine::new(
+        default_environment(),
+        hirsel_front_phases::compiler_adapters(),
+    );
     let file = engine.sources.add("map-loop.hir", source.into()).unwrap();
     let diagnostics = check_snapshot(&mut engine, file, &default_context()).unwrap();
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -82,8 +85,10 @@ fn extraction_actions_remain_distinct() {
             hirsel_types::UniqueAction::DeepCopy,
         ),
     ] {
-        let mut engine =
-            QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+        let mut engine = QueryEngine::new(
+            default_environment(),
+            hirsel_front_phases::compiler_adapters(),
+        );
         let file = engine.sources.add("extraction.hir", source.into()).unwrap();
         engine.parse_file(file, &default_context()).unwrap();
         let result = engine

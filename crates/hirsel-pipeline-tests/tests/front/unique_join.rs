@@ -9,7 +9,10 @@ const BOUND: &str = r#"fn pick(a:String,b:String,select:bool)->unique String { i
 fn main()->unique String { pick("a","b",false) }"#;
 
 fn accepts(source: &str) {
-    let mut engine = QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+    let mut engine = QueryEngine::new(
+        default_environment(),
+        hirsel_front_phases::compiler_adapters(),
+    );
     let file = engine
         .sources
         .add("unique-join.hir", source.into())
@@ -29,6 +32,9 @@ fn unique_if_join_matches_reference_heap_llvm_and_cranelift() {
         RunConfiguration, entry_path, run_observed_snapshot, source_check_request,
         with_compiler_stack,
     };
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         options.validation = Validation::EveryStage;
@@ -55,7 +61,9 @@ fn unique_if_join_matches_reference_heap_llvm_and_cranelift() {
         ];
         let directory =
             std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("unique-if-join");
-        let toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix)
+                .unwrap();
         for (name, source, expected) in [
             (
                 "if",
@@ -124,8 +132,10 @@ pub fn main(rt:Io,args:Args)->Result[(),GrantError] {
                 b"history-ok\n".as_slice(),
             ),
         ] {
-            let mut engine =
-                QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+            let mut engine = QueryEngine::new(
+                default_environment(),
+                hirsel_front_phases::compiler_adapters(),
+            );
             let file = engine
                 .sources
                 .add(format!("unique-{name}.hir"), source.into())
@@ -174,7 +184,10 @@ pub fn main(rt:Io,args:Args)->Result[(),GrantError] {
 fn unique_if_join_detached_destination_is_still_rejected_by_v() {
     use hirsel_tir::{InstructionKind, Rvalue, Storage};
     use hirsel_types::UseKind;
-    let mut engine = QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+    let mut engine = QueryEngine::new(
+        default_environment(),
+        hirsel_front_phases::compiler_adapters(),
+    );
     let file = engine
         .sources
         .add("unique-join.hir", DIRECT.into())

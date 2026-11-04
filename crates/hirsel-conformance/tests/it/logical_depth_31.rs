@@ -1,6 +1,12 @@
 //! Deterministic invocation depth through the public four-engine adapter, V on.
-use hirsel_conformance::native::{self, Class};
-use hirsel_driver::native::{Configuration, Engine, Options, Outcome, TargetSpec, Toolchain};
+use hirsel_conformance::native;
+use hirsel_conformance::native::Class;
+use hirsel_native::Options;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
+use hirsel_native_testing::Configuration;
+use hirsel_native_testing::Engine;
+use hirsel_native_testing::Outcome;
 
 fn matrix() -> Vec<Configuration> {
     let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
@@ -19,7 +25,11 @@ fn matrix() -> Vec<Configuration> {
 fn p1_recursion_and_self_restart_preserve_the_invocation_boundary() {
     hirsel_engine::with_compiler_stack(|| {
         let matrix = matrix();
-        let toolchain = Toolchain::for_matrix(&native::runtime_cache().unwrap(), &matrix).unwrap();
+        let toolchain = hirsel_native_testing::toolchain_for_matrix(
+            &hirsel_native::runtime_cache().unwrap(),
+            &matrix,
+        )
+        .unwrap();
         let scratch = native::scratch::RunRoot::create_in(
             &std::env::temp_dir().join("hirsel-logical-depth-31"),
         )
@@ -87,7 +97,11 @@ fn agreement(name: &str, source: &str, rules: &[&str]) {
 
 fn agreement_output(name: &str, source: &str, rules: &[&str], output: Option<&[u8]>) {
     let matrix = matrix();
-    let toolchain = Toolchain::for_matrix(&native::runtime_cache().unwrap(), &matrix).unwrap();
+    let toolchain = hirsel_native_testing::toolchain_for_matrix(
+        &hirsel_native::runtime_cache().unwrap(),
+        &matrix,
+    )
+    .unwrap();
     let scratch =
         native::scratch::RunRoot::create_in(&std::env::temp_dir().join("hirsel-logical-depth-31"))
             .unwrap();
@@ -858,10 +872,14 @@ fn optimized_inlining_keeps_the_leaf_invocation_at_full_foreground_depth() {
         let mut matrix = matrix();
         for configuration in &mut matrix {
             if let Engine::Native { opt, .. } = &mut configuration.engine {
-                *opt = hirsel_driver::native::OptLevel::Speed;
+                *opt = hirsel_native::OptLevel::Speed;
             }
         }
-        let toolchain = Toolchain::for_matrix(&native::runtime_cache().unwrap(), &matrix).unwrap();
+        let toolchain = hirsel_native_testing::toolchain_for_matrix(
+            &hirsel_native::runtime_cache().unwrap(),
+            &matrix,
+        )
+        .unwrap();
         let scratch = native::scratch::RunRoot::create_in(
             &std::env::temp_dir().join("hirsel-logical-depth-31"),
         )

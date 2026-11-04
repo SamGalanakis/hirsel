@@ -1,5 +1,8 @@
-use crate::{COMPILER, native::Fixture, requests::*, *};
+use crate::COMPILER;
+use crate::requests::*;
+use crate::*;
 use hirsel_engine::{CompileConfig, Verify, with_compiler_stack};
+use hirsel_native::Fixture;
 
 #[test]
 fn prepared_host_record_replay_keeps_independent_state_and_exact_program_binding() {

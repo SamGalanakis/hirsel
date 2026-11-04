@@ -33,7 +33,7 @@ pub struct Probed {
 pub fn sites(source: &str) -> Result<Vec<usize>, String> {
     let mut engine = QueryEngine::new(
         hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
+        hirsel_front_phases::compiler_adapters(),
     );
     let file = crate::corpus_format::parsed(&mut engine, source)?;
     let sources = &engine.sources;
@@ -243,10 +243,9 @@ fn split_export(text: &str) -> Result<(String, String, Vec<DefPath>), String> {
 /// interpretation, and that reference.
 fn native_runs(path: &Path) -> String {
     use crate::native;
-    let matrix =
-        native::cranelift::matrix(hirsel_driver::native::TargetSpec::x86_64_unknown_linux_gnu());
-    let toolchain = match native::runtime_cache().and_then(|cache| {
-        hirsel_driver::native::Toolchain::for_matrix(&cache, &matrix).map_err(|e| e.to_string())
+    let matrix = native::cranelift::matrix(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+    let toolchain = match hirsel_native::runtime_cache().and_then(|cache| {
+        hirsel_native_testing::toolchain_for_matrix(&cache, &matrix).map_err(|e| e.to_string())
     }) {
         Ok(toolchain) => toolchain,
         Err(error) => return format!("toolchain: {error}\n"),
@@ -271,7 +270,7 @@ fn native_runs(path: &Path) -> String {
 /// LANG-6 definition hashes of `roots`, one `path hash` line each.
 fn hashes(path: &Path, roots: Vec<DefPath>) -> String {
     hirsel_engine::with_compiler_stack(|| {
-        let mut program = match hirsel_driver::load_program_source(path, None) {
+        let mut program = match hirsel_front_phases::load_program_source(path, None) {
             Ok(program) => program,
             Err(error) => return format!("load: {error}\n"),
         };

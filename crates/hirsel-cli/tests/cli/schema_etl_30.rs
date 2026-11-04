@@ -191,7 +191,7 @@ fn schema_etl_30_scripted_reference_checked() {
     with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let selection = package(scratch.path());
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded.check_for_execution().unwrap();
         let config = RunConfiguration {
             entry: loaded.entry.clone(),
@@ -544,10 +544,13 @@ fn existing_replay(evidence: &Path) {
 #[test]
 fn schema_etl_30_native_scripted_entry_boundary_witness() {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let scratch = tempfile::tempdir().unwrap();
         let selection = package(scratch.path());
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded.check_for_execution().unwrap();
         let options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         let matrix = [
@@ -574,7 +577,9 @@ fn schema_etl_30_native_scripted_entry_boundary_witness() {
             failures: vec![],
             roots: vec![],
         };
-        let mut tools = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+                .unwrap();
         tools.launch_timeout = std::time::Duration::from_secs(60);
         let fixture = Fixture {
             file_reads: [(

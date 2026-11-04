@@ -123,7 +123,7 @@ fn std_sources() -> &'static StdSources {
     STD.get_or_init(|| {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../hirsel-driver/tests/fixtures/std_source/main.hir");
-        let mut loaded = hirsel_driver::COMPILER
+        let mut loaded = hirsel_front_phases::COMPILER
             .with_config(hirsel_engine::CompileConfig {
                 store: Arc::new(
                     hirsel_engine::store::MemStore::default().with_installed_products(),

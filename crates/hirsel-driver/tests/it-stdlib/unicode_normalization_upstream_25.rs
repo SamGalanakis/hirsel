@@ -1,6 +1,12 @@
 //! Unicode16 independent expectations on reference, checked H, LLVM and Cranelift.
-use hirsel_driver::{native::*, *};
+use hirsel_compiler_identity::COMPILER_IDENTITY;
+use hirsel_driver::native::*;
+use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -197,9 +203,9 @@ fn partition(group: &str, offset: usize, reference_only: bool, split_reference: 
         let validated = loaded.engine.import_native_input(input).expect("V-import");
         eprintln!(
             "UNICODE_IDENTITY compiler={COMPILER_IDENTITY:?} llvm={} source={:?} input={:?}",
-            native::llvm_version(),
+            hirsel_native::llvm_version(),
             hirsel_syntax::ContentHash::of_bytes(source.as_bytes()),
-            native::input_identity(validated.snapshot())
+            hirsel_native::input_identity(validated.snapshot())
         );
         let expected = Observation {
             exit_code: Some(0),
@@ -279,7 +285,8 @@ fn partition(group: &str, offset: usize, reference_only: bool, split_reference: 
         })
         .collect();
         let mut toolchain =
-            Toolchain::for_matrix(&directory.path().join("runtime"), &matrix).unwrap();
+            hirsel_native_testing::toolchain_for_matrix(&directory.path().join("runtime"), &matrix)
+                .unwrap();
         toolchain.launch_timeout = std::time::Duration::from_secs(60);
         let mut ready =
             crate::native_ready::supplier(&path, None, &loaded.entry, &toolchain).unwrap();

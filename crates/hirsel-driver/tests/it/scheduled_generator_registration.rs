@@ -1,6 +1,6 @@
 //! CT-5 source registration must settle before freezing an admitted front.
-use hirsel_driver::COMPILER;
 use hirsel_engine::with_compiler_stack;
+use hirsel_front_phases::COMPILER;
 
 #[test]
 fn admitted_generator_text_waits_on_lower_with_one_worker_and_keeps_detached_evidence() {

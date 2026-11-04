@@ -3,8 +3,14 @@
 //! not all programs. History/reduction structure follows ownership_history_21;
 //! bounded shrinking follows proptest traits.rs:580-621/num.rs:995-1069 at
 //! 70cf37d46b7d (no upstream implementation copied). No Rust borrow oracle.
-use hirsel_driver::{native::*, *};
+use hirsel_compiler_identity::COMPILER_IDENTITY;
+use hirsel_driver::native::*;
+use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_tir::{Rvalue, Storage};
 use hirsel_types::UseKind;
 use std::collections::{BTreeMap, BTreeSet};

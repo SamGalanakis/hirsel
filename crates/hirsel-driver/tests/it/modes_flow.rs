@@ -1,6 +1,7 @@
 //! Source flow keeps complete diagnostic witnesses and dependency observations.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_types::QueryError;
 
 fn transcript() -> String {

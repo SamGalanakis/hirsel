@@ -1,7 +1,11 @@
 //! GEN-6 package aliases select their terminal callable bodies and actuals.
 use crate::rc_support::history::{Category, Runner};
-use hirsel_driver::{load_program, native::*};
+use hirsel_driver::native::*;
 use hirsel_engine::*;
+use hirsel_front_phases::load_program;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use std::path::Path;
 
 fn compare(name: &str, failure: bool) {

@@ -1,6 +1,7 @@
 //! A deep copy changes value ownership, not a fixed nested element contract.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 #[path = "../support/history.rs"]
 #[allow(

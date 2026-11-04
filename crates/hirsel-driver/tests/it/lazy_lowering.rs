@@ -1,6 +1,7 @@
 //! Dependencies are checked completely and lowered only where the program reaches them.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_syntax::{ItemPath, PackageId};
 use std::{
     path::{Path, PathBuf},

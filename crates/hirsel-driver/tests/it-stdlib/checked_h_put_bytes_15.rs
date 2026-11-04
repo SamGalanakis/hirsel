@@ -1,6 +1,7 @@
 //! Borrowed inline cells use callee-relative provenance across a call.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn parity(source: &str) {
@@ -18,36 +19,38 @@ fn parity(source: &str) {
         };
         let plain = run_observed_snapshot(&mut loaded.engine, &config, SimulationConfig::default())
             .unwrap();
-        let reference = native::Observation::of_reference(plain.observation.as_ref().unwrap());
+        let reference =
+            hirsel_native::Observation::of_reference(plain.observation.as_ref().unwrap());
         assert_eq!(reference.exit_code, Some(0), "{reference:?}");
         assert!(reference.failures.is_empty(), "{reference:?}");
         let checked =
             run_observed_checked(&mut loaded.engine, &config, SimulationConfig::default()).unwrap();
         assert_eq!(
-            native::Observation::of_reference(checked.observation.as_ref().unwrap()),
+            hirsel_native::Observation::of_reference(checked.observation.as_ref().unwrap()),
             reference
         );
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let configurations = vec![
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Heap { campaign: false },
+                engine: hirsel_native_testing::Engine::Heap { campaign: false },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
@@ -59,8 +62,9 @@ fn parity(source: &str) {
             ));
         std::fs::create_dir_all(&scratch).unwrap();
         let toolchain =
-            native::Toolchain::for_matrix(&scratch.join("runtime"), &configurations).unwrap();
-        let outcomes = native::differential(
+            hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &configurations)
+                .unwrap();
+        let outcomes = hirsel_native_testing::differential(
             &validated,
             &loaded.entry,
             &reference,
@@ -71,7 +75,7 @@ fn parity(source: &str) {
         assert_eq!(outcomes.len(), 3);
         for (configuration, outcome) in outcomes {
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{configuration}: {outcome:?}"
             );
         }

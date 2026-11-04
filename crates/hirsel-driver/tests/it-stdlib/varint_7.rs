@@ -3,6 +3,7 @@
 //! Independent u128 division/remainder oracle; no signed overflow or shifts.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::{fmt::Write, path::PathBuf};
 
 fn literal(bytes: &[u8]) -> String {

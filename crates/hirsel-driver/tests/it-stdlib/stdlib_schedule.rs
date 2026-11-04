@@ -54,7 +54,7 @@ fn schedule_seeded_waits_replay_exactly() {
     with_compiler_stack(|| {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../conformance/SEM/SEM-3-schedule-jitter-run.hir");
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded.check_for_execution().unwrap();
         run_replayed(&mut loaded.engine, loaded.entry, clocked());
     });

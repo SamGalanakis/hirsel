@@ -66,7 +66,7 @@ fn semantic(part: usize) {
     hirsel_engine::with_compiler_stack(|| {
         let root = evidence(&format!("semantic-{part}-"));
         let selection = package(&root);
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded.check_for_execution().unwrap();
         let config = hirsel_engine::RunConfiguration {
             entry: loaded.entry.clone(),
@@ -107,7 +107,7 @@ fn semantic(part: usize) {
                 )
                 .unwrap();
                 let observable = execution.observation.as_ref().unwrap();
-                let observed = hirsel_driver::native::Observation::of_reference(observable);
+                let observed = hirsel_native::Observation::of_reference(observable);
                 assert_eq!(
                     observed.exit_code,
                     vector["code"].as_i64().map(|n| n as i32),

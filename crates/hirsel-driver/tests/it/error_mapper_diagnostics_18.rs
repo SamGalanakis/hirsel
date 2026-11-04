@@ -1,6 +1,7 @@
 //! LANG-8 explicit mapper explanations and checked named payload-discard repairs.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn checked(source: &str) -> CheckOutput {
@@ -176,25 +177,29 @@ pub fn main() -> Result[(), String] {
             SimulationConfig::default(),
         )
         .unwrap();
-        let reference = native::Observation::of_reference(execution.observation.as_ref().unwrap());
+        let reference =
+            hirsel_native::Observation::of_reference(execution.observation.as_ref().unwrap());
         assert_eq!(reference.exit_code, Some(0), "{reference:?}");
         assert!(reference.failures.is_empty());
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let configurations = vec![native::Configuration {
-            options: native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
-            engine: native::Engine::Native {
-                opt: native::OptLevel::Speed,
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+        let configurations = vec![hirsel_native_testing::Configuration {
+            options: hirsel_native::Options::new(
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+            ),
+            engine: hirsel_native_testing::Engine::Native {
+                opt: hirsel_native::OptLevel::Speed,
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         }];
         let scratch =
             PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("error-mapper-diagnostics-18");
         std::fs::create_dir_all(&scratch).unwrap();
         let toolchain =
-            native::Toolchain::for_matrix(&scratch.join("runtime"), &configurations).unwrap();
-        let outcomes = native::differential(
+            hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &configurations)
+                .unwrap();
+        let outcomes = hirsel_native_testing::differential(
             &validated,
             &entry,
             &reference,
@@ -205,7 +210,7 @@ pub fn main() -> Result[(), String] {
         assert_eq!(outcomes.len(), 1);
         for (configuration, outcome) in outcomes {
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{configuration}: {outcome:?}"
             );
         }

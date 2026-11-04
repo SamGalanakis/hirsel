@@ -1,6 +1,9 @@
 //! Actual six-module Io+Args main, independent frozen Decimal oracle and immutable replay tapes.
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, SimulationConfig};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use serde_json::{Value, json};
 use std::{
@@ -403,7 +406,7 @@ fn native_workflows(part: usize) {
     hirsel_engine::with_compiler_stack(|| {
         let root = scratch("native-");
         let path = package(&root);
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -414,7 +417,8 @@ fn native_workflows(part: usize) {
             options: options.clone(),
             engine: Engine::Heap { campaign: false },
         }];
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.wrapper = vec![
             "python3".into(),
             root.join("run_capped.py").to_string_lossy().into_owned(),
@@ -772,7 +776,7 @@ fn spectral_audit_35_unrounded_oracle() {
             &root,
             include_str!("../support/spectral_audit_35/kernel.hir"),
         );
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -849,7 +853,8 @@ fn spectral_audit_35_unrounded_oracle() {
             !matrix.is_empty(),
             "select at least one missing native oracle engine"
         );
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.wrapper = vec![
             "python3".into(),
             root.join("run_capped.py").to_string_lossy().into_owned(),
@@ -935,7 +940,7 @@ fn spectral_audit_35_output_cap_helpers() {
             &root,
             include_str!("../support/spectral_audit_35/output_bounds.hir"),
         );
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -1001,7 +1006,7 @@ fn spectral_audit_35_scripted_ordered_streams() {
     hirsel_engine::with_compiler_stack(|| {
         let root = scratch("scripted-ordered-");
         let path = package(&root);
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -1012,7 +1017,8 @@ fn spectral_audit_35_scripted_ordered_streams() {
             options: options.clone(),
             engine: Engine::Heap { campaign: false },
         }];
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.wrapper = vec![
             "python3".into(),
             root.join("run_capped.py").to_string_lossy().into_owned(),
@@ -1186,7 +1192,7 @@ fn spectral_audit_35_unrounded_vector_controls() {
             &root,
             include_str!("../support/spectral_audit_35/kernel_cases.hir"),
         );
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));

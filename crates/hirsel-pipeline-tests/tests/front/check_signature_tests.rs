@@ -3,8 +3,8 @@ use hirsel_types::*;
 
 #[test]
 fn flat_storage_proves_actual_nominal_and_generic_fields() {
-    use hirsel_driver::compiler_adapters;
     use hirsel_engine::{DefinitionQueries, QueryEngine, default_context, default_environment};
+    use hirsel_front_phases::compiler_adapters;
     for (prefix, payload, accepted) in [
         ("", "Dir", false),
         ("", "Mutex[u32]", false),
@@ -42,11 +42,11 @@ fn flat_storage_proves_actual_nominal_and_generic_fields() {
 
 #[test]
 fn represented_seals_prove_ceilings_and_exported_bounds() {
-    use hirsel_driver::compiler_adapters;
     use hirsel_engine::{
         QueryEngine, default_context, default_environment, source_check_request,
         with_compiler_stack,
     };
+    use hirsel_front_phases::compiler_adapters;
     with_compiler_stack(|| {
         for (declaration, expected) in [
             (

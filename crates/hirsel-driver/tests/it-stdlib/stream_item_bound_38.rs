@@ -1,8 +1,13 @@
 //! Remaining-count vectors adapted from Rust Take (MIT), f6c1107f8be13e48465e12c0fd26e6a39fe18e4f:
 //! library/coretests/tests/iter/adapters/take.rs:103-128. Overflow/error/drop
 //! traces are Hirsel-specific additions; the oracle never calls an adapter.
-use hirsel_driver::{native::*, *};
+use hirsel_driver::native::*;
+use hirsel_driver::*;
 use hirsel_engine::{RunConfiguration, with_compiler_stack};
+use hirsel_front_phases::*;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use std::{fmt::Write, path::PathBuf};
 
 fn report<T>(error: hirsel_engine::ToolError) -> T {

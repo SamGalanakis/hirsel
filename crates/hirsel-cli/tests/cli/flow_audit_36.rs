@@ -1,6 +1,9 @@
 //! Full main, independent solve/certificate validation, public fixtures and immutable tapes.
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, SimulationConfig};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use serde_json::{Value, json};
 use std::{
@@ -368,7 +371,7 @@ fn flow_audit_36_reference_checked_workflows() {
         let root = scratch("simulation-");
         let _evidence = Evidence(root.clone());
         let path = package(&root);
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -489,7 +492,7 @@ fn flow_audit_36_native_four_engine_replay() {
         let root = scratch("native-");
         let _evidence = Evidence(root.clone());
         let path = package(&root);
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -505,7 +508,8 @@ fn flow_audit_36_native_four_engine_replay() {
             options: options.clone(),
             engine: Engine::Heap { campaign: false },
         }];
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.wrapper = vec![
             "python3".into(),
             root.join("run_capped.py").to_string_lossy().into_owned(),
@@ -928,7 +932,7 @@ fn flow_audit_36_ordered_capacity() {
         let root = scratch("ordered-");
         let _evidence = Evidence(root.clone());
         let path = package(&root);
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let input = loaded.engine.import_native_input(input).unwrap();
@@ -941,7 +945,8 @@ fn flow_audit_36_ordered_capacity() {
                 runtime: Runtime::Diagnostic,
             },
         }];
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.execution = Execution::Executable;
         tools.wrapper = vec![
             "python3".into(),
@@ -1272,7 +1277,7 @@ fn flow_audit_36_unique_projection_small_controls() {
         ] {
             let path = root.join(format!("{name}.hir"));
             fs::write(&path, source).unwrap();
-            let mut loaded = hirsel_driver::load_program(&path).unwrap();
+            let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
             loaded.check_for_execution().unwrap();
             let run = RunConfiguration {
                 entry: loaded.entry.clone(),

@@ -1,6 +1,7 @@
 //! Source sites of hirsel-check's audit diagnostics, checked through the driver's mode query.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 fn modes(source: &str, name: &str) -> (QueryEngine, Vec<hirsel_diag::Diagnostic>) {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
     let file = engine.sources.add("audit.hir", source.into()).unwrap();

@@ -1,6 +1,8 @@
 //! One native executable shared by the numeric vector suites. Large products
 //! exceed the corpus interpreter budget; the vector cases remain ordinary std source.
-use hirsel_driver::native::{self, BuildProfile, TargetSpec};
+use hirsel_driver::native;
+use hirsel_native::BuildProfile;
+use hirsel_native::TargetSpec;
 use std::{path::PathBuf, process::Command, sync::OnceLock};
 
 pub fn check(arguments: &[String], context: &str) {
@@ -21,7 +23,7 @@ pub fn check(arguments: &[String], context: &str) {
         std::fs::write(dir.join("grants.json"), "{}").unwrap();
         let binary = dir.join("vectors");
         native::build_path_native_backend_with_validation(&source, &binary, TargetSpec::x86_64_unknown_linux_gnu(),
-            BuildProfile::Release, native::Backend::Llvm, None, false, hirsel_driver::session::Policy::default(), native::Validation::EveryStage).unwrap().unwrap();
+            BuildProfile::Release, hirsel_native::Backend::Llvm, None, false, hirsel_driver::session::Policy::default(), hirsel_native::Validation::EveryStage).unwrap().unwrap();
         let _ = dir_scratch.keep();
         binary
     });

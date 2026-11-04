@@ -1,6 +1,7 @@
 //! CAVP one-shot vectors exercise V, checked H, heap, LLVM and Cranelift.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::Path;
 #[path = "../support/history.rs"]
 #[allow(dead_code, reason = "shared runner supports other histories")]
@@ -73,21 +74,21 @@ fn sha_primitive_38_cavp_four_engines() {
         let validated = program.engine.import_native_input(input).unwrap();
         let temp = tempfile::tempdir().unwrap();
         let matrix = [
-            hirsel_driver::native::Engine::Heap { campaign: false },
-            hirsel_driver::native::Engine::Native {
-                opt: hirsel_driver::native::OptLevel::None,
-                partition: hirsel_driver::native::Partition::Whole,
-                runtime: hirsel_driver::native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Heap { campaign: false },
+            hirsel_native_testing::Engine::Native {
+                opt: hirsel_native::OptLevel::None,
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
-            hirsel_driver::native::Engine::Cranelift {
-                partition: hirsel_driver::native::Partition::Whole,
-                runtime: hirsel_driver::native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Cranelift {
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         ]
         .into_iter()
-        .map(|engine| hirsel_driver::native::Configuration {
-            options: hirsel_driver::native::Options::new(
-                hirsel_driver::native::TargetSpec::x86_64_unknown_linux_gnu(),
+        .map(|engine| hirsel_native_testing::Configuration {
+            options: hirsel_native::Options::new(
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
             ),
             engine,
         })
@@ -96,9 +97,7 @@ fn sha_primitive_38_cavp_four_engines() {
         let report = runner.compare(
             &validated,
             &entry,
-            &hirsel_driver::native::Observation::of_reference(
-                reference.observation.as_ref().unwrap(),
-            ),
+            &hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap()),
             "sha-cavp",
         );
         assert!(report.agrees(), "{report:#?}");

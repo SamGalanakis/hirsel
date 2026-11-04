@@ -1,0 +1,32 @@
+[package]
+name = "hirsel-native-cache"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hirsel-front-phases = { path = "../hirsel-front-phases" }
+hirsel-compiler-identity = { path = "../hirsel-compiler-identity" }
+hirsel-native = { path = "../hirsel-native" }
+hirsel-codec = { path = "../hirsel-codec" }
+hirsel-core-contract = { path = "../hirsel-core-contract" }
+hirsel-engine = { path = "../hirsel-engine" }
+hirsel-graph = { path = "../hirsel-graph" }
+hirsel-guard = { path = "../hirsel-guard" }
+hirsel-intern = { path = "../hirsel-intern" }
+hirsel-layout = { path = "../hirsel-layout" }
+hirsel-lir = { path = "../hirsel-lir" }
+hirsel-rc = { path = "../hirsel-rc" }
+hirsel-run-config = { path = "../hirsel-run-config" }
+hirsel-run-schema = { path = "../hirsel-run-schema" }
+hirsel-span = { path = "../hirsel-span" }
+hirsel-syntax = { path = "../hirsel-syntax" }
+hirsel-tir = { path = "../hirsel-tir" }
+hirsel-types = { path = "../hirsel-types" }
+hirsel-validate = { path = "../hirsel-validate" }
+object = { version = "=0.40.0", default-features = false, features = ["archive", "elf", "read_core", "std", "write"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+

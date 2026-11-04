@@ -1,6 +1,11 @@
 //! Inject a real filesystem event only after entered WatchNext returns its stack.
-use hirsel_driver::native::{self, Backend, OptLevel, Partition, TargetSpec, Toolchain};
+use hirsel_driver::native;
 use hirsel_engine::*;
+use hirsel_native::Backend;
+use hirsel_native::OptLevel;
+use hirsel_native::Partition;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
 
 #[test]
 fn watch_pending_releases_its_pooled_stack_before_external_event_and_replays() {
@@ -34,10 +39,12 @@ pub fn main(rt:Io)->Result[(),E] {
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
-        let sites = native::Sites::new(&input);
+        let sites = hirsel_native::Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let program = native::build(&validated, &native::Options::new(target.clone())).unwrap();
+        let program =
+            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
+                .unwrap();
         let root = tempfile::Builder::new()
             .prefix("watch57-physical-")
             .tempdir()
@@ -46,7 +53,7 @@ pub fn main(rt:Io)->Result[(),E] {
             Toolchain::in_tree_diagnostic(&root.path().join("runtime"), &[&target]).unwrap();
         let entry = entry_path(&default_context());
         for backend in [Backend::Llvm, Backend::Cranelift] {
-            let objects = native::emit_backend_objects(
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
                 OptLevel::Default,
@@ -58,8 +65,10 @@ pub fn main(rt:Io)->Result[(),E] {
             for width in [1, 4] {
                 let dir = root.path().join(format!("{backend:?}-{width}"));
                 std::fs::create_dir_all(dir.join("root")).unwrap();
-                let exe = native::link_standalone_objects(&program, &entry, &objects, &tools, &dir)
-                    .unwrap();
+                let exe = hirsel_native::link_standalone_objects(
+                    &program, &entry, &objects, &tools, &dir,
+                )
+                .unwrap();
                 let grants = dir.join("grants.json");
                 let data = dir.join("root/data");
                 std::fs::create_dir_all(&data).unwrap();
@@ -124,7 +133,7 @@ pub fn main(rt:Io)->Result[(),E] {
                         }
                         finish(process, &cell)
                     };
-                    let launched = native::Launched {
+                    let launched = hirsel_native::Launched {
                         audit_required: true,
                         exit: output.status.code(),
                         signal: None,
@@ -132,7 +141,7 @@ pub fn main(rt:Io)->Result[(),E] {
                         stderr: output.stderr,
                         record: std::fs::read_to_string(&observation).unwrap(),
                     };
-                    let actual = native::observe(&launched, &program, &sites).unwrap();
+                    let actual = hirsel_native::observe(&launched, &program, &sites).unwrap();
                     assert_eq!(
                         actual.output,
                         b"7",

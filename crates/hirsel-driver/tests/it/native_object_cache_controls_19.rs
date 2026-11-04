@@ -1,9 +1,10 @@
 //! Original unit-cache warm/recompute vectors using admitted native tasks.
-use hirsel_driver::{compiler_adapters, native};
+use hirsel_driver::native;
 use hirsel_engine::{
     store::{self, Address, Association, Bytes, EntryKey, ResultStore, VerifyStore},
     *,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_intern::{
     jobs::Jobs,
     timings::{self, Count, Phase},
@@ -68,7 +69,7 @@ impl ResultStore for Store {
 fn compile(
     store: Arc<Store>,
     jobs: usize,
-    backend: native::Backend,
+    backend: hirsel_native::Backend,
     verification: VerifyStore,
 ) -> crate::native_object_products_19::Objects {
     compile_source(store, jobs, backend, verification, "warm-object.hir", || ())
@@ -76,7 +77,7 @@ fn compile(
 fn compile_source(
     store: Arc<Store>,
     jobs: usize,
-    backend: native::Backend,
+    backend: hirsel_native::Backend,
     verification: VerifyStore,
     name: &str,
     before_native: impl FnOnce(),
@@ -99,11 +100,12 @@ fn compile_source(
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
     let input = engine.export_native_input().unwrap();
     let _validated = engine.import_native_input(input).unwrap();
-    let mut options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+    let mut options =
+        hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
     options.validation = if name == "warm-object.hir" && verification == VerifyStore::Recompute {
-        native::Validation::EveryStage
+        hirsel_native::Validation::EveryStage
     } else {
-        native::Validation::Ready
+        hirsel_native::Validation::Ready
     };
     before_native();
     let objects = crate::native_object_products_19::compile_front(
@@ -111,7 +113,7 @@ fn compile_source(
         store,
         &[entry_path(&default_context())],
         backend,
-        native::OptLevel::None,
+        hirsel_native::OptLevel::None,
         options,
         false,
         Jobs::new(jobs),
@@ -167,7 +169,7 @@ fn original_warm_ready_skips_work_and_recompute_compares_actual_fragments() {
                 let cold = compile(
                     store.clone(),
                     workers,
-                    native::Backend::Cranelift,
+                    hirsel_native::Backend::Cranelift,
                     VerifyStore::Off,
                 );
                 let after = calls();
@@ -183,7 +185,7 @@ fn original_warm_ready_skips_work_and_recompute_compares_actual_fragments() {
                 let warm = compile(
                     store.clone(),
                     workers,
-                    native::Backend::Cranelift,
+                    hirsel_native::Backend::Cranelift,
                     VerifyStore::Off,
                 );
                 let after_warm = calls();
@@ -209,7 +211,7 @@ fn original_warm_ready_skips_work_and_recompute_compares_actual_fragments() {
                 let verified = compile(
                     store.clone(),
                     workers,
-                    native::Backend::Cranelift,
+                    hirsel_native::Backend::Cranelift,
                     VerifyStore::Recompute,
                 );
                 let after_verified = calls();
@@ -231,7 +233,7 @@ fn original_warm_ready_skips_work_and_recompute_compares_actual_fragments() {
                 let other = compile(
                     store.clone(),
                     workers,
-                    native::Backend::Llvm,
+                    hirsel_native::Backend::Llvm,
                     VerifyStore::Off,
                 );
                 // The old fixture corrupts every fragment lookup, so retain
@@ -273,7 +275,7 @@ fn original_warm_ready_skips_work_and_recompute_compares_actual_fragments() {
                     compile(
                         store.clone(),
                         workers,
-                        native::Backend::Cranelift,
+                        hirsel_native::Backend::Cranelift,
                         VerifyStore::Recompute,
                     )
                 }));
@@ -340,7 +342,7 @@ fn original_whole_plan_cross_open_skips_all_value_work_and_compares_recomputatio
                 let cold = compile_source(
                     store.clone(),
                     workers,
-                    native::Backend::Cranelift,
+                    hirsel_native::Backend::Cranelift,
                     VerifyStore::Off,
                     "plan.hir",
                     || (),
@@ -351,7 +353,7 @@ fn original_whole_plan_cross_open_skips_all_value_work_and_compares_recomputatio
                 let hit = compile_source(
                     store.clone(),
                     workers,
-                    native::Backend::Cranelift,
+                    hirsel_native::Backend::Cranelift,
                     VerifyStore::Off,
                     "plan.hir",
                     || before = Some(counts()),
@@ -368,7 +370,7 @@ fn original_whole_plan_cross_open_skips_all_value_work_and_compares_recomputatio
                 let verified = compile_source(
                     store.clone(),
                     workers,
-                    native::Backend::Cranelift,
+                    hirsel_native::Backend::Cranelift,
                     VerifyStore::Recompute,
                     "plan.hir",
                     || (),
@@ -396,7 +398,7 @@ fn original_whole_plan_cross_open_skips_all_value_work_and_compares_recomputatio
                 let other = compile_source(
                     store.clone(),
                     workers,
-                    native::Backend::Llvm,
+                    hirsel_native::Backend::Llvm,
                     VerifyStore::Off,
                     "plan.hir",
                     || (),
@@ -436,7 +438,7 @@ fn original_whole_plan_cross_open_skips_all_value_work_and_compares_recomputatio
                     compile_source(
                         store.clone(),
                         workers,
-                        native::Backend::Cranelift,
+                        hirsel_native::Backend::Cranelift,
                         VerifyStore::Recompute,
                         "plan.hir",
                         || (),

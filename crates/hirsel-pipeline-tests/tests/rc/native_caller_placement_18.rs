@@ -176,6 +176,10 @@ fn native_parity(cases: &[(&str, &str)]) {
     use hirsel_driver::native::*;
     use hirsel_driver::*;
     use hirsel_engine::*;
+    use hirsel_front_phases::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let matrix: Vec<_> = [true, false]
         .into_iter()
         .flat_map(|regions| {

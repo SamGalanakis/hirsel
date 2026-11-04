@@ -48,7 +48,7 @@ resource type Token { text: String } @noalloc drop(self) { emit(self.text) }
 fn run_source(program: &str, fail: Option<&str>) -> Execution {
     let mut engine = QueryEngine::new(
         hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
+        hirsel_front_phases::compiler_adapters(),
     );
     let context = FileContext {
         package: path("main").0.package,
@@ -130,7 +130,7 @@ fn match_tables_share_guard_fallbacks_and_unguarded_arm_bodies() {
             );
             let mut engine = QueryEngine::new(
                 hirsel_engine::default_environment(),
-                hirsel_driver::compiler_adapters(),
+                hirsel_front_phases::compiler_adapters(),
             );
             let context = FileContext {
                 package: path("main").0.package,

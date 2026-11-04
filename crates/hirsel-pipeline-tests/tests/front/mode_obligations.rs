@@ -2,7 +2,10 @@
 use hirsel_engine::{QueryEngine, check_snapshot, default_context, default_environment};
 
 fn check(source: &str, rejected: Option<u32>) {
-    let mut engine = QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+    let mut engine = QueryEngine::new(
+        default_environment(),
+        hirsel_front_phases::compiler_adapters(),
+    );
     let file = engine
         .sources
         .add("mode-obligations.hir", source.into())
@@ -86,6 +89,9 @@ fn mode_obligations_nested_matches_h_heap_llvm_cranelift() {
         RunConfiguration, entry_path, run_observed_snapshot, source_check_request,
         with_compiler_stack,
     };
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         options.validation = Validation::EveryStage;
@@ -112,7 +118,9 @@ fn mode_obligations_nested_matches_h_heap_llvm_cranelift() {
         ];
         let directory =
             std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mode-obligations");
-        let toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix)
+                .unwrap();
         for (name, source) in [
             (
                 "box",
@@ -181,8 +189,10 @@ fn mode_obligations_nested_matches_h_heap_llvm_cranelift() {
                 .into(),
             ),
         ] {
-            let mut engine =
-                QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+            let mut engine = QueryEngine::new(
+                default_environment(),
+                hirsel_front_phases::compiler_adapters(),
+            );
             let file = engine
                 .sources
                 .add(format!("mode-{name}.hir"), source.into())
@@ -237,7 +247,10 @@ fn mode_obligations_forged_nested_contracts_rejected_by_v() {
         Brand, Origin, OriginRoot, ParamId, ParameterRef, SignatureKind, TypeKind, Uniqueness,
     };
     let source = include_str!("../../../../conformance/MODE/MODE-2-nested-view-mut-ok.hir");
-    let mut engine = QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+    let mut engine = QueryEngine::new(
+        default_environment(),
+        hirsel_front_phases::compiler_adapters(),
+    );
     let file = engine
         .sources
         .add("forged-mode.hir", source.into())

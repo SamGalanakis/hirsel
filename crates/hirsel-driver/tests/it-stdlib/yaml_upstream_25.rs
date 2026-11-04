@@ -1,6 +1,7 @@
 //! Saphyr event expectations, adapted only by the documented YAML value policies.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use serde_json::Value;
 use std::{fmt::Write, path::PathBuf};
 
@@ -159,7 +160,7 @@ fn run_partition(prefix: &str, start: usize, end: usize, modes: &[bool]) {
         );
         let snapshot = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(snapshot).unwrap();
-        let expected = native::Observation {
+        let expected = hirsel_native::Observation {
             exit_code: Some(0),
             blocked: false,
             budget: None,
@@ -207,7 +208,7 @@ fn run_partition(prefix: &str, start: usize, end: usize, modes: &[bool]) {
             let observed = run
                 .observation
                 .as_ref()
-                .map(native::Observation::of_reference);
+                .map(hirsel_native::Observation::of_reference);
             if !matches!(
                 run.outcome,
                 Ok(RunOutcome::Returned(hirsel_run_schema::Returned::Ok))
@@ -224,21 +225,22 @@ fn run_partition(prefix: &str, start: usize, end: usize, modes: &[bool]) {
                 );
             }
         }
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let configurations = [
-            native::Engine::Heap { campaign: false },
-            native::Engine::Native {
-                opt: native::OptLevel::None,
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Heap { campaign: false },
+            hirsel_native_testing::Engine::Native {
+                opt: hirsel_native::OptLevel::None,
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
-            native::Engine::Cranelift {
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Cranelift {
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         ]
         .into_iter()
-        .map(|engine| native::Configuration {
+        .map(|engine| hirsel_native_testing::Configuration {
             options: options.clone(),
             engine,
         })
@@ -247,15 +249,17 @@ fn run_partition(prefix: &str, start: usize, end: usize, modes: &[bool]) {
             .prefix("yaml-upstream-25-")
             .tempdir()
             .unwrap();
-        let mut toolchain =
-            native::Toolchain::for_matrix(&scratch.path().join("runtime"), &configurations)
-                .unwrap();
+        let mut toolchain = hirsel_native_testing::toolchain_for_matrix(
+            &scratch.path().join("runtime"),
+            &configurations,
+        )
+        .unwrap();
         toolchain.launch_timeout = std::time::Duration::from_secs(60);
         for config in configurations {
             let label = match config.engine {
-                native::Engine::Heap { .. } => "checked-H",
-                native::Engine::Native { .. } => "LLVM",
-                native::Engine::Cranelift { .. } => "Cranelift",
+                hirsel_native_testing::Engine::Heap { .. } => "checked-H",
+                hirsel_native_testing::Engine::Native { .. } => "LLVM",
+                hirsel_native_testing::Engine::Cranelift { .. } => "Cranelift",
             };
             if engine_filter.as_deref().is_some_and(|e| e != label) {
                 continue;
@@ -265,7 +269,7 @@ fn run_partition(prefix: &str, start: usize, end: usize, modes: &[bool]) {
                 config.name(),
                 selected.len() * modes.len()
             );
-            let outcomes = native::differential(
+            let outcomes = hirsel_native_testing::differential(
                 &validated,
                 &loaded.entry,
                 &expected,
@@ -275,7 +279,7 @@ fn run_partition(prefix: &str, start: usize, end: usize, modes: &[bool]) {
             );
             assert_eq!(outcomes.len(), 1);
             for (engine, outcome) in outcomes {
-                if matches!(outcome, native::Outcome::Agree) {
+                if matches!(outcome, hirsel_native_testing::Outcome::Agree) {
                     eprintln!(
                         "YAML25 passed {engine} completed={}",
                         selected.len() * modes.len()

@@ -2,12 +2,14 @@
 #[path = "../support/history.rs"]
 #[allow(dead_code, reason = "shared four-engine test support")]
 mod history;
-use hirsel_driver::{COMPILER, native, requests::*};
+use hirsel_driver::native;
+use hirsel_driver::requests::*;
 use hirsel_engine::{
     requests::{OutputReadiness, RequestEngine, observe_inputs},
     runtime::QueryRuntime,
     with_compiler_stack,
 };
+use hirsel_front_phases::COMPILER;
 use std::sync::Arc;
 
 const UPSERT: &str = "pub fn main() {\n  let mut counts: unique Map[u32, u64] = map.empty()\n  core@1/map.upsert_with(\n    mut counts, 0u32,\n    fn() -> unique u64 uses {} { 1 },\n    fn(mut count: unique u64) -> () uses {} { count += 1 }\n  )\n}\n";
@@ -20,11 +22,14 @@ fn native_upsert_initializer_preserves_prepared_map_entry_addresses() {
         std::fs::write(directory.path().join("main.hir"), UPSERT).unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"keyed_address","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
         let compiler = COMPILER.with_owned_engines();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
         let tools = Arc::new(
-            native::Toolchain::in_tree(&directory.path().join("tools"), &[&target]).unwrap(),
+            hirsel_native::Toolchain::in_tree(&directory.path().join("tools"), &[&target]).unwrap(),
         );
-        for backend in [native::Backend::Cranelift, native::Backend::Llvm] {
+        for backend in [
+            hirsel_native::Backend::Cranelift,
+            hirsel_native::Backend::Llvm,
+        ] {
             let mut selector =
                 CompilerRequests::for_host(compiler.clone(), compiler.configuration())
                     .with_toolchain(tools.clone());
@@ -42,10 +47,14 @@ fn native_upsert_initializer_preserves_prepared_map_entry_addresses() {
                 inputs: inputs.into(),
                 operation: CompileOperation::NativeBuild(NativeRequest {
                     options: {
-                        let mut options = native::BuildProfile::Default
-                            .options(backend, target.clone(), native::Validation::EveryStage)
+                        let mut options = hirsel_native::BuildProfile::Default
+                            .options(
+                                backend,
+                                target.clone(),
+                                hirsel_native::Validation::EveryStage,
+                            )
                             .unwrap();
-                        options.opt = native::OptLevel::None;
+                        options.opt = hirsel_native::OptLevel::None;
                         options
                     },
                     definition: Some(entry.clone()),
@@ -79,14 +88,16 @@ fn native_upsert_initializer_preserves_prepared_map_entry_addresses() {
             };
             assert!(!objects.products.is_empty());
             for product in &objects.products {
-                let fragment = native::object_queries::fragment_product(
+                let fragment = hirsel_native::object_queries::fragment_product(
                     objects.store.as_ref(),
                     product.clone(),
                 )
                 .unwrap();
-                let object =
-                    native::object_queries::load_object(objects.store.as_ref(), fragment.object)
-                        .unwrap();
+                let object = hirsel_native::object_queries::load_object(
+                    objects.store.as_ref(),
+                    fragment.object,
+                )
+                .unwrap();
                 assert!(object.bytes.starts_with(b"\x7fELF"));
             }
         }

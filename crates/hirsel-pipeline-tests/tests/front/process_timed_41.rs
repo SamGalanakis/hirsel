@@ -1,8 +1,13 @@
 //! Timed process fixtures share the byte machine and existing quiescent timer seam.
-use hirsel_driver::{native::*, record_loaded_fixture_observations, replay_loaded_observations};
+use hirsel_driver::native::*;
+use hirsel_driver::record_loaded_fixture_observations;
+use hirsel_driver::replay_loaded_observations;
 use hirsel_engine::{
     RunConfiguration, run_observed_checked, run_observed_snapshot, with_compiler_stack,
 };
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::ProcessGrant;
 use serde_json::json;
 
@@ -44,7 +49,8 @@ fn campaign_mode(
             std::fs::write(&path, source).unwrap();
         }
         eprintln!("TIMED_PHASE {id} source-load start");
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{id}: {e}"));
+        let mut loaded =
+            hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{id}: {e}"));
         eprintln!("TIMED_PHASE {id} source-load done; source-check start");
         loaded.check_for_execution().unwrap_or_else(|e| match e {
             hirsel_engine::ToolError::Query { error, .. } => panic!("{id}: {error:?}"),
@@ -196,7 +202,8 @@ fn campaign_mode(
                 },
             },
         ];
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.launch_timeout = std::time::Duration::from_secs(60);
         tools.execution = Execution::RunnerExec;
         tools.wrapper = vec![

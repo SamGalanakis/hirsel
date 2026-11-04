@@ -1,13 +1,14 @@
 //! Compare every capture resolver with the unchanged ordered PikeVM.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
-pub(super) fn engines_for(backend: Option<native::Backend>, entries: &[&str]) {
+pub(super) fn engines_for(backend: Option<hirsel_native::Backend>, entries: &[&str]) {
     engines_for_budget(backend, entries, 200_000_000);
 }
 
-fn engines_for_budget(backend: Option<native::Backend>, entries: &[&str], steps: u64) {
+fn engines_for_budget(backend: Option<hirsel_native::Backend>, entries: &[&str], steps: u64) {
     with_compiler_stack(|| {
         let temp = tempfile::tempdir().unwrap();
         let path = super::regex_capture_span_17::private_fixture(temp.path(), false);
@@ -96,7 +97,7 @@ fn engines_for_budget(backend: Option<native::Backend>, entries: &[&str], steps:
     });
 }
 
-fn engines(backend: Option<native::Backend>) {
+fn engines(backend: Option<hirsel_native::Backend>) {
     engines_for(
         backend,
         &[
@@ -113,11 +114,11 @@ fn interpreter_and_checked_h() {
 }
 #[test]
 fn llvm() {
-    engines(Some(native::Backend::Llvm));
+    engines(Some(hirsel_native::Backend::Llvm));
 }
 #[test]
 fn cranelift() {
-    engines(Some(native::Backend::Cranelift));
+    engines(Some(hirsel_native::Backend::Cranelift));
 }
 
 // The unchanged legacy entry set, each retaining its original 100M-step budget.

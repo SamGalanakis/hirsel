@@ -1,6 +1,8 @@
 use crate::image_fixture::*;
-use hirsel_driver::{requests::*, *};
+use hirsel_driver::requests::*;
+use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::sync::Arc;
 
 #[test]
@@ -64,8 +66,8 @@ fn imaged_generic_comptime_materializes_selected_client_sizes() {
                 CompileOperation::NativeOwnership(OwnershipRequest {
                     selection: hirsel_lir::ownership_trace::Selection::Resources,
                     definition: None,
-                    target: native::TargetSpec::x86_64_unknown_linux_gnu(),
-                    validation: native::Validation::EveryStage,
+                    target: hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                    validation: hirsel_native::Validation::EveryStage,
                     launch: Default::default(),
                     fuel: false,
                 }),

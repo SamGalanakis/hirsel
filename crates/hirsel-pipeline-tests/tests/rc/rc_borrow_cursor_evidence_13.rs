@@ -42,7 +42,7 @@ fn borrow_cursor_evidence_13_environment_diagnostic_preserves_ordinary_bindings(
         hirsel_engine::with_compiler_stack(|| {
             let mut engine = hirsel_engine::QueryEngine::new(
                 hirsel_engine::default_environment(),
-                hirsel_driver::compiler_adapters(),
+                hirsel_front_phases::compiler_adapters(),
             );
             let file = engine
                 .sources
@@ -64,6 +64,7 @@ fn borrow_cursor_evidence_13_environment_diagnostic_preserves_ordinary_bindings(
 fn borrow_cursor_evidence_13_native_import_rejects_owned_refill_with_old_audit() {
     use hirsel_driver::*;
     use hirsel_engine::*;
+    use hirsel_front_phases::*;
     use hirsel_tir::*;
     use hirsel_types::UseKind;
     use std::sync::Arc;
@@ -222,6 +223,7 @@ fn old_cursor_at_failure(body: &hirsel_tir::Body) -> Result<(), &'static str> {
 pub(super) fn bounds_failure_evidence() {
     use hirsel_driver::*;
     use hirsel_engine::*;
+    use hirsel_front_phases::*;
     use hirsel_tir::*;
     let program = with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());

@@ -103,7 +103,7 @@ fn metricfold_23_pure_model_interpreter_and_checked_h() {
         manifest["entry"]["name"] = "model_contract".into();
         fs::write(&path, manifest.to_string()).unwrap();
         let mut loaded =
-            hirsel_driver::load_program(&path).unwrap_or_else(|error| panic!("{error}"));
+            hirsel_front_phases::load_program(&path).unwrap_or_else(|error| panic!("{error}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|error| panic!("{error}"));

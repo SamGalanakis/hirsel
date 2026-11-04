@@ -1,21 +1,28 @@
+use hirsel_compiler_identity::COMPILER_IDENTITY;
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::ResultStore, *};
+use hirsel_front_phases::*;
+use hirsel_native::object_queries::linked_product;
+use hirsel_native::object_queries::materialize_executable;
+use hirsel_native::query_model::NativeRootKey;
+use hirsel_native::query_model::NativeRoots;
+use hirsel_native::root_source::NativeLinkFacts;
+use hirsel_native::root_source::NativeLinkSource;
+use hirsel_native_cache::declarations::NativeDeclarations;
+use hirsel_native_cache::source_inputs::NativeInstanceInputs;
+use hirsel_native_queries::arena_tasks::ArenaTasks;
+use hirsel_native_queries::compilation_tasks::CompilationBackend;
+use hirsel_native_queries::compilation_tasks::CompilationFactory;
+use hirsel_native_queries::compilation_tasks::CompilationTasks;
+use hirsel_native_queries::instance_tasks::InstanceTasks;
+use hirsel_native_queries::link_tasks::LinkExecution;
+use hirsel_native_queries::link_tasks::NativeLinkExecutor;
+use hirsel_native_queries::products::EmissionOptions;
+use hirsel_native_queries::roots::RootExecutableInputs;
+use hirsel_native_queries::roots::RootFrozenExecutableInputs;
+use hirsel_native_queries::roots::RootLinkInputs;
+use hirsel_native_queries::roots::RootProducts;
 use hirsel_syntax::ContentHash;
-use native::{
-    object_queries::{linked_product, materialize_executable},
-    queries::{
-        NativeRootKey, NativeRoots,
-        arena_tasks::ArenaTasks,
-        compilation_tasks::{CompilationBackend, CompilationFactory, CompilationTasks},
-        declarations::NativeDeclarations,
-        instance_tasks::InstanceTasks,
-        link_tasks::{LinkExecution, NativeLinkExecutor},
-        products::EmissionOptions,
-        roots::{RootExecutableInputs, RootFrozenExecutableInputs, RootLinkInputs, RootProducts},
-        source_inputs::NativeInstanceInputs,
-    },
-    root_source::{NativeLinkFacts, NativeLinkSource},
-};
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -51,7 +58,7 @@ impl ResultStore for DiagnosedStore {
     fn get_content(&self, reference: store::Reference) -> Option<store::Bytes> {
         assert_ne!(
             reference.domain.kind,
-            native::queries::execution::EXECUTION_KIND,
+            hirsel_native_queries::execution::EXECUTION_KIND,
             "local native compilation read a PLAN archive"
         );
         self.0.get_content(reference)
@@ -59,7 +66,7 @@ impl ResultStore for DiagnosedStore {
     fn put_content(&self, domain: store::Domain, bytes: &[u8]) -> Option<store::Reference> {
         assert_ne!(
             domain.kind,
-            native::queries::execution::EXECUTION_KIND,
+            hirsel_native_queries::execution::EXECUTION_KIND,
             "local native compilation published a PLAN archive"
         );
         // Exactly DirStore's one physical put: no retry or fallback provider.
@@ -100,14 +107,14 @@ impl ResultStore for DiagnosedStore {
 // admission remains a separate owner; this tests native query composition.
 struct Platform {
     store: Arc<dyn ResultStore>,
-    tools: native::Toolchain,
-    target: native::TargetSpec,
-    backend: native::Backend,
+    tools: hirsel_native::Toolchain,
+    target: hirsel_native::TargetSpec,
+    backend: hirsel_native::Backend,
     entry: hirsel_syntax::DefPath,
     directory: PathBuf,
     calls: Arc<AtomicU64>,
-    frozen: Option<native::object_queries::capture::FrozenLinker>,
-    frozen_kit: Option<native::object_queries::capture::FrozenLinkKit>,
+    frozen: Option<hirsel_native::object_queries::capture::FrozenLinker>,
+    frozen_kit: Option<hirsel_native::object_queries::capture::FrozenLinkKit>,
 }
 impl NativeLinkExecutor for Platform {
     fn link(
@@ -120,7 +127,7 @@ impl NativeLinkExecutor for Platform {
         }
         std::fs::create_dir_all(&self.directory).map_err(|e| e.to_string())?;
         let archive = self.directory.join("selected-runtime.a");
-        native::object_queries::materialize_link_input(
+        hirsel_native::object_queries::materialize_link_input(
             self.store.as_ref(),
             input.inputs.runtime_archives[0],
             &archive,
@@ -138,7 +145,7 @@ impl NativeLinkExecutor for Platform {
                         directory: &self.directory,
                         requested: None,
                         standalone: false,
-                        platform: native::FrozenExecutableLinkInputs {
+                        platform: hirsel_native::FrozenExecutableLinkInputs {
                             store: self.store.as_ref(),
                             kit,
                             runtime: &archive,
@@ -158,7 +165,7 @@ impl NativeLinkExecutor for Platform {
                         directory: &self.directory,
                         requested: None,
                         standalone: false,
-                        platform: native::ExecutableLinkInputs {
+                        platform: hirsel_native::ExecutableLinkInputs {
                             kit: &self.tools.kit,
                             runtime: &archive,
                             foreign: &[],
@@ -170,7 +177,7 @@ impl NativeLinkExecutor for Platform {
             let captured = plan.capture(
                 self.store.as_ref(),
                 linker,
-                native::object_queries::capture::CaptureLimits {
+                hirsel_native::object_queries::capture::CaptureLimits {
                     archive_bytes: 64 << 20,
                     files: 256,
                 },
@@ -381,11 +388,11 @@ fn run_program_case_with_frame(
         backend,
         budget.reserve(24 << 20).unwrap(),
     ));
-    let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-    let tools = native::Toolchain::in_tree_with_products(
+    let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+    let tools = hirsel_native::Toolchain::in_tree_with_products(
         &directory.path().join("runtime"),
         &[&target],
-        &[native::RuntimeBuild {
+        &[hirsel_native::RuntimeBuild {
             diagnostic: true,
             ..Default::default()
         }],
@@ -393,25 +400,25 @@ fn run_program_case_with_frame(
         store.clone(),
     )
     .unwrap();
-    let archive = native::object_queries::store_link_input(
+    let archive = hirsel_native::object_queries::store_link_input(
         store.as_ref(),
         &std::fs::read(tools.archive(&target.triple).unwrap()).unwrap(),
     )
     .unwrap();
     let frozen = frozen_plan.then(|| {
-        native::object_queries::capture::FrozenLinker::snapshot(
+        hirsel_native::object_queries::capture::FrozenLinker::snapshot(
             store.as_ref(),
             &PathBuf::from(std::env::var_os("HIRSEL_CAPTURE_LINKER").unwrap()),
         )
         .unwrap()
     });
     let frozen_kit = use_frozen_kit.then(|| {
-        native::object_queries::capture::FrozenLinkKit::snapshot(
+        hirsel_native::object_queries::capture::FrozenLinkKit::snapshot(
             store.as_ref(),
             &tools.kit,
             &target,
             frozen.unwrap(),
-            native::object_queries::capture::CaptureLimits {
+            hirsel_native::object_queries::capture::CaptureLimits {
                 archive_bytes: 64 << 20,
                 files: 256,
             },
@@ -461,7 +468,7 @@ fn run_program_case_with_frame(
                 SimulationConfig::default(),
             )
             .unwrap();
-            Some(native::Observation::of_reference(
+            Some(hirsel_native::Observation::of_reference(
                 execution.observation.as_ref().unwrap(),
             ))
         };
@@ -503,9 +510,9 @@ fn run_program_case_with_frame(
         let emission = EmissionOptions {
             input: declarations.program.input.clone(),
             opt: if case.optimized() {
-                native::OptLevel::Default
+                hirsel_native::OptLevel::Default
             } else {
-                native::OptLevel::None
+                hirsel_native::OptLevel::None
             },
             debug: !case.optimized(),
             callbacks: false,
@@ -528,8 +535,8 @@ fn run_program_case_with_frame(
             retained,
             stack: 0,
         };
-        let mut options = native::Options::new(target.clone());
-        options.validation = native::Validation::Ready;
+        let mut options = hirsel_native::Options::new(target.clone());
+        options.validation = hirsel_native::Validation::Ready;
         let instances = InstanceTasks::new(
             inputs,
             store.clone(),
@@ -548,47 +555,50 @@ fn run_program_case_with_frame(
         )
         .unwrap();
         let calls = Arc::new(AtomicU64::new(0));
-        let backends = [native::Backend::Llvm, native::Backend::Cranelift]
-            .into_iter()
-            .filter(|backend| !observation_only || *backend == native::Backend::Llvm)
-            .map(|backend| CompilationBackend {
-                backend: backend.name().into(),
-                backend_version: ContentHash::of_parts(
-                    "fixture backend",
-                    [backend.name().as_bytes(), COMPILER_IDENTITY.as_slice()],
-                ),
-                target_features: target.digest(),
-                profile_options: ContentHash::of_bytes(if case.optimized() {
-                    b"optimized"
-                } else {
-                    b"debug opt none"
-                }),
-                runtime_abi: ContentHash::of_bytes(&hirsel_lir::RUNTIME_ABI_VERSION.to_le_bytes()),
-                linker_options: ContentHash::of_parts(
-                    "fixture selected platform",
-                    [
-                        backend.name().as_bytes(),
-                        COMPILER_IDENTITY.as_slice(),
-                        tool_identity.as_bytes(),
-                    ],
-                ),
-                runtime_archives: vec![archive],
-                foreign_inputs: vec![],
-                executor: Arc::new(Platform {
-                    store: store.clone(),
-                    tools: tools.clone(),
-                    target: target.clone(),
-                    backend,
-                    entry: main.clone(),
-                    directory: directory
-                        .path()
-                        .join(format!("{literal}-{fresh}-{}", backend.name())),
-                    calls: calls.clone(),
-                    frozen,
-                    frozen_kit,
-                }),
-            })
-            .collect();
+        let backends = [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ]
+        .into_iter()
+        .filter(|backend| !observation_only || *backend == hirsel_native::Backend::Llvm)
+        .map(|backend| CompilationBackend {
+            backend: backend.name().into(),
+            backend_version: ContentHash::of_parts(
+                "fixture backend",
+                [backend.name().as_bytes(), COMPILER_IDENTITY.as_slice()],
+            ),
+            target_features: target.digest(),
+            profile_options: ContentHash::of_bytes(if case.optimized() {
+                b"optimized"
+            } else {
+                b"debug opt none"
+            }),
+            runtime_abi: ContentHash::of_bytes(&hirsel_lir::RUNTIME_ABI_VERSION.to_le_bytes()),
+            linker_options: ContentHash::of_parts(
+                "fixture selected platform",
+                [
+                    backend.name().as_bytes(),
+                    COMPILER_IDENTITY.as_slice(),
+                    tool_identity.as_bytes(),
+                ],
+            ),
+            runtime_archives: vec![archive],
+            foreign_inputs: vec![],
+            executor: Arc::new(Platform {
+                store: store.clone(),
+                tools: tools.clone(),
+                target: target.clone(),
+                backend,
+                entry: main.clone(),
+                directory: directory
+                    .path()
+                    .join(format!("{literal}-{fresh}-{}", backend.name())),
+                calls: calls.clone(),
+                frozen,
+                frozen_kit,
+            }),
+        })
+        .collect();
         let compilation = CompilationTasks::new_with_store_verification(
             instances.clone(),
             arena.clone(),
@@ -719,8 +729,12 @@ fn run_program_case_with_frame(
                 .unwrap()
                 .0
                 .clone();
-            let fragments = [native::Backend::Llvm, native::Backend::Cranelift].map(|backend| {
-                let key = native::object_queries::CodegenKey {
+            let fragments = [
+                hirsel_native::Backend::Llvm,
+                hirsel_native::Backend::Cranelift,
+            ]
+            .map(|backend| {
+                let key = hirsel_native::object_queries::CodegenKey {
                     owner: owner.clone(),
                     backend: backend.name().into(),
                     backend_version: ContentHash::of_parts(
@@ -770,7 +784,10 @@ fn run_program_case_with_frame(
         let ready = selected[1..]
             .iter()
             .map(|product| {
-                Arc::new(native::queries::ready_product(store.as_ref(), product.clone()).unwrap())
+                Arc::new(
+                    hirsel_native::query_model::ready_product(store.as_ref(), product.clone())
+                        .unwrap(),
+                )
             })
             .collect::<Vec<_>>();
         let records = outputs
@@ -817,11 +834,15 @@ fn run_program_case_with_frame(
             std::fs::create_dir_all(&destination).unwrap();
             let executable = destination.join("program");
             materialize_executable(store.as_ref(), &linked, &executable).unwrap();
-            let run = native::launch(&executable, &target, &tools, &destination, true).unwrap();
+            let run =
+                hirsel_native::launch(&executable, &target, &tools, &destination, true).unwrap();
             view.with_link_context(&root, &ready, |program| {
                 assert!(program.units.is_empty());
                 if let Some(metadata) = &observation {
-                    assert_eq!(metadata.failure_rules, native::failure_rules(program));
+                    assert_eq!(
+                        metadata.failure_rules,
+                        hirsel_native::failure_rules(program)
+                    );
                     let sites = metadata
                         .sites
                         .iter()
@@ -829,10 +850,10 @@ fn run_program_case_with_frame(
                             (*code, (definition.path().clone(), *range))
                         })
                         .collect::<BTreeMap<_, _>>();
-                    assert_eq!(sites, native::site_codes(program));
+                    assert_eq!(sites, hirsel_native::site_codes(program));
                 }
-                let observed =
-                    native::observe(&run, program, &source.sites()).map_err(|e| e.to_string())?;
+                let observed = hirsel_native::observe(&run, program, &source.sites())
+                    .map_err(|e| e.to_string())?;
                 if let Some(reference) = &reference {
                     assert_eq!(&observed, reference);
                 }

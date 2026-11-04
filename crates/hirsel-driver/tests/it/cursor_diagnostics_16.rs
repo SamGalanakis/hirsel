@@ -1,6 +1,7 @@
 //! Expectations derive from LANG-15's fixed cover and owned refill contract.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 const TAGGED: &str = "// λ cursor witness\ntype Value = Leaf | Tagged(value: box Value)\nfn unboxed(value: box Value) -> Value in value uses {} {\n  match value { Leaf() => Leaf(), Tagged(value: inner) => Tagged(value: copy inner) }\n}\nfn probe(value: Value) {\n  let mut cursor = value\n  match cursor { Tagged(value: inner) => { cursor = unboxed(inner) }, _ => () }\n}\n";
 const PAIR: &str = "// λ computed pair\ntype Value = Leaf | Array(List[Value])\nfn probe(a: Value, b: Value) {\n  let mut left: Value in {a, b} = a\n  match (left, b) { (Array(xs), Array(_)) => { left = xs[0u64] }, _ => () }\n}\n";
@@ -367,6 +368,9 @@ fn cursor_lookup_recipe() -> String {
 #[test]
 fn cursor_diagnostics_16_lookup_recipes_check_export_and_observe() {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let source = format!(
             "{}{}",
@@ -436,7 +440,9 @@ pub fn main()->Result[(),u64] {
         let directory = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
             .join("cursor-owned-refill-repairs-21");
         std::fs::create_dir_all(&directory).unwrap();
-        let toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix)
+                .unwrap();
         let input = engine.export_native_input().unwrap();
         let input = engine.import_native_input(input).unwrap();
         let outcomes = differential(&input, &entry, &reference, &matrix, &toolchain, &directory);

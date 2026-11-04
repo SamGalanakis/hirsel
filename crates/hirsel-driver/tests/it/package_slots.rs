@@ -8,6 +8,7 @@
 //! both dependency paths (src/compiler/links.rs:44).
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_syntax::{DefPath, PackageId};
 use hirsel_types::{GenericDeclarations, SignatureKind, serialization::serializable_schema};
 use serde_json::{Value, json};

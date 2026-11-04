@@ -1,10 +1,14 @@
 //! The binarytrees arena node in optimized LLVM IR: the construction of
 //! `tree` and the traversal of `check` from the measured program, on both targets.
-use hirsel_driver::compiler_adapters;
-use hirsel_driver::native::{OptLevel, Options, TargetSpec, build, emit_ir};
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::TargetSpec;
+use hirsel_native::emit_ir;
+use hirsel_native_batch::build;
 
 const TREE: &str = "type Tree = Leaf | Branch(left: box Tree, right: box Tree)
 fn tree(a: Arena, depth: u64) -> (box Tree) in a {

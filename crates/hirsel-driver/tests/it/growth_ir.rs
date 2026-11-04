@@ -2,11 +2,15 @@
 //! must-unique fact back by value, so a push loop over a list it owns carries
 //! must-unique as an SSA value and loads only its capacity word (runtime ABI 5),
 //! while shared, escaping and over-reserved lists keep their tests.
-use hirsel_driver::compiler_adapters;
-use hirsel_driver::native::{OptLevel, Options, TargetSpec, build, emit_ir};
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::TargetSpec;
+use hirsel_native::emit_ir;
+use hirsel_native_batch::build;
 use std::collections::{BTreeMap, BinaryHeap};
 
 /// The optimized IR of `main` in `source`, compiled for `target`.

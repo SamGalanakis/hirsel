@@ -1,6 +1,7 @@
 //! R4 retained representation gate. Expanded debug paths/cleanup lists are not storage.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_tir::*;
 use hirsel_types::{
     AuthoritySummary, DropAllocation, ErasedCaptures, GenericArgument, GenericParameter, Reach,

@@ -5,13 +5,17 @@
 //! cancellation, entered failure and a terminal stop. Gathered SoA places,
 //! underaligned packed fields, pointer/length views and owning `mut`
 //! parameters keep the stackful form; a forged call-edge proof is refused.
-use hirsel_driver::native::{self, *};
+use hirsel_driver::native;
+use hirsel_driver::native::*;
 use hirsel_engine::*;
 use hirsel_lir::abi_types::ParameterPassing;
 use hirsel_lir::continuation::{
     ContinuationError, ContinuationPlan, ContinuationPlans, ExclusiveSlot, Representation,
 };
 use hirsel_lir::ir::{EdgeId, FailureId, LoanId, SlotId};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_syntax::ContentHash;
 
 use super::runtime50_continuation::ready;
@@ -154,8 +158,8 @@ fn runtime55_wait_mut_slot_plans_and_routing() {
     with_compiler_stack(|| {
         let done = source(&DONE);
         let program = ready(&done);
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let callee = wait_mut(&plans);
         assert_eq!(callee.representation, Representation::Resumable);
         let record = callee
@@ -225,7 +229,7 @@ fn runtime55_wait_mut_slot_unread() {
             ..DONE
         });
         let unread_program = ready(&unread);
-        let unread_plans = native::continuation::plans(&unread_program);
+        let unread_plans = hirsel_native::continuation::plans(&unread_program);
         let (child, at) = proved(&unread_plans, wait_mut(&unread_plans).body);
         let proof = child.states[at].exclusive.clone().unwrap();
         assert!(
@@ -255,8 +259,8 @@ fn runtime55_wait_mut_slot_compact_custody() {
 /// every engine agrees locally and under forced migration.
 fn stopped_agrees(text: &str, label: &str) {
     let program = ready(text);
-    let plans = native::continuation::plans(&program);
-    native::continuation::validate(&program, &plans).unwrap();
+    let plans = hirsel_native::continuation::plans(&program);
+    hirsel_native::continuation::validate(&program, &plans).unwrap();
     let (child, at) = proved(&plans, wait_mut(&plans).body);
     assert!(child.states[at].exclusive.is_some(), "{label}");
     agree(text, &Fixture::default(), &format!("{label} local"));
@@ -320,8 +324,8 @@ type Refusal = Option<&'static str>;
 /// for `caller_refusal`; the program agrees on every engine under migration.
 fn stays_stackful(text: &str, callee: &str, callee_refusal: Refusal, caller_refusal: &str) {
     let program = ready(text);
-    let plans = native::continuation::plans(&program);
-    native::continuation::validate(&program, &plans).unwrap();
+    let plans = hirsel_native::continuation::plans(&program);
+    hirsel_native::continuation::validate(&program, &plans).unwrap();
     let callee_plan = program
         .units
         .iter()
@@ -465,8 +469,8 @@ fn runtime55_escaping_exclusive_capture_is_refused() {
 fn runtime55_forged_exclusive_slot_claims_are_refused() {
     with_compiler_stack(|| {
         let program = ready(&source(&DONE));
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let callee = wait_mut(&plans).body;
         let (child, at) = proved(&plans, callee);
         let child = child.body;
@@ -485,7 +489,7 @@ fn runtime55_forged_exclusive_slot_claims_are_refused() {
         let refused = |body: ContentHash, edit: &dyn Fn(&mut ContinuationPlan)| {
             let mut bad = plans.clone();
             edit(bad.plans.get_mut(&body).unwrap());
-            native::continuation::validate(&program, &bad)
+            hirsel_native::continuation::validate(&program, &bad)
                 .expect_err("a forged exclusive claim was imported")
         };
         let proof = |edit: fn(&mut ExclusiveSlot)| {

@@ -210,12 +210,15 @@ fn snapshot_file_waits_live_and_native_replay() {
     use hirsel_engine::{
         RunConfiguration, run_observed_checked_bounded, run_observed_snapshot_bounded,
     };
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     use hirsel_run_schema::{Access, FileReadScript};
     hirsel_engine::with_compiler_stack(|| {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("main.hir");
         fs::write(&source, FILES).unwrap();
-        let mut loaded = hirsel_driver::load_program(&source).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&source).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|error| panic!("{error}"));
@@ -442,6 +445,9 @@ fn retained_production_tapes() {
 #[ignore = "requires HOST_REPLAY_PARITY_31_CHUNK with source and fixture evidence"]
 fn record_chunk_blocked_on_current_runtime() {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     hirsel_engine::with_compiler_stack(|| {
         let root =
             std::path::PathBuf::from(std::env::var_os("HOST_REPLAY_PARITY_31_CHUNK").unwrap());
@@ -463,7 +469,7 @@ fn record_chunk_blocked_on_current_runtime() {
             steps: Some(20_000_000),
             ..Default::default()
         };
-        let mut loaded = hirsel_driver::load_program(&source).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&source).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|error| panic!("{error}"));

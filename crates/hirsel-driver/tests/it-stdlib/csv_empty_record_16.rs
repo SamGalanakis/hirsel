@@ -1,6 +1,7 @@
 //! Exact CSV bytes, opt-in reparsing, defaults and exhaustive delimiter errors.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> PathBuf {
@@ -8,7 +9,7 @@ fn fixture(name: &str) -> PathBuf {
         .join(format!("tests/fixtures/csv-empty-record-16/{name}.hir"))
 }
 
-fn run(name: &str, backend: Option<native::Backend>) {
+fn run(name: &str, backend: Option<hirsel_native::Backend>) {
     with_compiler_stack(|| {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -23,7 +24,7 @@ fn run(name: &str, backend: Option<native::Backend>) {
                     stderr: &mut stderr,
                 },
                 hirsel_driver::session::Policy::default(),
-                native::Validation::EveryStage,
+                hirsel_native::Validation::EveryStage,
             )
             .unwrap_or_else(|error| match error {
                 ToolError::Query { error, .. } => panic!("{error:?}"),
@@ -73,5 +74,5 @@ macro_rules! cases {
 }
 
 cases!(interpreter, None);
-cases!(llvm, Some(native::Backend::Llvm));
-cases!(cranelift, Some(native::Backend::Cranelift));
+cases!(llvm, Some(hirsel_native::Backend::Llvm));
+cases!(cranelift, Some(hirsel_native::Backend::Cranelift));

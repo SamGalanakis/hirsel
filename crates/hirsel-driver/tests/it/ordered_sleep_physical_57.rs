@@ -1,7 +1,13 @@
 //! Like the compact custody witness in runtime50_resume, with an entered host
 //! marker: a pre-operation resume point alone is not an in-operation leave.
-use hirsel_driver::native::{self, Backend, Fixture, OptLevel, Partition, Tape, Toolchain};
+use hirsel_driver::native;
 use hirsel_engine::*;
+use hirsel_native::Backend;
+use hirsel_native::Fixture;
+use hirsel_native::OptLevel;
+use hirsel_native::Partition;
+use hirsel_native::Tape;
+use hirsel_native::Toolchain;
 
 #[test]
 fn entered_sleep_and_join_release_stacks_at_widths_one_and_four_and_replay() {
@@ -26,21 +32,24 @@ fn entered_sleep_and_join_release_stacks_at_widths_one_and_four_and_replay() {
             (&fixture).into(),
         )
         .unwrap();
-        let expected = native::Observation::of_reference(reference.observation.as_ref().unwrap());
+        let expected =
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
         let input = engine.export_native_input().unwrap();
-        let sites = native::Sites::new(&input);
+        let sites = hirsel_native::Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-        let program = native::build(&validated, &native::Options::new(target.clone())).unwrap();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+        let program =
+            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
+                .unwrap();
         let root = tempfile::Builder::new()
             .prefix("ordered-sleep57-")
             .tempdir()
             .unwrap();
         let mut tools =
             Toolchain::in_tree_diagnostic(&root.path().join("runtime"), &[&target]).unwrap();
-        tools.execution = native::Execution::Executable;
+        tools.execution = hirsel_native::Execution::Executable;
         for backend in [Backend::Llvm, Backend::Cranelift] {
-            let objects = native::emit_backend_objects(
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
                 OptLevel::Default,
@@ -52,13 +61,13 @@ fn entered_sleep_and_join_release_stacks_at_widths_one_and_four_and_replay() {
             for width in [1, 4] {
                 let dir = root.path().join(format!("{backend:?}-{width}"));
                 std::fs::create_dir_all(&dir).unwrap();
-                let runnable = native::link_fixture_runnable(
+                let runnable = hirsel_native::link_fixture_runnable(
                     &program, &entry, &objects, &tools, &dir, &fixture,
                 )
                 .unwrap();
                 // Placement is excluded from the semantic binding. Harness
                 // admission uses it to exercise the actual physical dispatcher.
-                let mut run = native::fixture_run_record(&program, &entry, &fixture)
+                let mut run = hirsel_native::fixture_run_record(&program, &entry, &fixture)
                     .unwrap()
                     .record()
                     .clone();
@@ -77,7 +86,7 @@ fn entered_sleep_and_join_release_stacks_at_widths_one_and_four_and_replay() {
                         format!("HIRSEL_RT_COMPACT_TRACE={}", trace.display()),
                     ];
                     let cell = format!("{backend:?} width={width} replay={replay}");
-                    let launched = native::launch_fixture(
+                    let launched = hirsel_native::launch_fixture(
                         &runnable,
                         &target,
                         &tools,
@@ -95,7 +104,7 @@ fn entered_sleep_and_join_release_stacks_at_widths_one_and_four_and_replay() {
                     )
                     .unwrap_or_else(|error| panic!("{cell}: {error}"));
                     assert_eq!(
-                        native::observe(&launched, &program, &sites).unwrap(),
+                        hirsel_native::observe(&launched, &program, &sites).unwrap(),
                         expected,
                         "{cell}"
                     );

@@ -3,12 +3,14 @@ use hirsel_lir::validate::Inputs;
 
 #[test]
 fn arena_query_graph_settles_local_equations_and_reuses_unchanged_components() {
-    use hirsel_driver::native::queries::arena::{
-        ArenaQueryCounts, EQUATIONS_DOMAIN, EquationProduct,
-    };
-    use hirsel_driver::native::queries::graph::{ArenaNode, settle_arena_queries};
-    use hirsel_driver::native::queries::{InstanceAddress, extract_local_arena};
     use hirsel_engine::store::{MemStore, ResultStore};
+    use hirsel_native::query_model::InstanceAddress;
+    use hirsel_native::query_model::extract_local_arena;
+    use hirsel_native_cache::arena::ArenaQueryCounts;
+    use hirsel_native_cache::arena::EQUATIONS_DOMAIN;
+    use hirsel_native_cache::arena::EquationProduct;
+    use hirsel_native_queries::graph::ArenaNode;
+    use hirsel_native_queries::graph::settle_arena_queries;
     use hirsel_syntax::ContentHash;
     let source = "type Item { n:u64 }\nfn first(a:Arena,n:u64)->(box Item) in a {if n==0u64 {box Item(n:6u64)} else {second(a,n-1u64)}}\nfn second(a:Arena,n:u64)->(box Item) in a {first(a,n)}\nfn wrapper(a:Arena)->(box Item) in a {second(a,2u64)}\nfn main(){arena.with(fn(a:Arena){let x=wrapper(a);});}";
     let program = rc_support::compile(source);

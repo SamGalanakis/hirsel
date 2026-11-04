@@ -1,6 +1,9 @@
 //! Minimum scripts checked against independent dynamic-programming LCS lengths.
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, SimulationConfig};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use std::path::PathBuf;
 
 fn path() -> PathBuf {
@@ -113,7 +116,7 @@ fn pair(loaded: &mut hirsel_engine::LoadedProgram, old: &str, new: &str) -> Obse
 #[test]
 fn public_witness() {
     hirsel_engine::with_compiler_stack(|| {
-        let mut loaded = hirsel_driver::load_program(&path()).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path()).unwrap();
         loaded.check_for_execution().unwrap();
         let (old, new) = witness();
         let observed = pair(&mut loaded, &old, &new);
@@ -123,7 +126,7 @@ fn public_witness() {
 #[test]
 fn lcs_property_reference_and_checked_h() {
     hirsel_engine::with_compiler_stack(|| {
-        let mut loaded = hirsel_driver::load_program(&path()).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path()).unwrap();
         loaded.check_for_execution().unwrap();
         let mut words = vec![String::new()];
         for n in 1..=3 {
@@ -176,7 +179,7 @@ fn lcs_property_reference_and_checked_h() {
 #[test]
 fn public_witness_four_engines() {
     hirsel_engine::with_compiler_stack(|| {
-        let mut loaded = hirsel_driver::load_program(&path()).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path()).unwrap();
         loaded.check_for_execution().unwrap();
         let (old, new) = witness();
         let expected = pair(&mut loaded, &old, &new);
@@ -199,7 +202,9 @@ fn public_witness_four_engines() {
             },
         ];
         let dir = tempfile::tempdir().unwrap();
-        let tools = Toolchain::for_matrix(&dir.path().join("runtime"), &configs).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&dir.path().join("runtime"), &configs)
+                .unwrap();
         let fixture = Fixture {
             args: vec![old, new],
             steps: Some(1_000_000),

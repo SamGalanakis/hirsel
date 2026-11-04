@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn native_engine(source: &str) -> QueryEngine {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -29,9 +30,9 @@ fn native_declarations_match_snapshot_inputs_and_refuse_implicit_growth() {
         let mut engine = native_engine(EDGES).with_result_store(store.clone());
         let snapshot = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(snapshot).unwrap();
-        let expected = native::program(&validated);
+        let expected = hirsel_native::program(&validated);
         let mut cache = NativeDiscoveryCache::new(engine.types().clone(), store.clone());
-        let actual = native::queries::declarations::NativeDeclarations::collect(
+        let actual = hirsel_native_cache::declarations::NativeDeclarations::collect(
             &mut engine,
             &mut cache,
             &[],
@@ -79,7 +80,7 @@ fn native_declarations_match_snapshot_inputs_and_refuse_implicit_growth() {
 
         let mut growing = native_engine(FINALIZER_GROWING).with_result_store(store.clone());
         let mut cache = NativeDiscoveryCache::new(growing.types().clone(), store);
-        let error = native::queries::declarations::NativeDeclarations::collect(
+        let error = hirsel_native_cache::declarations::NativeDeclarations::collect(
             &mut growing,
             &mut cache,
             &[],

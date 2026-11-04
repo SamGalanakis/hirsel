@@ -1,6 +1,7 @@
 //! Source JSON conformance plus an independent Python json/number-lexeme oracle.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::{path::PathBuf, process::Command};
 
 fn root() -> PathBuf {
@@ -57,10 +58,12 @@ fn seeded_bounded_json_fuzz_matches_python_policy_and_exact_numbers() {
 }
 
 fn native_measurement(source: &str, label: &str) -> String {
-    use hirsel_driver::{
-        native::{self, OptLevel, RuntimeBuild, TargetSpec, Toolchain},
-        requests::*,
-    };
+    use hirsel_driver::native;
+    use hirsel_driver::requests::*;
+    use hirsel_native::OptLevel;
+    use hirsel_native::RuntimeBuild;
+    use hirsel_native::TargetSpec;
+    use hirsel_native::Toolchain;
     use std::sync::Arc;
     let dir_scratch = tempfile::Builder::new()
         .prefix(&format!("hirsel-json-{label}-"))
@@ -89,11 +92,11 @@ fn native_measurement(source: &str, label: &str) -> String {
             &path,
             CompileOperation::NativeBuild(NativeRequest {
                 options: {
-                    let mut options = native::BuildProfile::Default
+                    let mut options = hirsel_native::BuildProfile::Default
                         .options(
-                            native::Backend::Llvm,
+                            hirsel_native::Backend::Llvm,
                             target,
-                            native::Validation::EveryStage,
+                            hirsel_native::Validation::EveryStage,
                         )
                         .unwrap();
                     options.opt = OptLevel::Speed;
@@ -245,18 +248,21 @@ fn execute_native_source(name: &str, source: &str) {
             }]
         });
         std::fs::write(path.with_extension("hir.json"), manifest.to_string()).unwrap();
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let executable = dir.join(backend.name());
             native::build_path_native_backend_with_validation(
                 &path,
                 &executable,
-                native::TargetSpec::x86_64_unknown_linux_gnu(),
-                native::BuildProfile::Debug,
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                hirsel_native::BuildProfile::Debug,
                 backend,
                 None,
                 false,
                 hirsel_driver::session::Policy::default(),
-                native::Validation::EveryStage,
+                hirsel_native::Validation::EveryStage,
             )
             .unwrap()
             .unwrap();

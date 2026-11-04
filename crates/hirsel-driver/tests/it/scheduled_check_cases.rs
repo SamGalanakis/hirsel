@@ -2,6 +2,7 @@
 //! fixtures, producer grants and scalar equality assertions.
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::MemStore, *};
+use hirsel_front_phases::*;
 use std::sync::Arc;
 
 #[test]

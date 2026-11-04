@@ -1,6 +1,7 @@
 use crate::source_std;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn execute(source: &str, simulation: SimulationConfig) -> hirsel_engine::ObservedExecution {
     let mut engine = source_std::engine();

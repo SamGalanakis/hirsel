@@ -5,16 +5,24 @@
 //! The tests marked `ignore` link for AArch64 and run under qemu or run many
 //! configurations; `tools/check-native.sh` runs them.
 use crate::source_std;
-use hirsel_driver::compiler_adapters;
-use hirsel_driver::native::{
-    Configuration, Engine, Observation, Outcome, Partition, StageName, TargetSpec, Toolchain,
-    differential, full_matrix, smoke_matrix, topology_matrix,
-};
 use hirsel_engine::{
     DefPath, DefinitionQueries, QueryEngine, RunConfiguration, SimulationConfig,
     ValidatedNativeInput, default_context, default_environment, entry_path, run_observed_snapshot,
     source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::Observation;
+use hirsel_native::Partition;
+use hirsel_native::StageName;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
+use hirsel_native_testing::Configuration;
+use hirsel_native_testing::Engine;
+use hirsel_native_testing::Outcome;
+use hirsel_native_testing::differential;
+use hirsel_native_testing::full_matrix;
+use hirsel_native_testing::smoke_matrix;
+use hirsel_native_testing::topology_matrix;
 use std::path::PathBuf;
 
 pub(super) fn admitted_native_store(
@@ -37,7 +45,7 @@ struct Checked {
 fn checked_in(engine: &mut QueryEngine, source: &str) -> Checked {
     let context = default_context();
     if source.contains("std@1/") {
-        let mut loaded = hirsel_driver::load_program_source(
+        let mut loaded = hirsel_front_phases::load_program_source(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/std_numeric.hir"),
             Some(source),
@@ -90,7 +98,7 @@ fn scratch(name: &str) -> PathBuf {
 /// The runtime archives, built once per test binary.
 fn toolchain(configurations: &[Configuration]) -> Toolchain {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("native-runtime");
-    Toolchain::for_matrix(&dir, configurations).unwrap()
+    hirsel_native_testing::toolchain_for_matrix(&dir, configurations).unwrap()
 }
 
 /// Every configuration agrees with the reference; returns the reference.
@@ -128,7 +136,9 @@ fn agree(name: &str, source: &str, configurations: &[Configuration]) -> Observat
 #[test]
 fn native_glue_preserves_linked_value_metadata_on_every_target() {
     use hirsel_core_contract::handle_scan::{VALUE, VALUE_FIELDS, VALUE_VARIANT, WORDS};
-    use hirsel_driver::native::{self, Backend, Options};
+    use hirsel_driver::native;
+    use hirsel_native::Backend;
+    use hirsel_native::Options;
     use object::{Object, ObjectSection, ObjectSymbol};
     with_compiler_stack(|| {
         let source = r#"type P { a: bool, b: u64 }
@@ -145,7 +155,8 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
 "#;
         let checked = checked(source);
         for target in TargetSpec::executed() {
-            let ready = native::build(&checked.validated, &Options::new(target)).unwrap();
+            let ready =
+                hirsel_native_batch::build(&checked.validated, &Options::new(target)).unwrap();
             let registry = hirsel_lir::descriptor_registry::DescriptorRegistry::new(
                 &ready.table,
                 &ready.finalizers,
@@ -154,7 +165,7 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
                 hirsel_lir::rt_program::descriptors(&ready.table, &registry.layouts).unwrap();
             let mut kinds = std::collections::BTreeSet::new();
             for backend in [Backend::Llvm, Backend::Cranelift] {
-                let emitted = native::emit_glue(&ready, backend, &registry).unwrap();
+                let emitted = hirsel_native::emit_glue(&ready, backend, &registry).unwrap();
                 let object = object::File::parse(emitted.bytes.as_slice()).unwrap();
                 for descriptor in &descriptors {
                     let words = descriptor.scan.linked(|id| registry.index(id)).unwrap();
@@ -298,7 +309,9 @@ const SERVE: &str = "fn serve(n: u64) -> Never {\n  let _ = 10u64 / n\n  serve(n
 /// restarts, so this control checks the executable's own observation.
 #[test]
 fn a_diverging_self_tail_call_loops_a_million_times_within_the_stack() {
-    use hirsel_driver::native::{Sites, launch, observe};
+    use hirsel_native::Sites;
+    use hirsel_native::launch;
+    use hirsel_native::observe;
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine.sources.add("serve.hir", SERVE.into()).unwrap();
@@ -357,7 +370,12 @@ fn singleton_whole_and_twenty_random_partitions_observe_the_same() {
     assert!(assignments.len() > 10, "{assignments:?}");
 }
 
-use hirsel_driver::native::{OptLevel, Options, build, build_program, emit, link};
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::emit;
+use hirsel_native::link;
+use hirsel_native_batch::build;
+use hirsel_native_batch::build_program;
 
 fn x86() -> TargetSpec {
     TargetSpec::x86_64_unknown_linux_gnu()
@@ -370,7 +388,7 @@ fn x86() -> TargetSpec {
 fn the_ready_validator_refuses_what_a_pass_let_through() {
     with_compiler_stack(|| {
         let program = checked(HELLO);
-        let adapted = hirsel_driver::native::program(&program.validated);
+        let adapted = hirsel_native::program(&program.validated);
         let skeleton =
             hirsel_core_contract::Manifest::skeleton(adapted.operations.values().cloned());
         let Err(error) = build_program(&adapted, skeleton, &Options::new(x86())) else {
@@ -402,8 +420,8 @@ fn a_native_gap_is_a_tool_outcome_not_a_source_verdict() {
         );
         assert_eq!(mutex.reference.exit_code, Some(0));
         assert!(build(&mutex.validated, &Options::new(x86())).is_ok());
-        let adapted = hirsel_driver::native::program(&grant.validated);
-        let mut manifest = hirsel_driver::native::manifest(grant.validated.snapshot()).unwrap();
+        let adapted = hirsel_native::program(&grant.validated);
+        let mut manifest = hirsel_native::manifest(grant.validated.snapshot()).unwrap();
         let mut unavailable = manifest
             .rows()
             .find(|row| row.id.definition == DefPath::core("io.net"))
@@ -444,7 +462,7 @@ fn every_runtime_primitive_row_matches_its_export() {
     use hirsel_rt_operations::{AbiExport, HIRSEL_ABI_EXPORTS, Physical};
     with_compiler_stack(|| {
         let program = checked(HELLO);
-        let manifest = hirsel_driver::native::manifest(program.validated.snapshot()).unwrap();
+        let manifest = hirsel_native::manifest(program.validated.snapshot()).unwrap();
         let inventory = hirsel_engine::registry::BuiltinRegistry::new().operation_inventory();
         manifest
             .check_coverage(
@@ -615,7 +633,7 @@ fn every_runtime_primitive_row_matches_its_export() {
         );
         for target in [x86(), TargetSpec::aarch64_unknown_linux_gnu()] {
             let ready = build(&calls.validated, &Options::new(target)).unwrap();
-            hirsel_driver::native::check_runtime_calls(&ready).unwrap();
+            hirsel_native::check_runtime_calls(&ready).unwrap();
         }
     });
 }
@@ -709,7 +727,10 @@ const SMALL_HELPER: &str = "fn step(h: u64, value: u64) -> u64 {\n  let wide: u1
 /// nothing is copied and the caller imports it (the control).
 #[test]
 fn a_small_callee_inlines_across_singleton_objects_at_o3() {
-    use hirsel_driver::native::{OptLevel, Options, build, partition_objects};
+    use hirsel_native::OptLevel;
+    use hirsel_native::Options;
+    use hirsel_native::partition_objects;
+    use hirsel_native_batch::build;
     let observed = agree("small-helper", SMALL_HELPER, &topology_matrix(2));
     assert_eq!(observed.output, b"mixed\n");
     with_compiler_stack(|| {
@@ -785,10 +806,15 @@ fn an_index_failure_site_is_the_index_expression_in_every_engine() {
 /// own site tables.
 #[test]
 fn requested_ready_views_agree_with_the_reference_under_the_smoke_matrix() {
-    use hirsel_driver::native::{BuildOptions, NativeError, Options};
-    use hirsel_driver::requests::{
-        CompileOperation, CompileResult, CompilerRequests, NativeOutput, NativeReady, NativeRequest,
-    };
+    use hirsel_driver::requests::CompileOperation;
+    use hirsel_driver::requests::CompileResult;
+    use hirsel_driver::requests::CompilerRequests;
+    use hirsel_driver::requests::NativeOutput;
+    use hirsel_driver::requests::NativeReady;
+    use hirsel_driver::requests::NativeRequest;
+    use hirsel_native::BuildOptions;
+    use hirsel_native::NativeError;
+    use hirsel_native::Options;
     const PRINT: &str = "pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
   let _ = out.print(io.stdout(rt)?, \"hi\\n\")
   Ok(())
@@ -811,7 +837,7 @@ fn requested_ready_views_agree_with_the_reference_under_the_smoke_matrix() {
             let path = dir.join("main.hir");
             std::fs::write(&path, source).unwrap();
             std::fs::write(path.with_extension("hir.json"), SIDECAR).unwrap();
-            let mut loaded = hirsel_driver::load_program_source(&path, None).unwrap();
+            let mut loaded = hirsel_front_phases::load_program_source(&path, None).unwrap();
             loaded.check_for_execution().unwrap();
             let entry = loaded.entry.clone();
             let execution = run_observed_snapshot(
@@ -825,7 +851,7 @@ fn requested_ready_views_agree_with_the_reference_under_the_smoke_matrix() {
             )
             .unwrap();
             let reference = Observation::of_reference(execution.observation.as_ref().unwrap());
-            let compiler = hirsel_driver::COMPILER;
+            let compiler = hirsel_front_phases::COMPILER;
             let mut requests =
                 CompilerRequests::for_host(compiler.clone(), compiler.configuration())
                     .with_toolchain(std::sync::Arc::new(tools.clone()));
@@ -847,8 +873,8 @@ fn requested_ready_views_agree_with_the_reference_under_the_smoke_matrix() {
                                 output: NativeOutput::Ready,
                                 options: BuildOptions::new(
                                     options.clone(),
-                                    hirsel_driver::native::Backend::Llvm,
-                                    hirsel_driver::native::OptLevel::Default,
+                                    hirsel_native::Backend::Llvm,
+                                    hirsel_native::OptLevel::Default,
                                 ),
                                 run: None,
                                 fuel: false,
@@ -862,7 +888,7 @@ fn requested_ready_views_agree_with_the_reference_under_the_smoke_matrix() {
                         _ => Err(failed("another operation".into())),
                     }
                 };
-            let outcomes = hirsel_driver::native::differential_ready(
+            let outcomes = hirsel_native_testing::differential_ready(
                 &mut ready,
                 &entry,
                 &reference,
@@ -919,7 +945,10 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
 
 #[test]
 fn native_main_records_closed_stdout_and_broken_pipe_as_output_errors() {
-    use hirsel_driver::native::{OptLevel, Options, build, link};
+    use hirsel_native::OptLevel;
+    use hirsel_native::Options;
+    use hirsel_native::link;
+    use hirsel_native_batch::build;
     use std::os::unix::process::CommandExt;
     use std::process::Command;
     with_compiler_stack(|| {
@@ -1076,8 +1105,8 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
     // the executable compares observable flat-record construction on both.
     with_compiler_stack(|| {
         let checked = checked(source);
-        let count = |options: &hirsel_driver::native::Options| {
-            let ready = hirsel_driver::native::build(&checked.validated, options).unwrap();
+        let count = |options: &hirsel_native::Options| {
+            let ready = hirsel_native_batch::build(&checked.validated, options).unwrap();
             ready
                 .units
                 .iter()
@@ -1105,7 +1134,13 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
 
 #[test]
 fn generated_main_binds_independent_seeds_and_refuses_mismatch_before_entry() {
-    use hirsel_driver::native::{LaunchInputs, OptLevel, Options, Tape, build, launch_with, link};
+    use hirsel_native::LaunchInputs;
+    use hirsel_native::OptLevel;
+    use hirsel_native::Options;
+    use hirsel_native::Tape;
+    use hirsel_native::launch_with;
+    use hirsel_native::link;
+    use hirsel_native_batch::build;
     with_compiler_stack(|| {
         let configs = full_matrix();
         let tools = toolchain(&configs);
@@ -1224,7 +1259,7 @@ fn zero_parameter_entries_agree_without_host_roots() {
         options: matrix[0].options.clone(),
         engine: Engine::Cranelift {
             partition: Partition::Whole,
-            runtime: hirsel_driver::native::Runtime::Diagnostic,
+            runtime: hirsel_native_testing::Runtime::Diagnostic,
         },
     });
     for (name, source, exit) in [
@@ -1353,7 +1388,11 @@ fn root_free_native_entry_ignores_ambient_directory_and_argument_inputs() {
 /// must reject a mismatched status before accepting the record's semantic observation.
 #[test]
 fn agreement_rejects_exit_codes_that_disagree_with_the_run_outcome() {
-    use hirsel_driver::native::{Launched, Options, Sites, build, observe};
+    use hirsel_native::Launched;
+    use hirsel_native::Options;
+    use hirsel_native::Sites;
+    use hirsel_native::observe;
+    use hirsel_native_batch::build;
     use hirsel_run_schema::{BudgetKind, Returned, RunOutcome, Site, Wait};
     with_compiler_stack(|| {
         let input = checked("pub fn main() -> Result[(), ()] { Ok(()) }");
@@ -1444,10 +1483,13 @@ fn agreement_rejects_exit_codes_that_disagree_with_the_run_outcome() {
 /// Include root adapters, dictionary function references and ordinary source inlining.
 #[test]
 fn template_owners_and_objects_are_identical_at_one_and_eight_workers() {
-    use hirsel_driver::native::{self, Backend, OptLevel, Options};
+    use hirsel_driver::native;
     use hirsel_intern::jobs::Jobs;
     use hirsel_lir::emission::{function_thunk_name, symbol_name};
     use hirsel_lir::ir::UnitOrigin;
+    use hirsel_native::Backend;
+    use hirsel_native::OptLevel;
+    use hirsel_native::Options;
     with_compiler_stack(|| {
         for (name, source) in [
             ("generic", GENERIC),
@@ -1459,7 +1501,8 @@ fn template_owners_and_objects_are_identical_at_one_and_eight_workers() {
             ("finalizer", FINALIZER),
         ] {
             let checked = checked(source);
-            let ready = native::build(&checked.validated, &Options::new(x86())).unwrap();
+            let ready =
+                hirsel_native_batch::build(&checked.validated, &Options::new(x86())).unwrap();
             let registry = hirsel_lir::descriptor_registry::DescriptorRegistry::new(
                 &ready.table,
                 &ready.finalizers,
@@ -1475,7 +1518,7 @@ fn template_owners_and_objects_are_identical_at_one_and_eight_workers() {
                 (Backend::Cranelift, OptLevel::None),
             ] {
                 let emit = |jobs| {
-                    native::partition_backend_objects_with_jobs(
+                    hirsel_native::partition_backend_objects_with_jobs(
                         &ready,
                         backend,
                         opt,
@@ -1525,12 +1568,14 @@ fn template_owners_and_objects_are_identical_at_one_and_eight_workers() {
                 }
                 let dir = scratch(&format!("owners-{name}-{backend:?}-{opt:?}"));
                 let exe =
-                    native::link_objects(&ready, &checked.entry, &parallel, &tools, &dir).unwrap();
-                let launched = native::launch(&exe, &ready.target, &tools, &dir, true).unwrap();
-                let actual = native::observe(
+                    hirsel_native::link_objects(&ready, &checked.entry, &parallel, &tools, &dir)
+                        .unwrap();
+                let launched =
+                    hirsel_native::launch(&exe, &ready.target, &tools, &dir, true).unwrap();
+                let actual = hirsel_native::observe(
                     &launched,
                     &ready,
-                    &native::Sites::new(checked.validated.snapshot()),
+                    &hirsel_native::Sites::new(checked.validated.snapshot()),
                 )
                 .unwrap();
                 assert_eq!(actual, checked.reference, "{name}: {backend:?} {opt:?}");
@@ -1542,18 +1587,21 @@ fn template_owners_and_objects_are_identical_at_one_and_eight_workers() {
 /// Historical migration link failures must keep their callable owner objects,
 /// including when cached summaries replace Ready bodies on the second build.
 fn original_callable_values_retain_their_thunk_owners_on_both_backends(path: &str) {
-    use hirsel_driver::native::{self, Backend, OptLevel, Options};
+    use hirsel_driver::native;
     use hirsel_engine::store::{MemStore, ResultStore};
     use hirsel_lir::emission::{function_thunk_name, symbol_name};
+    use hirsel_native::Backend;
+    use hirsel_native::OptLevel;
+    use hirsel_native::Options;
     use std::sync::Arc;
     with_compiler_stack(|| {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let store: Arc<dyn ResultStore> = admitted_native_store(Arc::new(MemStore::default()));
-        let mut config = hirsel_driver::COMPILER.configuration();
+        let mut config = hirsel_front_phases::COMPILER.configuration();
         config.store = store.clone();
         config.verify = hirsel_engine::Verify::On;
         config.verify_store = hirsel_engine::store::VerifyStore::Off;
-        let mut loaded = hirsel_driver::COMPILER
+        let mut loaded = hirsel_front_phases::COMPILER
             .with_config(config)
             .with_owned_engines()
             .load_program(&root.join(path))
@@ -1651,8 +1699,12 @@ fn original_callable_owners_std_container() {
 
 #[test]
 fn copied_callee_edits_invalidate_warm_owner_objects_at_one_two_eight_workers() {
-    use hirsel_driver::native::{self, Backend, OptLevel, Options, Validation};
+    use hirsel_driver::native;
     use hirsel_engine::store::{MemStore, ResultStore, VerifyStore};
+    use hirsel_native::Backend;
+    use hirsel_native::OptLevel;
+    use hirsel_native::Options;
+    use hirsel_native::Validation;
     use std::sync::Arc;
     with_compiler_stack(|| {
         // Keep the caller's text and positions fixed. Only its copied callee changes.
@@ -1690,7 +1742,7 @@ fn copied_callee_edits_invalidate_warm_owner_objects_at_one_two_eight_workers() 
                         verification,
                         |ready, artifacts| {
                             link.then(|| {
-                                let exe = native::link_objects(
+                                let exe = hirsel_native::link_objects(
                                     ready,
                                     &checked.entry,
                                     artifacts,
@@ -1700,12 +1752,12 @@ fn copied_callee_edits_invalidate_warm_owner_objects_at_one_two_eight_workers() 
                                 .unwrap();
                                 let bytes = std::fs::read(&exe).unwrap();
                                 let launched =
-                                    native::launch(&exe, &ready.target, &tools, &dir, true)
+                                    hirsel_native::launch(&exe, &ready.target, &tools, &dir, true)
                                         .unwrap();
-                                let actual = native::observe(
+                                let actual = hirsel_native::observe(
                                     &launched,
                                     ready,
-                                    &native::Sites::new(checked.validated.snapshot()),
+                                    &hirsel_native::Sites::new(checked.validated.snapshot()),
                                 )
                                 .unwrap();
                                 assert_eq!(actual, edited.reference);
@@ -1753,8 +1805,11 @@ fn copied_callee_edits_invalidate_warm_owner_objects_at_one_two_eight_workers() 
 
 #[test]
 fn intrinsic_static_objects_survive_unrelated_layouts_and_import_replay() {
-    use hirsel_driver::native::{self, Backend, OptLevel, Options};
+    use hirsel_driver::native;
     use hirsel_engine::store::{MemStore, ResultStore};
+    use hirsel_native::Backend;
+    use hirsel_native::OptLevel;
+    use hirsel_native::Options;
     use std::sync::Arc;
     with_compiler_stack(|| {
         let source = "type Tree = Leaf | Branch(left: box Tree, right: box Tree)\nfn leaf()->box Tree { box Leaf() }\nfn empty()->List[(u64,u64)] { [] }\npub fn main()->Result[(),()] { let xs=empty(); let tree=leaf(); failure.check(list.len(xs)==0u64, Arithmetic()); Ok(()) }\n";
@@ -1846,8 +1901,14 @@ fn generated_failure_sources() -> Vec<(&'static str, String, &'static str, u32, 
 
 #[test]
 fn generated_body_failure_uses_generated_source_in_every_engine() {
-    use hirsel_driver::native::{self, Backend, Fixture, OptLevel, Runtime, Sites, Tape};
+    use hirsel_driver::native;
     use hirsel_engine::store::{MemStore, ResultStore, VerifyStore};
+    use hirsel_native::Backend;
+    use hirsel_native::Fixture;
+    use hirsel_native::OptLevel;
+    use hirsel_native::Sites;
+    use hirsel_native::Tape;
+    use hirsel_native_testing::Runtime;
     use std::{cell::RefCell, sync::Arc};
 
     with_compiler_stack(|| {
@@ -1856,7 +1917,7 @@ fn generated_body_failure_uses_generated_source_in_every_engine() {
             options: configurations[0].options.clone(),
             engine: Engine::Cranelift {
                 partition: Partition::Whole,
-                runtime: hirsel_driver::native::Runtime::Diagnostic,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         });
         let tools = toolchain(&configurations);
@@ -1874,7 +1935,7 @@ fn generated_body_failure_uses_generated_source_in_every_engine() {
             );
             assert!(failure.file.starts_with("<generated:"), "{failure:?}");
             let declarations =
-                native::queries::declarations::NativeDeclarations::from_front(facts.clone())
+                hirsel_native_cache::declarations::NativeDeclarations::from_front(facts.clone())
                     .unwrap();
             let sites = Sites::from_anchors(
                 &facts.roots.sources,
@@ -1909,9 +1970,13 @@ fn generated_body_failure_uses_generated_source_in_every_engine() {
                                 .find(|c| matches!(c.engine, Engine::Heap { campaign: true }))
                                 .unwrap();
                             let result = view.with_execution_context(root, readies, |program| {
-                                native::heap_campaign(program, &facts.run.entry, &sites)
-                                    .map(|run| run.observation)
-                                    .map_err(|error| error.to_string())
+                                hirsel_native_testing::heap_campaign(
+                                    program,
+                                    &facts.run.entry,
+                                    &sites,
+                                )
+                                .map(|run| run.observation)
+                                .map_err(|error| error.to_string())
                             });
                             observations
                                 .borrow_mut()
@@ -1927,7 +1992,7 @@ fn generated_body_failure_uses_generated_source_in_every_engine() {
                             };
                             let toolchain = tools.with_runtime(runtime.build());
                             let result = (|| {
-                                let runnable = native::link_fixture_runnable(
+                                let runnable = hirsel_native::link_fixture_runnable(
                                     program,
                                     &facts.run.entry,
                                     objects,
@@ -1935,7 +2000,7 @@ fn generated_body_failure_uses_generated_source_in_every_engine() {
                                     &dir,
                                     &fixture,
                                 )?;
-                                let launched = native::launch_fixture(
+                                let launched = hirsel_native::launch_fixture(
                                     &runnable,
                                     &program.target,
                                     &toolchain,
@@ -1947,7 +2012,7 @@ fn generated_body_failure_uses_generated_source_in_every_engine() {
                                     },
                                     &fixture,
                                 )?;
-                                native::observe(&launched, program, &sites)
+                                hirsel_native::observe(&launched, program, &sites)
                             })()
                             .map_err(|error| error.to_string());
                             observations
@@ -1981,7 +2046,8 @@ fn generated_request_products(
     std::sync::Arc<hirsel_engine::FrontNativeProducts>,
     Observation,
 ) {
-    use hirsel_driver::{COMPILER, requests::*};
+    use hirsel_driver::requests::*;
+    use hirsel_front_phases::COMPILER;
     let directory = tempfile::tempdir().unwrap();
     let manifest = directory.path().join("hirsel.json");
     std::fs::write(directory.path().join("native.hir"), source).unwrap();
@@ -2022,8 +2088,11 @@ fn generated_request_products(
 
 #[test]
 fn generated_body_sites_and_objects_do_not_depend_on_id_assignment() {
-    use hirsel_driver::native::{self, Backend, OptLevel, Validation};
+    use hirsel_driver::native;
     use hirsel_engine::store::{MemStore, ResultStore};
+    use hirsel_native::Backend;
+    use hirsel_native::OptLevel;
+    use hirsel_native::Validation;
     use std::sync::Arc;
     let Some(runs) = hirsel_intern::under_salts(
         "native::generated_body_sites_and_objects_do_not_depend_on_id_assignment",
@@ -2037,7 +2106,7 @@ fn generated_body_sites_and_objects_do_not_depend_on_id_assignment() {
                     let (facts, reference) = generated_request_products(&source, store.clone());
                     transcript.push_str(&format!("{reference:?}\n"));
                     for backend in [Backend::Cranelift, Backend::Llvm] {
-                        let mut options = native::Options::new(x86());
+                        let mut options = hirsel_native::Options::new(x86());
                         options.validation = Validation::EveryStage;
                         let (ready, ()) = crate::native_object_products_19::compile_front(
                             facts.clone(),
@@ -2159,8 +2228,11 @@ fn generated_body_origins_follow_item_moves_without_stale_source_names() {
 
 #[test]
 fn generated_body_objects_rebind_debug_and_failures_after_source_moves() {
-    use hirsel_driver::native::{self, Backend, OptLevel, Validation};
+    use hirsel_driver::native;
     use hirsel_engine::store::{MemStore, ResultStore, VerifyStore};
+    use hirsel_native::Backend;
+    use hirsel_native::OptLevel;
+    use hirsel_native::Validation;
     use std::sync::Arc;
     with_compiler_stack(|| {
         let source = generated_failure_sources().remove(0).1;
@@ -2190,7 +2262,8 @@ fn generated_body_objects_rebind_debug_and_failures_after_source_moves() {
             checked_engine(engine)
         };
         let matrix = smoke_matrix();
-        let tools = toolchain(&matrix).with_runtime(native::Runtime::Diagnostic.build());
+        let tools =
+            toolchain(&matrix).with_runtime(hirsel_native_testing::Runtime::Diagnostic.build());
         let dwarf = std::path::PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap())
             .join("bin/llvm-dwarfdump");
         for (backend, opt) in [
@@ -2214,7 +2287,7 @@ fn generated_body_objects_rebind_debug_and_failures_after_source_moves() {
                                validation,
                                jobs,
                                link: bool| {
-                    let mut options = native::Options::new(x86());
+                    let mut options = hirsel_native::Options::new(x86());
                     options.validation = validation;
                     let verification = match validation {
                         Validation::Ready => VerifyStore::Off,
@@ -2237,16 +2310,22 @@ fn generated_body_objects_rebind_debug_and_failures_after_source_moves() {
                             let dir = scratch(&format!(
                                 "generated-debug-{backend:?}-{version}-{jobs}-{validation:?}"
                             ));
-                            let exe =
-                                native::link_objects(ready, &warm.entry, objects, &tools, &dir)
-                                    .unwrap();
+                            let exe = hirsel_native::link_objects(
+                                ready,
+                                &warm.entry,
+                                objects,
+                                &tools,
+                                &dir,
+                            )
+                            .unwrap();
                             let launched =
-                                native::launch(&exe, &ready.target, &tools, &dir, true).unwrap();
+                                hirsel_native::launch(&exe, &ready.target, &tools, &dir, true)
+                                    .unwrap();
                             assert_eq!(launched.exit, Some(2));
-                            let actual = native::observe(
+                            let actual = hirsel_native::observe(
                                 &launched,
                                 ready,
-                                &native::Sites::new(warm.validated.snapshot()),
+                                &hirsel_native::Sites::new(warm.validated.snapshot()),
                             )
                             .unwrap();
                             assert_eq!(actual, warm.reference, "{backend:?}, version={version}");
@@ -2315,7 +2394,9 @@ fn generated_body_objects_rebind_debug_and_failures_after_source_moves() {
 
 #[test]
 fn generated_body_debug_preserves_nested_body_sites() {
-    use hirsel_driver::native::{self, Backend, OptLevel};
+    use hirsel_driver::native;
+    use hirsel_native::Backend;
+    use hirsel_native::OptLevel;
     with_compiler_stack(|| {
         for (name, source, _, line, column) in generated_failure_sources().into_iter().skip(2) {
             let store: std::sync::Arc<dyn hirsel_engine::store::ResultStore> =
@@ -2331,7 +2412,7 @@ fn generated_body_debug_preserves_nested_body_sites() {
                     std::slice::from_ref(&facts.run.entry),
                     backend,
                     OptLevel::None,
-                    native::Options::new(x86()),
+                    hirsel_native::Options::new(x86()),
                     true,
                     hirsel_intern::jobs::Jobs::new(2),
                     hirsel_engine::store::VerifyStore::Off,
@@ -2405,7 +2486,7 @@ pub fn main() -> Result[(), ()] {
         options: configurations[0].options.clone(),
         engine: Engine::Cranelift {
             partition: Partition::Whole,
-            runtime: hirsel_driver::native::Runtime::Diagnostic,
+            runtime: hirsel_native_testing::Runtime::Diagnostic,
         },
     });
     assert_eq!(configurations.len(), 3);
@@ -2445,7 +2526,13 @@ pub fn main() -> Result[(), ()] {
 /// a mismatched binding before entry or a missing completion as divergence.
 #[test]
 fn native_logical_depth_recording_replays_and_rejects_corruption() {
-    use hirsel_driver::native::{self, Backend, Observed, OptLevel, Options, Sites, Tape};
+    use hirsel_driver::native;
+    use hirsel_native::Backend;
+    use hirsel_native::Observed;
+    use hirsel_native::OptLevel;
+    use hirsel_native::Options;
+    use hirsel_native::Sites;
+    use hirsel_native::Tape;
     with_compiler_stack(|| {
         let checked = checked(
             r#"
@@ -2461,13 +2548,13 @@ pub fn main(rt:Io)->Result[(),GrantError] {
         assert_eq!(checked.reference.output, b"entered\n");
         assert_eq!(checked.reference.failures.len(), 1);
         assert_eq!(checked.reference.failures[0].rule, "LANG-10");
-        let tools = toolchain(&native::trace_roots_matrix());
-        let ready = native::build(&checked.validated, &Options::new(x86())).unwrap();
+        let tools = toolchain(&hirsel_native_testing::trace_roots_matrix());
+        let ready = hirsel_native_batch::build(&checked.validated, &Options::new(x86())).unwrap();
         let sites = Sites::new(checked.validated.snapshot());
         for backend in [Backend::Llvm, Backend::Cranelift] {
             let dir = scratch(&format!("logical-depth-recording-{backend:?}"));
             let tape = dir.join("depth.tape");
-            let objects = native::emit_backend_objects(
+            let objects = hirsel_native::emit_backend_objects(
                 &ready,
                 backend,
                 OptLevel::None,
@@ -2477,9 +2564,9 @@ pub fn main(rt:Io)->Result[(),GrantError] {
             )
             .unwrap();
             let runnable =
-                native::link_runnable(&ready, &checked.entry, &objects, &tools, &dir, None)
+                hirsel_native::link_runnable(&ready, &checked.entry, &objects, &tools, &dir, None)
                     .unwrap();
-            let recorded = native::launch_runnable(
+            let recorded = hirsel_native::launch_runnable(
                 &runnable,
                 &ready.target,
                 &tools,
@@ -2492,10 +2579,10 @@ pub fn main(rt:Io)->Result[(),GrantError] {
             )
             .unwrap();
             assert_eq!(
-                native::observe(&recorded, &ready, &sites).unwrap(),
+                hirsel_native::observe(&recorded, &ready, &sites).unwrap(),
                 checked.reference
             );
-            let replay = native::launch_runnable(
+            let replay = hirsel_native::launch_runnable(
                 &runnable,
                 &ready.target,
                 &tools,
@@ -2505,7 +2592,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
             )
             .unwrap();
             assert_eq!(
-                native::observe(&replay, &ready, &sites).unwrap(),
+                hirsel_native::observe(&replay, &ready, &sites).unwrap(),
                 checked.reference
             );
             let recording = hirsel_rt::launch::parse_recording(
@@ -2516,7 +2603,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
             let mut forged = recording.clone();
             forged.run_identity[0] ^= 1;
             std::fs::write(&tape, hirsel_rt::launch::render_recording(&forged).unwrap()).unwrap();
-            let refused = native::launch_runnable(
+            let refused = hirsel_native::launch_runnable(
                 &runnable,
                 &ready.target,
                 &tools,
@@ -2528,7 +2615,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
             assert!(refused.stdout.is_empty(), "entry ran before refusal");
             assert!(
                 matches!(
-                    native::observe_run(&refused, &ready, &sites).unwrap(),
+                    hirsel_native::observe_run(&refused, &ready, &sites).unwrap(),
                     Observed::Refused(_)
                 ),
                 "{refused:?}"
@@ -2536,7 +2623,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
             let mut forged = recording;
             forged.events.clear();
             std::fs::write(&tape, hirsel_rt::launch::render_recording(&forged).unwrap()).unwrap();
-            let diverged = native::launch_runnable(
+            let diverged = hirsel_native::launch_runnable(
                 &runnable,
                 &ready.target,
                 &tools,
@@ -2547,7 +2634,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
             .unwrap();
             assert!(
                 matches!(
-                    native::observe_run(&diverged, &ready, &sites).unwrap(),
+                    hirsel_native::observe_run(&diverged, &ready, &sites).unwrap(),
                     Observed::Stopped(hirsel_run_schema::RunOutcome::Diverged(_))
                 ),
                 "{diverged:?}"

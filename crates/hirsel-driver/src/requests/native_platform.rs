@@ -1,21 +1,22 @@
 //! Capture compiler-selected platform inputs and emission policy before native
 //! root selection. This layer uses the ordinary native library resolver and
 //! captured platform producer; it performs no source or native compiler work.
-use super::{
-    NativeRequest,
-    native_bootstrap::NativePlan,
-    native_link::{FrozenPlatform, LinkInputs},
-};
-use crate::native::{
-    self, NativeError, StageName, Toolchain,
-    object_queries::{
-        capture::{CaptureLimits, FrozenLinkKit, FrozenLinker},
-        platform::{CapturedPlatform, PlatformCaptureInputs, RuntimeSelection},
-        runtime::RuntimeLimits,
-    },
-    queries::compilation_tasks::CompilationOutput,
-};
+use super::NativeRequest;
+use super::native_bootstrap::NativePlan;
+use super::native_link::FrozenPlatform;
+use super::native_link::LinkInputs;
 use hirsel_engine::{LinkInput, runtime::MemoryReservation, store::ResultStore};
+use hirsel_native::NativeError;
+use hirsel_native::StageName;
+use hirsel_native::Toolchain;
+use hirsel_native::object_queries::capture::CaptureLimits;
+use hirsel_native::object_queries::capture::FrozenLinkKit;
+use hirsel_native::object_queries::capture::FrozenLinker;
+use hirsel_native::object_queries::platform::CapturedPlatform;
+use hirsel_native::object_queries::platform::PlatformCaptureInputs;
+use hirsel_native::object_queries::platform::RuntimeSelection;
+use hirsel_native::object_queries::runtime::RuntimeLimits;
+use hirsel_native_queries::compilation_tasks::CompilationOutput;
 use hirsel_syntax::{ContentHash, DefPath};
 use std::{path::PathBuf, sync::Arc};
 
@@ -53,14 +54,14 @@ pub(super) enum NativePurpose {
 pub(super) fn profile_options(request: &NativeRequest) -> Result<ContentHash, NativeError> {
     let options = &request.options;
     let opt = match options.opt {
-        native::OptLevel::None => 0u8,
-        native::OptLevel::Default => 1,
-        native::OptLevel::Speed => 2,
+        hirsel_native::OptLevel::None => 0u8,
+        hirsel_native::OptLevel::Default => 1,
+        hirsel_native::OptLevel::Speed => 2,
     };
     let partition = match options.partition {
-        native::Partition::Whole => (0u8, 0u64),
-        native::Partition::Singleton => (1, 0),
-        native::Partition::Random(seed) => (2, seed),
+        hirsel_native::Partition::Whole => (0u8, 0u64),
+        hirsel_native::Partition::Singleton => (1, 0),
+        hirsel_native::Partition::Random(seed) => (2, seed),
     };
     let bytes = serde_json::to_vec(&(
         options.backend.name(),
@@ -77,13 +78,13 @@ pub(super) fn profile_options(request: &NativeRequest) -> Result<ContentHash, Na
 }
 /// The request's object partition as its ordinary Codegen grouping.
 pub(super) fn codegen_partition(
-    partition: native::Partition,
-) -> native::queries::link_tasks::CodegenPartition {
-    use native::queries::link_tasks::CodegenPartition;
+    partition: hirsel_native::Partition,
+) -> hirsel_native_queries::link_tasks::CodegenPartition {
+    use hirsel_native_queries::link_tasks::CodegenPartition;
     match partition {
-        native::Partition::Whole => CodegenPartition::WholeModule,
-        native::Partition::Singleton => CodegenPartition::PerInstance,
-        native::Partition::Random(seed) => CodegenPartition::Seeded(seed),
+        hirsel_native::Partition::Whole => CodegenPartition::WholeModule,
+        hirsel_native::Partition::Singleton => CodegenPartition::PerInstance,
+        hirsel_native::Partition::Random(seed) => CodegenPartition::Seeded(seed),
     }
 }
 pub(super) struct NativePlatformInputs<'a> {
@@ -150,7 +151,9 @@ impl NativePlatformSelection {
                 plan: NativePlan {
                     options: options.passes.clone(),
                     policy: profile_options,
-                    verify_store: if options.passes.validation == native::Validation::EveryStage {
+                    verify_store: if options.passes.validation
+                        == hirsel_native::Validation::EveryStage
+                    {
                         hirsel_engine::store::VerifyStore::Recompute
                     } else {
                         inputs.verify_store
@@ -168,9 +171,9 @@ impl NativePlatformSelection {
                     },
                     output,
                     backends: vec![
-                        crate::native::queries::compilation_tasks::CompilationBackend {
+                        hirsel_native_queries::compilation_tasks::CompilationBackend {
                             backend: options.backend.name().into(),
-                            backend_version: native::backend_version(),
+                            backend_version: hirsel_native::backend_version(),
                             target_features: target.digest(),
                             profile_options,
                             runtime_abi: ContentHash::of_bytes(
@@ -224,9 +227,13 @@ impl NativePlatformSelection {
             .tools
             .archive(&target.triple)
             .ok_or_else(|| failed(format!("no runtime archive for {}", target.triple)))?;
-        let archive =
-            native::runtime_archive(inputs.tools, &target.triple, stripped, options.debug_tables)?;
-        let foreign = native::selected_foreign_inputs(inputs.tools, target, inputs.links)?;
+        let archive = hirsel_native::runtime_archive(
+            inputs.tools,
+            &target.triple,
+            stripped,
+            options.debug_tables,
+        )?;
+        let foreign = hirsel_native::selected_foreign_inputs(inputs.tools, target, inputs.links)?;
         let linker = FrozenLinker::snapshot(store.as_ref(), &policy.linker).map_err(failed)?;
         let kit =
             FrozenLinkKit::snapshot(store.as_ref(), &inputs.tools.kit, target, linker, limits)
@@ -274,7 +281,8 @@ impl NativePlatformSelection {
             plan: NativePlan {
                 options: options.passes.clone(),
                 policy: profile_options,
-                verify_store: if options.passes.validation == native::Validation::EveryStage {
+                verify_store: if options.passes.validation == hirsel_native::Validation::EveryStage
+                {
                     hirsel_engine::store::VerifyStore::Recompute
                 } else {
                     inputs.verify_store
@@ -288,7 +296,7 @@ impl NativePlatformSelection {
                 test_entries: request.test_entries.clone(),
                 output: CompilationOutput::Executable,
                 backends: vec![platform.backend(
-                    native::backend_version(),
+                    hirsel_native::backend_version(),
                     target.digest(),
                     profile_options,
                     ContentHash::of_bytes(&hirsel_lir::RUNTIME_ABI_VERSION.to_le_bytes()),
@@ -302,13 +310,13 @@ impl NativePlatformSelection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::Backend;
+    use hirsel_native::Backend;
 
     /// Every codegen choice reaches the Codegen identity, so no compilation
     /// product is reused across another backend selection.
     #[test]
     fn every_codegen_choice_is_explicit_in_codegen_profile_identity() {
-        let request = |options: native::BuildOptions, fuel| NativeRequest {
+        let request = |options: hirsel_native::BuildOptions, fuel| NativeRequest {
             definition: None,
             test_entries: Vec::new(),
             supplemental_sources: Vec::new(),
@@ -318,11 +326,11 @@ mod tests {
             fuel,
             evidence: None,
         };
-        let base = native::BuildProfile::Default
+        let base = hirsel_native::BuildProfile::Default
             .options(
                 Backend::Llvm,
-                native::TargetSpec::x86_64_unknown_linux_gnu(),
-                native::Validation::EveryStage,
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                hirsel_native::Validation::EveryStage,
             )
             .unwrap();
         let identity = |options, fuel| profile_options(&request(options, fuel)).unwrap();
@@ -330,11 +338,11 @@ mod tests {
         assert_eq!(plain, identity(base.clone(), false));
         let mut variants = vec![identity(base.clone(), true)];
         for change in [
-            |o: &mut native::BuildOptions| o.backend = Backend::Cranelift,
-            |o: &mut native::BuildOptions| o.opt = native::OptLevel::None,
-            |o: &mut native::BuildOptions| o.partition = native::Partition::Singleton,
-            |o: &mut native::BuildOptions| o.partition = native::Partition::Random(7),
-            |o: &mut native::BuildOptions| o.debug_tables = true,
+            |o: &mut hirsel_native::BuildOptions| o.backend = Backend::Cranelift,
+            |o: &mut hirsel_native::BuildOptions| o.opt = hirsel_native::OptLevel::None,
+            |o: &mut hirsel_native::BuildOptions| o.partition = hirsel_native::Partition::Singleton,
+            |o: &mut hirsel_native::BuildOptions| o.partition = hirsel_native::Partition::Random(7),
+            |o: &mut hirsel_native::BuildOptions| o.debug_tables = true,
         ] {
             let mut options = base.clone();
             change(&mut options);
@@ -351,15 +359,15 @@ mod tests {
 
 /// Only chooses the request's backend partition. Compilation's emit-only and
 /// Ready modes never create a Link plan, so calling `link` is a protocol error.
-struct ObjectOutput(native::Partition);
-impl native::queries::link_tasks::NativeLinkExecutor for ObjectOutput {
-    fn codegen_partition(&self) -> native::queries::link_tasks::CodegenPartition {
+struct ObjectOutput(hirsel_native::Partition);
+impl hirsel_native_queries::link_tasks::NativeLinkExecutor for ObjectOutput {
+    fn codegen_partition(&self) -> hirsel_native_queries::link_tasks::CodegenPartition {
         codegen_partition(self.0)
     }
     fn link(
         &self,
-        _: &mut native::queries::roots::RootProducts,
-        _: native::queries::link_tasks::LinkExecution<'_>,
+        _: &mut hirsel_native_queries::roots::RootProducts,
+        _: hirsel_native_queries::link_tasks::LinkExecution<'_>,
     ) -> Result<Vec<u8>, String> {
         Err("object-only compilation cannot execute Link".into())
     }

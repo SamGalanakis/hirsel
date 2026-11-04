@@ -4,11 +4,15 @@
 //! and token across the callback's suspension, so a charge after the resume
 //! still sees the same budget, and its `OutOfSpace` still unwinds to the
 //! same recovery, once.
-use hirsel_driver::native::{self, *};
+use hirsel_driver::native;
+use hirsel_driver::native::*;
 use hirsel_engine::*;
 use hirsel_lir::continuation::{
     ContinuationError, ContinuationPlan, ContinuationPlans, RegionKind, Representation,
 };
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_syntax::ContentHash;
 
 use super::runtime50_continuation::ready;
@@ -153,8 +157,8 @@ fn bounded_plans(
 fn runtime54_bounded_callback_continuation() {
     with_compiler_stack(|| {
         let program = ready(&bounded_source(Cap::Fits, false));
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let (callback, arena, child) = bounded_plans(&plans);
         for plan in [callback, arena, child] {
             assert_eq!(
@@ -194,7 +198,8 @@ fn runtime54_bounded_callback_continuation() {
         let refused = |body: ContentHash, edit: &dyn Fn(&mut ContinuationPlan)| {
             let mut bad = plans.clone();
             edit(bad.plans.get_mut(&body).unwrap());
-            native::continuation::validate(&program, &bad).expect_err("a forged plan was imported")
+            hirsel_native::continuation::validate(&program, &bad)
+                .expect_err("a forged plan was imported")
         };
         let other = child.body;
         let checks: Vec<(&str, ContinuationError, fn(&ContinuationError) -> bool)> = vec![

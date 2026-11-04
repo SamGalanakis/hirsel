@@ -10,7 +10,7 @@ fn taking_a_directory_into_a_borrowed_call_ends_its_open_files_brand() {
         );
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let context = hirsel_engine::default_context();
         let file = engine.sources.add("directory.hir", source).unwrap();
@@ -48,7 +48,7 @@ fn moving_a_directory_ends_file_brands_across_whole_transfers() {
             );
             let mut engine = hirsel_engine::QueryEngine::new(
                 hirsel_engine::default_environment(),
-                hirsel_driver::compiler_adapters(),
+                hirsel_front_phases::compiler_adapters(),
             );
             let context = hirsel_engine::default_context();
             let file = engine.sources.add("moved-directory.hir", source).unwrap();
@@ -79,7 +79,7 @@ fn whole_file_call_arguments_check_expiry_in_evaluation_order() {
         );
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let context = hirsel_engine::default_context();
         let file = engine.sources.add("argument-order.hir", source).unwrap();
@@ -110,7 +110,7 @@ fn error_mapper_occurrences_check_the_owned_payloads_receiving_modes() {
     ] {
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let context = hirsel_engine::default_context();
         let source = format!(
@@ -135,7 +135,7 @@ fn error_mapper_occurrences_check_the_owned_payloads_receiving_modes() {
     ] {
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let context = hirsel_engine::default_context();
         let source = format!(
@@ -155,7 +155,7 @@ fn annotated_nested_receivers_keep_their_declared_payload_contract() {
     let source = "fn inspect(x:box List[Bytes]){}\nfn probe(){let xs:List[Bytes]=[b\"x\"];let built=box unique xs;let received:box List[Bytes]=take built;inspect(received)}";
     let mut engine = hirsel_engine::QueryEngine::new(
         hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
+        hirsel_front_phases::compiler_adapters(),
     );
     let context = hirsel_engine::default_context();
     let file = engine.sources.add("nested.hir", source.into()).unwrap();
@@ -185,6 +185,7 @@ fn annotated_nested_receivers_keep_their_declared_payload_contract() {
 // Current capture evidence survives owning callable and aggregate transport.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn capture_crossing_matrix(payload: &str, initial: &str, measure: &str, stable: bool) {
     with_compiler_stack(|| {

@@ -1,6 +1,9 @@
 //! Full entry fixtures; each bounded cell runs in its own capped child process.
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, SimulationConfig};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use serde_json::{Value, json};
 use std::{
@@ -381,7 +384,8 @@ fn native(
             },
         },
     ];
-    let tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+    let tools =
+        hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
     if !accepted(root, "h-differential") {
         receipt(root, "h-differential", "started");
         for (name, result) in differential_ready(
@@ -616,7 +620,7 @@ fn prepare_product_inputs(root: &Path, manifest: &Path) -> PathBuf {
     // qualification closure use the same tree before bounded cells start.
     let products = PathBuf::from(std::env::var_os("HIRSEL_PRODUCTS").unwrap());
     hirsel_engine::with_compiler_stack(|| {
-        hirsel_driver::load_program_source(manifest, None)
+        hirsel_front_phases::load_program_source(manifest, None)
             .unwrap_or_else(|e| panic!("ordinary package setup: {e}"));
     });
     if recovery_plan().is_some() {
@@ -722,7 +726,7 @@ fn policy_evaluator_33_cell() {
         let recipe = fixture(&row, row["jobs"].as_u64().unwrap_or(4));
         if std::env::var("POLICY_EVALUATOR_33_PHASE").unwrap() == "native" {
             let mut loaded =
-                hirsel_driver::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
+                hirsel_front_phases::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
             loaded
                 .check_for_execution()
                 .unwrap_or_else(|e| panic!("{e}"));

@@ -89,6 +89,9 @@ fn groupmap_23_named_manifest_three_engines_and_effects() {
 fn groupmap_23_pure_model_checked_heap() {
     hirsel_engine::with_compiler_stack(|| {
         use hirsel_driver::native::*;
+        use hirsel_native::*;
+        use hirsel_native_batch::*;
+        use hirsel_native_testing::*;
         let scratch = tempfile::tempdir().unwrap();
         // A pure entry reaches both decode and group, including error payloads.
         let source = r##"
@@ -116,7 +119,7 @@ pub fn main() -> std@1/process.ExitCode {
 }
 "##;
         let manifest = package(scratch.path(), source);
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&manifest).unwrap();
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();

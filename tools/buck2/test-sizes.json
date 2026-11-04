@@ -2413,5 +2413,65 @@
       1792447222,
       1792532020
     ]
+  },
+  "hirsel-candidate-unittest": {
+    "cpu_count": 1,
+    "memory_kb": 1572864,
+    "cpu_class": "",
+    "inherited_from": "hirsel-driver-unittest"
+  },
+  "hirsel-native-unittest": {
+    "cpu_count": 1,
+    "memory_kb": 1572864,
+    "cpu_class": "",
+    "inherited_from": "hirsel-driver-unittest"
+  },
+  "hirsel-native-testing-unittest": {
+    "cpu_count": 1,
+    "memory_kb": 1572864,
+    "cpu_class": "",
+    "inherited_from": "hirsel-driver-unittest"
+  },
+  "hirsel-native-queries-unittest": {
+    "cpu_count": 1,
+    "memory_kb": 1572864,
+    "cpu_class": "",
+    "inherited_from": "hirsel-driver-unittest"
+  },
+  "hirsel-host-io-unittest": {
+    "cpu_count": 1,
+    "memory_kb": 1572864,
+    "cpu_class": "",
+    "inherited_from": "hirsel-driver-unittest"
+  },
+  "hirsel-observation-view-unittest": {
+    "cpu_count": 1,
+    "memory_kb": 1572864,
+    "cpu_class": "",
+    "inherited_from": "hirsel-driver-unittest"
+  },
+  "hirsel-front-phases-unittest": {
+    "cpu_count": 1,
+    "memory_kb": 1572864,
+    "cpu_class": "",
+    "inherited_from": "hirsel-driver-unittest"
+  },
+  "hirsel-native-batch-unittest": {
+    "cpu_count": 1,
+    "memory_kb": 1572864,
+    "cpu_class": "",
+    "inherited_from": "hirsel-driver-unittest"
+  },
+  "hirsel-native-cache-unittest": {
+    "cpu_count": 1,
+    "memory_kb": 1572864,
+    "cpu_class": "",
+    "inherited_from": "hirsel-driver-unittest"
+  },
+  "hirsel-project-info-unittest": {
+    "cpu_count": 1,
+    "memory_kb": 1572864,
+    "cpu_class": "",
+    "inherited_from": "hirsel-driver-unittest"
   }
 }

@@ -1,9 +1,9 @@
 //! Cross-engine boundary: the corpus cannot invoke the Rust codec directly.
-use hirsel_driver::compiler_adapters;
 use hirsel_engine::{
     DefinitionQueries, QueryEngine, RunConfiguration, default_context, default_environment,
     entry_path, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_interp::{Outcome, Value, library::Library};
 use hirsel_types::{
     GenericDeclarations, SignatureKind,

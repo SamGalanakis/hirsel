@@ -1,6 +1,7 @@
 //! Creation owns copied captures; Many invocation operands cannot take them.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_tir::*;
 use hirsel_types::{TypeKind, UseKind};
 

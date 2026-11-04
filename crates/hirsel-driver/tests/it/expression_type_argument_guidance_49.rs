@@ -3,6 +3,7 @@
 //! Hirsel prohibits expression generics; deleting brackets is not a general fix.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 const HOLDER: &str = "type Holder[T] { item:T }\n";
 const ID: &str = "fn id[T](take x:T)->T {take x}\n";

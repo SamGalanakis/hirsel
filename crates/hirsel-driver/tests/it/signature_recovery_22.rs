@@ -3,6 +3,7 @@
 //! 70cf37d). Inputs stay in Hirsel's semantic header grammar; no syntax fuzzing.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_types::SignatureKind;
 
 struct Case {

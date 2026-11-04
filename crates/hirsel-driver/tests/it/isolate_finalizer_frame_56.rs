@@ -16,13 +16,13 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 "#,
         );
         let units: Vec<_> = program.units.iter().collect();
-        let plans = native::continuation::plans(&program);
+        let plans = hirsel_native::continuation::plans(&program);
         let inputs = PlanInputs {
             table: &program.table,
             target: &program.target,
             environments: &program.ahead_environments,
-            runtime: native::continuation::runtime_identity(),
-            classify: &native::continuation::classify,
+            runtime: hirsel_native::continuation::runtime_identity(),
+            classify: &hirsel_native::continuation::classify,
         };
         let mut checked = 0;
         for (&layout, &body) in &program.finalizers {

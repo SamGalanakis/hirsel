@@ -182,7 +182,7 @@ enum Command {
         max_steps: Option<u64>,
         /// `--bench` and its target time per bench.
         bench: Option<std::time::Duration>,
-        backend: hirsel_driver::native::Backend,
+        backend: hirsel_native::Backend,
         schedules: hirsel_driver::testing::Schedules,
         simulation_debug: hirsel_driver::testing::SimulationDebug,
     },
@@ -225,12 +225,12 @@ enum Command {
     Build {
         source: OsString,
         output: OsString,
-        target: hirsel_driver::native::TargetSpec,
-        profile: hirsel_driver::native::BuildProfile,
-        backend: hirsel_driver::native::Backend,
+        target: hirsel_native::TargetSpec,
+        profile: hirsel_native::BuildProfile,
+        backend: hirsel_native::Backend,
         proofs: Proofs,
         fuel: bool,
-        validation: hirsel_driver::native::Validation,
+        validation: hirsel_native::Validation,
     },
     View {
         tape: OsString,
@@ -262,8 +262,8 @@ enum Command {
         file: OsString,
         launch: Launch,
         native: bool,
-        validation: hirsel_driver::native::Validation,
-        backend: Option<hirsel_driver::native::Backend>,
+        validation: hirsel_native::Validation,
+        backend: Option<hirsel_native::Backend>,
         proofs: Proofs,
         arguments: Option<Vec<OsString>>,
         trace_events: Option<OsString>,
@@ -324,17 +324,17 @@ impl Launch {
 }
 
 /// Harness subprocesses inherit the same policy as `--validate-stages`.
-fn validation(stages: bool) -> hirsel_driver::native::Validation {
+fn validation(stages: bool) -> hirsel_native::Validation {
     if stages || env::var_os("HIRSEL_VALIDATE_STAGES").is_some_and(|v| v == "1") {
-        hirsel_driver::native::Validation::EveryStage
+        hirsel_native::Validation::EveryStage
     } else {
-        hirsel_driver::native::Validation::Ready
+        hirsel_native::Validation::Ready
     }
 }
 
 /// `--backend llvm|cranelift`: the code generator a native build lowers its LIR with.
-fn backend(value: OsString) -> Result<hirsel_driver::native::Backend, lexopt::Error> {
-    use hirsel_driver::native::Backend;
+fn backend(value: OsString) -> Result<hirsel_native::Backend, lexopt::Error> {
+    use hirsel_native::Backend;
     match value.to_str() {
         Some("llvm") => Ok(Backend::Llvm),
         Some("cranelift") => Ok(Backend::Cranelift),
@@ -346,14 +346,14 @@ fn backend(value: OsString) -> Result<hirsel_driver::native::Backend, lexopt::Er
 #[derive(Default)]
 struct Proofs {
     sidecar: Option<OsString>,
-    trusted: Vec<hirsel_driver::native::Checker>,
+    trusted: Vec<hirsel_native::Checker>,
 }
 impl Proofs {
     fn trust(&mut self, value: OsString) -> Result<(), lexopt::Error> {
         self.trusted.push(
             value
                 .to_str()
-                .and_then(hirsel_driver::native::Checker::parse)
+                .and_then(hirsel_native::Checker::parse)
                 .ok_or("--trust requires tool@version")?,
         );
         Ok(())
@@ -364,9 +364,9 @@ impl Proofs {
         }
         Ok(())
     }
-    fn evidence(self) -> Result<Option<hirsel_driver::native::Evidence>, ToolError> {
+    fn evidence(self) -> Result<Option<hirsel_native::Evidence>, ToolError> {
         self.sidecar
-            .map(|path| hirsel_driver::native::Evidence::read(Path::new(&path), self.trusted))
+            .map(|path| hirsel_native::Evidence::read(Path::new(&path), self.trusted))
             .transpose()
     }
 }
@@ -574,7 +574,8 @@ fn parse_command(args: Vec<OsString>) -> Result<Command, lexopt::Error> {
                     directory,
                 });
             }
-            use hirsel_driver::testing::{Scheduler, Schedules};
+            use hirsel_driver::testing::Scheduler;
+            use hirsel_driver::testing::Schedules;
             let schedules = match (explore, scheduler) {
                 (None, None) => Schedules::Default,
                 (None, Some(text)) => Schedules::One(Scheduler::parse(&text).ok_or(
@@ -612,7 +613,9 @@ fn parse_command(args: Vec<OsString>) -> Result<Command, lexopt::Error> {
             }
         }
         Some(Value(command)) if command == "build" => {
-            use hirsel_driver::native::{Backend, BuildProfile, TargetSpec};
+            use hirsel_native::Backend;
+            use hirsel_native::BuildProfile;
+            use hirsel_native::TargetSpec;
             let (mut source, mut output, mut target, mut profile) = (None, None, None, None);
             let mut selected = None;
             let mut proofs = Proofs::default();
@@ -1458,7 +1461,7 @@ fn execute_command(
                 }
                 if native {
                     command.push_str(" --native");
-                    if backend != hirsel_driver::native::Backend::default() {
+                    if backend != hirsel_native::Backend::default() {
                         command.push_str(&format!(" --backend {}", backend.name()));
                     }
                 }
@@ -1542,7 +1545,7 @@ fn execute_command(
             code_store,
             json,
         } => {
-            match hirsel_driver::dependency_card::cards(
+            match hirsel_project_info::dependency_card::cards(
                 Path::new(&manifest),
                 package.as_deref(),
                 code_store.as_deref().map(Path::new),
@@ -1563,14 +1566,14 @@ fn execute_command(
             output,
             json,
         } => {
-            let entries = match hirsel_driver::api_index::entries(Path::new(&manifest)) {
+            let entries = match hirsel_project_info::api_index::entries(Path::new(&manifest)) {
                 Ok(entries) => entries,
                 Err(error) => return tool_error(error, false),
             };
             let page = if json {
-                hirsel_driver::api_index::render_json(&entries)
+                hirsel_project_info::api_index::render_json(&entries)
             } else {
-                hirsel_driver::api_index::render(&entries)
+                hirsel_project_info::api_index::render(&entries)
             };
             return match output {
                 Some(path) => match std::fs::write(path, page) {
@@ -1673,7 +1676,7 @@ fn execute_command(
             };
         }
         Command::Precompute { manifest, output } => {
-            return match hirsel_driver::COMPILER
+            return match hirsel_front_phases::COMPILER
                 .precompute_package(Path::new(&manifest), Path::new(&output))
             {
                 Ok(()) => 0,
@@ -1729,7 +1732,7 @@ fn execute_command(
         } => {
             let view = || -> Result<String, String> {
                 let bytes = std::fs::read(&tape).map_err(|e| e.to_string())?;
-                let mut view = hirsel_driver::observation_view::View::parse(&capture, &bytes)?;
+                let mut view = hirsel_observation_view::View::parse(&capture, &bytes)?;
                 let explicit_timing = timing.is_some();
                 let timing_path = timing.unwrap_or_else(|| {
                     let mut path = tape.clone();
@@ -1771,7 +1774,7 @@ fn execute_command(
             output,
         } => {
             if matches!(kind, "c-header" | "native-abi") {
-                let target = hirsel_driver::native::TargetSpec::x86_64_unknown_linux_gnu();
+                let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
                 let header = kind == "c-header";
                 return match hirsel_driver::native::export_data_abi(
                     Path::new(&entry),
@@ -1864,7 +1867,7 @@ fn execute_command(
                 return ownership_trace::run_native(
                     Path::new(&file),
                     launch.host(arguments.as_deref()),
-                    backend.unwrap_or(hirsel_driver::native::Backend::Cranelift),
+                    backend.unwrap_or(hirsel_native::Backend::Cranelift),
                     policy,
                     Path::new(&sidecar),
                     json,
@@ -1882,7 +1885,7 @@ fn execute_command(
                 launch.host(arguments.as_deref()),
                 evidence.as_ref(),
                 // `run --native` is the edit loop's: Cranelift unless LLVM is asked for.
-                backend.unwrap_or(hirsel_driver::native::Backend::Cranelift),
+                backend.unwrap_or(hirsel_native::Backend::Cranelift),
                 hirsel_driver::native::Output::Inherit { json },
                 policy,
                 validation,

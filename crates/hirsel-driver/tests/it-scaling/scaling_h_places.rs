@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 #[test]
 fn body_place_publication_uses_expression_identity() {
     with_compiler_stack(|| {

@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn check(source: &str) -> CheckOutput {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -447,6 +448,7 @@ fn a_growing_finalizer_cycle_is_native_unavailable_over_every_partition_order_on
 mod verdict {
     use hirsel_driver::*;
     use hirsel_engine::*;
+    use hirsel_front_phases::*;
     use hirsel_intern::work::{Counter, read};
     use hirsel_syntax::ContentHash;
 

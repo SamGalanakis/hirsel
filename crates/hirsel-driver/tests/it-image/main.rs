@@ -10,6 +10,7 @@ mod image_fixture;
 
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use image_fixture::*;
 
 const STD_PROGRAM: &str = "pub type AppError = Grant(GrantError) | Output(OutputError)

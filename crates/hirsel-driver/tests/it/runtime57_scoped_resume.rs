@@ -1,9 +1,12 @@
 //! Known scope callbacks retain an owned result across an entered exit.
 use super::runtime50_continuation::ready;
 use super::runtime50_resume::{agree_on, routing};
-use hirsel_driver::native::{self, Backend, Fixture, Partition};
+use hirsel_driver::native;
 use hirsel_engine::with_compiler_stack;
 use hirsel_lir::continuation::{Representation, ResumeAction, RuntimeOpKind};
+use hirsel_native::Backend;
+use hirsel_native::Fixture;
+use hirsel_native::Partition;
 
 const WITNESS: &str = r#"
 fn witness(tasks:Tasks,c:MonotonicClock)->unique List[u64] {
@@ -54,7 +57,7 @@ fn runtime57_entered_scope_import_refuses_forged_kind_helper_storage_scope_and_s
     use hirsel_lir::ir::{BlockId, CleanupAnchorId, ValueId};
     with_compiler_stack(|| {
         let program = ready(WITNESS);
-        let plans = native::continuation::plans(&program);
+        let plans = hirsel_native::continuation::plans(&program);
         let (&body, plan) = plans
             .plans
             .iter()
@@ -151,7 +154,7 @@ fn runtime57_entered_scope_import_refuses_forged_kind_helper_storage_scope_and_s
                 }
                 _ => unreachable!(),
             }
-            let error = native::continuation::validate(&program, &bad).expect_err(label);
+            let error = hirsel_native::continuation::validate(&program, &bad).expect_err(label);
             assert!(
                 !matches!(
                     error,
@@ -232,8 +235,8 @@ fn check_scope_until(deadline: &str, expired: &str) {
             .replace("DEADLINE", deadline)
             .replace("EXPIRED", expired);
         let program = ready(&source);
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         assert!(plans.plans.values().any(|p| p.states.iter().any(|s| {
             s.runtime
                 .as_ref()
@@ -284,8 +287,8 @@ pub fn main(rt:Io,args:Args)->Result[(),GrantError] {
 }
 "#;
         let program = ready(source);
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         for unit in &program.units {
             let u = unit.unit();
             if u.header.definition.is_core("task.scope") {
@@ -336,19 +339,23 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 
 #[test]
 fn runtime57_free_owned_scope_physically_leaves_its_pending_exit_and_replays() {
-    use hirsel_driver::native::{OptLevel, TargetSpec, Toolchain};
     use hirsel_engine::{QueryEngine, default_context, source_check_request};
+    use hirsel_native::OptLevel;
+    use hirsel_native::TargetSpec;
+    use hirsel_native::Toolchain;
     with_compiler_stack(|| {
         let mut engine: QueryEngine = crate::source_std::engine();
         let file = engine.sources.add("main.hir", PHYSICAL.into()).unwrap();
         let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
         let input = engine.export_native_input().unwrap();
-        let sites = native::Sites::new(&input);
+        let sites = hirsel_native::Sites::new(&input);
         let validated = engine.import_native_input(input.clone()).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let program = native::build(&validated, &native::Options::new(target.clone())).unwrap();
-        let plans = native::continuation::plans(&program);
+        let program =
+            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
+                .unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
         let witness = program
             .units
             .iter()
@@ -377,7 +384,7 @@ fn runtime57_free_owned_scope_physically_leaves_its_pending_exit_and_replays() {
         for backend in [Backend::Llvm, Backend::Cranelift] {
             let dir = root.path().join(format!("{backend:?}"));
             std::fs::create_dir_all(dir.join("root")).unwrap();
-            let objects = native::emit_backend_objects(
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
                 OptLevel::Default,
@@ -387,7 +394,8 @@ fn runtime57_free_owned_scope_physically_leaves_its_pending_exit_and_replays() {
             )
             .unwrap();
             let exe =
-                native::link_standalone_objects(&program, &entry, &objects, &tools, &dir).unwrap();
+                hirsel_native::link_standalone_objects(&program, &entry, &objects, &tools, &dir)
+                    .unwrap();
             let grants = dir.join("grants.json");
             std::fs::write(&grants,r#"{"io":{"stdout":"stdout.bytes@1","tasks":"tasks.free@1","stdin":"stdin.bytes@1","dirs":[]},"args":[],"placement":{"cores":4}}"#).unwrap();
             let tape = dir.join("run.tape");
@@ -446,7 +454,7 @@ fn runtime57_free_owned_scope_physically_leaves_its_pending_exit_and_replays() {
                     }
                     finish_physical_run(process)
                 };
-                let launched = native::Launched {
+                let launched = hirsel_native::Launched {
                     audit_required: true,
                     exit: output.status.code(),
                     signal: None,
@@ -454,7 +462,7 @@ fn runtime57_free_owned_scope_physically_leaves_its_pending_exit_and_replays() {
                     stderr: output.stderr,
                     record: std::fs::read_to_string(&observation).unwrap(),
                 };
-                let actual = native::observe(&launched, &program, &sites).unwrap();
+                let actual = hirsel_native::observe(&launched, &program, &sites).unwrap();
                 assert_eq!(
                     actual.output,
                     b"41 42\n",
@@ -532,7 +540,7 @@ fn runtime57_emitter_runtime_evidence_refuses_out_of_bounds_metadata() {
     use hirsel_lir::ir::{BlockId, SlotId};
     with_compiler_stack(|| {
         let program = ready(WITNESS);
-        let plans = native::continuation::plans(&program);
+        let plans = hirsel_native::continuation::plans(&program);
         let (&body, plan) = plans
             .plans
             .iter()

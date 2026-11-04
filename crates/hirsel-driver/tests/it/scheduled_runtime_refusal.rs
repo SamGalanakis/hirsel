@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::MemStore, *};
+use hirsel_front_phases::*;
 use std::sync::Arc;
 struct Refuse(hirsel_engine::store::Reference);
 impl LocalQueryFactory for Refuse {

@@ -116,6 +116,9 @@ fn bounded() -> String {
 fn reference_checked_heap_llvm_o0_o2_cranelift() {
     use hirsel_driver::native::*;
     use hirsel_engine::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let options = Options::new(target());
         let configurations = [
@@ -150,14 +153,18 @@ fn reference_checked_heap_llvm_o0_o2_cranelift() {
         let root =
             std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("native-nested-loan-18");
         std::fs::create_dir_all(&root).unwrap();
-        let tools = Toolchain::for_matrix(&root.join("runtime"), &configurations).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &configurations)
+                .unwrap();
         for (name, source, output) in [
             ("original", ORIGINAL.to_string(), b"ok\n".as_slice()),
             ("bounded-18-vectors", bounded(), b"".as_slice()),
             ("map-loop-cleanup", MAP.to_string(), b"".as_slice()),
         ] {
-            let mut engine =
-                QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+            let mut engine = QueryEngine::new(
+                default_environment(),
+                hirsel_front_phases::compiler_adapters(),
+            );
             let context = default_context();
             let file = engine.sources.add("nested.hir", source).unwrap();
             let diagnostics = check_snapshot(&mut engine, file, &context).unwrap();

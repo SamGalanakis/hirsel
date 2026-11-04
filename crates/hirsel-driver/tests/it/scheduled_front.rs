@@ -4,6 +4,7 @@ use hirsel_engine::{
     store::{Domain, MemStore, ResultStore},
     *,
 };
+use hirsel_front_phases::*;
 use std::sync::Arc;
 
 pub(super) fn errors() -> RuntimeErrors {

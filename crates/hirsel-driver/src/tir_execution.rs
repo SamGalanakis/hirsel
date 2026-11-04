@@ -3,7 +3,7 @@
 //! host effects, admission, recording, cancellation and budgets.
 use crate::launch_binding::LaunchSelection;
 use crate::requests::TirExecution;
-use crate::{HostLaunch, HostRun, RunOutcome, ToolError, call_schemas, network};
+use crate::{HostLaunch, HostRun, RunOutcome, ToolError, call_schemas};
 use std::path::Path;
 
 pub(crate) fn refuse_foreign_interpretation(input: &TirExecution) -> Result<(), ToolError> {
@@ -22,7 +22,7 @@ pub(crate) fn run_tir_on_host(
     selection: LaunchSelection,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    cancel: Option<network::ExternalCancel>,
+    cancel: Option<hirsel_host_io::ExternalCancel>,
     checked: bool,
 ) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
     run_tir_on_host_with_grants(
@@ -36,7 +36,7 @@ pub(crate) fn run_tir_on_host_with_grants(
     selection: LaunchSelection,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    cancel: Option<network::ExternalCancel>,
+    cancel: Option<hirsel_host_io::ExternalCancel>,
     checked: bool,
     snapshot: Option<hirsel_rt::host_launch::HostGrants>,
 ) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
@@ -51,7 +51,7 @@ pub(crate) fn run_tir_on_host_traced(
     selection: LaunchSelection,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    cancel: Option<network::ExternalCancel>,
+    cancel: Option<hirsel_host_io::ExternalCancel>,
     checked: bool,
     snapshot: Option<hirsel_rt::host_launch::HostGrants>,
     ownership: Option<&mut crate::ownership_trace::Capture>,
@@ -102,7 +102,7 @@ pub(crate) fn run_loaded_on_host_with_checks(
     launch: HostLaunch<'_>,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    cancel: Option<network::ExternalCancel>,
+    cancel: Option<hirsel_host_io::ExternalCancel>,
     checked: bool,
     snapshot: Option<hirsel_rt::host_launch::HostGrants>,
 ) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
@@ -265,7 +265,7 @@ fn run_provider_on_host(
     selection: LaunchSelection,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    cancel: Option<network::ExternalCancel>,
+    cancel: Option<hirsel_host_io::ExternalCancel>,
     checked: bool,
     snapshot: Option<hirsel_rt::host_launch::HostGrants>,
     ownership: Option<&mut crate::ownership_trace::Capture>,
@@ -312,7 +312,7 @@ fn run_provider_on_host(
             };
             (
                 admitted.run().clone(),
-                network::HostIo::Live(io),
+                hirsel_host_io::HostIo::Live(io),
                 admitted.instance(),
                 free,
             )
@@ -320,7 +320,7 @@ fn run_provider_on_host(
         // A replay parks where the recording parked (its `blocked` and `ready` events).
         HostRun::Replay { run, io } => {
             let instance = io.instance();
-            (run, network::HostIo::Replay(io), instance, None)
+            (run, hirsel_host_io::HostIo::Replay(io), instance, None)
         }
     };
     // A callee replay selected its entry before requesting immutable TIR.
@@ -350,7 +350,7 @@ fn run_provider_on_host(
             memory_bytes: budgets.memory_bytes,
         };
     }
-    let mut operations = network::HostLibrary::new(&tir_run, &run, io)
+    let mut operations = hirsel_host_io::HostLibrary::new(&tir_run, &run, io)
         .map_err(|e| ToolError::Runtime(format!("host launch: {e:?}")))?;
     if let Some((codec, session, report)) = free {
         operations.enable_free_recording(codec, session, report, run.record().inputs.test_seed);
@@ -366,18 +366,18 @@ fn run_provider_on_host(
         let callees = input.callees.clone();
         // A live run's remote runners open their providers now, reading their TLS material.
         let remote = match &operations.io {
-            network::HostIo::Live(_) => network::RemoteRunners::open(
+            hirsel_host_io::HostIo::Live(_) => hirsel_host_io::RemoteRunners::open(
                 run.record()
                     .io
                     .as_ref()
                     .map_or(&[][..], |io| io.runners.as_slice()),
                 instance.unwrap_or_default(),
-                || network::remote_wire(&runtime, hirsel_remote::wire::DEFAULT_FRAME_BYTES),
+                || hirsel_host_io::remote_wire(&runtime, hirsel_remote::wire::DEFAULT_FRAME_BYTES),
             )
             .map_err(|e| ToolError::Runtime(format!("launch: {e}")))?,
-            network::HostIo::Replay(_) => None,
+            hirsel_host_io::HostIo::Replay(_) => None,
         };
-        operations.set_runners(network::RunnerContext {
+        operations.set_runners(hirsel_host_io::RunnerContext {
             instance,
             callees: std::sync::Arc::new(callees),
             tape,
@@ -494,7 +494,7 @@ fn run_provider_on_host(
         )
         .map_err(|error| ToolError::Runtime(format!("CPU fuel trace: {error}")))?;
     }
-    let replay = matches!(operations.io, network::HostIo::Replay(_));
+    let replay = matches!(operations.io, hirsel_host_io::HostIo::Replay(_));
     if let Some(refusal) = operations.refused.take() {
         return Err(ToolError::Runtime(if replay {
             if run.budgets().is_some_and(|budget| budget.fuel.is_some())
@@ -556,7 +556,7 @@ fn run_provider_on_host(
             .cpu_budget_stop(kind)
             .map_err(|error| ToolError::Runtime(format!("{error:?}")))?;
     }
-    if let network::HostIo::Replay(io) = &mut operations.io
+    if let hirsel_host_io::HostIo::Replay(io) = &mut operations.io
         && !operations.library.native_free()
         && !matches!(execution.outcome, hirsel_interp::Outcome::ToolingLimit(_))
     {
@@ -573,7 +573,7 @@ fn run_provider_on_host(
         .finish_free(&outcome)
         .map_err(|e| ToolError::Runtime(format!("Free replay: {e}")))?
         .unwrap_or(outcome);
-    if let network::HostIo::Live(io) = &mut operations.io {
+    if let hirsel_host_io::HostIo::Live(io) = &mut operations.io {
         io.finish_recording(&outcome)
             .map_err(|e| ToolError::Runtime(format!("the Io tape: {e}")))?;
     }

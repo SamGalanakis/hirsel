@@ -1,7 +1,12 @@
 //! An iterator primitive and its user callback consume separate activations;
 //! the compiler's iterator thunk consumes none.
 use hirsel_conformance::native;
-use hirsel_driver::native::{Configuration, Engine, Options, Outcome, TargetSpec, Toolchain};
+use hirsel_native::Options;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
+use hirsel_native_testing::Configuration;
+use hirsel_native_testing::Engine;
+use hirsel_native_testing::Outcome;
 
 #[test]
 fn iterator_dispatch_preserves_the_exact_activation_boundary() {
@@ -15,7 +20,11 @@ fn iterator_dispatch_preserves_the_exact_activation_boundary() {
                 engine: Engine::Heap { campaign: false },
             },
         );
-        let tools = Toolchain::for_matrix(&native::runtime_cache().unwrap(), &matrix).unwrap();
+        let tools = hirsel_native_testing::toolchain_for_matrix(
+            &hirsel_native::runtime_cache().unwrap(),
+            &matrix,
+        )
+        .unwrap();
         let scratch = native::scratch::RunRoot::create_in(
             &std::env::temp_dir().join("hirsel-iterator-depth-47"),
         )

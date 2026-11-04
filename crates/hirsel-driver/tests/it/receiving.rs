@@ -2,6 +2,7 @@
 use crate::source_std;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn check(source: &str) {
     let mut engine = if source.contains("std@1/") {

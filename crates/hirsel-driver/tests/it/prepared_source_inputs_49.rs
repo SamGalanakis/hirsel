@@ -1,6 +1,6 @@
 //! Prepared source catalogues retain exact admission and pinned source identity.
-use hirsel_driver::COMPILER;
 use hirsel_engine::{runtime::*, store::MemStore, *};
+use hirsel_front_phases::COMPILER;
 use std::sync::Arc;
 
 #[test]

@@ -1,6 +1,7 @@
 //! Bounded default-budget runs cover every case; native runs execute their union.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn path(name: &str) -> PathBuf {
@@ -14,9 +15,9 @@ fn batches(name: &str, seeds: std::ops::Range<u64>) {
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let mut ready = native::build(
+        let mut ready = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
         let seeds: Vec<u64> = if name == "invalid_window" {
@@ -50,12 +51,12 @@ fn batches(name: &str, seeds: std::ops::Range<u64>) {
                 reference.outcome
             );
             let expected =
-                native::Observation::of_reference(reference.observation.as_ref().unwrap());
+                hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
             ready.launch.test_seed = seed;
-            let heap = native::run_heap(
+            let heap = hirsel_native_testing::run_heap(
                 &ready,
                 &loaded.entry,
-                &native::Sites::new(validated.snapshot()),
+                &hirsel_native::Sites::new(validated.snapshot()),
             )
             .unwrap_or_else(|error| panic!("{name} seed {seed}: {error}"));
             assert_eq!(heap.observation, expected, "{name} seed {seed}");
@@ -66,7 +67,10 @@ fn batches(name: &str, seeds: std::ops::Range<u64>) {
 
 fn native_union(name: &str) {
     with_compiler_stack(|| {
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let outcome = native::run_path_native_backend_with_validation(
@@ -86,7 +90,7 @@ fn native_union(name: &str) {
                     stderr: &mut stderr,
                 },
                 hirsel_driver::session::Policy::default(),
-                native::Validation::EveryStage,
+                hirsel_native::Validation::EveryStage,
             )
             .unwrap()
             .unwrap();

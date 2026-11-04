@@ -1,8 +1,9 @@
 //! Bounded library host for serial candidate cost comparisons. The Python
 //! client sends eight open-loop lines; this is measurement transport only.
 hirsel_guard::install!();
-use hirsel_driver::candidate::*;
-use hirsel_driver::session::{FileChange, Session};
+use hirsel_candidate::*;
+use hirsel_driver::session::FileChange;
+use hirsel_driver::session::Session;
 use hirsel_engine::{CheckCompletion, CompileConfig, LoweringPolicy};
 use sha2::{Digest, Sha256};
 use std::{
@@ -88,7 +89,7 @@ fn main() {
     } else if mode != "cold" && mode != "cold-once" {
         config.store = Arc::new(hirsel_engine::store::MemStore::default());
     }
-    let compiler = hirsel_driver::COMPILER
+    let compiler = hirsel_front_phases::COMPILER
         .clone()
         .with_config(config.clone())
         .with_owned_engines();
@@ -151,7 +152,7 @@ fn main() {
     }
     let mut leases = vec![];
     emit(
-        serde_json::json!({"ready":true,"initialization_ns":ns(started),"compiler":format!("{:02x?}",hirsel_driver::COMPILER_IDENTITY),"mode":mode,"store":config.store.name(),"retention":format!("{:?}",config.retention)}),
+        serde_json::json!({"ready":true,"initialization_ns":ns(started),"compiler":format!("{:02x?}",hirsel_compiler_identity::COMPILER_IDENTITY),"mode":mode,"store":config.store.name(),"retention":format!("{:?}",config.retention)}),
     );
     for line in io::stdin().lock().lines() {
         let i: usize = line.unwrap().parse().unwrap();

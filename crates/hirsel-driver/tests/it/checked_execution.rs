@@ -3,6 +3,7 @@
 //! checked mode exactly as it runs normally.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_interp::checked::TrapRule;
 use hirsel_interp::{Outcome, library::LaunchError};
 use hirsel_syntax::DefPath;

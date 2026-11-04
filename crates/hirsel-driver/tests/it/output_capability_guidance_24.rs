@@ -1,6 +1,7 @@
 //! Typed capability diagnostics use H's parameter association, never source order.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn checked(source: &str) -> CheckOutput {
     let mut engine = crate::source_std::engine();

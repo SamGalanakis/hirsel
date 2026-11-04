@@ -103,7 +103,7 @@ fn main() {
     let root = manifest.parent().unwrap().parent().unwrap();
     let mut selected = Vec::new();
     for input in [
-        "crates/hirsel-driver/src/network.rs",
+        "crates/hirsel-host-io/src",
         "crates/hirsel-interp/src",
         "crates/hirsel-interp/Cargo.toml",
         "crates/hirsel-rt/src",

@@ -37,7 +37,7 @@ fn indexed_loop_patterns_follow_the_published_source_storage() {
                         );
                         let mut engine = QueryEngine::new(
                             hirsel_engine::default_environment(),
-                            hirsel_driver::compiler_adapters(),
+                            hirsel_front_phases::compiler_adapters(),
                         );
                         let context = hirsel_engine::default_context();
                         let file = engine

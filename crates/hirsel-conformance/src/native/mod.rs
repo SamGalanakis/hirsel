@@ -22,10 +22,16 @@ pub(crate) mod source_request;
 
 pub use scratch::{runtime_cache, scratch};
 
-use hirsel_driver::native::{
-    Configuration, Engine, MATRIX_VERSION, NativeError, OBSERVATION_SCHEMA, Observation, Outcome,
-    StageName, Toolchain, differential_ready,
-};
+use hirsel_native::NativeError;
+use hirsel_native::OBSERVATION_SCHEMA;
+use hirsel_native::Observation;
+use hirsel_native::StageName;
+use hirsel_native::Toolchain;
+use hirsel_native_testing::Configuration;
+use hirsel_native_testing::Engine;
+use hirsel_native_testing::MATRIX_VERSION;
+use hirsel_native_testing::Outcome;
+use hirsel_native_testing::differential_ready;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -397,7 +403,7 @@ fn checked_with_config(
     id: &str,
     source: &str,
     path: Option<&Path>,
-    launch: hirsel_driver::native::LaunchInputs,
+    launch: hirsel_native::LaunchInputs,
     trace_roots: bool,
 ) -> Result<Prepared, String> {
     let expected = oracle::expected_stdout(id, source, path)?;
@@ -528,7 +534,7 @@ fn run_source_path(
                 &matrix,
                 toolchain,
                 dir,
-                &hirsel_driver::native::Fixture {
+                &hirsel_native::Fixture {
                     trace_roots: probe.trace_roots,
                     migrate: probe.migrate,
                     callees,
@@ -576,14 +582,14 @@ fn run_test_suite(
             for c in &mut configurations {
                 c.options.launch.test_seed = test.seed;
             }
-            hirsel_driver::native::differential_ready(
+            hirsel_native_testing::differential_ready(
                 ready,
                 &test.entry,
                 reference,
                 &configurations,
                 toolchain,
                 test_dir,
-                &hirsel_driver::native::Fixture {
+                &hirsel_native::Fixture {
                     trace_roots: probe.trace_roots,
                     migrate: probe.migrate,
                     ..Default::default()
@@ -604,11 +610,11 @@ fn visit_test_suite(
     source: &str,
     path: Option<&Path>,
     dir: &Path,
-    launch: hirsel_driver::native::LaunchInputs,
+    launch: hirsel_native::LaunchInputs,
     trace_roots: bool,
     toolchain: &Toolchain,
     probe: impl Fn(
-        &mut hirsel_driver::native::ReadySupplier<
+        &mut hirsel_native_testing::ReadySupplier<
             '_,
             std::sync::Arc<hirsel_driver::requests::NativeReady>,
         >,
@@ -626,10 +632,12 @@ fn visit_test_suite(
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             std::fs::write(&fallback, source).map_err(|e| e.to_string())?;
         }
-        use hirsel_driver::requests::{
-            CompileOperation, CompileRequest, CompileResult, CompilerRequests, NativeOutput,
-            NativeRequest,
-        };
+        use hirsel_driver::requests::CompileOperation;
+        use hirsel_driver::requests::CompileRequest;
+        use hirsel_driver::requests::CompileResult;
+        use hirsel_driver::requests::CompilerRequests;
+        use hirsel_driver::requests::NativeOutput;
+        use hirsel_driver::requests::NativeRequest;
         let path = path.unwrap_or(&fallback);
         let compiler = crate::compiler::verifying_compiler();
         let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration())
@@ -718,7 +726,7 @@ fn visit_test_suite(
             }
             let test_dir = dir.join(format!("test-{index}"));
             std::fs::create_dir_all(&test_dir).map_err(|e| e.to_string())?;
-            let mut ready = |options: &hirsel_driver::native::Options| {
+            let mut ready = |options: &hirsel_native::Options| {
                 let failure = |message: String| NativeError {
                     stage: StageName::Ready,
                     definition: None,
@@ -734,10 +742,10 @@ fn visit_test_suite(
                             test_entries: vec![],
                             supplemental_sources: vec![],
                             output: NativeOutput::Ready,
-                            options: hirsel_driver::native::BuildOptions::new(
+                            options: hirsel_native::BuildOptions::new(
                                 options.clone(),
-                                hirsel_driver::native::Backend::Llvm,
-                                hirsel_driver::native::OptLevel::Default,
+                                hirsel_native::Backend::Llvm,
+                                hirsel_native::OptLevel::Default,
                             ),
                             run: None,
                             fuel: false,
@@ -796,7 +804,7 @@ pub fn replay_source_with_config(
     path: Option<&Path>,
     toolchain: &Toolchain,
     dir: &Path,
-    launch: hirsel_driver::native::LaunchInputs,
+    launch: hirsel_native::LaunchInputs,
 ) -> CaseResult {
     if source.lines().any(|line| line.trim() == "// expect: test") {
         return visit_test_suite(
@@ -813,14 +821,14 @@ pub fn replay_source_with_config(
                 vec![(
                     "x86_64/real-io-record-and-replay".into(),
                     Class::Llvm,
-                    hirsel_driver::native::real_io_replay_ready(
+                    hirsel_native_testing::real_io_replay_ready(
                         ready,
                         &test.entry,
                         reference,
                         toolchain,
                         test_dir,
                         inputs,
-                        &hirsel_driver::native::Fixture::default(),
+                        &hirsel_native::Fixture::default(),
                     ),
                 )]
             },
@@ -846,14 +854,14 @@ pub fn replay_source_with_config(
             outcomes: vec![(
                 "x86_64/real-io-record-and-replay".into(),
                 Class::Llvm,
-                hirsel_driver::native::real_io_replay_ready(
+                hirsel_native_testing::real_io_replay_ready(
                     &mut |options| validated.ready(options),
                     &entry,
                     &reference,
                     toolchain,
                     dir,
                     launch,
-                    &hirsel_driver::native::Fixture {
+                    &hirsel_native::Fixture {
                         callees,
                         ..crate::fixture(source).unwrap()
                     },
@@ -890,7 +898,7 @@ pub fn oracle_source(
                 .filter(|c| !matches!(c.engine, Engine::Heap { .. }))
                 .cloned()
                 .collect();
-            let fixture = hirsel_driver::native::Fixture {
+            let fixture = hirsel_native::Fixture {
                 callees,
                 ..crate::fixture(source).unwrap()
             };
@@ -898,7 +906,7 @@ pub fn oracle_source(
                 .iter()
                 .enumerate()
                 .flat_map(|(index, configuration)| {
-                    hirsel_driver::native::runner_oracle_ready(
+                    hirsel_native_testing::runner_oracle_ready(
                         &mut |options| validated.ready(options),
                         entry,
                         std::slice::from_ref(configuration),
@@ -931,13 +939,13 @@ pub fn oracle_source(
                     .filter(|configuration| !matches!(configuration.engine, Engine::Heap { .. }))
                     .enumerate()
                     .flat_map(|(index, configuration)| {
-                        hirsel_driver::native::runner_oracle_ready(
+                        hirsel_native_testing::runner_oracle_ready(
                             ready,
                             &test.entry,
                             std::slice::from_ref(configuration),
                             toolchain,
                             test_dir,
-                            &hirsel_driver::native::Fixture::default(),
+                            &hirsel_native::Fixture::default(),
                             index == 0,
                         )
                         .into_iter()

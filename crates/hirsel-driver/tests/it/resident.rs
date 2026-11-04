@@ -2,6 +2,7 @@
 mod canonical_tir;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_types::Signature;
 use std::sync::Arc;
 
@@ -392,7 +393,9 @@ fn diagnostic_objects(output: &CheckOutput) -> Vec<serde_json::Value> {
 
 fn assert_manifest_check_parity(session: &mut session::Session) -> CheckOutput {
     // Use the compiler directly so this oracle cannot lease a resident session.
-    let cold = hirsel_driver::COMPILER.check_path(session.entry()).unwrap();
+    let cold = hirsel_front_phases::COMPILER
+        .check_path(session.entry())
+        .unwrap();
     let actual = session.check().unwrap();
     assert_eq!(actual.completion, cold.completion);
     assert_eq!(diagnostic_objects(&actual), diagnostic_objects(&cold));
@@ -462,7 +465,7 @@ fn manifest_session_missing_source_remains_an_io_error() {
         std::fs::remove_file(fixture.path().join("main.hir")).unwrap();
         for result in [
             session.check(),
-            hirsel_driver::COMPILER.check_path(&manifest),
+            hirsel_front_phases::COMPILER.check_path(&manifest),
         ] {
             let Err(ToolError::Io(error)) = result else {
                 panic!("missing source must remain an I/O error: {result:?}");
@@ -489,7 +492,7 @@ fn manifest_session_malformed_manifest_remains_a_tool_error() {
         std::fs::write(&manifest, "{").unwrap();
         for result in [
             session.check(),
-            hirsel_driver::COMPILER.check_path(&manifest),
+            hirsel_front_phases::COMPILER.check_path(&manifest),
         ] {
             let Err(ToolError::Runtime(message)) = result else {
                 panic!("malformed manifest must remain a tool error: {result:?}");
@@ -548,7 +551,7 @@ fn manifest_session_preserves_non_diagnostic_query_errors() {
             };
             let mut session = session::Session::open_with_compiler(
                 &manifest,
-                hirsel_driver::COMPILER.with_phase_adapters(
+                hirsel_front_phases::COMPILER.with_phase_adapters(
                     factory,
                     [if error == QueryError::NotImplemented {
                         0x47
@@ -661,7 +664,9 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
         }
     }
     with_compiler_stack(|| {
-        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
+        use hirsel_driver::requests::CompileOperation;
+        use hirsel_driver::requests::CompileResult;
+        use hirsel_driver::requests::CompilerRequests;
         let source = "fn a(x:u8) -> u8 { x + 1u8 }\nfn main() -> u8 { a(2u8) }\n";
         let directory = tempfile::tempdir().unwrap();
         let source_path = directory.path().join("resident.hir");
@@ -746,7 +751,7 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
         let actual = session.check_applied().unwrap();
         assert_eq!(session.stats().loads, 1);
         assert_eq!(session.recompute_counts(queries.to_vec()).unwrap(), before);
-        let expected = hirsel_driver::COMPILER
+        let expected = hirsel_front_phases::COMPILER
             .clone()
             .with_config(config)
             .with_owned_engines()
@@ -2380,7 +2385,9 @@ fn evicted_lower_receipts_preserve_program_reuse_and_edit_invalidation() {
 #[test]
 fn evicted_generated_lowerings_preserve_cold_semantic_content() {
     with_compiler_stack(|| {
-        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
+        use hirsel_driver::requests::CompileOperation;
+        use hirsel_driver::requests::CompileResult;
+        use hirsel_driver::requests::CompilerRequests;
         let source = r#"type Point { x:u64 }
 fn gen[T](s:TypeShape[T])->Result[Body[fn(T)->u64 uses {}],String] { Ok(codegen.body("fn(p:standalone@0/Point)->u64 uses {} { p.x + 12u64 }")) }
 fn sum(p:Point)->u64 uses {} = comptime gen(shape(Point))
@@ -2880,7 +2887,7 @@ fn library_session_checks_every_source_and_cannot_launch() {
                 .to_string()
                 .contains("launch manifest requires entry")
         );
-        let compiler = hirsel_driver::COMPILER;
+        let compiler = hirsel_front_phases::COMPILER;
         let (checked, entry) = compiler.check_safe_path(&manifest).unwrap();
         assert!(checked.diagnostics.is_empty());
         assert!(entry.is_none());

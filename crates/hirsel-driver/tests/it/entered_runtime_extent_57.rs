@@ -14,7 +14,7 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 }
 "#,
         );
-        let plans = hirsel_driver::native::continuation::plans(&program);
+        let plans = hirsel_native::continuation::plans(&program);
         let units: Vec<_> = program.units.iter().collect();
         hirsel_lir::continuation::validate_runtime_operations(
             &units,
@@ -65,8 +65,8 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 }
 "#,
         );
-        let plans = hirsel_driver::native::continuation::plans(&program);
-        hirsel_driver::native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         assert!(
             plans
                 .plans

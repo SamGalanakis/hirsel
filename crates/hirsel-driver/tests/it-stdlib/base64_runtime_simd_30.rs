@@ -1,6 +1,7 @@
 //! Scalar codec boundaries and malformed bulk blocks across H, checked heap and both native backends.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn fixture(name: &str, steps: Option<u64>) {
@@ -40,19 +41,20 @@ fn fixture(name: &str, steps: Option<u64>) {
             "{:?}",
             reference.outcome
         );
-        let expected = native::Observation::of_reference(reference.observation.as_ref().unwrap());
+        let expected =
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &validated,
-            &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
-        let heap = native::run_heap_in(
+        let heap = hirsel_native_testing::run_heap_in(
             &ready,
             &loaded.entry,
-            &native::Sites::new(validated.snapshot()),
-            &native::HeapWorld {
+            &hirsel_native::Sites::new(validated.snapshot()),
+            &hirsel_native_testing::HeapWorld {
                 steps,
                 ..Default::default()
             },
@@ -60,7 +62,10 @@ fn fixture(name: &str, steps: Option<u64>) {
         .unwrap();
         assert_eq!(heap.observation, expected);
         assert_eq!(heap.counters.live_heap_bytes, 0);
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let outcome = native::run_path_native_backend_with_validation(
@@ -80,7 +85,7 @@ fn fixture(name: &str, steps: Option<u64>) {
                     stderr: &mut stderr,
                 },
                 hirsel_driver::session::Policy::default(),
-                native::Validation::EveryStage,
+                hirsel_native::Validation::EveryStage,
             )
             .unwrap()
             .unwrap();

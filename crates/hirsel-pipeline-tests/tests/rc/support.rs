@@ -1,11 +1,11 @@
 //! Shared test support: compile a source program with the real driver and
 //! adapt its validated `NativeInput` into the plain `Program` this crate reads
 //! (the driver wires the same adapter).
-use hirsel_driver::compiler_adapters;
 use hirsel_engine::{
     DefinitionQueries, InstanceKind, NativeInput, QueryEngine, default_context,
     default_environment, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_layout::layout::{OwnerRepresentation, Owners};
 
 use hirsel_lir::stage::InputIdentity;
@@ -219,7 +219,7 @@ pub fn manifest(program: &Program) -> hirsel_core_contract::Manifest {
             .get(&key)
             .expect("source operation has its exact registry declaration")
     });
-    let manifest = hirsel_driver::native::manifest_for_operations(records)
+    let manifest = hirsel_native::manifest_for_operations(records)
         .expect("source native capabilities pass the production review");
     manifest
         .check_coverage(program.operations.values().cloned())

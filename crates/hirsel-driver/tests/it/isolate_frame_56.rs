@@ -22,10 +22,10 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
             table: &program.table,
             target: &program.target,
             environments: &program.ahead_environments,
-            runtime: native::continuation::runtime_identity(),
-            classify: &native::continuation::classify,
+            runtime: hirsel_native::continuation::runtime_identity(),
+            classify: &hirsel_native::continuation::classify,
         };
-        let ordinary = native::continuation::plans(&program);
+        let ordinary = hirsel_native::continuation::plans(&program);
         let mut checked = 0;
         for caller in &program.units {
             for (at, call) in caller.unit().tables.calls.iter().enumerate() {
@@ -146,7 +146,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
                         5 => row.cost.frame_bytes = 8,
                         _ => unreachable!(),
                     }
-                    assert!(native::continuation::validate(&program, &forged).is_err());
+                    assert!(hirsel_native::continuation::validate(&program, &forged).is_err());
                     emit(&forged, false);
                 }
                 let begin = plan
@@ -206,8 +206,8 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 }
 "#,
         );
-        let proved = native::continuation::plans(&program);
-        native::continuation::validate(&program, &proved).unwrap();
+        let proved = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &proved).unwrap();
         assert!(
             proved.plans.values().any(|p| p.isolate.is_some()),
             "complete source finalizer proof was not admitted"
@@ -218,8 +218,8 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
         program
             .units
             .retain(|u| !finalizers.contains(&u.unit().header.instance));
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let mut found = false;
         for unit in &program.units {
             if unit.unit().header.definition.is_core("task.isolate")

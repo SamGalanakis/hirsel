@@ -1,5 +1,10 @@
 //! Derived native campaign inputs and static cost inventory.
-use crate::{Expect, agree, discover, native, parse_header, spec_rules};
+use crate::Expect;
+use crate::agree;
+use crate::discover;
+use crate::native;
+use crate::parse_header;
+use crate::spec_rules;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -122,16 +127,16 @@ fn universe(root: &Path) -> Result<BTreeSet<String>, String> {
 /// Retain all named exclusion cells in addition to feasible pair coverage, so
 /// the exact-row ratchet can still discover a stale or changed exclusion.
 pub fn configurations(
-    matrix: &[hirsel_driver::native::Configuration],
+    matrix: &[hirsel_native_testing::Configuration],
     id: &str,
     seed: u64,
     exhaustive: bool,
     exclusions: &native::Exclusions,
-) -> Vec<hirsel_driver::native::Configuration> {
+) -> Vec<hirsel_native_testing::Configuration> {
     if exhaustive {
         return matrix.to_vec();
     }
-    let mut selected = hirsel_driver::native::pairwise_matrix(matrix, id, seed);
+    let mut selected = hirsel_native_testing::pairwise_matrix(matrix, id, seed);
     for config in matrix {
         let mut baseline = config.clone();
         baseline.options.launch = Default::default();
@@ -473,7 +478,7 @@ fn finish(root: &Path, c: Collected) -> Result<serde_json::Value, String> {
     let selected = cover(&c.features, &c.pinned, &c.costs);
     let inventory = &c.inventory;
     let costs = &c.costs;
-    let matrix = hirsel_driver::native::full_matrix();
+    let matrix = hirsel_native_testing::full_matrix();
     let baseline = native::baseline(root)?;
     let baseline_selected: Vec<_> = baseline
         .iter()
@@ -481,14 +486,14 @@ fn finish(root: &Path, c: Collected) -> Result<serde_json::Value, String> {
         .collect();
     let slim_attempts: usize = baseline_selected
         .iter()
-        .map(|c| hirsel_driver::native::pairwise_matrix(&matrix, &c.id, 1).len())
+        .map(|c| hirsel_native_testing::pairwise_matrix(&matrix, &c.id, 1).len())
         .sum();
     let slim_llvm: usize = baseline_selected
         .iter()
         .map(|c| {
-            hirsel_driver::native::pairwise_matrix(&matrix, &c.id, 1)
+            hirsel_native_testing::pairwise_matrix(&matrix, &c.id, 1)
                 .iter()
-                .filter(|c| matches!(c.engine, hirsel_driver::native::Engine::Native { .. }))
+                .filter(|c| matches!(c.engine, hirsel_native_testing::Engine::Native { .. }))
                 .count()
         })
         .sum();
@@ -503,13 +508,13 @@ fn finish(root: &Path, c: Collected) -> Result<serde_json::Value, String> {
     let generated = native::generate::cases(0, 64);
     let generated_plans: Vec<_> = generated
         .iter()
-        .map(|case| hirsel_driver::native::pairwise_matrix(&matrix, &case.id, 1))
+        .map(|case| hirsel_native_testing::pairwise_matrix(&matrix, &case.id, 1))
         .collect();
     let generated_attempts: usize = generated_plans.iter().map(Vec::len).sum();
     let generated_llvm: usize = generated_plans
         .iter()
         .flatten()
-        .filter(|c| matches!(c.engine, hirsel_driver::native::Engine::Native { .. }))
+        .filter(|c| matches!(c.engine, hirsel_native_testing::Engine::Native { .. }))
         .count();
     let topology_attempts = inventory["topology_programs"].as_u64().unwrap() as usize * 22;
     let run_variants: usize = inventory["programs"]
@@ -526,7 +531,7 @@ fn finish(root: &Path, c: Collected) -> Result<serde_json::Value, String> {
     value["selected"] = json!(selected);
     value["counts"] = json!({"baseline_before": baseline.len(), "baseline_after": baseline_selected.len(), "seed": 1,
             "baseline_configurations_before": baseline.len() * matrix.len(), "baseline_configurations_after": slim_attempts,
-            "baseline_llvm_before": baseline.len() * matrix.iter().filter(|c| matches!(c.engine, hirsel_driver::native::Engine::Native { .. })).count(), "baseline_llvm_after": slim_llvm,
+            "baseline_llvm_before": baseline.len() * matrix.iter().filter(|c| matches!(c.engine, hirsel_native_testing::Engine::Native { .. })).count(), "baseline_llvm_after": slim_llvm,
             "native_full_configurations_after": slim_attempts + generated_attempts + topology_attempts,
             "native_full_llvm_after": slim_llvm + generated_llvm + topology_attempts,
             "agreement_exact_historical_inputs": exact,
@@ -564,9 +569,9 @@ pub fn replay_history(
     if cases.is_empty() {
         return Err("history replay selected no programs".into());
     }
-    let matrix = hirsel_driver::native::full_matrix();
+    let matrix = hirsel_native_testing::full_matrix();
     let toolchain =
-        hirsel_driver::native::Toolchain::for_matrix(&native::runtime_cache()?, &matrix)
+        hirsel_native_testing::toolchain_for_matrix(&hirsel_native::runtime_cache()?, &matrix)
             .map_err(|e| e.to_string())?;
     // Each case names itself as it finishes, so a shard stopped by its pool
     // timeout still shows which sources it completed and how long each took.
@@ -778,7 +783,7 @@ mod tests {
 
     #[test]
     fn excluded_cells_stay_in_a_cover_under_nonzero_launch_inputs() {
-        let mut matrix = hirsel_driver::native::full_matrix();
+        let mut matrix = hirsel_native_testing::full_matrix();
         for c in &mut matrix {
             c.options.launch.hash_seed = 7;
         }
@@ -824,10 +829,10 @@ pub fn inventory(root: &Path) -> Result<serde_json::Value, String> {
         };
         programs.push(json!({"path": relative, "variants": variants, "run": matches!(header.expect, Expect::Run { .. })}));
     }
-    let matrix = hirsel_driver::native::full_matrix();
+    let matrix = hirsel_native_testing::full_matrix();
     let native_rows = matrix
         .iter()
-        .filter(|c| matches!(c.engine, hirsel_driver::native::Engine::Native { .. }))
+        .filter(|c| matches!(c.engine, hirsel_native_testing::Engine::Native { .. }))
         .count();
     let baseline = native::baseline(root)?.len();
     let topology = std::fs::read_to_string(root.join("native-tests/topology/cases.txt"))

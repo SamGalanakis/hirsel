@@ -1,6 +1,7 @@
 //! Exact cumulative parser admission and unchanged CommonMark AST/rendering.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::Path;
 
 const PARTS: &[&str] = &[
@@ -24,7 +25,7 @@ fn parts(variable: &str) -> Vec<String> {
     parts
 }
 
-fn seal_native(dir: &Path, tools: &native::Toolchain, engine: &str, part: &str) {
+fn seal_native(dir: &Path, tools: &hirsel_native::Toolchain, engine: &str, part: &str) {
     use sha2::{Digest, Sha256};
     fn tree(path: &Path, files: &mut std::collections::BTreeMap<String, String>) {
         if path.is_dir() {
@@ -119,7 +120,7 @@ fn run(engine: &str) {
         } else {
             // The fixture's independent oracle is a normal return after all
             // exact-byte/cap/sink assertions, with no printed output or effects.
-            let expected = native::Observation {
+            let expected = hirsel_native::Observation {
                 exit_code: Some(0),
                 blocked: false,
                 budget: None,
@@ -130,19 +131,20 @@ fn run(engine: &str) {
             };
             let input = program.engine.export_native_input().unwrap();
             let validated = program.engine.import_native_input(input).unwrap();
-            let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
-            let matrix = vec![native::Configuration {
+            let options =
+                hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+            let matrix = vec![hirsel_native_testing::Configuration {
                 options,
                 engine: if engine == "llvm" {
-                    native::Engine::Native {
-                        opt: native::OptLevel::Speed,
-                        partition: native::Partition::Whole,
-                        runtime: native::Runtime::Default,
+                    hirsel_native_testing::Engine::Native {
+                        opt: hirsel_native::OptLevel::Speed,
+                        partition: hirsel_native::Partition::Whole,
+                        runtime: hirsel_native_testing::Runtime::Default,
                     }
                 } else {
-                    native::Engine::Cranelift {
-                        partition: native::Partition::Whole,
-                        runtime: native::Runtime::Diagnostic,
+                    hirsel_native_testing::Engine::Cranelift {
+                        partition: hirsel_native::Partition::Whole,
+                        runtime: hirsel_native_testing::Runtime::Diagnostic,
                     }
                 },
             }];
@@ -150,41 +152,42 @@ fn run(engine: &str) {
                 .join("markdown-parse-budget-39")
                 .join(engine);
             std::fs::create_dir_all(&dir).unwrap();
-            let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &matrix).unwrap();
+            let tools =
+                hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &matrix).unwrap();
             let runtime = if engine == "llvm" {
-                native::Runtime::Default
+                hirsel_native_testing::Runtime::Default
             } else {
-                native::Runtime::Diagnostic
+                hirsel_native_testing::Runtime::Diagnostic
             };
             let tools = tools.with_runtime(runtime.build());
-            let ready = native::build(&validated, &matrix[0].options).unwrap();
-            let objects = native::emit_backend_objects(
+            let ready = hirsel_native_batch::build(&validated, &matrix[0].options).unwrap();
+            let objects = hirsel_native::emit_backend_objects(
                 &ready,
                 if engine == "llvm" {
-                    native::Backend::Llvm
+                    hirsel_native::Backend::Llvm
                 } else {
-                    native::Backend::Cranelift
+                    hirsel_native::Backend::Cranelift
                 },
                 if engine == "llvm" {
-                    native::OptLevel::Speed
+                    hirsel_native::OptLevel::Speed
                 } else {
-                    native::OptLevel::None
+                    hirsel_native::OptLevel::None
                 },
-                native::Partition::Whole,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
             .unwrap();
-            let sites = native::Sites::new(validated.snapshot());
+            let sites = hirsel_native::Sites::new(validated.snapshot());
             for part in parts("MARKDOWN_39_NATIVE_PARTS") {
                 eprintln!("MARKDOWN_39_STARTED {part}/{engine}");
                 let case_dir = dir.join(&part);
                 std::fs::create_dir_all(&case_dir).unwrap();
-                let fixture = native::Fixture {
+                let fixture = hirsel_native::Fixture {
                     args: vec![part.clone()],
                     ..Default::default()
                 };
-                let runnable = native::link_fixture_runnable(
+                let runnable = hirsel_native::link_fixture_runnable(
                     &ready,
                     &program.entry,
                     &objects,
@@ -194,20 +197,20 @@ fn run(engine: &str) {
                 )
                 .unwrap();
                 seal_native(&case_dir, &tools, engine, &part);
-                let launched = native::launch_fixture(
+                let launched = hirsel_native::launch_fixture(
                     &runnable,
                     &ready.target,
                     &tools,
                     &case_dir,
                     engine == "cranelift",
-                    native::Tape::Live {
+                    hirsel_native::Tape::Live {
                         record: None,
                         revocations: None,
                     },
                     &fixture,
                 )
                 .unwrap();
-                let observed = native::observe(&launched, &ready, &sites).unwrap();
+                let observed = hirsel_native::observe(&launched, &ready, &sites).unwrap();
                 assert_eq!(observed, expected, "{part}/{engine}");
                 eprintln!("MARKDOWN_39_PASS {part}/{engine}");
             }

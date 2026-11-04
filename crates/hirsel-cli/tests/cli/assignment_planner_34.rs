@@ -1,6 +1,9 @@
 //! Full main, independent matching/certificate validation, public fixtures and immutable tapes.
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, SimulationConfig};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use serde_json::{Value, json};
 use std::{
@@ -317,7 +320,7 @@ fn assignment_planner_34_reference_checked_workflows() {
     hirsel_engine::with_compiler_stack(|| {
         let root = scratch("simulation-");
         let path = package(&root);
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -462,7 +465,7 @@ fn native_four_engine_replay(partition: usize) {
     hirsel_engine::with_compiler_stack(|| {
         let root = scratch("native-");
         let path = package(&root);
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -478,7 +481,8 @@ fn native_four_engine_replay(partition: usize) {
             options: options.clone(),
             engine: Engine::Heap { campaign: false },
         }];
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.wrapper = vec![
             "python3".into(),
             root.join("run_capped.py").to_string_lossy().into_owned(),
@@ -1036,7 +1040,7 @@ fn assignment_planner_34_output_cap_and_certificate_controls() {
             &root,
             include_str!("../support/assignment_planner_34/helper.hir"),
         );
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));

@@ -23,7 +23,7 @@ pub struct CompilerRequests {
     carry: Option<super::source_graph::Carry>,
     source_index: Arc<std::sync::Mutex<super::source_graph::SourceIndexSlot>>,
     scratch_parent: std::path::PathBuf,
-    toolchain: Option<Arc<crate::native::Toolchain>>,
+    toolchain: Option<Arc<hirsel_native::Toolchain>>,
     host_toolchain: bool,
     #[cfg(test)]
     before_check: Option<fn(&mut hirsel_engine::LoadedProgram)>,
@@ -201,7 +201,7 @@ impl CompilerRequests {
             super::host_selector::GraphSelections::new(&self.budget, self.config.hold_bytes != 0);
         self
     }
-    pub fn with_toolchain(mut self, toolchain: Arc<crate::native::Toolchain>) -> Self {
+    pub fn with_toolchain(mut self, toolchain: Arc<hirsel_native::Toolchain>) -> Self {
         self.toolchain = Some(toolchain);
         self.graphs =
             super::host_selector::GraphSelections::new(&self.budget, self.config.hold_bytes != 0);
@@ -219,7 +219,7 @@ impl CompilerRequests {
     pub fn limits(&self) -> RequestLimits {
         self.limits
     }
-    pub fn toolchain(&self) -> Option<&Arc<crate::native::Toolchain>> {
+    pub fn toolchain(&self) -> Option<&Arc<hirsel_native::Toolchain>> {
         self.toolchain.as_ref()
     }
     /// Test fault injection: run on each freshly loaded program before Check.
@@ -256,8 +256,8 @@ mod tests {
         let (budget, cap) = host_budget();
         let before = budget.reserved();
         let directory = tempfile::tempdir().unwrap();
-        let target = crate::native::TargetSpec::x86_64_unknown_linux_gnu();
-        let tools = crate::native::Toolchain::in_tree(directory.path(), &[&target]).unwrap();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+        let tools = hirsel_native::Toolchain::in_tree(directory.path(), &[&target]).unwrap();
         let charged = before + (cap / 8).min(128 << 20);
         assert_eq!(budget.reserved(), charged);
         let view = tools.products.clone();

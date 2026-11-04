@@ -2,6 +2,7 @@
 //! panic-retain-original-set, with move-only resource owners and two failure sites.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn check(name: &str) {
@@ -47,7 +48,8 @@ fn check(name: &str) {
                 "{outcome:?}"
             );
         }
-        let expected = native::Observation::of_reference(reference.observation.as_ref().unwrap());
+        let expected =
+            hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
         if name.starts_with("owned") {
             let text = std::str::from_utf8(&expected.output).unwrap();
             let mut ids: Vec<u64> = text
@@ -59,14 +61,15 @@ fn check(name: &str) {
         }
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
-        let ready = native::build(&validated, &options).unwrap();
-        let sites = native::Sites::new(validated.snapshot());
-        let heap = native::run_heap_in(
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+        let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+        let sites = hirsel_native::Sites::new(validated.snapshot());
+        let heap = hirsel_native_testing::run_heap_in(
             &ready,
             &loaded.entry,
             &sites,
-            &native::HeapWorld {
+            &hirsel_native_testing::HeapWorld {
                 steps: Some(80_000_000),
                 ..Default::default()
             },
@@ -78,29 +81,35 @@ fn check(name: &str) {
             assert_eq!(heap.counters.finalizers, 129);
         }
         let configs = [
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
         let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("drift-{name}"));
-        let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &configs).unwrap();
-        for (config, result) in
-            native::differential(&validated, &loaded.entry, &expected, &configs, &tools, &dir)
-        {
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs).unwrap();
+        for (config, result) in hirsel_native_testing::differential(
+            &validated,
+            &loaded.entry,
+            &expected,
+            &configs,
+            &tools,
+            &dir,
+        ) {
             assert!(
-                matches!(result, native::Outcome::Agree),
+                matches!(result, hirsel_native_testing::Outcome::Agree),
                 "{name}: {config}: {result:?}"
             );
         }
@@ -163,25 +172,26 @@ fn large_scratch(name: &str) {
         });
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let configs = [
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
-        let expected = native::Observation {
+        let expected = hirsel_native::Observation {
             exit_code: Some(0),
             blocked: false,
             budget: None,
@@ -191,12 +201,18 @@ fn large_scratch(name: &str) {
             roots: vec![],
         };
         let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("drift-large-{name}"));
-        let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &configs).unwrap();
-        for (config, result) in
-            native::differential(&validated, &loaded.entry, &expected, &configs, &tools, &dir)
-        {
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs).unwrap();
+        for (config, result) in hirsel_native_testing::differential(
+            &validated,
+            &loaded.entry,
+            &expected,
+            &configs,
+            &tools,
+            &dir,
+        ) {
             assert!(
-                matches!(result, native::Outcome::Agree),
+                matches!(result, hirsel_native_testing::Outcome::Agree),
                 "{config}: {result:?}"
             );
         }

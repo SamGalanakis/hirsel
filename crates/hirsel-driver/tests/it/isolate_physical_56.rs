@@ -31,8 +31,8 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 fn known_isolate_owned_result_survives_generated_begin_save_replay_and_migration() {
     hirsel_engine::with_compiler_stack(|| {
         let ready = super::runtime50_continuation::ready(SOURCE);
-        let plans = hirsel_driver::native::continuation::plans(&ready);
-        hirsel_driver::native::continuation::validate(&ready, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&ready);
+        hirsel_native::continuation::validate(&ready, &plans).unwrap();
         let wrappers: Vec<_> = plans
             .plans
             .values()
@@ -64,7 +64,7 @@ fn known_isolate_owned_result_survives_generated_begin_save_replay_and_migration
                 .unwrap();
             state.live.retain(|slot| slot.value != protocol.mark);
             assert!(
-                hirsel_driver::native::continuation::validate(&ready, &forged).is_err(),
+                hirsel_native::continuation::validate(&ready, &forged).is_err(),
                 "independent validation accepted a missing catch-only begin mark"
             );
             assert!(
@@ -119,14 +119,14 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 "#,
         );
         for backend in [
-            hirsel_driver::native::Backend::Llvm,
-            hirsel_driver::native::Backend::Cranelift,
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
         ] {
-            let result = hirsel_driver::native::emit_backend_objects(
+            let result = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
                 hirsel_lir::emission::OptLevel::Default,
-                hirsel_driver::native::Partition::Whole,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             );

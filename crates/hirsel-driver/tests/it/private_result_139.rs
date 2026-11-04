@@ -1,5 +1,6 @@
-use hirsel_driver::{COMPILER, requests::*};
+use hirsel_driver::requests::*;
 use hirsel_engine::{CompileConfig, LoweringPolicy, QueryError, ToolError, with_compiler_stack};
+use hirsel_front_phases::COMPILER;
 
 #[test]
 fn private_result_payload_inference_matches_scalar_preparation() {

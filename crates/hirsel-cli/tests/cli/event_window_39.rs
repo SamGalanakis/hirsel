@@ -1,6 +1,9 @@
 //! Full-main event time, restart, strict checkpoint admission and publication.
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, with_compiler_stack};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileReadScript};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -244,7 +247,8 @@ fn reference(partition: &str) {
         let _evidence = Evidence(root.clone());
         let manifest = package(&root);
         let cases = cases(&root, partition);
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded =
+            hirsel_front_phases::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -394,7 +398,8 @@ fn native(partition: &str) {
         let _evidence = Evidence(root.clone());
         let manifest = package(&root);
         let cases = cases(&root, partition);
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded =
+            hirsel_front_phases::load_program(&manifest).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -416,7 +421,8 @@ fn native(partition: &str) {
             options: options.clone(),
             engine,
         });
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.execution = Execution::Executable;
         tools.wrapper = vec![
             "env".into(),
@@ -686,7 +692,7 @@ fn event_window_39_arithmetic_and_output_boundary() {
         )
         .unwrap();
         seal(&root);
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -731,7 +737,8 @@ fn event_window_39_arithmetic_and_output_boundary() {
             options: options.clone(),
             engine,
         });
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.execution = Execution::Executable;
         tools.wrapper = vec![
             "env".into(),

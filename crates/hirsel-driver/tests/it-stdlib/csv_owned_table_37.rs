@@ -1,6 +1,8 @@
 //! Owned CSV construction: pinned Go vectors, reachable V, four engines and copy events.
-use hirsel_driver::{native, *};
+use hirsel_driver::native;
+use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use serde_json::Value;
 use std::{path::PathBuf, process::Command};
 
@@ -179,27 +181,30 @@ fn run(engine: &str, part: usize) {
                 "{observation:?}"
             );
         } else {
-            let matrix = [native::Configuration {
-                options: native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+            let matrix = [hirsel_native_testing::Configuration {
+                options: hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                ),
                 engine: if engine == "llvm" {
-                    native::Engine::Native {
-                        opt: native::OptLevel::Speed,
-                        partition: native::Partition::Whole,
-                        runtime: native::Runtime::Diagnostic,
+                    hirsel_native_testing::Engine::Native {
+                        opt: hirsel_native::OptLevel::Speed,
+                        partition: hirsel_native::Partition::Whole,
+                        runtime: hirsel_native_testing::Runtime::Diagnostic,
                     }
                 } else {
-                    native::Engine::Cranelift {
-                        partition: native::Partition::Whole,
-                        runtime: native::Runtime::Diagnostic,
+                    hirsel_native_testing::Engine::Cranelift {
+                        partition: hirsel_native::Partition::Whole,
+                        runtime: hirsel_native_testing::Runtime::Diagnostic,
                     }
                 },
             }];
             let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
                 .join(format!("csv-owned-table-37-{engine}-{part}"));
             let mut tools =
-                native::Toolchain::for_matrix(&scratch.join("runtime"), &matrix).unwrap();
+                hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &matrix)
+                    .unwrap();
             tools.launch_timeout = std::time::Duration::from_secs(60);
-            let expected = native::Observation {
+            let expected = hirsel_native::Observation {
                 exit_code: Some(0),
                 blocked: false,
                 budget: None,
@@ -208,7 +213,7 @@ fn run(engine: &str, part: usize) {
                 failures: vec![],
                 roots: vec![],
             };
-            let outcomes = native::differential(
+            let outcomes = hirsel_native_testing::differential(
                 &validated,
                 &loaded.entry,
                 &expected,
@@ -218,7 +223,11 @@ fn run(engine: &str, part: usize) {
             );
             assert_eq!(outcomes.len(), 1);
             for (name, outcome) in outcomes {
-                assert_eq!(outcome, native::Outcome::Agree, "{name}: {outcome:?}");
+                assert_eq!(
+                    outcome,
+                    hirsel_native_testing::Outcome::Agree,
+                    "{name}: {outcome:?}"
+                );
             }
         }
         eprintln!("CSV_OWNED_37_PASS part={part} engine={engine}");
@@ -373,25 +382,27 @@ fn measured(source: &str, label: &str) -> String {
     let mut loaded = checked(source);
     let input = loaded.engine.export_native_input().unwrap();
     let validated = loaded.engine.import_native_input(input).unwrap();
-    let target = native::TargetSpec::x86_64_unknown_linux_gnu();
-    let ready = native::build(&validated, &native::Options::new(target.clone())).unwrap();
+    let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+    let ready =
+        hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target.clone()))
+            .unwrap();
     let dir =
         PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("csv-owned-table-37-{label}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let tools = native::Toolchain::in_tree_with_runtime(
+    let tools = hirsel_native::Toolchain::in_tree_with_runtime(
         &dir.join("runtime"),
         &[&target],
-        native::RuntimeBuild {
+        hirsel_native::RuntimeBuild {
             measurement: true,
             ..Default::default()
         },
     )
     .unwrap();
-    let exe = native::link(
+    let exe = hirsel_native::link(
         &ready,
         &loaded.entry,
-        native::OptLevel::Speed,
-        native::Partition::Whole,
+        hirsel_native::OptLevel::Speed,
+        hirsel_native::Partition::Whole,
         &tools,
         &dir,
     )

@@ -1,6 +1,7 @@
 //! cespare/xxhash TestAll and stripe transitions exceed the corpus's step budget.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::Path;
 
 fn execute(source: &str) {

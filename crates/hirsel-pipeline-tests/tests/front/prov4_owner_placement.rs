@@ -17,7 +17,10 @@ fn lowered(
     hirsel_tir::Definition,
     hirsel_validate::SignatureMap,
 ) {
-    let mut engine = QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+    let mut engine = QueryEngine::new(
+        default_environment(),
+        hirsel_front_phases::compiler_adapters(),
+    );
     let file = engine
         .sources
         .add("owner-placement.hir", source.into())
@@ -247,7 +250,7 @@ fn omitted_destination_receipt_never_invents_an_explicit_arena() {
         {
             row.construction_destination = None;
         }
-        let result = hirsel_driver::LowerAdapter.lower(
+        let result = hirsel_front_phases::LowerAdapter.lower(
             engine.types(),
             &hirsel_types::TypeMemo::new(),
             &analyzed,

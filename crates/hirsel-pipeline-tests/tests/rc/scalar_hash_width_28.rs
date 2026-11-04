@@ -2,13 +2,16 @@
 //! and coretests/tests/hash/sip.rs:43-132 at f6c1107f (MIT, Rust Contributors).
 //! Test expectations use an independent buffered reference, fixed upstream vectors,
 //! and the unchanged byte ABI; no DefaultHasher framing is assumed.
-use hirsel_driver::compiler_adapters;
 use hirsel_driver::native::*;
 use hirsel_engine::{
     QueryEngine, default_context, default_environment, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_lir::layout::sequence_elements_offset;
 use hirsel_lir::layout_types::{LayoutKind, SizeSpec};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use std::fmt::Write;
 
 const SEEDS: [u64; 3] = [0, 1, u64::MAX];

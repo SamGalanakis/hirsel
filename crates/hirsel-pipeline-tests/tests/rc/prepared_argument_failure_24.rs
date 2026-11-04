@@ -1,5 +1,7 @@
-use hirsel_driver::{native, *};
+use hirsel_driver::native;
+use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::Path;
 
 #[test]
@@ -50,7 +52,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {{
             };
             let reference =
                 run_observed_snapshot(&mut program.engine, &run, Default::default()).unwrap();
-            let expected = native::Observation {
+            let expected = hirsel_native::Observation {
                 exit_code: Some(0),
                 blocked: false,
                 budget: None,
@@ -60,43 +62,51 @@ pub fn main(rt: Io) -> Result[(), GrantError] {{
                 roots: vec![],
             };
             assert_eq!(
-                native::Observation::of_reference(reference.observation.as_ref().unwrap()),
+                hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap()),
                 expected
             );
             let input = program.engine.export_native_input().unwrap();
             let validated = program.engine.import_native_input(input).unwrap();
-            let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+            let options =
+                hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
             let matrix = [
-                native::Configuration {
+                hirsel_native_testing::Configuration {
                     options: options.clone(),
-                    engine: native::Engine::Heap { campaign: false },
+                    engine: hirsel_native_testing::Engine::Heap { campaign: false },
                 },
-                native::Configuration {
+                hirsel_native_testing::Configuration {
                     options: options.clone(),
-                    engine: native::Engine::Native {
-                        opt: native::OptLevel::Speed,
-                        partition: native::Partition::Whole,
-                        runtime: native::Runtime::Diagnostic,
+                    engine: hirsel_native_testing::Engine::Native {
+                        opt: hirsel_native::OptLevel::Speed,
+                        partition: hirsel_native::Partition::Whole,
+                        runtime: hirsel_native_testing::Runtime::Diagnostic,
                     },
                 },
-                native::Configuration {
+                hirsel_native_testing::Configuration {
                     options,
-                    engine: native::Engine::Cranelift {
-                        partition: native::Partition::Whole,
-                        runtime: native::Runtime::Diagnostic,
+                    engine: hirsel_native_testing::Engine::Cranelift {
+                        partition: hirsel_native::Partition::Whole,
+                        runtime: hirsel_native_testing::Runtime::Diagnostic,
                     },
                 },
             ];
             let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
                 .join(format!("prepared-argument-failure-{cap}"));
-            let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &matrix).unwrap();
-            let outcomes =
-                native::differential(&validated, &program.entry, &expected, &matrix, &tools, &dir);
+            let tools =
+                hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &matrix).unwrap();
+            let outcomes = hirsel_native_testing::differential(
+                &validated,
+                &program.entry,
+                &expected,
+                &matrix,
+                &tools,
+                &dir,
+            );
             assert_eq!(outcomes.len(), 3);
             for (configuration, outcome) in outcomes {
                 assert_eq!(
                     outcome,
-                    native::Outcome::Agree,
+                    hirsel_native_testing::Outcome::Agree,
                     "cap={cap}/{configuration}: {outcome:?}"
                 );
             }

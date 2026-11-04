@@ -156,7 +156,7 @@ pub enum CompileResult {
     Expansion(Arc<str>),
     Hashes(Arc<std::collections::BTreeMap<DefPath, hirsel_syntax::ContentHash>>),
     /// Native pipeline failures retain their existing inner error category.
-    NativeError(crate::native::NativeError),
+    NativeError(hirsel_native::NativeError),
     Check(CheckOutput),
     Precomputed {
         definitions: u64,
@@ -357,12 +357,6 @@ impl TirProvider for ExecutionProvider<'_> {
 }
 /// Compact linked observation tables. Site ordinals use the selected source
 /// anchors, including generated definitions; no Ready/Value body is retained.
-#[derive(Clone, Debug, Default)]
-pub struct NativeObservation {
-    pub failure_rules: Vec<String>,
-    pub sites: std::collections::BTreeMap<u64, (hirsel_syntax::DefId, hirsel_lir::ir::SiteRange)>,
-    pub anchors: std::collections::BTreeMap<DefPath, Vec<hirsel_span::Anchor>>,
-}
 /// Executable readiness includes a materialized executable and frozen launch
 /// metadata. Construction follows successful Link/materialization checks; the
 /// admission/scratch owner lives until the last output user releases it.
@@ -381,7 +375,7 @@ pub struct NativeExecution {
     pub types: Arc<hirsel_types::TypeInterner>,
     pub code: hirsel_run_schema::CodeReach,
     pub callees: std::collections::BTreeMap<String, hirsel_run_schema::CalleeFacts>,
-    pub toolchain: Arc<crate::native::Toolchain>,
+    pub toolchain: Arc<hirsel_native::Toolchain>,
     pub run: Option<Arc<hirsel_run_config::ValidatedRun>>,
     pub foreign_unreplayable: bool,
     pub foreign: hirsel_engine::ForeignUse,
@@ -456,19 +450,19 @@ impl hirsel_engine::requests::OutputReadiness for CompilerReadiness {
 pub struct NativeReady {
     pub root: hirsel_engine::runtime::ProductRef,
     pub ready: Vec<hirsel_engine::runtime::ProductRef>,
-    pub program: crate::native::ReadyProgram,
+    pub program: hirsel_native::ReadyProgram,
     pub entry: DefPath,
     pub observation: NativeObservation,
     pub sources: SourceMap,
     /// Source profiles, present when the request selected source/debug tables.
-    pub profiles: Option<Arc<crate::native::ProfileSources>>,
+    pub profiles: Option<Arc<hirsel_native::ProfileSources>>,
     pub callees: std::collections::BTreeMap<String, hirsel_run_schema::CalleeFacts>,
     pub(super) _owner: Arc<dyn Send + Sync>,
 }
 impl NativeReady {
     /// Failure sites over the selected source anchors.
-    pub fn sites(&self) -> crate::native::Sites<'_> {
-        crate::native::Sites::from_anchors(
+    pub fn sites(&self) -> hirsel_native::Sites<'_> {
+        hirsel_native::Sites::from_anchors(
             &self.sources,
             self.observation
                 .anchors
@@ -486,4 +480,13 @@ pub struct NativeObjectOutput {
     pub instances: usize,
     pub store: Arc<dyn hirsel_engine::store::ResultStore>,
     pub(super) _owner: Arc<dyn Send + Sync>,
+}
+
+impl hirsel_native_testing::ReadyExecution for NativeReady {
+    fn program(&self) -> &hirsel_native::ReadyProgram {
+        &self.program
+    }
+    fn sites(&self) -> hirsel_native::Sites<'_> {
+        NativeReady::sites(self)
+    }
 }

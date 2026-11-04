@@ -1,6 +1,7 @@
 //! The admitted source program runs independently of its resource diagnostics.
+use hirsel_driver::HostLaunch;
+use hirsel_driver::LaunchConfig;
 use hirsel_driver::ownership_trace::run_resources_on_host;
-use hirsel_driver::{HostLaunch, LaunchConfig};
 use hirsel_engine::Verify;
 
 #[test]
@@ -132,10 +133,9 @@ fn ownership_host_plain_builtin_calls_preserve_live_resource_custody_in_both_eng
 #[test]
 fn ownership_simulation_test_entry_preserves_source_results_and_restores_the_adapter() {
     use hirsel_driver::ownership_trace::execute_test_resources;
-    use hirsel_driver::{
-        COMPILER,
-        testing::{self, Selection},
-    };
+    use hirsel_driver::testing;
+    use hirsel_driver::testing::Selection;
+    use hirsel_front_phases::COMPILER;
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("tests.hir");
     std::fs::write(&source,"resource type Token {}\ndrop(x) {}\n@test\nfn resource_lifetime(t: Test) {\n let first = Token()\n let second = take first\n test.check(t, true)\n}\n").unwrap();
@@ -209,10 +209,9 @@ fn ownership_simulation_test_entry_preserves_source_results_and_restores_the_ada
 
 fn observed_task_source(body: &str, creates: usize) -> hirsel_run_schema::ownership_trace::Trace {
     use hirsel_driver::ownership_trace::execute_test_resources;
-    use hirsel_driver::{
-        COMPILER,
-        testing::{self, Selection},
-    };
+    use hirsel_driver::testing;
+    use hirsel_driver::testing::Selection;
+    use hirsel_front_phases::COMPILER;
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("tasks.hir");
     std::fs::write(&source, body).unwrap();
@@ -684,20 +683,24 @@ fn read(token: Token) -> u64 { token.value }
 #[test]
 fn ownership_native_source_emission_binds_checked_metadata_and_preserves_ordinary_objects() {
     hirsel_engine::with_compiler_stack(|| {
-        use hirsel_driver::native::{
-            self, Backend, OptLevel, Options, Partition, Sites, TargetSpec,
-        };
+        use hirsel_driver::native;
+        use hirsel_native::Backend;
+        use hirsel_native::OptLevel;
+        use hirsel_native::Options;
+        use hirsel_native::Partition;
+        use hirsel_native::Sites;
+        use hirsel_native::TargetSpec;
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("main.hir");
         std::fs::write(&source, "resource type Token { value: u64 }\ndrop(x) {}\npub fn main() -> Result[(), ()] {\n let token = Token(value: 7u64)\n Ok(())\n}\n").unwrap();
-        let mut loaded = hirsel_driver::load_program(&source)
+        let mut loaded = hirsel_front_phases::load_program(&source)
             .unwrap_or_else(|error| panic!("source fixture: {error}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|error| panic!("source fixture: {error}"));
         let input = loaded.engine.export_native_input().unwrap();
         let checked = loaded.engine.import_native_input(input).unwrap();
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &checked,
             &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
         )
@@ -705,7 +708,7 @@ fn ownership_native_source_emission_binds_checked_metadata_and_preserves_ordinar
         let sites = Sites::new(checked.snapshot());
         for backend in [Backend::Llvm, Backend::Cranelift] {
             let ordinary = || {
-                native::emit_backend_objects(
+                hirsel_native::emit_backend_objects(
                     &ready,
                     backend,
                     OptLevel::None,
@@ -716,7 +719,7 @@ fn ownership_native_source_emission_binds_checked_metadata_and_preserves_ordinar
                 .unwrap()
             };
             let before = ordinary();
-            let traced = native::ownership_trace::emit_leaf(
+            let traced = hirsel_native_testing::ownership_trace::emit_leaf(
                 &ready,
                 &loaded.entry,
                 &sites,
@@ -779,9 +782,14 @@ pub fn main() -> Result[(), ()] {
 
 fn observed_native_source(body: &str, created: u64, expect_calls: bool) {
     hirsel_engine::with_compiler_stack(|| {
-        use hirsel_driver::native::{
-            self, Backend, OptLevel, Options, RuntimeBuild, Sites, TargetSpec, Toolchain,
-        };
+        use hirsel_driver::native;
+        use hirsel_native::Backend;
+        use hirsel_native::OptLevel;
+        use hirsel_native::Options;
+        use hirsel_native::RuntimeBuild;
+        use hirsel_native::Sites;
+        use hirsel_native::TargetSpec;
+        use hirsel_native::Toolchain;
         use hirsel_run_schema::ownership_trace::Action;
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("main.hir");
@@ -813,13 +821,13 @@ fn observed_native_source(body: &str, created: u64, expect_calls: bool) {
             traces.push(run.trace.unwrap());
         }
         assert_eq!(traces[0], traces[1]);
-        let mut loaded = hirsel_driver::load_program(&source)
+        let mut loaded = hirsel_front_phases::load_program(&source)
             .unwrap_or_else(|error| panic!("source fixture: {error}"));
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let checked = loaded.engine.import_native_input(input).unwrap();
         let target = TargetSpec::x86_64_unknown_linux_gnu();
-        let ready = native::build(&checked, &Options::new(target.clone())).unwrap();
+        let ready = hirsel_native_batch::build(&checked, &Options::new(target.clone())).unwrap();
         let selected: Vec<_> = ready.units.iter().collect();
         let calls = hirsel_lir::ownership_trace::native::local_calls(&selected).unwrap();
         assert_eq!(
@@ -867,7 +875,7 @@ fn observed_native_source(body: &str, created: u64, expect_calls: bool) {
         }
         let selected = tools.with_runtime(variants[1]);
         for backend in [Backend::Llvm, Backend::Cranelift] {
-            let objects = native::ownership_trace::emit_leaf(
+            let objects = hirsel_native_testing::ownership_trace::emit_leaf(
                 &ready,
                 &loaded.entry,
                 &sites,
@@ -1196,22 +1204,27 @@ pub fn main() -> Result[(), ()] {
 #[test]
 fn ownership_native_call_inputs_require_original_projection_for_synthetic_moves() {
     hirsel_engine::with_compiler_stack(|| {
-        use hirsel_driver::native::{self, Backend, OptLevel, Options, Sites, TargetSpec};
+        use hirsel_driver::native;
+        use hirsel_native::Backend;
+        use hirsel_native::OptLevel;
+        use hirsel_native::Options;
+        use hirsel_native::Sites;
+        use hirsel_native::TargetSpec;
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("main.hir");
         std::fs::write(&source, "resource type Token {}\ndrop(x) {}\nfn relay(take token: Token) -> Token { take token }\npub fn main() -> Result[(), ()] { let first = Token()\n let last = relay(take first)\n Ok(()) }\n").unwrap();
-        let mut loaded = hirsel_driver::load_program(&source).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&source).unwrap();
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let checked = loaded.engine.import_native_input(input).unwrap();
-        let ready = native::build(
+        let ready = hirsel_native_batch::build(
             &checked,
             &Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
         )
         .unwrap();
         let sites = Sites::new(checked.snapshot());
         for backend in [Backend::Llvm, Backend::Cranelift] {
-            let error = native::ownership_trace::emit_leaf(
+            let error = hirsel_native_testing::ownership_trace::emit_leaf(
                 &ready,
                 &loaded.entry,
                 &sites,

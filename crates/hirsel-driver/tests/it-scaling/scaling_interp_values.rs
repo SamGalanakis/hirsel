@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 /// Value nodes the interpreter copies while a loop pushes onto a List that it
 /// also reads through a borrowed parameter and a borrowed core operation each

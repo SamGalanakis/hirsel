@@ -53,7 +53,8 @@ fn export_friction_recipe(name: &str, source: &str) {
     assert!(output.status.success(), "{name}: {output:?}");
     let text = std::fs::read_to_string(artifact).unwrap();
     hirsel_engine::with_compiler_stack(|| {
-        let mut program = hirsel_driver::load_program(&fixture.0.join("hirsel.json")).unwrap();
+        let mut program =
+            hirsel_front_phases::load_program(&fixture.0.join("hirsel.json")).unwrap();
         program.check_for_execution().unwrap();
         program
             .engine
@@ -230,10 +231,15 @@ impl Fixture {
     // Exercise explicit Args/root/Net through the native fixture boundary.
     fn native_executable(&self) -> PathBuf {
         hirsel_engine::with_compiler_stack(|| {
-            use hirsel_driver::native::{
-                OptLevel, Options, Partition, TargetSpec, Toolchain, build, link,
-            };
-            let mut loaded = hirsel_driver::load_program(&self.0.join("hirsel.json")).unwrap();
+            use hirsel_native::OptLevel;
+            use hirsel_native::Options;
+            use hirsel_native::Partition;
+            use hirsel_native::TargetSpec;
+            use hirsel_native::Toolchain;
+            use hirsel_native::link;
+            use hirsel_native_batch::build;
+            let mut loaded =
+                hirsel_front_phases::load_program(&self.0.join("hirsel.json")).unwrap();
             loaded.check_for_execution().unwrap();
             let input = loaded.engine.export_native_input().unwrap();
             let validated = loaded.engine.import_native_input(input).unwrap();
@@ -1247,7 +1253,7 @@ impl Example {
     }
 
     /// `hirsel build` for `target`, in this process.
-    fn build(&self, target: hirsel_driver::native::TargetSpec) -> PathBuf {
+    fn build(&self, target: hirsel_native::TargetSpec) -> PathBuf {
         let exe = self.dir.join(format!("program-{}", target.triple));
         hirsel_engine::with_compiler_stack(|| {
             hirsel_driver::native::build_path_native_backend_with_validation(
@@ -1255,11 +1261,11 @@ impl Example {
                 &exe,
                 target,
                 Default::default(),
-                hirsel_driver::native::Backend::Llvm,
+                hirsel_native::Backend::Llvm,
                 None,
                 false,
                 hirsel_driver::session::Policy::default(),
-                hirsel_driver::native::Validation::EveryStage,
+                hirsel_native::Validation::EveryStage,
             )
         })
         .unwrap()
@@ -1331,7 +1337,7 @@ impl Drop for Example {
 /// Each case runs interpreted and as the built x86-64 executable (`aarch64`: as the
 /// AArch64 executable under qemu instead), with one expectation.
 fn check_cases(example: &Example, access: &str, aarch64: bool, cases: &[Case]) {
-    use hirsel_driver::native::TargetSpec;
+    use hirsel_native::TargetSpec;
     let grants = example.grants(access);
     let exe = example.build(if aarch64 {
         TargetSpec::aarch64_unknown_linux_gnu()

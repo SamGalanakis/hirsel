@@ -6,6 +6,7 @@
 mod model;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 const PRODUCT: &str =
     "fn probe(x:(bool,bool))->u32 {match x {(true,_)=>1, (false,true)=>2}}\npub fn main() {}\n";

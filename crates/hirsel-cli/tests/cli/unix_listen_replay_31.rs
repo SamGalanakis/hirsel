@@ -1,5 +1,8 @@
 //! Snapshot and host Unix listeners replay from the tape's authority, without providers.
 use hirsel_driver::native::*;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_rt::io::{Completion, Request};
 use serde_json::json;
 use std::{
@@ -78,7 +81,7 @@ fn replay_case(case: &str) {
             .unwrap();
         let root = scratch.path().canonicalize().unwrap();
         let manifest = package(&root);
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&manifest).unwrap();
         loaded.check_for_execution().unwrap();
         let snapshot = loaded.engine.export_native_input().unwrap();
         let input = loaded.engine.import_native_input(snapshot).unwrap();
@@ -93,7 +96,8 @@ fn replay_case(case: &str) {
                 runtime: Runtime::Diagnostic,
             },
         }];
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         let mut objects = Vec::new();
         for backend in [Backend::Llvm, Backend::Cranelift] {
             objects.push((

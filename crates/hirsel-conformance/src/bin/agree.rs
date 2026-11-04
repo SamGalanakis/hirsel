@@ -82,7 +82,9 @@ fn main_on_compiler_thread() -> ExitCode {
     let native = match native {
         None => None,
         Some(mode) => {
-            use hirsel_driver::native::{Engine, Toolchain, smoke_matrix};
+            use hirsel_native::Toolchain;
+            use hirsel_native_testing::Engine;
+            use hirsel_native_testing::smoke_matrix;
             let mut matrix = smoke_matrix();
             for config in &mut matrix {
                 config.options.launch.hash_seed = hash_seed;
@@ -91,7 +93,10 @@ fn main_on_compiler_thread() -> ExitCode {
                 matrix.retain(|c| matches!(c.engine, Engine::Heap { .. }));
             }
             let built = hirsel_conformance::native::runtime_cache()
-                .and_then(|dir| Toolchain::for_matrix(&dir, &matrix).map_err(|e| e.to_string()))
+                .and_then(|dir| {
+                    hirsel_native_testing::toolchain_for_matrix(&dir, &matrix)
+                        .map_err(|e| e.to_string())
+                })
                 .and_then(|toolchain| {
                     Ok(hirsel_conformance::agree::Native::new(
                         matrix,

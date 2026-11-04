@@ -5,6 +5,7 @@
 //! f64.txt retains all 332 prior independent vectors; f32.txt adds power neighbors.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::{collections::BTreeMap, path::PathBuf};
 
 #[test]
@@ -132,24 +133,26 @@ fn check_engines(source: &str) {
         "{:?}",
         reference.outcome
     );
-    let expected = native::Observation::of_reference(reference.observation.as_ref().unwrap());
+    let expected =
+        hirsel_native::Observation::of_reference(reference.observation.as_ref().unwrap());
     let input = loaded.engine.export_native_input().unwrap();
     let validated = loaded.engine.import_native_input(input).unwrap();
-    let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+    let options =
+        hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
     let configs = vec![
-        native::Configuration {
+        hirsel_native_testing::Configuration {
             options: options.clone(),
-            engine: native::Engine::Native {
-                opt: native::OptLevel::Speed,
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            engine: hirsel_native_testing::Engine::Native {
+                opt: hirsel_native::OptLevel::Speed,
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         },
-        native::Configuration {
+        hirsel_native_testing::Configuration {
             options,
-            engine: native::Engine::Cranelift {
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            engine: hirsel_native_testing::Engine::Cranelift {
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         },
     ];
@@ -158,12 +161,18 @@ fn check_engines(source: &str) {
         .tempdir()
         .unwrap()
         .keep();
-    let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &configs).unwrap();
-    for (config, outcome) in
-        native::differential(&validated, &loaded.entry, &expected, &configs, &tools, &dir)
-    {
+    let tools =
+        hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs).unwrap();
+    for (config, outcome) in hirsel_native_testing::differential(
+        &validated,
+        &loaded.entry,
+        &expected,
+        &configs,
+        &tools,
+        &dir,
+    ) {
         assert!(
-            matches!(outcome, native::Outcome::Agree),
+            matches!(outcome, hirsel_native_testing::Outcome::Agree),
             "{config}: {outcome:?}; {}",
             dir.display()
         );

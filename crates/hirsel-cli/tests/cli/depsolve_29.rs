@@ -139,8 +139,8 @@ fn scripted(checked: bool, full: bool) {
             selected.push(case.clone());
         }
         eprintln!("DEPSOLVE_29_EVIDENCE {}", retained.display());
-        let mut loaded =
-            hirsel_driver::load_program(&manifest).unwrap_or_else(|error| panic!("load: {error}"));
+        let mut loaded = hirsel_front_phases::load_program(&manifest)
+            .unwrap_or_else(|error| panic!("load: {error}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|error| panic!("check: {error}"));

@@ -1,6 +1,7 @@
 //! Suspend an entered send before delivery while the evaluator owns its Region.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_interp::{
     BlockedWait, Error, OperationCall, OperationContext, OperationId, OperationResult, Operations,
     OperationsAdapter, Outcome, library::Library,

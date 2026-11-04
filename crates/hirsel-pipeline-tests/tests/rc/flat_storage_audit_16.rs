@@ -657,9 +657,12 @@ fn local_region_sources_still_make_two_distinct_flat_copies() {
 #[test]
 #[ignore = "native: focused flat region copy parity"]
 fn native_flat_region_copy_parity() {
-    use hirsel_driver::compiler_adapters;
     use hirsel_driver::native::*;
     use hirsel_engine::*;
+    use hirsel_front_phases::compiler_adapters;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let matrix = vec![
         Configuration {
             options: Options::new(target()),
@@ -684,7 +687,8 @@ fn native_flat_region_copy_parity() {
     let directory =
         std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("flat-storage-audit-16-native");
     std::fs::create_dir_all(&directory).unwrap();
-    let toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
+    let toolchain =
+        hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix).unwrap();
     for (name, source, succeeds) in [
         (
             "region-item",

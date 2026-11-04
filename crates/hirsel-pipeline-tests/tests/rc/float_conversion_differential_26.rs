@@ -494,9 +494,13 @@ fn oracle_golden_certificates() {
 // Four-engine harness (the pure prefix is independently executable by the evidence adapter).
 fn partition(index: usize) {
     use crate::rc_support::history::{Category, Runner};
-    use hirsel_driver::native::{
-        Configuration, Engine, OptLevel, Options, Partition, Runtime, TargetSpec,
-    };
+    use hirsel_native::OptLevel;
+    use hirsel_native::Options;
+    use hirsel_native::Partition;
+    use hirsel_native::TargetSpec;
+    use hirsel_native_testing::Configuration;
+    use hirsel_native_testing::Engine;
+    use hirsel_native_testing::Runtime;
     let (source, expected, ids) = fixture(index);
     let source_hash = format!(
         "{:?}",
@@ -531,7 +535,7 @@ fn partition(index: usize) {
     .collect();
     let runner = Runner::with_matrix(directory.path(), matrix).unwrap();
     let report = hirsel_engine::with_compiler_stack(|| {
-        let mut loaded = hirsel_driver::load_program_source(
+        let mut loaded = hirsel_front_phases::load_program_source(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../hirsel-driver/tests/fixtures/std_numeric.hir"),
             Some(&source),
@@ -550,9 +554,8 @@ fn partition(index: usize) {
             hirsel_engine::SimulationConfig::default(),
         )
         .unwrap();
-        let reference = hirsel_driver::native::Observation::of_reference(
-            execution.observation.as_ref().unwrap(),
-        );
+        let reference =
+            hirsel_native::Observation::of_reference(execution.observation.as_ref().unwrap());
         runner.compare(
             &validated,
             &loaded.entry,

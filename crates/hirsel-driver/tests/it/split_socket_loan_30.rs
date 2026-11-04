@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 const ORIGINAL: &str = r#"fn deadline(clock: MonotonicClock) -> Result[Deadline, ClockError] {
  let now = clock.monotonic(clock)?
@@ -63,6 +64,9 @@ fn checked(source: &str) -> QueryEngine {
 #[test]
 fn split_socket_loan_30_original_and_twins_on_four_engines() {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let mut options = Options::new(TargetSpec::x86_64_unknown_linux_gnu());
         options.validation = Validation::EveryStage;
@@ -91,8 +95,11 @@ fn split_socket_loan_30_original_and_twins_on_four_engines() {
             .prefix("split-socket-loan-30-")
             .tempdir()
             .unwrap();
-        let toolchain =
-            Toolchain::for_matrix(&scratch.path().join("runtime"), &configurations).unwrap();
+        let toolchain = hirsel_native_testing::toolchain_for_matrix(
+            &scratch.path().join("runtime"),
+            &configurations,
+        )
+        .unwrap();
         let net: hirsel_run_schema::NetGrant = serde_json::from_value(serde_json::json!({
             "provider": "net.script@2",
             "rules": [{"address": "/fixture/pubsub.sock", "service": "0", "operation": "unix_connect"}],

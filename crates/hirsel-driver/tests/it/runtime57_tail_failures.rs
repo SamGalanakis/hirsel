@@ -47,8 +47,8 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 fn check(source: &str, kind: TailKind, label: &str) {
     with_compiler_stack(|| {
         let program = ready(source);
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let admitted = plans.plans.values().flat_map(|p| &p.states).any(|s| {
             s.tail.as_ref().is_some_and(|tail| tail.kind == kind)
                 && matches!(s.action, ResumeAction::AfterEnteredCall(..))
@@ -63,7 +63,7 @@ fn check(source: &str, kind: TailKind, label: &str) {
                 .find(|s| s.tail.as_ref().is_some_and(|t| t.kind == TailKind::Cause))
                 .unwrap();
             state.action = ResumeAction::RetryUnenteredCall(state.boundary.call);
-            assert!(native::continuation::validate(&program, &wrong).is_err());
+            assert!(hirsel_native::continuation::validate(&program, &wrong).is_err());
         }
         assert_eq!(
             compact_runs_with(source, label, true, "tasks.free@1").len(),

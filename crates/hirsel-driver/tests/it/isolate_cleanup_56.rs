@@ -168,8 +168,8 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
 }
 "#,
         );
-        let plans = hirsel_driver::native::continuation::plans(&program);
-        hirsel_driver::native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let wrapper = plans
             .plans
             .values()

@@ -1,5 +1,8 @@
 use hirsel_driver::native::*;
 use hirsel_engine::*;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 
 const RESIDUAL_CAPTURE: &str = r#"
 resource type Guard { n: u64 }
@@ -210,7 +213,9 @@ fn agrees(source: &str, output: &[u8]) {
             .prefix("isolate56-probe-")
             .tempdir()
             .unwrap();
-        let toolchain = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+                .unwrap();
         let results = differential(
             &validated,
             &entry,

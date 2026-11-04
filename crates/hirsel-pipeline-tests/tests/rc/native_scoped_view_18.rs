@@ -6,6 +6,9 @@
 use crate::rc_support::target;
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, run_observed_snapshot, with_compiler_stack};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use std::path::PathBuf;
 
 const ORIGINAL: &str =
@@ -50,7 +53,8 @@ fn matrix() -> Vec<Configuration> {
 
 fn agree(name: &str, source: &str, failure: Option<&str>) {
     with_compiler_stack(|| {
-        let mut loaded = hirsel_driver::load_program_source(&fixture(), Some(source)).unwrap();
+        let mut loaded =
+            hirsel_front_phases::load_program_source(&fixture(), Some(source)).unwrap();
         loaded.check_for_execution().unwrap();
         let entry = loaded.entry.clone();
         let run = run_observed_snapshot(
@@ -83,7 +87,11 @@ fn agree(name: &str, source: &str, failure: Option<&str>) {
             .join("native-scoped-view-18")
             .join(name);
         std::fs::create_dir_all(&directory).unwrap();
-        let tools = Toolchain::for_matrix(&directory.join("runtime"), &configurations).unwrap();
+        let tools = hirsel_native_testing::toolchain_for_matrix(
+            &directory.join("runtime"),
+            &configurations,
+        )
+        .unwrap();
         let outcomes = differential(
             &input,
             &entry,
@@ -205,7 +213,8 @@ fn still_live_peek_views_reject_mutable_fill_and_consume() {
         include_str!("../../../../conformance/OWN/OWN-3-iter-peekable-7-next-borrowed-bad.hir"),
     ] {
         with_compiler_stack(|| {
-            let mut loaded = hirsel_driver::load_program_source(&fixture(), Some(source)).unwrap();
+            let mut loaded =
+                hirsel_front_phases::load_program_source(&fixture(), Some(source)).unwrap();
             let error = loaded.check_for_execution().unwrap_err();
             assert!(format!("{error:?}").contains("MODE-1"), "{error:?}");
         });

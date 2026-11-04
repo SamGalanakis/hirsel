@@ -121,7 +121,7 @@ pub fn scratch(name: &str) -> Result<PathBuf, String> {
 
 /// The runtime archive cache beside the executable. Every run shares it: its
 /// archives are content-addressed and built under a lock
-/// (`hirsel_driver::native::runtime_cache`).
+/// (`hirsel_native::runtime_cache`).
 pub fn runtime_cache() -> Result<PathBuf, String> {
     let dir = base()?.join("runtime").join("cache");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;

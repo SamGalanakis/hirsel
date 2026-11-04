@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_types::SignatureKind;
 use std::sync::Arc;
 fn engine(text: &str) -> QueryEngine {
@@ -732,7 +733,7 @@ fn explicit_native_roots_keep_their_private_closure() {
         use hirsel_engine::DefinitionQueries;
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let file = engine.sources.add("surface.hir", "fn helper(x:u64)->u64{x}\npub fn visible(x:u64)->u64{helper(x)}\nfn unrelated()->u64{9u64}\n".into()).unwrap();
         let parsed = engine
@@ -769,8 +770,7 @@ fn library_surface_instantiates_generics_and_preserves_argument_labels() {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("hirsel.json"), r#"{"schema":1,"package":{"name":"surface","version":"1"},"sources":[{"path":"sample.hir","module":["sample"]}],"dependencies":[]}"#).unwrap();
         std::fs::write(root.join("sample.hir"), "pub fn keep[T](name take value:T)->T uses {value} {value}\npub fn empty[T]()->List[T] uses {} {[]}\n").unwrap();
-        let mut surface =
-            hirsel_driver::native::StdSurface::load(&root.join("hirsel.json")).unwrap();
+        let mut surface = hirsel_native_batch::StdSurface::load(&root.join("hirsel.json")).unwrap();
         assert_eq!(surface.modules.len(), 1);
         assert!(surface.compile("sample").unwrap() >= 4);
     });

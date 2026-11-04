@@ -1,9 +1,13 @@
 //! Scripted regular files: release, structured cancellation, and replay on every engine.
-use hirsel_driver::{compiler_adapters, native::*};
+use hirsel_driver::native::*;
 use hirsel_engine::{
     QueryEngine, RunConfiguration, SimulationConfig, default_context, default_environment,
     entry_path, source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::FileReadScript;
 use std::{collections::BTreeMap, path::Path};
 
@@ -107,7 +111,7 @@ fn campaign(name: &str, source: &str, gate: FileReadScript) {
             ..Default::default()
         };
         use hirsel_driver::requests::*;
-        let compiler = hirsel_driver::COMPILER;
+        let compiler = hirsel_front_phases::COMPILER;
         let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
         let request = CompileRequest::source(
             source,
@@ -194,7 +198,8 @@ fn campaign(name: &str, source: &str, gate: FileReadScript) {
                 },
             },
         ];
-        let tools = Toolchain::for_matrix(&scratch.join("runtime"), &matrix).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &matrix).unwrap();
         let fixture = Fixture {
             file_reads,
             ..Default::default()

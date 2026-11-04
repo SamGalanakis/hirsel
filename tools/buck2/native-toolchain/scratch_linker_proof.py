@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 
-CASE = "native::object_queries::capture::tests::large_tool_snapshots_and_replays_under_none_and_unwritable_with_original_ram_cap"
+CASE = "object_queries::capture::tests::large_tool_snapshots_and_replays_under_none_and_unwritable_with_original_ram_cap"
 
 
 def command(arguments, environment):

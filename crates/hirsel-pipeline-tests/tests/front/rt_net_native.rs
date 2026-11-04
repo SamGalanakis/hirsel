@@ -5,11 +5,17 @@
 //! net.script@2 grant runs the same program against scripted peers and replays it.
 #[path = "../../../hirsel-driver/tests/support/source_std.rs"]
 mod source_std;
-use hirsel_driver::native::{
-    Launched, OptLevel, Options, Partition, Sites, Toolchain, build, link, observe,
-};
 use hirsel_engine::{default_context, entry_path, source_check_request, with_compiler_stack};
 use hirsel_lir::layout_types::TargetSpec;
+use hirsel_native::Launched;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::Sites;
+use hirsel_native::Toolchain;
+use hirsel_native::link;
+use hirsel_native::observe;
+use hirsel_native_batch::build;
 use hirsel_rt::io::Request;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -17,7 +23,7 @@ use std::process::Command;
 
 /// TIME_WAIT is kernel state, which a simulated corpus run cannot exercise. Run
 /// the same source against real sockets in each backend and the host interpreter.
-fn reuseaddr(backend: Option<hirsel_driver::native::Backend>) {
+fn reuseaddr(backend: Option<hirsel_native::Backend>) {
     with_compiler_stack(move || {
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../native-tests/library/net-reuseaddr.hir");
@@ -35,12 +41,12 @@ fn reuseaddr(backend: Option<hirsel_driver::native::Backend>) {
                 &source,
                 &executable,
                 TargetSpec::x86_64_unknown_linux_gnu(),
-                hirsel_driver::native::BuildProfile::Debug,
+                hirsel_native::BuildProfile::Debug,
                 backend,
                 None,
                 false,
                 hirsel_driver::session::Policy::default(),
-                hirsel_driver::native::Validation::EveryStage,
+                hirsel_native::Validation::EveryStage,
             )
             .unwrap()
             .unwrap();

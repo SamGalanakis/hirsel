@@ -1,20 +1,23 @@
 //! Native graph policy and ownership over the selected ordinary source graph.
 //! Reuse recaptures linker/kit/runtime resolution before choosing the old key.
-use super::{
-    NativeRequest,
-    native_assembly::{NativeAssembly, NativeAssemblyPlan, NativeProofPlan, NativeSourceInputs},
-    native_bootstrap::NativeAdmission,
-    native_platform::{
-        NativePlatformInputs, NativePlatformPolicy, NativePlatformSelection, NativePurpose,
-    },
-    native_products::NativeBuildReadiness,
-};
-use crate::native::{self, NativeError, object_queries};
+use super::NativeRequest;
+use super::native_assembly::NativeAssembly;
+use super::native_assembly::NativeAssemblyPlan;
+use super::native_assembly::NativeProofPlan;
+use super::native_assembly::NativeSourceInputs;
+use super::native_bootstrap::NativeAdmission;
+use super::native_platform::NativePlatformInputs;
+use super::native_platform::NativePlatformPolicy;
+use super::native_platform::NativePlatformSelection;
+use super::native_platform::NativePurpose;
+use super::native_products::NativeBuildReadiness;
 use hirsel_engine::{
     FrontNativeDefinitionQueries, FrontNativeQueries, LinkInput, LoadedProgram, ToolError,
     runtime::{MemoryReservation, MemoryWeight, QueryId, RuntimeErrors},
     store::ResultStore,
 };
+use hirsel_native::NativeError;
+use hirsel_native::object_queries;
 use hirsel_syntax::{ContentHash, DefPath};
 use std::sync::Arc;
 
@@ -83,7 +86,7 @@ pub(super) struct NativeSelection {
     purpose: NativePurpose,
     verify_store: hirsel_engine::store::VerifyStore,
     entry: DefPath,
-    tools: Arc<native::Toolchain>,
+    tools: Arc<hirsel_native::Toolchain>,
     links: Vec<LinkInput>,
     policy: Option<NativePlatformPolicy>,
     platform: Option<Arc<super::native_link::FrozenPlatform>>,
@@ -102,7 +105,7 @@ impl NativeSelection {
         request: NativeRequest,
         purpose: NativePurpose,
         verify_store: hirsel_engine::store::VerifyStore,
-        tools: Arc<native::Toolchain>,
+        tools: Arc<hirsel_native::Toolchain>,
         footprint: &Footprint,
         allowance: &mut MemoryReservation,
         weight: MemoryWeight,
@@ -273,8 +276,8 @@ fn request_key(request: &NativeRequest, _: NativePurpose) -> Result<ContentHash,
         super::native_platform::profile_options(request).map_err(native_error)?,
         passes.target.digest(),
         match passes.validation {
-            native::Validation::Ready => 0u8,
-            native::Validation::EveryStage => 1,
+            hirsel_native::Validation::Ready => 0u8,
+            hirsel_native::Validation::EveryStage => 1,
         },
         &passes.launch,
         (
@@ -317,24 +320,27 @@ pub(super) fn artifacts(
             ToolError::Runtime("native artifacts exceed their snapshot partition".into())
         })
     };
-    let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+    let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
     let policy = ContentHash::of_bytes(b"hirsel.native.oracle-singleton-o0.v1");
-    let backends = [native::Backend::Llvm, native::Backend::Cranelift]
-        .into_iter()
-        .map(
-            |backend| crate::native::queries::compilation_tasks::CompilationBackend {
-                backend: backend.name().into(),
-                backend_version: ContentHash::of_bytes(&crate::COMPILER_IDENTITY),
-                target_features: target.digest(),
-                profile_options: policy,
-                runtime_abi: ContentHash::of_bytes(&hirsel_lir::RUNTIME_ABI_VERSION.to_le_bytes()),
-                linker_options: policy,
-                runtime_archives: vec![],
-                foreign_inputs: vec![],
-                executor: Arc::new(ArtifactObjects),
-            },
-        )
-        .collect();
+    let backends = [
+        hirsel_native::Backend::Llvm,
+        hirsel_native::Backend::Cranelift,
+    ]
+    .into_iter()
+    .map(
+        |backend| hirsel_native_queries::compilation_tasks::CompilationBackend {
+            backend: backend.name().into(),
+            backend_version: ContentHash::of_bytes(&crate::COMPILER_IDENTITY),
+            target_features: target.digest(),
+            profile_options: policy,
+            runtime_abi: ContentHash::of_bytes(&hirsel_lir::RUNTIME_ABI_VERSION.to_le_bytes()),
+            linker_options: policy,
+            runtime_archives: vec![],
+            foreign_inputs: vec![],
+            executor: Arc::new(ArtifactObjects),
+        },
+    )
+    .collect();
     let roots = source
         .definitions
         .iter()
@@ -347,17 +353,17 @@ pub(super) fn artifacts(
         source,
         NativeAssemblyPlan {
             native: super::native_bootstrap::NativePlan {
-                options: native::Options::new(target),
+                options: hirsel_native::Options::new(target),
                 policy,
                 verify_store,
-                opt: native::OptLevel::None,
+                opt: hirsel_native::OptLevel::None,
                 debug: false,
                 verify_backend: true,
                 measurement: false,
                 fuel: false,
                 requested_run: None,
                 test_entries: vec![],
-                output: native::queries::compilation_tasks::CompilationOutput::Objects,
+                output: hirsel_native_queries::compilation_tasks::CompilationOutput::Objects,
                 backends,
             },
             output: super::NativeOutput::Objects { roots },
@@ -384,11 +390,11 @@ pub(super) fn artifacts(
     Ok((assembly, output))
 }
 struct ArtifactObjects;
-impl native::queries::link_tasks::NativeLinkExecutor for ArtifactObjects {
+impl hirsel_native_queries::link_tasks::NativeLinkExecutor for ArtifactObjects {
     fn link(
         &self,
-        _: &mut native::queries::roots::RootProducts,
-        _: native::queries::link_tasks::LinkExecution<'_>,
+        _: &mut hirsel_native_queries::roots::RootProducts,
+        _: hirsel_native_queries::link_tasks::LinkExecution<'_>,
     ) -> Result<Vec<u8>, String> {
         Err("oracle object emission cannot link an executable".into())
     }

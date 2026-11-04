@@ -1,6 +1,7 @@
 //! Compiled reference vectors too large for the corpus interpreter budget.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn run_expanded(case_name: &str, replacements: &[(&str, &str)]) {
     with_compiler_stack(|| {
@@ -41,7 +42,7 @@ fn run_expanded(case_name: &str, replacements: &[(&str, &str)]) {
             &path,
             HostLaunch::empty(),
             None,
-            native::Backend::Cranelift,
+            hirsel_native::Backend::Cranelift,
             native::Output::Streams {
                 stdout: &mut stdout,
                 stderr: &mut stderr,

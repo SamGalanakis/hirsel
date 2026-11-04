@@ -331,8 +331,10 @@ fn finite_exits_all_engines() {
         let report = hirsel_engine::with_compiler_stack(|| {
             use hirsel_engine::*;
             use hirsel_interp::observation::{Effect, SemanticRole};
-            let mut engine =
-                QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+            let mut engine = QueryEngine::new(
+                default_environment(),
+                hirsel_front_phases::compiler_adapters(),
+            );
             let file = engine.sources.add("main.hir", source.clone()).unwrap();
             let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
             assert!(
@@ -385,7 +387,7 @@ fn finite_exits_all_engines() {
                     .collect();
                 assert_eq!(failure.cause_indices, causes, "{case:?}");
             }
-            let reference = hirsel_driver::native::Observation::of_reference(&observation);
+            let reference = hirsel_native::Observation::of_reference(&observation);
             runner.compare(&validated, &entry, &reference, &format!("exit-{index}"))
         });
         persist(

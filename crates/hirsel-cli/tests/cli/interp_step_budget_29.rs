@@ -10,7 +10,7 @@ fn program(source: &str) -> (tempfile::TempDir, LoadedProgram) {
         "dependencies":[{"manifest":PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std@1/hirsel.json").canonicalize().unwrap(),"package":{"name":"std","version":"1"},"expose":[]}]});
     let path = scratch.path().join("hirsel.json");
     fs::write(&path, manifest.to_string()).unwrap();
-    let mut loaded = hirsel_driver::load_program(&path).unwrap();
+    let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
     loaded.check_for_execution().unwrap();
     (scratch, loaded)
 }

@@ -1,15 +1,12 @@
 //! Production demand import and C replay of original constructor obligations.
-use hirsel_driver::{
-    compiler_adapters,
-    native::queries::{
-        declarations::NativeDeclarations,
-        demand::DemandInstances,
-        instance::InstanceQueries,
-        source_inputs::{NativeInstanceInputs, NativeSourceProvider},
-    },
-};
 use hirsel_engine::*;
+use hirsel_front_phases::compiler_adapters;
 use hirsel_lir::validate::{Inputs, NativeEnvironment};
+use hirsel_native_cache::declarations::NativeDeclarations;
+use hirsel_native_cache::instance::InstanceQueries;
+use hirsel_native_cache::source_inputs::NativeInstanceInputs;
+use hirsel_native_cache::source_inputs::NativeSourceProvider;
+use hirsel_native_queries::demand::DemandInstances;
 use hirsel_syntax::ContentHash;
 use std::sync::Arc;
 
@@ -58,8 +55,8 @@ pub fn forward(root:List[u64])->u64 {
         let inputs = NativeInstanceInputs::from_products(declarations, reader).unwrap();
         let mut source = inputs.provider();
         let target = hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu();
-        let mut options = hirsel_driver::native::Options::new(target.clone());
-        options.validation = hirsel_driver::native::Validation::Ready;
+        let mut options = hirsel_native::Options::new(target.clone());
+        options.validation = hirsel_native::Validation::Ready;
         let mut demand = DemandInstances::new_from_source(
             &source,
             store.clone(),

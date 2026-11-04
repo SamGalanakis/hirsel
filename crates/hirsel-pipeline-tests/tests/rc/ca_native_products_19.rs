@@ -83,10 +83,10 @@ fn native_products_relocate_recursive_layouts_closures_and_finalizers() {
             .map(|u| hirsel_lir::validate::validate_value(u, &inputs).unwrap())
             .collect();
         roundtrip::<Value>(units, &inputs);
-        let ready = hirsel_driver::native::build_program(
+        let ready = hirsel_native_batch::build_program(
             &program,
             manifest.clone(),
-            &hirsel_driver::native::Options::new(target.clone()),
+            &hirsel_native::Options::new(target.clone()),
         )
         .unwrap();
         let inputs = Inputs {

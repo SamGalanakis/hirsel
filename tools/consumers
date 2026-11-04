@@ -42,6 +42,11 @@ RUNTIME = re.compile(r'(?:^|/)(?:startup[^/]*|scheduler[^/]*|pool[^/]*|cpu[^/]*|
 STARTUP_PREFIXES = (
     'crates/hirsel-rt/src/',
     'crates/hirsel-driver/src/native',
+    'crates/hirsel-native/src/',
+    'crates/hirsel-native-queries/src/',
+    'crates/hirsel-native-batch/src/',
+    'crates/hirsel-native-testing/src/',
+    'crates/hirsel-host-io/src/',
     'crates/hirsel-llvm/src/',
     'crates/hirsel-cranelift/src/',
     'crates/hirsel-engine/src/queries/native_records',

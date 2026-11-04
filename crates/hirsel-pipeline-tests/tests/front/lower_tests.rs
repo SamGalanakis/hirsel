@@ -592,7 +592,7 @@ fn source_capture_preserves_selected_types(annotation: &str, context: CaptureCon
     );
     let mut engine = hirsel_engine::QueryEngine::new(
         hirsel_engine::default_environment(),
-        hirsel_driver::compiler_adapters(),
+        hirsel_front_phases::compiler_adapters(),
     );
     let file_context = hirsel_engine::default_context();
     let file = engine.sources.add("capture.hir", source.clone()).unwrap();

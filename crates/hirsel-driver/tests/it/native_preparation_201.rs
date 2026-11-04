@@ -1,6 +1,7 @@
-use hirsel_driver::{COMPILER, native::queries::preparation::*};
 use hirsel_engine::{runtime::*, store::*, *};
+use hirsel_front_phases::COMPILER;
 use hirsel_intern::jobs::Jobs;
+use hirsel_native_cache::preparation::*;
 use std::{
     sync::{Arc, Mutex},
     task::Poll,

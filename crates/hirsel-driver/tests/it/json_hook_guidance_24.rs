@@ -1,10 +1,9 @@
 //! Field attribution and incorrect custom hook vectors follow Serde's
 //! internals/check.rs:29–53 and tests/ui/with/incorrect_type.rs (MIT OR Apache-2.0).
 //! Contracts are handwritten independently of the generator.
-use hirsel_driver::{
-    requests::{CompileOperation, CompileResult},
-    session::Session,
-};
+use hirsel_driver::requests::CompileOperation;
+use hirsel_driver::requests::CompileResult;
+use hirsel_driver::session::Session;
 use hirsel_engine::{LoweringPolicy, with_compiler_stack};
 use std::{fs, path::PathBuf};
 
@@ -353,24 +352,23 @@ pub fn main() -> Result[(), String] uses {} {
                 checked,
             )
             .unwrap();
-            let observation = hirsel_driver::native::Observation::of_reference(
-                execution.observation.as_ref().unwrap(),
-            );
+            let observation =
+                hirsel_native::Observation::of_reference(execution.observation.as_ref().unwrap());
             assert_eq!(observation.exit_code, Some(0), "{observation:?}");
             assert!(observation.failures.is_empty(), "{observation:?}");
         }
         let capped = dir.path().join("capped");
         fs::write(&capped, include_str!("../../../../tools/capped")).unwrap();
         for backend in [
-            hirsel_driver::native::Backend::Llvm,
-            hirsel_driver::native::Backend::Cranelift,
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
         ] {
             let exe = dir.path().join(format!("roundtrip-{backend:?}"));
             let built = hirsel_driver::native::build_path_native_backend(
                 &path,
                 &exe,
-                hirsel_driver::native::TargetSpec::x86_64_unknown_linux_gnu(),
-                hirsel_driver::native::BuildProfile::Default,
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                hirsel_native::BuildProfile::Default,
                 backend,
                 None,
                 false,

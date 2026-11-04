@@ -1,6 +1,7 @@
 //! Independent host text and rational oracles for ordinary numeric std source.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_lir::ir::UnitOrigin;
 use std::{collections::BTreeSet, path::Path};
 

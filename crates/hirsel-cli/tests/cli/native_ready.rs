@@ -1,20 +1,22 @@
-use hirsel_driver::{native, requests};
+use hirsel_driver::native;
+use hirsel_driver::requests;
 use std::{path::Path, sync::Arc};
 
 pub(crate) fn supplier(
     path: &Path,
     entry: &hirsel_engine::DefPath,
-    toolchain: &native::Toolchain,
-) -> impl FnMut(&native::Options) -> Result<Arc<requests::NativeReady>, native::NativeError> {
+    toolchain: &hirsel_native::Toolchain,
+) -> impl FnMut(&hirsel_native::Options) -> Result<Arc<requests::NativeReady>, hirsel_native::NativeError>
+{
     let path = path.to_path_buf();
     let entry = entry.clone();
-    let compiler = hirsel_driver::COMPILER;
+    let compiler = hirsel_front_phases::COMPILER;
     let mut compiler_requests =
         requests::CompilerRequests::for_host(compiler.clone(), compiler.configuration())
             .with_toolchain(Arc::new(toolchain.clone()));
     move |options| {
-        let failed = |message| native::NativeError {
-            stage: native::StageName::Ready,
+        let failed = |message| hirsel_native::NativeError {
+            stage: hirsel_native::StageName::Ready,
             definition: None,
             validator: false,
             message,
@@ -27,10 +29,10 @@ pub(crate) fn supplier(
                     test_entries: vec![],
                     supplemental_sources: vec![],
                     output: requests::NativeOutput::Ready,
-                    options: native::BuildOptions::new(
+                    options: hirsel_native::BuildOptions::new(
                         options.clone(),
-                        native::Backend::Llvm,
-                        native::OptLevel::Default,
+                        hirsel_native::Backend::Llvm,
+                        hirsel_native::OptLevel::Default,
                     ),
                     run: None,
                     fuel: false,

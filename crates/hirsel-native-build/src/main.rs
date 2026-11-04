@@ -2,10 +2,16 @@
 
 hirsel_guard::install!();
 
-use hirsel_driver::native::{
-    OptLevel, Options, Partition, RuntimeBuild, TargetSpec, Toolchain, build, emit_objects,
-    link_profile, link_standalone_objects,
-};
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::RuntimeBuild;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
+use hirsel_native::emit_objects;
+use hirsel_native::link_profile;
+use hirsel_native::link_standalone_objects;
+use hirsel_native_batch::build;
 use std::{path::Path, time::Instant};
 
 const CONFIGURATIONS: [&str; 4] = [
@@ -30,7 +36,7 @@ fn compile() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: hirsel-native-build SOURCE OUTPUT CONFIGURATION|all".into());
     }
     let source_start = Instant::now();
-    let mut loaded = hirsel_driver::load_program(Path::new(&args[0]))?;
+    let mut loaded = hirsel_front_phases::load_program(Path::new(&args[0]))?;
     if let Err(error) = loaded.check_for_execution() {
         if let hirsel_engine::ToolError::Query {
             error: hirsel_engine::QueryError::Diagnostics(diagnostics),
@@ -48,7 +54,7 @@ fn compile() -> Result<(), Box<dyn std::error::Error>> {
         .engine
         .export_native_input()
         .map_err(|e| format!("{e:?}"))?;
-    let sources = hirsel_driver::native::profile_sources(&input);
+    let sources = hirsel_native::profile_sources(&input);
     let validated = loaded
         .engine
         .import_native_input(input)
@@ -173,12 +179,12 @@ fn compile() -> Result<(), Box<dyn std::error::Error>> {
                 "source_check_snapshot_seconds": source_seconds,
                 "runtime_build_seconds": runtime_seconds,
                 "compile_kind": "source check/snapshot shared across configurations; native passes, LLVM O3 and link; runtime separate; caches retained",
-                "llvm_version": hirsel_driver::native::llvm_version(),
+                "llvm_version": hirsel_native::llvm_version(),
                 "hirsel_opt_level": "O3", "hirsel_lto": false,
                 "runtime_archive": toolchain.runtime.get(&(target.triple.clone(), runtime_build)),
                 "runtime_build": { "diagnostic": false, "system_allocator": runtime_build.system_allocator, "measurement": measurement },
                 "standalone": standalone,
-                "matrix_version": hirsel_driver::native::MATRIX_VERSION,
+                "matrix_version": hirsel_native_testing::MATRIX_VERSION,
                 "configuration": config, "partition": partition.name(),
                 "regions": options.regions, "reuse": options.reuse, "flat_walk": options.flat_walk,
             });

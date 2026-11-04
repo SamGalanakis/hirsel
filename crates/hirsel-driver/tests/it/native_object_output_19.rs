@@ -1,15 +1,17 @@
 //! Object-only requests compile helpers that have no executable launch ABI.
-use hirsel_driver::{
-    native::{self, Backend},
-    requests::{
-        CompileOperation, CompileRequest, CompileResult, CompilerRequests, NativeOutput,
-        NativeRequest, NativeSourceText,
-    },
-};
+use hirsel_driver::native;
+use hirsel_driver::requests::CompileOperation;
+use hirsel_driver::requests::CompileRequest;
+use hirsel_driver::requests::CompileResult;
+use hirsel_driver::requests::CompilerRequests;
+use hirsel_driver::requests::NativeOutput;
+use hirsel_driver::requests::NativeRequest;
+use hirsel_driver::requests::NativeSourceText;
 use hirsel_engine::{
     requests::{OutputReadiness, RequestEngine, observe_inputs},
     runtime::QueryRuntime,
 };
+use hirsel_native::Backend;
 use std::sync::Arc;
 
 #[test]
@@ -19,10 +21,10 @@ fn object_requests_emit_generic_helpers_without_link_or_launch() {
         let manifest = directory.path().join("hirsel.json");
         std::fs::write(directory.path().join("sample.hir"), "pub fn keep[T](name take value:T)->T uses {value} {value}\npub fn empty[T]()->List[T] uses {} {[]}\n").unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"object_helpers","version":"1"},"sources":[{"path":"sample.hir","module":["sample"]}],"dependencies":[]}"#).unwrap();
-        let compiler = hirsel_driver::COMPILER.with_owned_engines();
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+        let compiler = hirsel_front_phases::COMPILER.with_owned_engines();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
         let tools = Arc::new(
-            native::Toolchain::in_tree(&directory.path().join("tools"), &[&target]).unwrap(),
+            hirsel_native::Toolchain::in_tree(&directory.path().join("tools"), &[&target]).unwrap(),
         );
         let mut expected = None;
         for backend in [Backend::Cranelift, Backend::Llvm] {
@@ -52,8 +54,8 @@ fn object_requests_emit_generic_helpers_without_link_or_launch() {
                 path: manifest.clone(), inputs: inputs.into(),
                 operation: CompileOperation::NativeBuild(NativeRequest {
                     options: {
-                        let mut options = native::BuildProfile::Default.options(backend, target.clone(), native::Validation::EveryStage).unwrap();
-                        options.opt = native::OptLevel::None;
+                        let mut options = hirsel_native::BuildProfile::Default.options(backend, target.clone(), hirsel_native::Validation::EveryStage).unwrap();
+                        options.opt = hirsel_native::OptLevel::None;
                         options
                     },
                     definition: Some(first.clone()),
@@ -99,18 +101,23 @@ fn object_requests_emit_generic_helpers_without_link_or_launch() {
             }
             assert!(!objects.products.is_empty());
             for product in &objects.products {
-                let fragment = native::object_queries::fragment_product(
+                let fragment = hirsel_native::object_queries::fragment_product(
                     objects.store.as_ref(),
                     product.clone(),
                 )
                 .unwrap();
-                let object =
-                    native::object_queries::load_object(objects.store.as_ref(), fragment.object)
-                        .unwrap();
+                let object = hirsel_native::object_queries::load_object(
+                    objects.store.as_ref(),
+                    fragment.object,
+                )
+                .unwrap();
                 assert!(object.bytes.starts_with(b"\x7fELF"));
                 assert!(
-                    native::object_queries::linked_product(objects.store.as_ref(), product.clone())
-                        .is_err(),
+                    hirsel_native::object_queries::linked_product(
+                        objects.store.as_ref(),
+                        product.clone()
+                    )
+                    .is_err(),
                     "a Codegen output cannot supply an executable"
                 );
             }

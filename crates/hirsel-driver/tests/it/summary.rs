@@ -2,6 +2,7 @@
 //! selections they imply equal those today's checked bodies give.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_types::{
     ActualBindings, BinderRef, GenericArgument, NameSite, Size, SizeParameterRef, TypeKind,
 };

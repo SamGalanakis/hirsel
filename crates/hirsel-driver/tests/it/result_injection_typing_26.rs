@@ -6,6 +6,7 @@
 //! nominal, unique, one-level arm rule replaces Rust's From conversion.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_syntax::ContentHash;
 use hirsel_tir::{Constructor, Projection, Rvalue};
 use serde_json::json;

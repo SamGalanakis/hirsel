@@ -30,10 +30,10 @@ pub fn main() -> u64 {
     wrong_target.tables.symbols[symbol.index()].definition = path("step");
     assert!(hirsel_lir::invocations::check(&wrong_target, rows, 0).is_err());
 
-    let ready = hirsel_driver::native::build_program(
+    let ready = hirsel_native_batch::build_program(
         &program,
         manifest(&program),
-        &hirsel_driver::native::Options::new(target()),
+        &hirsel_native::Options::new(target()),
     )
     .unwrap();
     let heap = hirsel_heapcheck::Program {

@@ -104,7 +104,7 @@ fn scripted(engine: &str, caps: bool) {
         let scratch = scratch(&format!("config-migrate-29-{engine}-"));
         let root = scratch.path();
         let selection = package(root);
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded.check_for_execution().unwrap();
         let config = hirsel_engine::RunConfiguration {
             entry: loaded.entry.clone(),

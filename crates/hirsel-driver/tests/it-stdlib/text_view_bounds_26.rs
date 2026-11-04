@@ -3,6 +3,7 @@
 use crate::source_std::load_program_source;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
 use std::path::PathBuf;
@@ -111,8 +112,13 @@ fn valid(expected: &str) -> String {
     source
 }
 
-fn observation(source: &str, entry: &DefPath, kind: &str, expected: &str) -> native::Observation {
-    let mut oracle = native::Observation {
+fn observation(
+    source: &str,
+    entry: &DefPath,
+    kind: &str,
+    expected: &str,
+) -> hirsel_native::Observation {
+    let mut oracle = hirsel_native::Observation {
         exit_code: Some(0),
         blocked: false,
         budget: None,
@@ -132,7 +138,7 @@ fn observation(source: &str, entry: &DefPath, kind: &str, expected: &str) -> nat
         let mut definition = entry.clone();
         definition.0.name = name.into();
         oracle.exit_code = None;
-        oracle.failures.push(native::Failure {
+        oracle.failures.push(hirsel_native::Failure {
             rule: rule.into(),
             definition,
             file: fixture()
@@ -185,23 +191,26 @@ fn partition(text: usize, depth: usize) {
             e => panic!("source check: {e}"),
         });
         let configurations = [
-            native::Engine::Heap { campaign: false },
-            native::Engine::Native {
-                opt: native::OptLevel::None,
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Heap { campaign: false },
+            hirsel_native_testing::Engine::Native {
+                opt: hirsel_native::OptLevel::None,
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
-            native::Engine::Cranelift {
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            hirsel_native_testing::Engine::Cranelift {
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         ]
-        .map(|engine| native::Configuration {
-            options: native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+        .map(|engine| hirsel_native_testing::Configuration {
+            options: hirsel_native::Options::new(
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+            ),
             engine,
         });
         let scratch = tempfile::tempdir().unwrap();
-        let mut tools = native::Toolchain::for_matrix(scratch.path(), &configurations).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(scratch.path(), &configurations).unwrap();
         tools.launch_timeout = std::time::Duration::from_secs(60);
         let mut failures = Vec::new();
         let only = std::env::var("HIRSEL_TEXT_VIEW_ONLY").ok();
@@ -237,11 +246,11 @@ fn partition(text: usize, depth: usize) {
                 .as_ref()
                 .ok()
                 .and_then(|run| run.observation.as_ref())
-                .map(native::Observation::of_reference);
+                .map(hirsel_native::Observation::of_reference);
             let passed = observed.as_ref() == Some(&oracle);
             eprintln!(
                 "TEXT_RECEIPT {}",
-                serde_json::json!({"id":id,"engine":"reference","source":hash(source.as_bytes()),"expected":hash(expected.as_bytes()),"passed":passed,"observed":observed.as_ref().map(native::Observation::render)})
+                serde_json::json!({"id":id,"engine":"reference","source":hash(source.as_bytes()),"expected":hash(expected.as_bytes()),"passed":passed,"observed":observed.as_ref().map(hirsel_native::Observation::render)})
             );
             if !passed {
                 failures.push(format!(
@@ -254,21 +263,21 @@ fn partition(text: usize, depth: usize) {
             eprintln!("TEXT_STARTED {id} H/LLVM/Cranelift");
             let mut ready =
                 crate::native_ready::supplier(&fixture(), Some(&source), &entry, &tools).unwrap();
-            let results = native::differential_ready(
+            let results = hirsel_native_testing::differential_ready(
                 &mut ready,
                 &entry,
                 &oracle,
                 &configurations,
                 &tools,
                 scratch.path(),
-                &native::Fixture {
+                &hirsel_native::Fixture {
                     steps: Some(1_000_000),
                     ..Default::default()
                 },
             );
             assert_eq!(results.len(), 3);
             for (engine, result) in results {
-                let passed = matches!(result, native::Outcome::Agree);
+                let passed = matches!(result, hirsel_native_testing::Outcome::Agree);
                 eprintln!(
                     "TEXT_RECEIPT {}",
                     serde_json::json!({"id":id,"engine":engine,"source":hash(source.as_bytes()),"expected":hash(expected.as_bytes()),"passed":passed,"observed":format!("{result:?}")})
@@ -400,7 +409,8 @@ fn index_expression_failure_site() {
             SimulationConfig::default(),
         )
         .unwrap();
-        let observation = native::Observation::of_reference(result.observation.as_ref().unwrap());
+        let observation =
+            hirsel_native::Observation::of_reference(result.observation.as_ref().unwrap());
         eprintln!("TEXT_MINIMAL {}", observation.render());
         assert_eq!(observation.failures.len(), 1);
         assert_eq!(observation.failures[0].rule, "MEM-14");

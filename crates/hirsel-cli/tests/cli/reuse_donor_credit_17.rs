@@ -6,9 +6,12 @@ const SOURCE: &str = include_str!("../../../../conformance/MEM/MEM-14-reuse-dono
 fn reuse_donor_credit_17_engines() {
     hirsel_engine::with_compiler_stack(|| {
         use hirsel_driver::native::*;
+        use hirsel_native::*;
+        use hirsel_native_batch::*;
+        use hirsel_native_testing::*;
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let file = engine.sources.add("donor.hir", SOURCE.into()).unwrap();
         let context = hirsel_engine::default_context();
@@ -75,9 +78,12 @@ fn original_paired_programs_keep_owned_credit() {
     ] {
         hirsel_engine::with_compiler_stack(|| {
             use hirsel_driver::native::*;
+            use hirsel_native::*;
+            use hirsel_native_batch::*;
+            use hirsel_native_testing::*;
             let mut engine = hirsel_engine::QueryEngine::new(
                 hirsel_engine::default_environment(),
-                hirsel_driver::compiler_adapters(),
+                hirsel_front_phases::compiler_adapters(),
             );
             let file = engine.sources.add("paired.hir", source.into()).unwrap();
             let context = hirsel_engine::default_context();

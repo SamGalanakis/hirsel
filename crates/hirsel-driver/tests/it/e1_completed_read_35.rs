@@ -2,10 +2,14 @@
 //! the reference engine's step budget. Native acceptance uses the full fixture.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 #[test]
 fn public_completed_read_compute_agrees_on_four_engines() {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let source = include_str!("../fixtures/e1-completed-read-35/main.hir");
         let mut engine = crate::source_std::engine();
@@ -72,8 +76,11 @@ fn public_completed_read_compute_agrees_on_four_engines() {
             .prefix("e1-completed-read-35-")
             .tempdir()
             .unwrap();
-        let toolchain =
-            Toolchain::for_matrix(&scratch.path().join("runtime"), &configurations).unwrap();
+        let toolchain = hirsel_native_testing::toolchain_for_matrix(
+            &scratch.path().join("runtime"),
+            &configurations,
+        )
+        .unwrap();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/e1-completed-read-35/main.hir");
         let mut ready = crate::native_ready::supplier(&path, None, &entry, &toolchain).unwrap();
@@ -94,6 +101,9 @@ fn public_completed_read_compute_agrees_on_four_engines() {
 #[test]
 fn public_read_continuation_covers_active_callers_and_inert_cleanup() {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let mut engine = crate::source_std::engine();
         // A real materialized keyed adapter can reject with pending String
@@ -356,6 +366,9 @@ fn public_read_continuation_covers_active_callers_and_inert_cleanup() {
 fn ordinary_prefix_thunk_does_not_authorize_a_post_read_private_site() {
     use hirsel_driver::native::*;
     use hirsel_lir::ir::{Callee, Inst};
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     with_compiler_stack(|| {
         let mut engine = crate::source_std::engine();
         let source = include_str!("../fixtures/e1-completed-read-35/main.hir")

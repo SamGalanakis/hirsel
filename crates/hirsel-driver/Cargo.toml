@@ -6,9 +6,18 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-native-tsan = ["hirsel-llvm/native-tsan", "hirsel-cranelift/native-tsan"]
+native-tsan = ["hirsel-native/native-tsan"]
 
 [dependencies]
+hirsel-project-info = { path = "../hirsel-project-info" }
+hirsel-native-cache = { path = "../hirsel-native-cache" }
+hirsel-native-batch = { path = "../hirsel-native-batch" }
+hirsel-front-phases = { path = "../hirsel-front-phases" }
+hirsel-compiler-identity = { path = "../hirsel-compiler-identity" }
+hirsel-host-io = { path = "../hirsel-host-io" }
+hirsel-native = { path = "../hirsel-native" }
+hirsel-native-queries = { path = "../hirsel-native-queries" }
+hirsel-native-testing = { path = "../hirsel-native-testing" }
 hirsel-artifact-store = { path = "../hirsel-artifact-store" }
 hirsel-validate = { path = "../hirsel-validate" }
 base64 = "=0.22.1"
@@ -23,8 +32,6 @@ hirsel-check-protocol = { path = "../hirsel-check-protocol" }
 hirsel-signature = { path = "../hirsel-signature" }
 hirsel-check = { path = "../hirsel-check" }
 hirsel-lower = { path = "../hirsel-lower" }
-hirsel-authority = { path = "../hirsel-authority" }
-hirsel-ownership = { path = "../hirsel-ownership" }
 hirsel-run-config = { path = "../hirsel-run-config" }
 hirsel-run-schema = { path = "../hirsel-run-schema" }
 hirsel-remote = { path = "../hirsel-remote" }
@@ -53,10 +60,8 @@ libc = { version = "0.2", default-features = false }
 object = { version = "=0.40.0", default-features = false, features = ["archive", "elf", "read_core", "std", "write"] }
 sha2 = "0.10"
 
-[build-dependencies]
-sha2 = "0.10"
-
 [dev-dependencies]
+hirsel-candidate = { path = "../hirsel-candidate" }
 bincode = "=1.3.3"
 hirsel-intern = { path = "../hirsel-intern", features = ["id-salt"] }
 hirsel-lexer = { path = "../hirsel-lexer" }

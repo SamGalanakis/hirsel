@@ -3,15 +3,25 @@
 //! both engines) or fails ends alone, with its own outcome, while runs of other programs before and after it complete. Natively the
 //! programs are images loaded into one host's runtime, so each failure names its own program's
 //! site from that program's failure table.
-use hirsel_driver::compiler_adapters;
-use hirsel_driver::native::{
-    Backend, Configuration, Engine, OptLevel, Options, Partition, Runtime, TargetSpec, Toolchain,
-    build, emit_backend_objects, link_host, link_library, run_host,
-};
 use hirsel_engine::{
     QueryEngine, RunOutcome, SimulationConfig, default_context, default_environment, entry_path,
     source_check_request, with_compiler_stack,
 };
+use hirsel_front_phases::compiler_adapters;
+use hirsel_native::Backend;
+use hirsel_native::OptLevel;
+use hirsel_native::Options;
+use hirsel_native::Partition;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
+use hirsel_native::emit_backend_objects;
+use hirsel_native::link_host;
+use hirsel_native::link_library;
+use hirsel_native::run_host;
+use hirsel_native_batch::build;
+use hirsel_native_testing::Configuration;
+use hirsel_native_testing::Engine;
+use hirsel_native_testing::Runtime;
 use std::path::PathBuf;
 
 const BLOCKS: &str = "pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
@@ -154,7 +164,7 @@ fn native_runs_that_block_stop_or_fail_end_alone_in_one_host_process_on_both_bac
                 runtime: Runtime::Default,
             },
         };
-        let toolchain = Toolchain::for_matrix(
+        let toolchain = hirsel_native_testing::toolchain_for_matrix(
             &PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("native-runtime"),
             &[configuration],
         )

@@ -10,6 +10,9 @@
 // same finite typed semantics to the independent lowered Heap provider.
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, run_observed_snapshot, with_compiler_stack};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileFault, FileFaultError as E, FileFaults, FileOperation as O};
 use std::collections::{BTreeMap, VecDeque};
 fn step(requested: Option<u64>, error: Option<E>, partial: u64) -> FileFault {
@@ -56,7 +59,7 @@ fn campaign_status(id: &str, source: &str, fixture: Fixture, allocation_campaign
             serde_json::to_vec_pretty(&fixture.file_faults).unwrap(),
         )
         .unwrap();
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -429,7 +432,7 @@ fn tiny_commit_denied_and_affected_native_build() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("main.hir");
         std::fs::write(&path, source).unwrap();
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded.check_for_execution().unwrap();
         let matrix = [Configuration {
             options: Options::new(TargetSpec::x86_64_unknown_linux_gnu()),
@@ -439,7 +442,7 @@ fn tiny_commit_denied_and_affected_native_build() {
                 runtime: Runtime::Diagnostic,
             },
         }];
-        let tools = Toolchain::for_matrix(dir.path(), &matrix).unwrap();
+        let tools = hirsel_native_testing::toolchain_for_matrix(dir.path(), &matrix).unwrap();
         let expected = Observation {
             exit_code: Some(0),
             blocked: false,
@@ -572,7 +575,7 @@ fn treelearn_original_commit_denied() {
             file_faults: script(O::Commit, vec![step(None, Some(E::PermissionDenied), 0)]),
             ..Default::default()
         };
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();
@@ -661,7 +664,7 @@ fn heap_launch_refuses_invalid_scripts_and_counts() {
             main_source("file.write_bytes(output, path.of(\"old\"), b\"xyz\")?"),
         )
         .unwrap();
-        let mut loaded = hirsel_driver::load_program(&path).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap();
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
         let validated = loaded.engine.import_native_input(input).unwrap();

@@ -62,16 +62,16 @@ pub fn main(rt:Io)->Result[(),GrantError] {
 }
 "#;
 
-pub(crate) fn ready(source: &str) -> native::ReadyProgram {
+pub(crate) fn ready(source: &str) -> hirsel_native::ReadyProgram {
     let mut engine: QueryEngine = crate::source_std::engine();
     let file = engine.sources.add("main.hir", source.to_owned()).unwrap();
     let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     let snapshot = engine.export_native_input().unwrap();
     let validated = engine.import_native_input(snapshot).unwrap();
-    native::build(
+    hirsel_native_batch::build(
         &validated,
-        &native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
+        &hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
     )
     .unwrap()
 }
@@ -91,25 +91,25 @@ pub(crate) fn child(plans: &ContinuationPlans) -> &ContinuationPlan {
 }
 
 fn refused(
-    program: &native::ReadyProgram,
+    program: &hirsel_native::ReadyProgram,
     plans: &ContinuationPlans,
     body: ContentHash,
     edit: impl FnOnce(&mut ContinuationPlan),
 ) -> ContinuationError {
     let mut bad = plans.clone();
     edit(bad.plans.get_mut(&body).unwrap());
-    native::continuation::validate(program, &bad).expect_err("a mutated plan was imported")
+    hirsel_native::continuation::validate(program, &bad).expect_err("a mutated plan was imported")
 }
 
 #[test]
 fn runtime50_resume_import_mutations_refused() {
     with_compiler_stack(|| {
         let program = ready(TWO_BOUNDARY);
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         assert_eq!(
             plans,
-            native::continuation::plans(&program),
+            hirsel_native::continuation::plans(&program),
             "plans are deterministic"
         );
         let plan = child(&plans);
@@ -334,32 +334,35 @@ fn runtime50_resume_import_mutations_refused() {
         let mut bad = plans.clone();
         bad.plans.remove(&id);
         assert!(matches!(
-            native::continuation::validate(&program, &bad),
+            hirsel_native::continuation::validate(&program, &bad),
             Err(ContinuationError::Coverage(_))
         ));
         let mut bad = plans.clone();
         bad.identity = ContentHash::of_bytes(b"other partition");
         assert_eq!(
-            native::continuation::validate(&program, &bad),
+            hirsel_native::continuation::validate(&program, &bad),
             Err(ContinuationError::Identity)
         );
 
         // Final-frame certificates of the ahead roots, in both backends.
         let program = ready(SCALAR);
-        let plan = native::ahead_plan(&program);
-        let plans = native::continuation::plans(&program);
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
-            let objects = native::emit_backend_objects(
+        let plan = hirsel_native::ahead_plan(&program);
+        let plans = hirsel_native::continuation::plans(&program);
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
                 OptLevel::Default,
-                native::Partition::Whole,
+                hirsel_native::Partition::Whole,
                 false,
                 None,
             )
             .unwrap();
             let evidence = objects.iter().find_map(|o| o.ahead.clone()).unwrap();
-            let certificates = native::continuation::ahead_certificates(&program, &objects);
+            let certificates = hirsel_native::continuation::ahead_certificates(&program, &objects);
             assert_eq!(certificates.len(), 1, "{backend:?}");
             let certificate = &certificates[0];
             certificate.check(&plan, &plans, &evidence).unwrap();

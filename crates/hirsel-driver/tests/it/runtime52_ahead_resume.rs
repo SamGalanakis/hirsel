@@ -3,9 +3,13 @@
 //! boundary hands its frame, at the saved state, to the body's ordinary
 //! dispatcher, which leaves the stack and resumes the frame there without
 //! restarting the body.
-use hirsel_driver::native::{self, *};
+use hirsel_driver::native;
+use hirsel_driver::native::*;
 use hirsel_engine::*;
 use hirsel_lir::continuation::Representation;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 
 const SOURCE: &str = include_str!("../fixtures/e1-completed-read-35/main.hir");
 
@@ -43,7 +47,7 @@ fn runtime52_ahead_resume_certificate() {
     with_compiler_stack(|| {
         let (_, program) = checked();
         let plan = ahead_plan(&program);
-        let plans = native::continuation::plans(&program);
+        let plans = hirsel_native::continuation::plans(&program);
         let roots: Vec<_> = plan
             .roots
             .iter()
@@ -59,7 +63,7 @@ fn runtime52_ahead_resume_certificate() {
         let definition = &plan.symbols[&root].definition;
         let entry = hirsel_lir::ahead::alternate_resume_name(definition, root);
         for backend in [Backend::Llvm, Backend::Cranelift] {
-            let objects = native::emit_backend_objects(
+            let objects = hirsel_native::emit_backend_objects(
                 &program,
                 backend,
                 OptLevel::Default,
@@ -79,7 +83,7 @@ fn runtime52_ahead_resume_certificate() {
                 "{backend:?}: {entry}"
             );
             let evidence = objects.iter().find_map(|o| o.ahead.clone()).unwrap();
-            let certificates = native::continuation::ahead_certificates(&program, &objects);
+            let certificates = hirsel_native::continuation::ahead_certificates(&program, &objects);
             let certificate = certificates.iter().find(|c| c.root == root).unwrap();
             certificate.check(&plan, &plans, &evidence).unwrap();
             let resume = certificate.resume.as_ref().unwrap();
@@ -136,7 +140,7 @@ fn runtime52_ahead_child_suspends_compactly_and_replays() {
         let expected = Observation::of_reference(reference.observation.as_ref().unwrap());
         assert_eq!(expected.exit_code, Some(0), "{expected:?}");
         let input = engine.export_native_input().unwrap();
-        let sites = native::Sites::new(&input);
+        let sites = hirsel_native::Sites::new(&input);
         let target = TargetSpec::x86_64_unknown_linux_gnu();
         let root = tempfile::Builder::new()
             .prefix("runtime52-ahead-")
@@ -147,7 +151,7 @@ fn runtime52_ahead_child_suspends_compactly_and_replays() {
         for backend in [Backend::Llvm, Backend::Cranelift] {
             let dir = root.path().join(format!("{backend:?}"));
             std::fs::create_dir_all(dir.join("root")).unwrap();
-            let objects = native::emit_backend_objects(
+            let objects = hirsel_native::emit_backend_objects(
                 &ready,
                 backend,
                 OptLevel::Default,
@@ -157,7 +161,8 @@ fn runtime52_ahead_child_suspends_compactly_and_replays() {
             )
             .unwrap();
             let exe =
-                native::link_standalone_objects(&ready, &entry, &objects, &tools, &dir).unwrap();
+                hirsel_native::link_standalone_objects(&ready, &entry, &objects, &tools, &dir)
+                    .unwrap();
             let grants = dir.join("grants.json");
             std::fs::write(
                 &grants,
@@ -194,7 +199,7 @@ fn runtime52_ahead_child_suspends_compactly_and_replays() {
                         .args(["1", "/fixture/gate.sock"]);
                 }
                 let output = command.output().unwrap();
-                let launched = native::Launched {
+                let launched = hirsel_native::Launched {
                     audit_required: true,
                     exit: output.status.code(),
                     signal: None,
@@ -203,7 +208,7 @@ fn runtime52_ahead_child_suspends_compactly_and_replays() {
                     record: std::fs::read_to_string(&record).unwrap(),
                 };
                 assert_eq!(
-                    native::observe(&launched, &ready, &sites).unwrap(),
+                    hirsel_native::observe(&launched, &ready, &sites).unwrap(),
                     expected,
                     "{cell}: {}",
                     String::from_utf8_lossy(&launched.stderr)

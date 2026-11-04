@@ -320,7 +320,7 @@ fn native(selected: &[String], cases: &[Value]) {
     let mut errors = Vec::new();
     // Every immutable native tape is consumed again by both public host adapters.
     with_compiler_stack(|| {
-        let mut program = hirsel_driver::load_program(&manifest).unwrap();
+        let mut program = hirsel_front_phases::load_program(&manifest).unwrap();
         for stem in selected {
             let path = retained.join(format!("{stem}.tape"));
             let live_stdout = fs::read(retained.join(format!("{stem}.stdout")))

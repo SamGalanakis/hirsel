@@ -1,6 +1,12 @@
 //! Independent strict Go expectations, including documented Hirsel policies.
-use hirsel_driver::{native::*, *};
+use hirsel_compiler_identity::COMPILER_IDENTITY;
+use hirsel_driver::native::*;
+use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -197,7 +203,9 @@ fn partition(group: &str) {
             engine,
         })
         .collect();
-        let mut toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
+        let mut toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix)
+                .unwrap();
         toolchain.launch_timeout = std::time::Duration::from_secs(60);
         let mut ready =
             crate::native_ready::supplier(&path, None, &loaded.entry, &toolchain).unwrap();

@@ -3,8 +3,9 @@
 //! H, LLVM and Cranelift; every other site stays ordinary recursion.
 //! Vectors follow OCaml 4.14's testsuite/tests/tmc (stack_space.ml, semantic.ml)
 //! and Koka's test/cgen/ctail*.kk, restricted to Hirsel's last-field subset.
-use hirsel_driver::{load_program_source, native};
+use hirsel_driver::native;
 use hirsel_engine::{DefinitionQueries, RunConfiguration, SimulationConfig, with_compiler_stack};
+use hirsel_front_phases::load_program_source;
 use hirsel_tir::TailKind;
 
 /// How a vector runs: its explicit reference step grant (None: the default
@@ -29,7 +30,11 @@ const DEEP: Grant = Grant {
 /// Check `source`, return the tail kinds of `function`, and run it on all four
 /// engines, which must agree; the reference observation and its consumed steps
 /// are returned.
-fn agree(source: &str, function: &str, grant: Grant) -> (Vec<TailKind>, native::Observation, u64) {
+fn agree(
+    source: &str,
+    function: &str,
+    grant: Grant,
+) -> (Vec<TailKind>, hirsel_native::Observation, u64) {
     let fixture =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/std_numeric.hir");
     let mut program = load_program_source(&fixture, Some(source)).unwrap();
@@ -56,31 +61,33 @@ fn agree(source: &str, function: &str, grant: Grant) -> (Vec<TailKind>, native::
     )
     .unwrap();
     let consumed = reference.step_usage.as_ref().unwrap().consumed;
-    let observation = native::Observation::of_reference(
+    let observation = hirsel_native::Observation::of_reference(
         reference
             .observation
             .as_ref()
             .unwrap_or_else(|| panic!("{}", concise(&reference.outcome))),
     );
-    let mut matrix = native::trace_roots_matrix();
-    matrix.push(native::Configuration {
-        options: native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu()),
-        engine: native::Engine::Heap {
+    let mut matrix = hirsel_native_testing::trace_roots_matrix();
+    matrix.push(hirsel_native_testing::Configuration {
+        options: hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu()),
+        engine: hirsel_native_testing::Engine::Heap {
             campaign: grant.campaign,
         },
     });
     let scratch = tempfile::tempdir().unwrap();
-    let tools = native::Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+    let tools =
+        hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+            .unwrap();
     let mut ready =
         crate::native_ready::supplier(&fixture, Some(source), &run.entry, &tools).unwrap();
-    let outcomes = native::differential_ready(
+    let outcomes = hirsel_native_testing::differential_ready(
         &mut ready,
         &run.entry,
         &observation,
         &matrix,
         &tools,
         scratch.path(),
-        &native::Fixture {
+        &hirsel_native::Fixture {
             steps: grant.steps,
             ..Default::default()
         },
@@ -88,7 +95,7 @@ fn agree(source: &str, function: &str, grant: Grant) -> (Vec<TailKind>, native::
     assert_eq!(outcomes.len(), 3);
     for (configuration, outcome) in outcomes {
         assert!(
-            matches!(outcome, native::Outcome::Agree),
+            matches!(outcome, hirsel_native_testing::Outcome::Agree),
             "{source}\n{configuration}: {outcome:?}\nreference: {observation:?}"
         );
     }
@@ -102,13 +109,13 @@ fn concise(error: &impl std::fmt::Debug) -> String {
     text.chars().take(2_000).collect()
 }
 
-fn printed(observation: &native::Observation, expected: &str) {
+fn printed(observation: &hirsel_native::Observation, expected: &str) {
     assert_eq!(observation.exit_code, Some(0), "{observation:?}");
     assert!(observation.failures.is_empty(), "{observation:?}");
     assert_eq!(String::from_utf8_lossy(&observation.output), expected);
 }
 
-fn failure(observation: &native::Observation, rule: &str) {
+fn failure(observation: &hirsel_native::Observation, rule: &str) {
     assert_eq!(observation.exit_code, None, "{observation:?}");
     assert_eq!(observation.failures.len(), 1, "{observation:?}");
     assert_eq!(observation.failures[0].rule, rule, "{observation:?}");

@@ -4,13 +4,18 @@ use hirsel_engine::{
     QueryEngine, RunConfiguration, check_snapshot, default_context, default_environment,
     entry_path, run_observed_snapshot, with_compiler_stack,
 };
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 
 #[test]
 fn bounded_loop_matrix_reference_heap_llvm_cranelift() {
     with_compiler_stack(|| {
         let source = include_str!("../../../../conformance/OWN/OWN-2-map-loop-validity-17-run.hir");
-        let mut engine =
-            QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+        let mut engine = QueryEngine::new(
+            default_environment(),
+            hirsel_front_phases::compiler_adapters(),
+        );
         let file = engine.sources.add("map-loop.hir", source.into()).unwrap();
         let diagnostics = check_snapshot(&mut engine, file, &default_context()).unwrap();
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -51,7 +56,9 @@ fn bounded_loop_matrix_reference_heap_llvm_cranelift() {
                 },
             },
         ];
-        let tools = Toolchain::for_matrix(&root.join("runtime"), &configurations).unwrap();
+        let tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &configurations)
+                .unwrap();
         let ready = build(&validated, &options).unwrap();
         let sites = Sites::new(validated.snapshot());
         let heap = run_heap(&ready, &entry, &sites).unwrap();

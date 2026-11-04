@@ -28,9 +28,9 @@ fn main() -> bool { equal([box Word(key: b"key", count: 1, next: 0)], 0, b"key")
     // Insertion and elision must keep those views borrowed too. A Value-stage
     // read alone does not prove that the executable acquires no holder.
     for regions in [false, true] {
-        let mut options = hirsel_driver::native::Options::new(target());
+        let mut options = hirsel_native::Options::new(target());
         options.regions = regions;
-        let built = hirsel_driver::native::build_program(&program, manifest(&program), &options)
+        let built = hirsel_native_batch::build_program(&program, manifest(&program), &options)
             .expect("build borrowed reads");
         let mut checked = 0;
         for unit in &built.units {
@@ -1175,10 +1175,15 @@ fn loop_version_matches_reference_heap_llvm_and_cranelift() {
         QueryEngine, RunConfiguration, default_context, default_environment, entry_path,
         run_observed_snapshot, source_check_request, with_compiler_stack,
     };
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let source = include_str!("../../../../conformance/LANG/LANG-13-loop-element-match-run.hir");
     with_compiler_stack(move || {
-        let mut engine =
-            QueryEngine::new(default_environment(), hirsel_driver::compiler_adapters());
+        let mut engine = QueryEngine::new(
+            default_environment(),
+            hirsel_front_phases::compiler_adapters(),
+        );
         let file = engine
             .sources
             .add("loop-element.hir", source.into())
@@ -1221,7 +1226,9 @@ fn loop_version_matches_reference_heap_llvm_and_cranelift() {
         ];
         let directory =
             std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("loop-version-native");
-        let toolchain = Toolchain::for_matrix(&directory.join("runtime"), &matrix).unwrap();
+        let toolchain =
+            hirsel_native_testing::toolchain_for_matrix(&directory.join("runtime"), &matrix)
+                .unwrap();
         let outcomes = differential(&input, &entry, &reference, &matrix, &toolchain, &directory);
         assert_eq!(outcomes.len(), 3);
         for (configuration, outcome) in outcomes {

@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 #[test]
 fn statement_retirement_visits_new_slots_and_ending_scopes() {
     with_compiler_stack(|| {

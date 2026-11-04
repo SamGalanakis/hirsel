@@ -92,7 +92,7 @@ pub fn main() -> Result[(), scalar.ParseError] {
 }
 "#;
         let selection = package(scratch.path(), source);
-        let mut loaded = hirsel_driver::load_program(&selection).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&selection).unwrap();
         loaded.check_for_execution().unwrap();
         let config = hirsel_engine::RunConfiguration {
             entry: loaded.entry.clone(),
@@ -106,7 +106,7 @@ pub fn main() -> Result[(), scalar.ParseError] {
         )
         .unwrap();
         let observation =
-            hirsel_driver::native::Observation::of_reference(checked.observation.as_ref().unwrap());
+            hirsel_native::Observation::of_reference(checked.observation.as_ref().unwrap());
         assert_eq!(observation.exit_code, Some(0), "{observation:?}");
         assert!(observation.failures.is_empty(), "{observation:?}");
         assert!(observation.output.is_empty(), "{observation:?}");

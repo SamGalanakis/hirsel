@@ -15,7 +15,7 @@ thread_local! {
     static RENDEZVOUS: RefCell<Option<Arc<Rendezvous>>> = const { RefCell::new(None) };
 }
 
-pub(super) fn before_link(path: &Path) {
+pub fn before_link(path: &Path) {
     if let Some(rendezvous) = RENDEZVOUS.take() {
         rendezvous.paths.lock().unwrap().push(path.to_path_buf());
         rendezvous.barrier.wait();
@@ -24,7 +24,7 @@ pub(super) fn before_link(path: &Path) {
 
 #[test]
 fn concurrent_native_builds_keep_descriptors_and_observations_separate() {
-    let inputs = super::super::executable::Scratch::new().unwrap();
+    let inputs = hirsel_native::Scratch::new().unwrap();
     let rendezvous = Arc::new(Rendezvous {
         barrier: Barrier::new(2),
         paths: Mutex::new(Vec::new()),

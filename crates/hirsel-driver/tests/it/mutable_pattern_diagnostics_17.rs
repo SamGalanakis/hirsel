@@ -2,6 +2,7 @@
 //! Hirsel's existing physical/taken pattern rules, without match ergonomics.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 #[test]
@@ -139,26 +140,27 @@ fn mutable_pattern_diagnostics_17_checked_repairs_execute_on_both_backends() {
             1,
             "the transferred FileLike must be finalized exactly once"
         );
-        let reference = native::Observation::of_reference(observation);
+        let reference = hirsel_native::Observation::of_reference(observation);
         assert_eq!(reference.exit_code, Some(0), "{reference:?}");
         assert!(reference.failures.is_empty());
         let input = engine.export_native_input().unwrap();
         let validated = engine.import_native_input(input).unwrap();
-        let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+        let options =
+            hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let configurations = vec![
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options: options.clone(),
-                engine: native::Engine::Native {
-                    opt: native::OptLevel::Speed,
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Native {
+                    opt: hirsel_native::OptLevel::Speed,
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
-            native::Configuration {
+            hirsel_native_testing::Configuration {
                 options,
-                engine: native::Engine::Cranelift {
-                    partition: native::Partition::Whole,
-                    runtime: native::Runtime::Diagnostic,
+                engine: hirsel_native_testing::Engine::Cranelift {
+                    partition: hirsel_native::Partition::Whole,
+                    runtime: hirsel_native_testing::Runtime::Diagnostic,
                 },
             },
         ];
@@ -166,8 +168,9 @@ fn mutable_pattern_diagnostics_17_checked_repairs_execute_on_both_backends() {
             PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mutable-pattern-diagnostics-17");
         std::fs::create_dir_all(&scratch).unwrap();
         let toolchain =
-            native::Toolchain::for_matrix(&scratch.join("runtime"), &configurations).unwrap();
-        let outcomes = native::differential(
+            hirsel_native_testing::toolchain_for_matrix(&scratch.join("runtime"), &configurations)
+                .unwrap();
+        let outcomes = hirsel_native_testing::differential(
             &validated,
             &entry,
             &reference,
@@ -178,7 +181,7 @@ fn mutable_pattern_diagnostics_17_checked_repairs_execute_on_both_backends() {
         assert_eq!(outcomes.len(), 2);
         for (configuration, outcome) in outcomes {
             assert!(
-                matches!(outcome, native::Outcome::Agree),
+                matches!(outcome, hirsel_native_testing::Outcome::Agree),
                 "{configuration}: {outcome:?}"
             );
         }

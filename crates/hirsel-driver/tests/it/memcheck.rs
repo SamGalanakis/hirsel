@@ -5,7 +5,10 @@
 //! release and must fail with memcheck's exit code, and its twin, which stops reading before
 //! the release, must exit 0. A refactor that drops a request (`free_small`'s `pool_free`, for
 //! one) leaves the freed slot addressable and fails the first test.
-use hirsel_driver::native::{RuntimeBuild, TargetSpec, Toolchain, launch};
+use hirsel_native::RuntimeBuild;
+use hirsel_native::TargetSpec;
+use hirsel_native::Toolchain;
+use hirsel_native::launch;
 use std::path::PathBuf;
 use std::process::Command;
 

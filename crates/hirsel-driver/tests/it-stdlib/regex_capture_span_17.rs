@@ -1,6 +1,7 @@
 //! Private engine differential checks run without exporting selectors from std.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::{Path, PathBuf};
 
 pub(super) fn private_fixture(directory: &Path, _interpreter: bool) -> PathBuf {
@@ -51,7 +52,7 @@ pub(super) fn private_fixture(directory: &Path, _interpreter: bool) -> PathBuf {
     path
 }
 
-fn check_capture(backend: Option<native::Backend>, selected_entries: &[&str]) {
+fn check_capture(backend: Option<hirsel_native::Backend>, selected_entries: &[&str]) {
     with_compiler_stack(|| {
         let temp = tempfile::tempdir().unwrap();
         let path = private_fixture(temp.path(), false);
@@ -162,11 +163,11 @@ const NATIVE_ENTRIES: &[&str] = &[
 ];
 #[test]
 fn capture_span_llvm() {
-    check_capture(Some(native::Backend::Llvm), NATIVE_ENTRIES);
+    check_capture(Some(hirsel_native::Backend::Llvm), NATIVE_ENTRIES);
 }
 #[test]
 fn capture_span_cranelift() {
-    check_capture(Some(native::Backend::Cranelift), NATIVE_ENTRIES);
+    check_capture(Some(hirsel_native::Backend::Cranelift), NATIVE_ENTRIES);
 }
 
 fn verify_trace_copies(root: &Path, std_root: &Path) {
@@ -216,8 +217,8 @@ fn verify_trace_copies(root: &Path, std_root: &Path) {
 fn capture_span_wrapper_smoke() {
     for backend in [
         None,
-        Some(native::Backend::Llvm),
-        Some(native::Backend::Cranelift),
+        Some(hirsel_native::Backend::Llvm),
+        Some(hirsel_native::Backend::Cranelift),
     ] {
         check_capture(backend, &["capture_forced_limits"]);
     }
@@ -234,37 +235,46 @@ fn capture_replacements_ambiguous_interpreter_budget() {
 #[test]
 fn capture_span_cranelift_context_and_retention() {
     check_capture(
-        Some(native::Backend::Cranelift),
+        Some(hirsel_native::Backend::Cranelift),
         &["capture_context_and_retention"],
     );
 }
 #[test]
 fn capture_span_cranelift_expand_partial() {
     check_capture(
-        Some(native::Backend::Cranelift),
+        Some(hirsel_native::Backend::Cranelift),
         &["capture_expand_partial"],
     );
 }
 #[test]
 fn capture_span_cranelift_forced_limits() {
-    check_capture(Some(native::Backend::Cranelift), &["capture_forced_limits"]);
+    check_capture(
+        Some(hirsel_native::Backend::Cranelift),
+        &["capture_forced_limits"],
+    );
 }
 #[test]
 fn capture_span_llvm_goldens() {
-    check_capture(Some(native::Backend::Llvm), &["capture_goldens"]);
+    check_capture(Some(hirsel_native::Backend::Llvm), &["capture_goldens"]);
 }
 #[test]
 fn capture_span_llvm_context_and_retention() {
     check_capture(
-        Some(native::Backend::Llvm),
+        Some(hirsel_native::Backend::Llvm),
         &["capture_context_and_retention"],
     );
 }
 #[test]
 fn capture_span_llvm_expand_partial() {
-    check_capture(Some(native::Backend::Llvm), &["capture_expand_partial"]);
+    check_capture(
+        Some(hirsel_native::Backend::Llvm),
+        &["capture_expand_partial"],
+    );
 }
 #[test]
 fn capture_span_llvm_forced_limits() {
-    check_capture(Some(native::Backend::Llvm), &["capture_forced_limits"]);
+    check_capture(
+        Some(hirsel_native::Backend::Llvm),
+        &["capture_forced_limits"],
+    );
 }

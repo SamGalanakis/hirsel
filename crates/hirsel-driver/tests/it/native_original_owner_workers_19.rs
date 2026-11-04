@@ -1,9 +1,10 @@
 //! Retained-owner source vector from the removed-controller migration inventory.
-use hirsel_driver::{compiler_adapters, native};
+use hirsel_driver::native;
 use hirsel_engine::{
     store::{MemStore, ResultStore, VerifyStore},
     *,
 };
+use hirsel_front_phases::compiler_adapters;
 use hirsel_intern::jobs::Jobs;
 use hirsel_lir::ir::UnitOrigin;
 use std::sync::Arc;
@@ -15,13 +16,22 @@ fn original_retained_owners_match_at_one_two_eight_under_both_validation_policie
             let mut transcript = String::new();
             let source = "fn step(x:u64)->u64{x+1u64}\nfn main()->u64 {let mut xs:List[u64]=[];list.push(mut xs,7u64);step(xs[0u64])}\n";
             for (backend, opt) in [
-                (native::Backend::Cranelift, native::OptLevel::None),
-                (native::Backend::Llvm, native::OptLevel::None),
-                (native::Backend::Llvm, native::OptLevel::Default),
+                (
+                    hirsel_native::Backend::Cranelift,
+                    hirsel_native::OptLevel::None,
+                ),
+                (hirsel_native::Backend::Llvm, hirsel_native::OptLevel::None),
+                (
+                    hirsel_native::Backend::Llvm,
+                    hirsel_native::OptLevel::Default,
+                ),
             ] {
                 let mut baseline = None;
                 for workers in [1, 2, 8] {
-                    for validation in [native::Validation::Ready, native::Validation::EveryStage] {
+                    for validation in [
+                        hirsel_native::Validation::Ready,
+                        hirsel_native::Validation::EveryStage,
+                    ] {
                         let store: Arc<dyn ResultStore> =
                             crate::native::admitted_native_store(Arc::new(MemStore::default()));
                         let mut engine =
@@ -36,8 +46,9 @@ fn original_retained_owners_match_at_one_two_eight_under_both_validation_policie
                         assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
                         let input = engine.export_native_input().unwrap();
                         let _validated = engine.import_native_input(input).unwrap();
-                        let mut options =
-                            native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+                        let mut options = hirsel_native::Options::new(
+                            hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                        );
                         options.validation = validation;
                         let actual = crate::native_object_products_19::compile_front(
                             crate::native_front_fixture::products(&mut engine, &[]).unwrap(),
@@ -48,7 +59,7 @@ fn original_retained_owners_match_at_one_two_eight_under_both_validation_policie
                             options,
                             false,
                             Jobs::new(workers),
-                            if validation == native::Validation::EveryStage {
+                            if validation == hirsel_native::Validation::EveryStage {
                                 VerifyStore::Recompute
                             } else {
                                 VerifyStore::Off

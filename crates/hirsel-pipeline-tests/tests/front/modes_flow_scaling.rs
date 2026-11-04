@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_intern::work::{self, Counter};
 
 fn measure(source: String) -> [u64; 5] {

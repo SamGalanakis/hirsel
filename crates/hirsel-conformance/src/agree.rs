@@ -33,7 +33,7 @@ impl Classification {
 /// bounds execution without confusing ordinary limits with interpreter bugs.
 const STEPS: u64 = 10_000;
 fn engine() -> QueryEngine {
-    let mut adapters = hirsel_driver::compiler_adapters();
+    let mut adapters = hirsel_front_phases::compiler_adapters();
     let mut interpreter = hirsel_engine::InterpreterAdapter::default();
     interpreter.limits.steps = Some(STEPS);
     adapters.interpreter = Some(Box::new(interpreter));
@@ -126,8 +126,8 @@ pub fn classify(source: &str, execution: Execution) -> Classification {
 /// variant that the interpreter runs is also run under, on the heap executor
 /// and as native code, and what they did.
 pub struct Native {
-    pub matrix: Vec<hirsel_driver::native::Configuration>,
-    pub toolchain: hirsel_driver::native::Toolchain,
+    pub matrix: Vec<hirsel_native_testing::Configuration>,
+    pub toolchain: hirsel_native::Toolchain,
     pub dir: std::path::PathBuf,
     /// The baseline's named exclusions: a program's variants do not run
     /// under a configuration the program itself is listed for.
@@ -148,8 +148,8 @@ pub struct NativeStats {
 
 impl Native {
     pub fn new(
-        matrix: Vec<hirsel_driver::native::Configuration>,
-        toolchain: hirsel_driver::native::Toolchain,
+        matrix: Vec<hirsel_native_testing::Configuration>,
+        toolchain: hirsel_native::Toolchain,
         dir: std::path::PathBuf,
         exclusions: crate::native::Exclusions,
     ) -> Self {
@@ -171,7 +171,7 @@ impl Native {
     }
     /// The configurations `path`'s variants run under: those the baseline
     /// lists no exclusion of `path` for, by the configuration's seedless name.
-    fn for_program(&self, path: &str) -> Vec<hirsel_driver::native::Configuration> {
+    fn for_program(&self, path: &str) -> Vec<hirsel_native_testing::Configuration> {
         let listed = |configuration: String| {
             self.exclusions
                 .contains_key(&(path.to_string(), configuration))
@@ -180,7 +180,7 @@ impl Native {
             return Vec::new();
         }
         let matrix = if self.selection.is_some() {
-            hirsel_driver::native::pairwise_matrix(&self.matrix, path, self.seed)
+            hirsel_native_testing::pairwise_matrix(&self.matrix, path, self.seed)
         } else {
             self.matrix.clone()
         };
@@ -198,12 +198,12 @@ impl Native {
     fn compare(
         &self,
         program: &NativeProgram,
-        matrix: &[hirsel_driver::native::Configuration],
-        reference: &hirsel_driver::native::Observation,
+        matrix: &[hirsel_native_testing::Configuration],
+        reference: &hirsel_native::Observation,
         entry: &hirsel_engine::DefPath,
-        fixture: &hirsel_driver::native::Fixture,
+        fixture: &hirsel_native::Fixture,
     ) -> Option<Classification> {
-        use hirsel_driver::native::Outcome;
+        use hirsel_native_testing::Outcome;
         let unavailable = |reason: String| {
             *self
                 .stats
@@ -223,16 +223,18 @@ impl Native {
         if needs_files {
             std::fs::create_dir_all(&dir).expect("scratch directory");
         }
-        use hirsel_driver::requests::{
-            CompileOperation, CompileRequest, CompileResult, CompilerRequests, NativeOutput,
-            NativeRequest,
-        };
+        use hirsel_driver::requests::CompileOperation;
+        use hirsel_driver::requests::CompileRequest;
+        use hirsel_driver::requests::CompileResult;
+        use hirsel_driver::requests::CompilerRequests;
+        use hirsel_driver::requests::NativeOutput;
+        use hirsel_driver::requests::NativeRequest;
         let mut requests =
             CompilerRequests::for_host(program.compiler.clone(), program.compiler.configuration())
                 .with_toolchain(std::sync::Arc::new(self.toolchain.clone()));
-        let mut ready = |options: &hirsel_driver::native::Options| {
-            let failed = |message: String| hirsel_driver::native::NativeError {
-                stage: hirsel_driver::native::StageName::Ready,
+        let mut ready = |options: &hirsel_native::Options| {
+            let failed = |message: String| hirsel_native::NativeError {
+                stage: hirsel_native::StageName::Ready,
                 definition: None,
                 validator: false,
                 message,
@@ -246,10 +248,10 @@ impl Native {
                         test_entries: vec![],
                         supplemental_sources: vec![],
                         output: NativeOutput::Ready,
-                        options: hirsel_driver::native::BuildOptions::new(
+                        options: hirsel_native::BuildOptions::new(
                             options.clone(),
-                            hirsel_driver::native::Backend::Llvm,
-                            hirsel_driver::native::OptLevel::Default,
+                            hirsel_native::Backend::Llvm,
+                            hirsel_native::OptLevel::Default,
                         ),
                         run: None,
                         fuel: false,
@@ -263,7 +265,7 @@ impl Native {
                 _ => Err(failed("agreement expected Ready".into())),
             }
         };
-        let outcomes = hirsel_driver::native::differential_ready(
+        let outcomes = hirsel_native_testing::differential_ready(
             &mut ready,
             entry,
             reference,
@@ -320,7 +322,7 @@ impl Native {
 pub fn classify_native(
     source: &str,
     execution: Execution,
-    native: Option<(&Native, &[hirsel_driver::native::Configuration])>,
+    native: Option<(&Native, &[hirsel_native_testing::Configuration])>,
 ) -> Classification {
     classify_package_native(source, execution, native, None, 0)
 }
@@ -349,7 +351,7 @@ pub fn replay_program_with_hash_seed(
 fn classify_package_native(
     source: &str,
     execution: Execution,
-    native: Option<(&Native, &[hirsel_driver::native::Configuration])>,
+    native: Option<(&Native, &[hirsel_native_testing::Configuration])>,
     path: Option<&Path>,
     hash_seed: u64,
 ) -> Classification {
@@ -407,13 +409,14 @@ fn variant_inputs(
 fn classify_requested(
     source: &str,
     execution: Execution,
-    native: Option<(&Native, &[hirsel_driver::native::Configuration])>,
+    native: Option<(&Native, &[hirsel_native_testing::Configuration])>,
     path: &Path,
     hash_seed: u64,
 ) -> Classification {
-    use hirsel_driver::requests::{
-        CompileOperation, CompileRequest, CompileResult, CompilerRequests,
-    };
+    use hirsel_driver::requests::CompileOperation;
+    use hirsel_driver::requests::CompileRequest;
+    use hirsel_driver::requests::CompileResult;
+    use hirsel_driver::requests::CompilerRequests;
     let compiler = crate::compiler::verifying_compiler();
     let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
     let inputs = match variant_inputs(&compiler, &requests, source, path) {
@@ -577,7 +580,7 @@ fn classify_requested(
 fn classify_standalone(
     source: &str,
     execution: Execution,
-    native: Option<(&Native, &[hirsel_driver::native::Configuration])>,
+    native: Option<(&Native, &[hirsel_native_testing::Configuration])>,
     hash_seed: u64,
 ) -> Classification {
     match crate::native::source_request::Source::new(None, source) {
@@ -599,9 +602,9 @@ struct NativeProgram {
 /// unavailable phase ends it as well).
 fn compare_engines(
     config: &hirsel_engine::RunConfiguration,
-    native: Option<(&Native, &[hirsel_driver::native::Configuration])>,
+    native: Option<(&Native, &[hirsel_native_testing::Configuration])>,
     program: &mut NativeProgram,
-    fixture: &hirsel_driver::native::Fixture,
+    fixture: &hirsel_native::Fixture,
     mut observe: impl FnMut(
         &mut NativeProgram,
         bool,
@@ -635,7 +638,7 @@ fn compare_engines(
         return Some(Classification::Bug { kind, detail });
     }
     if let (Some((native, matrix)), Some(observation)) = (native, &normal.observation) {
-        let reference = hirsel_driver::native::Observation::of_reference(observation);
+        let reference = hirsel_native::Observation::of_reference(observation);
         return native.compare(program, matrix, &reference, &config.entry, fixture);
     }
     None
@@ -1727,7 +1730,7 @@ pub fn shrink_native(
     source: &str,
     execution: Execution,
     kind: &str,
-    native: Option<(&Native, &[hirsel_driver::native::Configuration])>,
+    native: Option<(&Native, &[hirsel_native_testing::Configuration])>,
 ) -> String {
     shrink_package_native(source, execution, kind, native, None, 0)
 }
@@ -1735,7 +1738,7 @@ fn shrink_package_native(
     source: &str,
     execution: Execution,
     kind: &str,
-    native: Option<(&Native, &[hirsel_driver::native::Configuration])>,
+    native: Option<(&Native, &[hirsel_native_testing::Configuration])>,
     path: Option<&Path>,
     hash_seed: u64,
 ) -> String {

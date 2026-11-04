@@ -173,8 +173,8 @@ fn check(callback: &str, known: bool) {
             }
         }
         assert_eq!(proved != 0, known);
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let boundaries: Vec<_> = plans
             .plans
             .values()
@@ -182,7 +182,7 @@ fn check(callback: &str, known: bool) {
             .filter(|s| s.boundary.operation.is_core("task.isolate"))
             .collect();
         assert_eq!(
-            native::continuation::classify(&hirsel_syntax::DefPath::core("task.isolate")),
+            hirsel_native::continuation::classify(&hirsel_syntax::DefPath::core("task.isolate")),
             Some(hirsel_lir::continuation::CalleeClass::Boundary)
         );
         if known {
@@ -431,8 +431,8 @@ fn entered_isolate_mark_storage_requires_separate_source_admission() {
             }
         }
         assert!(checked > 0);
-        let plans = native::continuation::plans(&program);
-        native::continuation::validate(&program, &plans).unwrap();
+        let plans = hirsel_native::continuation::plans(&program);
+        hirsel_native::continuation::validate(&program, &plans).unwrap();
         let nested: Vec<_> = plans
             .plans
             .values()

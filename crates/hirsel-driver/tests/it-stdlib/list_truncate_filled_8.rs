@@ -2,6 +2,7 @@
 use crate::source_std::load_program_source;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::{Path, PathBuf};
 
 fn fixture(group: &str, name: &str) -> PathBuf {
@@ -54,38 +55,39 @@ fn check(path: &Path, source: Option<&str>, stdout: &[u8], failure: Option<&str>
             run.outcome
         ),
     }
-    let expected = native::Observation::of_reference(observation);
+    let expected = hirsel_native::Observation::of_reference(observation);
     let input = loaded.engine.export_native_input().unwrap();
     let validated = loaded.engine.import_native_input(input).unwrap();
-    let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
-    let ready = native::build(&validated, &options).unwrap();
-    let sites = native::Sites::new(validated.snapshot());
-    let world = native::HeapWorld {
+    let options =
+        hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+    let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+    let sites = hirsel_native::Sites::new(validated.snapshot());
+    let world = hirsel_native_testing::HeapWorld {
         steps: Some(20_000_000),
         ..Default::default()
     };
     let heap = if campaign {
-        native::heap_campaign_in(&ready, &loaded.entry, &sites, &world)
+        hirsel_native_testing::heap_campaign_in(&ready, &loaded.entry, &sites, &world)
     } else {
-        native::run_heap_in(&ready, &loaded.entry, &sites, &world)
+        hirsel_native_testing::run_heap_in(&ready, &loaded.entry, &sites, &world)
     }
     .unwrap();
     assert_eq!(heap.observation, expected);
     assert_eq!(heap.counters.live_heap_bytes, 0);
     let configs = [
-        native::Configuration {
+        hirsel_native_testing::Configuration {
             options: options.clone(),
-            engine: native::Engine::Native {
-                opt: native::OptLevel::Speed,
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            engine: hirsel_native_testing::Engine::Native {
+                opt: hirsel_native::OptLevel::Speed,
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         },
-        native::Configuration {
+        hirsel_native_testing::Configuration {
             options,
-            engine: native::Engine::Cranelift {
-                partition: native::Partition::Whole,
-                runtime: native::Runtime::Diagnostic,
+            engine: hirsel_native_testing::Engine::Cranelift {
+                partition: hirsel_native::Partition::Whole,
+                runtime: hirsel_native_testing::Runtime::Diagnostic,
             },
         },
     ];
@@ -93,12 +95,18 @@ fn check(path: &Path, source: Option<&str>, stdout: &[u8], failure: Option<&str>
         "list-filled-truncate-{}",
         path.file_stem().unwrap().to_str().unwrap()
     ));
-    let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &configs).unwrap();
-    for (configuration, outcome) in
-        native::differential(&validated, &loaded.entry, &expected, &configs, &tools, &dir)
-    {
+    let tools =
+        hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &configs).unwrap();
+    for (configuration, outcome) in hirsel_native_testing::differential(
+        &validated,
+        &loaded.entry,
+        &expected,
+        &configs,
+        &tools,
+        &dir,
+    ) {
         assert!(
-            matches!(outcome, native::Outcome::Agree),
+            matches!(outcome, hirsel_native_testing::Outcome::Agree),
             "{configuration}: {outcome:?}"
         );
     }
@@ -160,12 +168,12 @@ fn impossible_large_inline_count_fails_before_filling_on_all_engines() {
 fn filled_zero_large_and_regrowth_keep_one_allocation_on_both_native_engines() {
     with_compiler_stack(|| {
         let path = fixture("SEM", "SEM-4-list-filled-truncate-run");
-        let target = native::TargetSpec::x86_64_unknown_linux_gnu();
+        let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("list-filled-8-counts");
-        let tools = native::Toolchain::in_tree_with_runtime(
+        let tools = hirsel_native::Toolchain::in_tree_with_runtime(
             &dir.join("runtime"),
             &[&target],
-            native::RuntimeBuild {
+            hirsel_native::RuntimeBuild {
                 measurement: true,
                 ..Default::default()
             },
@@ -192,14 +200,14 @@ pub fn main() -> Result[(), ()] {{
                 .unwrap_or_else(|e| panic!("{e:?}"));
             let input = loaded.engine.export_native_input().unwrap();
             let validated = loaded.engine.import_native_input(input).unwrap();
-            let mut options = native::Options::new(target.clone());
+            let mut options = hirsel_native::Options::new(target.clone());
             options.regions = false;
-            let ready = native::build(&validated, &options).unwrap();
-            let heap = native::run_heap_in(
+            let ready = hirsel_native_batch::build(&validated, &options).unwrap();
+            let heap = hirsel_native_testing::run_heap_in(
                 &ready,
                 &loaded.entry,
-                &native::Sites::new(validated.snapshot()),
-                &native::HeapWorld {
+                &hirsel_native::Sites::new(validated.snapshot()),
+                &hirsel_native_testing::HeapWorld {
                     steps: Some(20_000_000),
                     ..Default::default()
                 },
@@ -207,20 +215,24 @@ pub fn main() -> Result[(), ()] {{
             .unwrap();
             let expected = u64::from(n != 0);
             assert_eq!(heap.counters.allocations, expected, "n={n} value={value}");
-            for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+            for backend in [
+                hirsel_native::Backend::Llvm,
+                hirsel_native::Backend::Cranelift,
+            ] {
                 let case = dir.join(format!("{backend:?}-{n}-{value}"));
                 std::fs::create_dir_all(&case).unwrap();
-                let objects = native::emit_backend_objects(
+                let objects = hirsel_native::emit_backend_objects(
                     &ready,
                     backend,
-                    native::OptLevel::Speed,
-                    native::Partition::Whole,
+                    hirsel_native::OptLevel::Speed,
+                    hirsel_native::Partition::Whole,
                     true,
                     None,
                 )
                 .unwrap();
                 let exe =
-                    native::link_objects(&ready, &loaded.entry, &objects, &tools, &case).unwrap();
+                    hirsel_native::link_objects(&ready, &loaded.entry, &objects, &tools, &case)
+                        .unwrap();
                 let totals = case.join("totals");
                 let run = std::process::Command::new(exe)
                     .env_clear()

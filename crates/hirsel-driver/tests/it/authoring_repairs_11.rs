@@ -1,6 +1,7 @@
 //! Checked record, binding, literal and capability-error repairs.
-use hirsel_driver::{load_program, native};
+use hirsel_driver::native;
 use hirsel_engine::{LoweringPolicy, RunConfiguration, SimulationConfig, with_compiler_stack};
+use hirsel_front_phases::load_program;
 use std::path::PathBuf;
 
 fn root() -> PathBuf {
@@ -105,30 +106,31 @@ fn authoring_repairs_11_accepted_twins_agree_on_h_llvm_and_cranelift() {
                     "I/O twin must exercise real operations"
                 );
             }
-            let reference = native::Observation::of_reference(observation);
+            let reference = hirsel_native::Observation::of_reference(observation);
             assert_eq!(reference.exit_code, Some(0), "{reference:?}");
             assert!(reference.failures.is_empty());
             let input = program.engine.export_native_input().unwrap();
             let validated = program.engine.import_native_input(input).unwrap();
-            let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+            let options =
+                hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
             let configurations = vec![
-                native::Configuration {
+                hirsel_native_testing::Configuration {
                     options: options.clone(),
-                    engine: native::Engine::Heap { campaign: false },
+                    engine: hirsel_native_testing::Engine::Heap { campaign: false },
                 },
-                native::Configuration {
+                hirsel_native_testing::Configuration {
                     options: options.clone(),
-                    engine: native::Engine::Native {
-                        opt: native::OptLevel::Speed,
-                        partition: native::Partition::Whole,
-                        runtime: native::Runtime::Diagnostic,
+                    engine: hirsel_native_testing::Engine::Native {
+                        opt: hirsel_native::OptLevel::Speed,
+                        partition: hirsel_native::Partition::Whole,
+                        runtime: hirsel_native_testing::Runtime::Diagnostic,
                     },
                 },
-                native::Configuration {
+                hirsel_native_testing::Configuration {
                     options,
-                    engine: native::Engine::Cranelift {
-                        partition: native::Partition::Whole,
-                        runtime: native::Runtime::Diagnostic,
+                    engine: hirsel_native_testing::Engine::Cranelift {
+                        partition: hirsel_native::Partition::Whole,
+                        runtime: hirsel_native_testing::Runtime::Diagnostic,
                     },
                 },
             ];
@@ -137,9 +139,12 @@ fn authoring_repairs_11_accepted_twins_agree_on_h_llvm_and_cranelift() {
                 .join("authoring-repairs-11")
                 .join(name);
             std::fs::create_dir_all(&scratch).unwrap();
-            let toolchain =
-                native::Toolchain::for_matrix(&scratch.join("runtime"), &configurations).unwrap();
-            let outcomes = native::differential(
+            let toolchain = hirsel_native_testing::toolchain_for_matrix(
+                &scratch.join("runtime"),
+                &configurations,
+            )
+            .unwrap();
+            let outcomes = hirsel_native_testing::differential(
                 &validated,
                 &program.entry,
                 &reference,
@@ -151,7 +156,7 @@ fn authoring_repairs_11_accepted_twins_agree_on_h_llvm_and_cranelift() {
             for (configuration, outcome) in outcomes {
                 eprintln!("authoring-repairs-11/{name}: {configuration}: {outcome:?}");
                 assert!(
-                    matches!(outcome, native::Outcome::Agree),
+                    matches!(outcome, hirsel_native_testing::Outcome::Agree),
                     "{}: {outcome:?}",
                     configuration
                 );
@@ -334,7 +339,7 @@ fn authoring_repairs_11_shadow_binding_sites_follow_relocated_declarations() {
         let main = "pub fn main() { let counts = 0u64 }\n";
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         for source in [
             format!("fn counts() {{}}\n{main}"),
@@ -692,31 +697,32 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
             )
             .unwrap();
             let reference =
-                native::Observation::of_reference(execution.observation.as_ref().unwrap());
+                hirsel_native::Observation::of_reference(execution.observation.as_ref().unwrap());
             assert_eq!(reference.exit_code, Some(0), "{name}: {reference:?}");
             assert!(reference.failures.is_empty(), "{name}: {reference:?}");
             assert_eq!(reference.output, expected.as_bytes(), "{name}");
             let input = program.engine.export_native_input().unwrap();
             let validated = program.engine.import_native_input(input).unwrap();
-            let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+            let options =
+                hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
             let configurations = vec![
-                native::Configuration {
+                hirsel_native_testing::Configuration {
                     options: options.clone(),
-                    engine: native::Engine::Heap { campaign: false },
+                    engine: hirsel_native_testing::Engine::Heap { campaign: false },
                 },
-                native::Configuration {
+                hirsel_native_testing::Configuration {
                     options: options.clone(),
-                    engine: native::Engine::Native {
-                        opt: native::OptLevel::Speed,
-                        partition: native::Partition::Whole,
-                        runtime: native::Runtime::Diagnostic,
+                    engine: hirsel_native_testing::Engine::Native {
+                        opt: hirsel_native::OptLevel::Speed,
+                        partition: hirsel_native::Partition::Whole,
+                        runtime: hirsel_native_testing::Runtime::Diagnostic,
                     },
                 },
-                native::Configuration {
+                hirsel_native_testing::Configuration {
                     options,
-                    engine: native::Engine::Cranelift {
-                        partition: native::Partition::Whole,
-                        runtime: native::Runtime::Diagnostic,
+                    engine: hirsel_native_testing::Engine::Cranelift {
+                        partition: hirsel_native::Partition::Whole,
+                        runtime: hirsel_native_testing::Runtime::Diagnostic,
                     },
                 },
             ];
@@ -724,10 +730,12 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
                 .prefix("partial-move-repairs-20-")
                 .tempdir()
                 .unwrap();
-            let toolchain =
-                native::Toolchain::for_matrix(&scratch.path().join("runtime"), &configurations)
-                    .unwrap();
-            let outcomes = native::differential(
+            let toolchain = hirsel_native_testing::toolchain_for_matrix(
+                &scratch.path().join("runtime"),
+                &configurations,
+            )
+            .unwrap();
+            let outcomes = hirsel_native_testing::differential(
                 &validated,
                 &program.entry,
                 &reference,
@@ -739,7 +747,7 @@ pub fn main(rt: Io) -> Result[(), GrantError] {
             for (configuration, outcome) in outcomes {
                 eprintln!("partial-move-repairs-20/{name}: {configuration}: {outcome:?}");
                 assert!(
-                    matches!(outcome, native::Outcome::Agree),
+                    matches!(outcome, hirsel_native_testing::Outcome::Agree),
                     "{name}: {configuration}: {outcome:?}"
                 );
             }

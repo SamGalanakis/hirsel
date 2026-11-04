@@ -1,6 +1,7 @@
 //! cmark-gfm single-walker port with fallible output admission (BSD-2-Clause).
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::Path;
 
 fn run(engine: &str) {
@@ -50,7 +51,7 @@ fn run(engine: &str) {
         } else {
             // The fixture's independent oracle is a normal return after all
             // exact-byte/cap/sink assertions, with no printed output or effects.
-            let expected = native::Observation {
+            let expected = hirsel_native::Observation {
                 exit_code: Some(0),
                 blocked: false,
                 budget: None,
@@ -59,19 +60,20 @@ fn run(engine: &str) {
                 failures: vec![],
                 roots: vec![],
             };
-            let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
-            let matrix = vec![native::Configuration {
+            let options =
+                hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+            let matrix = vec![hirsel_native_testing::Configuration {
                 options,
                 engine: if engine == "llvm" {
-                    native::Engine::Native {
-                        opt: native::OptLevel::Speed,
-                        partition: native::Partition::Whole,
-                        runtime: native::Runtime::Default,
+                    hirsel_native_testing::Engine::Native {
+                        opt: hirsel_native::OptLevel::Speed,
+                        partition: hirsel_native::Partition::Whole,
+                        runtime: hirsel_native_testing::Runtime::Default,
                     }
                 } else {
-                    native::Engine::Cranelift {
-                        partition: native::Partition::Whole,
-                        runtime: native::Runtime::Diagnostic,
+                    hirsel_native_testing::Engine::Cranelift {
+                        partition: hirsel_native::Partition::Whole,
+                        runtime: hirsel_native_testing::Runtime::Diagnostic,
                     }
                 },
             }];
@@ -79,21 +81,26 @@ fn run(engine: &str) {
                 .join("markdown-bounded-output-33")
                 .join(engine);
             std::fs::create_dir_all(&dir).unwrap();
-            let tools = native::Toolchain::for_matrix(&dir.join("runtime"), &matrix).unwrap();
+            let tools =
+                hirsel_native_testing::toolchain_for_matrix(&dir.join("runtime"), &matrix).unwrap();
             let mut ready =
                 crate::native_ready::supplier(&path, None, &program.entry, &tools).unwrap();
-            let outcomes = native::differential_ready(
+            let outcomes = hirsel_native_testing::differential_ready(
                 &mut ready,
                 &program.entry,
                 &expected,
                 &matrix,
                 &tools,
                 &dir,
-                &native::Fixture::default(),
+                &hirsel_native::Fixture::default(),
             );
             assert_eq!(outcomes.len(), 1);
             for (name, result) in outcomes {
-                assert_eq!(result, native::Outcome::Agree, "{name}: {result:?}");
+                assert_eq!(
+                    result,
+                    hirsel_native_testing::Outcome::Agree,
+                    "{name}: {result:?}"
+                );
             }
         }
         eprintln!("MARKDOWN_33_PASS vectors/{engine}");

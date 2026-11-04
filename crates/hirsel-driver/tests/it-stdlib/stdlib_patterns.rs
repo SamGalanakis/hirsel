@@ -1,6 +1,7 @@
 //! The bounded pattern APIs must stay ordinary audited source, with no host hooks.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 // Go syntax/parse_test.go:505-507 at ebe2feef. Each exact input independently

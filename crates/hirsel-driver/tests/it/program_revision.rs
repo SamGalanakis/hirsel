@@ -1,5 +1,8 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
+use hirsel_native::*;
+use hirsel_native_batch::build;
 use hirsel_run_config::RunConfig;
 use hirsel_run_schema::{LaunchKind, ProgramRevision};
 use hirsel_syntax::ContentHash;

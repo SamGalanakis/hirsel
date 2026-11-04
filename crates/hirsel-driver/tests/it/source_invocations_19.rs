@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_lir::ir::{Symbol, SymbolKind};
 use std::sync::Arc;
 
@@ -40,7 +41,8 @@ fn v_owned_invocations_match_original_source_and_survive_a_fresh_body_free_hit()
             .reader(front.originals.iter().map(|product| (**product).clone()))
             .unwrap();
         let declarations =
-            native::queries::declarations::NativeDeclarations::from_front(front.clone()).unwrap();
+            hirsel_native_cache::declarations::NativeDeclarations::from_front(front.clone())
+                .unwrap();
         let program = &declarations.program;
         let mut signatures = hirsel_validate::SignatureMap::new(program.types.clone());
         signatures.extend(

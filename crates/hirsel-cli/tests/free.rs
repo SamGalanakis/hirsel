@@ -5204,9 +5204,8 @@ uint64_t f1_serial_overlap(void) { return atomic_load_explicit(&overlap, memory_
 "#,
     )
     .unwrap();
-    let target = hirsel_driver::native::TargetSpec::x86_64_unknown_linux_gnu();
-    let tools =
-        hirsel_driver::native::Toolchain::in_tree(&scratch.path("runtime"), &[&target]).unwrap();
+    let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
+    let tools = hirsel_native::Toolchain::in_tree(&scratch.path("runtime"), &[&target]).unwrap();
     let mut command = Command::new(&tools.clang);
     command
         .args(["-c", "-O1", "-fPIC"])

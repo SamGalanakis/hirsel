@@ -1,23 +1,22 @@
 //! Native compilation follows dependency-ready source data. A separate join
 //! requires complete source acceptance before publishing executable readiness.
-use super::{native_lower, native_routing::NativeRouting};
-use crate::native::{
-    self,
-    queries::{
-        NativeRootKey,
-        arena_tasks::ArenaTasks,
-        compilation_tasks::{CompilationBackend, CompilationOutput, CompilationTasks},
-        declarations::NativeDeclarations,
-        instance_tasks::InstanceTasks,
-        products::EmissionOptions,
-        source_inputs::NativeInstanceInputs,
-    },
-    root_source::{NativeLinkFacts, NativeLinkSource},
-};
+use super::native_lower;
+use super::native_routing::NativeRouting;
 use hirsel_engine::{
     FrontLowerQueries, FrontNativeProducts, FrontNativeQueries, FrontProofExport, runtime::*,
     store::*,
 };
+use hirsel_native::query_model::NativeRootKey;
+use hirsel_native::root_source::NativeLinkFacts;
+use hirsel_native::root_source::NativeLinkSource;
+use hirsel_native_cache::declarations::NativeDeclarations;
+use hirsel_native_cache::source_inputs::NativeInstanceInputs;
+use hirsel_native_queries::arena_tasks::ArenaTasks;
+use hirsel_native_queries::compilation_tasks::CompilationBackend;
+use hirsel_native_queries::compilation_tasks::CompilationOutput;
+use hirsel_native_queries::compilation_tasks::CompilationTasks;
+use hirsel_native_queries::instance_tasks::InstanceTasks;
+use hirsel_native_queries::products::EmissionOptions;
 use hirsel_syntax::{ContentHash, DefPath};
 use std::{
     sync::{Arc, Mutex, OnceLock},
@@ -37,7 +36,7 @@ const FAILURE: Domain = Domain {
 /// Compiler-owned policy and captured platform inputs. Public request clients
 /// cannot supply this plan, a factory, an executor or an admission capability.
 pub(super) struct NativePlan {
-    pub options: native::Options,
+    pub options: hirsel_native::Options,
     pub policy: ContentHash,
     pub verify_store: hirsel_engine::store::VerifyStore,
     pub opt: hirsel_lir::emission::OptLevel,
@@ -53,7 +52,7 @@ pub(super) struct NativePlan {
 /// Selected evidence and the PS9 export captured over this bootstrap's native
 /// source root. Assessment reads only that root's completed product.
 pub(super) struct NativeProofs {
-    pub evidence: Arc<native::Evidence>,
+    pub evidence: Arc<hirsel_native::Evidence>,
     pub export: Arc<FrontProofExport>,
 }
 pub(super) struct NativeAdmission {
@@ -65,7 +64,7 @@ struct Prepared {
     source: ProductRef,
     facts: Arc<FrontNativeProducts>,
     compilation: Arc<CompilationTasks>,
-    proofs: Option<native::Proofs>,
+    proofs: Option<hirsel_native::Proofs>,
 }
 struct Completed {
     product: ProductRef,
@@ -112,8 +111,8 @@ impl NativeBootstrap {
         let discharge = discharge_rows(&plan.options.discharge);
         let native_policy = serde_json::to_vec(&(
             match plan.options.validation {
-                native::Validation::Ready => 0u8,
-                native::Validation::EveryStage => 1,
+                hirsel_native::Validation::Ready => 0u8,
+                hirsel_native::Validation::EveryStage => 1,
             },
             &plan.options.launch,
             plan.options.target.digest(),
@@ -264,7 +263,7 @@ impl NativeBootstrap {
         ))
     }
     /// The assessment selected for this bootstrap's completed source root.
-    pub fn proofs(&self) -> Option<&native::Proofs> {
+    pub fn proofs(&self) -> Option<&hirsel_native::Proofs> {
         self.prepared
             .get()
             .and_then(|prepared| prepared.proofs.as_ref())
@@ -311,7 +310,7 @@ impl NativeBootstrap {
             .proofs
             .as_ref()
             .map(|proofs| {
-                native::Proofs::assess_native(
+                hirsel_native::Proofs::assess_native(
                     &proofs.export,
                     &self.source,
                     product.clone(),
@@ -353,7 +352,7 @@ impl NativeBootstrap {
             .collect();
         let operations = Arc::new(declarations.program.operation_registry());
         let callees =
-            native::settled_callee_metadata(facts.run.callees.clone(), &facts.run.runtime)
+            hirsel_native::settled_callee_metadata(facts.run.callees.clone(), &facts.run.runtime)
                 .map_err(|e| e.to_string())?;
         let mut source = NativeLinkSource::from_settled(
             NativeLinkFacts {

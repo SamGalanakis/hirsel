@@ -1,11 +1,15 @@
 //! Actual source/native diagnostic roots; no linked executable or old Session.
-use hirsel_driver::{COMPILER, native, requests::*, resident::ObservedSession};
+use hirsel_driver::native;
+use hirsel_driver::requests::*;
+use hirsel_driver::resident::ObservedSession;
 use hirsel_engine::{
     CompileConfig,
     runtime::ProcessBudget,
     store::{MemStore, ResultStore},
 };
-use hirsel_lir::ownership_trace::{Kind, native::LeafPlan};
+use hirsel_front_phases::COMPILER;
+use hirsel_lir::ownership_trace::Kind;
+use hirsel_lir::ownership_trace::native::LeafPlan;
 use std::sync::Arc;
 
 #[test]
@@ -55,8 +59,8 @@ fn source_request(explicit_manifest: bool) {
             .request(CompileOperation::NativeOwnership(OwnershipRequest {
                 selection: hirsel_lir::ownership_trace::Selection::Resources,
                 definition: None,
-                target: native::TargetSpec::x86_64_unknown_linux_gnu(),
-                validation: native::Validation::EveryStage,
+                target: hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                validation: hirsel_native::Validation::EveryStage,
                 launch: Default::default(),
                 fuel: false,
             }))

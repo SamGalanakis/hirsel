@@ -65,7 +65,7 @@ fn batch_release_releases_resolution_and_later_demand_recomputes_it() {
         );
 
         let products = f.0.join("lib.products");
-        hirsel_driver::COMPILER
+        hirsel_front_phases::COMPILER
             .precompute_package(&library, &products)
             .unwrap();
         let mut cached = load(&client, Some(&products));

@@ -1,24 +1,38 @@
 //! Original object-control vectors over actual native continuations. The two
 //! runtimes settle source discovery and then the immutable native snapshot;
 //! no legacy Ready/object controller or test implementation supplies products.
-use hirsel_driver::{COMPILER_IDENTITY, native};
+use hirsel_compiler_identity::COMPILER_IDENTITY;
+use hirsel_driver::native;
 use hirsel_engine::{runtime::*, store::ResultStore, *};
+use hirsel_native::object_queries::CodegenKey;
+use hirsel_native::object_queries::ObjectTaskFactory;
+use hirsel_native::object_queries::fragment_product;
+use hirsel_native::object_queries::load_object;
+use hirsel_native::query_model::NativeRootKey;
+use hirsel_native::query_model::NativeRoots;
+use hirsel_native::root_source::NativeLinkFacts;
+use hirsel_native::root_source::NativeLinkSource;
+use hirsel_native_cache::declarations::NativeDeclarations;
+use hirsel_native_cache::source_inputs::NativeInstanceInputs;
+use hirsel_native_queries as queries;
+use hirsel_native_queries::arena_tasks::ARENA_GRAPH_KIND;
+use hirsel_native_queries::arena_tasks::ArenaTaskFactory;
+use hirsel_native_queries::arena_tasks::ArenaTasks;
+use hirsel_native_queries::execution::EXECUTION_KIND;
+use hirsel_native_queries::execution::ExecutionTasks;
+use hirsel_native_queries::execution::Factory as ExecutionFactory;
+use hirsel_native_queries::instance_tasks::DISCOVERY_KIND;
+use hirsel_native_queries::instance_tasks::INSTANCE_INPUT_KIND;
+use hirsel_native_queries::instance_tasks::InstanceTaskFactory;
+use hirsel_native_queries::instance_tasks::InstanceTasks;
+use hirsel_native_queries::products::EmissionOptions;
+use hirsel_native_queries::products::NativeSnapshot;
+use hirsel_native_queries::root_tasks::NativeRootFactory;
+use hirsel_native_queries::root_tasks::NativeRootTasks;
+use hirsel_native_queries::tasks::CodegenTasks;
+use hirsel_native_queries::tasks::NativeTaskFactory;
+use hirsel_native_queries::tasks::NativeTasks;
 use hirsel_syntax::ContentHash;
-use native::{
-    object_queries::{CodegenKey, ObjectTaskFactory, fragment_product, load_object},
-    queries::{
-        self, NativeRootKey, NativeRoots,
-        arena_tasks::{ARENA_GRAPH_KIND, ArenaTaskFactory, ArenaTasks},
-        declarations::NativeDeclarations,
-        execution::{EXECUTION_KIND, ExecutionTasks, Factory as ExecutionFactory},
-        instance_tasks::{DISCOVERY_KIND, INSTANCE_INPUT_KIND, InstanceTaskFactory, InstanceTasks},
-        products::{EmissionOptions, NativeSnapshot},
-        root_tasks::{NativeRootFactory, NativeRootTasks},
-        source_inputs::NativeInstanceInputs,
-        tasks::{CodegenTasks, NativeTaskFactory, NativeTasks},
-    },
-    root_source::{NativeLinkFacts, NativeLinkSource},
-};
 use std::{collections::BTreeMap, sync::Arc};
 
 pub(super) struct Objects {
@@ -34,9 +48,9 @@ pub(super) struct Objects {
 pub(super) fn compile(
     engine: &mut QueryEngine,
     store: Arc<dyn ResultStore>,
-    backend: native::Backend,
-    opt: native::OptLevel,
-    options: native::Options,
+    backend: hirsel_native::Backend,
+    opt: hirsel_native::OptLevel,
+    options: hirsel_native::Options,
     debug: bool,
     jobs: hirsel_intern::jobs::Jobs,
 ) -> Objects {
@@ -56,9 +70,9 @@ pub(super) fn compile_entry(
     engine: &mut QueryEngine,
     store: Arc<dyn ResultStore>,
     entry: &hirsel_syntax::DefPath,
-    backend: native::Backend,
-    opt: native::OptLevel,
-    options: native::Options,
+    backend: hirsel_native::Backend,
+    opt: hirsel_native::OptLevel,
+    options: hirsel_native::Options,
     debug: bool,
     jobs: hirsel_intern::jobs::Jobs,
 ) -> Objects {
@@ -81,13 +95,13 @@ pub(super) fn compile_with_context<R>(
     engine: &mut QueryEngine,
     store: Arc<dyn ResultStore>,
     entry: &hirsel_syntax::DefPath,
-    backend: native::Backend,
-    opt: native::OptLevel,
-    options: native::Options,
+    backend: hirsel_native::Backend,
+    opt: hirsel_native::OptLevel,
+    options: hirsel_native::Options,
     debug: bool,
     jobs: hirsel_intern::jobs::Jobs,
     verification: hirsel_engine::store::VerifyStore,
-    use_context: impl FnOnce(&native::ReadyProgram, &[hirsel_lir::stage::ObjectArtifact]) -> R,
+    use_context: impl FnOnce(&hirsel_native::ReadyProgram, &[hirsel_lir::stage::ObjectArtifact]) -> R,
 ) -> (Objects, R) {
     compile_roots(
         engine,
@@ -109,13 +123,13 @@ pub(super) fn compile_roots<R>(
     store: Arc<dyn ResultStore>,
     source_selection: &[hirsel_syntax::DefPath],
     requested: &[hirsel_syntax::DefPath],
-    backend: native::Backend,
-    opt: native::OptLevel,
-    options: native::Options,
+    backend: hirsel_native::Backend,
+    opt: hirsel_native::OptLevel,
+    options: hirsel_native::Options,
     debug: bool,
     jobs: hirsel_intern::jobs::Jobs,
     verification: hirsel_engine::store::VerifyStore,
-    use_context: impl FnOnce(&native::ReadyProgram, &[hirsel_lir::stage::ObjectArtifact]) -> R,
+    use_context: impl FnOnce(&hirsel_native::ReadyProgram, &[hirsel_lir::stage::ObjectArtifact]) -> R,
 ) -> (Objects, R) {
     compile_roots_inspect(
         engine,
@@ -137,18 +151,18 @@ pub(super) fn compile_with_context_inspect<R>(
     engine: &mut QueryEngine,
     store: Arc<dyn ResultStore>,
     entry: &hirsel_syntax::DefPath,
-    backend: native::Backend,
-    opt: native::OptLevel,
-    options: native::Options,
+    backend: hirsel_native::Backend,
+    opt: hirsel_native::OptLevel,
+    options: hirsel_native::Options,
     debug: bool,
     jobs: hirsel_intern::jobs::Jobs,
     verification: hirsel_engine::store::VerifyStore,
     inspect: impl FnOnce(
         &mut queries::roots::RootProducts,
-        &Arc<queries::NativeRootProduct>,
-        &[Arc<queries::ReadyProduct>],
+        &Arc<hirsel_native::query_model::NativeRootProduct>,
+        &[Arc<hirsel_native::query_model::ReadyProduct>],
     ),
-    use_context: impl FnOnce(&native::ReadyProgram, &[hirsel_lir::stage::ObjectArtifact]) -> R,
+    use_context: impl FnOnce(&hirsel_native::ReadyProgram, &[hirsel_lir::stage::ObjectArtifact]) -> R,
 ) -> (Objects, R) {
     compile_roots_inspect(
         engine,
@@ -171,18 +185,18 @@ pub(super) fn compile_roots_inspect<R>(
     store: Arc<dyn ResultStore>,
     source_selection: &[hirsel_syntax::DefPath],
     requested: &[hirsel_syntax::DefPath],
-    backend: native::Backend,
-    opt: native::OptLevel,
-    options: native::Options,
+    backend: hirsel_native::Backend,
+    opt: hirsel_native::OptLevel,
+    options: hirsel_native::Options,
     debug: bool,
     jobs: hirsel_intern::jobs::Jobs,
     verification: hirsel_engine::store::VerifyStore,
     inspect: impl FnOnce(
         &mut queries::roots::RootProducts,
-        &Arc<queries::NativeRootProduct>,
-        &[Arc<queries::ReadyProduct>],
+        &Arc<hirsel_native::query_model::NativeRootProduct>,
+        &[Arc<hirsel_native::query_model::ReadyProduct>],
     ),
-    use_context: impl FnOnce(&native::ReadyProgram, &[hirsel_lir::stage::ObjectArtifact]) -> R,
+    use_context: impl FnOnce(&hirsel_native::ReadyProgram, &[hirsel_lir::stage::ObjectArtifact]) -> R,
 ) -> (Objects, R) {
     let mut cache = NativeDiscoveryCache::new(engine.types().clone(), store.clone());
     let mut declarations = NativeDeclarations::collect(engine, &mut cache, requested).unwrap();
@@ -221,19 +235,19 @@ pub(super) fn compile_front<R>(
     facts: Arc<FrontNativeProducts>,
     store: Arc<dyn ResultStore>,
     source_selection: &[hirsel_syntax::DefPath],
-    backend: native::Backend,
-    opt: native::OptLevel,
-    options: native::Options,
+    backend: hirsel_native::Backend,
+    opt: hirsel_native::OptLevel,
+    options: hirsel_native::Options,
     debug: bool,
     jobs: hirsel_intern::jobs::Jobs,
     verification: hirsel_engine::store::VerifyStore,
     execution: bool,
     inspect: impl FnOnce(
         &mut queries::roots::RootProducts,
-        &Arc<queries::NativeRootProduct>,
-        &[Arc<queries::ReadyProduct>],
+        &Arc<hirsel_native::query_model::NativeRootProduct>,
+        &[Arc<hirsel_native::query_model::ReadyProduct>],
     ),
-    use_context: impl FnOnce(&native::ReadyProgram, &[hirsel_lir::stage::ObjectArtifact]) -> R,
+    use_context: impl FnOnce(&hirsel_native::ReadyProgram, &[hirsel_lir::stage::ObjectArtifact]) -> R,
 ) -> (Objects, R) {
     let declarations = NativeDeclarations::from_front(facts.clone()).unwrap();
     let original = facts
@@ -266,19 +280,19 @@ fn compile_settled<R>(
     semantic: Arc<NativeSemanticProgram>,
     store: Arc<dyn ResultStore>,
     source_selection: &[hirsel_syntax::DefPath],
-    backend: native::Backend,
-    opt: native::OptLevel,
-    options: native::Options,
+    backend: hirsel_native::Backend,
+    opt: hirsel_native::OptLevel,
+    options: hirsel_native::Options,
     debug: bool,
     jobs: hirsel_intern::jobs::Jobs,
     verification: hirsel_engine::store::VerifyStore,
     execution: bool,
     inspect: impl FnOnce(
         &mut queries::roots::RootProducts,
-        &Arc<queries::NativeRootProduct>,
-        &[Arc<queries::ReadyProduct>],
+        &Arc<hirsel_native::query_model::NativeRootProduct>,
+        &[Arc<hirsel_native::query_model::ReadyProduct>],
     ),
-    use_context: impl FnOnce(&native::ReadyProgram, &[hirsel_lir::stage::ObjectArtifact]) -> R,
+    use_context: impl FnOnce(&hirsel_native::ReadyProgram, &[hirsel_lir::stage::ObjectArtifact]) -> R,
 ) -> (Objects, R) {
     let entries = declarations
         .context
@@ -364,8 +378,8 @@ fn compile_settled<R>(
         AdmittedRuntime::new(jobs, budget.reserve(runtime_bytes).unwrap(), errors).unwrap();
     let factory = Arc::new(InstanceTaskFactory::new(instances.clone()));
     for kind in [
-        queries::INSTANCE_KIND,
-        queries::instance::CALLABLE_VALUE_KIND,
+        hirsel_native::query_model::INSTANCE_KIND,
+        hirsel_native::query_model::CALLABLE_VALUE_KIND,
         queries::instance_tasks::CALLABLE_GRAPH_KIND,
         INSTANCE_INPUT_KIND,
         DISCOVERY_KIND,
@@ -374,8 +388,8 @@ fn compile_settled<R>(
     }
     let factory = Arc::new(ArenaTaskFactory::new(arenas.clone()));
     for kind in [
-        queries::ARENA_CANDIDATES_KIND,
-        queries::ARENA_CHOSEN_KIND,
+        hirsel_native::query_model::ARENA_CANDIDATES_KIND,
+        hirsel_native::query_model::ARENA_CHOSEN_KIND,
         ARENA_GRAPH_KIND,
     ] {
         discovery.register(kind, factory.clone()).unwrap();
@@ -436,23 +450,23 @@ fn compile_settled<R>(
         AdmittedRuntime::new(jobs, budget.reserve(runtime_bytes).unwrap(), errors).unwrap();
     let factory = Arc::new(NativeTaskFactory::new(native.clone()));
     for kind in [
-        queries::INSTANCE_KIND,
-        queries::instance::CALLABLE_VALUE_KIND,
-        queries::ARENA_CANDIDATES_KIND,
-        queries::ARENA_CHOSEN_KIND,
-        queries::READY_KIND,
+        hirsel_native::query_model::INSTANCE_KIND,
+        hirsel_native::query_model::CALLABLE_VALUE_KIND,
+        hirsel_native::query_model::ARENA_CANDIDATES_KIND,
+        hirsel_native::query_model::ARENA_CHOSEN_KIND,
+        hirsel_native::query_model::READY_KIND,
     ] {
         runtime.register(kind, factory.clone()).unwrap();
     }
     runtime
         .register(
-            queries::ROOT_KIND,
+            hirsel_native::query_model::ROOT_KIND,
             Arc::new(NativeRootFactory::new(roots.clone())),
         )
         .unwrap();
     runtime
         .register(
-            native::object_queries::CODEGEN_KIND,
+            hirsel_native::object_queries::CODEGEN_KIND,
             Arc::new(ObjectTaskFactory::new(objects)),
         )
         .unwrap();
@@ -515,7 +529,9 @@ fn compile_settled<R>(
         .unwrap();
     let readies = ready
         .iter()
-        .map(|product| queries::ready_product(store.as_ref(), product.clone()).map(Arc::new))
+        .map(|product| {
+            hirsel_native::query_model::ready_product(store.as_ref(), product.clone()).map(Arc::new)
+        })
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     inspect(&mut products, &root, &readies);

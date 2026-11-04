@@ -102,7 +102,7 @@ class Consumers(unittest.TestCase):
         expected |= {'root//:hirsel-cli-test-cli-consumer-native-http',
                      'root//:hirsel-cli-test-cli-consumer-native-http-concurrent'}
         for path in ('crates/hirsel-rt/src/pool.rs', 'crates/hirsel-rt/src/free_launch.rs',
-                     'crates/hirsel-driver/src/native/kit.rs', 'crates/hirsel-llvm/src/c_entry.rs',
+                     'crates/hirsel-native/src/kit.rs', 'crates/hirsel-llvm/src/c_entry.rs',
                      'crates/hirsel-engine/src/queries/native_records.rs',
                      'tools/buck2/native-toolchain/link_kit.py'):
             with self.subTest(path=path):

@@ -1,6 +1,7 @@
 //! MEM-5 cleanup reports source obligations rather than internal effect rows.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn check(source: &str) -> (QueryEngine, CheckOutput) {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());

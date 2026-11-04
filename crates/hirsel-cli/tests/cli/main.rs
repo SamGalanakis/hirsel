@@ -623,7 +623,7 @@ fn proofs_remove_their_checks_from_native_builds_only() {
     let source = file(
         "fn bump(x: u32, y: u32) -> u32\n  ensures result > x\n{\n  x + y\n}\npub fn main() -> Result[(), ()] {\n  let n = bump(1u32, 0u32)\n  Ok(())\n}\n",
     );
-    let mut loaded = hirsel_driver::load_program(&source).unwrap();
+    let mut loaded = hirsel_front_phases::load_program(&source).unwrap();
     loaded.check_for_execution().unwrap();
     let text = loaded.engine.export_tir(&loaded.entry).unwrap();
     let export = loaded.engine.import_tir(&text).unwrap();
@@ -1383,7 +1383,7 @@ fn build_executable(source: &std::path::Path, profile: &[&str]) -> std::path::Pa
     executable
 }
 fn build_run_record(source: &std::path::Path) -> serde_json::Value {
-    let mut loaded = hirsel_driver::load_program(source).unwrap();
+    let mut loaded = hirsel_front_phases::load_program(source).unwrap();
     loaded.check_for_execution().unwrap();
     let revision = loaded
         .engine
@@ -3148,8 +3148,8 @@ fn doc_manifest_json_and_output_file_share_public_api() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["schema"], 1);
     let entries = json["entries"].as_array().unwrap();
-    let expected = hirsel_driver::api_index::render_json(
-        &hirsel_driver::api_index::entries(&manifest).unwrap(),
+    let expected = hirsel_project_info::api_index::render_json(
+        &hirsel_project_info::api_index::entries(&manifest).unwrap(),
     );
     assert_eq!(
         json,

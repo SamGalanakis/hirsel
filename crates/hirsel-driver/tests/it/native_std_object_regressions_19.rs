@@ -1,10 +1,11 @@
 //! Original private std projection and singleton callable ABI vectors from
 //! native/seed_parity_tests.rs, executed through source-owned native tasks.
-use hirsel_driver::{COMPILER, native};
+use hirsel_driver::native;
 use hirsel_engine::{
     store::{self, ResultStore, VerifyStore},
     *,
 };
+use hirsel_front_phases::COMPILER;
 use std::sync::Arc;
 
 fn manifest() -> std::path::PathBuf {
@@ -38,13 +39,18 @@ fn ordinary_store_delete_has_one_consistent_entry_abi() {
             .engine
             .native_input_for(std::slice::from_ref(&selected))
             .unwrap();
-        for backend in [native::Backend::Cranelift, native::Backend::Llvm] {
+        for backend in [
+            hirsel_native::Backend::Cranelift,
+            hirsel_native::Backend::Llvm,
+        ] {
             for opt in [
-                native::OptLevel::None,
-                native::OptLevel::Default,
-                native::OptLevel::Speed,
+                hirsel_native::OptLevel::None,
+                hirsel_native::OptLevel::Default,
+                hirsel_native::OptLevel::Speed,
             ] {
-                let options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
+                let options = hirsel_native::Options::new(
+                    hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                );
                 let (actual, ()) = crate::native_object_products_19::compile_roots(
                     &mut package.engine,
                     store.clone(),

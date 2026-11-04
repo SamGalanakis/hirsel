@@ -1,5 +1,5 @@
+use hirsel_candidate::*;
 use hirsel_driver::CompilerRequestsExt;
-use hirsel_driver::candidate::*;
 use hirsel_engine::{CompileConfig, LoweringPolicy, Verify};
 use hirsel_syntax::ContentHash;
 use std::path::PathBuf;
@@ -577,7 +577,7 @@ fn store_fault_checks(candidate: bool) -> String {
         u64,
     ) {
         hirsel_engine::with_compiler_stack(|| {
-            let compiler = hirsel_driver::COMPILER
+            let compiler = hirsel_front_phases::COMPILER
                 .clone()
                 .with_config(config.clone())
                 .with_owned_engines();
@@ -768,7 +768,7 @@ fn candidate_ordinary_products_keep_snapshots_frozen_and_allow_library_edits() {
         let entry = f.0.join("hirsel.json");
         std::fs::write(&entry,serde_json::json!({"schema":1,"package":{"name":"app","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[{"manifest":"lib.json","package":{"name":"lib","version":"1"},"expose":[]}],"entry":{"module":[],"name":"main"}}).to_string()).unwrap();
         let products = f.0.join("lib.products");
-        hirsel_driver::COMPILER
+        hirsel_front_phases::COMPILER
             .precompute_package(&lib_manifest, &products)
             .unwrap();
         let config = CompileConfig {

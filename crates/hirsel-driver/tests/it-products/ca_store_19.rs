@@ -1,5 +1,6 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, *};
+use hirsel_front_phases::*;
 use hirsel_tir::TirProvider;
 use std::sync::Arc;
 fn signature_session(

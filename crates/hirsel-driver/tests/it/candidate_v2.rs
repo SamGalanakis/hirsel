@@ -1,7 +1,7 @@
 //! H1-H8/A01-A20 public-operation controls. Cold helpers use a separate
 //! process and ordinary DiskInputs/NoneStore, never namespace lookup.
-use hirsel_driver::candidate::v2::*;
-use hirsel_driver::candidate::*;
+use hirsel_candidate::v2::*;
+use hirsel_candidate::*;
 use hirsel_engine::loader_inputs::namespace::{Limits as NL, Root};
 use hirsel_engine::{CompileConfig, LoweringPolicy, ToolError};
 use hirsel_syntax::ContentHash;
@@ -1126,7 +1126,7 @@ fn candidate_v2_cold_child() {
     let entry = PathBuf::from(entry);
     let root = entry.parent().unwrap();
     let value = hirsel_engine::with_compiler_stack(|| {
-        let compiler = hirsel_driver::COMPILER
+        let compiler = hirsel_front_phases::COMPILER
             .clone()
             .with_config(config(jobs))
             .with_owned_engines();

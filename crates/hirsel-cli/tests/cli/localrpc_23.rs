@@ -50,7 +50,7 @@ fn localrpc_23_checked_model_vectors() {
     )
     .unwrap();
     hirsel_engine::with_compiler_stack(|| {
-        let mut loaded = hirsel_driver::load_program(&manifest).unwrap();
+        let mut loaded = hirsel_front_phases::load_program(&manifest).unwrap();
         loaded.check_for_execution().unwrap();
         let config = hirsel_engine::RunConfiguration {
             entry: loaded.entry.clone(),
@@ -63,9 +63,8 @@ fn localrpc_23_checked_model_vectors() {
             hirsel_engine::SimulationConfig::default(),
         )
         .unwrap();
-        let observed = hirsel_driver::native::Observation::of_reference(
-            execution.observation.as_ref().unwrap(),
-        );
+        let observed =
+            hirsel_native::Observation::of_reference(execution.observation.as_ref().unwrap());
         assert_eq!(observed.exit_code, Some(0), "{observed:?}");
         assert!(
             observed.failures.is_empty() && observed.output.is_empty(),

@@ -1,6 +1,7 @@
 //! Release-backed confined-result restoration and its conservative boundary.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 fn checked(source: &str) -> QueryEngine {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -15,6 +16,9 @@ fn checked(source: &str) -> QueryEngine {
 
 fn runtime(source: &str) {
     use hirsel_driver::native::*;
+    use hirsel_native::*;
+    use hirsel_native_batch::*;
+    use hirsel_native_testing::*;
     let mut engine = checked(source);
     let entry = entry_path(&default_context());
     let run = run_observed_snapshot(
@@ -71,7 +75,9 @@ fn runtime(source: &str) {
         .prefix("unique-restoration-31-29-")
         .tempdir()
         .unwrap();
-    let toolchain = Toolchain::for_matrix(&scratch.path().join("runtime"), &matrix).unwrap();
+    let toolchain =
+        hirsel_native_testing::toolchain_for_matrix(&scratch.path().join("runtime"), &matrix)
+            .unwrap();
     let outcomes = differential(
         &validated,
         &entry,

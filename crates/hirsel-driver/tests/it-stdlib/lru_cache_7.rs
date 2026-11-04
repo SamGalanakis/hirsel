@@ -1,6 +1,7 @@
 //! LRU ownership, independent vectors and bounded reference-model traces.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use std::path::PathBuf;
 
 fn fixture(name: &str, steps: Option<u64>) {
@@ -28,7 +29,10 @@ fn fixture(name: &str, steps: Option<u64>) {
                 "{outcome:?}"
             );
         }
-        for backend in [native::Backend::Llvm, native::Backend::Cranelift] {
+        for backend in [
+            hirsel_native::Backend::Llvm,
+            hirsel_native::Backend::Cranelift,
+        ] {
             // Standalone builds own unique scratch directories; run_path_native
             // shares one process-wide directory across concurrent tests.
             let directory = std::env::temp_dir().join(format!(
@@ -42,13 +46,13 @@ fn fixture(name: &str, steps: Option<u64>) {
             native::build_path_native_backend_with_validation(
                 &path,
                 &executable,
-                native::TargetSpec::x86_64_unknown_linux_gnu(),
-                native::BuildProfile::Default,
+                hirsel_native::TargetSpec::x86_64_unknown_linux_gnu(),
+                hirsel_native::BuildProfile::Default,
                 backend,
                 None,
                 false,
                 hirsel_driver::session::Policy::default(),
-                native::Validation::EveryStage,
+                hirsel_native::Validation::EveryStage,
             )
             .unwrap_or_else(|error| panic!("{name} {backend:?}: {error}"))
             .unwrap_or_else(|error| panic!("{name} {backend:?}: {error:?}"));

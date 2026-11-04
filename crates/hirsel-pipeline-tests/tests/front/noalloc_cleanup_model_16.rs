@@ -1,6 +1,7 @@
 //! Bounded MEM-5 model: a written take remains caller-owned until entry.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 
 #[derive(Clone, Copy, Debug)]
 enum Exit {

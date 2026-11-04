@@ -158,9 +158,12 @@ fn borrow_cursor_recipes_13_package_engines() {
     );
     hirsel_engine::with_compiler_stack(|| {
         use hirsel_driver::native::*;
+        use hirsel_native::*;
+        use hirsel_native_batch::*;
+        use hirsel_native_testing::*;
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let file = engine
             .sources
@@ -215,6 +218,9 @@ fn borrow_cursor_recipes_13_package_engines() {
 fn count_free_transport(root: &Path) {
     hirsel_engine::with_compiler_stack(|| {
         use hirsel_driver::native::*;
+        use hirsel_native::*;
+        use hirsel_native_batch::*;
+        use hirsel_native_testing::*;
         let source = r#"type Tree = Leaf(n: u64) | Branch(left: box Tree, right: box Tree)
 fn scan(root: box Tree) -> u64 {
   let mut node = root
@@ -246,7 +252,7 @@ pub fn main() -> Result[(), ()] {
         fs::write(artifact.join("input.hir"), source).unwrap();
         let mut engine = hirsel_engine::QueryEngine::new(
             hirsel_engine::default_environment(),
-            hirsel_driver::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let file = engine.sources.add("transport.hir", source.into()).unwrap();
         let context = hirsel_engine::default_context();

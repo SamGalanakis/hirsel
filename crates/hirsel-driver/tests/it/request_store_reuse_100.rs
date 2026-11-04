@@ -41,9 +41,10 @@ impl ResultStore for ReadScopes {
 
 #[test]
 fn selected_request_keeps_one_read_epoch_and_releases_it_before_retained_outputs() {
-    use hirsel_driver::requests::{
-        CompileOperation, CompileRequest, CompilerRequests, RequestLimits,
-    };
+    use hirsel_driver::requests::CompileOperation;
+    use hirsel_driver::requests::CompileRequest;
+    use hirsel_driver::requests::CompilerRequests;
+    use hirsel_driver::requests::RequestLimits;
     use hirsel_engine::{
         LoweringPolicy,
         requests::{OutputReadiness, RequestEngine, observe_inputs},
@@ -61,7 +62,7 @@ fn selected_request_keeps_one_read_epoch_and_releases_it_before_retained_outputs
             hold_bytes: 0,
             ..Default::default()
         };
-        let compiler = hirsel_driver::COMPILER
+        let compiler = hirsel_front_phases::COMPILER
             .with_config(config.clone())
             .with_owned_engines();
         let (loaded, inputs) = observe_inputs(
@@ -190,9 +191,10 @@ fn directory_request_products_reuse_unchanged_bodies_across_sessions_and_edits()
 
 #[test]
 fn unfinished_equal_requests_have_independent_abort_owners_and_completed_graphs_reuse() {
-    use hirsel_driver::requests::{
-        CompileOperation, CompileRequest, CompilerRequests, RequestLimits,
-    };
+    use hirsel_driver::requests::CompileOperation;
+    use hirsel_driver::requests::CompileRequest;
+    use hirsel_driver::requests::CompilerRequests;
+    use hirsel_driver::requests::RequestLimits;
     use hirsel_engine::{
         LoweringPolicy,
         requests::{OutputReadiness, RequestEngine, observe_inputs},
@@ -213,7 +215,7 @@ fn unfinished_equal_requests_have_independent_abort_owners_and_completed_graphs_
             hold_bytes: 0,
             ..Default::default()
         };
-        let compiler = hirsel_driver::COMPILER
+        let compiler = hirsel_front_phases::COMPILER
             .with_config(config.clone())
             .with_owned_engines();
         let (loaded, inputs) = observe_inputs(
@@ -270,7 +272,8 @@ fn unfinished_equal_requests_have_independent_abort_owners_and_completed_graphs_
 
 #[test]
 fn check_diagnostics_do_not_require_a_valid_run_or_export_entry() {
-    use hirsel_driver::requests::{CompileOperation, CompileResult};
+    use hirsel_driver::requests::CompileOperation;
+    use hirsel_driver::requests::CompileResult;
     use hirsel_engine::LoweringPolicy;
     hirsel_engine::with_compiler_stack(|| {
         let tree = tempfile::tempdir().unwrap();
@@ -323,7 +326,8 @@ fn source_operations_share_one_graph_only_for_exact_inputs_and_compiler() {
                 .unwrap(),
                 ..CompileConfig::default()
             };
-            let mut requests = CompilerRequests::for_host(hirsel_driver::COMPILER, config.clone());
+            let mut requests =
+                CompilerRequests::for_host(hirsel_front_phases::COMPILER, config.clone());
             let capture = |requests: &CompilerRequests| {
                 let (loaded, inputs) = observe_inputs(
                     requests.input_limits(),
@@ -408,7 +412,7 @@ fn source_operations_share_one_graph_only_for_exact_inputs_and_compiler() {
             };
             assert_ne!(first_execution.unwrap().revision, edited.revision);
             let mut other = CompilerRequests::for_host(
-                hirsel_driver::COMPILER.with_verify(hirsel_engine::Verify::Off),
+                hirsel_front_phases::COMPILER.with_verify(hirsel_engine::Verify::Off),
                 CompileConfig {
                     verify: hirsel_engine::Verify::Off,
                     ..config

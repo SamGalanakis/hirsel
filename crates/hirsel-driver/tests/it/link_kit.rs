@@ -2,8 +2,11 @@
 //! `hirsel build` gives the same bytes (including embedded DWARF with `--debug`)
 //! on a repeat and from 1, 2 or 4 builds running at once,
 //! on both targets, each build in its own scratch directory.
-use hirsel_driver::native::{self, Backend, BuildProfile, TargetSpec};
+use hirsel_driver::native;
 use hirsel_engine::with_compiler_stack;
+use hirsel_native::Backend;
+use hirsel_native::BuildProfile;
+use hirsel_native::TargetSpec;
 use object::read::elf::{FileHeader, Sym};
 use object::{LittleEndian, elf};
 use std::path::{Path, PathBuf};
@@ -47,7 +50,7 @@ fn build(source: &Path, dir: &Path, target: &TargetSpec, profile: BuildProfile) 
             None,
             false,
             hirsel_driver::session::Policy::default(),
-            hirsel_driver::native::Validation::EveryStage,
+            hirsel_native::Validation::EveryStage,
         )
     })
     .unwrap();
@@ -151,7 +154,7 @@ fn an_executable_links_each_host_provider_only_when_its_program_reaches_it() {
     // By name: ring's primitives, rustls's client handshake and the compiled root set
     // (TLS), the resolver and sockets (network), and process spawning.
     let providers = |bytes: &[u8]| {
-        // Read ELF symbol tables as native::runner does. setsockopt is also
+        // Read ELF symbol tables as hirsel_native::runner does. setsockopt is also
         // used by managed_cores' control socket, so the network marker names
         // its provider constructors rather than that shared libc dependency.
         // Local bindings select provider; concurrent bindings select send_provider.

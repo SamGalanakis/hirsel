@@ -1,6 +1,7 @@
 //! Force a real channel Pending while region.with retains its read loan.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_interp::{
     Error, OperationCall, OperationContext, OperationId, OperationResult, Operations,
     OperationsAdapter, Outcome, library::Library,

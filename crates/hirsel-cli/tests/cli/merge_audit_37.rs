@@ -1,6 +1,9 @@
 //! Bounded merge planner: independent common-hunk/DP oracle and full Io+Args workflows.
 use hirsel_driver::native::*;
 use hirsel_engine::{RunConfiguration, SimulationConfig};
+use hirsel_native::*;
+use hirsel_native_batch::*;
+use hirsel_native_testing::*;
 use hirsel_run_schema::{Access, FileFault, FileFaultError, FileOperation, FileReadScript};
 use serde_json::{Value, json};
 use std::{
@@ -244,7 +247,7 @@ fn model_part(part: usize) {
     hirsel_engine::with_compiler_stack(|| {
         let root = scratch("merge37-model-");
         let path = package(&root, None);
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -350,7 +353,7 @@ fn merge_audit_37_independent_oracles() {
             &root,
             Some(include_str!("../support/merge_audit_37/oracle_main.hir")),
         );
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -463,7 +466,7 @@ fn refusal_cases(include_four: bool) {
     hirsel_engine::with_compiler_stack(|| {
         let root = scratch("merge37-refuse-");
         let path = package(&root, None);
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -695,7 +698,7 @@ fn native_workflows(native_only: bool) {
     hirsel_engine::with_compiler_stack(|| {
         let root = scratch("merge37-native-");
         let path = package(&root, None);
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -706,7 +709,8 @@ fn native_workflows(native_only: bool) {
             options: options.clone(),
             engine: Engine::Heap { campaign: false },
         }];
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.wrapper = vec![
             "python3".into(),
             root.join("run_capped.py").to_string_lossy().into_owned(),
@@ -1381,7 +1385,7 @@ fn cap_case(kind: &str) {
     hirsel_engine::with_compiler_stack(|| {
         let root = scratch("merge37-cap-");
         let path = package(&root, None);
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -1636,7 +1640,7 @@ fn capped_fixture_capacity(
 ) {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
-    let mut loaded = hirsel_driver::load_program(manifest).unwrap();
+    let mut loaded = hirsel_front_phases::load_program(manifest).unwrap();
     loaded.check_for_execution().unwrap();
     let input = loaded.engine.export_native_input().unwrap();
     let input = loaded.engine.import_native_input(input).unwrap();
@@ -1649,7 +1653,8 @@ fn capped_fixture_capacity(
             runtime: Runtime::Diagnostic,
         },
     }];
-    let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+    let mut tools =
+        hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
     tools.execution = Execution::Executable;
     tools.wrapper = vec![
         "env".into(),
@@ -1792,7 +1797,7 @@ fn merge_audit_37_native_report_boundaries() {
     hirsel_engine::with_compiler_stack(|| {
         let root = scratch("merge37-native-report-");
         let path = package(&root, None);
-        let mut loaded = hirsel_driver::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
+        let mut loaded = hirsel_front_phases::load_program(&path).unwrap_or_else(|e| panic!("{e}"));
         loaded
             .check_for_execution()
             .unwrap_or_else(|e| panic!("{e}"));
@@ -1803,7 +1808,8 @@ fn merge_audit_37_native_report_boundaries() {
             options: options.clone(),
             engine: Engine::Heap { campaign: false },
         }];
-        let mut tools = Toolchain::for_matrix(&root.join("runtime"), &matrix).unwrap();
+        let mut tools =
+            hirsel_native_testing::toolchain_for_matrix(&root.join("runtime"), &matrix).unwrap();
         tools.wrapper = vec![
             "python3".into(),
             root.join("run_capped.py").to_string_lossy().into_owned(),

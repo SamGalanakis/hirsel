@@ -4,6 +4,7 @@
 //! ciphers' and curves' traces must not depend on their keys, seeds or messages.
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_front_phases::*;
 use hirsel_interp::{Limits, Outcome, TraceEvent, TraceMode, Value, library::Library};
 use hirsel_syntax::{DefPath, ItemPath, PackageId};
 use std::path::PathBuf;

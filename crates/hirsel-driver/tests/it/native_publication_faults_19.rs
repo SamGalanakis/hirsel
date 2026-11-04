@@ -1,10 +1,11 @@
 //! Original private plan missing/corrupt/publication-failure vectors over Codegen.
-use hirsel_driver::{compiler_adapters, native};
+use hirsel_driver::native;
 use hirsel_engine::{
     runtime::*,
     store::{self, ResultStore},
     *,
 };
+use hirsel_front_phases::compiler_adapters;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -96,14 +97,15 @@ fn compile(faults: Arc<Faults>, verify: Verify) -> crate::native_object_products
         .unwrap();
     let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
-    let mut options = native::Options::new(native::TargetSpec::x86_64_unknown_linux_gnu());
-    options.validation = native::Validation::Ready;
+    let mut options =
+        hirsel_native::Options::new(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
+    options.validation = hirsel_native::Validation::Ready;
     let result = crate::native_object_products_19::compile_front(
         crate::native_front_fixture::products(&mut engine, &[]).unwrap(),
         store,
         &[entry_path(&default_context())],
-        native::Backend::Cranelift,
-        native::OptLevel::None,
+        hirsel_native::Backend::Cranelift,
+        hirsel_native::OptLevel::None,
         options,
         false,
         hirsel_intern::jobs::Jobs::ONE,

@@ -1,0 +1,25 @@
+[package]
+name = "hirsel-front-phases"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hirsel-compiler-identity = { path = "../hirsel-compiler-identity" }
+hirsel-graph = { path = "../hirsel-graph" }
+hirsel-authority = { path = "../hirsel-authority" }
+hirsel-check = { path = "../hirsel-check" }
+hirsel-check-protocol = { path = "../hirsel-check-protocol" }
+hirsel-diag = { path = "../hirsel-diag" }
+hirsel-engine = { path = "../hirsel-engine" }
+hirsel-lower = { path = "../hirsel-lower" }
+hirsel-ownership = { path = "../hirsel-ownership" }
+hirsel-signature = { path = "../hirsel-signature" }
+hirsel-span = { path = "../hirsel-span" }
+hirsel-syntax = { path = "../hirsel-syntax" }
+hirsel-tir = { path = "../hirsel-tir" }
+hirsel-types = { path = "../hirsel-types" }
+
+[dev-dependencies]
+hirsel-guard = { path = "../hirsel-guard" }

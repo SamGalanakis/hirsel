@@ -35,7 +35,7 @@ mod statistics;
 mod verified;
 use statistics::Counter;
 pub use statistics::{Statistics, StatisticsSnapshot};
-pub use verified::VerifiedRecords;
+pub use verified::{VerifiedRecords, VerifiedReference};
 
 /// Stable query address, used before its previous dependencies are evaluated.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -234,7 +234,12 @@ pub struct InstalledSource {
 /// Checked installed products and parse inputs, independent of cache policy.
 pub(crate) struct InstalledSourceRecords {
     pub(super) root: PathBuf,
-    rows: Box<[(ContentHash, hirsel_artifact_store::Association)]>,
+    rows: Box<
+        [(
+            ContentHash,
+            (Action, hirsel_artifact_store::VerifiedReference),
+        )],
+    >,
     contents: hirsel_artifact_store::VerifiedRecords,
     retained_bytes: usize,
 }
@@ -254,7 +259,11 @@ impl InstalledSourceRecords {
             .rows
             .binary_search_by_key(&address.0, |(key, _)| *key)
             .ok()?;
-        Some(self.rows[index].1)
+        let (action, handle) = self.rows[index].1;
+        Some(hirsel_artifact_store::Association {
+            action,
+            reference: self.contents.reference(handle)?,
+        })
     }
     pub(super) fn content(&self, reference: Reference) -> Option<Bytes> {
         self.contents.get(reference)
@@ -410,15 +419,17 @@ impl InstalledPackage {
                 .rows
                 .iter()
                 .map(|&(address, action, reference)| {
-                    (
+                    Ok((
                         address,
-                        hirsel_artifact_store::Association {
-                            action: Action(action),
-                            reference,
-                        },
-                    )
+                        (
+                            Action(action),
+                            contents.handle(reference).ok_or_else(|| {
+                                "installation reference handle is unavailable".to_owned()
+                            })?,
+                        ),
+                    ))
                 })
-                .collect();
+                .collect::<Result<BTreeMap<_, _>, String>>()?;
             let mut records = InstalledSourceRecords {
                 root: store.root().to_owned(),
                 rows: rows.into_iter().collect(),

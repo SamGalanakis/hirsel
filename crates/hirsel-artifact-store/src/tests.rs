@@ -41,6 +41,7 @@ fn checked_views_bind_the_mapping_range_and_complete_reference() {
     }
     assert_eq!(statistics.snapshot().counters["ContentChecks"], 1);
     assert_eq!(statistics.snapshot().counters["ContentReuses"], 8);
+    let verified = reader.verify_records([], [reference]).unwrap();
     for fault in 0..3 {
         let mut forged = reference;
         match fault {
@@ -61,6 +62,11 @@ fn checked_views_bind_the_mapping_range_and_complete_reference() {
     let operation = reader.request();
     assert!(reader.get(reference).is_none());
     assert_eq!(&*held, &vec![7; 5000]);
+    assert_eq!(&*verified.get(reference).unwrap(), &vec![7; 5000]);
+    assert!(
+        reader.get(reference).is_none(),
+        "old verified handles must not repopulate a later scope's cache"
+    );
     operation.finish().unwrap();
 }
 

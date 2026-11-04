@@ -9,7 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Every new operation constructs fresh handles from its selected store.
 #[derive(Debug)]
 pub struct VerifiedRecords {
-    contents: Box<[(Reference, Bytes)]>,
+    store: Store,
+    scope: Arc<()>,
+    contents: Box<[(Reference, VerifiedBytes)]>,
 }
 impl VerifiedRecords {
     pub fn get(&self, reference: Reference) -> Option<Bytes> {
@@ -17,12 +19,39 @@ impl VerifiedRecords {
             .contents
             .binary_search_by_key(&reference, |(r, _)| *r)
             .ok()?;
-        Some(self.contents[index].1.clone())
+        match &self.contents[index].1 {
+            VerifiedBytes::Memory(bytes) => Some(bytes.clone()),
+            #[cfg(unix)]
+            VerifiedBytes::Mapped { file, range } => {
+                let region = self
+                    .store
+                    .load_region(
+                        &file.path,
+                        Counter::RegionRemaps,
+                        Some((&file.file, &self.scope)),
+                        || Region::map_file(file.file.clone(), file.len),
+                    )
+                    .ok()?;
+                Some(
+                    Bytes {
+                        region,
+                        range: range.clone(),
+                    }
+                    .with_reference(reference),
+                )
+            }
+        }
     }
 
-    /// Include the handle table and every retained backing in the caller's
-    /// existing shared-allocation charge. Repeated identities are shared.
+    /// Charge retained handles and owned buffers. Unix file mappings stay in
+    /// the physical store's existing bounded cache; demanded views carry their
+    /// complete mapping charge through Bytes::visit_retained_allocations.
     pub fn visit_retained_allocations(&self, mut visit: impl FnMut(usize, usize)) {
+        visit(
+            self.store.root.as_os_str().as_encoded_bytes().as_ptr() as usize,
+            self.store.root.as_os_str().len(),
+        );
+        visit(Arc::as_ptr(&self.scope) as usize, 2 * size_of::<usize>());
         if !self.contents.is_empty() {
             visit(
                 self.contents.as_ptr() as usize,
@@ -30,9 +59,43 @@ impl VerifiedRecords {
             );
         }
         for (_, bytes) in &self.contents {
-            bytes.visit_retained_allocations(&mut visit);
+            match bytes {
+                VerifiedBytes::Memory(bytes) => bytes.visit_retained_allocations(&mut visit),
+                #[cfg(unix)]
+                VerifiedBytes::Mapped { file, .. } => {
+                    visit(
+                        Arc::as_ptr(file) as usize,
+                        size_of::<PinnedFile>() + 2 * size_of::<usize>(),
+                    );
+                    visit(
+                        file.path.as_os_str().as_encoded_bytes().as_ptr() as usize,
+                        file.path.as_os_str().len(),
+                    );
+                    visit(
+                        Arc::as_ptr(&file.file) as usize,
+                        size_of::<File>() + 2 * size_of::<usize>(),
+                    );
+                }
+            }
         }
     }
+}
+
+#[derive(Debug)]
+enum VerifiedBytes {
+    Memory(Bytes),
+    #[cfg(unix)]
+    Mapped {
+        file: Arc<PinnedFile>,
+        range: Range<usize>,
+    },
+}
+#[cfg(unix)]
+#[derive(Debug)]
+struct PinnedFile {
+    path: PathBuf,
+    file: Arc<File>,
+    len: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -41,16 +104,33 @@ enum Expected {
     Row(Address, Association),
 }
 impl Expected {
-    fn check(self, bytes: Bytes, contents: &mut Vec<(Reference, Bytes)>) -> Option<()> {
+    fn check(
+        self,
+        bytes: Bytes,
+        contents: &mut Vec<(Reference, VerifiedBytes)>,
+        #[cfg(unix)] file: Option<&Arc<PinnedFile>>,
+        #[cfg(not(unix))] _file: Option<&()>,
+    ) -> Option<()> {
         match self {
             Self::Content(reference) => {
                 let bytes = checked_container(bytes, reference)?;
+                #[cfg(unix)]
+                if let Some(file) = file {
+                    contents.push((
+                        reference,
+                        VerifiedBytes::Mapped {
+                            file: file.clone(),
+                            range: bytes.range.clone(),
+                        },
+                    ));
+                    return Some(());
+                }
                 let bytes = if bytes.has_reference(reference) {
                     bytes
                 } else {
                     bytes.with_reference(reference)
                 };
-                contents.push((reference, bytes));
+                contents.push((reference, VerifiedBytes::Memory(bytes)));
             }
             Self::Row(address, expected) => {
                 if checked_association(&bytes, address)? != expected {
@@ -78,7 +158,7 @@ impl Store {
         let mut contents = Vec::new();
         let mut route = |source, expected: Expected, packed| -> Option<()> {
             match source {
-                pack::Source::Pending(bytes) => expected.check(bytes, &mut contents)?,
+                pack::Source::Pending(bytes) => expected.check(bytes, &mut contents, None)?,
                 pack::Source::File { path, offset, len } => {
                     files.entry((path, packed)).or_default().push((
                         u64::from(offset),
@@ -125,6 +205,16 @@ impl Store {
                     range: 0..len,
                 }
             };
+            #[cfg(unix)]
+            let file = bytes.region.file().map(|file| {
+                Arc::new(PinnedFile {
+                    path,
+                    file: file.clone(),
+                    len: bytes.len(),
+                })
+            });
+            #[cfg(not(unix))]
+            let file = None;
             for (offset, len, expected) in records {
                 if !packed && len != bytes.len() as u64 {
                     return None;
@@ -132,11 +222,21 @@ impl Store {
                 expected.check(
                     bytes.range(offset, len, if packed { 8 } else { 1 })?,
                     &mut contents,
+                    file.as_ref(),
                 )?;
             }
         }
         contents.sort_unstable_by_key(|(reference, _)| *reference);
+        let scope = self
+            .regions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .scope
+            .get_or_insert_with(|| Arc::new(()))
+            .clone();
         Some(VerifiedRecords {
+            store: self.clone(),
+            scope,
             contents: contents.into_boxed_slice(),
         })
     }

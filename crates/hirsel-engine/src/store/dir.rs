@@ -622,7 +622,12 @@ mod tests {
         assert_eq!(statistics.snapshot().counters["ContentChecks"], checks);
         let opened = statistics.snapshot();
         let source = package_owner.source_records().unwrap();
-        assert!(source.metadata_bytes() >= 70 * 5000);
+        assert!(source.metadata_bytes() >= inputs.len() * size_of::<crate::store::Reference>());
+        #[cfg(unix)]
+        assert!(
+            source.metadata_bytes() < 70 * 5000,
+            "file handles must not retain all payload mappings"
+        );
         for _ in 0..2 {
             for (address, action, reference, expected) in &inputs {
                 let key = EntryKey(address.0, ContentHash::default(), crate::QueryKind::Parse);
@@ -641,17 +646,14 @@ mod tests {
             }
         }
         let consumed = statistics.snapshot();
-        for counter in [
-            "ContentChecks",
-            "SegmentOpens",
-            "StandaloneOpens",
-            "RegionLoads",
-        ] {
+        for counter in ["ContentChecks", "SegmentOpens", "StandaloneOpens"] {
             assert_eq!(
                 consumed.counters[counter], opened.counters[counter],
                 "{counter}"
             );
         }
+        assert!(consumed.counters["RetainedRegionPeakCount"] <= 64);
+        assert!(consumed.counters["RetainedRegionPeakBytes"] <= 32 << 20);
         assert_eq!(local_statistics.snapshot().counters["ContentChecks"], 0);
         // An independent operation rechecks even while old handles stay alive.
         let next = provider.for_operation().unwrap();

@@ -150,6 +150,7 @@ impl Domain {
 enum Region {
     #[cfg(unix)]
     Map {
+        file: Arc<File>,
         address: *mut libc::c_void,
         len: usize,
     },
@@ -196,22 +197,7 @@ impl Region {
         }
         #[cfg(unix)]
         {
-            use std::os::fd::AsRawFd;
-            // SAFETY: nonempty regular file, read-only mapping, bounded length.
-            let address = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    len,
-                    libc::PROT_READ,
-                    libc::MAP_PRIVATE,
-                    file.as_raw_fd(),
-                    0,
-                )
-            };
-            if address == libc::MAP_FAILED {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(Self::Map { address, len })
+            Self::map_file(Arc::new(file), len)
         }
         #[cfg(not(unix))]
         {
@@ -224,10 +210,43 @@ impl Region {
                 .ok_or_else(invalid)
         }
     }
+    #[cfg(unix)]
+    fn map_file(file: Arc<File>, len: usize) -> io::Result<Self> {
+        use std::os::fd::AsRawFd;
+        if !(HEADER..=HEADER + MAX_RECORD).contains(&len) {
+            return Err(invalid());
+        }
+        // SAFETY: the retained file is immutable, nonempty and read-only. This
+        // region owns the exact mapping until its final byte view is dropped.
+        let address = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if address == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self::Map { file, address, len })
+    }
+    #[cfg(unix)]
+    fn file(&self) -> Option<&Arc<File>> {
+        match self {
+            Self::Map { file, .. } => Some(file),
+            Self::Checked(checked) => checked.region.file(),
+            Self::Payload(checked) => checked.region.file(),
+            Self::Retained { region, .. } => region.file(),
+            _ => None,
+        }
+    }
     fn bytes(&self) -> &[u8] {
         match self {
             #[cfg(unix)]
-            Self::Map { address, len } => {
+            Self::Map { address, len, .. } => {
                 // SAFETY: this object owns the mapping; returned borrow is bounded
                 // by both its length and lifetime.
                 unsafe { std::slice::from_raw_parts(address.cast(), *len) }
@@ -253,7 +272,7 @@ impl Drop for Region {
     fn drop(&mut self) {
         #[cfg(unix)]
         {
-            if let Self::Map { address, len } = *self {
+            if let Self::Map { address, len, .. } = *self {
                 // SAFETY: exactly the mapping allocated in open, with no live views.
                 unsafe { libc::munmap(address, len) };
             }
@@ -395,7 +414,13 @@ impl Bytes {
             );
             match &**region {
                 #[cfg(unix)]
-                Region::Map { address, len } => visit(*address as usize, *len),
+                Region::Map { file, address, len } => {
+                    visit(*address as usize, *len);
+                    visit(
+                        Arc::as_ptr(file) as usize,
+                        size_of::<File>() + 2 * size_of::<usize>(),
+                    );
+                }
                 Region::Owned(bytes) => visit(
                     bytes.as_ptr() as usize,
                     bytes.len() + 2 * std::mem::size_of::<usize>(),
@@ -476,12 +501,14 @@ const REGION_COUNT: usize = 64;
 #[derive(Default)]
 struct RegionCache {
     active: bool,
+    scope: Option<Arc<()>>,
     bytes: usize,
     entries: std::collections::BTreeMap<PathBuf, Arc<Region>>,
 }
 impl RegionCache {
     fn reset(&mut self, active: bool) {
         self.active = active;
+        self.scope = None;
         self.entries.clear();
         self.bytes = 0;
     }
@@ -496,8 +523,10 @@ impl RegionCache {
             };
             self.bytes -= evicted.bytes().len();
         }
+        if let Some(previous) = self.entries.insert(path, region) {
+            self.bytes -= previous.bytes().len();
+        }
         self.bytes += len;
-        self.entries.insert(path, region);
     }
 }
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -609,16 +638,45 @@ impl Store {
         }
     }
     fn open_region(&self, path: &Path, kind: Counter) -> io::Result<Arc<Region>> {
+        self.load_region(path, kind, None, || Region::open(path))
+    }
+    fn load_region(
+        &self,
+        path: &Path,
+        kind: Counter,
+        #[cfg(unix)] pinned: Option<(&Arc<File>, &Arc<()>)>,
+        #[cfg(not(unix))] _pinned: Option<(&Arc<File>, &Arc<()>)>,
+        load: impl FnOnce() -> io::Result<Region>,
+    ) -> io::Result<Arc<Region>> {
         let mut cache = self.regions.lock().unwrap_or_else(|e| e.into_inner());
         // Index generations retain their own backing. Payload paths are
         // immutable during a scope; a later scope starts with fresh handles.
-        let retain = cache.active && !matches!(kind, Counter::IndexOpens);
+        #[cfg(unix)]
+        let same_scope = pinned.is_none_or(|(_, scope)| {
+            cache
+                .scope
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(scope, active))
+        });
+        #[cfg(not(unix))]
+        let same_scope = true;
+        let retain = cache.active && same_scope && !matches!(kind, Counter::IndexOpens);
         if retain && let Some(region) = cache.entries.get(path) {
-            self.count(Counter::RegionCacheHits, 1);
-            return Ok(region.clone());
+            #[cfg(unix)]
+            let same_file = pinned.is_none_or(|(file, _)| {
+                region
+                    .file()
+                    .is_some_and(|actual| Arc::ptr_eq(file, actual))
+            });
+            #[cfg(not(unix))]
+            let same_file = true;
+            if same_file {
+                self.count(Counter::RegionCacheHits, 1);
+                return Ok(region.clone());
+            }
         }
         self.count(kind, 1);
-        let mut region = Arc::new(Region::open(path)?);
+        let mut region = Arc::new(load()?);
         let bytes = region.bytes().len() as u64;
         if let Some(statistics) = self.statistics.get() {
             statistics.add(Counter::RegionLoads, 1);

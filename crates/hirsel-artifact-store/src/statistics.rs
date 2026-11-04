@@ -47,6 +47,7 @@ counters!(
     SegmentOpens,
     StandaloneOpens,
     RegionLoads,
+    RegionRemaps,
     RegionCacheHits,
     ContentChecks,
     ContentReuses,

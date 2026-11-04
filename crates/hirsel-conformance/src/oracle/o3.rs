@@ -51,9 +51,7 @@ fn one(scenario: &Scenario, report: &mut Report) -> Result<(), String> {
     let entry = base.join(&scenario.entry);
     std::fs::write(&entry, &before).map_err(|e| e.to_string())?;
     let config = || {
-        let mut config = scenario
-            .config_before
-            .compile(super::cold_store());
+        let mut config = scenario.config_before.compile(super::cold_store());
         // A check lowers only compile-time evaluation.
         config.lowering = hirsel_engine::LoweringPolicy::Comptime;
         config

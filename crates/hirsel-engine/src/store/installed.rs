@@ -234,7 +234,7 @@ pub struct InstalledSource {
 /// Checked installed products and parse inputs, independent of cache policy.
 pub(crate) struct InstalledSourceRecords {
     pub(super) root: PathBuf,
-    rows: BTreeMap<ContentHash, hirsel_artifact_store::Association>,
+    rows: Box<[(ContentHash, hirsel_artifact_store::Association)]>,
     contents: hirsel_artifact_store::VerifiedRecords,
     retained_bytes: usize,
 }
@@ -250,7 +250,11 @@ impl InstalledSourceRecords {
         self.content(reference)
     }
     pub(super) fn lookup(&self, address: Address) -> Option<hirsel_artifact_store::Association> {
-        self.rows.get(&address.0).copied()
+        let index = self
+            .rows
+            .binary_search_by_key(&address.0, |(key, _)| *key)
+            .ok()?;
+        Some(self.rows[index].1)
     }
     pub(super) fn content(&self, reference: Reference) -> Option<Bytes> {
         self.contents.get(reference)
@@ -265,7 +269,7 @@ impl InstalledSourceRecords {
                 + 2 * std::mem::size_of::<usize>()
                 + self.root.as_os_str().len(),
         );
-        weight.tree::<ContentHash, hirsel_artifact_store::Association>(self.rows.len());
+        weight.add(std::mem::size_of_val(&*self.rows));
         let mut allocations = std::collections::BTreeSet::new();
         self.contents.visit_retained_allocations(|identity, bytes| {
             if allocations.insert(identity) {
@@ -402,7 +406,7 @@ impl InstalledPackage {
                 return Err("installed package dependency products are unavailable".into());
             }
             let contents = installed.check_records(store)?;
-            let rows = installed
+            let rows: BTreeMap<_, _> = installed
                 .rows
                 .iter()
                 .map(|&(address, action, reference)| {
@@ -417,7 +421,7 @@ impl InstalledPackage {
                 .collect();
             let mut records = InstalledSourceRecords {
                 root: store.root().to_owned(),
-                rows,
+                rows: rows.into_iter().collect(),
                 contents,
                 retained_bytes: 0,
             };

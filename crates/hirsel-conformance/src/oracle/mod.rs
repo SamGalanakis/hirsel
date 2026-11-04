@@ -13,7 +13,7 @@ pub mod o5;
 pub mod switches;
 
 use hirsel_engine::ToolError;
-use hirsel_engine::store::{DirStore, NoneStore, ResultStore, VerifyStore};
+use hirsel_engine::store::{ResultStore, VerifyStore, store_by_name};
 use std::{
     collections::BTreeMap,
     fmt::Write as _,
@@ -29,6 +29,38 @@ pub const SCENARIOS: &str = "crates/hirsel-conformance/oracles";
 /// `receipts` and `objects/<backend>/<n>.o`. Two runs agree when the maps are
 /// byte-identical.
 pub type Artifacts = BTreeMap<String, Vec<u8>>;
+
+struct ColdStore(Arc<dyn ResultStore>);
+
+impl ResultStore for ColdStore {
+    fn installed_package(
+        &self,
+        package: &hirsel_syntax::PackageId,
+        compiler: hirsel_syntax::ContentHash,
+    ) -> Result<Arc<hirsel_engine::store::InstalledPackage>, String> {
+        self.0.installed_package(package, compiler)
+    }
+
+    fn persistence(&self) -> hirsel_engine::store::Persistence {
+        hirsel_engine::store::Persistence::Disabled
+    }
+
+    fn get(&self, _: &hirsel_engine::store::EntryKey) -> Option<hirsel_engine::store::Bytes> {
+        None
+    }
+
+    fn put(&self, _: &hirsel_engine::store::EntryKey, _: &[u8]) {}
+
+    fn name(&self) -> &'static str {
+        "none@1"
+    }
+}
+
+fn cold_store() -> Arc<dyn ResultStore> {
+    Arc::new(ColdStore(
+        store_by_name("none@1", None).expect("known none@1 result provider"),
+    ))
+}
 
 /// How one run compiles.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,8 +136,9 @@ impl Config {
 
     fn result_store(&self) -> Arc<dyn ResultStore> {
         match &self.store {
-            Some(path) => Arc::new(DirStore::new(path.clone())),
-            None => Arc::new(NoneStore),
+            Some(path) => store_by_name("dir@1", Some(path.clone()))
+                .expect("known dir@1 result provider with an explicit path"),
+            None => cold_store(),
         }
     }
 

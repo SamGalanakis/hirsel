@@ -37,7 +37,7 @@ fn one(
     let (before, after) = (&scenario.config_before, &scenario.config_after);
     scenario.write(&tree, root, false)?;
     let entry = scenario.entry(&tree);
-    let store = Arc::new(MemStore::default());
+    let store = Arc::new(MemStore::default().with_installed_products());
     let warmed = produce_with_store(&entry, before, store.clone());
     let resident_store = before.result_store();
     let mut resident = Session::open_with_compiler(&entry, before.compiler(resident_store.clone()));

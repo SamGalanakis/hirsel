@@ -34,7 +34,7 @@ pub fn run(exe: &Path, root: &Path, programs: &[PathBuf], work: &Path) -> Report
                 continue;
             }
         };
-        let store = Arc::new(MemStore::default());
+        let store = Arc::new(MemStore::default().with_installed_products());
         let hit = produce_with_store(program, &config, store.clone())
             .and_then(|_| produce_with_store(program, &config, store));
         report.add(

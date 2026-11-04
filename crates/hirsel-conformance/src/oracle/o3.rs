@@ -53,7 +53,7 @@ fn one(scenario: &Scenario, report: &mut Report) -> Result<(), String> {
     let config = || {
         let mut config = scenario
             .config_before
-            .compile(Arc::new(hirsel_engine::store::NoneStore));
+            .compile(super::cold_store());
         // A check lowers only compile-time evaluation.
         config.lowering = hirsel_engine::LoweringPolicy::Comptime;
         config

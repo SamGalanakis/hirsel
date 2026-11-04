@@ -597,8 +597,7 @@ impl QueryEngine {
     ) -> Result<Arc<AcceptedFrontRegistration>, FrontRegistrationFailure> {
         let definition = output.definition().clone();
         let captured = (|| {
-            self.materialize(&definition)?;
-            let original = self.snapshot(&definition)?;
+            let original = self.materialized_snapshot(&definition)?;
             let mut current = Vec::new();
             for (key, _) in output.reads().observed() {
                 let observed = self.observe(&definition, key);

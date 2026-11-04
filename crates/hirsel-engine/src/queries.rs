@@ -945,6 +945,12 @@ impl QueryEngine {
         self.unavailable = Some(kind);
         Err(QueryError::NotImplemented)
     }
+    fn materialized_snapshot(&mut self, definition: &DefPath) -> Result<Arc<ItemSyntax>, QueryError> {
+        if !self.items.contains_key(definition) {
+            self.materialize(definition)?;
+        }
+        self.snapshot(definition)
+    }
     fn snapshot(&self, definition: &DefPath) -> Result<Arc<ItemSyntax>, QueryError> {
         self.items
             .get(definition)

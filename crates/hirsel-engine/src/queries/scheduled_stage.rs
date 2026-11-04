@@ -523,7 +523,7 @@ impl QueryEngine {
                 accepted.validate(self)?;
                 accepted.syntax.clone()
             }
-            None => self.snapshot(output.owner())?,
+            None => self.materialized_snapshot(output.owner())?,
         };
         let mut registrations = registrations.clone();
         for (row, site) in registrations.iter_mut().zip(&output.data.sites) {

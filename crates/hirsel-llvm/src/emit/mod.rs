@@ -686,6 +686,10 @@ fn lower<T>(
                 true,
                 Aliasing::of(inputs.callbacks),
             )?;
+            if profile.debug {
+                module.string_attribute(function, "frame-pointer", "all");
+                module.string_attribute(function, "disable-tail-calls", "true");
+            }
             if inputs.alternate {
                 // These helpers have the same checked storage handoffs as
                 // their caller. Inlining preserves every save boundary and
@@ -730,6 +734,10 @@ fn lower<T>(
                             definition: None,
                             abi: None,
                         });
+                }
+                if profile.debug {
+                    module.string_attribute(entry, "frame-pointer", "all");
+                    module.string_attribute(entry, "disable-tail-calls", "true");
                 }
                 if inputs.alternate {
                     module.add_attribute(entry, AttributeSlot::Function, Attribute::NoRedZone);

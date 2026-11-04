@@ -848,6 +848,60 @@ Read-only products cannot transfer a producer's verifier receipts. Diagnostics,
 semantic revisions, private representations and native source audits retain their
 source-check contracts.
 
+## Profiling generated programs
+
+`hirsel build --profile app/hirsel.json -o app-profile` uses LLVM release
+optimization with Hirsel source line tables and frame pointers. It also keeps
+call frames across tail calls and links the debug-bearing runtime archive.
+`--profile` is exclusive with `--debug`, `--release`, `--lto` and Cranelift.
+Use it for attribution. Take acceptance numbers from `--release`.
+
+```sh
+hirsel build --profile examples/csvjson/hirsel.json -o /tmp/csvjson-profile
+perf record --call-graph dwarf -o /tmp/csvjson.perf /tmp/csvjson-profile --hirsel-grants examples/csvjson/stdin-grants.json < examples/csvjson/demo.json
+perf report -i /tmp/csvjson.perf --stdio --sort symbol,srcline
+```
+
+DWARF unwinding includes runtime frames. Frame-pointer sampling also unwinds
+generated Hirsel frames; runtime archives retain their ordinary build settings.
+The native benchmark helper automatically includes resolved source sites in
+measurement builds (`HIRSEL_BENCH_MEASUREMENT=1`), including standalone builds.
+Its `.sites.json` output splits allocation and RC counts by initiating source.
+
+## Query CPU profiles
+
+```sh
+hirsel check --query-profile /tmp/check.jsonl examples/csvjson/hirsel.json
+tools/query-profile /tmp/check.jsonl --top 20
+hirsel build --query-profile /tmp/build.jsonl app/hirsel.json -o app
+tools/query-profile diff /tmp/check-before.jsonl /tmp/check.jsonl
+```
+
+`check` and `build` export the scheduler's claim, read, admit, release, waiting,
+wake, settlement and request events. Each runtime has its own numeric id.
+Admission/release records include the worker, charged bytes and nanoseconds
+since runtime creation; release CPU is the disjoint thread CPU of that poll.
+Waiting and wake records include timestamps and dependency/admission reasons.
+Definition rows bind query addresses to producer-owned definition paths. Queries
+without a single definition retain their address in the report. Settlement rows
+report success or failure without serializing live compiler products.
+
+Capture is off by default. While on, serde_json writes complete JSONL records
+into a preallocated 16 MiB memory buffer, without file IO in scheduler locks.
+When full, recording stops and the final `end` row says `truncated: true`.
+The file is written after compilation drains, including a rejected compilation.
+The summarizer warns on truncation and rejects incomplete captures. It groups
+poll CPU and completed wait intervals by query kind and definition; its diff
+prints NEW minus OLD. Unfinished waits at capture end are excluded. The flag
+uses the current process, bypassing resident dispatch.
+
+On csvjson, three seeded interleaved release-compiler rounds on one core measured
+median instruction overhead of 1.30% for query capture and 0.65% for
+`--mem-usage`. Paired CPU changes for capture ranged from -1.20% to +1.47%;
+median memory-report CPU overhead was 1.38%. The csvjson capture filled the
+buffer, so its query totals describe a truncated recording. These are observer
+cost measurements on that workload, not compiler or generated-program speed gates.
+
 ## Compile timings
 
 `check`, `build`, `run` and `test` take `--timings`, `--timings=json` and
@@ -887,7 +941,10 @@ The report keeps three measures apart (`hirsel_intern::timings`):
   the phases nested in it, summed over every thread, with their entry counts.
   Engine bookkeeping for a query (cache validation, read recording) counts as
   that query's phase. `verify in comptime` is the part of `verify` run inside
-  compile-time evaluation. Phases overlap the intervals and are not added up.
+  compile-time evaluation. Phases overlap the intervals. Their disjoint CPU totals can be summed across
+  threads. `codegen` includes both LLVM and Cranelift emission, and `link` is
+  host-side link preparation and linker invocation. External linker process CPU
+  is excluded from the compiler process CPU total.
   `lex` times tokenization alone. `parse` excludes nested lexer work;
   `declarations` times declaration indexing, excluding nested signature phases.
   `signature normalize` times header normalization alone, excluding header
@@ -911,6 +968,18 @@ included) and store and object hits and misses (0 until those caches exist).
 runs`), how many of those images were already cached (`cached images`), and each
 kind of fallback to a linked executable with its first reason (`fallback: foreign:
 the program calls C (1)`); see "Native runs without an executable".
+
+`process_cpu_ns` is CPU used by all threads during the measured command;
+`untimed_cpu_ns` is that total minus summed phase CPU. Both are null when the
+host cannot read process CPU. A resident timings request runs on the server and
+starts fresh phase/count totals for each request, excluding earlier requests.
+
+`--mem-usage` additionally reports `allocations`, `reallocations` and
+`requested_bytes`. Counts include successful allocator calls only. Allocations
+include zeroed allocations; requested bytes add the full new size on each
+reallocation, including in-place growth. These counters are enabled only by
+`--mem-usage` and retain mimalloc. They count Rust global-allocator traffic
+rather than retained bytes; they do not intercept LLVM's C allocations.
 
 `--timings=json` prints the same report as one JSON line, the last on stderr,
 which compiler-bench reads:

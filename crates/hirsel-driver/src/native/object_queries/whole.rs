@@ -150,6 +150,7 @@ pub(super) fn codegen<N: NativeProducts, L>(
                     debug,
                     sources: None,
                 };
+                let _timing = hirsel_intern::timings::phase(hirsel_intern::timings::Phase::Codegen);
                 match key.units[0].backend.as_str() {
                     "llvm" => hirsel_llvm::emit_object_profile(units, inputs, profile)
                         .map_err(|e| e.to_string()),

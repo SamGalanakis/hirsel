@@ -106,7 +106,7 @@ impl InstanceAddress {
         }
     }
     pub fn address(&self, kind: u32) -> hirsel_engine::store::Address {
-        hirsel_engine::store::Address(ContentHash::of_parts(
+        let address = hirsel_engine::store::Address(ContentHash::of_parts(
             "hirsel.native.instance-address.v1",
             [
                 kind.to_le_bytes().as_slice(),
@@ -114,7 +114,12 @@ impl InstanceAddress {
                 self.target_abi.0.as_slice(),
                 self.policy.0.as_slice(),
             ],
-        ))
+        ));
+        hirsel_engine::runtime::profile::definition(
+            hirsel_engine::runtime::QueryId { kind, address },
+            self.instance.definition(),
+        );
+        address
     }
 }
 

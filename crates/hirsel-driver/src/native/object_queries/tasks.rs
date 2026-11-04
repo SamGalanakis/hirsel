@@ -10,10 +10,12 @@ pub const CODEGEN_KIND: u32 = 0x4f000001;
 pub const LINK_KIND: u32 = 0x4f000002;
 impl CodegenKey {
     pub fn query_id(&self) -> QueryId {
-        QueryId {
+        let query = QueryId {
             kind: CODEGEN_KIND,
             address: self.address(),
-        }
+        };
+        hirsel_engine::runtime::profile::definition(query, self.owner.instance.definition());
+        query
     }
 }
 impl LinkKey {

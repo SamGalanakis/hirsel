@@ -93,11 +93,13 @@ pub enum Phase {
     Declarations,
     /// Header normalization, excluding header resolution and nested queries.
     SignatureNormalize,
+    /// Host-side link preparation and linker invocation, excluding nested codegen.
+    Link,
 }
 
 impl Phase {
     /// Every phase, in declaration order.
-    pub const ALL: [Phase; 21] = [
+    pub const ALL: [Phase; 22] = [
         Phase::Parse,
         Phase::Resolve,
         Phase::Signatures,
@@ -119,6 +121,7 @@ impl Phase {
         Phase::Lex,
         Phase::Declarations,
         Phase::SignatureNormalize,
+        Phase::Link,
     ];
     /// The stable name `--timings` prints.
     pub fn name(self) -> &'static str {
@@ -144,6 +147,7 @@ impl Phase {
             Phase::Lex => "lex",
             Phase::Declarations => "declarations",
             Phase::SignatureNormalize => "signature normalize",
+            Phase::Link => "link",
         }
     }
 }
@@ -433,6 +437,7 @@ impl Count {
 }
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
+static CPU_START: AtomicU64 = AtomicU64::new(0);
 
 struct Totals {
     intervals: [AtomicU64; Interval::ALL.len()],
@@ -475,9 +480,30 @@ thread_local! {
     static STACKS: RefCell<Stacks> = RefCell::new(Stacks::default());
 }
 
-/// Start recording, for the whole process.
+/// Enable process-wide recording without discarding accumulated measurements.
 pub fn enable() {
     ENABLED.store(true, Relaxed);
+}
+
+/// Start a fresh request recording. The caller serializes requests and drains prior work.
+pub fn start_request() {
+    for cell in TOTALS
+        .intervals
+        .iter()
+        .chain(TOTALS.phases.iter().flatten())
+        .chain(TOTALS.counts.iter())
+        .chain(TOTALS.comptime_verify.iter())
+        .chain(std::iter::once(&TOTALS.wait))
+    {
+        cell.store(0, Relaxed);
+    }
+    CPU_START.store(process_cpu().map_or(0, |d| d.as_nanos() as u64), Relaxed);
+    ENABLED.store(true, Relaxed);
+}
+
+/// End recording after all work for the request has drained.
+pub fn disable() {
+    ENABLED.store(false, Relaxed);
 }
 
 /// Whether timings are being recorded.
@@ -492,6 +518,15 @@ fn add(cell: &AtomicU64, duration: Duration) {
 
 /// This thread's CPU time, where the OS reports it.
 fn thread_cpu() -> Option<Duration> {
+    clock_cpu(3)
+}
+
+/// Process CPU, including every compiler worker, excluding child processes.
+fn process_cpu() -> Option<Duration> {
+    clock_cpu(2)
+}
+
+fn clock_cpu(clock: i32) -> Option<Duration> {
     #[cfg(target_os = "linux")]
     {
         #[repr(C)]
@@ -502,13 +537,12 @@ fn thread_cpu() -> Option<Duration> {
         unsafe extern "C" {
             fn clock_gettime(clock: i32, time: *mut Timespec) -> i32;
         }
-        const CLOCK_THREAD_CPUTIME_ID: i32 = 3;
         let mut time = Timespec {
             seconds: 0,
             nanoseconds: 0,
         };
         // SAFETY: `time` is a valid, writable timespec for the call.
-        if unsafe { clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut time) } == 0 {
+        if unsafe { clock_gettime(clock, &mut time) } == 0 {
             return Some(Duration::new(time.seconds as u64, time.nanoseconds as u32));
         }
     }
@@ -687,6 +721,7 @@ pub struct PhaseRow {
 /// `ALL` order, including those still 0.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
+    pub process_cpu: Option<Duration>,
     pub intervals: Vec<(Interval, Duration)>,
     pub phases: Vec<PhaseRow>,
     /// The part of [`Phase::Verify`] run inside a [`Phase::Comptime`]: V on
@@ -700,6 +735,8 @@ pub struct Report {
 pub fn report() -> Report {
     let nanos = |cell: &AtomicU64| Duration::from_nanos(cell.load(Relaxed));
     Report {
+        process_cpu: process_cpu()
+            .map(|cpu| cpu.saturating_sub(Duration::from_nanos(CPU_START.load(Relaxed)))),
         intervals: Interval::ALL
             .iter()
             .map(|&i| (i, nanos(&TOTALS.intervals[i as usize])))

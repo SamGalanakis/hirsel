@@ -304,6 +304,7 @@ where
     }
 
     fn link(&mut self, key: &LinkKey, inputs: &LinkInputs) -> Result<Arc<LinkedProduct>, String> {
+        let _timing = hirsel_intern::timings::phase(hirsel_intern::timings::Phase::Link);
         link_checked(
             self.store.as_ref(),
             key,

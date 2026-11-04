@@ -128,10 +128,10 @@ pub fn client(args: &[OsString]) -> Option<u8> {
         .collect::<Option<_>>()?;
     let separator = argv.iter().position(|a| a == "--").unwrap_or(argv.len());
     let flags = &argv[..separator];
-    // Measurements and watching are this process's own.
+    // Heap teardown and watching belong to the client process.
     if flags
         .iter()
-        .any(|a| a.starts_with("--timings") || a == "--mem-usage" || a == "--watch")
+        .any(|a| a == "--mem-usage" || a == "--watch" || a == "--query-profile")
     {
         return None;
     }

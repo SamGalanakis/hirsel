@@ -180,7 +180,7 @@ fn lower_admission_waits_for_another_body_to_release_its_partition() {
     struct ReleaseHolder(mpsc::Sender<()>);
     impl RuntimeObserver for ReleaseHolder {
         fn record(&self, event: RuntimeEvent) {
-            if matches!(event, RuntimeEvent::Waiting(id) | RuntimeEvent::Settled { query: id, .. } if id == query(1))
+            if matches!(event, RuntimeEvent::Waiting { query: id, .. } | RuntimeEvent::Settled { query: id, .. } if id == query(1))
             {
                 let _ = self.0.send(());
             }
@@ -311,7 +311,7 @@ fn repeated_reads_and_wide_fan_in_wake_once_per_poll() {
         assert_eq!(
             events
                 .iter()
-                .filter(|e| matches!(e, RuntimeEvent::Wake(q) if *q == query(0)))
+                .filter(|e| matches!(e, RuntimeEvent::Wake { query: q, .. } if *q == query(0)))
                 .count(),
             1
         );
@@ -556,6 +556,7 @@ fn actual_edges_disjoint_costs_admission_and_completion_are_explicit() {
         1
     );
     let mut live = 0;
+    let mut waiting = BTreeMap::new();
     for event in events {
         match event {
             RuntimeEvent::Admit { charged, .. } => {
@@ -566,11 +567,32 @@ fn actual_edges_disjoint_costs_admission_and_completion_are_explicit() {
                 live -= 1;
                 assert!(charged <= 4 << 20);
             }
+            RuntimeEvent::Waiting {
+                query,
+                elapsed_ns,
+                reason,
+            } => {
+                assert!(matches!(reason, WaitReason::Dependency));
+                waiting.insert(query.address.0, elapsed_ns);
+            }
+            RuntimeEvent::Wake {
+                query,
+                elapsed_ns,
+                reason,
+            } => {
+                assert!(matches!(
+                    reason,
+                    WakeReason::DependencySettled | WakeReason::AlreadyReady
+                ));
+                let started = waiting.remove(&query.address.0).expect("wake without wait");
+                assert!(elapsed_ns >= started);
+            }
             _ => (),
         }
         assert!((0..=1).contains(&live));
     }
     assert_eq!(live, 0);
+    assert!(waiting.is_empty());
 }
 #[test]
 fn dispatch_is_frozen_and_unknown_kind_cannot_fabricate_a_product() {
@@ -1556,7 +1578,7 @@ fn local_continuation_frame_charge_retires_only_after_home_destruction() {
 struct FrameWaiting(mpsc::Sender<()>);
 impl RuntimeObserver for FrameWaiting {
     fn record(&self, event: RuntimeEvent) {
-        if matches!(event,RuntimeEvent::Waiting(id) if id.kind==2) {
+        if matches!(event,RuntimeEvent::Waiting { query: id, .. } if id.kind==2) {
             let _ = self.0.send(());
         }
     }

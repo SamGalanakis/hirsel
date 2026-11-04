@@ -279,6 +279,7 @@ impl ExecutionTasks {
         native.with_execution_context(&root, &products, use_program)
     }
     fn emit(&self, query: QueryId, plan: ProductRef) -> Result<ProductRef, String> {
+        let _timing = hirsel_intern::timings::phase(hirsel_intern::timings::Phase::Codegen);
         let snapshot = &self.roots.native.snapshot;
         snapshot
             .execution

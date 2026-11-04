@@ -71,8 +71,16 @@ pub enum RuntimeEvent {
         cpu_ns: u64,
         charged: u64,
     },
-    Waiting(QueryId),
-    Wake(QueryId),
+    Waiting {
+        query: QueryId,
+        elapsed_ns: u64,
+        reason: WaitReason,
+    },
+    Wake {
+        query: QueryId,
+        elapsed_ns: u64,
+        reason: WakeReason,
+    },
     Settled {
         query: QueryId,
         result: Outcome,
@@ -83,6 +91,21 @@ pub enum RuntimeEvent {
     },
     Completed(RequestId),
     Cancelled(RequestId),
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitReason {
+    Dependency,
+    Admission,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeReason {
+    DependencySettled,
+    AdmissionProgress,
+    AlreadyReady,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -179,6 +202,7 @@ struct State {
     stats: RuntimeStats,
     observer: Option<Arc<dyn RuntimeObserver>>,
     origin: Instant,
+    profile_id: u64,
 }
 struct Shared {
     state: Mutex<State>,
@@ -356,6 +380,7 @@ impl AdmittedRuntime {
                 stats: RuntimeStats::default(),
                 observer: None,
                 origin: Instant::now(),
+                profile_id: super::profile::runtime_id(),
             }),
             changed: Condvar::new(),
             caller: Mutex::new(()),
@@ -693,6 +718,7 @@ impl Shared {
 }
 impl State {
     fn event(&mut self, event: RuntimeEvent) {
+        super::profile::record(self.profile_id, &event);
         if let Some(observer) = &self.observer {
             observer.record(event);
         }
@@ -752,7 +778,11 @@ impl State {
                 self.nodes.get_mut(&query).unwrap().status = Status::Ready;
                 self.queue(query);
                 self.stats.wakes += 1;
-                self.event(RuntimeEvent::Wake(id(query)));
+                self.event(RuntimeEvent::Wake {
+                    query: id(query),
+                    elapsed_ns: self.elapsed(),
+                    reason: WakeReason::AdmissionProgress,
+                });
             } else if !matches!(
                 node.status,
                 Status::Ready | Status::Running | Status::Waiting
@@ -1122,7 +1152,11 @@ impl State {
             if let Some(waiter) = self.nodes.consume(producer, i) {
                 self.queue(waiter);
                 self.stats.wakes += 1;
-                self.event(RuntimeEvent::Wake(id(waiter)));
+                self.event(RuntimeEvent::Wake {
+                    query: id(waiter),
+                    elapsed_ns: self.elapsed(),
+                    reason: WakeReason::DependencySettled,
+                });
             }
         }
     }
@@ -1698,11 +1732,24 @@ fn run_worker(shared: Arc<Shared>, worker: usize, stack: u64, caller: bool) {
                         Status::Waiting
                     };
                     state.stats.waits += 1;
-                    state.event(RuntimeEvent::Waiting(id(query)));
+                    let elapsed_ns = state.elapsed();
+                    state.event(RuntimeEvent::Waiting {
+                        query: id(query),
+                        elapsed_ns,
+                        reason: if cx.admission_wait {
+                            WaitReason::Admission
+                        } else {
+                            WaitReason::Dependency
+                        },
+                    });
                     if ready {
                         state.queue(query);
                         state.stats.wakes += 1;
-                        state.event(RuntimeEvent::Wake(id(query)));
+                        state.event(RuntimeEvent::Wake {
+                            query: id(query),
+                            elapsed_ns,
+                            reason: WakeReason::AlreadyReady,
+                        });
                     }
                 }
                 Err(_) => {

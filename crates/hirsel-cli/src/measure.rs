@@ -14,6 +14,7 @@ enum Format {
 pub struct Measure {
     timings: Option<Format>,
     memory: bool,
+    query_profile: Option<std::path::PathBuf>,
 }
 
 /// The commands that compile: check, build, run and test.
@@ -23,8 +24,27 @@ impl Measure {
     /// Take `--timings`, `--timings=json` and `--mem-usage` from anywhere
     /// before a `--` separator, as `--verbose` is taken.
     pub fn take(args: &mut Vec<OsString>) -> Result<Self, String> {
+        let mut query_profile = None;
+        let mut index = 0;
+        while index < args.len() && args[index] != "--" {
+            if args[index] == "--query-profile" {
+                if query_profile.is_some() {
+                    return Err("duplicate --query-profile".into());
+                }
+                if index + 1 == args.len() || args[index + 1] == "--" {
+                    return Err("--query-profile needs a file path".into());
+                }
+                query_profile = Some(std::path::PathBuf::from(args.remove(index + 1)));
+                args.remove(index);
+            } else {
+                index += 1;
+            }
+        }
         let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
-        let mut measure = Measure::default();
+        let mut measure = Measure {
+            query_profile,
+            ..Measure::default()
+        };
         let mut index = 0;
         let mut error = None;
         args.retain(|arg| {
@@ -48,37 +68,59 @@ impl Measure {
         if let Some(error) = error {
             return Err(error);
         }
-        let measuring = measure.timings.is_some() || measure.memory;
         let command = args.first().and_then(|a| a.to_str());
-        if measuring && !command.is_some_and(|c| COMMANDS.contains(&c)) {
+        if measure.query_profile.is_some()
+            && !command.is_some_and(|c| matches!(c, "check" | "build"))
+        {
+            return Err("--query-profile applies to check and build".into());
+        }
+        if (measure.timings.is_some() || measure.memory)
+            && !command.is_some_and(|c| COMMANDS.contains(&c))
+        {
             return Err("--timings and --mem-usage apply to check, build, run and test".into());
         }
         Ok(measure)
     }
 
     /// Start recording before the command runs.
-    pub fn start(&self) {
+    pub fn start(&self) -> Result<(), String> {
+        if self.query_profile.is_some() {
+            hirsel_engine::runtime::profile::start()?;
+        }
         if self.timings.is_some() {
-            timings::enable();
+            timings::start_request();
         }
         if self.memory {
             memory::install(crate::allocator::count_live());
         }
+        Ok(())
     }
 
     /// Print the reports for `command`, which took `wall`.
-    pub fn finish(&self, command: &str, wall: Duration) {
+    pub fn finish(&self, command: &str, wall: Duration) -> Result<(), String> {
+        let profile_result = self
+            .query_profile
+            .as_ref()
+            .map(|path| {
+                let capture = hirsel_engine::runtime::profile::finish().expect("profile started");
+                std::fs::File::create(path)
+                    .and_then(|file| capture.write_to(std::io::BufWriter::new(file)))
+                    .map_err(|e| format!("query profile {}: {e}", path.display()))
+            })
+            .transpose();
         if self.timings.is_none() && !self.memory {
-            return;
+            return profile_result.map(|_| ());
         }
         let memory = self.memory.then(|| {
             hirsel_engine::release_shared_caches();
             Memory {
                 peak_rss: peak_rss(),
                 held: memory::records(),
+                allocations: crate::allocator::totals(),
             }
         });
         let report = self.timings.map(|_| timings::report());
+        timings::disable();
         let text = match (self.timings, report) {
             (Some(Format::Json), Some(report)) => {
                 json(command, wall, &report, memory.as_ref()).to_string() + "\n"
@@ -95,12 +137,14 @@ impl Measure {
             }
         };
         eprint!("{text}");
+        profile_result.map(|_| ())
     }
 }
 
 struct Memory {
     peak_rss: Option<u64>,
     held: Vec<(&'static str, i64)>,
+    allocations: (u64, u64, u64),
 }
 
 impl Memory {
@@ -111,6 +155,10 @@ impl Memory {
             Some(bytes) => text += &format!("{:<32}{}\n", "peak RSS", mib(bytes as i64)),
             None => text += &format!("{:<32}{:>14}\n", "peak RSS", "unknown"),
         }
+        text += &format!(
+            "allocations: {}, reallocations: {}, cumulative requested bytes: {}\n",
+            self.allocations.0, self.allocations.1, self.allocations.2
+        );
         text += "held at exit, largest first\n";
         // Rows under 64 KiB appear only in the JSON form.
         for (name, bytes) in self.held.iter().filter(|(_, b)| b.abs() >= 64 << 10) {
@@ -172,6 +220,14 @@ fn table(command: &str, wall: Duration, report: &timings::Report) -> String {
             p.calls
         );
     }
+    if let Some(cpu) = report.process_cpu {
+        let phased: Duration = report.phases.iter().map(|p| p.cpu).sum();
+        text += &format!(
+            "process CPU ms: {}, untimed CPU ms: {}\n",
+            milliseconds(cpu),
+            milliseconds(cpu.saturating_sub(phased))
+        );
+    }
     let split = &report.comptime_verify;
     text += &format!(
         "{:<20}{} {} {:>9}\n",
@@ -208,6 +264,8 @@ fn json(
         "command": command,
         "wall_ns": nanos(wall),
         "untimed_ns": nanos(untimed(wall, report)),
+        "process_cpu_ns": report.process_cpu.map(nanos),
+        "untimed_cpu_ns": report.process_cpu.map(|cpu| nanos(cpu.saturating_sub(report.phases.iter().map(|p| p.cpu).sum()))),
         "intervals": report.intervals.iter().map(|(i, time)| serde_json::json!({
             "interval": i.name(),
             "wall_ns": nanos(*time),
@@ -241,6 +299,9 @@ fn json(
     if let Some(memory) = memory {
         value["memory"] = serde_json::json!({
             "peak_rss_bytes": memory.peak_rss,
+            "allocations": memory.allocations.0,
+            "reallocations": memory.allocations.1,
+            "requested_bytes": memory.allocations.2,
             "checkpoints": memory::checkpoints().iter().map(|point| serde_json::json!({
                 "name": point.name,
                 "heap_request_delta_bytes": point.heap_request_delta,

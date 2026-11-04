@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Summarize hirsel --query-profile JSONL; diff two captures by kind/definition."""
+import argparse
+from collections import defaultdict
+import json
+from pathlib import Path
+import sys
+
+KINDS = {
+    0x46000001: 'source body', 0x46000003: 'lower', 0x46000004: 'evaluate',
+    0x46000008: 'growth', 0x4600000a: 'check', 0x4600000d: 'storage',
+    0x46000010: 'run', 0x46000014: 'storage graph', 0x46000017: 'native source',
+    0x4600001a: 'native roots', 0x4600001e: 'run batch', 0x46010001: 'stage',
+    0x46010004: 'registration', 0x46020001: 'private signatures',
+    0x4e000001: 'instance', 0x4e000002: 'arena candidates', 0x4e000003: 'arena chosen',
+    0x4e000004: 'ready', 0x4e000005: 'roots', 0x4e000006: 'link input',
+    0x4e000007: 'link manifest', 0x4e000020: 'instance input',
+    0x4e000021: 'discovery', 0x4e000022: 'arena graph', 0x4e000023: 'compilation',
+    0x4e000029: 'callable value', 0x4e00002b: 'ownership ready',
+    0x4e00002c: 'ownership roots', 0x4e00002d: 'ownership compilation',
+    0x4e00002e: 'seal demand', 0x4e000031: 'execution', 0x4e000032: 'execution objects',
+    0x4e000033: 'callable graph', 0x4e000050: 'preparation',
+    0x4f000001: 'codegen', 0x4f000002: 'link',
+}
+
+
+def key(query):
+    return query['kind'], bytes(query['address']).hex()
+
+
+def read(path):
+    labels, costs, waiting = {}, defaultdict(lambda: [0, 0, 0]), {}
+    header = end = None
+    with Path(path).open() as source:
+        for line in source:
+            row = json.loads(line)
+            event = row['event']
+            if end is not None:
+                raise ValueError(f'{path}: records after end')
+            if header is None:
+                if event != 'profile' or row['schema'] != 1:
+                    raise ValueError(f'{path}: expected schema-1 profile header')
+                header = row
+                continue
+            if event == 'definition':
+                labels[key(row['query'])] = row['definition']
+            elif event == 'release':
+                cost = costs[key(row['query'])]
+                cost[0] += row['cpu_ns']
+                cost[1] += 1
+            elif event in ('waiting', 'wake'):
+                query = key(row['query'])
+                token = row['runtime'], query
+                if event == 'waiting':
+                    waiting[token] = row['elapsed_ns']
+                elif token in waiting:
+                    costs[query][2] += row['elapsed_ns'] - waiting.pop(token)
+            elif event == 'end':
+                end = row
+    if end is None:
+        raise ValueError(f'{path}: incomplete capture, no end record')
+    if end['truncated']:
+        print(f'{path}: truncated at the 16 MiB buffer limit; totals are partial', file=sys.stderr)
+    by_kind, by_definition = defaultdict(lambda: [0, 0, 0]), defaultdict(lambda: [0, 0, 0])
+    for (kind, address), cost in costs.items():
+        name = KINDS.get(kind, f'0x{kind:08x}')
+        for target, group in ((by_kind, name), (by_definition, (name, labels.get((kind, address), f'address:{address}')))):
+            for i, amount in enumerate(cost):
+                target[group][i] += amount
+    return by_kind, by_definition
+
+
+def rows(title, current, previous, limit):
+    print(title)
+    print(f'{"CPU ms" :>12} {"polls":>9} {"wait ms":>12}  kind / definition')
+    values = {name: [current.get(name, [0, 0, 0])[i] - previous.get(name, [0, 0, 0])[i] for i in range(3)]
+              for name in current.keys() | previous.keys()}
+    for name, (cpu, polls, wait) in sorted(values.items(), key=lambda item: (-abs(item[1][0]), str(item[0])))[:limit]:
+        print(f'{cpu / 1e6:12.3f} {polls:9d} {wait / 1e6:12.3f}  {" / ".join(name) if isinstance(name, tuple) else name}')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, usage='%(prog)s [diff] FILE [FILE] [--top N]')
+    parser.add_argument('files', nargs='+')
+    parser.add_argument('--top', '-n', type=int, default=20)
+    args = parser.parse_args()
+    diff = args.files[0] == 'diff'
+    paths = args.files[1:] if diff else args.files
+    if len(paths) != (2 if diff else 1) or args.top <= 0:
+        parser.error('supply one file, or diff OLD NEW, and a positive --top')
+    old = read(paths[0]) if diff else ({}, {})
+    new = read(paths[-1])
+    if diff:
+        print('Changes: NEW minus OLD. Positive CPU values mean more CPU.')
+    rows('By query kind', new[0], old[0], args.top)
+    rows('By query kind and definition', new[1], old[1], args.top)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        sys.exit(f'query-profile: {error}')

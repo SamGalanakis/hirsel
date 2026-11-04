@@ -359,6 +359,29 @@ fn function_lines(exe: &Path, source: &Path) -> BTreeMap<String, BTreeSet<u64>> 
 }
 
 #[test]
+fn profiling_build_resolves_hirsel_source_lines_and_runs_the_release_program() {
+    let source = super::file(
+        "pub fn main() -> Result[(), ()] {\n  failure.check(2u64 + 3u64 == 5u64, Arithmetic())\n  Ok(())\n}\n",
+    );
+    let exe = source.with_extension("profile");
+    let built = output(
+        Command::new(env!("CARGO_BIN_EXE_hirsel"))
+            .args(["build", "--profile"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&exe),
+    );
+    assert!(built.status.success(), "{built:?}");
+    let lines = function_lines(&exe, &source);
+    let main = lines
+        .iter()
+        .find(|(name, _)| name.ends_with("/main"))
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    assert!(main.1.iter().all(|line| (1..=4).contains(line)), "{main:?}");
+    assert_eq!(output(&mut Command::new(&exe)).status.code(), Some(0));
+}
+
+#[test]
 fn cranelift_debug_lines_match_llvm_per_function_on_both_targets() {
     hirsel_engine::with_compiler_stack(|| {
         for program in [

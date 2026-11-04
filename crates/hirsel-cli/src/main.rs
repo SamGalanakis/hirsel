@@ -27,6 +27,7 @@ Check a source file or package without running its entry.
   --verify-cache      Recompute cached results and compare
   --verbose           Report dependency image selection
   --timings[=json]    Report compiler timings on stderr
+  --query-profile <file.jsonl>  Export bounded scheduler events for check/build
   --mem-usage         Report compiler memory on stderr
   -h, --help          Show this help before a source operand
 Example: hirsel check --json app/hirsel.json",
@@ -36,6 +37,7 @@ Build a standalone executable; launch authority is supplied when it runs.
   -o <exe>            Required executable output path
   --release           Optimized LLVM build with scoped specialization
   --debug             Unoptimized build; defaults to Cranelift
+  --profile           LLVM release optimization with line tables and frame pointers
   --backend           Select llvm or cranelift; release requires LLVM
   --lto               LLVM whole-module optimization; incompatible with --debug
   --target            Target x86_64-linux (default) or aarch64-linux
@@ -46,6 +48,7 @@ Build a standalone executable; launch authority is supplied when it runs.
   --no-verify         Skip the second checker
   --verbose           Report dependency image selection
   --timings[=json]    Report compiler timings on stderr
+  --query-profile <file.jsonl>  Export bounded scheduler events for check/build
   --mem-usage         Report compiler memory on stderr
   -h, --help          Show this help before a source operand
 Default build: optimized LLVM without scoped specialization.
@@ -79,6 +82,7 @@ Run a source entry; the default engine is the interpreter.
   --no-verify         Skip the second checker
   --verbose           Report dependency image selection
   --timings[=json]    Report compiler timings on stderr
+  --query-profile <file.jsonl>  Export bounded scheduler events for check/build
   --mem-usage         Report compiler memory on stderr
   -h, --help          Show this help before a source operand
 Operands after -- belong to the app, including --help, -h and help.
@@ -106,6 +110,7 @@ Run matching tests; the default engine is the interpreter.
   --no-verify         Skip the second checker
   --verbose           Report dependency image selection
   --timings[=json]    Report compiler timings on stderr
+  --query-profile <file.jsonl>  Export bounded scheduler events for check/build
   --mem-usage         Report compiler memory on stderr
   -h, --help          Show this help before a source operand
 --race and --sim-points exclude --native and --bench.
@@ -618,6 +623,7 @@ fn parse_command(args: Vec<OsString>) -> Result<Command, lexopt::Error> {
                     Long("lto") if !lto => lto = true,
                     Long("release") if profile.is_none() => profile = Some(BuildProfile::Release),
                     Long("debug") if profile.is_none() => profile = Some(BuildProfile::Debug),
+                    Long("profile") if profile.is_none() => profile = Some(BuildProfile::Profiling),
                     Long("backend") if selected.is_none() => {
                         selected = Some(backend(args.value()?)?)
                     }
@@ -636,6 +642,9 @@ fn parse_command(args: Vec<OsString>) -> Result<Command, lexopt::Error> {
                     arg => return Err(arg.unexpected()),
                 }
             }
+            if lto && profile == Some(BuildProfile::Profiling) {
+                return Err("--lto cannot combine with --profile".into());
+            }
             if lto {
                 if profile == Some(BuildProfile::Debug) {
                     return Err("--lto requires LLVM optimization; remove --debug".into());
@@ -644,7 +653,7 @@ fn parse_command(args: Vec<OsString>) -> Result<Command, lexopt::Error> {
             }
             if matches!(
                 profile,
-                Some(BuildProfile::Release | BuildProfile::ReleaseLto)
+                Some(BuildProfile::Release | BuildProfile::ReleaseLto | BuildProfile::Profiling)
             ) && selected == Some(Backend::Cranelift)
             {
                 return Err(if lto {
@@ -1137,7 +1146,10 @@ fn execute(mut args: Vec<OsString>, start: std::time::Instant) -> u8 {
             return usage_for(args.first().and_then(|arg| arg.to_str()));
         }
     };
-    measure.start();
+    if let Err(error) = measure.start() {
+        eprintln!("hirsel: {error}");
+        return 2;
+    }
     let command = args
         .first()
         .and_then(|a| a.to_str())
@@ -1149,12 +1161,15 @@ fn execute(mut args: Vec<OsString>, start: std::time::Instant) -> u8 {
         hirsel_engine::store::VerifyStore::Off
     };
     let code = execute_command(args, verify, verify_store);
-    measure.finish(&command, start.elapsed());
+    if let Err(error) = measure.finish(&command, start.elapsed()) {
+        eprintln!("hirsel: {error}");
+        return 2;
+    }
     code
 }
 
 /// Run one command in a process that keeps its sessions (`serve`, `check
-/// --watch`): the global flags `execute` takes, without measurement.
+/// --watch`): the global flags `execute` takes, with per-request measurement.
 fn execute_resident(mut args: Vec<OsString>) -> u8 {
     let _verbose = take_flag(&mut args, "--verbose");
     let verify = if take_flag(&mut args, "--no-verify") {
@@ -1162,7 +1177,29 @@ fn execute_resident(mut args: Vec<OsString>) -> u8 {
     } else {
         Verify::On
     };
-    execute_command(args, verify, hirsel_engine::store::VerifyStore::Off)
+    let started = std::time::Instant::now();
+    let measure = match measure::Measure::take(&mut args) {
+        Ok(measure) => measure,
+        Err(error) => {
+            eprintln!("hirsel: {error}");
+            return 2;
+        }
+    };
+    if let Err(error) = measure.start() {
+        eprintln!("hirsel: {error}");
+        return 2;
+    }
+    let command = args
+        .first()
+        .and_then(|a| a.to_str())
+        .unwrap_or_default()
+        .to_owned();
+    let code = execute_command(args, verify, hirsel_engine::store::VerifyStore::Off);
+    if let Err(error) = measure.finish(&command, started.elapsed()) {
+        eprintln!("hirsel: {error}");
+        return 2;
+    }
+    code
 }
 
 fn execute_command(

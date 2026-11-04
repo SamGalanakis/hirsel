@@ -332,6 +332,7 @@ impl Toolchain {
         store: Option<std::sync::Arc<dyn hirsel_engine::store::ResultStore>>,
     ) -> Result<Self, NativeError> {
         let _timing = hirsel_intern::timings::interval(hirsel_intern::timings::Interval::Link);
+        let _phase = hirsel_intern::timings::phase(hirsel_intern::timings::Phase::Link);
         let [runtime_build, ..] = *runtime_builds else {
             return Err(NativeError::new(
                 StageName::Link,
@@ -1247,6 +1248,7 @@ pub fn link_runnable(
             .map(Runnable::Executable);
     }
     let _timing = hirsel_intern::timings::interval(hirsel_intern::timings::Interval::Link);
+    let _phase = hirsel_intern::timings::phase(hirsel_intern::timings::Phase::Link);
     let runner = super::runner::runner(toolchain, &program.target)?;
     let main = launcher_object(program, entry, objects, dir, requested, false, "main")?;
     let main = write(dir, "main.o", &main)?;
@@ -1541,6 +1543,7 @@ fn link_objects_impl(
     standalone: bool,
 ) -> Result<Linked, NativeError> {
     let _timing = hirsel_intern::timings::interval(hirsel_intern::timings::Interval::Link);
+    let _phase = hirsel_intern::timings::phase(hirsel_intern::timings::Phase::Link);
     let main = launcher_object(program, entry, objects, dir, requested, standalone, "main")?;
     let main = write(dir, "main.o", &main)?;
     let output = if standalone {

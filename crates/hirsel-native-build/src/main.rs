@@ -3,8 +3,8 @@
 hirsel_guard::install!();
 
 use hirsel_driver::native::{
-    OptLevel, Options, Partition, RuntimeBuild, TargetSpec, Toolchain, build, emit_objects, link,
-    link_standalone_objects,
+    OptLevel, Options, Partition, RuntimeBuild, TargetSpec, Toolchain, build, emit_objects,
+    link_profile, link_standalone_objects,
 };
 use std::{path::Path, time::Instant};
 
@@ -48,6 +48,7 @@ fn compile() -> Result<(), Box<dyn std::error::Error>> {
         .engine
         .export_native_input()
         .map_err(|e| format!("{e:?}"))?;
+    let sources = hirsel_driver::native::profile_sources(&input);
     let validated = loaded
         .engine
         .import_native_input(input)
@@ -134,25 +135,25 @@ fn compile() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::create_dir_all(&objects)?;
             let standalone = std::env::var_os("HIRSEL_BENCH_STANDALONE").is_some();
             let result = if standalone {
-                emit_objects(&ready, OptLevel::Speed, partition, measurement, None).and_then(
-                    |emitted| {
-                        link_standalone_objects(
-                            &ready,
-                            &loaded.entry,
-                            &emitted,
-                            &toolchain,
-                            &objects,
-                        )
-                    },
+                emit_objects(
+                    &ready,
+                    OptLevel::Speed,
+                    partition,
+                    measurement,
+                    measurement.then_some(&sources),
                 )
+                .and_then(|emitted| {
+                    link_standalone_objects(&ready, &loaded.entry, &emitted, &toolchain, &objects)
+                })
             } else {
-                link(
+                link_profile(
                     &ready,
                     &loaded.entry,
                     OptLevel::Speed,
                     partition,
                     &toolchain,
                     &objects,
+                    measurement.then_some(&sources),
                 )
             };
             let executable = match result {

@@ -41,6 +41,8 @@ pub enum BuildProfile {
     #[default]
     Default,
     Release,
+    /// LLVM release optimization with source tables and frame pointers.
+    Profiling,
     /// Explicit whole-module LLVM optimization (`--lto`).
     ReleaseLto,
     Debug,
@@ -53,7 +55,8 @@ impl BuildProfile {
         target: TargetSpec,
         validation: super::Validation,
     ) -> Result<BuildOptions, NativeError> {
-        if matches!(self, Self::Release | Self::ReleaseLto) && backend == super::Backend::Cranelift
+        if matches!(self, Self::Release | Self::ReleaseLto | Self::Profiling)
+            && backend == super::Backend::Cranelift
         {
             return Err(NativeError::new(
                 StageName::Emission,
@@ -62,13 +65,14 @@ impl BuildProfile {
         }
         let mut passes = Options::new(target);
         passes.validation = validation;
-        passes.scoped_specialization = matches!(self, Self::Release | Self::ReleaseLto);
+        passes.scoped_specialization =
+            matches!(self, Self::Release | Self::ReleaseLto | Self::Profiling);
         let opt = match self {
-            Self::Default | Self::Release | Self::ReleaseLto => OptLevel::Default,
+            Self::Default | Self::Release | Self::ReleaseLto | Self::Profiling => OptLevel::Default,
             Self::Debug => OptLevel::None,
         };
         Ok(BuildOptions {
-            debug_tables: self == Self::Debug,
+            debug_tables: matches!(self, Self::Debug | Self::Profiling),
             ..BuildOptions::new(passes, backend, opt)
         })
     }
@@ -329,6 +333,7 @@ mod scoped_consumer_9_tests {
                 BuildProfile::Debug,
                 BuildProfile::Default,
                 BuildProfile::Release,
+                BuildProfile::Profiling,
                 BuildProfile::ReleaseLto,
             ] {
                 let options = profile
@@ -338,7 +343,10 @@ mod scoped_consumer_9_tests {
                         super::super::Validation::EveryStage,
                     )
                     .unwrap();
-                let release = matches!(profile, BuildProfile::Release | BuildProfile::ReleaseLto);
+                let release = matches!(
+                    profile,
+                    BuildProfile::Release | BuildProfile::ReleaseLto | BuildProfile::Profiling
+                );
                 let ready = super::super::build(&input, &options.passes).unwrap();
                 let run = super::super::run_heap(&ready, &entry, &sites).unwrap();
                 assert!(run.observation.failures.is_empty());

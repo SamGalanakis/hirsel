@@ -7,6 +7,7 @@ use std::task::Poll;
 mod budget;
 mod future_task;
 mod product;
+pub mod profile;
 mod scheduler;
 pub use budget::{MemoryReservation, MemoryReservationPool, ProcessBudget};
 pub use future_task::{LocalFutureTask, QueryReads};
@@ -21,6 +22,7 @@ pub(crate) use product::{
 };
 pub use scheduler::{
     AdmittedRuntime, RuntimeCompletion, RuntimeErrors, RuntimeEvent, RuntimeObserver, RuntimeStats,
+    WaitReason, WakeReason,
 };
 
 /// Logical address, independent of source revision, worker or request order.

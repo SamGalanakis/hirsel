@@ -2,12 +2,36 @@
 //! in a release build, so `--mem-usage` counts them here. Counting is off until
 //! `count_live` turns it on; until then each call costs one relaxed load.
 use std::alloc::{GlobalAlloc, Layout};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::Relaxed};
 
 pub struct Counting;
 
 static COUNTING: AtomicBool = AtomicBool::new(false);
 static LIVE: AtomicI64 = AtomicI64::new(0);
+static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static REALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static REQUESTED: AtomicU64 = AtomicU64::new(0);
+
+pub fn totals() -> (u64, u64, u64) {
+    (
+        ALLOCATIONS.load(Relaxed),
+        REALLOCATIONS.load(Relaxed),
+        REQUESTED.load(Relaxed),
+    )
+}
+
+fn allocated(size: usize, realloc: bool, delta: i64) {
+    if COUNTING.load(Relaxed) {
+        if realloc {
+            &REALLOCATIONS
+        } else {
+            &ALLOCATIONS
+        }
+        .fetch_add(1, Relaxed);
+        REQUESTED.fetch_add(size as u64, Relaxed);
+        LIVE.fetch_add(delta, Relaxed);
+    }
+}
 
 fn count(bytes: i64) {
     if COUNTING.load(Relaxed) {
@@ -30,14 +54,14 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let block = unsafe { mimalloc::MiMalloc.alloc(layout) };
         if !block.is_null() {
-            count(layout.size() as i64);
+            allocated(layout.size(), false, layout.size() as i64);
         }
         block
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         let block = unsafe { mimalloc::MiMalloc.alloc_zeroed(layout) };
         if !block.is_null() {
-            count(layout.size() as i64);
+            allocated(layout.size(), false, layout.size() as i64);
         }
         block
     }
@@ -48,7 +72,7 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn realloc(&self, block: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         let moved = unsafe { mimalloc::MiMalloc.realloc(block, layout, size) };
         if !moved.is_null() {
-            count(size as i64 - layout.size() as i64);
+            allocated(size, true, size as i64 - layout.size() as i64);
         }
         moved
     }

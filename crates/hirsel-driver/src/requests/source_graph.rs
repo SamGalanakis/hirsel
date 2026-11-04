@@ -1807,6 +1807,7 @@ pub(super) fn install(
         .into_iter()
         .flatten()
         {
+            hirsel_engine::runtime::profile::definition(query, path);
             inventory.insert((query.kind, query.address.0));
         }
     }

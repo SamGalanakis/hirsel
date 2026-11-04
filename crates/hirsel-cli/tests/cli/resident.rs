@@ -22,6 +22,60 @@ fn command(directory: &Path) -> Command {
 }
 
 #[test]
+fn resident_timings_measure_each_request_without_accumulating_previous_phases() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("main.hir"),
+        "fn a() -> u8 { 1u8 }\nfn main() { let _ = a() }\n",
+    )
+    .unwrap();
+    let mut server = Server(
+        command(directory.path())
+            .args(["serve", "--idle", "30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut log = BufReader::new(server.0.stderr.take().unwrap());
+    let mut ready = String::new();
+    log.read_line(&mut ready).unwrap();
+    assert!(ready.contains("serving"), "{ready}");
+    let mut reports = Vec::new();
+    for _ in 0..2 {
+        let output = command(directory.path())
+            .args(["check", "--timings=json", "main.hir"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let mut served = String::new();
+        log.read_line(&mut served).unwrap();
+        assert!(
+            served.contains("serve:") && served.contains("exited 0"),
+            "{served}"
+        );
+        let text = String::from_utf8(output.stderr).unwrap();
+        let report: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        let cpu = report["process_cpu_ns"].as_u64().unwrap();
+        let phased: u64 = report["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["cpu_ns"].as_u64().unwrap())
+            .sum();
+        assert_eq!(cpu, phased + report["untimed_cpu_ns"].as_u64().unwrap());
+        reports.push(report);
+    }
+    assert!(
+        reports[0]["counts"]["definitions"].as_u64().unwrap() > 0,
+        "{:?}",
+        reports
+    );
+    assert_eq!(reports[1]["counts"]["definitions"], 0, "{:?}", reports);
+}
+
+#[test]
 fn resident_stop_exits_only_the_selected_workspace_and_is_idempotent() {
     let directory = tempfile::tempdir().unwrap();
     let start = |name: &str| {

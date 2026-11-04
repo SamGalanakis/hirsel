@@ -45,7 +45,7 @@ const INTERVALS: [&str; 11] = [
     "units",
     "link",
 ];
-const PHASES: [&str; 21] = [
+const PHASES: [&str; 22] = [
     "parse",
     "resolve",
     "signatures",
@@ -67,6 +67,7 @@ const PHASES: [&str; 21] = [
     "lex",
     "declarations",
     "signature normalize",
+    "link",
 ];
 const COUNTS: [&str; 70] = [
     "definitions",
@@ -170,8 +171,10 @@ fn report(stderr: &[u8]) -> serde_json::Value {
         "counts",
         "intervals",
         "phases",
+        "process_cpu_ns",
         "runner",
         "schema",
+        "untimed_cpu_ns",
         "untimed_ns",
         "wait_ns",
         "wall_ns",
@@ -248,8 +251,78 @@ fn timings_json_intervals_add_up_to_the_wall_time() {
         "{sum} of {wall}: {report}"
     );
     assert_eq!(report["untimed_ns"].as_u64(), Some(wall - sum));
+    let cpu = report["process_cpu_ns"].as_u64().unwrap();
+    let phased: u64 = report["phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["cpu_ns"].as_u64().unwrap())
+        .sum();
+    assert!(phased <= cpu, "{report}");
+    assert_eq!(report["untimed_cpu_ns"].as_u64(), Some(cpu - phased));
+    for name in ["codegen", "link"] {
+        let phase = report["phases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["phase"] == name)
+            .unwrap();
+        assert!(phase["cpu_ns"].as_u64().unwrap() > 0, "{report}");
+    }
     assert!(report["counts"]["units"].as_u64().unwrap() > 0, "{report}");
     assert!(report["counts"]["V runs"].as_u64().unwrap() > 0, "{report}");
+}
+
+#[test]
+fn query_profile_exports_cpu_and_definition_labels_without_changing_the_check() {
+    let source = super::file("fn add(x: u8) -> u8 { x + 1u8 }\nfn main() { let _ = add(2u8) }\n");
+    std::fs::write(
+        source.with_extension("hir.json"),
+        serde_json::json!({
+            "schema": 1, "package": {"name": "profile", "version": "1"},
+            "entry": {"module": [], "name": "main"},
+            "sources": [{"path": source, "module": []}], "dependencies": [],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let profile = source.with_extension("queries.jsonl");
+    let check = |enabled: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_hirsel"));
+        command.arg("check");
+        if enabled {
+            command.arg("--query-profile").arg(&profile);
+        }
+        command.arg(&source).output().unwrap()
+    };
+    let plain = check(false);
+    let traced = check(true);
+    assert!(traced.status.success(), "{traced:?}");
+    assert_eq!(
+        (&plain.status, &plain.stdout, &plain.stderr),
+        (&traced.status, &traced.stdout, &traced.stderr)
+    );
+    let rows = std::fs::read_to_string(&profile)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.last().unwrap()["truncated"], false);
+    let cpu: u64 = rows
+        .iter()
+        .filter(|row| row["event"] == "release")
+        .map(|row| row["cpu_ns"].as_u64().unwrap())
+        .sum();
+    assert!(cpu > 0, "no polled query CPU");
+    assert!(rows.iter().any(|row| row["event"] == "definition"
+        && row["definition"].as_str().unwrap().ends_with("/main")));
+    for row in rows
+        .iter()
+        .filter(|row| row["event"] == "waiting" || row["event"] == "wake")
+    {
+        assert!(row["elapsed_ns"].is_u64());
+        assert!(row["wait_reason"].is_string() || row["wake_reason"].is_string());
+    }
 }
 
 #[test]
@@ -264,6 +337,12 @@ fn mem_usage_reports_peak_rss_and_the_tables_held() {
     let report = report(&output.stderr);
     let memory = &report["memory"];
     assert!(memory["peak_rss_bytes"].as_u64().unwrap() > 0, "{memory}");
+    assert!(memory["allocations"].as_u64().unwrap() > 0, "{memory}");
+    assert!(memory["reallocations"].as_u64().unwrap() > 0, "{memory}");
+    assert!(
+        memory["requested_bytes"].as_u64().unwrap() >= memory["allocations"].as_u64().unwrap(),
+        "{memory}"
+    );
     let held = |name: &str| {
         memory["held"]
             .as_array()

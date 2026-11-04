@@ -195,7 +195,10 @@ impl NativeAssembly {
         let mut queries = vec![self.query(), self.source.query()];
         queries.extend(self.source.run_query_inventory());
         for path in definitions {
-            queries.extend(self.source.definition_query(path));
+            if let Some(query) = self.source.definition_query(path) {
+                hirsel_engine::runtime::profile::definition(query, path);
+                queries.push(query);
+            }
         }
         queries
     }

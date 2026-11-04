@@ -34,13 +34,12 @@ pub struct AcceptedFrontRegistration {
     retained: u64,
 }
 impl AcceptedFrontRegistration {
-    pub(crate) fn in_capture(
+    pub(crate) fn in_engine(
         self: &Arc<Self>,
-        capture: &NamespaceCapture,
-        observe: impl FnMut(&DefPath, &ReadKey) -> Option<ContentHash>,
+        engine: &mut QueryEngine,
         pool: &MemoryReservationPool,
     ) -> Result<Arc<Self>, QueryError> {
-        let (reads, execution) = self.validate_current(capture, observe)?;
+        let (reads, execution) = self.validate_engine_inputs(engine)?;
         if reads == *self.reads {
             return Ok(self.clone());
         }
@@ -132,12 +131,6 @@ impl AcceptedFrontRegistration {
         capture: &NamespaceCapture,
         mut observe: impl FnMut(&DefPath, &ReadKey) -> Option<ContentHash>,
     ) -> Result<(Reads, Option<hirsel_validate::ExecutionReceipt>), QueryError> {
-        let invalid = |reason: &str| {
-            QueryError::Operational(hirsel_types::OperationalFailure {
-                operation: "generated syntax validation".into(),
-                message: reason.into(),
-            })
-        };
         let id = DefId::intern(self.definition());
         let original = if capture.bodies.contains_key(&id) {
             let syntax = capture.syntax(self.definition())?;
@@ -155,24 +148,50 @@ impl AcceptedFrontRegistration {
                 ))
             })
         };
+        self.validate_exact(
+            original,
+            capture.verification(),
+            &mut observe,
+            |_, receipt| capture.revalidate_execution(receipt),
+            |observe, definition, key| observe(definition, key),
+        )
+    }
+    fn validate_exact<C>(
+        &self,
+        original: Option<(hirsel_span::Anchor, u32, ContentHash)>,
+        verify: Verify,
+        context: &mut C,
+        revalidate: impl FnOnce(
+            &mut C,
+            &hirsel_validate::ExecutionReceipt,
+        ) -> Option<hirsel_validate::ExecutionReceipt>,
+        mut observe: impl FnMut(&mut C, &DefPath, &ReadKey) -> Option<ContentHash>,
+    ) -> Result<(Reads, Option<hirsel_validate::ExecutionReceipt>), QueryError> {
+        let invalid = |reason: &str| {
+            QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "generated syntax validation".into(),
+                message: reason.into(),
+            })
+        };
+        hirsel_intern::work::count(hirsel_intern::work::Counter::RegistrationComparisons);
+        hirsel_intern::timings::count(hirsel_intern::timings::Count::RegistrationComparisons);
         if original != Some(self.original) {
             return Err(invalid("original declaration changed"));
         }
-        let execution =
-            if capture.verification() == Verify::On {
-                let receipt = self
-                    .acceptance()
-                    .ok_or_else(|| invalid("missing private execution acceptance"))?;
-                Some(capture.revalidate_execution(receipt).ok_or_else(|| {
-                    invalid("V refused the private artifacts in the current capture")
-                })?)
-            } else {
-                None
-            };
+        let execution = if verify == Verify::On {
+            let receipt = self
+                .acceptance()
+                .ok_or_else(|| invalid("missing private execution acceptance"))?;
+            Some(revalidate(context, receipt).ok_or_else(|| {
+                invalid("V refused the private artifacts in the current environment")
+            })?)
+        } else {
+            None
+        };
         if let Some(execution) = &execution {
             for (package, digest) in execution.contexts() {
                 let key = ReadKey::ValidationUniverse(crate::memo::PackageKey::of(package));
-                if observe(self.definition(), &key) != Some(*digest) {
+                if observe(context, self.definition(), &key) != Some(*digest) {
                     return Err(invalid(
                         "observer does not identify the current validation universe",
                     ));
@@ -185,7 +204,13 @@ impl AcceptedFrontRegistration {
                 if matches!(key, ReadKey::ValidationUniverse(_)) && execution.is_some() {
                     self.reads.get(key)
                 } else {
-                    observe(self.definition(), key)
+                    hirsel_intern::work::count(
+                        hirsel_intern::work::Counter::RegistrationReadComparisons,
+                    );
+                    hirsel_intern::timings::count(
+                        hirsel_intern::timings::Count::RegistrationReadComparisons,
+                    );
+                    observe(context, self.definition(), key)
                 }
             })
             .is_some()
@@ -231,57 +256,35 @@ impl AcceptedFrontRegistration {
         self.execution.as_ref()
     }
     pub(crate) fn validate(&self, engine: &mut QueryEngine) -> Result<(), QueryError> {
-        let invalid = |reason: String| {
-            QueryError::Operational(hirsel_types::OperationalFailure {
-                operation: "generated syntax validation".into(),
-                message: reason,
-            })
-        };
+        self.validate_engine_inputs(engine).map(|_| ())
+    }
+    fn validate_engine_inputs(
+        &self,
+        engine: &mut QueryEngine,
+    ) -> Result<(Reads, Option<hirsel_validate::ExecutionReceipt>), QueryError> {
         let syntax = engine.snapshot(self.definition())?;
-        if syntax.anchor != self.original.0
-            || syntax.occurrence != self.original.1
-            || syntax.text_hash != self.original.2
-        {
-            return Err(invalid("original declaration changed".into()));
-        }
+        let original = Some((syntax.anchor, syntax.occurrence, syntax.text_hash));
         let snapshot = engine.signature_inputs();
-        let execution = if engine.verify == Verify::On {
-            let anchors = crate::NativeRecordContext::capture(engine);
-            let receipt = self
-                .acceptance()
-                .ok_or_else(|| invalid("missing private execution acceptance".into()))?;
-            Some(
-                snapshot
-                    .revalidate_execution(receipt, |path, occurrence| {
-                        crate::NativeRecordSource::record_source_anchor(&anchors, path, occurrence)
-                            .or_else(|| {
-                                engine.items.iter().find_map(|(owner, candidates)| {
-                                    (generation::task::GeneratorInput::private_path(owner) == *path
-                                        && occurrence == 0)
-                                        .then(|| candidates.first().map(|syntax| syntax.anchor))
-                                        .flatten()
-                                })
+        let anchors = crate::NativeRecordContext::capture(engine);
+        self.validate_exact(
+            original,
+            engine.verify,
+            engine,
+            |engine, receipt| {
+                snapshot.revalidate_execution(receipt, |path, occurrence| {
+                    crate::NativeRecordSource::record_source_anchor(&anchors, path, occurrence)
+                        .or_else(|| {
+                            engine.items.iter().find_map(|(owner, candidates)| {
+                                (generation::task::GeneratorInput::private_path(owner) == *path
+                                    && occurrence == 0)
+                                    .then(|| candidates.first().map(|syntax| syntax.anchor))
+                                    .flatten()
                             })
-                    })
-                    .ok_or_else(|| {
-                        invalid("V refused private execution in the current environment".into())
-                    })?,
-            )
-        } else {
-            None
-        };
-        if let Some(key) = self.reads.first_changed(|key| {
-            if matches!(key, ReadKey::ValidationUniverse(_)) && execution.is_some() {
-                self.reads.get(key)
-            } else {
-                engine.observe(self.definition(), key)
-            }
-        }) {
-            return Err(invalid(format!(
-                "generator or normalization read changed: {key:?}"
-            )));
-        }
-        Ok(())
+                        })
+                })
+            },
+            |engine, definition, key| engine.observe(definition, key),
+        )
     }
 }
 

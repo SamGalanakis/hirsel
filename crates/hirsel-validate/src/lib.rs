@@ -57,10 +57,10 @@ mod origin_types;
 mod proofs;
 mod receipts;
 pub use receipts::{
-    AcceptedArtifact, Artifact, DefinitionInput, ExecutionReceipt, Installation, ReplayEnvironment,
-    SourceInvocation, StoredDefinitionOutput, VerifiedDefinition, VerifiedDefinitionOutput,
-    VerifiedInvocations, VerifierCache, VerifierRows, validate_cached, validate_definition,
-    validate_with_receipt,
+    AcceptedArtifact, Artifact, DefinitionInput, ExecutionReceipt, FactRefusal, Installation,
+    ReplayEnvironment, SourceInvocation, StoredDefinitionOutput, VerifiedDefinition,
+    VerifiedDefinitionOutput, VerifiedInvocations, VerifierCache, VerifierRows, validate_cached,
+    validate_definition, validate_with_receipt,
 };
 mod protocol;
 mod row_input;

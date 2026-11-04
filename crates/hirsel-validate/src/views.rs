@@ -267,7 +267,7 @@ impl ViewTable {
             heap_readers: vec![],
             errors: UniverseErrors::default(),
             input_digest: OnceLock::new(),
-            stamp: EnvironmentStamp::new(t),
+            stamp: EnvironmentStamp::new(t, store),
         };
         let verdicts: Vec<_> = table
             .views
@@ -423,6 +423,8 @@ pub struct PackageViews {
     errors: UniverseErrors,
     input_digest: OnceLock<ContentHash>,
     stamp: EnvironmentStamp,
+    origin_input: ContentHash,
+    _retention: Option<Arc<dyn Send + Sync>>,
 }
 impl PackageViews {
     /// The universe `base` with `replacements` in place of (or beside) its views.
@@ -448,7 +450,61 @@ impl PackageViews {
         let view = View::new(t, signature, None);
         let mut replaced = self.replaced.clone();
         replaced.insert(view.d, view);
-        Self::over(t, self.base.clone(), replaced, &self.verdicts, store, old)
+        let mut result = Self::over(t, self.base.clone(), replaced, &self.verdicts, store, old)?;
+        result.origin_input = self.input_digest();
+        Ok(result)
+    }
+    /// The independently identified complete universe before this replacement.
+    pub(crate) fn origin_input(&self) -> ContentHash {
+        self.origin_input
+    }
+    /// Incremental control storage of a successful overlay, excluding its
+    /// shared base and signature payloads. Failed verdict payloads stay transient.
+    pub fn retained_delta_bytes(&self) -> Option<u64> {
+        if !self.errors.errors.is_empty() || self.verdicts.values().any(|v| v.error.is_some()) {
+            return None;
+        }
+        let mut bytes = (size_of::<Self>() + 2 * size_of::<usize>()) as u64;
+        bytes = bytes.checked_add((self.replaced.len() as u64).checked_mul(
+            (3 * size_of::<(DefId, View)>() + size_of::<crate::IdentifiedSignature>() + 256) as u64,
+        )?)?;
+        bytes = bytes.checked_add((self.verdicts.len() as u64).checked_mul(
+            (3 * size_of::<(DefId, Arc<ViewVerdict>)>() + size_of::<ViewVerdict>() + 256) as u64,
+        )?)?;
+        for verdict in self.verdicts.values() {
+            bytes = bytes.checked_add((verdict.reads.capacity() * size_of::<VRead>()) as u64)?;
+        }
+        let heap_bytes = |heap: &HeapRole| -> Option<u64> {
+            [&heap.arena, &heap.operation]
+                .into_iter()
+                .try_fold(0u64, |n, path| {
+                    let n = n.checked_add(
+                        (path.0.package.name.capacity()
+                            + path.0.package.version.capacity()
+                            + path.0.name.capacity()
+                            + path.0.modules.capacity() * size_of::<String>())
+                            as u64,
+                    )?;
+                    path.0
+                        .modules
+                        .iter()
+                        .try_fold(n, |n, module| n.checked_add(module.capacity() as u64))
+                })
+        };
+        if let Some((_, heap)) = &self.first_heap {
+            bytes = bytes.checked_add(heap_bytes(heap)?)?;
+        }
+        for view in self.replaced.values() {
+            if let Some(heap) = view.input.heap() {
+                bytes = bytes.checked_add(heap_bytes(heap)?)?;
+            }
+        }
+        Some(bytes)
+    }
+    /// Retain the host's existing reservation with every shared overlay owner.
+    pub fn retain_owner(mut self, owner: Arc<dyn Send + Sync>) -> Self {
+        self._retention = Some(owner);
+        self
     }
     /// This universe's summary, including its private views' effects.
     pub fn universe(&self) -> PackageUniverse {
@@ -489,6 +545,10 @@ impl PackageViews {
         store: &mut ValidatedSignatures,
         old: Option<&ValidatedSignatures>,
     ) -> Result<Self, ViewRefusal> {
+        hirsel_intern::work::count(hirsel_intern::work::Counter::ValidationOverlayConstructions);
+        hirsel_intern::timings::count(
+            hirsel_intern::timings::Count::ValidationOverlayConstructions,
+        );
         // The universe in DefPath order: the base's views and new ones.
         // An installed view's readers are not known, so none is replaced.
         assert!(
@@ -528,13 +588,15 @@ impl PackageViews {
         }
         let order: Vec<DefId> = order.iter().map(|v| v.d).collect();
         let mut views = Self {
+            origin_input: base.input_digest(),
+            _retention: None,
             base,
             replaced,
             verdicts: DefMap::default(),
             first_heap: heap,
             errors: UniverseErrors::default(),
             input_digest: OnceLock::new(),
-            stamp: EnvironmentStamp::new(t),
+            stamp: EnvironmentStamp::new(t, store),
         };
         let verdicts: DefMap<_> = again
             .iter()
@@ -636,6 +698,8 @@ fn encode_def_path(out: &mut Vec<u8>, path: &hirsel_syntax::DefPath) {
 /// An immutable universe owned by V. Only V's view tables implement this trait;
 /// an ordinary lookup cannot claim another snapshot's clean stamp.
 pub trait CheckedEnvironment: SignatureLookup + sealed::Environment {
+    /// V's complete independently identified view/type/error input.
+    fn input_digest(&self) -> ContentHash;
     #[doc(hidden)]
     fn stamp(&self) -> &EnvironmentStamp;
 }
@@ -647,23 +711,38 @@ mod sealed {
 pub struct EnvironmentStamp {
     pub(crate) types: Arc<TypeInterner>,
     pub(crate) identity: Arc<()>,
+    pub(crate) verifier: std::sync::Weak<crate::VerifierCache>,
+    pub(crate) execution: std::sync::Mutex<Vec<Arc<crate::receipts::ExecutionFact>>>,
+    pub(crate) reads:
+        std::sync::Mutex<std::collections::BTreeMap<VRead, (bool, Arc<dyn Send + Sync>)>>,
 }
 impl EnvironmentStamp {
-    fn new(types: &Arc<TypeInterner>) -> Self {
+    fn new(types: &Arc<TypeInterner>, store: &ValidatedSignatures) -> Self {
         Self {
             types: types.clone(),
             identity: Arc::new(()),
+            verifier: store
+                .verifier()
+                .map_or_else(std::sync::Weak::new, Arc::downgrade),
+            execution: Default::default(),
+            reads: Default::default(),
         }
     }
 }
 impl sealed::Environment for ViewTable {}
 impl CheckedEnvironment for ViewTable {
+    fn input_digest(&self) -> ContentHash {
+        self.input_digest()
+    }
     fn stamp(&self) -> &EnvironmentStamp {
         &self.stamp
     }
 }
 impl sealed::Environment for PackageViews {}
 impl CheckedEnvironment for PackageViews {
+    fn input_digest(&self) -> ContentHash {
+        self.input_digest()
+    }
     fn stamp(&self) -> &EnvironmentStamp {
         &self.stamp
     }

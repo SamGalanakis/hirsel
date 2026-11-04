@@ -190,6 +190,10 @@ fn indexed_tir_reads_check_each_child_and_keep_full_backing_after_provider_drop(
     data.visit_retained_allocations(|id, n| parent.push((id, n)));
     let missing = TypeRecords::new(TypeInterner::new(None), Arc::new(Memory::default()));
     let reader = CheckedTir::open(data, expected, missing, |_, _| Some(anchor)).unwrap();
+    assert!(
+        reader.frozen_bindings().is_none(),
+        "sealing cannot hide a missing type component"
+    );
     assert_eq!(reader.header().unwrap().path, definition.path);
     assert!(
         reader.body(0).unwrap().header().is_none(),
@@ -215,6 +219,24 @@ fn indexed_tir_reads_check_each_child_and_keep_full_backing_after_provider_drop(
     assert_eq!(&*child, MAGIC);
     drop(child);
     assert!(released.load(Ordering::SeqCst));
+    let (records, definition, anchor) = fixture(false);
+    let codec = Arc::downgrade(&records);
+    let types = records.types.clone();
+    let encoded = bytes(&records, &definition, anchor);
+    let reader = open(encoded, records.clone(), anchor).unwrap();
+    let frozen = reader.frozen_bindings().unwrap();
+    drop(reader);
+    drop(records);
+    assert!(
+        codec.upgrade().is_none(),
+        "frozen bindings release the mutable codec maps"
+    );
+    assert_eq!(
+        frozen.body(0).unwrap().header().unwrap().result,
+        definition.bodies[0].result
+    );
+    assert!(!frozen.matches_bindings(&TypeInterner::new(None), |_, _| Some(anchor)));
+    assert!(!frozen.matches_bindings(&types, |_, _| None));
 }
 #[test]
 fn checksummed_tir_tables_reject_wraparound_wrong_tags_counts_overlap_and_truncation() {

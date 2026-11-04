@@ -296,6 +296,18 @@ impl<T: SignatureLookup + ?Sized> SignatureLookup for &T {
     }
 }
 
+impl<T: SignatureLookup + Send + ?Sized> SignatureLookup for Arc<T> {
+    fn view(&self, d: DefId) -> Option<ViewInput<'_>> {
+        (**self).view(d)
+    }
+    fn first_heap(&self) -> Option<(DefId, HeapRole)> {
+        (**self).first_heap()
+    }
+    fn universe_errors(&self) -> (ContentHash, &[Violation]) {
+        (**self).universe_errors()
+    }
+}
+
 /// V's digest of a view. Every field is encoded, including private shape,
 /// malformed rows and metadata a producer could leave out of its fingerprint.
 ///
@@ -353,6 +365,8 @@ pub fn errors_digest(errors: &[Violation]) -> ContentHash {
 
 /// Whether `read` observes the same value in `signatures` now.
 pub fn read_holds(read: &VRead, signatures: &dyn SignatureLookup) -> bool {
+    hirsel_intern::work::count(hirsel_intern::work::Counter::ValidationReadComparisons);
+    hirsel_intern::timings::count(hirsel_intern::timings::Count::ValidationReadComparisons);
     match read {
         VRead::View(d, digest) => signatures
             .view(*d)
@@ -372,9 +386,13 @@ pub(crate) fn read_holds_for_types(
     signatures: &dyn SignatureLookup,
 ) -> bool {
     match read {
-        VRead::View(d, digest) => signatures
-            .view(*d)
-            .is_some_and(|view| view.for_types(t) && view.digest() == *digest),
+        VRead::View(d, digest) => {
+            hirsel_intern::work::count(hirsel_intern::work::Counter::ValidationReadComparisons);
+            hirsel_intern::timings::count(hirsel_intern::timings::Count::ValidationReadComparisons);
+            signatures
+                .view(*d)
+                .is_some_and(|view| view.for_types(t) && view.digest() == *digest)
+        }
         _ => read_holds(read, signatures),
     }
 }
@@ -535,6 +553,9 @@ pub struct ValidatedSignatures {
     policy: ContentHash,
 }
 impl ValidatedSignatures {
+    pub(crate) fn verifier(&self) -> Option<&Arc<crate::VerifierCache>> {
+        self.cache.as_ref()
+    }
     /// Group physical writes while retaining each independent verdict and its
     /// complete current reads. The batch itself confers no verification proof.
     pub fn publication_batch(&self) -> Option<hirsel_artifact_store::Batch> {

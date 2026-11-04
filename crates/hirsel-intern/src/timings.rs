@@ -285,11 +285,24 @@ pub enum Count {
     HeaderSourceFiles,
     /// Full installed validation tables constructed for registration overlays.
     RegistrationValidationViews,
+    RegistrationComparisons,
+    RegistrationReadComparisons,
+    DeclarationProjections,
+    ExecutionReplayRequests,
+    ExecutionReplayComputations,
+    ReplayArtifactDecodes,
+    SnapshotMembershipBuilds,
+    ValidationReadComparisons,
+    ValidationOverlayConstructions,
+    NamespaceConstructions,
+    SealedReadComparisons,
+    ExecutionValidationRequests,
+    ExecutionValidationRefusals,
 }
 
 impl Count {
     /// Every count, in declaration order.
-    pub const ALL: [Count; 71] = [
+    pub const ALL: [Count; 84] = [
         Count::Definitions,
         Count::Units,
         Count::VRuns,
@@ -361,10 +374,36 @@ impl Count {
         Count::StoreModeMisses,
         Count::HeaderSourceFiles,
         Count::RegistrationValidationViews,
+        Count::RegistrationComparisons,
+        Count::RegistrationReadComparisons,
+        Count::DeclarationProjections,
+        Count::ExecutionReplayRequests,
+        Count::ExecutionReplayComputations,
+        Count::ReplayArtifactDecodes,
+        Count::SnapshotMembershipBuilds,
+        Count::ValidationReadComparisons,
+        Count::ValidationOverlayConstructions,
+        Count::NamespaceConstructions,
+        Count::SealedReadComparisons,
+        Count::ExecutionValidationRequests,
+        Count::ExecutionValidationRefusals,
     ];
     /// The stable name `--timings` prints.
     pub fn name(self) -> &'static str {
         match self {
+            Count::ExecutionValidationRequests => "execution validation requests",
+            Count::ExecutionValidationRefusals => "execution validation refusals",
+            Count::SealedReadComparisons => "sealed V read comparisons",
+            Count::SnapshotMembershipBuilds => "snapshot membership builds",
+            Count::ValidationReadComparisons => "V read comparisons",
+            Count::ValidationOverlayConstructions => "validation overlay constructions",
+            Count::NamespaceConstructions => "namespace constructions",
+            Count::ExecutionReplayRequests => "execution replay requests",
+            Count::ExecutionReplayComputations => "execution replay computations",
+            Count::ReplayArtifactDecodes => "replay artifact decodes",
+            Count::RegistrationComparisons => "registration comparisons",
+            Count::RegistrationReadComparisons => "registration semantic read comparisons",
+            Count::DeclarationProjections => "declaration projections",
             Count::RegistrationValidationViews => "registration validation views",
             Count::ImageRowsDecoded => "image declaration rows decoded",
             Count::ImageRowsAdopted => "image declaration rows adopted",

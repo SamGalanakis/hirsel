@@ -675,6 +675,9 @@ impl DeclarationIndex {
         let _ = inputs.frozen_rows.set(self.frozen().rows.clone());
         inputs
     }
+    pub(crate) fn shares_inputs(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.rows, &other.rows) && Arc::ptr_eq(&self.inputs, &other.inputs)
+    }
     pub(crate) fn observations(&self) -> Self {
         Self {
             revision: self.revision,
@@ -685,7 +688,7 @@ impl DeclarationIndex {
             identity: self.identity,
             inputs: self.inputs.clone(),
             frozen: OnceLock::new(),
-            frozen_rows: OnceLock::new(),
+            frozen_rows: self.frozen_rows.clone(),
         }
     }
     /// The frozen module input, built after a row or an input changed.
@@ -718,6 +721,8 @@ impl DeclarationIndex {
         Arc::make_mut(&mut self.inputs)
     }
     fn freeze(&self) -> FrozenRows {
+        hirsel_intern::work::count(hirsel_intern::work::Counter::DeclarationProjections);
+        hirsel_intern::timings::count(hirsel_intern::timings::Count::DeclarationProjections);
         let mut metadata = self.inputs.signature_metadata.clone();
         let roles = crate::registry::nominal_roles();
         metadata.unsafe_capability = roles.unsafe_capability;

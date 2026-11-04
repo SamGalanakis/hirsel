@@ -216,6 +216,44 @@ impl hirsel_artifact_store::Contents for RequestVerifierRows {
     }
 }
 impl hirsel_validate::VerifierRows for RequestVerifierRows {
+    fn retain_fact(
+        &self,
+        bytes: u64,
+    ) -> Result<Option<Arc<dyn Send + Sync>>, hirsel_validate::FactRefusal> {
+        let bytes = bytes
+            .checked_add((size_of::<ArchiveLease>() + 2 * size_of::<usize>()) as u64)
+            .ok_or(hirsel_validate::FactRefusal)?;
+        if !self.admission.charge(bytes) {
+            return Err(hirsel_validate::FactRefusal);
+        }
+        Ok(Some(Arc::new(ArchiveLease {
+            memory: self.admission.clone(),
+            bytes,
+        })))
+    }
+
+    fn retain_replay(
+        &self,
+        archive: &hirsel_product_codec::CheckedTir,
+        overlay: Option<&hirsel_types::SignatureRef>,
+        metadata: u64,
+    ) -> Result<Option<Arc<dyn Send + Sync>>, hirsel_validate::FactRefusal> {
+        let mut bytes = metadata
+            .checked_add(
+                archive
+                    .frozen_binding_bytes()
+                    .ok_or(hirsel_validate::FactRefusal)?,
+            )
+            .ok_or(hirsel_validate::FactRefusal)?;
+        if let Some(overlay) = overlay {
+            bytes = bytes
+                .checked_add(crate::memo::retained::retained_signature_payload_bytes(
+                    overlay,
+                ))
+                .ok_or(hirsel_validate::FactRefusal)?;
+        }
+        self.retain_fact(bytes)
+    }
     fn row(&self, key: ContentHash) -> Option<Reference> {
         self.rows
             .lock()

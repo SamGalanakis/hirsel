@@ -104,6 +104,23 @@ pub enum Counter {
     SummaryComparisons,
     /// Memo validation-context memberships visited, including index construction.
     MemoContextVisits,
+    /// Complete registration reuse predicates evaluated against current inputs.
+    RegistrationComparisons,
+    /// Semantic generator/normalization observations compared by registration validation.
+    RegistrationReadComparisons,
+    /// Immutable declaration projections built from their row inputs.
+    DeclarationProjections,
+    ExecutionReplayRequests,
+    ExecutionReplayComputations,
+    ReplayArtifactDecodes,
+    SnapshotMembershipBuilds,
+    ValidationReadComparisons,
+    ValidationOverlayConstructions,
+    NamespaceConstructions,
+    /// Actual recorded-read comparisons against a sealed immutable observer.
+    SealedReadComparisons,
+    ExecutionValidationRequests,
+    ExecutionValidationRefusals,
     /// Cached dependency-node inspections.
     CacheValidationRows,
 }

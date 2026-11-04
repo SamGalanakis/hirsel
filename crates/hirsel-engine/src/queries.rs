@@ -403,6 +403,7 @@ pub struct QueryEngine {
         crate::snapshot::SnapshotStamp,
         Arc<crate::snapshot::SignatureSnapshot>,
     )>,
+    pub(crate) namespace_captures: Vec<std::sync::Weak<NamespaceCapture>>,
     pub(crate) snapshot_epoch: crate::memo::Revision,
     /// Producer identity for rows in the retained frozen snapshot. Weak
     /// references establish provenance without retaining old memo generations.
@@ -786,6 +787,7 @@ impl QueryEngine {
             comptime_runtime: None,
             source_growth: Default::default(),
             snapshot: None,
+            namespace_captures: Vec::new(),
             snapshot_epoch: crate::memo::Revision::from_u64(1).expect("a nonzero revision"),
             snapshot_sources: Default::default(),
             snapshot_inputs_revision: 0,

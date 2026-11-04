@@ -1,6 +1,6 @@
 //! Local verifier authority, separate from producer query associations. Imported
 //! content can share the physical store but cannot publish through this API.
-use crate::{SignatureLookup, VRead, Validation, read_holds};
+use crate::{SignatureLookup, VRead, Validation};
 mod installation;
 mod outputs;
 use bincode::Options;
@@ -126,18 +126,21 @@ impl VerifiedDefinition {
             if !Arc::ptr_eq(&types, &stamp.types) {
                 return false;
             }
-            let mut seen = self.environment.lock().unwrap();
-            if seen.ptr_eq(&Arc::downgrade(&stamp.identity)) {
+            if self
+                .environment
+                .lock()
+                .unwrap()
+                .ptr_eq(&Arc::downgrade(&stamp.identity))
+            {
                 return true;
             }
-            if !self
-                .reads
-                .iter()
-                .all(|r| crate::input::read_holds_for_types(&types, r, signatures.lookup()))
-            {
+            if !self.reads.iter().all(|r| match stamp.verifier.upgrade() {
+                Some(cache) => cache.read_holds(&types, r, signatures).unwrap_or(false),
+                None => crate::input::read_holds_for_types(&types, r, signatures.lookup()),
+            }) {
                 return false;
             }
-            *seen = Arc::downgrade(&stamp.identity);
+            *self.environment.lock().unwrap() = Arc::downgrade(&stamp.identity);
             true
         } else {
             self.reads
@@ -181,7 +184,7 @@ pub fn validate_definition<'a, 'input>(
     let mut reads = vec![];
     let artifact = Artifact::new(definition.view(), types.clone(), owner);
     let (report, ran, accepted) =
-        validate_with_receipt(&artifact, signatures.lookup(), policy, cache, &mut reads)?;
+        validate_with_receipt_in(&artifact, signatures, policy, cache, &mut reads)?;
     let evidence = report.violations.is_empty().then(|| VerifiedDefinition {
         definition: definition.downgrade(),
         owner: artifact
@@ -306,6 +309,9 @@ struct Receipt {
     policy: ContentHash,
     reads: Vec<VRead>,
 }
+fn original_receipt_key(action: ContentHash) -> ContentHash {
+    ContentHash::of_parts("hirsel.validate.original-receipt.v1", [action.0.as_slice()])
+}
 fn receipt_action(artifact: ContentHash, policy: ContentHash, reads: &[VRead]) -> ContentHash {
     // VRead's DefIds encode stable DefPaths; order is V's canonical read order.
     let encoded = bincode::serialize(reads).expect("verifier reads are encodable");
@@ -326,13 +332,15 @@ struct ViewReceipt {
 }
 enum Backend {
     Memory(
-        Mutex<
-            HashMap<
-                ContentHash,
-                (
-                    hirsel_artifact_store::Reference,
-                    hirsel_artifact_store::Bytes,
-                ),
+        Arc<
+            Mutex<
+                HashMap<
+                    ContentHash,
+                    (
+                        hirsel_artifact_store::Reference,
+                        hirsel_artifact_store::Bytes,
+                    ),
+                >,
             >,
         >,
         Arc<hirsel_artifact_store::Memory>,
@@ -378,6 +386,9 @@ impl hirsel_artifact_store::Contents for TransportContents {
         Some(reference)
     }
 }
+/// Retaining a local verifier fact exceeded its existing owner's allowance.
+#[derive(Debug)]
+pub struct FactRefusal;
 /// A host-owned, bounded home for verifier rows and their content. Only this
 /// cache publishes rows, so product bytes in the same host cannot supply them.
 /// Either may be dropped by the host's bound; a missing row is a miss.
@@ -387,6 +398,21 @@ pub trait VerifierRows: hirsel_artifact_store::Contents {
     }
     fn publication_request(&self) -> Option<hirsel_artifact_store::Request> {
         None
+    }
+    /// Reserve request-owned storage for a verifier-issued local fact. The
+    /// lease releases its charge when the immutable environment is retired.
+    fn retain_fact(&self, _bytes: u64) -> Result<Option<Arc<dyn Send + Sync>>, FactRefusal> {
+        Ok(None)
+    }
+    /// Account for a decoded immutable replay through the host's existing
+    /// signature-payload bound and its ordinary fact reservation.
+    fn retain_replay(
+        &self,
+        _archive: &hirsel_product_codec::CheckedTir,
+        _overlay: Option<&hirsel_types::SignatureRef>,
+        _metadata: u64,
+    ) -> Result<Option<Arc<dyn Send + Sync>>, FactRefusal> {
+        Ok(None)
     }
     fn row(&self, key: ContentHash) -> Option<hirsel_artifact_store::Reference>;
     fn set_row(&self, key: ContentHash, reference: hirsel_artifact_store::Reference);
@@ -398,6 +424,8 @@ pub trait VerifierRows: hirsel_artifact_store::Contents {
 pub struct VerifierCache(
     Backend,
     Mutex<Option<Arc<hirsel_product_codec::TypeRecords>>>,
+    Arc<()>,
+    Mutex<Vec<Arc<DecodedFact>>>,
 );
 impl std::fmt::Debug for VerifierCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -407,7 +435,9 @@ impl std::fmt::Debug for VerifierCache {
 impl Default for VerifierCache {
     fn default() -> Self {
         Self(
-            Backend::Memory(Mutex::default(), Arc::default()),
+            Backend::Memory(Arc::default(), Arc::default()),
+            Mutex::default(),
+            Arc::new(()),
             Mutex::default(),
         )
     }
@@ -418,6 +448,12 @@ impl VerifierCache {
     /// supplied operation handle; transported/hosted owners already have one.
     pub fn for_operation(self: &Arc<Self>, shared: Option<&Store>) -> Arc<Self> {
         match &self.0 {
+            Backend::Memory(rows, contents) => Arc::new(Self(
+                Backend::Memory(rows.clone(), contents.clone()),
+                Mutex::default(),
+                Arc::new(()),
+                Mutex::default(),
+            )),
             Backend::Directory(store) => Arc::new(Self::directory_store(
                 shared
                     .filter(|shared| shared.root() == store.root())
@@ -438,11 +474,21 @@ impl VerifierCache {
     /// Share physical publication state with ordinary products in the selected
     /// trusted local directory. This does not import verifier associations.
     pub fn directory_store(store: Store) -> Self {
-        Self(Backend::Directory(store), Mutex::default())
+        Self(
+            Backend::Directory(store),
+            Mutex::default(),
+            Arc::new(()),
+            Mutex::default(),
+        )
     }
     /// Keep rows, receipts and type records in the host's bounded storage.
     pub fn hosted<T: VerifierRows + 'static>(rows: Arc<T>) -> Self {
-        Self(Backend::Hosted(rows.clone(), rows), Mutex::default())
+        Self(
+            Backend::Hosted(rows.clone(), rows),
+            Mutex::default(),
+            Arc::new(()),
+            Mutex::default(),
+        )
     }
 
     /// Keep this request's verifier content through best-effort cache eviction.
@@ -462,9 +508,50 @@ impl VerifierCache {
                 }),
             ),
             Mutex::default(),
+            Arc::new(()),
+            Mutex::default(),
         ))
     }
 
+    fn retain_fact(&self, bytes: u64) -> Result<Option<Arc<dyn Send + Sync>>, FactRefusal> {
+        match &self.0 {
+            Backend::Transport(_, rows, _) | Backend::Hosted(rows, _) => rows.retain_fact(bytes),
+            // The in-memory verifier is already an explicit unbounded owner.
+            Backend::Memory(..) => Ok(Some(Arc::new(()))),
+            Backend::Directory(_) | Backend::Registered(..) => Ok(None),
+        }
+    }
+
+    fn read_holds(
+        &self,
+        types: &Arc<TypeInterner>,
+        read: &VRead,
+        signatures: crate::SignatureInputs<'_>,
+    ) -> Result<bool, FactRefusal> {
+        let Some(stamp) = signatures.stamp() else {
+            return Ok(crate::input::read_holds_for_types(
+                types,
+                read,
+                signatures.lookup(),
+            ));
+        };
+        if !Arc::ptr_eq(&stamp.types, types) {
+            return Ok(false);
+        }
+        // Checked lookups only inspect V's immutable table rows. No producer
+        // or private inference runs while the guard table is locked.
+        let mut reads = stamp.reads.lock().unwrap();
+        if let Some((holds, _)) = reads.get(read) {
+            return Ok(*holds);
+        }
+        hirsel_intern::work::count(hirsel_intern::work::Counter::SealedReadComparisons);
+        hirsel_intern::timings::count(hirsel_intern::timings::Count::SealedReadComparisons);
+        let holds = crate::input::read_holds_for_types(types, read, signatures.lookup());
+        if let Some(lease) = self.retain_fact((size_of::<VRead>() + 256) as u64)? {
+            reads.insert(read.clone(), (holds, lease));
+        }
+        Ok(holds)
+    }
     pub(crate) fn publication_batch(&self) -> Option<hirsel_artifact_store::Batch> {
         match &self.0 {
             Backend::Directory(store) => Some(store.batch()),
@@ -767,7 +854,22 @@ impl VerifierCache {
         accepted: &AcceptedArtifact,
         types: Arc<TypeInterner>,
         mut anchor: impl FnMut(&DefPath, u32) -> Option<Anchor>,
-    ) -> Option<ReplayArtifact> {
+    ) -> Option<Arc<ReplayArtifact>> {
+        let resident = self.3.lock().unwrap().clone();
+        if let Some(fact) = resident.iter().find(|fact| {
+            fact.accepted.artifact == accepted.artifact
+                && fact.accepted.policy == accepted.policy
+                && fact.replay.archive.uses_types(&types)
+                && fact
+                    .replay
+                    .owners
+                    .iter()
+                    .all(|(site, (path, occurrence))| anchor(path, *occurrence) == Some(*site))
+        }) {
+            return Some(fact.replay.clone());
+        }
+        hirsel_intern::work::count(hirsel_intern::work::Counter::ReplayArtifactDecodes);
+        hirsel_intern::timings::count(hirsel_intern::timings::Count::ReplayArtifactDecodes);
         let record: ReplayRecord = self.load(
             replay_key(accepted.artifact, accepted.policy),
             REPLAY_DOMAIN,
@@ -806,17 +908,84 @@ impl VerifierCache {
         if identity != Some(accepted.artifact) {
             return None;
         }
-        Some(ReplayArtifact {
-            archive,
+        let replay = Arc::new(ReplayArtifact {
+            archive: archive.frozen_bindings()?,
             overlay,
             identity: accepted.artifact,
             policy: accepted.policy,
             owners,
-        })
+        });
+        let bindings = replay
+            .owners
+            .iter()
+            .map(|(site, owner)| (*site, owner.clone()))
+            .collect::<Vec<_>>();
+        let package = replay.archive.header()?.path.path().0.package.clone();
+        let metadata = ExecutionFact::bytes(&bindings, &package)?
+            .checked_add(size_of::<DecodedFact>() as u64)?
+            .checked_add(
+                (replay.owners.len() as u64)
+                    .checked_mul((3 * size_of::<(Anchor, (DefPath, u32))>() + 64) as u64)?,
+            )?;
+        let lease = match &self.0 {
+            Backend::Memory(..) => Some(Arc::new(()) as Arc<dyn Send + Sync>),
+            Backend::Transport(_, rows, _) | Backend::Hosted(rows, _) => rows
+                .retain_replay(&replay.archive, replay.overlay.as_ref(), metadata)
+                .ok()?,
+            Backend::Directory(_) | Backend::Registered(..) => None,
+        };
+        if let Some(lease) = lease {
+            self.3.lock().unwrap().push(Arc::new(DecodedFact {
+                accepted: accepted.clone(),
+                replay: replay.clone(),
+                _lease: lease,
+            }));
+        }
+        Some(replay)
+    }
+    /// Keep the original local issuance separate from its refreshed context.
+    /// Supplying an old capability never rolls a successful association back.
+    pub fn revalidate_execution(
+        &self,
+        original: &ExecutionReceipt,
+        types: Arc<TypeInterner>,
+        anchor: impl FnMut(&DefPath, u32) -> Option<Anchor>,
+        environment: &dyn ReplayEnvironment,
+    ) -> Option<ExecutionReceipt> {
+        let subject = original.identity()?;
+        match self.load::<ExecutionRecord>(execution_key(subject), EXECUTION_DOMAIN) {
+            Some(record)
+                if record.subject == subject
+                    && record.artifacts.iter().copied().eq(original
+                        .artifacts
+                        .iter()
+                        .map(|a| (a.artifact, a.policy, a.receipt))) => {}
+            Some(_) => return None,
+            None => self.publish_execution(subject, original),
+        }
+        self.execution_revalidated(subject, types, anchor, environment)
     }
     /// Refresh only a local association, running V here against independently
     /// supplied current views. A caller cannot refresh it with cloned evidence.
     pub fn execution_revalidated(
+        &self,
+        subject: ContentHash,
+        types: Arc<TypeInterner>,
+        anchor: impl FnMut(&DefPath, u32) -> Option<Anchor>,
+        environment: &dyn ReplayEnvironment,
+    ) -> Option<ExecutionReceipt> {
+        hirsel_intern::work::count(hirsel_intern::work::Counter::ExecutionValidationRequests);
+        hirsel_intern::timings::count(hirsel_intern::timings::Count::ExecutionValidationRequests);
+        let result = self.execution_revalidated_inner(subject, types, anchor, environment);
+        if result.is_none() {
+            hirsel_intern::work::count(hirsel_intern::work::Counter::ExecutionValidationRefusals);
+            hirsel_intern::timings::count(
+                hirsel_intern::timings::Count::ExecutionValidationRefusals,
+            );
+        }
+        result
+    }
+    fn execution_revalidated_inner(
         &self,
         subject: ContentHash,
         types: Arc<TypeInterner>,
@@ -837,27 +1006,124 @@ impl VerifierCache {
             .map(|(package, _)| Some((package.clone(), environment.base_digest(package)?)))
             .collect::<Option<_>>()?;
         let changed = contexts != record.contexts;
+        let mut checked = Vec::new();
+        for (package, digest) in &contexts {
+            if let Some(input) = environment.checked(package) {
+                let stamp = input.stamp();
+                if !Arc::ptr_eq(&stamp.types, &types) || input.input_digest() != *digest {
+                    return None;
+                }
+                checked.push((package, input));
+            }
+        }
         let mut artifacts = Vec::new();
+        let mut pending = Vec::new();
         let mut covered = std::collections::BTreeSet::new();
-        for (artifact, policy) in record.artifacts {
-            let accepted = AcceptedArtifact { artifact, policy };
-            if changed {
+        for (artifact, policy, receipt) in record.artifacts {
+            let accepted = AcceptedArtifact {
+                artifact,
+                policy,
+                receipt,
+            };
+            if artifacts.contains(&accepted) {
+                artifacts.push(accepted);
+                continue;
+            }
+            if changed || !checked.is_empty() {
+                hirsel_intern::work::count(hirsel_intern::work::Counter::ExecutionReplayRequests);
+                hirsel_intern::timings::count(
+                    hirsel_intern::timings::Count::ExecutionReplayRequests,
+                );
+                let held: Vec<_> = checked
+                    .iter()
+                    .flat_map(|(_, input)| {
+                        input
+                            .stamp()
+                            .execution
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                if let Some(fact) = held
+                    .iter()
+                    .find(|fact| fact.holds(&self.2, &types, &accepted, &mut anchor))
+                {
+                    covered.insert(fact.package.clone());
+                    artifacts.push(accepted);
+                    continue;
+                }
+                hirsel_intern::work::count(
+                    hirsel_intern::work::Counter::ExecutionReplayComputations,
+                );
+                hirsel_intern::timings::count(
+                    hirsel_intern::timings::Count::ExecutionReplayComputations,
+                );
                 let replay = self.replay_artifact(&accepted, types.clone(), &mut anchor)?;
                 let package = replay.archive.header()?.path.path().0.package.clone();
                 if !contexts.iter().any(|(p, _)| *p == package) {
                     return None;
                 }
                 covered.insert(package.clone());
-                let views = environment.views(&package, replay.overlay.clone())?;
-                let verdict_key = ContentHash::of_parts(
-                    "hirsel.validate.receipt.v2",
-                    [accepted.artifact.0.as_slice(), accepted.policy.0.as_slice()],
-                );
-                let original: Receipt = self.load(verdict_key, DOMAIN)?;
+                let base = checked
+                    .iter()
+                    .find(|(p, _)| **p == package)
+                    .map(|(_, input)| *input);
+                let checked_overlay = match (base, &replay.overlay) {
+                    (Some(base), Some(overlay)) => {
+                        let views = environment.checked_overlay(&package, overlay.clone())?;
+                        if views.origin_input() != base.input_digest()
+                            || !Arc::ptr_eq(
+                                &crate::CheckedEnvironment::stamp(&*views).types,
+                                &types,
+                            )
+                            || !views
+                                .replacement(overlay.definition)
+                                .is_some_and(|view| view.digest() == crate::digest(&types, overlay))
+                        {
+                            return None;
+                        }
+                        Some(views)
+                    }
+                    _ => None,
+                };
+                let raw;
+                let (views, reusable): (&dyn SignatureLookup, bool) =
+                    match (&replay.overlay, base, &checked_overlay) {
+                        (None, Some(base), _) => (base, true),
+                        (Some(_), _, Some(overlay)) => (&**overlay, true),
+                        _ => {
+                            raw = environment.views(&package, replay.overlay.clone())?;
+                            (&*raw, false)
+                        }
+                    };
+                let inputs = if let Some(overlay) = &checked_overlay {
+                    crate::SignatureInputs::Checked(&**overlay)
+                } else if replay.overlay.is_none()
+                    && let Some(base) = base
+                {
+                    crate::SignatureInputs::Checked(base)
+                } else {
+                    crate::SignatureInputs::Raw(views)
+                };
+                let original: Receipt =
+                    self.load(original_receipt_key(accepted.receipt), DOMAIN)?;
+                let mut refused = false;
                 if original.artifact != accepted.artifact
                     || original.policy != accepted.policy
+                    || original.action != accepted.receipt
+                    || original.action
+                        != receipt_action(original.artifact, original.policy, &original.reads)
                     || !original.reads.iter().all(|read| {
-                        if read_holds(read, &*views) {
+                        if match self.read_holds(&types, read, inputs) {
+                            Ok(holds) => holds,
+                            Err(_) => {
+                                refused = true;
+                                false
+                            }
+                        } {
                             return true;
                         }
                         // A new earlier declaration may carry the exact same
@@ -880,26 +1146,60 @@ impl VerifierCache {
                     return None;
                 }
 
+                if refused {
+                    return None;
+                }
                 // replay_artifact independently identified this decoded
                 // closure. Its immutable fields have not changed since then.
+                let bindings = replay
+                    .owners
+                    .iter()
+                    .map(|(anchor, owner)| (*anchor, owner.clone()))
+                    .collect::<Vec<_>>();
                 let exact = Artifact {
                     definition: hirsel_product_codec::TirView::Archived(&replay.archive),
                     types: types.clone(),
                     identity: Some(replay.identity),
-                    owners: replay.owners,
-                    overlay: replay.overlay,
+                    owners: replay.owners.clone(),
+                    overlay: replay.overlay.clone(),
                 };
                 // A refused read revalidates nothing: the execution runs again.
-                let (report, _, refreshed) =
-                    validate_with_receipt(&exact, &*views, replay.policy, Some(self), &mut vec![])
-                        .ok()?;
-                if !report.violations.is_empty() || refreshed.as_ref() != Some(&accepted) {
+                let (report, _, refreshed) = validate_with_receipt_in(
+                    &exact,
+                    inputs,
+                    replay.policy,
+                    Some(self),
+                    &mut vec![],
+                )
+                .ok()?;
+                if !report.violations.is_empty()
+                    || !refreshed.as_ref().is_some_and(|current| {
+                        current.artifact == accepted.artifact && current.policy == accepted.policy
+                    })
+                {
                     return None;
+                }
+                if reusable
+                    && let Some(base) = base
+                    && let Some(bytes) = ExecutionFact::bytes(&bindings, &package)
+                    && let Some(lease) = self.retain_fact(bytes).ok()?
+                {
+                    pending.push((
+                        base.stamp(),
+                        Arc::new(ExecutionFact {
+                            issuer: Arc::downgrade(&self.2),
+                            types: Arc::downgrade(&types),
+                            artifact: accepted.clone(),
+                            package,
+                            bindings,
+                            _lease: lease,
+                        }),
+                    ));
                 }
             }
             artifacts.push(accepted);
         }
-        if changed && contexts.iter().any(|(p, _)| !covered.contains(p)) {
+        if (changed || !checked.is_empty()) && contexts.iter().any(|(p, _)| !covered.contains(p)) {
             return None;
         }
         // The independently observed environment must remain the same through V.
@@ -908,6 +1208,9 @@ impl VerifierCache {
             .any(|(p, d)| environment.base_digest(p) != Some(*d))
         {
             return None;
+        }
+        for (stamp, fact) in pending {
+            stamp.execution.lock().unwrap().push(fact);
         }
         let receipt = ExecutionReceipt {
             contexts: contexts.into(),
@@ -930,7 +1233,7 @@ impl VerifierCache {
                 artifacts: receipt
                     .artifacts
                     .iter()
-                    .map(|a| (a.artifact, a.policy))
+                    .map(|a| (a.artifact, a.policy, a.receipt))
                     .collect(),
             },
         );
@@ -960,10 +1263,60 @@ impl VerifierCache {
             artifacts: record
                 .artifacts
                 .into_iter()
-                .map(|(artifact, policy)| AcceptedArtifact { artifact, policy })
+                .map(|(artifact, policy, receipt)| AcceptedArtifact {
+                    artifact,
+                    policy,
+                    receipt,
+                })
                 .collect::<Vec<_>>()
                 .into(),
         })
+    }
+}
+
+/// A successful exact-artifact comparison in one V-owned base environment.
+/// Only the replay path constructs this; a producer cannot import its stamp.
+pub(crate) struct ExecutionFact {
+    issuer: Weak<()>,
+    types: Weak<TypeInterner>,
+    artifact: AcceptedArtifact,
+    package: PackageId,
+    bindings: Vec<(Anchor, (DefPath, u32))>,
+    _lease: Arc<dyn Send + Sync>,
+}
+impl ExecutionFact {
+    fn holds(
+        &self,
+        issuer: &Arc<()>,
+        types: &Arc<TypeInterner>,
+        accepted: &AcceptedArtifact,
+        anchor: &mut impl FnMut(&DefPath, u32) -> Option<Anchor>,
+    ) -> bool {
+        self.issuer.ptr_eq(&Arc::downgrade(issuer))
+            && self.types.ptr_eq(&Arc::downgrade(types))
+            && &self.artifact == accepted
+            && self
+                .bindings
+                .iter()
+                .all(|(site, (path, occurrence))| anchor(path, *occurrence) == Some(*site))
+    }
+    fn bytes(bindings: &[(Anchor, (DefPath, u32))], package: &PackageId) -> Option<u64> {
+        let mut bytes = (std::mem::size_of::<Self>() + 256) as u64;
+        bytes = bytes
+            .checked_add(package.name.capacity() as u64)?
+            .checked_add(package.version.capacity() as u64)?;
+        bytes = bytes.checked_add(std::mem::size_of_val(bindings) as u64)?;
+        for (_, (path, _)) in bindings {
+            bytes = bytes
+                .checked_add(path.0.package.name.capacity() as u64)?
+                .checked_add(path.0.package.version.capacity() as u64)?
+                .checked_add(path.0.name.capacity() as u64)?
+                .checked_add((path.0.modules.capacity() * std::mem::size_of::<String>()) as u64)?;
+            for module in &path.0.modules {
+                bytes = bytes.checked_add(module.capacity() as u64)?;
+            }
+        }
+        Some(bytes)
     }
 }
 
@@ -971,7 +1324,21 @@ impl VerifierCache {
 /// views, never verdicts. Overlay bytes come only from the verifier's exact
 /// locally retained artifact, and are independently checked again by V.
 pub trait ReplayEnvironment {
+    /// V-owned complete immutable base, when the adapter retains one. General
+    /// lookups supply no stamp and keep the ordinary uncached replay path.
+    fn checked(&self, _package: &PackageId) -> Option<&dyn crate::CheckedEnvironment> {
+        None
+    }
     fn base_digest(&self, package: &PackageId) -> Option<ContentHash>;
+    /// A replacement checked by V. V checks its complete pre-replacement
+    /// identity against `checked`; unrelated checked views grant no stamp.
+    fn checked_overlay(
+        &self,
+        _package: &PackageId,
+        _overlay: hirsel_types::SignatureRef,
+    ) -> Option<Arc<crate::PackageViews>> {
+        None
+    }
     fn views(
         &self,
         package: &PackageId,
@@ -1005,6 +1372,11 @@ struct ReplayRows {
     overlay: Option<hirsel_types::SignatureRef>,
     owners: std::collections::BTreeMap<Anchor, (DefPath, u32)>,
 }
+struct DecodedFact {
+    accepted: AcceptedArtifact,
+    replay: Arc<ReplayArtifact>,
+    _lease: Arc<dyn Send + Sync>,
+}
 /// Construction is verifier-private. These bytes alone are not acceptance.
 struct ReplayArtifact {
     archive: hirsel_product_codec::CheckedTir,
@@ -1015,10 +1387,10 @@ struct ReplayArtifact {
 }
 const EXECUTION_DOMAIN: Domain = Domain {
     kind: 0x5600_0002,
-    schema: 2,
+    schema: 3,
 };
 fn execution_key(subject: ContentHash) -> ContentHash {
-    ContentHash::of_parts("hirsel.validate.execution.v2", [subject.0.as_slice()])
+    ContentHash::of_parts("hirsel.validate.execution.v3", [subject.0.as_slice()])
 }
 /// A terminal successful V decision. There is intentionally no Deserialize or
 /// producer constructor: only validate_with_receipt can mint this capability.
@@ -1026,6 +1398,7 @@ fn execution_key(subject: ContentHash) -> ContentHash {
 pub struct AcceptedArtifact {
     artifact: ContentHash,
     policy: ContentHash,
+    receipt: ContentHash,
 }
 /// Composed execution evidence contains small artifact identities, not bodies.
 /// Its complete independent base contexts guard private overlays and callees.
@@ -1041,11 +1414,11 @@ impl ExecutionReceipt {
         let artifacts: Vec<_> = self
             .artifacts
             .iter()
-            .map(|accepted| (accepted.artifact, accepted.policy))
+            .map(|accepted| (accepted.artifact, accepted.policy, accepted.receipt))
             .collect();
         let bytes = bincode::serialize(&(self.contexts.as_ref(), artifacts)).ok()?;
         Some(ContentHash::of_parts(
-            "hirsel.validate.execution-receipt.v1",
+            "hirsel.validate.execution-receipt.v2",
             [bytes.as_slice()],
         ))
     }
@@ -1089,7 +1462,7 @@ impl ExecutionReceipt {
 struct ExecutionRecord {
     subject: ContentHash,
     contexts: Vec<(PackageId, ContentHash)>,
-    artifacts: Vec<(ContentHash, ContentHash)>,
+    artifacts: Vec<(ContentHash, ContentHash, ContentHash)>,
 }
 
 /// Reuse only this verifier's successful terminal record, after independently
@@ -1108,9 +1481,18 @@ pub fn validate_cached(
 }
 /// The same validation path, retaining the opaque evidence for composition
 /// with dependent private/source artifacts after successful execution.
-pub fn validate_with_receipt(
+pub fn validate_with_receipt<'a>(
     artifact: &Artifact<'_>,
-    signatures: &dyn SignatureLookup,
+    signatures: impl Into<crate::SignatureInputs<'a>>,
+    policy: ContentHash,
+    cache: Option<&VerifierCache>,
+    reads: &mut Vec<VRead>,
+) -> Result<(Validation, bool, Option<AcceptedArtifact>), crate::ViewRefusal> {
+    validate_with_receipt_in(artifact, signatures.into(), policy, cache, reads)
+}
+fn validate_with_receipt_in(
+    artifact: &Artifact<'_>,
+    signatures: crate::SignatureInputs<'_>,
     policy: ContentHash,
     cache: Option<&VerifierCache>,
     reads: &mut Vec<VRead>,
@@ -1126,54 +1508,82 @@ pub fn validate_with_receipt(
         && receipt.artifact == identity
         && receipt.policy == policy
         && receipt.action == receipt_action(identity, policy, &receipt.reads)
-        && receipt
-            .reads
-            .iter()
-            .all(|read| crate::input::read_holds_for_types(&artifact.types, read, signatures))
     {
-        cache.retain_artifact(artifact, policy);
-        reads.extend(receipt.reads);
-        return Ok((
-            Validation::default(),
-            false,
-            Some(AcceptedArtifact {
-                artifact: identity,
-                policy,
-            }),
-        ));
+        let mut holds = true;
+        for read in &receipt.reads {
+            if !cache
+                .read_holds(&artifact.types, read, signatures)
+                .map_err(|_| crate::ViewRefusal::Unreadable {
+                    definition: artifact
+                        .definition
+                        .header()
+                        .expect("identified artifact header")
+                        .path,
+                    cause: hirsel_types::QueryError::Operational(
+                        hirsel_types::OperationalFailure {
+                            operation: "verifier fact retention".into(),
+                            message: "existing request allowance refused a read fact".into(),
+                        },
+                    ),
+                })?
+            {
+                holds = false;
+                break;
+            }
+        }
+        if holds {
+            cache.retain_artifact(artifact, policy);
+            cache.publish(original_receipt_key(receipt.action), DOMAIN, &receipt);
+            let original_action = receipt.action;
+            reads.extend(receipt.reads);
+            return Ok((
+                Validation::default(),
+                false,
+                Some(AcceptedArtifact {
+                    artifact: identity,
+                    policy,
+                    receipt: original_action,
+                }),
+            ));
+        }
     }
     let mut own = vec![];
-    let report = crate::validate_rows(artifact.definition, &artifact.types, signatures, &mut own)?
-        .unwrap_or_else(|| Validation {
-            violations: vec![crate::Violation {
-                body: None,
-                block: None,
-                instruction: None,
-                kind: crate::ViolationKind::InvalidTypeGraph,
-            }],
-        });
+    let report = crate::validate_rows(
+        artifact.definition,
+        &artifact.types,
+        signatures.lookup(),
+        &mut own,
+    )?
+    .unwrap_or_else(|| Validation {
+        violations: vec![crate::Violation {
+            body: None,
+            block: None,
+            instruction: None,
+            kind: crate::ViolationKind::InvalidTypeGraph,
+        }],
+    });
     if report.violations.is_empty()
         && let (Some(cache), Some(key), Some(identity)) = (cache, key, artifact.identity)
     {
         cache.retain_artifact(artifact, policy);
-        cache.publish(
-            key,
-            DOMAIN,
-            &Receipt {
-                action: receipt_action(identity, policy, &own),
-                artifact: identity,
-                policy,
-                reads: own.clone(),
-            },
-        );
+        let receipt = Receipt {
+            action: receipt_action(identity, policy, &own),
+            artifact: identity,
+            policy,
+            reads: own.clone(),
+        };
+        cache.publish(original_receipt_key(receipt.action), DOMAIN, &receipt);
+        cache.publish(key, DOMAIN, &receipt);
     }
     let accepted = report
         .violations
         .is_empty()
         .then(|| {
-            artifact
-                .identity
-                .map(|artifact| AcceptedArtifact { artifact, policy })
+            artifact.identity.map(|artifact| AcceptedArtifact {
+                artifact,
+                policy,
+                receipt: receipt_action(artifact, policy, &own),
+            })
         })
         .flatten();
     reads.extend(own);
@@ -1357,6 +1767,7 @@ mod tests {
         struct Rows(
             hirsel_artifact_store::Memory,
             Mutex<HashMap<ContentHash, hirsel_artifact_store::Reference>>,
+            std::sync::atomic::AtomicBool,
         );
         impl hirsel_artifact_store::Contents for Rows {
             fn get_content(
@@ -1374,6 +1785,21 @@ mod tests {
             }
         }
         impl VerifierRows for Rows {
+            fn retain_fact(&self, _: u64) -> Result<Option<Arc<dyn Send + Sync>>, FactRefusal> {
+                if self.2.load(std::sync::atomic::Ordering::Relaxed) {
+                    Err(FactRefusal)
+                } else {
+                    Ok(Some(Arc::new(())))
+                }
+            }
+            fn retain_replay(
+                &self,
+                _: &hirsel_product_codec::CheckedTir,
+                _: Option<&hirsel_types::SignatureRef>,
+                bytes: u64,
+            ) -> Result<Option<Arc<dyn Send + Sync>>, FactRefusal> {
+                self.retain_fact(bytes)
+            }
             fn row(&self, key: ContentHash) -> Option<hirsel_artifact_store::Reference> {
                 self.1.lock().unwrap().get(&key).copied()
             }
@@ -1381,7 +1807,8 @@ mod tests {
                 self.1.lock().unwrap().insert(key, reference);
             }
         }
-        let cache = VerifierCache::hosted(Arc::new(Rows::default()));
+        let rows = Arc::new(Rows::default());
+        let cache = VerifierCache::hosted(rows.clone());
         let types = session();
         let baseline = Arc::strong_count(&types);
         let records = cache.records(types.clone());
@@ -1394,6 +1821,62 @@ mod tests {
         assert!(
             Arc::strong_count(&types) > baseline,
             "directory caches keep their codec"
+        );
+        let mut f = Fixture::unit();
+        owner_sig(&mut f, &[]);
+        f.body().blocks[0].span.anchor = Anchor::fresh();
+        let site = f.definition.bodies[0].blocks[0].span.anchor;
+        let (_, _, accepted) = validate_with_receipt(
+            &artifact(&f),
+            &f.signatures,
+            ContentHash::default(),
+            Some(&cache),
+            &mut vec![],
+        )
+        .unwrap();
+        let package = path("main").0.package;
+        let original = ExecutionReceipt::compose(
+            &[(package.clone(), ContentHash::of_bytes(b"old"))],
+            &[accepted.unwrap()],
+        )
+        .unwrap();
+        let table = crate::ViewTable::new(
+            &session(),
+            f.signatures.values().cloned().map(Arc::new),
+            None,
+            &mut crate::ValidatedSignatures::default(),
+            None,
+        )
+        .unwrap();
+        let environment = CheckedReplay {
+            package: &package,
+            views: &table,
+        };
+        rows.2.store(true, std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..2 {
+            assert!(
+                cache
+                    .revalidate_execution(&original, session(), |_, _| Some(site), &environment)
+                    .is_none()
+            );
+            assert!(
+                cache.3.lock().unwrap().is_empty(),
+                "a refused decode reservation publishes no retained artifact"
+            );
+            assert!(
+                crate::CheckedEnvironment::stamp(&table)
+                    .execution
+                    .lock()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        rows.2.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            cache
+                .revalidate_execution(&original, session(), |_, _| Some(site), &environment)
+                .is_some(),
+            "operational refusal remains retryable"
         );
     }
 
@@ -1798,6 +2281,183 @@ mod tests {
         }
     }
 
+    struct CheckedReplay<'a> {
+        package: &'a PackageId,
+        views: &'a crate::ViewTable,
+    }
+    impl ReplayEnvironment for CheckedReplay<'_> {
+        fn checked(&self, package: &PackageId) -> Option<&dyn crate::CheckedEnvironment> {
+            (package == self.package).then_some(self.views)
+        }
+        fn base_digest(&self, package: &PackageId) -> Option<ContentHash> {
+            (package == self.package).then(|| self.views.input_digest())
+        }
+        fn views(
+            &self,
+            package: &PackageId,
+            _: Option<hirsel_types::SignatureRef>,
+        ) -> Option<Box<dyn SignatureLookup + '_>> {
+            (package == self.package).then(|| Box::new(self.views) as Box<dyn SignatureLookup>)
+        }
+    }
+
+    #[test]
+    fn execution_facts_compute_each_authenticated_input_once_and_reject_foreign_bindings() {
+        use hirsel_intern::work::{self, Counter};
+        let mut f = Fixture::unit();
+        owner_sig(&mut f, &[]);
+        f.body().blocks[0].span.anchor = Anchor::fresh();
+        let site = f.definition.bodies[0].blocks[0].span.anchor;
+        let cache = Arc::new(VerifierCache::default());
+        let policy = ContentHash::default();
+        let (_, _, accepted) = validate_with_receipt(
+            &artifact(&f),
+            &f.signatures,
+            policy,
+            Some(&cache),
+            &mut vec![],
+        )
+        .unwrap();
+        let accepted = accepted.unwrap();
+        let package = path("main").0.package;
+        let original = ExecutionReceipt::compose(
+            &[(package.clone(), ContentHash::of_bytes(b"original"))],
+            &[accepted.clone(), accepted.clone()],
+        )
+        .unwrap();
+        let table = |extra| {
+            let mut rows = f
+                .signatures
+                .values()
+                .cloned()
+                .map(Arc::new)
+                .collect::<Vec<_>>();
+            if extra {
+                let mut unrelated = (*rows[0]).clone();
+                unrelated.definition = hirsel_syntax::DefId::intern(&path("unrelated"));
+                rows.push(Arc::new(unrelated));
+            }
+            crate::ViewTable::new(
+                &session(),
+                rows,
+                None,
+                &mut crate::ValidatedSignatures::default(),
+                None,
+            )
+            .unwrap()
+        };
+        let tables = [table(false), table(true)];
+        assert_ne!(tables[0].input_digest(), tables[1].input_digest());
+        let verdict_key = ContentHash::of_parts(
+            "hirsel.validate.receipt.v2",
+            [accepted.artifact.0.as_slice(), accepted.policy.0.as_slice()],
+        );
+        let recorded: Receipt = cache.load(verdict_key, DOMAIN).unwrap();
+        // Enumerate the fixture's authenticated inputs independently of cache
+        // counters and consumer count. The recorded reads are input to replay.
+        let decoded =
+            std::collections::BTreeSet::from([(accepted.artifact, accepted.policy, site)]);
+        let environments = (0..tables.len())
+            .map(|i| (accepted.artifact, accepted.policy, i))
+            .collect::<std::collections::BTreeSet<_>>();
+        let reads = (0..tables.len())
+            .flat_map(|i| recorded.reads.iter().cloned().map(move |read| (i, read)))
+            .collect::<std::collections::BTreeSet<_>>();
+        let before = [
+            Counter::ReplayArtifactDecodes,
+            Counter::ExecutionReplayComputations,
+            Counter::SealedReadComparisons,
+        ]
+        .map(work::read);
+        for index in [0, 1, 0, 1] {
+            let environment = CheckedReplay {
+                package: &package,
+                views: &tables[index],
+            };
+            for _ in 0..5 {
+                assert!(
+                    cache
+                        .revalidate_execution(
+                            &original,
+                            session(),
+                            |p, n| (*p == path("main") && n == 0).then_some(site),
+                            &environment
+                        )
+                        .is_some()
+                );
+            }
+        }
+        let actual = [
+            Counter::ReplayArtifactDecodes,
+            Counter::ExecutionReplayComputations,
+            Counter::SealedReadComparisons,
+        ]
+        .map(work::read);
+        let actual = std::array::from_fn::<_, 3, _>(|i| actual[i] - before[i]);
+        assert!(
+            actual[0] <= decoded.len() as u64,
+            "decode work follows exact artifact/binding identities"
+        );
+        assert!(
+            actual[1] <= environments.len() as u64,
+            "compatibility follows complete immutable environments"
+        );
+        assert!(
+            actual[2] <= reads.len() as u64,
+            "read comparisons {actual:?} exceed {} exact read/observer identities",
+            reads.len()
+        );
+        let environment = CheckedReplay {
+            package: &package,
+            views: &tables[1],
+        };
+        assert!(
+            cache
+                .revalidate_execution(&original, session(), |_, _| None, &environment)
+                .is_none()
+        );
+        assert!(
+            cache
+                .revalidate_execution(
+                    &original,
+                    TypeInterner::new(None),
+                    |_, _| Some(site),
+                    &environment
+                )
+                .is_none()
+        );
+        let wrong = ExecutionReceipt::compose(
+            original.contexts(),
+            &[AcceptedArtifact {
+                artifact: accepted.artifact,
+                policy: ContentHash::of_bytes(b"foreign policy"),
+                receipt: accepted.receipt,
+            }],
+        )
+        .unwrap();
+        assert!(
+            cache
+                .revalidate_execution(&wrong, session(), |_, _| Some(site), &environment)
+                .is_none()
+        );
+        assert!(
+            VerifierCache::default()
+                .revalidate_execution(&original, session(), |_, _| Some(site), &environment)
+                .is_none()
+        );
+        let next = cache.for_operation(None);
+        let before = work::read(Counter::ReplayArtifactDecodes);
+        assert!(
+            next.revalidate_execution(&original, session(), |_, _| Some(site), &environment)
+                .is_some()
+        );
+        assert_eq!(
+            work::read(Counter::ReplayArtifactDecodes) - before,
+            decoded.len() as u64,
+            "a new operation has its own decoded owner and issuer"
+        );
+    }
+
     #[test]
     fn execution_replay_runs_v_and_refuses_missing_wrong_or_uncovered_contexts() {
         let mut f = Fixture::unit();
@@ -1980,7 +2640,7 @@ mod tests {
         // The ordinary read guard stays exact. Only verifier replay compares
         // the complete role and validates the retained artifact again.
         let old_heap = VRead::FirstHeap(Some(hirsel_syntax::DefId::intern(&path("Arena"))));
-        assert!(!read_holds(&old_heap, &current));
+        assert!(!crate::read_holds(&old_heap, &current));
         assert!(attempt(&MissingHeap(&current)).is_none());
         for field in ["arena", "operation"] {
             let mut changed = current.clone();
@@ -2059,6 +2719,105 @@ mod tests {
             cache
                 .replay_artifact(&accepted, session(), |_, _| None)
                 .is_none()
+        );
+        let base = Arc::new(
+            crate::ViewTable::new(
+                &session(),
+                f.signatures.values().cloned().map(Arc::new),
+                None,
+                &mut crate::ValidatedSignatures::default(),
+                None,
+            )
+            .unwrap(),
+        );
+        let mut unrelated = (*signature).clone();
+        unrelated.definition = hirsel_syntax::DefId::intern(&path("unrelated_overlay_base"));
+        let other = Arc::new(
+            crate::ViewTable::new(
+                &session(),
+                [signature.clone(), Arc::new(unrelated)],
+                None,
+                &mut crate::ValidatedSignatures::default(),
+                None,
+            )
+            .unwrap(),
+        );
+        let overlay = Arc::new(
+            crate::PackageViews::new(
+                &session(),
+                other.clone(),
+                [crate::View::new(&session(), signature.clone(), None)],
+                &mut crate::ValidatedSignatures::default(),
+                None,
+            )
+            .unwrap(),
+        );
+        struct OverlayInputs<'a> {
+            base: &'a crate::ViewTable,
+            overlay: Arc<crate::PackageViews>,
+            package: &'a PackageId,
+        }
+        impl ReplayEnvironment for OverlayInputs<'_> {
+            fn checked(&self, p: &PackageId) -> Option<&dyn crate::CheckedEnvironment> {
+                (p == self.package).then_some(self.base)
+            }
+            fn base_digest(&self, p: &PackageId) -> Option<ContentHash> {
+                (p == self.package).then(|| self.base.input_digest())
+            }
+            fn checked_overlay(
+                &self,
+                p: &PackageId,
+                _: hirsel_types::SignatureRef,
+            ) -> Option<Arc<crate::PackageViews>> {
+                (p == self.package).then(|| self.overlay.clone())
+            }
+            fn views(
+                &self,
+                p: &PackageId,
+                _: Option<hirsel_types::SignatureRef>,
+            ) -> Option<Box<dyn SignatureLookup + '_>> {
+                (p == self.package)
+                    .then(|| Box::new(self.overlay.clone()) as Box<dyn SignatureLookup>)
+            }
+        }
+        let package = path("main").0.package;
+        let original = ExecutionReceipt::compose(
+            &[(
+                package.clone(),
+                ContentHash::of_bytes(b"old overlay context"),
+            )],
+            &[accepted.clone()],
+        )
+        .unwrap();
+        assert!(
+            cache
+                .revalidate_execution(
+                    &original,
+                    session(),
+                    |_, _| Some(anchor),
+                    &OverlayInputs {
+                        base: &base,
+                        overlay: overlay.clone(),
+                        package: &package,
+                    }
+                )
+                .is_none(),
+            "a checked overlay cannot refresh an unrelated declared base, even if every recorded read holds"
+        );
+        assert!(
+            cache
+                .revalidate_execution(
+                    &original,
+                    session(),
+                    |_, _| Some(anchor),
+                    &OverlayInputs {
+                        base: &other,
+                        overlay,
+                        package: &package,
+                    }
+                )
+                .is_some(),
+            "the complete matching base still replays"
         );
         let source = Store::new(directory.0.clone());
         let association = source

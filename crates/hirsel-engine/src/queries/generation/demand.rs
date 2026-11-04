@@ -1119,25 +1119,13 @@ impl DemandProducer {
         definitions: &[DefPath],
         registrations: &[Arc<AcceptedFrontRegistration>],
     ) -> Result<Arc<FrontLowerQueries>, QueryError> {
+        engine.prepare_namespace_scope(registrations);
+        let refreshed = registrations
+            .iter()
+            .map(|registration| registration.in_engine(engine, &self.syntax))
+            .collect::<Result<Vec<_>, _>>()?;
         let namespace =
-            engine.capture_namespace(definitions, registrations, self.front.available_bytes())?;
-        let mut refreshed = Vec::with_capacity(registrations.len());
-        let mut changed = false;
-        for registration in registrations {
-            let current = registration.in_capture(
-                &namespace,
-                |path, key| engine.observe(path, key),
-                &self.syntax,
-            )?;
-            changed |= !Arc::ptr_eq(registration, &current);
-            refreshed.push(current);
-        }
-        let namespace = if changed {
-            drop(namespace);
-            engine.capture_namespace(definitions, &refreshed, self.front.available_bytes())?
-        } else {
-            namespace
-        };
+            engine.capture_namespace(definitions, &refreshed, self.front.available_bytes())?;
         {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let existing = state

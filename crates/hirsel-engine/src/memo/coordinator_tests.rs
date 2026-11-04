@@ -481,8 +481,22 @@ fn unbounded_generator_evidence_matches_cold() {
 #[test]
 fn dropped_worker_releases_its_claims() {
     let coordinator = S1Coordinator::<usize>::new();
-    let mut a = coordinator.worker::<u32>();
+    let mut a = coordinator.thread_worker::<u32>();
     assert_eq!(a.enter(1, 0), Entered::Run);
+    {
+        let mut nested = coordinator.thread_worker::<u32>();
+        assert_eq!(
+            nested.id, a.id,
+            "nested synchronous producers keep their wait-graph owner"
+        );
+        assert_eq!(nested.enter(1, 0), Entered::Run);
+        drop(nested);
+        assert_eq!(
+            coordinator.stats().claims,
+            1,
+            "dropping an inline duplicate retains the outer claim"
+        );
+    }
     let waiter = {
         let coordinator = coordinator.clone();
         std::thread::spawn(move || {

@@ -102,6 +102,9 @@ impl<K, V> Default for SourceTable<K, V> {
     }
 }
 impl<K, V> SourceTable<K, V> {
+    pub(super) fn owner(&self) -> std::sync::Weak<BTreeMap<K, V>> {
+        Arc::downgrade(&self.values)
+    }
     pub(super) fn observations(&self) -> Arc<BTreeMap<K, V>> {
         self.values.clone()
     }

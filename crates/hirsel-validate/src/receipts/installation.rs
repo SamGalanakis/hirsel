@@ -2,7 +2,7 @@
 //! trusted associations in local state; git setup.c keeps repository state out
 //! of transported objects. Product roots never select this private namespace.
 use super::*;
-use hirsel_artifact_store::{Contents as _, Reference};
+use hirsel_artifact_store::Reference;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -240,6 +240,8 @@ impl Installation {
         });
         Ok(Arc::new(VerifierCache(
             Backend::Registered(local, rows),
+            Mutex::default(),
+            Arc::new(()),
             Mutex::default(),
         )))
     }

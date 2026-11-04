@@ -1421,45 +1421,48 @@ impl QueryEngine {
         let text = self.key_text(path, kind)?;
         Ok(self.product_store_key(path, kind, text))
     }
-    pub(super) fn accepted_front_store_key(
+    pub(super) fn accepted_front_store_keys(
         &mut self,
         accepted: &AcceptedFrontRegistration,
-        kind: QueryKind,
-    ) -> Result<EntryKey, QueryError> {
-        accepted.validate(self)?;
-        if !matches!(
-            kind,
-            QueryKind::Modes | QueryKind::Lower | QueryKind::Evaluate
-        ) {
-            return Err(QueryError::NotImplemented);
-        }
+    ) -> Result<[EntryKey; 3], QueryError> {
         let path = accepted.definition();
-        let mut text = self.key_text(path, kind)?;
-        let manifest = bincode::serialize(&accepted.generation_manifest())
-            .map_err(|_| QueryError::NotImplemented)?;
-        text = ContentHash::of_parts(
-            "hirsel.generated-source.inputs.v1",
-            [text.0.as_slice(), manifest.as_slice()],
-        );
-        if kind == QueryKind::Modes {
-            let dependencies = bincode::serialize(accepted.checked_prefix())
+        let input = self.key_text(path, QueryKind::Modes)?;
+        // All three body kinds observe the same declaration and exact private
+        // execution. Deriving their addresses consumes that one predicate.
+        accepted.validate(self)?;
+        let key = |kind| -> Result<EntryKey, QueryError> {
+            let mut text = input;
+            let manifest = bincode::serialize(&accepted.generation_manifest())
                 .map_err(|_| QueryError::NotImplemented)?;
             text = ContentHash::of_parts(
-                "hirsel.generated-mode.inputs.v2",
-                [
-                    text.0.as_slice(),
-                    accepted.text().as_bytes(),
-                    dependencies.as_slice(),
-                ],
+                "hirsel.generated-source.inputs.v1",
+                [text.0.as_slice(), manifest.as_slice()],
             );
-        }
-        if kind == QueryKind::Lower {
-            text = ContentHash::of_parts(
-                "hirsel.generated-lower.inputs.v1",
-                [text.0.as_slice(), accepted.text().as_bytes()],
-            );
-        }
-        Ok(self.product_store_key(path, kind, text))
+            if kind == QueryKind::Modes {
+                let dependencies = bincode::serialize(accepted.checked_prefix())
+                    .map_err(|_| QueryError::NotImplemented)?;
+                text = ContentHash::of_parts(
+                    "hirsel.generated-mode.inputs.v2",
+                    [
+                        text.0.as_slice(),
+                        accepted.text().as_bytes(),
+                        dependencies.as_slice(),
+                    ],
+                );
+            }
+            if kind == QueryKind::Lower {
+                text = ContentHash::of_parts(
+                    "hirsel.generated-lower.inputs.v1",
+                    [text.0.as_slice(), accepted.text().as_bytes()],
+                );
+            }
+            Ok(self.product_store_key(path, kind, text))
+        };
+        Ok([
+            key(QueryKind::Modes)?,
+            key(QueryKind::Lower)?,
+            key(QueryKind::Evaluate)?,
+        ])
     }
     fn source_owned_generator(&self, path: &DefPath) -> bool {
         self.items

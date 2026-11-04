@@ -332,12 +332,24 @@ pub struct BoundIndexedEnvelope {
     anchors: std::sync::Arc<[hirsel_span::Anchor]>,
 }
 struct IndexedTypes {
-    envelope: std::sync::Arc<IndexedEnvelope>,
-    records: std::sync::Arc<crate::TypeRecords>,
+    types: std::sync::Arc<hirsel_types::TypeInterner>,
+    source: IndexedTypeSource,
+}
+enum IndexedTypeSource {
+    Records {
+        envelope: std::sync::Arc<IndexedEnvelope>,
+        records: std::sync::Arc<crate::TypeRecords>,
+    },
+    Frozen(std::sync::Arc<[hirsel_types::TypeId]>),
 }
 impl hirsel_intern::persist::Source<hirsel_types::TypeId> for IndexedTypes {
     fn id(&self, number: u32) -> Option<hirsel_types::TypeId> {
-        self.records.get(self.envelope.type_reference(number)?)
+        match &self.source {
+            IndexedTypeSource::Records { envelope, records } => {
+                records.get(envelope.type_reference(number)?)
+            }
+            IndexedTypeSource::Frozen(types) => types.get(number as usize).copied(),
+        }
     }
 }
 impl IndexedEnvelope {
@@ -355,8 +367,11 @@ impl IndexedEnvelope {
         let envelope = std::sync::Arc::new(self);
         Some(BoundIndexedEnvelope {
             types: std::sync::Arc::new(IndexedTypes {
-                envelope: envelope.clone(),
-                records,
+                types: records.types.clone(),
+                source: IndexedTypeSource::Records {
+                    envelope: envelope.clone(),
+                    records,
+                },
             }),
             envelope,
             anchors,
@@ -368,14 +383,14 @@ impl BoundIndexedEnvelope {
         &self.envelope
     }
     pub(crate) fn uses_types(&self, types: &hirsel_types::TypeInterner) -> bool {
-        std::ptr::eq(types, &*self.types.records.types)
+        std::ptr::eq(types, &*self.types.types)
     }
     pub(crate) fn matches_bindings(
         &self,
         types: &std::sync::Arc<hirsel_types::TypeInterner>,
         mut anchor: impl FnMut(&DefPath, u32) -> Option<hirsel_span::Anchor>,
     ) -> bool {
-        std::sync::Arc::ptr_eq(types, &self.types.records.types)
+        std::sync::Arc::ptr_eq(types, &self.types.types)
             && self.anchors.iter().enumerate().all(|(n, bound)| {
                 self.envelope.anchor(n as u32).is_some_and(|owner| {
                     let (path, occurrence) = owner.to_owned();
@@ -385,9 +400,38 @@ impl BoundIndexedEnvelope {
     }
     pub(crate) fn bind_types(&self) -> Option<()> {
         for n in 0..self.envelope.type_count() {
-            self.types.records.get(self.envelope.type_reference(n)?)?;
+            hirsel_intern::persist::Source::id(&*self.types, n)?;
         }
         Some(())
+    }
+    /// Resolve this envelope's exact type positions without retaining the
+    /// mutable codec maps. The interner already owns the reachable type rows.
+    pub(crate) fn frozen(&self) -> Option<Self> {
+        let types = (0..self.envelope.type_count())
+            .map(|n| hirsel_intern::persist::Source::id(&*self.types, n))
+            .collect::<Option<std::sync::Arc<[_]>>>()?;
+        Some(Self {
+            envelope: self.envelope.clone(),
+            anchors: self.anchors.clone(),
+            types: std::sync::Arc::new(IndexedTypes {
+                types: self.types.types.clone(),
+                source: IndexedTypeSource::Frozen(types),
+            }),
+        })
+    }
+    pub(crate) fn frozen_bytes(&self) -> Option<u64> {
+        if !matches!(self.types.source, IndexedTypeSource::Frozen(_)) {
+            return None;
+        }
+        let mut bytes = (size_of::<Self>()
+            + size_of::<IndexedTypes>()
+            + size_of::<IndexedEnvelope>()
+            + 6 * size_of::<usize>()) as u64;
+        bytes = bytes.checked_add(size_of_val(&*self.anchors) as u64)?;
+        let IndexedTypeSource::Frozen(types) = &self.types.source else {
+            return None;
+        };
+        bytes.checked_add((size_of_val(&**types) + 2 * size_of::<usize>()) as u64)
     }
     pub(crate) fn decode<T: serde::de::DeserializeOwned>(&self, bytes: &[u8]) -> Option<T> {
         hirsel_types::with_type_source(self.types.clone(), || {

@@ -511,6 +511,21 @@ impl CheckedTir {
     pub fn uses_types(&self, types: &hirsel_types::TypeInterner) -> bool {
         self.source.uses_types(types)
     }
+    /// An immutable archive whose complete type binding outlives the codec's
+    /// transient encode/decode maps. This carries no verifier acceptance.
+    pub fn frozen_bindings(&self) -> Option<Self> {
+        Some(Self {
+            source: self.source.frozen()?,
+            payload: self.payload.clone(),
+        })
+    }
+    /// Retained binding metadata of `frozen_bindings`, excluding the already
+    /// owned backing bytes, source/type interners and the caller's Arc header.
+    pub fn frozen_binding_bytes(&self) -> Option<u64> {
+        self.source
+            .frozen_bytes()?
+            .checked_add(size_of::<Self>() as u64)
+    }
     pub fn backing(&self) -> &Bytes {
         self.source.envelope().backing()
     }

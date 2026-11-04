@@ -108,6 +108,7 @@ pub struct SignatureSnapshot {
     epoch: Revision,
     types: Arc<TypeInterner>,
     signatures: DefMap<Result<SignatureRef, QueryError>>,
+    membership: Mutex<Option<Arc<SnapshotMembership>>>,
     headers: Option<Arc<crate::queries::header_products::HeaderProducts>>,
     /// Each opaque type's private view, which only its own package's bodies see.
     private: DefMap<SignatureRef>,
@@ -124,6 +125,11 @@ pub struct SignatureSnapshot {
     /// Local verifier authority is never part of a serialized snapshot/product.
     verifier: Option<Arc<hirsel_validate::VerifierCache>>,
     verifier_policy: ContentHash,
+}
+struct SnapshotMembership {
+    definitions: Box<[DefId]>,
+    packages: std::collections::BTreeSet<PackageId>,
+    _lease: Option<Arc<dyn Send + Sync>>,
 }
 fn view_products<'a>(
     types: &TypeInterner,
@@ -159,6 +165,13 @@ struct ValidationState {
     /// source, registration and verifier inputs; each overlay still gets its
     /// own replacement verdicts and every execution receipt is replayed.
     overlay_bases: Mutex<BTreeMap<PackageId, Arc<ViewTable>>>,
+    overlays: Mutex<BTreeMap<(PackageId, ValidationDigest), Arc<PackageViews>>>,
+    producers: Arc<crate::memo::S1Coordinator<ValidationProducer>>,
+}
+#[derive(Clone, Eq, PartialEq, Hash)]
+enum ValidationProducer {
+    Base(PackageId),
+    Overlay(PackageId, ValidationDigest),
 }
 /// A read-only installed dependency's published universe summaries: its own
 /// universe, which its bodies are validated against, and what importers'
@@ -345,6 +358,7 @@ impl SignatureSnapshot {
             epoch,
             types,
             signatures,
+            membership: Mutex::default(),
             headers: None,
             private,
             validation: OnceLock::new(),
@@ -531,8 +545,10 @@ impl SignatureSnapshot {
             // can evict a row it only names.
             let installed = &self.lookup.installed;
             let (members, checked): (Vec<DefId>, Vec<DefId>) = self
-                .definitions()
-                .into_iter()
+                .membership()
+                .definitions
+                .iter()
+                .copied()
                 .partition(|d| installed.contains_key(&d.path().0.package));
             // A failed signature is no view. A row the header cache refuses
             // to produce refuses the build: a universe never omits a view it
@@ -649,8 +665,10 @@ impl SignatureSnapshot {
                 })
                 .map(|(package, universe, visible)| {
                     let members: Vec<DefId> = self
-                        .definitions()
-                        .into_iter()
+                        .membership()
+                        .definitions
+                        .iter()
+                        .copied()
                         .filter(|d| visible.contains(&d.path().0.package))
                         .collect();
                     let rows = self.installed_rows(&members, Some(package));
@@ -667,7 +685,7 @@ impl SignatureSnapshot {
                 })
                 .collect::<Result<_, hirsel_validate::ViewRefusal>>()?;
             let mut owned: BTreeMap<PackageId, Vec<View>> = BTreeMap::new();
-            for d in self.definitions() {
+            for &d in self.membership().definitions.iter() {
                 let package = &d.path().0.package;
                 if installed.contains_key(package) {
                     continue;
@@ -699,6 +717,8 @@ impl SignatureSnapshot {
                 bases,
                 packages,
                 overlay_bases: Mutex::default(),
+                overlays: Mutex::default(),
+                producers: crate::memo::S1Coordinator::new(),
                 installed: installed_universes,
                 validated,
             }))
@@ -729,9 +749,7 @@ impl SignatureSnapshot {
         anchor: impl FnMut(&DefPath, u32) -> Option<hirsel_span::Anchor>,
     ) -> Option<hirsel_validate::ExecutionReceipt> {
         let verifier = self.verifier.as_ref()?;
-        let subject = receipt.identity()?;
-        verifier.publish_execution(subject, receipt);
-        verifier.execution_revalidated(subject, self.types.clone(), anchor, self)
+        verifier.revalidate_execution(receipt, self.types.clone(), anchor, self)
     }
     pub(crate) fn validate_source_artifact<'input>(
         &self,
@@ -787,7 +805,7 @@ impl SignatureSnapshot {
         );
         let (report, ran, acceptance) = hirsel_validate::validate_with_receipt(
             &artifact,
-            &views,
+            hirsel_validate::SignatureInputs::Checked(&*views),
             self.verifier_policy,
             self.verifier.as_deref(),
             &mut vec![],
@@ -898,9 +916,16 @@ impl SignatureSnapshot {
     fn private_view(&self, d: DefId) -> Option<SignatureRef> {
         private_view(&self.types, &self.private, self.headers.as_ref(), d)
     }
-    /// Every definition in this snapshot's signature table, in path order.
-    pub fn definitions(&self) -> Vec<DefId> {
-        self.signatures
+    fn membership(&self) -> Arc<SnapshotMembership> {
+        // Naming immutable rows invokes no signature/private producer.
+        let mut resident = self.membership.lock().unwrap();
+        if let Some(membership) = &*resident {
+            return membership.clone();
+        }
+        hirsel_intern::work::count(hirsel_intern::work::Counter::SnapshotMembershipBuilds);
+        hirsel_intern::timings::count(hirsel_intern::timings::Count::SnapshotMembershipBuilds);
+        let definitions = self
+            .signatures
             .keys()
             .copied()
             .chain(
@@ -910,7 +935,38 @@ impl SignatureSnapshot {
             )
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
-            .collect()
+            .collect::<Box<[_]>>();
+        let packages = definitions
+            .iter()
+            .map(|d| d.path().0.package.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(
+            size_of::<SnapshotMembership>() + 2 * size_of::<usize>() + size_of_val(&*definitions),
+        );
+        weight.tree::<PackageId, ()>(packages.len());
+        for package in &packages {
+            weight.add(package.name.capacity() + package.version.capacity());
+        }
+        let lease = self
+            .headers
+            .as_ref()
+            .and_then(|headers| headers.validation_lease(weight.bytes()).ok());
+        let retained = self.headers.is_none() || lease.is_some();
+        let membership = Arc::new(SnapshotMembership {
+            definitions,
+            packages,
+            _lease: lease,
+        });
+        // A refused optional memo remains an exact transient computation.
+        if retained {
+            *resident = Some(membership.clone());
+        }
+        membership
+    }
+    /// Every definition in this snapshot's signature table, in path order.
+    pub fn definitions(&self) -> Vec<DefId> {
+        self.membership().definitions.to_vec()
     }
     /// The runtime types compile-time evaluation runs with. Each row is
     /// demanded when an evaluation names its path: `d`'s view in its own
@@ -1078,6 +1134,80 @@ impl SignatureSnapshot {
         &self,
         package: &PackageId,
         signature: SignatureRef,
+    ) -> Result<Arc<PackageViews>, hirsel_validate::ViewRefusal> {
+        let state = self.validation_state()?;
+        let key = (
+            package.clone(),
+            hirsel_validate::digest(&self.types, &signature),
+        );
+        let mut producer = state.producers.thread_worker::<()>();
+        loop {
+            if let Some(views) = state.overlays.lock().unwrap().get(&key).cloned() {
+                return Ok(views);
+            }
+            match producer.enter(ValidationProducer::Overlay(key.0.clone(), key.1), ()) {
+                crate::memo::Entered::Settled => continue,
+                crate::memo::Entered::Run => break,
+            }
+        }
+        let views = self.compute_validation_with(package, signature.clone())?;
+        let views = if let Some(delta) = views.retained_delta_bytes() {
+            let bytes = delta
+                .checked_add(crate::memo::retained::retained_signature_payload_bytes(
+                    &signature,
+                ))
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        (3 * size_of::<((PackageId, ValidationDigest), Arc<PackageViews>)>()
+                            + package.name.capacity()
+                            + package.version.capacity()) as u64,
+                    )
+                })
+                .ok_or_else(|| hirsel_validate::ViewRefusal::Unreadable {
+                    definition: signature.definition,
+                    cause: QueryError::Operational(hirsel_types::OperationalFailure {
+                        operation: "validation overlay retention".into(),
+                        message: "overlay size overflow".into(),
+                    }),
+                })?;
+            let lease = match &self.headers {
+                Some(headers) => match headers.validation_lease(bytes) {
+                    Ok(lease) => lease,
+                    Err(_) => {
+                        // Releasing unpinned results uses the same grant. No
+                        // cache lock is held while admission or a producer runs.
+                        state
+                            .overlays
+                            .lock()
+                            .unwrap()
+                            .retain(|_, views| Arc::strong_count(views) > 1);
+                        headers.validation_lease(bytes).map_err(|cause| {
+                            hirsel_validate::ViewRefusal::Unreadable {
+                                definition: signature.definition,
+                                cause,
+                            }
+                        })?
+                    }
+                },
+                None => Arc::new(()) as Arc<dyn Send + Sync>,
+            };
+            let views = Arc::new(views.retain_owner(lease));
+            state
+                .overlays
+                .lock()
+                .unwrap()
+                .entry(key)
+                .or_insert_with(|| views.clone())
+                .clone()
+        } else {
+            Arc::new(views)
+        };
+        Ok(views)
+    }
+    fn compute_validation_with(
+        &self,
+        package: &PackageId,
+        signature: SignatureRef,
     ) -> Result<PackageViews, hirsel_validate::ViewRefusal> {
         let t = &self.types;
         let state = self.validation_state()?;
@@ -1088,56 +1218,62 @@ impl SignatureSnapshot {
             // its full table once in this exact immutable snapshot, then check
             // each replacement and all verdicts that read it against that table.
             // A refused construction publishes nothing and remains retryable.
-            let mut bases = state
-                .overlay_bases
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let full = match bases.get(package) {
-                Some(full) => full.clone(),
-                None => {
-                    hirsel_intern::timings::count(
-                        hirsel_intern::timings::Count::RegistrationValidationViews,
-                    );
-                    hirsel_intern::work::count(
-                        hirsel_intern::work::Counter::RegistrationValidationViews,
-                    );
-                    let visible = self
-                        .visible(package)
-                        .expect("installed closures are complete");
-                    let full = Arc::new(ViewTable::from_views(
-                        t,
-                        self.definitions()
-                            .into_iter()
-                            .filter(|d| visible.contains(&d.path().0.package))
-                            .filter_map(|d| match self.body_view(package, d)? {
-                                Ok(view) => Some(Ok(
-                                    if package == &d.path().0.package
-                                        && self.private_view(d).is_some()
-                                    {
-                                        View::new(t, view, None)
-                                    } else {
-                                        self.public_views[&d]
-                                            .get_or_init(|| self.view_of(d, &view, None))
-                                            .clone()
-                                    },
-                                )),
-                                Err(cause @ QueryError::Operational(_)) => {
-                                    Some(Err(hirsel_validate::ViewRefusal::Unreadable {
-                                        definition: d,
-                                        cause,
-                                    }))
-                                }
-                                Err(_) => None,
-                            })
-                            .collect::<Result<Vec<_>, _>>()?,
-                        &mut store,
-                        Some(&state.validated),
-                    )?);
-                    bases.insert(package.clone(), full.clone());
-                    full
+            let mut producer = state.producers.thread_worker::<()>();
+            let full = loop {
+                if let Some(full) = state.overlay_bases.lock().unwrap().get(package).cloned() {
+                    break full;
                 }
+                match producer.enter(ValidationProducer::Base(package.clone()), ()) {
+                    crate::memo::Entered::Settled => continue,
+                    crate::memo::Entered::Run => {}
+                }
+                hirsel_intern::timings::count(
+                    hirsel_intern::timings::Count::RegistrationValidationViews,
+                );
+                hirsel_intern::work::count(
+                    hirsel_intern::work::Counter::RegistrationValidationViews,
+                );
+                let visible = self
+                    .visible(package)
+                    .expect("installed closures are complete");
+                let full = Arc::new(ViewTable::from_views(
+                    t,
+                    self.membership()
+                        .definitions
+                        .iter()
+                        .copied()
+                        .filter(|d| visible.contains(&d.path().0.package))
+                        .filter_map(|d| match self.body_view(package, d)? {
+                            Ok(view) => Some(Ok(
+                                if package == &d.path().0.package && self.private_view(d).is_some()
+                                {
+                                    View::new(t, view, None)
+                                } else {
+                                    self.public_views[&d]
+                                        .get_or_init(|| self.view_of(d, &view, None))
+                                        .clone()
+                                },
+                            )),
+                            Err(cause @ QueryError::Operational(_)) => {
+                                Some(Err(hirsel_validate::ViewRefusal::Unreadable {
+                                    definition: d,
+                                    cause,
+                                }))
+                            }
+                            Err(_) => None,
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    &mut store,
+                    Some(&state.validated),
+                )?);
+                state
+                    .overlay_bases
+                    .lock()
+                    .unwrap()
+                    .insert(package.clone(), full.clone());
+                break full;
             };
-            drop(bases);
+            drop(producer);
             return PackageViews::new(
                 t,
                 full,
@@ -1160,10 +1296,21 @@ impl SignatureSnapshot {
 }
 
 impl hirsel_validate::ReplayEnvironment for SignatureSnapshot {
+    fn checked(&self, package: &PackageId) -> Option<&dyn hirsel_validate::CheckedEnvironment> {
+        self.validation(package).ok()
+    }
+
+    fn checked_overlay(
+        &self,
+        package: &PackageId,
+        overlay: SignatureRef,
+    ) -> Option<Arc<PackageViews>> {
+        self.validation_with(package, overlay).ok()
+    }
     fn base_digest(&self, package: &PackageId) -> Option<ContentHash> {
-        self.definitions()
-            .into_iter()
-            .any(|id| id.path().0.package == *package)
+        self.membership()
+            .packages
+            .contains(package)
             .then(|| self.validation_input_digest(package).ok())
             .flatten()
     }
@@ -1595,6 +1742,10 @@ mod tests {
         )]);
         let snapshot = build(&rows, installed.clone());
         let before = work::read(Counter::RegistrationValidationViews);
+        let overlays_before = work::read(Counter::ValidationOverlayConstructions);
+        let memberships_before = work::read(Counter::SnapshotMembershipBuilds);
+        let mut identities = std::collections::BTreeSet::new();
+
         for row in &rows {
             // Distinct registrations and repeated receipt replays see the same
             // base, but each replacement must retain its own actual input.
@@ -1606,10 +1757,16 @@ mod tests {
                 *ty = types.intern(Type::with_kind(TypeKind::Primitive(primitive)));
                 let replacement = Arc::new(replacement);
                 let expected = View::new(&types, replacement.clone(), None).digest();
+                identities.insert((row.definition, expected));
+                let mut shared = None;
                 for _ in 0..2 {
                     let views = snapshot
                         .validation_with(&package, replacement.clone())
                         .unwrap();
+                    if let Some(previous) = &shared {
+                        assert!(Arc::ptr_eq(previous, &views));
+                    }
+                    shared = Some(views.clone());
                     assert_eq!(views.view(row.definition).unwrap().digest(), expected);
                     let other = &rows[usize::from(row.definition == rows[0].definition)];
                     assert_eq!(
@@ -1620,6 +1777,14 @@ mod tests {
                 }
             }
         }
+        assert_eq!(
+            work::read(Counter::ValidationOverlayConstructions) - overlays_before,
+            identities.len() as u64
+        );
+        assert_eq!(
+            work::read(Counter::SnapshotMembershipBuilds) - memberships_before,
+            1
+        );
         let mut invalid = (*rows[0]).clone();
         invalid.kind = SignatureKind::Const {
             ty: types.intern(Type::with_kind(TypeKind::Error)),

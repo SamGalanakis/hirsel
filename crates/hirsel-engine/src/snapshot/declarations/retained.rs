@@ -258,6 +258,22 @@ mod tests {
                 }
                 let (_, released) = crate::test_alloc::measured(|| drop(carried));
                 assert_eq!(-released.live, actual.live);
+                let mut index = DeclarationIndex::default();
+                let frozen = index.frozen();
+                let before =
+                    hirsel_intern::work::read(hirsel_intern::work::Counter::DeclarationProjections);
+                for _ in 0..4 {
+                    let projected = index.observations().header_inputs().frozen();
+                    assert!(Arc::ptr_eq(&frozen.rows, &projected.rows));
+                }
+                assert_eq!(
+                    hirsel_intern::work::read(hirsel_intern::work::Counter::DeclarationProjections)
+                        - before,
+                    0
+                );
+                index.inputs_mut().manifest_revision =
+                    ContentHash::of_bytes(b"changed projection input");
+                assert!(!Arc::ptr_eq(&frozen.rows, &index.frozen().rows));
             }
         });
     }

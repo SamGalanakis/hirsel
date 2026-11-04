@@ -704,6 +704,15 @@ impl HeaderProducts {
             HeaderCharge::Source(allowance),
         ))))
     }
+    pub(crate) fn validation_lease(&self, bytes: u64) -> Result<Arc<dyn Send + Sync>, QueryError> {
+        Ok(Arc::new(
+            self.admit(
+                bytes
+                    .checked_add((size_of::<Charge>() + 2 * size_of::<usize>()) as u64)
+                    .ok_or_else(|| sources::source_refusal("validation size overflow"))?,
+            )?,
+        ))
+    }
     /// Charge one settled row or proof to the front's header grant, evicting
     /// unpinned entries first. A refusal is a resource failure, never a verdict.
     fn admit(&self, bytes: u64) -> Result<Charge, QueryError> {

@@ -180,6 +180,40 @@ pub(crate) struct Catalog {
     facts_cache:
         std::sync::RwLock<BTreeMap<hirsel_syntax::LexicalOwner, (ContentHash, Arc<SourceFacts>)>>,
 }
+pub(super) struct CatalogIdentity {
+    files: std::sync::Weak<BTreeMap<FileId, FileContext>>,
+    candidates: std::sync::Weak<BTreeMap<DefPath, Vec<Candidate>>>,
+    installed: Vec<(
+        PackageId,
+        std::sync::Weak<crate::store::InstalledSourceRecords>,
+    )>,
+}
+impl CatalogIdentity {
+    pub(super) fn matches(&self, catalog: &Catalog) -> bool {
+        self.files.ptr_eq(&catalog.files.owner())
+            && self.candidates.ptr_eq(&catalog.candidates.owner())
+            && self.installed.len() == catalog.installed.len()
+            && self.installed.iter().zip(&catalog.installed).all(
+                |((package, owner), (current, records))| {
+                    package == current && owner.ptr_eq(&Arc::downgrade(records))
+                },
+            )
+    }
+    pub(super) fn retained_bytes(&self) -> u64 {
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(size_of::<Self>() + 256);
+        weight.flat_vec(&self.installed);
+        for (package, _) in &self.installed {
+            weight.add(
+                package.name.capacity()
+                    + package.version.capacity()
+                    + size_of::<crate::store::InstalledSourceRecords>()
+                    + 2 * size_of::<usize>(),
+            );
+        }
+        weight.bytes()
+    }
+}
 pub(super) struct SourceCatalog {
     installed: BTreeMap<PackageId, Arc<crate::store::InstalledSourceRecords>>,
     files: Box<[(FileId, FileContext)]>,
@@ -212,6 +246,18 @@ impl Clone for Catalog {
     }
 }
 impl Catalog {
+    pub(super) fn identity(&self) -> CatalogIdentity {
+        CatalogIdentity {
+            files: self.files.owner(),
+            candidates: self.candidates.owner(),
+            installed: self
+                .installed
+                .iter()
+                .map(|(package, records)| (package.clone(), Arc::downgrade(records)))
+                .collect(),
+        }
+    }
+
     pub(super) fn syntax_bindings(
         &self,
     ) -> impl Iterator<Item = (DefId, FileId, ContentHash, hirsel_span::Anchor, u32)> + '_ {

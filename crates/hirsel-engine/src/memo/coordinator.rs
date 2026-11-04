@@ -117,6 +117,7 @@ struct State<K> {
     /// The worker each parked worker waits for.
     waits: HashMap<WorkerId, WorkerId>,
     next: WorkerId,
+    threads: HashMap<std::thread::ThreadId, WorkerId>,
 }
 
 /// The global claim table and wait-for graph (design §3 `S1Coordinator`).
@@ -137,6 +138,7 @@ impl<K: Clone + Eq + Hash> Default for S1Coordinator<K> {
                 running: HashMap::new(),
                 waits: HashMap::new(),
                 next: 0,
+                threads: HashMap::new(),
             }),
             finished: Condvar::new(),
             claims: AtomicU64::new(0),
@@ -158,6 +160,29 @@ impl<K: Clone + Eq + Hash> S1Coordinator<K> {
             let mut state = self.lock();
             state.next += 1;
             state.next - 1
+        };
+        S1Worker {
+            coordinator: self.clone(),
+            id,
+            frames: vec![],
+            captures: vec![],
+            contextual: false,
+        }
+    }
+    /// A synchronous immutable producer keeps the thread's identity across
+    /// nested requests, so the existing wait graph also sees reentrant work.
+    pub(crate) fn thread_worker<S>(self: &Arc<Self>) -> S1Worker<K, S> {
+        let id = {
+            let mut state = self.lock();
+            let thread = std::thread::current().id();
+            if let Some(id) = state.threads.get(&thread) {
+                *id
+            } else {
+                let id = state.next;
+                state.next += 1;
+                state.threads.insert(thread, id);
+                id
+            }
         };
         S1Worker {
             coordinator: self.clone(),

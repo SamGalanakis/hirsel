@@ -58,6 +58,119 @@ pub struct NamespaceCapture {
     identity: ContentHash,
     retained: u64,
     admission: std::sync::OnceLock<NamespaceAdmission>,
+    capture_inputs: CaptureInputs,
+}
+
+/// Exact immutable source owners and complete mutable selection inputs of a
+/// capture request. Weak source-table owners never retain expression arenas.
+struct CaptureInputs {
+    declarations: crate::DeclarationIndex,
+    catalog: catalog::CatalogIdentity,
+    items: std::sync::Weak<BTreeMap<DefPath, Vec<Arc<ItemSyntax>>>>,
+    indexed: BTreeMap<FileId, (FileContext, QueryEnvironment)>,
+    generated: std::sync::Weak<BTreeMap<DefPath, GeneratedSource>>,
+    definitions: Vec<DefId>,
+    registrations: Vec<std::sync::Weak<AcceptedFrontRegistration>>,
+    staged: BTreeMap<DefPath, crate::comptime::StagedConstant>,
+    instances: hirsel_tir::InstanceBodies,
+    selected: BTreeMap<DefId, BTreeSet<hirsel_types::GeneratedActualKey>>,
+    store: Option<std::sync::Weak<dyn crate::store::ResultStore>>,
+    limit: u64,
+}
+impl CaptureInputs {
+    fn new(
+        engine: &QueryEngine,
+        definitions: &[DefPath],
+        registrations: &[Arc<AcceptedFrontRegistration>],
+        limit: u64,
+    ) -> Self {
+        Self {
+            declarations: engine.declarations.observations(),
+            catalog: engine.catalog.identity(),
+            items: engine.items.owner(),
+            indexed: engine.indexed_sources.clone(),
+            generated: engine.generated.owner(),
+            definitions: definitions.iter().map(DefId::intern).collect(),
+            registrations: registrations.iter().map(Arc::downgrade).collect(),
+            staged: engine.staged_constants.clone(),
+            instances: engine.instance_bodies.clone(),
+            selected: engine.selected_instances.clone(),
+            store: engine.result_store.as_ref().map(Arc::downgrade),
+            limit,
+        }
+    }
+    fn matches(
+        &self,
+        engine: &QueryEngine,
+        definitions: &[DefPath],
+        registrations: &[Arc<AcceptedFrontRegistration>],
+        limit: u64,
+    ) -> bool {
+        self.limit == limit
+            && self.declarations.shares_inputs(&engine.declarations)
+            && self.catalog.matches(&engine.catalog)
+            && self.items.ptr_eq(&engine.items.owner())
+            && self.indexed == engine.indexed_sources
+            && self.generated.ptr_eq(&engine.generated.owner())
+            && self
+                .definitions
+                .iter()
+                .copied()
+                .eq(definitions.iter().map(DefId::intern))
+            && self.registrations.len() == registrations.len()
+            && self
+                .registrations
+                .iter()
+                .zip(registrations)
+                .all(|(previous, current)| previous.ptr_eq(&Arc::downgrade(current)))
+            && self.instances == engine.instance_bodies
+            && self.selected == engine.selected_instances
+            && self.staged.len() == engine.staged_constants.len()
+            && self.staged.iter().zip(&engine.staged_constants).all(
+                |((path, previous), (current_path, current))| {
+                    path == current_path
+                        && previous.owner == current.owner
+                        && previous.expression == current.expression
+                        && previous.inputs == current.inputs
+                        && Arc::ptr_eq(&previous.signature, &current.signature)
+                },
+            )
+            && match (&self.store, &engine.result_store) {
+                (None, None) => true,
+                (Some(previous), Some(current)) => previous.ptr_eq(&Arc::downgrade(current)),
+                _ => false,
+            }
+    }
+    fn retained_bytes(&mut self) -> Option<u64> {
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(size_of::<Self>() + 256);
+        weight.flat_vec(&self.definitions);
+        weight.flat_vec(&self.registrations);
+        weight.tree::<FileId, (FileContext, QueryEnvironment)>(self.indexed.len());
+        for (context, environment) in self.indexed.values() {
+            weight.add(
+                context.package.name.capacity()
+                    + context.package.version.capacity()
+                    + environment.compiler_version.capacity(),
+            );
+            weight.vec(&context.modules, |weight, module| {
+                weight.add(module.capacity())
+            });
+        }
+
+        weight.instance_bodies(&mut self.instances);
+        weight.tree::<DefPath, crate::comptime::StagedConstant>(self.staged.len());
+        for (path, staged) in &self.staged {
+            weight.path(path);
+            weight.path(&staged.owner);
+            weight.flat_vec(&staged.inputs);
+        }
+        weight.tree::<DefId, BTreeSet<hirsel_types::GeneratedActualKey>>(self.selected.len());
+        for keys in self.selected.values() {
+            weight.tree::<hirsel_types::GeneratedActualKey, ()>(keys.len());
+        }
+        weight.bytes().checked_add(self.catalog.retained_bytes())
+    }
 }
 
 pub(crate) struct DiagnosticSources {
@@ -121,6 +234,19 @@ struct Manifest {
 }
 
 impl NamespaceCapture {
+    fn same_sources(&self, sources: &SourceMap) -> bool {
+        if !self.sources.anchors().eq(sources.anchors()) {
+            return false;
+        }
+        for n in 0..=u32::MAX {
+            match (self.sources.file(FileId(n)), sources.file(FileId(n))) {
+                (None, None) => return true,
+                (Some(previous), Some(current)) if std::ptr::eq(previous, current) => {}
+                _ => return false,
+            }
+        }
+        true
+    }
     pub fn validation_input_digest(
         &self,
         package: &hirsel_syntax::PackageId,
@@ -430,6 +556,16 @@ impl QueryEngine {
         &mut self,
         registrations: &[Arc<AcceptedFrontRegistration>],
     ) -> Result<(), QueryError> {
+        self.prepare_namespace_scope(registrations);
+        for registration in registrations {
+            registration.validate(self)?;
+        }
+        Ok(())
+    }
+    pub(super) fn prepare_namespace_scope(
+        &mut self,
+        registrations: &[Arc<AcceptedFrontRegistration>],
+    ) {
         if !private_unique::registrations_covered(&self.private_summary_inputs, registrations) {
             self.private_summary_inputs = private_unique::registration_inputs(registrations);
             self.private_summary_revision = None;
@@ -445,10 +581,6 @@ impl QueryEngine {
         {
             current.inherit_registration_scope(&previous, registrations);
         }
-        for registration in registrations {
-            registration.validate(self)?;
-        }
-        Ok(())
     }
     pub fn capture_namespace(
         &mut self,
@@ -456,7 +588,28 @@ impl QueryEngine {
         registrations: &[Arc<AcceptedFrontRegistration>],
         limit: u64,
     ) -> Result<Arc<NamespaceCapture>, QueryError> {
-        self.prepare_namespace_registrations(registrations)?;
+        self.prepare_namespace_scope(registrations);
+        let snapshot = self.signature_inputs();
+        if let Some(previous) = self
+            .namespace_captures
+            .iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .find(|previous| {
+                previous.limits == self.comptime_limits
+                    && previous.verify == self.verify
+                    && previous.environment == self.environment_value()
+                    && Arc::ptr_eq(&previous.snapshot, &snapshot)
+                    && previous.same_sources(&self.sources)
+                    && previous.anchors.bindings_hold(&self.source_records())
+                    && previous
+                        .capture_inputs
+                        .matches(self, definitions, registrations, limit)
+            })
+        {
+            return Ok(previous);
+        }
+        hirsel_intern::work::count(hirsel_intern::work::Counter::NamespaceConstructions);
+        hirsel_intern::timings::count(hirsel_intern::timings::Count::NamespaceConstructions);
         let declarations = self.frozen_declarations().headers_only();
         let anchors = Arc::new(self.source_records());
         let store = self
@@ -520,25 +673,35 @@ impl QueryEngine {
                 );
             }
             let queries = {
-                let mut key = |kind| match registration {
-                    Some(accepted) => self.accepted_front_store_key(accepted, kind),
-                    None if facts.generator && self.items.contains_key(path) => {
-                        self.front_declaration_store_key(path, kind)
+                let [modes, lower, evaluate] = match registration {
+                    Some(accepted) => self.accepted_front_store_keys(accepted)?,
+                    None => {
+                        let mut key = |kind| {
+                            if facts.generator && self.items.contains_key(path) {
+                                self.front_declaration_store_key(path, kind)
+                            } else {
+                                Ok(EntryKey::new(
+                                    environment,
+                                    path,
+                                    implementation,
+                                    kind,
+                                    LoweringPolicy::Reachable,
+                                ))
+                            }
+                        };
+                        [
+                            key(QueryKind::Modes)?,
+                            key(QueryKind::Lower)?,
+                            key(QueryKind::Evaluate)?,
+                        ]
                     }
-                    None => Ok(EntryKey::new(
-                        environment,
-                        path,
-                        implementation,
-                        kind,
-                        LoweringPolicy::Reachable,
-                    )),
                 };
                 Some(Arc::new(BodyKeys {
                     implementation,
                     site,
-                    modes: key(QueryKind::Modes)?,
-                    lower: key(QueryKind::Lower)?,
-                    evaluate: key(QueryKind::Evaluate)?,
+                    modes,
+                    lower,
+                    evaluate,
                 }))
             };
             bodies.insert(
@@ -710,7 +873,23 @@ impl QueryEngine {
         weight.add(size_of_val(&*source_paths) + size_of_val(&*roots));
         weight.flat_vec(&manifest_inputs.dependencies);
         weight.flat_vec(&manifest_inputs.trace);
+        let mut capture_inputs = CaptureInputs::new(
+            self,
+            definitions,
+            &registrations.values().cloned().collect::<Vec<_>>(),
+            limit,
+        );
+        // The caller's order is semantic, independently of the keyed registry.
+        capture_inputs.registrations = manifest_inputs
+            .trace
+            .iter()
+            .map(|id| Arc::downgrade(&registrations[id]))
+            .collect();
+        let capture_bytes = capture_inputs
+            .retained_bytes()
+            .ok_or_else(|| refused("capture input size overflow"))?;
         let retained = NamespaceCapture::input_bytes(definitions)
+            .and_then(|bytes| bytes.checked_add(capture_bytes))
             .and_then(|bytes| bytes.checked_add(weight.bytes()))
             .and_then(|bytes| bytes.checked_add(instance_weight.bytes()))
             .and_then(|bytes| {
@@ -723,7 +902,7 @@ impl QueryEngine {
         if retained > limit {
             return Err(refused("capture exceeds admission"));
         }
-        Ok(Arc::new(NamespaceCapture {
+        let capture = Arc::new(NamespaceCapture {
             snapshot,
             inputs,
             declarations,
@@ -745,7 +924,14 @@ impl QueryEngine {
             identity,
             retained,
             admission: std::sync::OnceLock::new(),
-        }))
+            capture_inputs,
+        });
+        if self.namespace_captures.len() == self.namespace_captures.capacity() {
+            self.namespace_captures
+                .retain(|capture| capture.strong_count() != 0);
+        }
+        self.namespace_captures.push(Arc::downgrade(&capture));
+        Ok(capture)
     }
 }
 
@@ -827,9 +1013,38 @@ mod tests {
         crate::with_compiler_stack(|| {
             let store = Arc::new(StoreOff::default());
             let (mut engine, definitions) = indexed(store.clone());
+            let before =
+                hirsel_intern::work::read(hirsel_intern::work::Counter::NamespaceConstructions);
             let capture = engine
                 .capture_namespace(&definitions, &[], 8 << 20)
                 .unwrap();
+            for _ in 0..3 {
+                let same = engine
+                    .capture_namespace(&definitions, &[], 8 << 20)
+                    .unwrap();
+                assert!(Arc::ptr_eq(&capture, &same));
+            }
+            let subset = engine
+                .capture_namespace(&definitions[..1], &[], 8 << 20)
+                .unwrap();
+            assert_eq!(subset.bodies.len(), 1);
+            assert!(!Arc::ptr_eq(&capture, &subset));
+            let again = engine
+                .capture_namespace(&definitions, &[], 8 << 20)
+                .unwrap();
+            assert!(Arc::ptr_eq(&capture, &again));
+            assert_eq!(
+                hirsel_intern::work::read(hirsel_intern::work::Counter::NamespaceConstructions)
+                    - before,
+                2,
+                "two independently selected input sets build twice, regardless of consumer order/count"
+            );
+            engine.comptime_limits.budget -= 1;
+            let changed = engine
+                .capture_namespace(&definitions, &[], 8 << 20)
+                .unwrap();
+            assert_ne!(capture.manifest, changed.manifest);
+            assert!(!Arc::ptr_eq(&capture, &changed));
             drop(engine);
             for definition in &definitions {
                 assert_eq!(

@@ -8,7 +8,7 @@
 use super::queries::{InstanceAddress, NativeProducts, ReadyProduct};
 use hirsel_codec::{Snapshot, snapshot_struct};
 use hirsel_engine::runtime::{ArchiveAdmission, ProductRef};
-use hirsel_engine::store::{Action, Address, Domain, MAX_RECORD, Output, Reference};
+use hirsel_engine::store::{Action, Address, Domain, Output, Reference};
 use hirsel_engine::store::{ResultStore, VerifyStore};
 use hirsel_lir::stage::ObjectArtifact;
 use hirsel_syntax::ContentHash;
@@ -165,10 +165,6 @@ const OBJECT: Domain = Domain {
 };
 const LINKED: Domain = Domain {
     kind: 0x4f000003,
-    schema: 1,
-};
-const LEGACY_BLOB: Domain = Domain {
-    kind: 0x4f000004,
     schema: 1,
 };
 const BLOB: Domain = Domain {
@@ -784,19 +780,14 @@ pub fn link_input_bytes(store: &dyn ResultStore, reference: Reference) -> Result
     read_blob(store, reference)
 }
 fn blob_record(store: &dyn ResultStore, reference: Reference) -> Result<BlobRecord, String> {
-    let (domain, chunk_bytes) = if reference.domain == LEGACY_BLOB {
-        (LEGACY_BLOB, MAX_RECORD)
-    } else {
-        (BLOB, BLOB_CHUNK)
-    };
-    let blob: BlobRecord = get_record(store, domain, reference)?;
+    let blob: BlobRecord = get_record(store, BLOB, reference)?;
     let mut total = 0u64;
     for (index, chunk) in blob.chunks.iter().enumerate() {
         let chunk: Reference = chunk.clone().into();
         if chunk.domain != CHUNK
             || chunk.len == 0
-            || chunk.len > chunk_bytes as u64
-            || (index + 1 != blob.chunks.len() && chunk.len != chunk_bytes as u64)
+            || chunk.len > BLOB_CHUNK as u64
+            || (index + 1 != blob.chunks.len() && chunk.len != BLOB_CHUNK as u64)
         {
             return Err("invalid native blob chunk".into());
         }
@@ -1005,7 +996,7 @@ pub use tasks::{
 #[cfg(test)]
 mod transport_tests {
     use super::*;
-    use hirsel_engine::store::DirStore;
+    use hirsel_engine::store::{DirStore, MAX_RECORD};
 
     #[test]
     fn streamed_inputs_preserve_chunk_identity_and_refuse_incomplete_content() {

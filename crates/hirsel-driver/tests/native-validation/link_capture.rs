@@ -1,4 +1,5 @@
 use super::*;
+use hirsel_engine::store::MAX_RECORD;
 use hirsel_engine::store::{DirStore, MemStore};
 
 const LIMITS: CaptureLimits = CaptureLimits {

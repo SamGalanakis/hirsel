@@ -1,5 +1,5 @@
 use super::*;
-use hirsel_engine::store::DirStore;
+use hirsel_engine::store::{DirStore, MAX_RECORD};
 fn output_path(store: &DirStore, reference: Reference) -> std::path::PathBuf {
     hirsel_artifact_store::Store::new(store.root().into()).output_path(reference)
 }
@@ -1130,13 +1130,16 @@ fn link_task_waits_for_manifest_then_all_fragments_and_runtime_inputs() {
 }
 
 #[test]
-fn legacy_blob_schema_one_remains_readable_with_streamed_schema_two() {
+fn stale_blob_schema_one_is_refused_with_streamed_schema_two() {
     let store = hirsel_engine::store::MemStore::default();
     let mut bytes = vec![0x5a; MAX_RECORD];
     bytes.extend_from_slice(b"old tail");
     let old = put_record(
         &store,
-        LEGACY_BLOB,
+        Domain {
+            kind: BLOB.kind,
+            schema: 1,
+        },
         &BlobRecord {
             len: bytes.len() as u64,
             chunks: bytes
@@ -1148,7 +1151,14 @@ fn legacy_blob_schema_one_remains_readable_with_streamed_schema_two() {
     .unwrap();
     let current = store_link_input(&store, &bytes).unwrap();
     assert_ne!(old.domain, current.domain);
-    assert_eq!(link_input_bytes(&store, old).unwrap(), bytes);
+    assert_eq!(
+        link_input_bytes(&store, old).unwrap_err(),
+        "wrong native product domain/schema"
+    );
+    assert_eq!(
+        validate_link_input(&store, old).unwrap_err(),
+        "wrong native product domain/schema"
+    );
     assert_eq!(link_input_bytes(&store, current).unwrap(), bytes);
 }
 

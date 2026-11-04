@@ -815,19 +815,24 @@ impl Store {
         checked_container(self.raw_container(reference)?, reference)
     }
     fn raw_container(&self, reference: Reference) -> Option<Bytes> {
-        if let Some(source) = self.packed_source(0, reference.output.0) {
-            self.read_packed(source)
-        } else if reference.len <= pack::SMALL as u64 {
-            None
-        } else {
-            let region = self
-                .open_region(&self.output_path(reference), Counter::StandaloneOpens)
-                .ok()?;
-            let len = region.bytes().len();
-            Some(Bytes {
-                region,
-                range: 0..len,
-            })
+        if reference.len <= pack::SMALL as u64 {
+            return self.packed_get(0, reference.output.0);
+        }
+        let path = self
+            .private_output_path(reference.output.0)
+            .unwrap_or_else(|| self.path(reference.output.0, "outputs"));
+        match self.open_region(&path, Counter::StandaloneOpens) {
+            Ok(region) => {
+                let len = region.bytes().len();
+                Some(Bytes {
+                    region,
+                    range: 0..len,
+                })
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.packed_get(0, reference.output.0)
+            }
+            Err(_) => None,
         }
     }
     /// A checked ordinary container, including its header, for embedding the

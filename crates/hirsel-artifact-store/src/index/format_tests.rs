@@ -329,6 +329,8 @@ fn repaired_crc_cannot_make_invalid_routing_or_locations_valid() {
         (4, 0),
         (8, 0),
         (8, 4161),
+        (8, MEDIUM_LOCATOR | 64),
+        (8, MEDIUM_LOCATOR | (1 << 20)),
         (4, 131071),
     ] {
         let mut bytes = valid.clone();

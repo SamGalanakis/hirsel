@@ -185,10 +185,30 @@ fn decode_key(bytes: [u8; 33]) -> Option<Key> {
         digest: ContentHash(bytes[1..].try_into().ok()?),
     })
 }
+// Small locators retain their original 4160-byte bound. A disjoint tagged
+// length encodes medium containers inside the same 1 MiB segment; canonical
+// tagging prevents a wide encoding from aliasing a small record.
+const SMALL_LOCATOR: u32 = 4160;
+const MEDIUM_LOCATOR: u32 = 1 << 31;
+fn locator_len(word: u32) -> Option<u32> {
+    if word & MEDIUM_LOCATOR == 0 {
+        (1..=SMALL_LOCATOR).contains(&word).then_some(word)
+    } else {
+        let len = word & !MEDIUM_LOCATOR;
+        (len > SMALL_LOCATOR).then_some(len)
+    }
+}
+fn encoded_locator_len(len: u32) -> u32 {
+    if len > SMALL_LOCATOR {
+        len | MEDIUM_LOCATOR
+    } else {
+        len
+    }
+}
 fn valid_location(location: Location) -> bool {
     location.offset >= 64
         && location.offset.is_multiple_of(8)
-        && (1..=4160).contains(&location.len)
+        && location.len != 0
         && location
             .offset
             .checked_add(location.len)
@@ -376,7 +396,7 @@ pub(super) fn encode_replayed<I: Iterator<Item = io::Result<Entry>>>(
         last_segment = Some((entry.location.segment, segment));
         put32(&mut locator, 0, segment as u32);
         put32(&mut locator, 4, entry.location.offset / 8);
-        put32(&mut locator, 8, entry.location.len);
+        put32(&mut locator, 8, encoded_locator_len(entry.location.len));
         planes[3].write(&mut bytes, i * 12, &locator);
     }
     if written != rows {
@@ -642,7 +662,7 @@ impl Layer {
         let location = Location {
             segment: id,
             offset: u32_at(&bytes, 4)?.checked_mul(8)?,
-            len: u32_at(&bytes, 8)?,
+            len: locator_len(u32_at(&bytes, 8)?)?,
         };
         valid_location(location).then_some(location)
     }

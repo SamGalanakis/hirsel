@@ -896,6 +896,14 @@ def first_party(meta: dict) -> str:
                            args=["AtomicScratch"],
                            data=["//tools/buck2:sync.py", "//tools/buck2:generated.py",
                                  "//tools/buck2:action_sizes_from_log.py", "//tools/buck2:test_sizes_from_usage.py"]))
+    out.append("\n" + call("hirsel_script_test", name="test-consumers", script="tools/tests/consumers.py", full=False,
+                           args=["-v"],
+                           data=Raw('["tools/consumers", "tools/capped", "//tools/buck2:consumer_results.py", '
+                                    '"//tools/buck2:event_logs.py", "//tools/buck2:sync.py", '
+                                    '"//tools/buck2:generated.py", "//tools/buck2:action_sizes_from_log.py", '
+                                    '"//tools/buck2:test_sizes_from_usage.py", "//tools/buck2:test_requirements.bzl"] + '
+                                    'glob(["crates/hirsel-cli/tests/**", "crates/hirsel-driver/tests/**", '
+                                    '"stdlib/std@1/*.hir", "conformance/**/*.hir"])')))
 
     def label(package_id: str) -> str:
         package = packages[package_id]

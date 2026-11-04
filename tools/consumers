@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Usage: tools/consumers <path>... prints affected Buck2 test targets, one per line."""
+"""Select affected Buck2 targets, or classify a completed consumer event log.
+
+Default stdout remains a target list for `buck2 test $(tools/consumers ...)`.
+Selection reasons go to stderr; --reasons puts target/reason columns on stdout.
+--classify LOG reads Buck's .pb.zst or decoded JSONL without running tests.
+"""
 import argparse
 import json
 import os
@@ -52,10 +57,19 @@ def buck(root, *args):
 
 def test_graph(root, seeds):
     selection = f'rdeps(//:, {" + ".join(seeds)})' if seeds else '//:'
-    return json.loads(buck(root, 'uquery', selection,
+    graph = json.loads(buck(root, 'uquery', selection,
                            '--output-attribute', '^test_binary$', '--output-attribute', '^shard',
                            '--output-attribute', '^costs$', '--output-attribute', '^extra_env$',
-                           '--output-attribute', '^args$', '--output-attribute', '^exact_cpus$'))
+                           '--output-attribute', '^args$', '--output-attribute', '^exact_cpus$',
+                           '--output-attribute', '^script$', '--output-attribute', '^harness$'))
+    # A test's data edge can be affected while its executable is independent.
+    # Resolve that executable explicitly; rdeps need not contain its node.
+    missing = sorted({attrs['harness'] for attrs in graph.values()
+                      if attrs.get('harness') and attrs['harness'] not in graph})
+    if missing:
+        graph.update(json.loads(buck(root, 'uquery', 'set(' + ' '.join(missing) + ')',
+                                     '--output-attribute', '^script$')))
+    return graph
 
 
 def listings(root, graph):
@@ -275,12 +289,32 @@ def corpus_shard(path, count):
     return value % count + 1
 
 
-def select(root, paths, graph, inventories):
+def direct_owners(root, paths):
+    expression = ' + '.join('owner(' + json.dumps(path) + ')' for path in paths)
+    owners = json.loads(buck(root, 'uquery', expression, '--output-attribute', '^srcs$',
+                             '--output-attribute', '^script$'))
+    # owner() also includes runtime data. Only compilation/script inputs prove
+    # direct ownership; shipping std or compiler sources as test data does not.
+    direct = {}
+    for target, attrs in owners.items():
+        sources = {source.removeprefix('root//').lstrip('/') for source in attrs.get('srcs', [])}
+        sources.add(attrs.get('script', '').removeprefix('root//').lstrip('/'))
+        owned = set(paths) & sources
+        if owned:
+            direct[target] = ('direct source owner' if any('/tests/' not in path for path in owned)
+                              else 'direct test owner')
+    return direct
+
+
+def select(root, paths, graph, inventories, owners=None, reasons=None):
     sys.path.insert(0, str(root / 'tools/buck2'))
     from sync import CONFORMANCE_SHARDS, CONSUMER_CASES
     mapped = assignments(root, graph, inventories)
     mandatory, ordinary, shards = set(), set(), set()
     runtime = runtime_change(paths)
+    tooling = all(path.startswith('tools/') for path in paths)
+    scripts = {target: attrs['harness'] for target, attrs in graph.items()
+               if graph.get(attrs.get('harness'), {}).get('script')}
     crates = {Path(path).parts[1].replace('-', '_') for path in paths if path.startswith('crates/')}
     modules = module_users(root, paths)
     loaded_crates = crates | {target.split(':')[-1].replace('-', '_') for target in graph
@@ -295,7 +329,9 @@ def select(root, paths, graph, inventories):
             mandatory |= {f'root//:{binary}-consumer-{suffix}' for suffix in cases}
     for target, attrs in graph.items():
         binary = attrs.get('test_binary', '')
-        if runtime and binary.startswith('hirsel-cli-test-cpu_pool_'):
+        if tooling and target in scripts:
+            ordinary.add(target)
+        elif runtime and binary.startswith('hirsel-cli-test-cpu_pool_'):
             mandatory.add(target)
         elif crates and binary and binary not in BIG:
             ordinary.add(target)
@@ -303,8 +339,14 @@ def select(root, paths, graph, inventories):
                    + [re.escape(path) for path in paths]
                    + [r'\b' + re.escape(module) + r'\.' for module in modules])
     pattern = re.compile('|'.join(expressions))
+    direct_cases = set()
+    test_paths = [path for path in paths if '/tests/' in path]
+    test_pattern = re.compile('|'.join(map(re.escape, test_paths))) if test_paths else None
     for binary, names in inventories.items():
-        affected = Sources(root, BIG[binary]).matching(names, pattern)
+        sources = Sources(root, BIG[binary])
+        affected = sources.matching(names, pattern)
+        if test_pattern:
+            direct_cases |= {mapped[binary, name] for name in sources.matching(names, test_pattern)}
         for name in names:
             if runtime and (name in MUST.get(binary, set()) or
                             binary == 'hirsel-cli-test-free' and name == 'native_returned_rest_completion_replays_across_engines'):
@@ -318,29 +360,65 @@ def select(root, paths, graph, inventories):
         if any(re.search(r'\b' + re.escape(module) + r'\.', file.read_text()) for module in modules):
             chosen.add(file.relative_to(root).as_posix())
     ordinary |= {f'root//:gate-conformance-shard-{corpus_shard(path, CONFORMANCE_SHARDS)}' for path in chosen}
-    # Mandatory launches come first; truncation never removes them.
+    # Ownership is established by Buck's source graph, never by test status.
+    direct = {}
+    for target, attrs in graph.items():
+        binary = attrs.get('test_binary', '')
+        if binary in BIG:
+            if target in direct_cases:
+                direct[target] = 'direct test owner'
+        elif owners and (binary or target in scripts):
+            harness = scripts.get(target, 'root//:' + binary + '-harness')
+            if target not in owners and harness not in owners:
+                continue
+            owner = target if target in owners else harness
+            direct[target] = (owners[owner] if isinstance(owners, dict) else
+                              'direct test owner' if test_paths else 'direct source owner')
+    if len(mandatory) > LIMIT:
+        raise ValueError(f'{len(mandatory)} mandatory targets exceed the {LIMIT}-target ceiling')
+    # Reserve the mandatory set before spending the remaining bound. Direct
+    # owners precede broad shards; each transitive binary still gets a turn.
     # Give each affected binary a turn before spending the bound on a large
     # unit-test family. Full conformance shards precede optional harness shards.
     groups = {}
     for target in ordinary | shards:
-        if target not in mandatory:
+        if target not in mandatory and target not in direct:
             family = graph.get(target, {}).get('test_binary', 'conformance')
             groups.setdefault(family, []).append(target)
     for targets in groups.values():
         targets.sort(key=lambda target: re.sub(r'\d+', lambda m: m[0].zfill(8), target))
-    selected = sorted(mandatory)
+    selected = sorted(direct) + sorted(mandatory - direct.keys())
     while any(groups.values()):
         for family in sorted(groups):
             if groups[family]:
                 selected.append(groups[family].pop(0))
-    return selected
+    # Keep the mandatory reservation even when direct ownership itself is broad.
+    retained = set(sorted(direct.keys() - mandatory)[:LIMIT - len(mandatory)]) | mandatory
+    for target in selected:
+        if len(retained) < LIMIT:
+            retained.add(target)
+    if reasons is not None:
+        reasons.update({target: direct.get(target, 'mandatory set' if target in mandatory else 'transitive shard')
+                        for target in selected})
+    return [target for target in selected if target in retained] + [target for target in selected if target not in retained]
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('paths', nargs='+')
+    parser.add_argument('paths', nargs='*')
+    parser.add_argument('--reasons', action='store_true', help='print target/reason columns on stdout')
+    parser.add_argument('--classify', metavar='LOG', nargs='+', help='classify completed Buck event logs')
+    parser.add_argument('--known-failures', type=Path, default=ROOT / 'tools/known-failures.tsv')
     args = parser.parse_args()
     try:
+        if args.classify:
+            if args.paths or args.reasons:
+                raise ValueError('--classify cannot be combined with paths or --reasons')
+            sys.path.insert(0, str(ROOT / 'tools/buck2'))
+            from consumer_results import report
+            return report(args.classify, args.known_failures)
+        if not args.paths:
+            raise ValueError('supply changed paths or --classify LOG')
         paths = []
         seeds = set()
         for argument in args.paths:
@@ -348,6 +426,8 @@ def main():
             if not path.is_file() or not path.is_relative_to(ROOT):
                 raise ValueError(f'expected a repository file: {argument}')
             paths.append(path.relative_to(ROOT).as_posix())
+            if paths[-1].startswith('tools/'):
+                seeds.add('owner(' + json.dumps(paths[-1]) + ')')
             if paths[-1].startswith('crates/'):
                 package = tomllib.loads((ROOT / 'crates' / path.relative_to(ROOT).parts[1] / 'Cargo.toml').read_text())
                 seeds.add('owner(' + json.dumps(paths[-1]) + ')')
@@ -365,10 +445,17 @@ def main():
         generated.require(ROOT)
         graph = test_graph(ROOT, sorted(seeds))
         inventories = listings(ROOT, graph)
-        selected = select(ROOT, paths, graph, inventories)
+        reasons = {}
+        selected = select(ROOT, paths, graph, inventories, direct_owners(ROOT, paths), reasons)
         if not selected:
             raise ValueError('no consumers found for ' + ', '.join(paths))
-        print('\n'.join(target.removeprefix('root') for target in selected[:LIMIT]))
+        for target in selected[:LIMIT]:
+            label = target.removeprefix('root')
+            if args.reasons:
+                print(f'{label}\t{reasons[target]}')
+            else:
+                print(label)
+                print(f'{label}\t{reasons[target]}', file=sys.stderr)
         if len(selected) > LIMIT:
             print(f'consumers: truncated {len(selected)} affected targets to {LIMIT}; mandatory launches retained; remaining shards omitted', file=sys.stderr)
         return 0

@@ -40,8 +40,15 @@ thread_local! {
 /// The calling thread's scheduler-role acquisitions, for tests that tell an
 /// operation's own role use from its wakee's dispatch on another worker.
 #[cfg(test)]
+#[inline(never)]
 pub(crate) fn thread_acquisitions() -> u64 {
     THREAD_ACQUISITIONS.with(Cell::get)
+}
+
+#[cfg(test)]
+#[inline(never)]
+fn thread_acquired() {
+    THREAD_ACQUISITIONS.with(|count| count.set(count.get() + 1));
 }
 
 impl Default for Role {
@@ -70,7 +77,7 @@ impl Role {
     fn acquired(&self) {
         self.acquisitions.fetch_add(1, Ordering::Relaxed);
         #[cfg(test)]
-        THREAD_ACQUISITIONS.with(|count| count.set(count.get() + 1));
+        thread_acquired();
     }
 
     #[inline(always)]
@@ -217,23 +224,39 @@ pub(crate) struct RoleTables<'a> {
 impl std::ops::Deref for RoleTables<'_> {
     type Target = Scheduler;
     fn deref(&self) -> &Scheduler {
+        #[cfg(any(test, feature = "diagnostic"))]
+        check_lent();
         self.tables
     }
 }
 
 impl std::ops::DerefMut for RoleTables<'_> {
     fn deref_mut(&mut self) -> &mut Scheduler {
+        #[cfg(any(test, feature = "diagnostic"))]
+        check_lent();
         self.tables
     }
 }
 
 struct Lent;
 
+// Keep TLS addresses inside non-suspending calls. An inlined TLS access can
+// retain its worker's address across a caller's migrating fiber switch.
+#[cfg(any(test, feature = "diagnostic"))]
+#[inline(never)]
+fn check_lent() {
+    assert!(
+        LENT.with(Cell::get).is_some(),
+        "the running worker has no role table borrow"
+    );
+}
+
 impl Lent {
-    #[inline(always)]
+    #[inline(never)]
     #[track_caller]
     fn new() -> Self {
-        if let Some(outer) = LENT.with(|lent| lent.replace(Some(Location::caller()))) {
+        let location = Location::caller();
+        if let Some(outer) = LENT.with(|lent| lent.replace(Some(location))) {
             spanned(outer, "another role table borrow");
         }
         Self
@@ -241,7 +264,7 @@ impl Lent {
 }
 
 impl Drop for Lent {
-    #[inline(always)]
+    #[inline(never)]
     fn drop(&mut self) {
         LENT.with(|lent| lent.set(None));
     }
@@ -287,7 +310,7 @@ pub(crate) unsafe fn with_held<T>(
 
 /// No role table borrow may span `boundary` on this thread. Like every
 /// runtime panic, this aborts at the compiled-code boundary.
-#[inline(always)]
+#[inline(never)]
 pub(crate) fn unlent(boundary: &str) {
     if let Some(lent) = LENT.with(Cell::get) {
         spanned(lent, boundary);
@@ -301,6 +324,7 @@ fn spanned(lent: &Location<'_>, boundary: &str) -> ! {
 }
 
 #[cfg(test)]
+#[inline(never)]
 pub(crate) fn lent() -> bool {
     LENT.with(Cell::get).is_some()
 }

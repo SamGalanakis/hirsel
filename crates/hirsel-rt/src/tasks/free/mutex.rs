@@ -236,6 +236,13 @@ pub(crate) unsafe fn take(
                 // Only primitives remain on this frame across the wait. The
                 // returned stop unwinds helpers before the ABI entry raises it.
                 unsafe { try_block(&mut *ctx, Wait::Retry { cancelable: false }, false, 0) }?;
+                // The diagnostic migration mode must exercise the retry's
+                // table accesses on a different worker, even if the shared
+                // ready queue dispatched the saved stack to its old worker.
+                #[cfg(any(test, feature = "diagnostic"))]
+                if crate::pool::free::migrating(unsafe { (*ctx).run_ref() }) {
+                    unsafe { super::migrate(&mut *ctx) };
+                }
             }
             Acquired::Payload | Acquired::Dead => {
                 unsafe { out.write(u32::from(result == Acquired::Dead)) };

@@ -1,4 +1,6 @@
 hirsel_guard::install!();
+#[path = "support/cpu_pool/mutex_borrow.rs"]
+mod mutex_borrow;
 include!("support/cpu_pool/physical.rs");
 #[test]
 fn fresh_cpu_pool_has_physical_width_8() {

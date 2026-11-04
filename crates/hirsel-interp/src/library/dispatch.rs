@@ -2627,6 +2627,9 @@ primary_operations! { library, call, context, name, a, value;
     },
     Primitive: "map.empty" => collection::sequence(BuiltinType::Map, []),
     Primitive: "set.empty" => collection::sequence(BuiltinType::Set, []),
+    Primitive: "map.try_insert_with" => {
+        return Ok(Some(keyed(library.map_try_insert_with(a), &call, context)?));
+    },
     Primitive: "map.update_value_with" => {
         return Ok(Some(keyed(library.map_update_value(a), &call, context)?));
     },

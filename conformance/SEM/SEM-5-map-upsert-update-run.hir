@@ -66,5 +66,76 @@ pub fn main(t: Test) -> Result[(), ()] {
       failure.check(order == "alpha" && k == "beta", Bounds())
     }
   }
+  // Rust HashMap::entry contract: a hit skips initialization; an error
+  // preserves the entry set and the initializer's explicit cursor writes.
+  let mut entries: Map[String, u64] = map.empty()
+  let mut cursor: u64 = 0
+  failure.check(
+    std@1/map.try_insert(
+      mut entries,
+      "first",
+      mut cursor,
+      fn(mut n: u64) -> Result[u64, u64] uses {} {
+        n += 1
+        Ok(10)
+      }
+    ) == Ok(true),
+    Bounds()
+  )
+  let saved = copy entries
+  failure.check(
+    std@1/map.try_insert(
+      mut entries,
+      "first",
+      mut cursor,
+      fn(mut n: u64) -> Result[u64, u64] uses {} {
+        n += 100
+        Error(99)
+      }
+    ) == Ok(false),
+    Bounds()
+  )
+  failure.check(cursor == 1, Bounds())
+  failure.check(
+    std@1/map.try_insert(
+      mut entries,
+      "failed",
+      mut cursor,
+      fn(mut n: u64) -> Result[u64, u64] uses {} {
+        n += 1
+        Error(7)
+      }
+    ) == Error(7),
+    Bounds()
+  )
+  failure.check(
+    cursor == 2 && map.len(entries) == 1 && map.get(entries, "failed") == None(),
+    Bounds()
+  )
+  for i in 0u64..12 {
+    failure.check(
+      std@1/map.try_insert(
+        mut entries,
+        f"k{i}",
+        mut cursor,
+        fn(mut n: u64) -> Result[u64, u64] uses {} {
+          n += 1
+          Ok(n)
+        }
+      ) == Ok(true),
+      Bounds()
+    )
+  }
+  failure.check(map.len(saved) == 1 && map.get(saved, "first") == Some(10u64), Bounds())
+  failure.check(map.len(entries) == 13 && cursor == 14, Bounds())
+  let mut position: u64 = 0
+  for (k, v) in entries {
+    if position == 0 {
+      failure.check(k == "first" && v == 10, Bounds())
+    } else {
+      failure.check(k == f"k{position - 1}" && v == position + 2, Bounds())
+    }
+    position += 1
+  }
   Ok(())
 }

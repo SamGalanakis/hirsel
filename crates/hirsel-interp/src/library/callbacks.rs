@@ -27,6 +27,10 @@ pub(super) enum Pending {
     MapUpdated {
         inserted: bool,
     },
+    MapTryInitialized {
+        key: Value,
+        hash: u64,
+    },
     MapInitialized {
         key: Value,
         hash: u64,
@@ -346,6 +350,74 @@ impl Library {
             None => result,
         })
     }
+    pub(super) fn map_try_insert_with(
+        &mut self,
+        args: &[Value],
+    ) -> Result<OperationResult, collection::KeyedError> {
+        let [map, key, state, initial] = args else {
+            return Err(invalid("map.try_insert_with arguments").into());
+        };
+        let (found, hash) = collection::map_index(map, key)?;
+        if found.is_some() {
+            return Ok(OperationResult::returned(super::ok(Value::Bool(false))));
+        }
+        // Reuse the same arena admission and copy-on-write preparation as upsert.
+        // Its own probe would be redundant, so prepare directly from the selected miss.
+        let mut prepared = map.clone();
+        let count = collection::len(map)?;
+        let charge = prepared
+            .arena_storage_mut()
+            .unwrap()
+            .as_mut()
+            .map(|storage| {
+                let copied = if storage.shared() { count } else { 0 };
+                let charge = (
+                    storage.arena,
+                    storage.element.saturating_mul(copied.saturating_add(1)),
+                );
+                if storage.shared() {
+                    map.fields()
+                        .unwrap()
+                        .iter()
+                        .flatten()
+                        .for_each(Value::share_arena_storage);
+                    *storage = storage.detached();
+                }
+                charge
+            });
+        let mut result = self.schedule(
+            Pending::MapTryInitialized {
+                key: key.clone(),
+                hash,
+            },
+            initial.clone(),
+            vec![state.clone()],
+            vec![0],
+            vec![],
+        );
+        let OperationResult::Call {
+            updates,
+            writebacks,
+            ..
+        } = &mut result
+        else {
+            unreachable!()
+        };
+        updates.push((0, prepared));
+        writebacks.push(CallbackWriteback {
+            parameter: 0,
+            argument: 2,
+            fields: vec![],
+        });
+        Ok(match charge {
+            Some((arena, bytes)) => OperationResult::ArenaCharge {
+                arena,
+                bytes,
+                result: Box::new(result),
+            },
+            None => result,
+        })
+    }
     /// The unique operations keep their existing path. Ordinary value access
     /// prepares the selected owner before the callback is published, under
     /// the same charge wrapper and failure writeback protocol.
@@ -529,6 +601,43 @@ impl Library {
             } else {
                 Value::Bool(true)
             })),
+            Pending::MapTryInitialized { key, hash } => {
+                let OperationResult::Complete { value, .. } = result else {
+                    return Err(invalid("fallible map initializer result"));
+                };
+                let Value::Variant {
+                    variant,
+                    mut fields,
+                } = value
+                else {
+                    return Err(invalid("fallible map initializer must return Result"));
+                };
+                let value = fields
+                    .pop()
+                    .flatten()
+                    .ok_or_else(|| invalid("Result payload"))?;
+                if variant == 1 {
+                    return Ok(OperationResult::returned(super::error(value)));
+                }
+                if variant != 0 {
+                    return Err(invalid("Result tag"));
+                }
+                let Some(Value::Map { entries, .. }) = arguments.first_mut() else {
+                    return Err(invalid("map initializer lost its mut argument"));
+                };
+                key.share_arena_storage();
+                entries.push_keyed(
+                    Value::Tuple(vec![Some(key), Some(value)]),
+                    hash,
+                    crate::value::KeyKind::Map,
+                );
+                Ok(OperationResult::Complete {
+                    value: super::ok(Value::Bool(true)),
+                    arguments: vec![],
+                    consumed: vec![1],
+                    released: vec![],
+                })
+            }
             Pending::MapInitialized { key, hash } => {
                 let OperationResult::Complete { value, .. } = result else {
                     return Err(invalid("map initializer result"));

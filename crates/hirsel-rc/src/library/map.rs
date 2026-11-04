@@ -34,10 +34,12 @@ body!(REMOVE_MAP, "map.remove", remove_map);
 body!(REMOVE_SET, "set.remove", remove_set);
 body!(CONTAINS, "set.contains", contains);
 body!(INSERT_MAP, "map.insert", insert_map);
+body!(TRY_INSERT_MAP, "map.try_insert_with", try_insert_with);
 body!(UPSERT_MAP, "map.upsert_with", upsert_with);
 body!(UPDATE_MAP, "map.update_with", update_with);
 body!(UPDATE_VALUE_MAP, "map.update_value_with", update_value_with);
 mod edit;
+use edit::try_insert as try_insert_with;
 use edit::{update as update_with, update_value as update_value_with, upsert as upsert_with};
 body!(INSERT_SET, "set.insert", insert_set);
 pub static MAP_PROBE: LibraryBody = LibraryBody {

@@ -6,7 +6,7 @@ use crate::import::ImportCx;
 use hirsel_core_contract::Passing;
 use hirsel_lir::ir::*;
 use hirsel_lir::stage::Value;
-use hirsel_types::{TypeKind, UseKind};
+use hirsel_types::{GenericArgument, TypeId, TypeKind, UseKind};
 
 pub static PUSH: LibraryBody = LibraryBody {
     path: || hirsel_syntax::DefPath::core("list.push"),
@@ -54,19 +54,8 @@ fn push(cx: &mut Cx<'_>) -> Result<LirUnit<Value>, PassError> {
     if sequential(cx) {
         return push_sequential(cx);
     }
-    let mut callable = cx.types.get(cx.callable).unwrap().clone();
-    let TypeKind::Function(f) = &mut callable.kind else {
-        unreachable!()
-    };
-    f.parameters = f.parameters[..1].to_vec().into();
-    let callable = cx.types.intern(callable);
-    let path = native_path("list_grow");
-    let grow = cx.require(Request::native(
-        super::body_index(&path).unwrap(),
-        &path,
-        cx.arguments.clone(),
-        callable,
-    ))?;
+    let request = grow_request_for_callable(cx, cx.arguments.clone(), cx.callable);
+    let grow = cx.require(request)?;
     let mut b = Body::new(cx)?;
     let [list, value] = b.parameters[..] else {
         return Err(PassError::Malformed("list.push parameters".into()));
@@ -137,6 +126,39 @@ fn push(cx: &mut Cx<'_>) -> Result<LirUnit<Value>, PassError> {
     b.seq_set_len(writable, count)?;
     ret_unit(&mut b);
     Ok(b.finish())
+}
+
+// Both callers derive the helper from the declared list.push callable so
+// its native registration has one signature for each element type.
+pub(super) fn grow_request(cx: &Cx<'_>, arguments: Vec<GenericArgument>) -> R<Request> {
+    let push = hirsel_syntax::DefPath::core("list.push");
+    let request = Request::operation(
+        cx.program,
+        super::body_index(&push).expect("registered list.push"),
+        &push,
+        arguments.clone(),
+    )?;
+    Ok(grow_request_for_callable(cx, arguments, request.callable))
+}
+
+fn grow_request_for_callable(
+    cx: &Cx<'_>,
+    arguments: Vec<GenericArgument>,
+    callable: TypeId,
+) -> Request {
+    let mut callable = cx.types.get(callable).unwrap().clone();
+    let TypeKind::Function(f) = &mut callable.kind else {
+        unreachable!()
+    };
+    f.parameters = f.parameters[..1].to_vec().into();
+    let callable = cx.types.intern(callable);
+    let path = native_path("list_grow");
+    Request::native(
+        super::body_index(&path).unwrap(),
+        &path,
+        arguments,
+        callable,
+    )
 }
 
 /// A push's charge and room in an arena (MEM-6): before the push reads the

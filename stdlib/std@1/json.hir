@@ -279,6 +279,9 @@ fn json_node(take data: Bytes, mut pos: u64, depth: u64, c: u8) -> Result[
       let array_value: Value = Array(take items)
       return Ok(take array_value)
     }
+    // A nonempty array has at least one child. Match list.push's initial
+    // capacity before recursion, leaving empty arrays allocation-free.
+    core@1/list.reserve(mut items, 4)
     while true {
       let child = json_node(copy data, mut pos, depth + 1, next)?
       core@1/list.push(mut items, take child)
@@ -301,22 +304,28 @@ fn json_node(take data: Bytes, mut pos: u64, depth: u64, c: u8) -> Result[
     pos += 1
     return Ok(Object(take entries))
   }
+  let initial: fn(mut cursor: u64) -> Result[Value, JsonError] uses {} = fn(
+    mut cursor: u64
+  ) -> Result[Value, JsonError] uses {} {
+    if json_whitespace(data, mut cursor) != 58 {
+      return Error(Syntax(cursor))
+    }
+    cursor += 1
+    let first = json_whitespace(data, mut cursor)
+    json_node(copy data, mut cursor, depth + 1, first)
+  }
   while true {
     if next != 34 {
       return Error(Syntax(pos))
     }
     let key_pos = pos
     let key = json_shared_quoted(copy data, mut pos)?
-    if let Some(_) = core@1/map.get(entries, key) {
+    // Select the entry before consuming the colon or value. This retains
+    // duplicate-key precedence even when the duplicate's value is malformed.
+    let inserted = std@1/map.try_insert(mut entries, take key, mut pos, initial)?
+    if !inserted {
       return Error(DuplicateKey(key_pos))
     }
-    if json_whitespace(data, mut pos) != 58 {
-      return Error(Syntax(pos))
-    }
-    pos += 1
-    let first = json_whitespace(data, mut pos)
-    let child = json_node(copy data, mut pos, depth + 1, first)?
-    core@1/map.insert(mut entries, take key, take child)
     next = json_whitespace(data, mut pos)
     if next == 125 {
       pos += 1

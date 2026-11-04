@@ -571,6 +571,7 @@ pub(crate) const MAP_BODIES: &[&str] = &[
     "map.upsert_with",
     "map.update_with",
     "map.update_value_with",
+    "map.try_insert_with",
     "set.insert",
 ];
 
@@ -2807,6 +2808,7 @@ pub const NATIVE_PATHS: &[&str] = &[
     "map.upsert_with",
     "map.update_with",
     "map.update_value_with",
+    "map.try_insert_with",
     "mutex.create",
     "mutex.with",
     "out.print",

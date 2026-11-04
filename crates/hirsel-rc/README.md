@@ -740,3 +740,9 @@ scoped environment digest. A mismatched environment cannot replace that proof.
 Source recipes retain the original native lexical key when their selected unit
 uses a distinct aware key. This producer binding does not admit capture receipt
 transport or supply the current C declaration/replay proof.
+
+`map.try_insert_with` selects a key once before its fallible initializer, forwards
+mutable caller state, and appends the taken key only on `Ok`. A hit bypasses the
+callback; a typed error preserves entries and the callback's state writes. The
+entry is arena-admitted before the callback. Callback insertions grow their
+entry storage geometrically, with unchanged logical arena charges.

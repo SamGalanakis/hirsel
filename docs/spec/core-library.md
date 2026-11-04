@@ -344,6 +344,7 @@ fn path.text(p: Path) -> String
 N fn failure.check(condition: bool, rule: CheckRule) -> () uses {}
 fn map.empty[K: key, V]() -> unique Map[K, V]
 @preserves_unique(m) fn map.insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> ()
+fn map.try_insert_with[K: key, V, S, E](mut m: Map[K, V], take k: K, mut state: S, initial: fn(mut state: S) -> Result[V, E] uses {}) -> Result[bool, E] uses {}
 @preserves_unique(m) @unretained(k, initial, update) fn map.upsert_with[K: key, V](mut m: unique Map[K, V], k: K, initial: fn() -> unique V uses {}, update: fn(mut value: unique V) -> () uses {}) -> ()
 @preserves_unique(m) @unretained(k, update) fn map.update_with[K: key, V](mut m: unique Map[K, V], k: K, update: fn(mut value: unique V) -> () uses {}) -> bool
 fn map.update_value_with[K: key, V: copyable](mut m: Map[K, V], k: K, change: fn(mut value: V) -> () uses {}) -> bool uses {}
@@ -1773,6 +1774,14 @@ existing element keeps its position, removal preserves the order of the remainin
 elements, and reinserting a removed element moves it to the end. Removal shifts
 dense entries and repairs only the private index, taking expected O(n + index
 capacity) time without copying payloads.
+
+`map.try_insert_with` probes once. A present key returns `Ok(false)` and drops
+its incoming key without calling `initial` or changing the map or caller state.
+A missing key admits its arena entry, then calls `initial(mut state)` once.
+`Ok(value)` appends the taken key and value in insertion order and returns
+`Ok(true)`. `Error(e)` leaves entries unchanged and returns `Error(e)`.
+Callback writes to state survive both outcomes and failures. Arena admission
+is not refunded on error. Ordinary map copies retain their entries through COW.
 
 ## SortedMap access
 

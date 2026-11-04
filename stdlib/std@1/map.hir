@@ -60,3 +60,14 @@ pub fn update_value[K: key, V: copyable](
 ) -> bool uses {} {
   core@1/map.update_value_with(mut m, k, change)
 }
+
+// One key probe. A hit skips initial and keeps state unchanged. On a miss,
+// initial's state writes survive its Result; only Ok(value) appends the key.
+pub fn try_insert[K: key, V, S, E](
+  mut m: Map[K, V],
+  take k: K,
+  mut state: S,
+  initial: fn(mut cursor: S) -> Result[V, E] uses {}
+) -> Result[bool, E] uses {} {
+  core@1/map.try_insert_with(mut m, take k, mut state, initial)
+}

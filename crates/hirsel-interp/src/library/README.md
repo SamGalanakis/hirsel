@@ -261,3 +261,8 @@ completion after readiness/cancellation. Native fixture `Fixture.file_reads`
 uses the same gates for `test.dir` snapshot trees and records existing
 `Blocked`/`Ready` events; `SimIo` replays without a script. Host descriptors are
 never gated and the runtime ABI and tape schema are unchanged.
+
+`map.try_insert_with` uses one `collection::map_index` selection and a fallible
+initializer continuation. The cursor/state writeback survives every exit.
+Only `Ok(value)` appends its incoming taken key and value; a hit calls nothing.
+Missing-entry arena admission precedes the initializer and is not refunded.

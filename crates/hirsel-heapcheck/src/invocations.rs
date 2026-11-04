@@ -274,6 +274,7 @@ pub(crate) fn audit_library<S: Stage>(
         "$native.iter_from_step",
         "map.update_with",
         "map.update_value_with",
+        "map.try_insert_with",
         "sorted_map.get",
         "sorted_map.remove",
         "sorted_map.insert",

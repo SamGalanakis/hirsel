@@ -813,9 +813,15 @@ fn lower<T>(
                 } else {
                     module.make_weak_odr(function);
                 }
-                let inline_map = ["map.get", "map.contains", "map.insert", "map.upsert_with"]
-                    .iter()
-                    .any(|name| unit.header.definition.is_core(name));
+                let inline_map = [
+                    "map.get",
+                    "map.contains",
+                    "map.insert",
+                    "map.upsert_with",
+                    "map.try_insert_with",
+                ]
+                .iter()
+                .any(|name| unit.header.definition.is_core(name));
                 let attribute = if inline_map
                     || unit.header.definition.is_core("list.push")
                     || unit.header.definition.is_core("$native.list_push_spare")

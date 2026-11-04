@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) fn entry_type(b: &mut Body<'_, '_>) -> R<TypeId> {
     let k = b.cx.type_actual(0)?;
-    let v = if b.cx.arguments.len() == 2 {
+    let v = if b.cx.arguments.len() >= 2 {
         b.cx.type_actual(1)?
     } else {
         b.cx.types.intern(Type::unit())
@@ -20,12 +20,12 @@ pub(super) fn entry_type(b: &mut Body<'_, '_>) -> R<TypeId> {
 
 fn map_type(b: &mut Body<'_, '_>) -> R<TypeId> {
     let k = b.cx.type_actual(0)?;
-    let v = if b.cx.arguments.len() == 2 {
+    let v = if b.cx.arguments.len() >= 2 {
         b.cx.type_actual(1)?
     } else {
         b.cx.types.intern(Type::unit())
     };
-    Ok(if b.cx.arguments.len() == 2 {
+    Ok(if b.cx.arguments.len() >= 2 {
         builtin(b, BuiltinType::Map, &[k, v])
     } else {
         builtin(b, BuiltinType::Set, &[k])
@@ -69,7 +69,7 @@ fn append(b: &mut Body<'_, '_>, list: AddressId, ty: TypeId, value: ValueId) -> 
 fn maintenance(b: &mut Body<'_, '_>, name: &str) -> R<()> {
     let map = map_type(b)?;
     let unit = b.cx.types.intern(Type::unit());
-    let actuals = b.cx.arguments.clone();
+    let actuals = b.cx.arguments[..b.cx.arguments.len().min(2)].to_vec();
     let name = if b.cx.arguments.len() == 1 {
         match name {
             "map_prepare" => "set_prepare",
@@ -99,10 +99,10 @@ fn update_index(b: &mut Body<'_, '_>) -> R<()> {
     let word = add_type(b.cx.types, TypeKind::Primitive(Primitive::U64));
     let words_ty = builtin(b, BuiltinType::List, &[word]);
     let unit = b.cx.types.intern(Type::unit());
-    let actuals = b.cx.arguments.clone();
+    let actuals = b.cx.arguments[..b.cx.arguments.len().min(2)].to_vec();
     let direct = helper(
         b,
-        if b.cx.arguments.len() == 2 {
+        if b.cx.arguments.len() >= 2 {
             "map_index"
         } else {
             "set_index"
@@ -197,7 +197,36 @@ fn append_map_inner(
     let reserved = if prepared {
         let n = len(b, entries)?;
         let next = b.add(ArithMode::Wrapping, n, one);
-        b.seq_reserve(entries, next)?;
+        // As list.push, grow geometrically rather than reserving exactly one
+        // extra entry for each callback insertion. Arena admission above still
+        // charges the same logical live entry before initialization.
+        let entry_ty = entry_type(b)?;
+        let request =
+            super::super::list::grow_request(b.cx, vec![GenericArgument::Type(entry_ty)])?;
+        let grow = b.cx.require(request)?;
+        let (view, loan) = b.borrow(entries, false)?;
+        let capacity = b.seq_capacity(view)?;
+        b.end_loan(loan);
+        let full = b.compare(BinaryOp::Ge, n, capacity)?;
+        let slot = b.root(entries).unwrap();
+        let before = b.reaching(slot)?;
+        let grown = b.version(slot);
+        let slow = b.block(BlockKind::Body, &[]);
+        let ready = b.block(BlockKind::Body, &[grown]);
+        let yes = b.edge(slow, &[]);
+        let no = b.edge(ready, &[before]);
+        b.terminate(Terminator::Branch {
+            condition: full,
+            yes,
+            no,
+        });
+        b.at(slow);
+        let argument = mut_argument(b, 0, entries)?;
+        call(b, grow, &[argument])?;
+        let after = b.reaching(slot)?;
+        b.jump(ready, &[after]);
+        b.at(ready);
+        b.set_reaching(slot, grown);
         Some((b.slot_place(entries, n)?, next))
     } else {
         None

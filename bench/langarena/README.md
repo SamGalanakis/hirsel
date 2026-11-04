@@ -21,6 +21,21 @@ Generated manifests, the registry, binaries and raw measurements live in ignored
 case-insensitive substring filter. Checksums include warmup and timed iterations;
 only timed iterations contribute to the printed duration. A mismatch exits 1.
 
+## Current compiler blocker
+
+The full package currently stops before execution while accepting the comptime
+JSON derivations in `json.hir:31-53`. Each of the five derivations reproduces the
+failure independently. The compiler's generated-registration acceptance calls
+`QueryEngine::snapshot` without retaining the original declaration's syntax in
+that query engine (`crates/hirsel-engine/src/queries/generation/accepted.rs:596`
+and `crates/hirsel-engine/src/queries.rs:948-953`). It returns `NotImplemented`;
+`requests/source_graph.rs:1584` then removes the phase from that error.
+This is a compiler source-registration bug, owned by example-check-406, which
+also owns the same failure on todo-api. Restore the original declaration in
+the accepting engine and retain the error's phase. The benchmark keeps all 50
+tasks and its checksum checks; a filtered CRC32 run still requires the full
+package to build.
+
 ## Add a group
 
 Create one file per group, such as `compress.hir`. Keep its state and helpers

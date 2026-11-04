@@ -51,17 +51,19 @@ fn load(mut s: store.Store[Dir], from: u64, to: u64) -> Result[(), ()] {
   Ok(())
 }
 
-fn snap_bytes(d: Dir) -> u64 uses {d} {
-  let Ok(entries) = file.read_dir(d, path.of("snap")) else {
-    return 0
+fn snap_bytes(d: Dir) -> Result[u64, FileError] uses {d} {
+  let entries = match file.read_dir(d, path.of("snap")) {
+    Ok(entries) => take entries,
+    Error(NotFound()) => return Ok(0),
+    Error(err) => return Error(take err),
   }
   let mut total: u64 = 0
-  for entry in entries {
-    if let Ok(data) = file.read_bytes(d, path.of(path.text(entry.path))) {
-      total += bytes.len(data)
-    }
+  for item in take entries {
+    let entry = item?
+    let data = file.read_bytes(d, entry.path)?
+    total += bytes.len(data)
   }
-  total
+  Ok(total)
 }
 
 pub fn main(rt: Io, args: Args) -> Result[(), ()] {
@@ -107,6 +109,11 @@ pub fn main(rt: Io, args: Args) -> Result[(), ()] {
   if store.close(take s) != Ok(()) {
     return Error(())
   }
-  let _ = out.print(stdout, f"{snap_bytes(d)}\n")
+  let Ok(size) = snap_bytes(d) else {
+    return Error(())
+  }
+  let Ok(_) = out.print(stdout, f"{size}\n") else {
+    return Error(())
+  }
   Ok(())
 }

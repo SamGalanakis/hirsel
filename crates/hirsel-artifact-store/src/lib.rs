@@ -32,8 +32,10 @@ mod pack;
 pub use pack::{Batch, Request};
 pub mod reapi;
 mod statistics;
+mod verified;
 use statistics::Counter;
 pub use statistics::{Statistics, StatisticsSnapshot};
+pub use verified::VerifiedRecords;
 
 /// Stable query address, used before its previous dependencies are evaluated.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,11 +44,15 @@ pub struct Address(pub ContentHash);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Action(pub ContentHash);
 /// Canonical output identity. Equal recomputation retains this identity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct Output(pub ContentHash);
 
 /// A content domain. Every referenced record checks both kind and schema.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct Domain {
     pub kind: u32,
     pub schema: u32,
@@ -54,7 +60,9 @@ pub struct Domain {
 
 /// A reference cannot supply proof authority. Producers and verifier-owned
 /// associations use separate roots; imported bytes create no action association.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct Reference {
     pub output: Output,
     pub domain: Domain,
@@ -305,7 +313,11 @@ impl Bytes {
     /// container range reuses its immutable backing's integrity check. Other
     /// views, including arbitrary provider bytes, require the complete digest.
     pub fn matches_reference(&self, reference: Reference) -> bool {
-        self.has_reference(reference) || reference.domain.reference(self) == Some(reference)
+        if self.has_reference(reference) {
+            return true;
+        }
+        self.count_content_check();
+        reference.domain.reference(self) == Some(reference)
     }
 
     fn has_reference(&self, reference: Reference) -> bool {
@@ -342,17 +354,32 @@ impl Bytes {
         if self.has_reference(reference) {
             return Some(self);
         }
+        self.count_content_check();
         if reference.domain.reference(&self)? != reference {
             return None;
         }
-        Some(Self {
+        Some(self.with_reference(reference))
+    }
+
+    fn count_content_check(&self) {
+        if let Some(statistics) = self
+            .region
+            .checks()
+            .and_then(|checks| checks.statistics.as_ref())
+        {
+            statistics.add(Counter::ContentChecks, 1);
+        }
+    }
+
+    fn with_reference(self, reference: Reference) -> Self {
+        Self {
             region: Arc::new(Region::Payload(Box::new(CheckedPayload {
                 region: self.region,
                 range: self.range.clone(),
                 reference,
             }))),
             range: self.range,
-        })
+        }
     }
 
     /// Visit the complete physical backing retained by this view. Identities
@@ -740,25 +767,7 @@ impl Store {
     /// avoiding an output reopen between association lookup and validation.
     pub fn lookup_open(&self, address: Address) -> Option<OpenedAssociation> {
         let bytes = self.packed_get(1, address.0)?;
-        if bytes.len() != ROOT_LEN
-            || bytes[..8] != *ROOT
-            || bytes[8..40] != address.0.0
-            || ContentHash::of_parts("hirsel.artifact.association.v1", [&bytes[..120]]).0
-                != bytes[120..]
-        {
-            return None;
-        }
-        let association = Association {
-            action: Action(ContentHash(bytes[40..72].try_into().ok()?)),
-            reference: Reference {
-                output: Output(ContentHash(bytes[72..104].try_into().ok()?)),
-                domain: Domain {
-                    kind: word(&bytes, 104)?,
-                    schema: word(&bytes, 108)?,
-                },
-                len: number(&bytes, 112)?,
-            },
-        };
+        let association = checked_association(&bytes, address)?;
         self.raw_container(association.reference)
             .filter(|bytes| {
                 bytes.len() as u64
@@ -1055,6 +1064,27 @@ fn checked_content(region: Arc<Region>, reference: Reference) -> Option<Bytes> {
         },
         reference,
     )
+}
+fn checked_association(bytes: &[u8], address: Address) -> Option<Association> {
+    if bytes.len() != ROOT_LEN
+        || bytes[..8] != *ROOT
+        || bytes[8..40] != address.0.0
+        || ContentHash::of_parts("hirsel.artifact.association.v1", [&bytes[..120]]).0
+            != bytes[120..]
+    {
+        return None;
+    }
+    Some(Association {
+        action: Action(ContentHash(bytes[40..72].try_into().ok()?)),
+        reference: Reference {
+            output: Output(ContentHash(bytes[72..104].try_into().ok()?)),
+            domain: Domain {
+                kind: word(bytes, 104)?,
+                schema: word(bytes, 108)?,
+            },
+            len: number(bytes, 112)?,
+        },
+    })
 }
 fn checked_container(bytes: Bytes, reference: Reference) -> Option<Bytes> {
     let checks = bytes.region.checks();

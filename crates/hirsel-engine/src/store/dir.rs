@@ -215,6 +215,15 @@ impl DirStore {
             .map(|root| (true, root))
             .chain(self.read_only.iter().map(|root| (false, root)))
     }
+    fn installed_records(&self, root: &Path) -> Option<Arc<super::InstalledSourceRecords>> {
+        let captured = self
+            .installed_capture
+            .as_ref()?
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let records = captured.as_ref()?.source_records()?;
+        (records.root == root).then_some(records)
+    }
     fn publication_store(&self) -> Option<&hirsel_artifact_store::Store> {
         let store = self.physical.as_ref()?;
         // A batch can retain unpublished bytes before its eventual disk flush.
@@ -276,7 +285,7 @@ impl ResultStore for DirStore {
         }
         let mut failures = Vec::new();
         for root in &self.read_only {
-            match super::InstalledPackage::open(root.root(), package, compiler) {
+            match super::InstalledPackage::open(root, package, compiler) {
                 Ok(package) => {
                     if let Some(captured) = &mut captured {
                         **captured = Some(package.clone());
@@ -370,7 +379,15 @@ impl ResultStore for DirStore {
         // A front QueryId shares its logical address with its variant row.
         // Keep the product index disjoint, as the byte providers do.
         let address = super::Address(super::product_association_key(address).0);
-        let row = self.roots().find_map(|(_, store)| store.lookup(address))?;
+        let row = self.roots().find_map(|(local, store)| {
+            if !local
+                && let Some(records) = self.installed_records(store.root())
+                && let Some(row) = records.lookup(address)
+            {
+                return Some(row);
+            }
+            store.lookup(address)
+        })?;
         self.record_row(address, row.action, row.reference);
         Some(row)
     }
@@ -404,7 +421,13 @@ impl ResultStore for DirStore {
     }
     fn get_content(&self, reference: super::Reference) -> Option<super::Bytes> {
         for (local, store) in self.roots() {
-            if let Some(bytes) = store.get(reference) {
+            let bytes = if !local {
+                self.installed_records(store.root())
+                    .and_then(|records| records.content(reference))
+            } else {
+                None
+            };
+            if let Some(bytes) = bytes.or_else(|| store.get(reference)) {
                 if local {
                     store.touch(
                         hirsel_artifact_store::Address(reference.output.0),
@@ -424,6 +447,21 @@ impl ResultStore for DirStore {
     }
     fn get(&self, key: &EntryKey) -> Option<super::Bytes> {
         for (local, store) in self.roots() {
+            if !local
+                && let Some(records) = self.installed_records(store.root())
+                && let Some(row) = records.lookup(hirsel_artifact_store::Address(key.0))
+            {
+                if row.reference.domain != super::entry_domain(key.2) {
+                    continue;
+                }
+                let bytes = records.content(row.reference)?;
+                self.record_row(
+                    hirsel_artifact_store::Address(key.0),
+                    row.action,
+                    row.reference,
+                );
+                return Some(bytes);
+            }
             let Some(opened) = store.lookup_open(hirsel_artifact_store::Address(key.0)) else {
                 if local
                     && let Some(path) =
@@ -489,6 +527,113 @@ impl ResultStore for DirStore {
 mod tests {
     use super::*;
     use crate::store::{Domain, ResultStore};
+
+    #[test]
+    fn installed_closure_checks_unique_references_once_and_reuses_all_read_paths() {
+        use crate::store::{
+            Action, Address, InstalledPackage, InstalledSource, installed::InstallationRecords,
+        };
+        use hirsel_syntax::{ContentHash, FileContext, PackageId};
+        let directory = tempfile::tempdir().unwrap();
+        let installed = directory.path().join("installed");
+        let writer = hirsel_artifact_store::Store::rebuildable(installed.clone());
+        let compiler = ContentHash::of_bytes(b"compiler");
+        let package = PackageId {
+            name: "std".into(),
+            version: "1".into(),
+        };
+        let mut records = InstallationRecords::default();
+        let mut inputs = Vec::new();
+        let batch = writer.batch();
+        // More packed references than integrity slots, and more standalone
+        // regions than the bounded region cache can retain.
+        for n in 0u64..150 {
+            let bytes = if n < 80 {
+                n.to_le_bytes().to_vec()
+            } else {
+                vec![n as u8; 5000]
+            };
+            let reference = writer
+                .put(crate::store::entry_domain(crate::QueryKind::Parse), &bytes)
+                .unwrap();
+            let address = Address(ContentHash::of_parts(
+                "installed-cost-law",
+                [&n.to_le_bytes()[..]],
+            ));
+            let action = Action(ContentHash::of_bytes(&n.to_le_bytes()));
+            for address in [
+                address,
+                Address(crate::store::product_association_key(address).0),
+            ] {
+                writer.associate(address, action, reference).unwrap();
+                records.rows.insert(address.0, (action, reference));
+            }
+            records.contents.insert(reference.output.0, reference);
+            inputs.push((address, action, reference, bytes));
+        }
+        batch.finish().unwrap();
+        InstalledPackage::new(
+            compiler,
+            package.clone(),
+            b"manifest".to_vec(),
+            vec![InstalledSource {
+                path: "/absent/source.hir".into(),
+                logical: "std@1/source.hir".into(),
+                context: FileContext {
+                    package: package.clone(),
+                    modules: vec![],
+                },
+                text: "pub fn value()->u8{1u8}".into(),
+            }],
+            vec![],
+        )
+        .publish(&writer, &records)
+        .unwrap();
+        let provider = DirStore::new(directory.path().join("local")).with_read_only_root(installed);
+        let statistics = provider.read_only[0].enable_statistics();
+        let operation = provider.for_operation().unwrap();
+        let _scope = operation.read_scope();
+        let package_owner = operation.installed_package(&package, compiler).unwrap();
+        // Exactly one complete content check per product plus the interface.
+        let checks = inputs.len() as u64 + 1;
+        assert_eq!(statistics.snapshot().counters["ContentChecks"], checks);
+        let opened = statistics.snapshot();
+        let source = package_owner.source_records().unwrap();
+        assert!(source.metadata_bytes() >= 70 * 5000);
+        for _ in 0..2 {
+            for (address, action, reference, expected) in &inputs {
+                let key = EntryKey(address.0, ContentHash::default(), crate::QueryKind::Parse);
+                let content = operation.get_content(*reference).unwrap();
+                assert_eq!(&*content, expected);
+                assert!(content.matches_reference(*reference));
+                assert_eq!(&*operation.get(&key).unwrap(), expected);
+                assert_eq!(&*source.get(&key).unwrap(), expected);
+                assert_eq!(
+                    operation.lookup_product(*address),
+                    Some(crate::store::Association {
+                        action: *action,
+                        reference: *reference
+                    })
+                );
+            }
+        }
+        let consumed = statistics.snapshot();
+        for counter in [
+            "ContentChecks",
+            "SegmentOpens",
+            "StandaloneOpens",
+            "RegionLoads",
+        ] {
+            assert_eq!(
+                consumed.counters[counter], opened.counters[counter],
+                "{counter}"
+            );
+        }
+        // An independent operation rechecks even while old handles stay alive.
+        let next = provider.for_operation().unwrap();
+        next.installed_package(&package, compiler).unwrap();
+        assert_eq!(statistics.snapshot().counters["ContentChecks"], 2 * checks);
+    }
 
     #[test]
     fn query_variants_and_product_associations_survive_each_others_publication_and_reopen() {

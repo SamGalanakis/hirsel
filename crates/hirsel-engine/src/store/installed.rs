@@ -71,9 +71,9 @@ mod tests {
     fn installed_interface_rejects_stale_corrupt_and_partial_products() {
         let directory = tempfile::tempdir().unwrap();
         let (store, compiler, package, _reference) = fixture(directory.path());
-        assert!(InstalledPackage::open(directory.path(), &package, compiler).is_ok());
+        assert!(InstalledPackage::open(&store, &package, compiler).is_ok());
         assert!(
-            InstalledPackage::open(directory.path(), &package, ContentHash::default())
+            InstalledPackage::open(&store, &package, ContentHash::default())
                 .unwrap_err()
                 .contains("compiler identity mismatch")
         );
@@ -84,7 +84,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let error = InstalledPackage::open(directory.path(), &package, compiler).unwrap_err();
+        let error = InstalledPackage::open(&store, &package, compiler).unwrap_err();
         assert!(error.contains("partial"), "{error}");
         assert!(
             error.contains(directory.path().to_str().unwrap()),
@@ -95,7 +95,7 @@ mod tests {
         *damaged.last_mut().unwrap() ^= 1;
         std::fs::write(path, damaged).unwrap();
         assert!(
-            InstalledPackage::open(directory.path(), &package, compiler)
+            InstalledPackage::open(&store, &package, compiler)
                 .unwrap_err()
                 .contains("corrupt")
         );
@@ -115,8 +115,7 @@ mod tests {
         store
             .associate(Address(key.0), Action(first.output.0), first)
             .unwrap();
-        let mut installed =
-            (*InstalledPackage::open(directory.path(), &package, compiler).unwrap()).clone();
+        let mut installed = (*InstalledPackage::open(&store, &package, compiler).unwrap()).clone();
         let mut records = InstallationRecords::default();
         for (address, action, reference) in &installed.rows {
             records.rows.insert(*address, (Action(*action), *reference));
@@ -127,7 +126,7 @@ mod tests {
         records.rows.insert(key.0, (Action(first.output.0), first));
         records.contents.insert(first.output.0, first);
         installed.publish(&store, &records).unwrap();
-        let owner = InstalledPackage::open(directory.path(), &package, compiler)
+        let owner = InstalledPackage::open(&store, &package, compiler)
             .unwrap()
             .source_records()
             .unwrap();
@@ -143,13 +142,13 @@ mod tests {
                 .get(&EntryKey(key.0, key.1, crate::QueryKind::Modes))
                 .is_none()
         );
-        assert!(InstalledPackage::open(directory.path(), &package, compiler).is_err());
+        assert!(InstalledPackage::open(&store, &package, compiler).is_err());
     }
     #[test]
     fn duplicate_content_checks_preserve_full_reference_identity() {
         let directory = tempfile::tempdir().unwrap();
         let (store, compiler, package, reference) = fixture(directory.path());
-        let installed = InstalledPackage::open(directory.path(), &package, compiler).unwrap();
+        let installed = InstalledPackage::open(&store, &package, compiler).unwrap();
         for invalid in [
             Reference {
                 len: reference.len + 1,
@@ -176,7 +175,7 @@ mod tests {
     #[test]
     fn operation_shares_installed_inputs_and_revalidates_at_the_next_boundary() {
         let directory = tempfile::tempdir().unwrap();
-        let (store, compiler, package, _) = fixture(directory.path());
+        let (store, compiler, package, reference) = fixture(directory.path());
         let provider = DirStore::new(directory.path().join("cache"))
             .with_read_only_root(directory.path().to_owned());
         let operation = provider.for_operation().unwrap();
@@ -189,6 +188,24 @@ mod tests {
                 .unwrap_err()
                 .contains("compiler identity mismatch")
         );
+        let path = store.output_path(reference);
+        let original = std::fs::read(&path).unwrap();
+        let mut damaged = original.clone();
+        *damaged.last_mut().unwrap() ^= 1;
+        let replacement = directory.path().join("replacement");
+        std::fs::write(&replacement, damaged).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert_eq!(&*operation.get_content(reference).unwrap(), b"product");
+        assert!(
+            provider
+                .for_operation()
+                .unwrap()
+                .installed_package(&package, compiler)
+                .unwrap_err()
+                .contains("corrupt")
+        );
+        std::fs::write(&replacement, original).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
         std::fs::remove_file(
             store
                 .association_path(Address(ContentHash::of_bytes(b"row")))
@@ -214,26 +231,47 @@ pub struct InstalledSource {
 }
 
 #[derive(Debug)]
-/// Immutable installed parse inputs, independent of result-cache policy.
+/// Checked installed products and parse inputs, independent of cache policy.
 pub(crate) struct InstalledSourceRecords {
-    store: hirsel_artifact_store::Store,
-    rows: BTreeMap<ContentHash, Reference>,
+    pub(super) root: PathBuf,
+    rows: BTreeMap<ContentHash, hirsel_artifact_store::Association>,
+    contents: hirsel_artifact_store::VerifiedRecords,
+    retained_bytes: usize,
 }
 impl InstalledSourceRecords {
     pub(crate) fn get(&self, key: &EntryKey) -> Option<Bytes> {
         if key.2 != crate::QueryKind::Parse {
             return None;
         }
-        self.store.get(*self.rows.get(&key.0)?)
+        let reference = self.lookup(Address(key.0))?.reference;
+        if reference.domain != super::entry_domain(crate::QueryKind::Parse) {
+            return None;
+        }
+        self.content(reference)
+    }
+    pub(super) fn lookup(&self, address: Address) -> Option<hirsel_artifact_store::Association> {
+        self.rows.get(&address.0).copied()
+    }
+    pub(super) fn content(&self, reference: Reference) -> Option<Bytes> {
+        self.contents.get(reference)
     }
     pub(crate) fn metadata_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+    fn count_retained_bytes(&self) -> usize {
         let mut weight = crate::NativeMetadataWeight::default();
         weight.add(
             std::mem::size_of::<Self>()
                 + 2 * std::mem::size_of::<usize>()
-                + self.store.root().as_os_str().len(),
+                + self.root.as_os_str().len(),
         );
-        weight.tree::<ContentHash, Reference>(self.rows.len());
+        weight.tree::<ContentHash, hirsel_artifact_store::Association>(self.rows.len());
+        let mut allocations = std::collections::BTreeSet::new();
+        self.contents.visit_retained_allocations(|identity, bytes| {
+            if allocations.insert(identity) {
+                weight.add(bytes);
+            }
+        });
         weight.bytes().try_into().unwrap_or(usize::MAX)
     }
 }
@@ -301,39 +339,31 @@ impl InstalledPackage {
         let reference = store.put(PACKAGE, &bytes)?;
         store.associate(address(), Action(reference.output.0), reference)
     }
-    fn check_records(&self, store: &hirsel_artifact_store::Store) -> Result<(), String> {
-        let mut checked = std::collections::BTreeSet::new();
-        let mut check_content = |reference: Reference| {
-            !checked.insert((
-                reference.output.0,
-                reference.domain.kind,
-                reference.domain.schema,
-                reference.len,
-            )) || store.get(reference).is_some()
-        };
-        for &(address, action, reference) in &self.rows {
-            if !store
-                .lookup(Address(address))
-                .is_some_and(|row| row.action.0 == action && row.reference == reference)
-                || !check_content(reference)
-            {
-                return Err("partial or corrupt package product row".into());
-            }
-        }
-        for &reference in &self.contents {
-            if !check_content(reference) {
-                return Err("partial or corrupt package product content".into());
-            }
-        }
-        Ok(())
+    fn check_records(
+        &self,
+        store: &hirsel_artifact_store::Store,
+    ) -> Result<hirsel_artifact_store::VerifiedRecords, String> {
+        store
+            .verify_records(
+                self.rows.iter().map(|&(address, action, reference)| {
+                    (
+                        Address(address),
+                        hirsel_artifact_store::Association {
+                            action: Action(action),
+                            reference,
+                        },
+                    )
+                }),
+                self.contents.iter().copied(),
+            )
+            .ok_or_else(|| "partial or corrupt package product content or row".into())
     }
     pub(super) fn open(
-        root: &Path,
+        store: &hirsel_artifact_store::Store,
         package: &PackageId,
         compiler: ContentHash,
     ) -> Result<Arc<Self>, String> {
         let read = || -> Result<Self, String> {
-            let store = hirsel_artifact_store::Store::new(root.to_owned());
             let _read = store.batch();
             let row = store
                 .lookup(address())
@@ -371,20 +401,32 @@ impl InstalledPackage {
             if !installed.dependencies.is_empty() {
                 return Err("installed package dependency products are unavailable".into());
             }
-            installed.check_records(&store)?;
+            let contents = installed.check_records(store)?;
             let rows = installed
                 .rows
                 .iter()
-                .filter(|(_, _, reference)| {
-                    reference.domain == super::entry_domain(crate::QueryKind::Parse)
+                .map(|&(address, action, reference)| {
+                    (
+                        address,
+                        hirsel_artifact_store::Association {
+                            action: Action(action),
+                            reference,
+                        },
+                    )
                 })
-                .map(|(address, _, reference)| (*address, *reference))
                 .collect();
-            installed.records = Some(Arc::new(InstalledSourceRecords { store, rows }));
+            let mut records = InstalledSourceRecords {
+                root: store.root().to_owned(),
+                rows,
+                contents,
+                retained_bytes: 0,
+            };
+            records.retained_bytes = records.count_retained_bytes();
+            installed.records = Some(Arc::new(records));
             Ok(installed)
         };
         read()
             .map(Arc::new)
-            .map_err(|error| format!("installed products {}: {error}", root.display()))
+            .map_err(|error| format!("installed products {}: {error}", store.root().display()))
     }
 }

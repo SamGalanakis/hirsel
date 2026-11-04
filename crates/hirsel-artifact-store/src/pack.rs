@@ -82,6 +82,14 @@ impl Index {
     }
 }
 type Stamp = (u64, std::time::SystemTime, u64);
+pub(super) enum Source {
+    Pending(Bytes),
+    File {
+        path: PathBuf,
+        offset: u32,
+        len: u32,
+    },
+}
 fn stamp(path: &Path) -> Option<Stamp> {
     let meta = fs::metadata(path).ok()?;
     #[cfg(unix)]
@@ -237,9 +245,18 @@ impl Store {
             .map(|l| self.path(l.segment, "packs"))
     }
     pub(super) fn packed_get(&self, tag: u8, key: ContentHash) -> Option<Bytes> {
+        match self.packed_source(tag, key)? {
+            Source::Pending(bytes) => Some(bytes),
+            Source::File { path, offset, len } => {
+                self.open_segment(&path)?
+                    .range(u64::from(offset), u64::from(len), 8)
+            }
+        }
+    }
+    pub(super) fn packed_source(&self, tag: u8, key: ContentHash) -> Option<Source> {
         let mut state = self.state();
         if let Some(bytes) = state.pending.get(&(tag, key)) {
-            return Some(bytes.clone());
+            return Some(Source::Pending(bytes.clone()));
         }
         let (location, path) = if let Some(epoch) = &state.epoch
             && let Some(location) = epoch.locations.get(&(tag, key))
@@ -250,8 +267,14 @@ impl Store {
             let location = index::find(&state.index.as_ref()?.generation, index_key(tag, key)?)?;
             (location, self.path(location.segment, "packs"))
         };
-        drop(state);
-        let region = self.open_region(&path, Counter::SegmentOpens).ok()?;
+        Some(Source::File {
+            path,
+            offset: location.offset,
+            len: location.len,
+        })
+    }
+    pub(super) fn open_segment(&self, path: &Path) -> Option<Bytes> {
+        let region = self.open_region(path, Counter::SegmentOpens).ok()?;
         let bytes = region.bytes();
         if bytes.len() > LIMIT
             || bytes.get(..8)? != SEGMENT
@@ -263,11 +286,10 @@ impl Store {
             return None;
         }
         let len = bytes.len();
-        Bytes {
+        Some(Bytes {
             region,
             range: 0..len,
-        }
-        .range(u64::from(location.offset), u64::from(location.len), 8)
+        })
     }
     pub(super) fn packed_put(&self, tag: u8, key: ContentHash, bytes: Bytes) -> io::Result<()> {
         let mut state = self.state();

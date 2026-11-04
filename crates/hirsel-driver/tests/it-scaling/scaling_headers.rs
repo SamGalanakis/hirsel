@@ -11,6 +11,9 @@ fn headers_compose_module_declarations_once() {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
             let before =
                 hirsel_intern::work::read(hirsel_intern::work::Counter::ModuleDeclarationRows);
+            let source_bytes = source.len() as u64;
+            let bytes_before =
+                hirsel_intern::work::read(hirsel_intern::work::Counter::SourceTextBytes);
             let file = engine.sources.add("headers.hir", source).unwrap();
             let parsed = engine.parse_file(file, &default_context()).unwrap();
             assert!(parsed.diagnostics.is_empty());
@@ -25,6 +28,15 @@ fn headers_compose_module_declarations_once() {
             let inspected =
                 hirsel_intern::work::read(hirsel_intern::work::Counter::ModuleDeclarationRows)
                     - before;
+            let exposed = hirsel_intern::work::read(hirsel_intern::work::Counter::SourceTextBytes)
+                - bytes_before;
+            // SourceFile::text also serves span slicing: exposing a source
+            // does not scan all of it. Allow at most eight full-text accesses
+            // per header across parsing, indexing and signature resolution.
+            assert!(
+                exposed <= 8 * count * source_bytes,
+                "{count} headers exposed {exposed} source bytes, input {source_bytes}"
+            );
             assert!(
                 inspected <= 8 * count,
                 "{count} headers inspected {inspected} module declaration rows"

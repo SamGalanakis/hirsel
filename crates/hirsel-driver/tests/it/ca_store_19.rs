@@ -81,6 +81,7 @@ struct Observed {
     reads: AtomicUsize,
     writes: AtomicUsize,
     parse_writes: AtomicUsize,
+    parse_reads: AtomicUsize,
     content_reads: AtomicUsize,
     content_writes: AtomicUsize,
     mode_reads: AtomicUsize,
@@ -148,6 +149,9 @@ fn ordinary_catalog_native_roots_survive_fresh_warm_checks() {
 impl store::ResultStore for Observed {
     fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
         self.reads.fetch_add(1, Ordering::Relaxed);
+        if key.2 == QueryKind::Parse {
+            self.parse_reads.fetch_add(1, Ordering::Relaxed);
+        }
         if key.2 == QueryKind::Modes {
             self.mode_reads.fetch_add(1, Ordering::Relaxed);
         }
@@ -2542,7 +2546,7 @@ fn ordinary_parse_heads_restore_names_and_signatures_without_syntax_or_type_tabl
 #[test]
 fn ordinary_parse_heads_materialize_only_demanded_files_and_preserve_resident_edits() {
     with_compiler_stack(|| {
-        let store = Arc::new(store::MemStore::default());
+        let store = Arc::new(Observed::default());
         let source = "fn value()->u32{7u32}\n";
         let other = "fn other()->u32{3u32}\n";
         let path = |name: &str| {
@@ -2566,7 +2570,7 @@ fn ordinary_parse_heads_materialize_only_demanded_files_and_preserve_resident_ed
         // This control exercises materialization from heads without a Parse
         // output; keep its exact parser-work and edit assertions below.
         let mut removed_syntax = 0;
-        for (key, bytes) in store.take() {
+        for (key, bytes) in store.inner.take() {
             if key.2 == QueryKind::Parse && bytes.starts_with(&2u32.to_le_bytes()) {
                 removed_syntax += 1;
             } else {
@@ -2574,14 +2578,20 @@ fn ordinary_parse_heads_materialize_only_demanded_files_and_preserve_resident_ed
             }
         }
         assert_eq!(removed_syntax, 2);
-        let mut reader =
-            QueryEngine::new(default_environment(), compiler_adapters()).with_result_store(store);
+        let mut reader = QueryEngine::new(default_environment(), compiler_adapters())
+            .with_result_store(store.clone());
         for (name, text) in [("heads.hir", source), ("other.hir", other)] {
             let file = reader.sources.add(name, text.into()).unwrap();
             reader.index_source(file, &default_context()).unwrap();
         }
         assert_eq!(reader.work_stats().parsed_bytes, 0);
+        let before_reads = store.parse_reads.load(Ordering::Relaxed);
         let item = reader.parse_definition(&path("value")).unwrap().value;
+        assert_eq!(
+            store.parse_reads.load(Ordering::Relaxed) - before_reads,
+            2,
+            "one syntax lookup miss and one publication equality read for the demanded file"
+        );
         assert_eq!(reader.work_stats().parsed_bytes, source.len() as u64);
         assert!(reader.lower_to_tir(&path("value")).is_ok());
         assert!(reader.body_validation_runs(&path("value")) > 0);
@@ -2595,7 +2605,13 @@ fn ordinary_parse_heads_materialize_only_demanded_files_and_preserve_resident_ed
             item.text_hash
         );
         assert_eq!(reader.work_stats().parsed_bytes, 2 * source.len() as u64);
+        let before_reads = store.parse_reads.load(Ordering::Relaxed);
         assert!(reader.parse_definition(&path("other")).is_ok());
+        assert_eq!(
+            store.parse_reads.load(Ordering::Relaxed) - before_reads,
+            2,
+            "the later demand performs one miss and one publication equality read"
+        );
         assert_eq!(
             reader.work_stats().parsed_bytes,
             (2 * source.len() + other.len()) as u64

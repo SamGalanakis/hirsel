@@ -90,6 +90,8 @@ pub enum Counter {
     InterpKeyedRows,
     /// Counted-content row visits, nominal expansions and shape-pair comparisons.
     ContentRelationRows,
+    /// Full source-text bytes exposed by SourceFile::text, including repeated access.
+    SourceTextBytes,
     /// Cached dependency-node inspections.
     CacheValidationRows,
 }

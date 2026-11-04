@@ -253,7 +253,13 @@ impl SourceFile {
     pub fn logical_path(&self) -> &Path {
         &self.logical_path
     }
+    /// Exposes the full source and charges its byte length per access. This
+    /// measures repeated full-source access, not byte loads through a held str.
     pub fn text(&self) -> &str {
+        hirsel_intern::work::count_by(
+            hirsel_intern::work::Counter::SourceTextBytes,
+            self.text.len() as u64,
+        );
         &self.text
     }
     pub fn location(&self, offset: u32) -> Option<LineColumn> {

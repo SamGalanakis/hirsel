@@ -51,7 +51,7 @@ multiplex percentages remain in the raw JSON.
 | native | `run --native --timings=json` until first output/listening | `cargo build --release --offline` (compile only) |
 | precompute | `precompute stdlib/std@1/hirsel.json -o <directory>` | none |
 
-The older explicit modes `clif`, `llvm-o0`, `llvm-o2` and the `edit-*` selectors
+The older explicit modes `clif`, `llvm-o2` and the `edit-*` selectors
 remain accepted. `--groups`, `--select`, `--modes`, `--jobs`, `--repeat` and
 `--timeout` narrow a run; a native-only selection still includes Rust release.
 The edit group must be explicitly selected with its `edit-*` modes. It uses the
@@ -181,7 +181,8 @@ above and edits private copies of the programs.
 tools/compiler-bench/resident oracle \
   --toolchain <bundle> --work /tmp/hirsel-resident-oracle --output oracle.json
 tools/compiler-bench/resident measure \
-  --toolchain <bundle> --native --work /tmp/hirsel-resident-measure --output edit-loop.json
+  --toolchain <bundle> --native --server-cpu "$SERVER_CPU" --client-cpu "$CLIENT_CPU" \
+  --work /tmp/hirsel-resident-measure --output edit-loop.json
 ```
 
 Each program holds one capped slot for its resident session and releases it
@@ -191,7 +192,9 @@ command is outside the resident protocol and is reported as excluded.
 `measure --native` runs ten seeded interleaved rounds on tasks and syn10k.
 Set `LLVM_SYS_231_PREFIX`, `HIRSEL_LINK_KIT`, and `HIRSEL_RUNTIME_ARCHIVES`
 to this tree's Buck2 native tool inputs, as the main compiler suite does. The server
-uses CPU31 and the client CPU7. `perf stat` counts cycles and instructions in
+and client require distinct CPUs from the admission affinity, supplied with
+`--server-cpu` and `--client-cpu`. Select ordinary CPUs on a shared host;
+use dedicated timing CPUs only during an approved timing window. `perf stat` counts cycles and instructions in
 both processes, and a control/ack pipe enables the server counters only for
 the request. The report retains each sample and medians; compare times only
 as ratios inside that session. `--select` filters oracle programs, and

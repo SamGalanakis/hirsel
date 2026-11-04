@@ -7,7 +7,7 @@ Every measurement takes its own tools/capped slot. Default: ten seeded,
 interleaved rounds of check, debug, release and native startup, including the
 3k/10k/30k scale series. --quick selects hello and csvjson, one round, with a
 540-second active-work budget. Toolchain preparation and capped queue time
-are outside that budget. Legacy clif/llvm-o0/llvm-o2 and edit modes remain
+are outside that budget. Legacy clif/llvm-o2 and edit modes remain
 selectable. Cold removes only this runner's program/native caches; std's
 published products and Rust dependency artifacts are retained on both sides.
 """
@@ -40,8 +40,8 @@ HIRSEL_MODES = ('check', 'debug', 'release', 'native')
 RUST_MODES = ('check', 'debug', 'release')
 EDITS = ('edit-body', 'edit-private-sig', 'edit-public-sig')
 # The Rust mode a Hirsel mode is compared with in the scoreboard.
-PAIRED = {'debug': 'debug', 'release': 'release', 'native': 'release', 'check': 'check', 'clif': 'debug', 'llvm-o0': 'debug', **{e: e for e in EDITS}}
-NATIVE = ('debug', 'release', 'native', 'clif', 'llvm-o0', 'llvm-o2')
+PAIRED = {'debug': 'debug', 'release': 'release', 'native': 'release', 'check': 'check', 'clif': 'debug', **{e: e for e in EDITS}}
+NATIVE = ('debug', 'release', 'native', 'clif', 'llvm-o2')
 HIRSEL_CACHE = 'none retained: fresh process, std product read, query cache process-local'
 RUST_COLD = 'cold: dependencies built, package artifacts and incremental state removed'
 RUST_WARM = 'warm: incremental cache of the unedited program retained'
@@ -184,7 +184,7 @@ class Runner:
             return [hirsel, 'run', *self.timings, '--native', str(path)]
         if mode == 'check' or mode in EDITS:
             return [hirsel, 'check', *self.timings, str(path)]
-        profile = {'clif': ['--debug', '--backend', 'cranelift'], 'llvm-o0': ['--debug'], 'llvm-o2': [], 'debug': ['--debug'], 'release': ['--release']}[mode]
+        profile = {'clif': ['--debug', '--backend', 'cranelift'], 'llvm-o2': [], 'debug': ['--debug'], 'release': ['--release']}[mode]
         return [hirsel, 'build', *self.timings, *profile, str(path), '-o', str(self.scratch / 'program')]
 
     def cargo(self, project, verb, jobs):
@@ -444,7 +444,7 @@ def modes(program, wanted, quick=False):
     elif program.language == 'hirsel' and program.check_only:
         own = ('check',)
     elif program.language == 'hirsel':
-        own = (*HIRSEL_MODES, 'clif', 'llvm-o0', 'llvm-o2')
+        own = (*HIRSEL_MODES, 'clif', 'llvm-o2')
     else:
         own = RUST_MODES
     return [m for m in own if wanted is None or m in wanted or (m == 'precompute' and 'check' in wanted)

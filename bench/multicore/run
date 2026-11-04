@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Run B1 in one seeded interleaved 1/2/4/8-core session; missing gates exit 2."""
 import argparse
-import fcntl
 import gzip
 import json
 import os
@@ -10,6 +9,8 @@ import random
 import subprocess
 import sys
 from suite import HERE, ROOT, MODES, analyze, digest, report, sample
+from measure import timing_lock
+from contextlib import ExitStack
 
 
 def main():
@@ -25,7 +26,8 @@ def main():
     p.add_argument('--iterations', type=int)
     p.add_argument('--rounds', type=int, default=10)
     p.add_argument('--seed', type=int, default=20261019)
-    p.add_argument('--cpus', default='31,30,29,28,27,26,25,24')
+    p.add_argument('--cpus', help='eight distinct physical worker CPUs, comma-separated')
+    p.add_argument('--client-cpu', type=int, help='separate load-client CPU for server cells')
     p.add_argument('--timeout', type=int, default=300)
     p.add_argument('--participants', type=Path, help='additional sealed participant inventory (free executor adapters)')
     args = p.parse_args()
@@ -34,12 +36,20 @@ def main():
     else:
         if args.rounds < 10 or args.iterations is not None and args.iterations < 1:
             p.error('at least ten rounds and positive iterations required')
-        cpus = list(map(int,args.cpus.split(',')))
+        if not args.cpus:
+            p.error('--cpus is required unless --report-only is set')
+        try:
+            cpus = list(map(int,args.cpus.split(',')))
+        except ValueError:
+            p.error('--cpus must be comma-separated CPU numbers')
         if len(cpus)<8 or len(set(cpus)) != len(cpus) or not set(cpus).issubset(os.sched_getaffinity(0)):
             p.error('eight distinct CPUs in the admission affinity required')
         # Reject SMT siblings in the worker grant: widths mean physical core parity.
         from suite import siblings
         if any(set(siblings(cpu)) & set(cpus) for cpu in cpus): p.error('worker CPUs must be distinct physical cores')
+        if not args.skip_servers and not args.tokio_only:
+            if args.client_cpu is None or args.client_cpu in cpus or args.client_cpu not in os.sched_getaffinity(0):
+                p.error('--client-cpu must be available and outside the worker grant')
         if not args.skip_build:
             subprocess.run([str(HERE/'build'), '--output',str(args.inventory.parent), *(['--tokio-only'] if args.tokio_only else [])],check=True)
         inventory = json.loads(args.inventory.read_text())
@@ -69,13 +79,10 @@ def main():
             for case in manifest['workloads'] if case in participant['commands']
             for width in manifest['widths'] if width in participant['widths']
             for mode in MODES if mode in participant['modes']]
-        # This is the existing host timing lease, shared with the tasks baseline.
-        lock = Path('/workspace/code/hirsel-briefs/locks/cpu31-timing.lock')
-        lock.parent.mkdir(parents=True,exist_ok=True)
         args.output.parent.mkdir(parents=True,exist_ok=True)
-        with lock.open('a') as stream:
-            print('B1: waiting for CPU31 timing lease',flush=True)
-            fcntl.flock(stream,fcntl.LOCK_EX)
+        with ExitStack() as locks:
+            for cpu in sorted(cpus):
+                locks.enter_context(timing_lock(cpu))
             for round_number in range(args.rounds):
                 rng.shuffle(cells)
                 for participant,case,width,mode in cells:
@@ -93,7 +100,7 @@ def main():
                 args.output.write_text(json.dumps(data,indent=2)+'\n')
                 print(f'B1: round {round_number+1}/{args.rounds}, {len(data["samples"])} samples',flush=True)
     if not args.report_only and not args.skip_servers and not args.tokio_only:
-        server_result = subprocess.run([str(HERE/'server'),'--output',str(args.output.with_suffix('.server.json')),'--rounds',str(args.rounds),'--seed',str(args.seed),'--cpus',args.cpus])
+        server_result = subprocess.run([str(HERE/'server'),'--output',str(args.output.with_suffix('.server.json')),'--rounds',str(args.rounds),'--seed',str(args.seed),'--cpus',args.cpus,'--client-cpu',str(args.client_cpu)])
         if server_result.returncode not in (0,2): return server_result.returncode
     rendered = args.report or (args.output.with_suffix('') if args.output.suffix == '.gz' else args.output).with_suffix('.md')
     rendered.write_text(report(data))

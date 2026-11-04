@@ -35,6 +35,20 @@ class Counters(unittest.TestCase):
         self.assertEqual(measure.cpu_list('0-2,7,15-16'), [0, 1, 2, 7, 15, 16])
 
 
+class PairRoutes(unittest.TestCase):
+    def test_unimplemented_rust_pairs_are_refused_before_building(self):
+        loader = importlib.machinery.SourceFileLoader('micro_build', str(ROOT / 'bench/micro/build'))
+        build = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(build)
+        for name in ('bigint_mul', 'gzip_read', 'json_scoped', 'json_scoped_check'):
+            with self.subTest(name=name), patch.object(sys, 'argv', ['build', name]), \
+                    patch.object(build, 'buck2_build') as compile_pair:
+                with self.assertRaises(SystemExit) as error:
+                    build.main()
+                self.assertEqual(error.exception.code, 2)
+                compile_pair.assert_not_called()
+
+
 class Sessions(unittest.TestCase):
     def test_seeded_schedule_interleaves_every_participant_once_per_round(self):
         order = measure.schedule(['old', 'new', 'rust'], 10, 42)

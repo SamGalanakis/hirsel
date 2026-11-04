@@ -14,11 +14,12 @@ import random
 import statistics
 import subprocess
 import time
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'micro'))
+from measure import cpu_list, siblings
 
 CASES = ('fork_join', 'mutex', 'independent_files')
 SIZES = (256, 512, 1024)
-CPUS = set(range(8, 16))
-SIBLINGS = set(range(24, 32))
 SEED = 20261024
 
 
@@ -35,12 +36,13 @@ def snapshot():
 
 
 def sibling_load(before, after):
+    sibling_cpus = {s for cpu in before['affinity'] for s in siblings(cpu)} - set(before['affinity'])
     def ticks(text):
         return {int(line.split()[0][3:]): list(map(int, line.split()[1:9]))
-                for line in text.splitlines() if line.split()[0] in {f'cpu{c}' for c in SIBLINGS}}
+                for line in text.splitlines() if line.split()[0] in {f'cpu{c}' for c in sibling_cpus}}
     b, a = ticks(before['proc_stat']), ticks(after['proc_stat'])
     result = {}
-    for cpu in sorted(SIBLINGS):
+    for cpu in sorted(sibling_cpus):
         delta = [x-y for x,y in zip(a[cpu], b[cpu])]
         total = sum(delta)
         result[str(cpu)] = {'total_ticks': total,
@@ -178,16 +180,20 @@ def main():
     parser.add_argument('--out',type=Path,required=True)
     parser.add_argument('--inventory',type=Path,required=True)
     parser.add_argument('--smoke',action='store_true')
+    parser.add_argument('--cpus', required=True, help='eight physical CPUs in the inherited timing fence')
     args=parser.parse_args()
+    try:
+        cpus=cpu_list(args.cpus)
+    except ValueError:
+        parser.error('--cpus must be a CPU list, for example 0-7')
+    if len(cpus)!=8 or len(set(cpus))!=8 or set(os.sched_getaffinity(0))!=set(cpus):
+        parser.error('--cpus requires exactly eight distinct CPUs matching the inherited affinity')
+    if any(set(siblings(cpu)) & set(cpus) for cpu in cpus):
+        parser.error('worker CPUs must be distinct physical cores')
     inventory=json.loads(args.inventory.read_text())
     for path,sha in inventory.get('sha256',{}).items(): assert digest(path)==sha,path
     if not args.smoke:
-        assert set(os.sched_getaffinity(0)) == CPUS
         assert float(Path('/proc/loadavg').read_text().split()[0]) < os.cpu_count()
-        for cpu in CPUS:
-            siblings=set(map(int,Path(f'/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list').read_text().strip().split(',')))
-            assert siblings & CPUS == {cpu}
-            assert siblings-{cpu} <= SIBLINGS
     session={'seed':SEED,'rounds':3,'before':snapshot(),'samples':[],'status':'running'}
     path=args.out/'session.json'
     def save(): path.write_text(json.dumps(session,indent=2)+'\n')

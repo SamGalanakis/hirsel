@@ -4,15 +4,16 @@ One command builds the locked tokio references and native LLVM programs and runs
 all workload cells in a seeded, ten-round, interleaved session at 1/2/4/8 cores:
 
 ```sh
-bench/multicore/run
+bench/multicore/run --cpus "$WORKER_CPUS" --client-cpu "$CLIENT_CPU"
 python3 tools/tests/multicore_bench.py
 ```
 
 Requires Linux, the repository Buck2/native toolchain, Cargo, perf counters,
 `taskset`, `/usr/bin/time`, and eight physical cores in the admission affinity.
-The default worker grant is CPUs 31,30,29,28,27,26,25,24 (client CPU7 is excluded).
-Use `--cpus` to select another eight distinct physical cores. The host's CPU31
-measurement lease serializes sessions with the tasks-rust suite. Each measured
+Supply `--cpus` with eight distinct physical cores and `--client-cpu` with a
+separate available CPU for server cells. Neither has a default. Use ordinary
+CPUs on a shared host; dedicated timing CPUs require an approved timing window.
+Per-CPU timing locks serialize sessions using the same CPUs. Each measured
 program is one `tools/capped` call with a width-matched CPU quota; perf inherits
 all its threads, and reads cycles, instructions, task-clock and duration_time.
 SMT siblings' busy shares and the actual capped scope's `throttled_usec` deltas
@@ -136,8 +137,8 @@ result. `--skip-servers` selects a partial micro-only session.
 Use the tasks-rust lane's `bench/apps/tasks/rust` application and open-loop `load`
 binary once landed; B1 does not fork that application. The baseline is pinned to
 tokio 1.52.0, axum 0.8.9 and the repository Rust toolchain, as are B1's tokio
-counterparts. Server on CPU31, client on CPU7; the server at width N receives
-CPU31 plus N-1 worker cores, with the same grant for both implementations. Its
+counterparts. Server width N uses the first N CPUs from `--cpus`; the open-loop
+client uses `--client-cpu`, with the same grant for both implementations. Its
 single-thread comparison remains width 1. `TASKS_WORKERS` integration and the
 server multicore launch adapter are coordinated with tasks-rust/C1/W1/F1 and are
 listed dependency-owned until available. The existing tasks suite uses ten
@@ -148,12 +149,14 @@ it with a closed-loop client or compare saved sessions' wall times.
 `b1.py` runs the narrow Free F1 continuation: fork_join, mutex and
 independent_files at n=256/512/1024, eight workers, three interleaved rounds
 (seed 20261024). It requires the coordinator's temporary physical-core fence
-on CPUs 8–15, with siblings 24–31 idle. It never establishes the fence itself.
+on the eight CPUs supplied by `--cpus`, with their SMT siblings idle.
+It derives the sibling set from sysfs and never establishes the fence itself.
 Build the ordinary archives, and the separate observer archives with `-c hirsel.operation_latency=true`
 (Cargo feature `operation-latency`, default off). Link otherwise identical
 native programs against each archive set. Tokio remains the locked comparator.
 
-Pass `--root <checkout> --out <external-session> --inventory <json>`. Inventory
+Pass `--root <checkout> --out <external-session> --inventory <json> --cpus <cpu-list>`.
+The inherited affinity must match those eight physical cores, including in smoke mode. Inventory
 contains `binaries.plain` with paths for fork_join, mutex, independent_files
 and tokio; `binaries.observer` contains the three native paths. Its `sha256`
 map may bind the binaries, workload inputs, harness and resolved perf ELF
@@ -164,8 +167,8 @@ Run inside the approved outer service, for example:
 
 ```sh
 sudo -n systemd-run --wait --pipe --collect --slice=timing.slice \
-  -p AllowedCPUs=8-15 -p MemoryMax=2G -p MemorySwapMax=0 \
-  taskset -c 8-15 python3 bench/multicore/b1.py \
+  -p AllowedCPUs="$WORKER_CPUS" -p MemoryMax=2G -p MemorySwapMax=0 \
+  taskset -c "$WORKER_CPUS" python3 bench/multicore/b1.py --cpus "$WORKER_CPUS" \
   --root "$PWD" --out /path/to/session --inventory /path/to/inventory.json
 ```
 

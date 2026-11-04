@@ -11,10 +11,10 @@ bench/multicore/deadline-readiness/run --binary /tmp/deadline-after \
 ```
 
 The runner keeps three seeded interleaved rounds at requested widths 1/2/4,
-whole-process cycles/instructions/context switches, argv, binary hashes and
+whole-process cycles/instructions:u/context switches, argv, binary hashes and
 stdout/stderr. It checks successful empty output and reports RED above 1.2×
-deadline width-1 cycles. The deadline-free twin identifies unrelated width
-overhead. Compare before/after only within one session. Instructions are the
+deadline width-1 instructions:u. The deadline-free twin identifies unrelated width
+overhead. Compare before/after only within one session. User instructions are the
 verdict; shared-host cycles are diagnostic. Requested width alone does not
 certify physical worker placement.
 

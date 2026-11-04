@@ -15,7 +15,10 @@ from suite import buck2_build, native_environment  # noqa: E402
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    sources = {p.stem: p for p in (HERE / 'programs').rglob('*.hir')}
+    pairs = {'channel', 'float_math', 'html_row', 'int_bits', 'json', 'json_typed',
+             'json_typed_dom', 'map_remove', 'map_str', 'map_str_entry', 'map_str_two_probe',
+             'map_str_upsert', 'map_u64', 'print', 'sha', 'sort', 'strbuild'}
+    sources = {p.stem: p for p in (HERE / 'programs').rglob('*.hir') if p.stem in pairs}
     parser.add_argument('case', choices=sorted(sources))
     parser.add_argument('--size', type=int, default=1000, help='workload size in the generated participant list')
     parser.add_argument('--epochs', type=int, default=1, help='epochs in the generated participant list')

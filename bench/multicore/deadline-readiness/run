@@ -50,7 +50,7 @@ def main():
         grant_file.write_text(json.dumps(grants))
         native = [str(binaries[variant]), '--hirsel-grants', str(grant_file), *grants['args']]
         measured = ['perf', 'stat', '-x', ';', '-e',
-                    'cycles,instructions,context-switches,duration_time',
+                    'cycles,instructions:u,context-switches,duration_time',
                     '-o', str(cell / 'perf.csv'), '--',
                     'taskset', '-c', args.cpus, *native]
         if args.timing_slice:
@@ -80,7 +80,7 @@ def main():
         rows.append(row)
         (out / 'receipts.json').write_text(json.dumps(rows, indent=2))
         print(variant, timer, width, passed, counts, flush=True)
-        if not passed or not {'cycles', 'instructions'} <= counts.keys():
+        if not passed or not {'cycles', 'instructions:u'} <= counts.keys():
             raise SystemExit('failed measurement retained')
     summary = {}
     for variant in binaries:
@@ -89,12 +89,12 @@ def main():
             medians = {w: {c: statistics.median(
                 r['perf'][c] for r in rows
                 if (r['variant'], r['timer'], r['width']) == (variant, timer, w))
-                for c in ['cycles', 'instructions', 'context-switches', 'duration_time']}
+                for c in ['cycles', 'instructions:u', 'context-switches', 'duration_time']}
                 for w in [1, 2, 4]}
             summary[variant][str(timer)] = medians
     (out / 'summary.json').write_text(json.dumps(summary, indent=2))
     after = summary['after']['True']
-    ratios = {w: after[w]['cycles'] / after[1]['cycles'] for w in [2, 4]}
+    ratios = {w: after[w]['instructions:u'] / after[1]['instructions:u'] for w in [2, 4]}
     print('DEADLINE_WIDTH_GATE', 'GREEN' if max(ratios.values()) <= 1.2 else 'RED', ratios)
     return int(max(ratios.values()) > 1.2)
 

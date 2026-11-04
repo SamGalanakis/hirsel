@@ -147,6 +147,41 @@ class Scoreboard(unittest.TestCase):
         self.assertEqual((pair['rust'], pair['ratio']), ('p/rust/debug/j1', 3.0))
 
 
+class ResidentPlacement(unittest.TestCase):
+    def test_selected_cpus_pin_server_and_client(self):
+        resident = script('resident')
+        with tempfile.TemporaryDirectory() as work:
+            directory = Path(work)
+            args = SimpleNamespace(toolchain=directory, server_cpu=2, client_cpu=3)
+            def start(*a, **kw):
+                (directory / 'server.log').write_bytes(b'serving test\n')
+                return SimpleNamespace(poll=lambda: None, terminate=lambda: None, wait=lambda **kw: None)
+            with patch.object(resident.subprocess, 'Popen', side_effect=start) as launched:
+                server = resident.Server(args, directory, pinned=True)
+            try:
+                self.assertEqual(launched.call_args.args[0][:3], ['taskset', '-c', '2'])
+                with patch.object(resident.subprocess, 'run', return_value=SimpleNamespace(returncode=0)) as client:
+                    server.command(['check', 'fixture.hir'], daemon='off', perf=directory / 'perf')
+                argv = client.call_args.args[0]
+                at = argv.index('taskset')
+                self.assertEqual(argv[at:at+3], ['taskset', '-c', '3'])
+            finally:
+                server.close()
+
+    def test_campaign_forwards_placement_to_capped_session(self):
+        resident = script('resident')
+        with tempfile.TemporaryDirectory() as work:
+            args = SimpleNamespace(mode='measure', select='^tasks$', work=Path(work),
+                                   output=Path(work) / 'result.json', scale=(3000,), rounds=3,
+                                   seed=42, toolchain=Path(work), native=False,
+                                   allow_rejected_checks=False, server_cpu=2, client_cpu=3)
+            with patch.object(resident.subprocess, 'run', return_value=SimpleNamespace(returncode=0)) as child:
+                resident.campaign(args)
+            argv = child.call_args.args[0]
+            self.assertEqual(argv[argv.index('--server-cpu') + 1], '2')
+            self.assertEqual(argv[argv.index('--client-cpu') + 1], '3')
+
+
 class QuickMatrix(unittest.TestCase):
 
     def test_measurements_disable_the_native_program_cache(self):

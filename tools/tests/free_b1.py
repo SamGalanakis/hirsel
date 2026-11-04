@@ -3,6 +3,7 @@
 from pathlib import Path
 import runpy
 import unittest
+from unittest.mock import patch
 
 B1 = runpy.run_path(str(Path(__file__).resolve().parents[2]/'bench/multicore/b1.py'))
 
@@ -30,6 +31,16 @@ class Acceptance(unittest.TestCase):
             self.assertEqual(row['p99_record_vs_off'],1.2)
             self.assertEqual(row['observer_wall_overhead_off'],1.2)
             self.assertTrue(all(row['floors'].values()))
+
+    def test_sibling_load_tracks_selected_cores_instead_of_fixed_host_ids(self):
+        stat = 'cpu16 10 0 0 10 0 0 0 0\ncpu17 10 0 0 10 0 0 0 0\n'
+        after = 'cpu16 20 0 0 20 0 0 0 0\ncpu17 10 0 0 30 0 0 0 0\n'
+        globals_ = B1['sibling_load'].__globals__
+        with patch.dict(globals_, siblings=lambda cpu: [cpu + 16]):
+            loads = B1['sibling_load']({'affinity': [0, 1], 'proc_stat': stat}, {'proc_stat': after})
+        self.assertEqual(set(loads), {'16', '17'})
+        self.assertEqual(loads['16']['busy_share'], .5)
+        self.assertEqual(loads['17']['busy_share'], 0)
 
     def test_missing_or_duplicate_rounds_refuse(self):
         rows = self.samples()

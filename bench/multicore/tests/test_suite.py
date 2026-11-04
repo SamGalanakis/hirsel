@@ -1,9 +1,13 @@
 import copy
+import importlib.machinery
 import importlib.util
 import json
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+from types import SimpleNamespace
+from unittest.mock import patch
 import unittest
 HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(HERE))
@@ -97,5 +101,34 @@ class AcceptanceTests(unittest.TestCase):
         text=report(data)
         self.assertIn('dependency-owned',text)
         self.assertIn('| recording | channel | 1 | cut_pause_ns | — | — | — |',text)
+
+class DeadlineVerdict(unittest.TestCase):
+    def test_user_instructions_decide_even_when_cycles_disagree(self):
+        loader = importlib.machinery.SourceFileLoader('deadline_run', str(HERE / 'deadline-readiness/run'))
+        deadline = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(deadline)
+        for instructions_ratio, cycles_ratio, expected in [(1.21, 1, 1), (1, 2, 0), (1.2, 2, 0)]:
+            with self.subTest(instructions=instructions_ratio, cycles=cycles_ratio), tempfile.TemporaryDirectory() as work:
+                binary = Path(work) / 'program'
+                binary.write_bytes(b'fixture')
+                output = Path(work) / 'session'
+                def measured(argv, **kw):
+                    grant = Path(argv[argv.index('--hirsel-grants') + 1])
+                    width = json.loads(grant.read_text())['placement']['cores']
+                    counter = Path(argv[argv.index('-o') + 1])
+                    counter.write_text('\n'.join(
+                        f'{value};;{event};' for event, value in {
+                            'cycles': 100 * (cycles_ratio if width > 1 else 1),
+                            'instructions:u': 100 * (instructions_ratio if width > 1 else 1),
+                            'instructions': 100,
+                            'context-switches': 0, 'duration_time': 1000}.items()))
+                    return SimpleNamespace(returncode=0, stdout=b'', stderr=b'')
+                with patch.object(sys, 'argv', ['run', '--binary', str(binary), '--output', str(output), '--cpus', '0,1,2,3']), \
+                        patch.object(deadline.subprocess, 'run', side_effect=measured):
+                    self.assertEqual(deadline.main(), expected)
+                receipts = json.loads((output / 'receipts.json').read_text())
+                self.assertEqual(len(receipts), 18)
+                self.assertTrue(all('instructions:u' in r['argv'][r['argv'].index('-e') + 1].split(',') for r in receipts))
+
 
 if __name__=='__main__': unittest.main()

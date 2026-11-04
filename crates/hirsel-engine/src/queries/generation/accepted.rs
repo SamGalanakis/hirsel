@@ -237,7 +237,7 @@ impl AcceptedFrontRegistration {
                 message: reason,
             })
         };
-        let syntax = engine.materialized_snapshot(self.definition())?;
+        let syntax = engine.snapshot(self.definition())?;
         if syntax.anchor != self.original.0
             || syntax.occurrence != self.original.1
             || syntax.text_hash != self.original.2

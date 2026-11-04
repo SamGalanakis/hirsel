@@ -401,6 +401,10 @@ fn evaluate_on_compiler_thread(
         Ok(simulation) => simulation,
         Err(error) => return (Status::Fail(error), observation),
     };
+    // The accepted TIR supplies the execution's source view. Release the
+    // completed Check view before admitting that independent operation.
+    engine.sources = Default::default();
+    drop(output);
     observation.phase = "TIR preparation".into();
     let prepared = {
         let prepared = requested.execute(CompileOperation::Tir {
@@ -491,7 +495,7 @@ fn evaluate_on_compiler_thread(
                 hirsel_engine::RuntimeError::Query(error) => ToolError::Query {
                     error,
                     phase: Some(hirsel_engine::QueryKind::Interpret),
-                    sources: output.sources.clone(),
+                    sources: prepared.sources.clone(),
                 }
                 .to_string(),
                 hirsel_engine::RuntimeError::Io(error) => error.to_string(),

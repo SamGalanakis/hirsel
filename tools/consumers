@@ -31,6 +31,12 @@ MUST = {
     'hirsel-cli-test-examples': {'grpc_greeter_serves_and_calls_itself_over_tcp',
                                 'unix_http_serves_itself_over_a_real_socket_and_replays_across_cli_backends'},
 }
+PROOF_HOMES = {
+    ('hirsel-driver-test-it', 'native_compilation_tasks_19::admitted_root_plans_bind_the_kit_before_codegen'):
+        'root//tools/buck2/native-toolchain:root-frozen-kit-proof',
+    ('hirsel-driver-test-it', 'native_compilation_tasks_19::frozen_root_plans_run_both_backends_without_live_linker_inputs'):
+        'root//tools/buck2/native-toolchain:root-plan-proof',
+}
 RUNTIME = re.compile(r'(?:^|/)(?:startup[^/]*|scheduler[^/]*|pool[^/]*|cpu[^/]*|managed_cores|ordered|launch)(?:[./]|$)')
 # Startup also lives in native entry emission and link-kit construction.
 STARTUP_PREFIXES = (
@@ -139,6 +145,9 @@ def assignments(root, graph, inventories, widths=None):
             if case not in inventories[attrs['test_binary']]:
                 raise ValueError(f'{target}: dedicated selector {case} is absent from the case listing')
             result[attrs['test_binary'], case] = target
+    for key, target in PROOF_HOMES.items():
+        if key[1] in inventories.get(key[0], set()):
+            result[key] = target
     return result
 
 
@@ -310,6 +319,17 @@ def select(root, paths, graph, inventories, owners=None, reasons=None):
     sys.path.insert(0, str(root / 'tools/buck2'))
     from sync import CONFORMANCE_SHARDS, CONSUMER_CASES
     mapped = assignments(root, graph, inventories)
+    replay_cells = {target for target, attrs in graph.items()
+                    if 'HIRSEL_REPLAY_CELL' in attrs.get('extra_env', {})}
+
+    def homes(binary, case):
+        if binary == 'hirsel-cli-test-cli' and case in {
+                'ordered_deadline_liveness_55::cell', 'ordered_deadline_liveness_55::fixture'}:
+            if not replay_cells:
+                raise ValueError('deadline replay consumers require their configured matrix targets')
+            return replay_cells
+        return {mapped[binary, case]}
+
     mandatory, ordinary, shards = set(), set(), set()
     runtime = runtime_change(paths)
     tooling = all(path.startswith('tools/') for path in paths)
@@ -350,9 +370,9 @@ def select(root, paths, graph, inventories, owners=None, reasons=None):
         for name in names:
             if runtime and (name in MUST.get(binary, set()) or
                             binary == 'hirsel-cli-test-free' and name == 'native_returned_rest_completion_replays_across_engines'):
-                mandatory.add(mapped[binary, name])
+                mandatory |= homes(binary, name)
             if name in affected or runtime and re.search(r'pool|ordered|scheduler|cpu|tasks', name):
-                shards.add(mapped[binary, name])
+                shards |= homes(binary, name)
     # Resolve std uses in corpus source, including uses through another std module.
     conformance = sorted((root / 'conformance').rglob('*.hir')) if modules else []
     chosen = {path for path in paths if path.startswith('conformance/') and path.endswith('.hir')}

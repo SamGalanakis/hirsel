@@ -7,6 +7,9 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
+[lib]
+test = false
+
 [features]
 # Mutations, each of which must fail: the owner's direct collection of its current page clears
 # the queued flag (dequeue instead of take), and the trim releases an empty slab without the

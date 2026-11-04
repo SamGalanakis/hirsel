@@ -19,6 +19,87 @@ mod properties;
 mod support;
 
 #[test]
+fn named_arguments_have_linear_lookup_work() {
+    let measure = |n: usize| {
+        let parameters = (0..n)
+            .map(|i| format!("p{i} v{i}: u8"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let actuals = (0..n)
+            .rev()
+            .map(|i| format!("p{i}: 1u8"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let before = work::read(Counter::BodyLabelRows);
+        let (diagnostics, outputs, _) = support::check_source(&format!(
+            "fn target({parameters}) {{}}\nfn main() {{ target({actuals}) }}"
+        ));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let call = &outputs[1].checked.value.calls[0];
+        assert_eq!(
+            call.arguments
+                .iter()
+                .map(|argument| argument.parameter.as_ref().map(|(slot, _)| *slot))
+                .collect::<Vec<_>>(),
+            (0..n as u32).rev().map(Some).collect::<Vec<_>>()
+        );
+        work::read(Counter::BodyLabelRows) - before
+    };
+    let [small, large] = [64, 512].map(measure);
+    eprintln!("label candidates {small} -> {large}");
+    assert!(small > 0 && large <= 16 * small, "{small} -> {large}");
+    let (diagnostics, outputs, _) = support::check_source(
+        "fn target(a x:u8,b y:u8) {}\nfn main() { target(a:1u8,a:2u8,b:3u8) }",
+    );
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics[0].rule.as_str(), "LANG-12");
+    assert_eq!(
+        outputs[1].checked.value.calls[0]
+            .arguments
+            .iter()
+            .map(|argument| argument.parameter.as_ref().map(|(slot, _)| *slot))
+            .collect::<Vec<_>>(),
+        vec![Some(0), None, Some(1)]
+    );
+}
+
+#[test]
+fn mutable_map_patterns_have_linear_lookup_work_and_preserve_key_value_uses() {
+    let measure = |n: usize| {
+        let types = vec!["u8"; n].join(",");
+        let names = (0..n)
+            .map(|i| format!("v{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let before = work::read(Counter::BodyPatternRows);
+        let (diagnostics, outputs, _) = support::check_source(&format!(
+            "fn main(mut m:Map[u8,({types})]) {{ for (key,({names})) in mut m {{}} }}"
+        ));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let body = &outputs[0].checked.value;
+        let bindings = body
+            .bindings
+            .iter()
+            .filter(|binding| matches!(binding.site, NameSite::Pattern(_)))
+            .collect::<Vec<_>>();
+        assert_eq!(bindings.len(), n + 1);
+        assert_eq!(
+            (bindings[0].usage, bindings[0].mutable),
+            (UseKind::Borrow, false)
+        );
+        assert!(
+            bindings[1..]
+                .iter()
+                .all(|binding| binding.usage == UseKind::Mut && binding.mutable)
+        );
+        work::read(Counter::BodyPatternRows) - before
+    };
+    let [small, large] = [32, 256].map(measure);
+    eprintln!("pattern candidates {small} -> {large}");
+    assert!(small > 0 && large <= 16 * small, "{small} -> {large}");
+}
+
+#[test]
 fn reordered_record_patterns_map_children_to_declared_fields() {
     let (ds, outputs, _) = support::check_source(
         "type Rec { a: u8, b: u16 }\nfn main(r: Rec) { let Rec(b: unused, a: _) = r }",

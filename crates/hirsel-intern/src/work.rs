@@ -75,6 +75,10 @@ pub enum Counter {
     BodySourceRows,
     /// H's source-place publication lookups.
     BodySourcePlaceRows,
+    /// H's declared-label index construction and argument lookups.
+    BodyLabelRows,
+    /// H's pattern/binding index construction and mutable-map lookups.
+    BodyPatternRows,
     /// H's pattern matrices examined by usefulness and exhaustiveness.
     BodyUsefulnessMatrices,
     /// Allocation/representation audit source-index candidates.

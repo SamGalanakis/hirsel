@@ -156,11 +156,19 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Vec<Option<usize>> {
         let mut used = BTreeSet::new();
+        let mut labels = BTreeMap::new();
+        for (slot, label) in declared.iter().enumerate() {
+            work::count(Counter::BodyLabelRows);
+            if let Some(label) = label {
+                labels.entry(label.as_str()).or_insert(slot);
+            }
+        }
         let mut result = vec![];
         let mut bad = !rest && actual.len() != declared.len();
         for (i, label) in actual.iter().enumerate() {
+            work::count(Counter::BodyLabelRows);
             let slot = match label {
-                Some(label) => declared.iter().position(|l| l.as_ref() == Some(label)),
+                Some(label) => labels.get(label.as_str()).copied(),
                 None => declared.get(i).filter(|l| l.is_none()).map(|_| i),
             };
             let slot = slot.filter(|slot| used.insert(*slot));

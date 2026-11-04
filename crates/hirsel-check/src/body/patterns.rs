@@ -1,11 +1,37 @@
 use super::*;
+#[derive(Default)]
+pub(super) struct PatternRows {
+    patterns: BTreeMap<ast::PatternId, usize>,
+    bindings: BTreeMap<ast::PatternId, usize>,
+    indexed_patterns: usize,
+    indexed_bindings: usize,
+}
+impl PatternRows {
+    fn extend(&mut self, body: &CheckedBody) {
+        for (i, row) in body.patterns.iter().enumerate().skip(self.indexed_patterns) {
+            work::count(Counter::BodyPatternRows);
+            self.patterns.entry(row.pattern).or_insert(i);
+        }
+        for (i, row) in body.bindings.iter().enumerate().skip(self.indexed_bindings) {
+            work::count(Counter::BodyPatternRows);
+            if let NameSite::Pattern(pattern) = row.site {
+                self.bindings.entry(pattern).or_insert(i);
+            }
+        }
+        self.indexed_patterns = body.patterns.len();
+        self.indexed_bindings = body.bindings.len();
+    }
+}
 impl Checker<'_, '_> {
     pub(super) fn mutable_map_pattern(&mut self, root: ast::PatternId) {
+        self.pattern_rows.extend(&self.body);
         let mut pending = vec![(root, false, true)];
         while let Some((pattern, key, whole)) = pending.pop() {
-            let Some(row) = self.body.patterns.iter().find(|p| p.pattern == pattern) else {
+            work::count(Counter::BodyPatternRows);
+            let Some(&index) = self.pattern_rows.patterns.get(&pattern) else {
                 continue;
             };
+            let row = &mut self.body.patterns[index];
             let fields = row.fields.clone();
             // An alternative stands where its or-pattern does.
             if let PatternDecisionKind::Or(alternatives) = &row.kind {
@@ -21,15 +47,10 @@ impl Checker<'_, '_> {
                 UseKind::Mut
             };
             let mutable = !key && !whole;
-            if let Some(row) = self.body.patterns.iter_mut().find(|p| p.pattern == pattern) {
-                row.usage = usage;
-            }
-            if let Some(binding) = self
-                .body
-                .bindings
-                .iter_mut()
-                .find(|b| b.site == NameSite::Pattern(pattern))
-            {
+            row.usage = usage;
+            work::count(Counter::BodyPatternRows);
+            if let Some(&index) = self.pattern_rows.bindings.get(&pattern) {
+                let binding = &mut self.body.bindings[index];
                 binding.usage = usage;
                 binding.mutable = mutable;
             }

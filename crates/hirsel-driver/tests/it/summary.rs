@@ -553,7 +553,7 @@ fn published_summaries_match_mode_refined_selection_inputs() {
 fn summary_membership_and_sibling_frames_have_bounded_scaling() {
     with_compiler_stack(|| {
         use hirsel_intern::work::{self, Counter};
-        let source = "fn leaf(x: u8) -> u8 uses {} { x }\nfn probe(x: u8) -> u8 { let f = fn() -> u8 { leaf(x) }; let _ = comptime leaf(1u8); f() }";
+        let source = "fn leaf(x: u8) -> u8 uses {} { x }\nfn probe(x: u8) -> u8 { let _ = (fn() -> u8 { leaf(x) })(); comptime leaf(1u8) }";
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let file = engine
             .sources
@@ -583,8 +583,8 @@ fn summary_membership_and_sibling_frames_have_bounded_scaling() {
                 .collect::<Vec<_>>(),
             [
                 (1, None, CallClass::Runtime),
-                (2, None, CallClass::ComptimeExecuted),
                 (0, Some(1), CallClass::Runtime),
+                (2, None, CallClass::ComptimeExecuted),
             ]
         );
         let mut measurements = Vec::new();

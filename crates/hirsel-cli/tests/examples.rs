@@ -820,7 +820,7 @@ fn calculator_stdin_session() {
     }
 }
 
-/// The todo API server, killed on drop; `port` is the one it printed.
+/// The todo API server's process group, killed on drop; `port` is the one it printed.
 struct TodoServer {
     child: std::process::Child,
     port: u16,
@@ -834,20 +834,23 @@ impl TodoServer {
     /// Run the server, compiled with `native`, until it prints its readiness line.
     fn launch(manifest: &std::path::Path, grants: &std::path::Path, native: bool) -> Self {
         use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
         let mut command = Command::new(env!("CARGO_BIN_EXE_hirsel"));
         command.arg("run");
         if native {
             command.arg("--native");
         }
-        let mut child = command
+        let child = command
             .arg(manifest)
             .arg("--grants")
             .arg(grants)
+            .process_group(0)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
             .spawn()
             .unwrap();
-        let stdout = child.stdout.take().unwrap();
+        let mut server = Self { child, port: 0 };
+        let stdout = server.child.stdout.take().unwrap();
         let (send, recv) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut line = String::new();
@@ -862,13 +865,13 @@ impl TodoServer {
                 90
             }))
             .expect("server readiness");
-        let port = line
+        server.port = line
             .strip_prefix("listening on 127.0.0.1:")
             .unwrap_or_else(|| panic!("readiness line {line:?}"))
             .trim()
             .parse()
             .unwrap();
-        Self { child, port }
+        server
     }
 
     /// Send one raw request and return the status code, the head and the body.
@@ -911,7 +914,11 @@ impl TodoServer {
 
 impl Drop for TodoServer {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        // SAFETY: launch creates this child's own process group. Its native
+        // program inherits the group and must end with the CLI that owns it.
+        unsafe {
+            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+        }
         let _ = self.child.wait();
     }
 }

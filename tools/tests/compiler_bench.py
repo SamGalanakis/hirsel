@@ -105,6 +105,9 @@ class Verdicts(unittest.TestCase):
                             result(cell('c', [], status='skipped')), BUDGET)
         with self.assertRaisesRegex(ValueError, 'required budget cell missing'):
             compare.compare(baseline, baseline, dict(BUDGET, cells=['required']))
+        partial = result(cell('c', [1.0]), cell('required', [], status='skipped'))
+        with self.assertRaisesRegex(ValueError, 'required budget cell has no completed measurement'):
+            compare.compare(partial, partial, dict(BUDGET, cells=['required']))
 
     def test_exit_status_follows_the_verdict(self):
         with tempfile.TemporaryDirectory() as scratch:
@@ -441,11 +444,15 @@ class CostTrend(unittest.TestCase):
             def process(*args, **kwargs):
                 (directory / 'perf').write_text('100;;instructions:u;1;100.00;\n200;;instructions;1;100.00;\n')
                 (directory / 'status').write_text(json.dumps({'exit': -9, 'rss_kib': 100}))
+                kwargs['stderr'].write('not implemented yet\n' + json.dumps(
+                    {'schema': 1, 'phases': ['x' * 4000], 'counts': {'rows': 1}}) + '\n')
                 return SimpleNamespace(returncode=0)
             with patch.object(trend.subprocess, 'run', side_effect=process):
                 values, reason = trend.measure(directory, Path('input.hir'), 0, directory, True)
             self.assertIsNone(values)
             self.assertIn('compiler -9', reason)
+            self.assertIn('not implemented yet', reason)
+            self.assertNotIn('phases', reason)
             def missing(*args, **kwargs):
                 (directory / 'status').write_text(json.dumps({'exit': 0, 'rss_kib': 100}))
                 return SimpleNamespace(returncode=0)

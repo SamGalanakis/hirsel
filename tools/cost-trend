@@ -94,19 +94,21 @@ def measure(toolchain, path, cpu, scratch, fresh):
     except OSError as error:
         return None, str(error)
     text = stderr.read_text()
+    reports, diagnostics = [], []
+    for line in text.splitlines():
+        try:
+            report = json.loads(line)
+        except ValueError:
+            report = None
+        if isinstance(report, dict) and report.get('schema') == 1 and 'phases' in report:
+            reports.append(report)
+        else:
+            diagnostics.append(line)
     child = json.loads(status.read_text()) if status.exists() else {}
     if done.returncode or child.get('exit') != 0:
-        return None, f'exit {done.returncode}, compiler {child.get("exit", "unobserved")}; ' + text[-2000:]
+        return None, f'exit {done.returncode}, compiler {child.get("exit", "unobserved")}; ' + '\n'.join(diagnostics)[-2000:]
     try:
         counts = perf.perf_instructions(counters.read_text())
-        reports = []
-        for line in text.splitlines():
-            try:
-                report = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(report, dict) and report.get('schema') == 1 and 'phases' in report:
-                reports.append(report)
         if not reports or not isinstance(reports[-1].get('counts'), dict) or not reports[-1]['counts']:
             raise ValueError('compiler work counters missing')
         if child.get('rss_kib', 0) <= 0:
@@ -245,7 +247,7 @@ def main():
             # One append under the lock, so partial rounds cannot look complete.
             with table.open('a', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=COLUMNS, delimiter='\t')
-                if not prior:
+                if f.tell() == 0:
                     writer.writeheader()
                 writer.writerows(rows)
                 f.flush()

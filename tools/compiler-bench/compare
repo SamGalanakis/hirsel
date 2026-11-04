@@ -63,6 +63,8 @@ def compare(baseline, current, budget):
             raise ValueError(f'{cid}: required budget cell missing from current run')
         if cid not in old:
             raise ValueError(f'{cid}: required budget cell missing from baseline')
+        if cid in budget.get('cells', []) and (old[cid]['status'] != 'ok' or new[cid]['status'] != 'ok'):
+            raise ValueError(f'{cid}: required budget cell has no completed measurement')
         if old[cid]['status'] == new[cid]['status'] == 'ok':
             for metric in budget['metrics']:
                 for label, c in (('baseline', old[cid]), ('current', new[cid])):

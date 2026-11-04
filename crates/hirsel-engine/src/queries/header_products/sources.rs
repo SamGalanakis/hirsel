@@ -138,6 +138,18 @@ impl SourceInputs {
     pub(crate) fn owns_written(&self, syntax: &Arc<ItemSyntax>) -> bool {
         self.syntax.owns(syntax)
     }
+    pub(crate) fn syntax(&self, path: &DefPath) -> Result<Option<Arc<ItemSyntax>>, QueryError> {
+        let syntax = self.syntax.syntax(DefId::intern(path))?;
+        if let Some(syntax) = &syntax
+            && self.catalog.body(path).is_some_and(|expected| {
+                syntax.text_hash != expected
+                    || self.catalog.anchor(path, syntax.occurrence) != Some(syntax.anchor)
+            })
+        {
+            return Err(source_refusal("captured source binding changed"));
+        }
+        Ok(syntax)
+    }
     pub(crate) fn materialize(
         &self,
         engine: &mut QueryEngine,
@@ -147,6 +159,46 @@ impl SourceInputs {
     }
 }
 impl HeaderSources {
+    fn syntax(&self, id: DefId) -> Result<Option<Arc<ItemSyntax>>, QueryError> {
+        let Some(files) = self.by_definition.get(&id) else {
+            return self
+                .parent
+                .as_ref()
+                .map_or(Ok(None), |parent| parent.syntax(id));
+        };
+        let mut first: Option<Arc<ItemSyntax>> = None;
+        for file in files {
+            let owner = self
+                .files
+                .get(file)
+                .ok_or_else(|| source_refusal("missing syntax owner"))?;
+            let guard = owner.live.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(live) = guard.as_ref().map_err(Clone::clone)? else {
+                // The ordinary materializing snapshot API fills this owner on demand.
+                return Ok(None);
+            };
+            for syntax in live
+                .items
+                .iter()
+                .filter(|syntax| syntax.item.definition == *id.path())
+            {
+                if owner
+                    .bindings
+                    .binary_search(&(id, syntax.text_hash, syntax.anchor, syntax.occurrence))
+                    .is_err()
+                {
+                    return Err(source_refusal("captured syntax binding changed"));
+                }
+                if first
+                    .as_ref()
+                    .is_none_or(|old| syntax.occurrence < old.occurrence)
+                {
+                    first = Some(syntax.clone());
+                }
+            }
+        }
+        Ok(first)
+    }
     pub(super) fn capture(engine: &QueryEngine) -> Self {
         let parent = engine
             .source_inputs
@@ -423,6 +475,7 @@ impl HeaderSources {
         }
     }
     fn install_file(engine: &mut QueryEngine, file: FileId, syntaxes: &[Arc<ItemSyntax>]) {
+        let mut changed = false;
         for syntax in syntaxes {
             let candidates = engine
                 .items
@@ -434,9 +487,10 @@ impl HeaderSources {
             {
                 candidates.push(syntax.clone());
                 candidates.sort_by_key(|s| s.occurrence);
+                changed = true;
             }
         }
-        if !syntaxes.is_empty() {
+        if !syntaxes.is_empty() && (changed || !engine.declarations.has_file(file)) {
             engine
                 .declarations
                 .place_file(file, syntaxes.to_vec(), &engine.sources);

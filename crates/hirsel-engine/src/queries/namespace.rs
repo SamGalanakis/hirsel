@@ -278,14 +278,18 @@ impl NamespaceCapture {
             .bodies
             .get(&DefId::intern(path))
             .ok_or_else(|| refused("body outside capture"))?;
-        let mut engine = self.source_engine(path)?;
-        let syntax = engine.snapshot(path)?;
+        let syntax = match self.inputs.syntax(path)? {
+            Some(syntax) => syntax,
+            None => self.source_engine(path)?.snapshot(path)?,
+        };
         if syntax.text_hash != input.implementation {
             return Err(refused("captured source binding changed"));
         }
         Ok(syntax)
     }
     pub(crate) fn source_engine(&self, path: &DefPath) -> Result<QueryEngine, QueryError> {
+        #[cfg(test)]
+        SOURCE_ENGINES.set(SOURCE_ENGINES.get() + 1);
         let headers = self
             .snapshot
             .header_products()
@@ -392,6 +396,11 @@ impl NamespaceCapture {
                         .is_some_and(|bytes| GENERATION.reference(&bytes) == Some(*reference))
             })
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SOURCE_ENGINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 fn refused(message: &str) -> QueryError {
     QueryError::Operational(hirsel_types::OperationalFailure {
@@ -944,6 +953,19 @@ mod tests {
                         assert!(syntax.iter().all(|item| Arc::ptr_eq(item, &syntax[0])));
                     });
                 }
+                let syntax = capture.syntax(&definitions[0]).unwrap();
+                let assemblies = SOURCE_ENGINES.get();
+                for _ in 0..8 {
+                    assert!(Arc::ptr_eq(
+                        &syntax,
+                        &capture.syntax(&definitions[0]).unwrap()
+                    ));
+                }
+                assert_eq!(
+                    SOURCE_ENGINES.get(),
+                    assemblies,
+                    "read-only syntax must reuse its captured owner"
+                );
                 for _ in 0..8 {
                     let mut demander = capture.source_engine(&definitions[0]).unwrap();
                     demander.item_signature(&definitions[0]).unwrap();

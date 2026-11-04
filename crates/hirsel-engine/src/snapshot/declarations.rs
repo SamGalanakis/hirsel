@@ -407,6 +407,9 @@ impl DeclarationIndex {
     ) {
         self.set_file(file, listed, sources);
     }
+    pub(crate) fn has_file(&self, file: FileId) -> bool {
+        self.files.contains_key(&file)
+    }
     /// `path`'s declaration sites, in occurrence order.
     pub(crate) fn sites(&self, path: &DefPath) -> &[DeclarationSite] {
         self.rows
@@ -446,13 +449,28 @@ impl DeclarationIndex {
     }
     /// `file`'s items, given in DefPath then occurrence order, by position.
     fn set_file(&mut self, file: FileId, mut listed: Vec<Arc<ItemSyntax>>, sources: &SourceMap) {
+        let unchanged = |listed: &[Arc<ItemSyntax>]| {
+            self.files.get(&file).map_or(listed.is_empty(), |old| {
+                old.len() == listed.len() && old.iter().zip(listed).all(|(a, b)| Arc::ptr_eq(a, b))
+            })
+        };
+        if unchanged(&listed) {
+            return;
+        }
         listed.sort_by(|a, b| {
-            a.item
-                .definition
-                .cmp(&b.item.definition)
+            sources
+                .anchor(a.anchor)
+                .unwrap()
+                .1
+                .cmp(&sources.anchor(b.anchor).unwrap().1)
+                .then(a.item.definition.cmp(&b.item.definition))
                 .then(a.occurrence.cmp(&b.occurrence))
         });
-        listed.sort_by_key(|item| place(sources, item).2);
+        if unchanged(&listed) {
+            return;
+        }
+        #[cfg(test)]
+        tests::FILE_UPDATES.set(tests::FILE_UPDATES.get() + 1);
         if let Some(old) = self.files.get(&file) {
             for item in old.iter() {
                 if self.anchors.get(&item.anchor) == Some(&file) {
@@ -475,17 +493,12 @@ impl DeclarationIndex {
         } else {
             snapshots.insert(file);
         }
-        let changed = self.files.get(&file).is_none_or(|old| {
-            old.len() != listed.len() || old.iter().zip(&listed).any(|(a, b)| !Arc::ptr_eq(a, b))
-        });
         if listed.is_empty() {
             Arc::make_mut(&mut self.files).remove(&file);
         } else {
             Arc::make_mut(&mut self.files).insert(file, listed.into());
         }
-        if changed {
-            self.frozen = OnceLock::new();
-        }
+        self.frozen = OnceLock::new();
     }
     fn set_row(
         &mut self,

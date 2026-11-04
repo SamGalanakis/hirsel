@@ -1,5 +1,60 @@
 use super::*;
 
+thread_local! {
+    pub(super) static FILE_UPDATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[test]
+fn unchanged_file_placement_does_no_index_updates() {
+    crate::with_compiler_stack(|| {
+        let mut engine = crate::QueryEngine::new(
+            crate::default_environment(),
+            crate::phases::engine_only_adapters(),
+        );
+        let file = engine
+            .sources
+            .add(
+                "siblings.hir",
+                "pub fn z(){()}\npub fn a(){()}\npub fn a(){()}\n".into(),
+            )
+            .unwrap();
+        let items = engine
+            .parse_file(file, &crate::default_context())
+            .unwrap()
+            .value
+            .items;
+        let mut index = engine.declarations.clone();
+        let frozen = index.frozen();
+        let updates = FILE_UPDATES.get();
+        let mut reversed = items.clone();
+        reversed.reverse();
+        index.place_file(file, reversed, &engine.sources);
+        index.place_file(file, items.clone(), &engine.sources);
+        assert_eq!(
+            FILE_UPDATES.get(),
+            updates,
+            "unchanged siblings require no map rewrites"
+        );
+        assert!(Arc::ptr_eq(&frozen, &index.frozen()));
+        assert_eq!(
+            frozen
+                .siblings(&items[0])
+                .iter()
+                .map(|item| item.item.definition.0.name.as_str())
+                .collect::<Vec<_>>(),
+            ["z", "a", "a"]
+        );
+        index.place_file(file, vec![], &engine.sources);
+        assert!(index.frozen().siblings(&items[0]).is_empty());
+        assert!(
+            index
+                .snapshots(&engine.sources.file(file).unwrap().path)
+                .is_empty()
+        );
+        assert_eq!(frozen.siblings(&items[0]).len(), items.len());
+    });
+}
+
 fn row(path: &DefPath, anchor: Anchor) -> DeclarationRow {
     DeclarationRow {
         definition: DefId::intern(path),

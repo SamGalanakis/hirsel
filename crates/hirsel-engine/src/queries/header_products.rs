@@ -36,6 +36,9 @@ enum HeaderCharge {
     Standalone(
         #[expect(dead_code, reason = "held for its drop")] crate::runtime::MemoryReservation,
     ),
+    /// Owned by shared syntax until its last source owner drops. It may use
+    /// a Front allowance, but is not a row of the portable Front facts cache.
+    Source(#[expect(dead_code, reason = "held for its drop")] crate::runtime::MemoryReservation),
     /// Lent by a live Front partition; evictable while unpinned.
     Front(FrontCharge),
 }
@@ -665,22 +668,48 @@ impl HeaderProducts {
         }
         product.result.clone()
     }
+    /// Reserve syntax against the existing source allowance without debiting
+    /// the Front metadata grant. The file owner retains this reservation even
+    /// after the partition ends; its aliases never reserve the payload again.
+    fn admit_source(&self, bytes: u64) -> Result<Charge, QueryError> {
+        let bytes = bytes
+            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                std::sync::Mutex<HeaderCharge>,
+            >::uninit()))
+            .ok_or_else(|| sources::source_refusal("syntax size overflow"))?;
+        let partition = self
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|admission| admission.partition.upgrade());
+        let allowance = match partition {
+            Some(partition) => loop {
+                if let Some(allowance) = partition.take_header(bytes) {
+                    break allowance;
+                }
+                if !self.evict() {
+                    return Err(sources::source_refusal(format!(
+                        "source allowance cannot retain {bytes} bytes"
+                    )));
+                }
+            },
+            None => self.reserve_standalone(bytes)?,
+        };
+        Ok(Charge(Arc::new(std::sync::Mutex::new(
+            HeaderCharge::Source(allowance),
+        ))))
+    }
     /// Charge one settled row or proof to the front's header grant, evicting
     /// unpinned entries first. A refusal is a resource failure, never a verdict.
     fn admit(&self, bytes: u64) -> Result<Charge, QueryError> {
-        self.admit_charge(bytes, true)
-    }
-    fn admit_source(&self, bytes: u64) -> Result<Charge, QueryError> {
-        self.admit_charge(bytes, false)
-    }
-    fn admit_charge(&self, bytes: u64, release_with_partition: bool) -> Result<Charge, QueryError> {
         let admission = self
             .admission
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let Some(admission) = admission else {
-            return Ok(if self.standalone || !release_with_partition {
+            return Ok(if self.standalone {
                 Charge(Arc::new(std::sync::Mutex::new(HeaderCharge::Standalone(
                     self.reserve_standalone(bytes)?,
                 ))))
@@ -693,13 +722,7 @@ impl HeaderProducts {
         // ended source pool cannot lend another reservation.
         let Some(partition) = admission.partition.upgrade() else {
             admission.release();
-            return if release_with_partition {
-                Ok(Charge::engine())
-            } else {
-                Ok(Charge(Arc::new(std::sync::Mutex::new(
-                    HeaderCharge::Standalone(self.reserve_standalone(bytes)?),
-                ))))
-            };
+            return Ok(Charge::engine());
         };
         // The charge cell itself is part of what the partition retains.
         let bytes =
@@ -735,18 +758,12 @@ impl HeaderProducts {
             })
         })?;
         drop(grant);
-        let charge = FrontCharge {
+        Ok(admission.lend(FrontCharge {
             partition: admission.partition.clone(),
             credit: admission.remaining.clone(),
             bytes,
             allowance,
-        };
-        Ok(if release_with_partition {
-            admission.lend(charge)
-        } else {
-            // Source syntax stays charged until its last shared owner drops.
-            Charge(Arc::new(std::sync::Mutex::new(HeaderCharge::Front(charge))))
-        })
+        }))
     }
     /// Retain a payload a module proof settled, when the header grant admits it.
     fn seed(&self, id: DefId, entry: Arc<Entry<hirsel_types::SignatureRef>>) {

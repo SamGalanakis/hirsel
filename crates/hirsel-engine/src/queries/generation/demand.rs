@@ -1095,16 +1095,6 @@ impl DemandProducer {
         definitions: &[DefPath],
         registrations: &[Arc<AcceptedFrontRegistration>],
     ) -> Result<Arc<FrontLowerQueries>, QueryError> {
-        let ready = definitions
-            .iter()
-            .filter_map(|path| {
-                let syntax = engine.snapshot(path).ok()?;
-                (generator(&syntax).is_none()
-                    || instance_bodied(&syntax)
-                    || registrations.iter().any(|r| r.definition() == path))
-                .then(|| path.clone())
-            })
-            .collect::<Vec<_>>();
         let namespace =
             engine.capture_namespace(definitions, registrations, self.front.available_bytes())?;
         let mut refreshed = Vec::with_capacity(registrations.len());
@@ -1136,6 +1126,16 @@ impl DemandProducer {
                 return Ok(owner);
             }
         }
+        // Readiness belongs to the immutable capture, not to this assembler's
+        // demand history. Ordinary shared syntax can still be cold here.
+        let ready = definitions
+            .iter()
+            .filter(|path| {
+                let id = DefId::intern(path);
+                !namespace.bodies[&id].generated || namespace.registrations.contains_key(&id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let front = engine.front_body_queries_in_pool(
             &ready,
             namespace,

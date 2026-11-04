@@ -62,7 +62,7 @@ impl LiveSyntax {
         })
     }
 }
-fn source_refusal(message: impl ToString) -> QueryError {
+pub(super) fn source_refusal(message: impl ToString) -> QueryError {
     QueryError::Operational(hirsel_types::OperationalFailure {
         operation: "source syntax admission".into(),
         message: message.to_string(),

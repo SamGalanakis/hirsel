@@ -1276,7 +1276,9 @@ mod tests {
             let mut backing = vec![0; size];
             backing[100..100 + encoded.len()].copy_from_slice(&encoded);
             hirsel_product_codec::CheckedTir::open(
-                Bytes::from(backing).range(100, encoded.len(), 1).unwrap(),
+                Bytes::from(backing)
+                    .range(100, encoded.len() as u64, 1)
+                    .unwrap(),
                 reference,
                 records.clone(),
                 |_, _| None,

@@ -740,6 +740,11 @@ Call-only providers retain the legacy path-dispatch fallback. An
 forwards to the underlying provider unless it also introduces new operation paths.
 Interpreter-only body caches resolve local operands and place offsets. Frames
 reuse projection workspace, retaining dynamic indices and variant checks at access.
+Native operation result derivation borrows argument lifetime summaries. Completed
+mutable updates move their shadows back to caller storage and retain their exact
+lifetime totals for callback propagation. The shared work counter
+`hirsel_intern::work::Counter::InterpClonedShadowNodes` counts administrative shadow
+node copies without changing fuel or semantic observations.
 
 `Operations::immediate` is an opt-in promise that a primitive produces no task
 rests and needs no completion hook. A fully transferred Complete result with

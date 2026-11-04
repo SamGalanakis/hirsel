@@ -195,7 +195,7 @@ impl PartialEq for Holder {
 impl Eq for Holder {}
 
 /// Bounds per value node: one per field of an inline aggregate, one for a block.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) enum Shadow {
     Uniform(Bound),
     /// A run-time deep ownership witness. Semantic copies invalidate every
@@ -214,6 +214,23 @@ pub(crate) enum Shadow {
         content: Box<Shadow>,
         home: Bound,
     },
+}
+impl Clone for Shadow {
+    fn clone(&self) -> Self {
+        hirsel_intern::work::count(hirsel_intern::work::Counter::InterpClonedShadowNodes);
+        match self {
+            Self::Uniform(bound) => Self::Uniform(bound.clone()),
+            Self::Ownership { content, holder } => Self::Ownership {
+                content: content.clone(),
+                holder: holder.clone(),
+            },
+            Self::Parts(parts) => Self::Parts(parts.clone()),
+            Self::View { content, home } => Self::View {
+                content: content.clone(),
+                home: home.clone(),
+            },
+        }
+    }
 }
 impl Default for Shadow {
     fn default() -> Self {
@@ -1073,7 +1090,7 @@ impl OperationCheck {
         }
         bound
     }
-    pub fn returned_shadow(&self, value: &Value, arguments: &[Value]) -> Shadow {
+    pub fn returned_shadow(&mut self, value: &Value, arguments: &[Value]) -> Shadow {
         if let Value::Closure {
             captures,
             environment,
@@ -1102,10 +1119,14 @@ impl OperationCheck {
                     .collect(),
             )
         } else {
-            self.result.clone().for_value(value)
+            std::mem::take(&mut self.result).for_value(value)
         }
     }
-    pub fn accept_callback(&mut self, returned: &Shadow, written: &[Shadow]) {
+    pub fn accept_callback<'a>(
+        &mut self,
+        returned: &Shadow,
+        written: impl IntoIterator<Item = &'a Shadow>,
+    ) {
         union(&mut self.callbacks, &returned.total());
         for shadow in written {
             union(&mut self.callbacks, &shadow.total());
@@ -1124,14 +1145,14 @@ impl OperationCheck {
 pub(crate) fn operation_result(
     types: &hirsel_types::TypeInterner,
     root: hirsel_types::TypeId,
-    inputs: &[Argument],
+    inputs: &[std::borrow::Cow<'_, Bound>],
     inherited: &Bound,
 ) -> Shadow {
     use hirsel_types::{BinderRef, TypeKind};
     fn walk(
         types: &hirsel_types::TypeInterner,
         ty: hirsel_types::TypeId,
-        inputs: &[Argument],
+        inputs: &[std::borrow::Cow<'_, Bound>],
         inherited: &Bound,
         active: &mut std::collections::HashSet<hirsel_types::TypeId>,
     ) -> Shadow {
@@ -1147,7 +1168,7 @@ pub(crate) fn operation_result(
                 } = source
                 {
                     if let Some(input) = inputs.get(parameter.0 as usize) {
-                        union(&mut bound, &input.lifetime);
+                        union(&mut bound, input);
                     }
                 }
             }

@@ -94,6 +94,8 @@ pub enum Counter {
     SourceTextBytes,
     /// Full installed signature tables constructed for registration overlays.
     RegistrationValidationViews,
+    /// Shadow tree nodes the checked interpreter copies administratively, preserving holders.
+    InterpClonedShadowNodes,
     /// Cached dependency-node inspections.
     CacheValidationRows,
 }

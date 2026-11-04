@@ -1291,7 +1291,7 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                                             &runtime.types,
                                             &check.state.borrow(),
                                             &reference.definition,
-                                            &callback_inputs,
+                                            callback_inputs,
                                             &[],
                                             &[],
                                         )
@@ -1469,9 +1469,10 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                                             .borrow()
                                             .access(&child.result, "native callback return")?;
                                     }
-                                    let written: Vec<_> =
-                                        child.updates.iter().map(|(_, s)| s.clone()).collect();
-                                    parent.accept_callback(&child.result, &written);
+                                    parent.accept_callback(
+                                        &child.result,
+                                        child.updates.iter().map(|(_, shadow)| shadow),
+                                    );
                                     if operations.retains_task_arguments(callback.token) {
                                         parent.task_arguments =
                                             Some((value.clone(), child.result.clone()));
@@ -1500,7 +1501,7 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                                 };
                                 let shadow = state
                                     .bounds
-                                    .as_ref()
+                                    .as_mut()
                                     .map(|bounds| {
                                         bounds.returned_shadow(&value, &state.arguments).ownership(
                                             &value,
@@ -2215,15 +2216,14 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                             .borrow()
                             .access(&returned, "callback return to operation")?;
                     }
-                    let shadows: Vec<_> = written.iter().map(|(_, s)| s.clone()).collect();
-                    for shadow in &shadows {
+                    for (_, shadow) in &written {
                         check
                             .state
                             .borrow()
                             .access(shadow, "callback mut writeback")?;
                     }
                     if let Some(bounds) = &mut callback.state.bounds {
-                        bounds.accept_callback(&returned, &shadows);
+                        bounds.accept_callback(&returned, written.iter().map(|(_, shadow)| shadow));
                         if operations.retains_task_arguments(callback.token)
                             && let crate::resources::Ending::Return(value) = &ending
                         {
@@ -3161,7 +3161,7 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                                     &runtime.types,
                                     &state,
                                     path,
-                                    &checks,
+                                    checks,
                                     &mut_places,
                                     &taken,
                                 );
@@ -5591,9 +5591,14 @@ fn restore_operation(
         let value = std::mem::replace(&mut state.arguments[*index], Value::Unit);
         let bound = state
             .bounds
-            .as_ref()
-            .and_then(|bounds| bounds.updates.iter().find(|(i, _)| i == index))
-            .map(|(_, b)| b.clone())
+            .as_mut()
+            .and_then(|bounds| bounds.updates.iter_mut().find(|(i, _)| i == index))
+            .map(|(_, shadow)| {
+                // Completion moves the witness back to caller storage. Later
+                // callback propagation reads only the written lifetime total.
+                let summary = Shadow::of(shadow.total());
+                std::mem::replace(shadow, summary)
+            })
             .unwrap_or_default();
         let shadow = bound.for_value(&value);
         frame.put(*place, Some(value), shadow)?;
@@ -5625,7 +5630,7 @@ fn operation_bounds(
     types: &hirsel_types::TypeInterner,
     state: &crate::checked::State,
     path: &hirsel_syntax::DefPath,
-    checks: &[crate::checked::Argument],
+    checks: Vec<crate::checked::Argument>,
     mut_places: &[(usize, PlaceId)],
     taken: &[usize],
 ) -> crate::checked::OperationCheck {
@@ -5655,23 +5660,29 @@ fn operation_bounds(
         // Content the operation moves out of `mut` storage is the caller's, as
         // for Replace: it keeps where it lives, not this frame's access root.
         if let Some(check) = checks.get(*i) {
-            let mut content = check.shadow.clone();
+            let mut content = Shadow::of(check.shadow.content_bound());
             state.caller_content(&mut content);
             retained.extend(content.content_bound());
         }
     }
     retained.sort_unstable();
     retained.dedup();
-    let result = if let (Some(signature), Some(function)) = (signature, function) {
-        let mut result_inputs = checks.to_vec();
-        for (i, parameter) in function.parameters.iter().enumerate() {
-            if parameter.passing == hirsel_syntax::PassingMode::Mut {
-                if let Some(input) = result_inputs.get_mut(i) {
-                    input.lifetime = input.shadow.content_bound();
-                }
-            }
-        }
-        crate::checked::operation_result(types, function.result, &result_inputs, &retained)
+    let result = if let Some(function) = function {
+        let lifetimes: Vec<_> =
+            checks
+                .iter()
+                .enumerate()
+                .map(|(i, input)| {
+                    if function.parameters.get(i).is_some_and(|parameter| {
+                        parameter.passing == hirsel_syntax::PassingMode::Mut
+                    }) {
+                        std::borrow::Cow::Owned(input.shadow.content_bound())
+                    } else {
+                        std::borrow::Cow::Borrowed(&input.lifetime)
+                    }
+                })
+                .collect();
+        crate::checked::operation_result(types, function.result, &lifetimes, &retained)
     } else {
         Shadow::of(retained)
     };
@@ -5691,7 +5702,7 @@ fn operation_bounds(
     crate::checked::OperationCheck {
         result,
         updates,
-        inputs: checks.to_vec(),
+        inputs: checks,
         callbacks: vec![],
         task_arguments: None,
     }
@@ -5865,12 +5876,10 @@ fn writeback_native_callback(
         .collect::<Vec<_>>();
     writeback_callback(callback, &updates)?;
     if let (Some(child), Some(parent)) = (&state.bounds, &mut callback.state.bounds) {
-        let written = child
-            .updates
-            .iter()
-            .map(|(_, shadow)| shadow.clone())
-            .collect::<Vec<_>>();
-        parent.accept_callback(&child.result, &written);
+        parent.accept_callback(
+            &child.result,
+            child.updates.iter().map(|(_, shadow)| shadow),
+        );
     }
     Ok(())
 }

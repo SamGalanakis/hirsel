@@ -79,6 +79,6 @@ static uint8_t entry(hirsel_rt_v2_ctx *ctx, uint8_t *destination, uint8_t *out, 
 }
 int main(int argc, char **argv) {
     const uint8_t failures[8]={0};
-    hirsel_rt_v2_program_descriptor program={.abi_version=HIRSEL_RT_V2_ABI_VERSION,.flags=HIRSEL_RT_V2_PROGRAM_STANDALONE,.roots=1,.layout_count=2,.entry=entry,.result_size=4,.layouts=layouts,.failure_table=failures,.failure_table_length=8,.entry_name=(const uint8_t *)"mutex_borrow@1/main",.entry_name_length=18};
+    hirsel_rt_v2_program_descriptor program={.abi_version=HIRSEL_RT_V2_ABI_VERSION,.flags=HIRSEL_RT_V2_PROGRAM_STANDALONE,.roots=1,.layout_count=2,.entry=entry,.result_size=4,.layouts=layouts,.failure_table=failures,.failure_table_length=8,.entry_name=(const uint8_t *)"mutex_borrow@1/main",.entry_name_length=sizeof("mutex_borrow@1/main")-1};
     return hirsel_rt_v2_main(&program,argc,(const char *const *)argv);
 }

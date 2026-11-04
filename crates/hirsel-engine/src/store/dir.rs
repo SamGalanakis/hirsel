@@ -19,7 +19,7 @@ pub struct DirStore {
     verifier_identity: Option<hirsel_syntax::ContentHash>,
     verifier: std::sync::Arc<hirsel_validate::VerifierCache>,
     operation: bool,
-    installed_capture: Option<Arc<Mutex<Option<Arc<super::InstalledPackage>>>>>,
+    installed_capture: Option<Arc<Mutex<Option<super::installed::OpenedInstallation>>>>,
     installation: Option<std::sync::Arc<std::sync::Mutex<super::installed::InstallationRecords>>>,
 }
 
@@ -220,13 +220,13 @@ impl DirStore {
             .map(|root| (true, root))
             .chain(self.read_only.iter().map(|root| (false, root)))
     }
-    fn installed_records(&self) -> Option<Arc<super::InstalledSourceRecords>> {
+    fn installed_records(&self) -> Option<Arc<super::installed::InstalledRecords>> {
         let captured = self
             .installed_capture
             .as_ref()?
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        captured.as_ref()?.source_records()
+        Some(captured.as_ref()?.records.clone())
     }
     fn publication_store(&self) -> Option<&hirsel_artifact_store::Store> {
         let store = self.physical.as_ref()?;
@@ -282,10 +282,10 @@ impl ResultStore for DirStore {
             .as_ref()
             .map(|slot| slot.lock().unwrap_or_else(|error| error.into_inner()));
         if let Some(installed) = captured.as_deref().and_then(Option::as_ref)
-            && installed.package == *package
-            && installed.compiler == compiler
+            && installed.package.package == *package
+            && installed.package.compiler == compiler
         {
-            return Ok(installed.clone());
+            return Ok(installed.package.clone());
         }
         let mut failures = Vec::new();
         for root in &self.read_only {
@@ -294,7 +294,7 @@ impl ResultStore for DirStore {
                     if let Some(captured) = &mut captured {
                         **captured = Some(package.clone());
                     }
-                    return Ok(package);
+                    return Ok(package.package);
                 }
                 Err(error) => failures.push(error),
             }
@@ -673,6 +673,31 @@ mod tests {
         let next = provider.for_operation().unwrap();
         next.installed_package(&package, compiler).unwrap();
         assert_eq!(statistics.snapshot().counters["ContentChecks"], 2 * checks);
+
+        // Integrity ownership uses the existing transport grant once, and
+        // source snapshots cannot keep that grant alive after the request.
+        let budget = crate::runtime::ProcessBudget::new(1 << 20);
+        let request = super::super::RequestStore::new(
+            Arc::new(provider.clone()),
+            budget.reserve(1 << 20).unwrap(),
+        );
+        let installed = request.installed_package(&package, compiler).unwrap();
+        let charged = request.retained_bytes();
+        assert!(charged >= installed.operation_metadata_bytes());
+        assert!(charged > 0);
+        request.installed_package(&package, compiler).unwrap();
+        assert_eq!(request.retained_bytes(), charged);
+        let sources = installed.source_records().unwrap();
+        drop(request);
+        assert_eq!(budget.reserved(), 0);
+        for (address, _, _, expected) in &inputs {
+            let key = EntryKey(address.0, ContentHash::default(), crate::QueryKind::Parse);
+            assert_eq!(&*sources.get(&key).unwrap(), expected);
+        }
+        let refused =
+            super::super::RequestStore::new(Arc::new(provider), budget.reserve(0).unwrap());
+        assert!(refused.installed_package(&package, compiler).is_err());
+        assert!(refused.exhausted());
     }
 
     #[test]

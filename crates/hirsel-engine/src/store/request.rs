@@ -20,6 +20,7 @@ fn association_bytes(entries: usize) -> u64 {
 }
 struct State {
     used: u64,
+    installed: Option<Arc<InstalledPackage>>,
     contents: BTreeMap<ContentHash, (Reference, Bytes)>,
     /// Each selected association, and whether its backend publication is
     /// deferred to the next `publish_root` (only under `Complete`).
@@ -150,6 +151,7 @@ impl RequestStore {
             memory,
             state: Mutex::new(State {
                 used: 0,
+                installed: None,
                 contents: BTreeMap::new(),
                 associations: BTreeMap::new(),
             }),
@@ -236,7 +238,22 @@ impl ResultStore for RequestStore {
         package: &hirsel_syntax::PackageId,
         compiler: ContentHash,
     ) -> Result<Arc<InstalledPackage>, String> {
-        self.backend.installed_package(package, compiler)
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(installed) = &state.installed
+            && installed.package == *package
+            && installed.compiler == compiler
+        {
+            return Ok(installed.clone());
+        }
+        let installed = self.backend.installed_package(package, compiler)?;
+        if state.installed.is_some() {
+            return Err("operation already owns another installed package".into());
+        }
+        if !self.charge(&mut state, installed.operation_metadata_bytes()) {
+            return Err("installed integrity metadata exceeds request transport admission".into());
+        }
+        state.installed = Some(installed.clone());
+        Ok(installed)
     }
     fn operation_scope(&self) -> StoreOperation {
         let mut operation = self.backend.operation_scope();

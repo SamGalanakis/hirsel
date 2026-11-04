@@ -115,7 +115,10 @@ mod tests {
         store
             .associate(Address(key.0), Action(first.output.0), first)
             .unwrap();
-        let mut installed = (*InstalledPackage::open(&store, &package, compiler).unwrap()).clone();
+        let mut installed = (*InstalledPackage::open(&store, &package, compiler)
+            .unwrap()
+            .package)
+            .clone();
         let mut records = InstallationRecords::default();
         for (address, action, reference) in &installed.rows {
             records.rows.insert(*address, (Action(*action), *reference));
@@ -128,6 +131,7 @@ mod tests {
         installed.publish(&store, &records).unwrap();
         let owner = InstalledPackage::open(&store, &package, compiler)
             .unwrap()
+            .package
             .source_records()
             .unwrap();
         let changed = store
@@ -148,7 +152,9 @@ mod tests {
     fn duplicate_content_checks_preserve_full_reference_identity() {
         let directory = tempfile::tempdir().unwrap();
         let (store, compiler, package, reference) = fixture(directory.path());
-        let installed = InstalledPackage::open(&store, &package, compiler).unwrap();
+        let installed = InstalledPackage::open(&store, &package, compiler)
+            .unwrap()
+            .package;
         for invalid in [
             Reference {
                 len: reference.len + 1,
@@ -231,8 +237,8 @@ pub struct InstalledSource {
 }
 
 #[derive(Debug)]
-/// Checked installed products and parse inputs, independent of cache policy.
-pub(crate) struct InstalledSourceRecords {
+/// Complete integrity handles, retained only by the operation provider.
+pub(super) struct InstalledRecords {
     pub(super) root: PathBuf,
     rows: Box<
         [(
@@ -243,17 +249,7 @@ pub(crate) struct InstalledSourceRecords {
     contents: hirsel_artifact_store::VerifiedRecords,
     retained_bytes: usize,
 }
-impl InstalledSourceRecords {
-    pub(crate) fn get(&self, key: &EntryKey) -> Option<Bytes> {
-        if key.2 != crate::QueryKind::Parse {
-            return None;
-        }
-        let reference = self.lookup(Address(key.0))?.reference;
-        if reference.domain != super::entry_domain(crate::QueryKind::Parse) {
-            return None;
-        }
-        self.content(reference)
-    }
+impl InstalledRecords {
     pub(super) fn lookup(&self, address: Address) -> Option<hirsel_artifact_store::Association> {
         let index = self
             .rows
@@ -288,6 +284,37 @@ impl InstalledSourceRecords {
         weight.bytes().try_into().unwrap_or(usize::MAX)
     }
 }
+/// Immutable parse references survive their operation without retaining its
+/// complete integrity closure. Reads after release validate the pinned reference.
+#[derive(Debug)]
+pub(crate) struct InstalledSourceRecords {
+    store: hirsel_artifact_store::Store,
+    rows: BTreeMap<ContentHash, Reference>,
+    operation: std::sync::Weak<InstalledRecords>,
+}
+impl InstalledSourceRecords {
+    pub(crate) fn get(&self, key: &EntryKey) -> Option<Bytes> {
+        if key.2 != crate::QueryKind::Parse {
+            return None;
+        }
+        let reference = *self.rows.get(&key.0)?;
+        match self.operation.upgrade() {
+            Some(operation) => operation.content(reference),
+            None => self.store.get(reference),
+        }
+    }
+    pub(crate) fn metadata_bytes(&self) -> usize {
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(
+            std::mem::size_of::<Self>()
+                + std::mem::size_of::<InstalledRecords>()
+                + 4 * std::mem::size_of::<usize>()
+                + self.store.root().as_os_str().len(),
+        );
+        weight.tree::<ContentHash, Reference>(self.rows.len());
+        weight.bytes().try_into().unwrap_or(usize::MAX)
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InstalledPackage {
     pub compiler: ContentHash,
@@ -299,7 +326,15 @@ pub struct InstalledPackage {
     rows: Vec<(ContentHash, ContentHash, Reference)>,
     contents: Vec<Reference>,
     #[serde(skip)]
-    records: Option<Arc<InstalledSourceRecords>>,
+    records: std::sync::Weak<InstalledRecords>,
+    #[serde(skip)]
+    sources_owner: Option<Arc<InstalledSourceRecords>>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct OpenedInstallation {
+    pub(super) package: Arc<InstalledPackage>,
+    pub(super) records: Arc<InstalledRecords>,
 }
 
 #[derive(Debug, Default)]
@@ -310,7 +345,36 @@ pub(super) struct InstallationRecords {
 
 impl InstalledPackage {
     pub(crate) fn source_records(&self) -> Option<Arc<InstalledSourceRecords>> {
-        self.records.clone()
+        self.sources_owner.clone()
+    }
+    pub(crate) fn operation_metadata_bytes(&self) -> u64 {
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(std::mem::size_of::<Self>() + 2 * std::mem::size_of::<usize>());
+        weight.add(self.package.name.capacity() + self.package.version.capacity());
+        weight.add(self.manifest.capacity());
+        weight.add(
+            self.rows.capacity() * std::mem::size_of::<(ContentHash, ContentHash, Reference)>(),
+        );
+        weight.add(self.contents.capacity() * std::mem::size_of::<Reference>());
+        weight.add(self.sources.capacity() * std::mem::size_of::<InstalledSource>());
+        for source in &self.sources {
+            weight.add(source.path.as_os_str().len() + source.logical.as_os_str().len());
+            weight.add(source.text.capacity());
+            weight.add(
+                source.context.package.name.capacity() + source.context.package.version.capacity(),
+            );
+            weight.add(source.context.modules.capacity() * std::mem::size_of::<String>());
+            for module in &source.context.modules {
+                weight.add(module.capacity());
+            }
+        }
+        if let Some(records) = self.records.upgrade() {
+            weight.add(records.metadata_bytes());
+        }
+        if let Some(sources) = &self.sources_owner {
+            weight.add(sources.metadata_bytes());
+        }
+        weight.bytes()
     }
     pub(crate) fn new(
         compiler: ContentHash,
@@ -327,7 +391,8 @@ impl InstalledPackage {
             dependencies,
             rows: vec![],
             contents: vec![],
-            records: None,
+            records: Default::default(),
+            sources_owner: None,
         }
     }
     pub(super) fn publish(
@@ -375,8 +440,8 @@ impl InstalledPackage {
         store: &hirsel_artifact_store::Store,
         package: &PackageId,
         compiler: ContentHash,
-    ) -> Result<Arc<Self>, String> {
-        let read = || -> Result<Self, String> {
+    ) -> Result<OpenedInstallation, String> {
+        let read = || -> Result<OpenedInstallation, String> {
             let _read = store.batch();
             let row = store
                 .lookup(address())
@@ -430,18 +495,32 @@ impl InstalledPackage {
                     ))
                 })
                 .collect::<Result<BTreeMap<_, _>, String>>()?;
-            let mut records = InstalledSourceRecords {
+            let mut records = InstalledRecords {
                 root: store.root().to_owned(),
                 rows: rows.into_iter().collect(),
                 contents,
                 retained_bytes: 0,
             };
             records.retained_bytes = records.count_retained_bytes();
-            installed.records = Some(Arc::new(records));
-            Ok(installed)
+            let records = Arc::new(records);
+            installed.sources_owner = Some(Arc::new(InstalledSourceRecords {
+                store: store.clone(),
+                rows: installed
+                    .rows
+                    .iter()
+                    .filter(|(_, _, reference)| {
+                        reference.domain == super::entry_domain(crate::QueryKind::Parse)
+                    })
+                    .map(|(address, _, reference)| (*address, *reference))
+                    .collect(),
+                operation: Arc::downgrade(&records),
+            }));
+            installed.records = Arc::downgrade(&records);
+            Ok(OpenedInstallation {
+                package: Arc::new(installed),
+                records,
+            })
         };
-        read()
-            .map(Arc::new)
-            .map_err(|error| format!("installed products {}: {error}", store.root().display()))
+        read().map_err(|error| format!("installed products {}: {error}", store.root().display()))
     }
 }

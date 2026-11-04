@@ -215,14 +215,13 @@ impl DirStore {
             .map(|root| (true, root))
             .chain(self.read_only.iter().map(|root| (false, root)))
     }
-    fn installed_records(&self, root: &Path) -> Option<Arc<super::InstalledSourceRecords>> {
+    fn installed_records(&self) -> Option<Arc<super::InstalledSourceRecords>> {
         let captured = self
             .installed_capture
             .as_ref()?
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let records = captured.as_ref()?.source_records()?;
-        (records.root == root).then_some(records)
+        captured.as_ref()?.source_records()
     }
     fn publication_store(&self) -> Option<&hirsel_artifact_store::Store> {
         let store = self.physical.as_ref()?;
@@ -381,7 +380,9 @@ impl ResultStore for DirStore {
         let address = super::Address(super::product_association_key(address).0);
         let row = self.roots().find_map(|(local, store)| {
             if !local
-                && let Some(records) = self.installed_records(store.root())
+                && let Some(records) = self
+                    .installed_records()
+                    .filter(|records| records.root == store.root())
                 && let Some(row) = records.lookup(address)
             {
                 return Some(row);
@@ -420,14 +421,17 @@ impl ResultStore for DirStore {
         Some(self.verifier.clone())
     }
     fn get_content(&self, reference: super::Reference) -> Option<super::Bytes> {
+        // Complete references identify the same bytes across namespaces. Reuse
+        // the installed check even when a writable cache has another copy.
+        if let Some(bytes) = self
+            .installed_records()
+            .and_then(|records| records.content(reference))
+        {
+            self.record_content(reference);
+            return Some(bytes);
+        }
         for (local, store) in self.roots() {
-            let bytes = if !local {
-                self.installed_records(store.root())
-                    .and_then(|records| records.content(reference))
-            } else {
-                None
-            };
-            if let Some(bytes) = bytes.or_else(|| store.get(reference)) {
+            if let Some(bytes) = store.get(reference) {
                 if local {
                     store.touch(
                         hirsel_artifact_store::Address(reference.output.0),
@@ -448,7 +452,9 @@ impl ResultStore for DirStore {
     fn get(&self, key: &EntryKey) -> Option<super::Bytes> {
         for (local, store) in self.roots() {
             if !local
-                && let Some(records) = self.installed_records(store.root())
+                && let Some(records) = self
+                    .installed_records()
+                    .filter(|records| records.root == store.root())
                 && let Some(row) = records.lookup(hirsel_artifact_store::Address(key.0))
             {
                 if row.reference.domain != super::entry_domain(key.2) {
@@ -476,7 +482,11 @@ impl ResultStore for DirStore {
             if previous.reference.domain != super::entry_domain(key.2) {
                 continue;
             }
-            let Some(bytes) = opened.get() else {
+            let bytes = self
+                .installed_records()
+                .and_then(|records| records.content(previous.reference))
+                .or_else(|| opened.get());
+            let Some(bytes) = bytes else {
                 if local {
                     let _ = fs::remove_file(store.output_path(previous.reference));
                 }
@@ -590,6 +600,19 @@ mod tests {
         .publish(&writer, &records)
         .unwrap();
         let provider = DirStore::new(directory.path().join("local")).with_read_only_root(installed);
+        let local = provider.physical.as_ref().unwrap();
+        let batch = local.batch();
+        for (address, action, reference, bytes) in &inputs {
+            assert_eq!(local.put(reference.domain, bytes).unwrap(), *reference);
+            for address in [
+                *address,
+                Address(crate::store::product_association_key(*address).0),
+            ] {
+                local.associate(address, *action, *reference).unwrap();
+            }
+        }
+        batch.finish().unwrap();
+        let local_statistics = local.enable_statistics();
         let statistics = provider.read_only[0].enable_statistics();
         let operation = provider.for_operation().unwrap();
         let _scope = operation.read_scope();
@@ -629,6 +652,7 @@ mod tests {
                 "{counter}"
             );
         }
+        assert_eq!(local_statistics.snapshot().counters["ContentChecks"], 0);
         // An independent operation rechecks even while old handles stay alive.
         let next = provider.for_operation().unwrap();
         next.installed_package(&package, compiler).unwrap();

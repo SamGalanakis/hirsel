@@ -216,20 +216,30 @@ pub(crate) enum Shadow {
     },
 }
 impl Clone for Shadow {
+    #[inline]
     fn clone(&self) -> Self {
-        hirsel_intern::work::count(hirsel_intern::work::Counter::InterpClonedShadowNodes);
-        match self {
-            Self::Uniform(bound) => Self::Uniform(bound.clone()),
-            Self::Ownership { content, holder } => Self::Ownership {
-                content: content.clone(),
-                holder: holder.clone(),
-            },
-            Self::Parts(parts) => Self::Parts(parts.clone()),
-            Self::View { content, home } => Self::View {
-                content: content.clone(),
-                home: home.clone(),
-            },
+        #[inline]
+        fn clone_node(shadow: &Shadow, nodes: &mut u64) -> Shadow {
+            *nodes += 1;
+            match shadow {
+                Shadow::Uniform(bound) => Shadow::Uniform(bound.clone()),
+                Shadow::Ownership { content, holder } => Shadow::Ownership {
+                    content: Box::new(clone_node(content, nodes)),
+                    holder: holder.clone(),
+                },
+                Shadow::Parts(parts) => {
+                    Shadow::Parts(parts.iter().map(|part| clone_node(part, nodes)).collect())
+                }
+                Shadow::View { content, home } => Shadow::View {
+                    content: Box::new(clone_node(content, nodes)),
+                    home: home.clone(),
+                },
+            }
         }
+        let mut nodes = 0;
+        let shadow = clone_node(self, &mut nodes);
+        hirsel_intern::work::count_by(hirsel_intern::work::Counter::InterpClonedShadowNodes, nodes);
+        shadow
     }
 }
 impl Default for Shadow {
@@ -532,16 +542,32 @@ impl Shadow {
             };
         }
         if inline_fields(value).is_some() {
+            let fields = value.fields().unwrap();
+            let mut parts = match self {
+                Self::Parts(parts) => parts.into_iter(),
+                other => {
+                    let bound = other.total();
+                    return Self::Parts(
+                        fields
+                            .iter()
+                            .map(|field| {
+                                field
+                                    .as_ref()
+                                    .map(|value| Self::of(bound.clone()).ownership(value, unique))
+                                    .unwrap_or_default()
+                            })
+                            .collect(),
+                    );
+                }
+            };
             return Self::Parts(
-                value
-                    .fields()
-                    .unwrap()
+                fields
                     .iter()
-                    .enumerate()
-                    .map(|(i, field)| {
+                    .map(|field| {
+                        let part = parts.next().unwrap_or_default();
                         field
                             .as_ref()
-                            .map(|value| self.part(i).ownership(value, unique))
+                            .map(|value| part.ownership(value, unique))
                             .unwrap_or_default()
                     })
                     .collect(),
@@ -700,31 +726,33 @@ impl Shadow {
     }
     /// Replace the local lifetime inside a callee without discarding the
     /// actual incoming sharing witness, including a forged Unique row.
-    pub fn rebound(&self, bound: &Bound) -> Self {
+    pub fn rebound(&mut self, bound: &Bound) {
         match self {
-            Self::Ownership { content, holder } => Self::Ownership {
-                content: Box::new(content.rebound(bound)),
-                holder: holder.clone(),
-            },
-            Self::Parts(parts) => Self::Parts(parts.iter().map(|p| p.rebound(bound)).collect()),
-            _ => Self::of(bound.clone()),
+            Self::Ownership { content, .. } => content.rebound(bound),
+            Self::Parts(parts) => {
+                for part in parts {
+                    part.rebound(bound);
+                }
+            }
+            _ => *self = Self::of(bound.clone()),
         }
     }
     /// Borrowing a callable keeps its environment fields: invoking it reads
     /// those fields, rather than content stored in the borrowed callable slot.
     /// Its access view still expires with the parameter or capture instance.
-    pub fn rebound_value(&self, value: &Value, bound: &Bound) -> Self {
+    pub fn rebound_value(mut self, value: &Value, bound: &Bound) -> Self {
         if matches!(value, Value::Closure { .. }) {
             let content = match self {
-                Self::View { content, .. } => (**content).clone(),
-                _ => self.clone(),
+                Self::View { content, .. } => *content,
+                other => other,
             };
             Self::View {
                 content: Box::new(content),
                 home: bound.clone(),
             }
         } else {
-            self.rebound(bound)
+            self.rebound(bound);
+            self
         }
     }
     /// MODE-7: deep copying removes binding/own-root loans, retaining only
@@ -1357,7 +1385,9 @@ impl FrameCheck {
         callee: Option<Callee>,
         noalloc: bool,
     ) -> Self {
-        let mut shadows = vec![Shadow::default(); body.locals.len()];
+        let mut shadows: Vec<_> = std::iter::repeat_with(Shadow::default)
+            .take(body.locals.len())
+            .collect();
         let mut owned = vec![];
         let mut lifetimes = vec![];
         let mut originals = vec![];
@@ -1366,8 +1396,9 @@ impl FrameCheck {
         let region = s.instance(Kind::Region);
         owned.extend([environment, region]);
         let mut parameters = vec![];
-        for (ordinal, local) in body.parameters.iter().enumerate() {
-            let mut argument = arguments.get(ordinal).cloned().unwrap_or_default();
+        let mut arguments = arguments.into_iter();
+        for local in &body.parameters {
+            let mut argument = arguments.next().unwrap_or_default();
             let instance = if argument.mutable {
                 s.instance(Kind::MutableRoot(argument.shadow.total()))
             } else {
@@ -1392,15 +1423,17 @@ impl FrameCheck {
                 })
             });
             let value = slots.get(local.0 as usize).and_then(Option::as_ref);
+            let original = argument.shadow.total();
             shadows[local.0 as usize] = match value.filter(|v| row_local && holds_storage(v)) {
                 Some(value) => argument.shadow.rebound_value(value, &vec![instance]),
-                None => argument.shadow.clone(),
+                None => argument.shadow,
             };
             lifetimes.push((instance, argument.lifetime));
-            originals.push((instance, argument.shadow.total()));
+            originals.push((instance, original));
         }
         let mut captures = vec![];
         let callee = callee.unwrap_or_default();
+        let mut capture_shadows = callee.captures.into_iter();
         for (ordinal, (index, _)) in body
             .locals
             .iter()
@@ -1408,7 +1441,7 @@ impl FrameCheck {
             .filter(|(_, l)| l.storage == Storage::Capture)
             .enumerate()
         {
-            let shadow = callee.captures.get(ordinal).cloned().unwrap_or_default();
+            let shadow = capture_shadows.next().unwrap_or_default();
             if callee.owned.get(ordinal).copied().unwrap_or(true) {
                 captures.push(environment);
                 shadows[index] = shadow;
@@ -1554,14 +1587,19 @@ impl FrameCheck {
         shadow
     }
     /// A `mut` write-back keeps its own argument's original bound.
-    pub fn written_back(&self, parameter: usize, local: LocalId) -> Shadow {
-        self.caller_content(
-            parameter,
-            self.shadows
-                .get(local.0 as usize)
-                .cloned()
-                .unwrap_or_default(),
-        )
+    pub fn written_back(&mut self, parameter: usize, local: LocalId, preserve: bool) -> Shadow {
+        let shadow = self
+            .shadows
+            .get_mut(local.0 as usize)
+            .map(|shadow| {
+                if preserve {
+                    shadow.clone()
+                } else {
+                    std::mem::take(shadow)
+                }
+            })
+            .unwrap_or_default();
+        self.caller_content(parameter, shadow)
     }
     /// A self-tail restart substitutes surviving parameter contracts, then
     /// poisons every old invocation instance, including its lexical scopes.

@@ -2121,9 +2121,10 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
             if let Some(check) = &mut finished.check {
                 let body = &finished.definition.bodies[finished.body_id.0 as usize];
                 returned = check.returned_to_caller(body, &runtime.types);
-                for local in &finished.mut_parameters {
+                for (index, local) in finished.mut_parameters.iter().enumerate() {
                     if let Some(ordinal) = body.parameters.iter().position(|p| p == local) {
-                        written.push((*local, check.written_back(ordinal, *local)));
+                        let preserve = finished.mut_parameters[index + 1..].contains(local);
+                        written.push((*local, check.written_back(ordinal, *local, preserve)));
                     }
                 }
                 check.exit();
@@ -3977,7 +3978,9 @@ async fn rvalue(
             } else {
                 (
                     vec![None; fields.len()],
-                    vec![Shadow::default(); fields.len()],
+                    std::iter::repeat_with(Shadow::default)
+                        .take(fields.len())
+                        .collect(),
                 )
             };
             for field in fields {
@@ -5151,7 +5154,9 @@ fn execute_terminator(
             });
             let mut values = vec![None; arguments.len()];
             let mut checks = if frame.check.is_some() {
-                vec![crate::checked::Argument::default(); arguments.len()]
+                std::iter::repeat_with(crate::checked::Argument::default)
+                    .take(arguments.len())
+                    .collect()
             } else {
                 vec![]
             };

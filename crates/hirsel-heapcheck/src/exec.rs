@@ -6532,7 +6532,12 @@ impl<'p, S: Stage> Machine<'p, S> {
         }
         hirsel_lir::layout::block_charge(&self.program.layouts, payload)
             .map(|charge| charge.bytes(count))
-            .ok_or_else(|| err(V::Unsupported, "a bounded-arena charge of a flat payload"))
+            .map_err(|error| match error {
+                hirsel_lir::layout::LayoutError::Unavailable { what, .. } => {
+                    err(V::Unsupported, what)
+                }
+                error => err(V::Malformed, format!("logical charge: {error:?}")),
+            })
     }
 
     /// A construction's charge: its block's, before any operand is consumed.
@@ -6562,7 +6567,12 @@ impl<'p, S: Stage> Machine<'p, S> {
                 .find(|fl| fl.ordinal == i)
                 .ok_or_else(|| err(V::Malformed, "a capture outside its environment"))?;
             let size = hirsel_lir::layout::logical_size(&self.program.layouts, field.layout)
-                .ok_or_else(|| err(V::Unsupported, "a bounded-arena charge of a flat capture"))?;
+                .map_err(|error| match error {
+                    hirsel_lir::layout::LayoutError::Unavailable { what, .. } => {
+                        err(V::Unsupported, what)
+                    }
+                    error => err(V::Malformed, format!("logical capture charge: {error:?}")),
+                })?;
             total = total.saturating_add(size);
         }
         Ok(total)

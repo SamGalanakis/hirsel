@@ -88,6 +88,8 @@ pub enum Counter {
     InterpCopiedValues,
     /// Ordered collection entries indexed, compared or appended by the interpreter.
     InterpKeyedRows,
+    /// Counted-content row visits, nominal expansions and shape-pair comparisons.
+    ContentRelationRows,
     /// Cached dependency-node inspections.
     CacheValidationRows,
 }

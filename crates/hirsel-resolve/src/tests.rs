@@ -1462,3 +1462,81 @@ fn package_head_22_core_std_merge_requires_matching_module_targets() {
         }
     }
 }
+
+#[test]
+fn signature_context_keeps_nominal_fields_through_deep_boxes() {
+    let mut t = Tree::new("external.field\n");
+    let base = t.value("external", 1);
+    let name = t.name("field");
+    let projection = t.expr(ExprKind::Field { base, field: name }, 1);
+    let body = t.block(vec![], Some(projection), 1);
+    let main = t.function(
+        "main",
+        FunctionSyntax::default(),
+        body,
+        Visibility::Private,
+        1,
+    );
+    let entries = vec![entry(own("external"), Namespace::Value, Visibility::Public)];
+    let (index, ds) = ManifestIndex::new(fixture(entries));
+    assert!(ds.is_empty());
+    let mut fake = Fake::new(&index);
+    let store = session();
+    let scalar = store.intern(ty::Type::with_kind(ty::TypeKind::Primitive(
+        ty::Primitive::U8,
+    )));
+    let shape = store.intern(ty::Type::with_kind(ty::TypeKind::Record(
+        vec![ty::Field {
+            growable: false,
+            name: "field".into(),
+            ty: scalar,
+        }]
+        .into(),
+    )));
+    let mut nominal = constant(own("Payload"), ty::TypeKind::Tuple(vec![].into()));
+    nominal.kind = ty::SignatureKind::Type(Box::new(ty::TypeDefinition {
+        representation: Some(shape),
+        loop_source: None,
+        format: None,
+        generics: vec![],
+        bounds: vec![],
+        authority: ty::AuthoritySummary::inert(),
+        capability: None,
+        implementation_authority: None,
+        serializable: false,
+        serializable_check: None,
+        layout: ty::Layout::default(),
+        distinct: false,
+        resource: false,
+        drop: None,
+        fact: None,
+        captures: None,
+        destructor_allocation: ty::Allocation::NoAlloc,
+    }));
+    fake.signatures.insert(own("Payload"), nominal);
+    let mut value = store.intern(ty::Type::with_kind(ty::TypeKind::Named {
+        definition: DefId::intern(&own("Payload")),
+        arguments: vec![].into(),
+    }));
+    for _ in 0..4097 {
+        value = store.intern(ty::Type::with_kind(ty::TypeKind::Box(value)));
+    }
+    let mut signature = constant(own("external"), ty::TypeKind::Tuple(vec![].into()));
+    signature.kind = ty::SignatureKind::Const {
+        ty: value,
+        generics: Default::default(),
+    };
+    fake.signatures.insert(own("external"), signature);
+    let output = resolve_item(&t.file, &t.file.items[main], &index, store, &mut fake);
+    clean(&output);
+    assert_eq!(
+        output.contextual.iter().find_map(|(site, name)| {
+            (*site == NameSite::Expression(projection)).then_some(name)
+        }),
+        Some(&ContextualName::Field {
+            owner: own("Payload"),
+            variant: None,
+            field: ty::FieldId(0)
+        })
+    );
+}

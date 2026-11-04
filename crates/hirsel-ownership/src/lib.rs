@@ -248,7 +248,7 @@ pub fn check_ownership_with_clauses(
                 signatures
                     .read(path, Arc::make_mut(&mut body.resolution.reads))
                     .ok()
-            });
+            })?;
         }
     }
     let result_sharing = properties::result_sharing(t, body, &graphs, &mut signatures, &rows)?;

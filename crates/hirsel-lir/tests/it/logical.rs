@@ -108,7 +108,7 @@ fn layout_and_type_logical_sizes_agree() {
     let table = b.finish();
     for ((ty, expected), layout) in cases.iter().zip(&layouts) {
         assert_eq!(type_size(&t.store, *ty, &resolve), Ok(*expected), "{ty:?}");
-        assert_eq!(logical_size(&table, *layout), Some(*expected), "{ty:?}");
+        assert_eq!(logical_size(&table, *layout), Ok(*expected), "{ty:?}");
     }
     // A list block charges its elements; a box block its payload.
     let list = &table.layout(layouts[6]).unwrap().kind;
@@ -117,14 +117,53 @@ fn layout_and_type_logical_sizes_agree() {
     };
     assert_eq!(
         block_charge(&table, payload),
-        Some(LogicalCharge::PerElement(8))
+        Ok(LogicalCharge::PerElement(8))
     );
     let LayoutKind::Box { payload } = table.layout(layouts[8]).unwrap().kind else {
         panic!("a box is a block reference")
     };
-    assert_eq!(
-        block_charge(&table, payload),
-        Some(LogicalCharge::Fixed(20))
-    );
+    assert_eq!(block_charge(&table, payload), Ok(LogicalCharge::Fixed(20)));
     assert_eq!(LogicalCharge::PerElement(8).bytes(3), 24);
+}
+
+#[test]
+fn finite_deep_inline_layouts_keep_their_logical_charge() {
+    use hirsel_lir::layout_types::{LayoutId, ScalarKind, SizeSpec};
+    let mut table = crate::support::table();
+    let mut record = table.layouts[0].clone();
+    record.kind = LayoutKind::Scalar(ScalarKind::U8);
+    record.size = SizeSpec::Fixed(1);
+    let mut id = LayoutId(table.layouts.len() as u32);
+    table.layouts.push(record.clone());
+    for _ in 0..257 {
+        record.kind = LayoutKind::Inline {
+            element: id,
+            count: 1,
+        };
+        id = LayoutId(table.layouts.len() as u32);
+        table.layouts.push(record.clone());
+    }
+    assert_eq!(logical_size(&table, id), Ok(1));
+    assert_eq!(block_charge(&table, id), Ok(LogicalCharge::Fixed(1)));
+    // A finite deep value is supported; malformed rows and genuinely
+    // unsupported encodings keep different errors.
+    assert!(matches!(
+        logical_size(&table, LayoutId(u32::MAX)),
+        Err(hirsel_lir::layout::LayoutError::Invalid(_))
+    ));
+    record.kind = LayoutKind::Flat;
+    table.layouts.push(record.clone());
+    assert!(matches!(
+        logical_size(&table, LayoutId(table.layouts.len() as u32 - 1)),
+        Err(hirsel_lir::layout::LayoutError::Unavailable { .. })
+    ));
+    record.kind = LayoutKind::Inline {
+        element: id,
+        count: 1,
+    };
+    table.layouts[id.0 as usize] = record;
+    assert!(matches!(
+        logical_size(&table, id),
+        Err(hirsel_lir::layout::LayoutError::InfiniteSize(_))
+    ));
 }

@@ -445,11 +445,14 @@ fn descriptor_with_storage(
         return malformed("a Map or Set payload whose entries are not at offset 0");
     }
     let (logical, per_element) = match crate::layout::block_charge(table, id) {
-        Some(crate::layout::LogicalCharge::Fixed(n)) => (n, 0),
-        Some(crate::layout::LogicalCharge::PerElement(n)) => {
+        Ok(crate::layout::LogicalCharge::Fixed(n)) => (n, 0),
+        Ok(crate::layout::LogicalCharge::PerElement(n)) => {
             (n, crate::runtime_abi::LAYOUT_LOGICAL_PER_ELEMENT)
         }
-        None => (crate::runtime_abi::LOGICAL_UNSUPPORTED, 0),
+        Err(crate::layout::LayoutError::Unavailable { .. }) => {
+            (crate::runtime_abi::LOGICAL_UNSUPPORTED, 0)
+        }
+        Err(error) => return malformed(format!("logical charge: {error:?}")),
     };
     let (logical, logical_count) = match storage.entries(id) {
         Some(entries) => (entries.logical, Some(entries.program())),

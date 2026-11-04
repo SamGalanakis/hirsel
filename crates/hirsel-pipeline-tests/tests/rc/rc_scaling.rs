@@ -332,3 +332,94 @@ fn early_releases_share_the_cleanup_of_live_resources() {
         "FinalizeBegin in the Ready units at 10, 20 and 40 released lists: {finalizations:?}"
     );
 }
+
+#[test]
+fn disjoint_counted_nominals_have_near_linear_relation_work() {
+    use hirsel_intern::work::{self, Counter};
+    use hirsel_syntax::{DefId, DefPath};
+    use hirsel_types::*;
+    let measure = |n: usize| {
+        let store = TypeInterner::new(None);
+        let memo = TypeMemo::new();
+        let scalar = store.intern(Type::with_kind(TypeKind::Primitive(Primitive::U8)));
+        let mut declarations = std::collections::HashMap::new();
+        let mut parts = vec![];
+        for i in 0..2 * n {
+            let definition = DefId::intern(&DefPath::core(&format!("ContentPart{i}")));
+            let ty = store.intern(Type::with_kind(TypeKind::Named {
+                definition,
+                arguments: vec![].into(),
+            }));
+            declarations.insert(
+                definition,
+                std::sync::Arc::new(Signature {
+                    definition,
+                    metadata: Default::default(),
+                    fingerprint: Default::default(),
+                    kind: SignatureKind::Type(Box::new(TypeDefinition {
+                        representation: Some(scalar),
+                        loop_source: None,
+                        format: None,
+                        generics: vec![],
+                        bounds: vec![],
+                        authority: AuthoritySummary::inert(),
+                        capability: None,
+                        implementation_authority: None,
+                        serializable: false,
+                        serializable_check: None,
+                        layout: Layout::default(),
+                        distinct: false,
+                        resource: false,
+                        drop: None,
+                        fact: None,
+                        captures: None,
+                        destructor_allocation: Allocation::NoAlloc,
+                    })),
+                }),
+            );
+            parts.push(ty);
+        }
+        // Different outer constructors prevent a match before the disjoint
+        // nominal identities are inspected. Every representation is a scalar.
+        let holder = store.intern(Type::with_kind(TypeKind::Tuple(parts[..n].to_vec().into())));
+        let content = store.intern(Type::with_kind(TypeKind::Record(
+            parts[n..]
+                .iter()
+                .enumerate()
+                .map(|(i, ty)| Field {
+                    growable: false,
+                    name: hirsel_intern::Symbol::intern(&format!("f{i}")),
+                    ty: *ty,
+                })
+                .collect(),
+        )));
+        let counters = [
+            Counter::ContentRelationRows,
+            Counter::TypeNormalRows,
+            Counter::InternedTypeRows,
+        ];
+        let before = counters.map(work::read);
+        assert!(
+            !hirsel_type_analysis::representation::may_hold_content(
+                &store,
+                &memo,
+                holder,
+                content,
+                &mut |d| declarations.get(&d).cloned(),
+            )
+            .unwrap()
+        );
+        counters
+            .into_iter()
+            .zip(before)
+            .map(|(c, before)| work::read(c) - before)
+            .sum::<u64>()
+    };
+    let (small, large) = (measure(16), measure(128));
+    eprintln!("counted relation work: n=16 {small}, n=128 {large}");
+    // The existing n/8n scaling gate permits a ratio below 32.
+    assert!(
+        small > 0 && large < 32 * small,
+        "small {small}, large {large}"
+    );
+}

@@ -1917,6 +1917,7 @@ impl Checker<'_> {
                         *ty,
                         &mut |path| this.read(path),
                     )
+                    .unwrap_or_else(|error| this.proof_failure(error, false))
                 {
                     placement = placement.union(from);
                 }

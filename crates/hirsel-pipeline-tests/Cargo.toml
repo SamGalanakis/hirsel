@@ -41,6 +41,7 @@ hirsel-run-schema = { path = "../hirsel-run-schema" }
 hirsel-span = { path = "../hirsel-span" }
 hirsel-syntax = { path = "../hirsel-syntax" }
 hirsel-tir = { path = "../hirsel-tir" }
+hirsel-type-analysis = { path = "../hirsel-type-analysis" }
 hirsel-types = { path = "../hirsel-types", features = ["testing"] }
 hirsel-validate = { path = "../hirsel-validate" }
 insta = "1"

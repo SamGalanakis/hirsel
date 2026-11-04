@@ -2185,7 +2185,7 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
                 && let ExpectedType::Named {
                     definition,
                     arguments,
-                } = semantic_expected(self.types, representation, arguments, 0, 0)
+                } = semantic_expected(self.types, representation, arguments, 0)
             {
                 return self.shape(&definition, &arguments);
             }
@@ -2294,7 +2294,7 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
                 Some(signature) => match &signature.kind {
                     ty::SignatureKind::Type(declaration) if signature.metadata.alias => declaration
                         .representation
-                        .map(|r| semantic_expected(self.types, r, &current.1, 0, 0)),
+                        .map(|r| semantic_expected(self.types, r, &current.1, 0)),
                     _ => None,
                 },
                 None => self
@@ -2969,19 +2969,13 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
                                 parameters: f
                                     .parameters
                                     .iter()
-                                    .map(|p| semantic_expected(self.types, p.ty, &[], 0, 0))
+                                    .map(|p| semantic_expected(self.types, p.ty, &[], 0))
                                     .collect(),
-                                result: Box::new(semantic_expected(
-                                    self.types,
-                                    f.result,
-                                    &[],
-                                    0,
-                                    0,
-                                )),
+                                result: Box::new(semantic_expected(self.types, f.result, &[], 0)),
                             };
                         }
                         ty::SignatureKind::Const { ty: ty, .. } => {
-                            return semantic_expected(self.types, *ty, &[], 0, 0);
+                            return semantic_expected(self.types, *ty, &[], 0);
                         }
                         _ => {}
                     }
@@ -3733,60 +3727,88 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
     }
 }
 
-const MAX_EXPECTED_DEPTH: usize = 4096;
 /// `arguments` instantiate the generic parameters bound `binders` function
-/// types outside `id`; any other parameter is unknown context.
+/// types outside `id`; any other parameter is unknown context. Boxes carry
+/// their payload's context. The worklist preserves all finite nesting; actual
+/// allocation exhaustion is handled by the compiler's resource guard.
 fn semantic_expected(
     store: &ty::TypeInterner,
     id: ty::TypeId,
     arguments: &[ExpectedType],
     binders: u32,
-    depth: usize,
 ) -> ExpectedType {
-    // Valid graphs are acyclic; this bounds a malformed (cyclic) one.
-    if depth > MAX_EXPECTED_DEPTH {
-        return ExpectedType::Unknown;
+    enum Task {
+        Visit(ty::TypeId, u32),
+        Named(DefPath, usize),
+        Tuple(usize),
+        Function(usize),
+        Unknown,
     }
-    let nested =
-        |id: ty::TypeId, binders: u32| semantic_expected(store, id, arguments, binders, depth + 1);
-    match store.get(id).map(|ty| &ty.kind) {
-        Some(ty::TypeKind::Named {
-            definition,
-            arguments: written,
-        }) => ExpectedType::Named {
-            definition: definition.path().clone(),
-            arguments: written
-                .iter()
-                .map(|argument| match argument {
-                    ty::GenericArgument::Type(t) => nested(*t, binders),
-                    ty::GenericArgument::Size(_) => ExpectedType::Unknown,
-                })
-                .collect(),
-        },
-        Some(ty::TypeKind::Parameter(ty::BinderRef::Bound {
-            depth: binder,
-            parameter,
-        })) if *binder == binders => arguments
-            .get(parameter.0 as usize)
-            .cloned()
-            .unwrap_or_default(),
-        Some(ty::TypeKind::Tuple(types)) => {
-            ExpectedType::Tuple(types.iter().map(|t| nested(*t, binders)).collect())
+    let mut pending = vec![Task::Visit(id, binders)];
+    let mut values = vec![];
+    while let Some(task) = pending.pop() {
+        match task {
+            Task::Visit(id, binders) => match store.get(id).map(|ty| &ty.kind) {
+                Some(ty::TypeKind::Named {
+                    definition,
+                    arguments: written,
+                }) => {
+                    pending.push(Task::Named(definition.path().clone(), written.len()));
+                    pending.extend(written.iter().rev().map(|argument| match argument {
+                        ty::GenericArgument::Type(t) => Task::Visit(*t, binders),
+                        ty::GenericArgument::Size(_) => Task::Unknown,
+                    }));
+                }
+                Some(ty::TypeKind::Parameter(ty::BinderRef::Bound { depth, parameter }))
+                    if *depth == binders =>
+                {
+                    values.push(
+                        arguments
+                            .get(parameter.0 as usize)
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
+                }
+                Some(ty::TypeKind::Tuple(types)) => {
+                    pending.push(Task::Tuple(types.len()));
+                    pending.extend(types.iter().rev().map(|t| Task::Visit(*t, binders)));
+                }
+                Some(ty::TypeKind::Function(f)) => {
+                    pending.push(Task::Function(f.parameters.len()));
+                    pending.push(Task::Visit(f.result, binders + 1));
+                    pending.extend(
+                        f.parameters
+                            .iter()
+                            .rev()
+                            .map(|p| Task::Visit(p.ty, binders + 1)),
+                    );
+                }
+                Some(ty::TypeKind::Box(id)) => pending.push(Task::Visit(*id, binders)),
+                _ => values.push(ExpectedType::Unknown),
+            },
+            Task::Named(definition, count) => {
+                let arguments = values.split_off(values.len() - count);
+                values.push(ExpectedType::Named {
+                    definition,
+                    arguments,
+                });
+            }
+            Task::Tuple(count) => {
+                let parts = values.split_off(values.len() - count);
+                values.push(ExpectedType::Tuple(parts));
+            }
+            Task::Function(count) => {
+                let result = Box::new(values.pop().unwrap());
+                let parameters = values.split_off(values.len() - count);
+                values.push(ExpectedType::Function { parameters, result });
+            }
+            Task::Unknown => values.push(ExpectedType::Unknown),
         }
-        Some(ty::TypeKind::Function(f)) => ExpectedType::Function {
-            parameters: f
-                .parameters
-                .iter()
-                .map(|p| nested(p.ty, binders + 1))
-                .collect(),
-            result: Box::new(nested(f.result, binders + 1)),
-        },
-        Some(ty::TypeKind::Box(id)) => nested(*id, binders),
-        _ => ExpectedType::Unknown,
     }
+    values.pop().unwrap()
 }
 fn shape_from_type(store: &ty::TypeInterner, id: ty::TypeId, arguments: &[ExpectedType]) -> Shape {
-    let expected = |t: ty::TypeId| semantic_expected(store, t, arguments, 0, 0);
+    let expected = |t: ty::TypeId| semantic_expected(store, t, arguments, 0);
     match store.get(id).map(|t| &t.kind) {
         Some(ty::TypeKind::Record(fields)) => Shape {
             fields: fields

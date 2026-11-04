@@ -2915,6 +2915,10 @@ impl Checker<'_, '_> {
                             *ty,
                             &mut lookup,
                         )
+                        .unwrap_or_else(|error| {
+                            *self.proof_error.borrow_mut() = Some(error);
+                            false
+                        })
                 })
                 .map(|(i, _)| i)
                 .collect()

@@ -1,7 +1,8 @@
 //! Nominal representation expansion for stage-owned layout walks.
+use hirsel_intern::work::{self, Counter};
 use hirsel_syntax::DefId;
 use hirsel_types::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Why a representation walk stopped before reaching a structural row.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,6 +60,7 @@ pub fn expand_representation(
         else {
             return Ok(root);
         };
+        work::count(Counter::ContentRelationRows);
         let definition = *definition;
         let arguments = arguments.clone();
         if !expansions
@@ -103,38 +105,82 @@ pub fn may_hold_content(
     holder: TypeId,
     content: TypeId,
     lookup: &mut impl FnMut(DefId) -> Option<SignatureRef>,
-) -> bool {
+) -> Result<bool, QueryError> {
     let (Some(holders), Some(contents)) = (
-        counted_parts(store, memo, holder, lookup),
-        counted_parts(store, memo, content, lookup),
+        counted_parts(store, memo, holder, lookup)?,
+        counted_parts(store, memo, content, lookup)?,
     ) else {
-        return true;
+        return Ok(true);
     };
-    holders
-        .iter()
-        .any(|h| contents.iter().any(|c| same_shape(store, *h, *c, 0)))
+    // A nominal only compares with the same declaration, and a structural
+    // part only with the same constructor. Disjoint nominal sets therefore
+    // cost one index insertion/lookup each, rather than all pairs.
+    let mut index: HashMap<PartKey, Vec<TypeId>> = HashMap::new();
+    for part in contents {
+        index.entry(part_key(store, part)).or_default().push(part);
+    }
+    let mut comparisons = HashMap::new();
+    for holder in holders {
+        if let Some(contents) = index.get(&part_key(store, holder)) {
+            for content in contents {
+                if same_shape(store, holder, *content, &mut comparisons) {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
 }
+
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+enum PartKey {
+    Primitive(Primitive),
+    Named(DefId),
+    Builtin(BuiltinType),
+    Box,
+    Tuple,
+    Record,
+    Variant,
+}
+fn part_key(store: &TypeInterner, ty: TypeId) -> PartKey {
+    match &store.get(ty).expect("a counted part has a row").kind {
+        TypeKind::Primitive(p) => PartKey::Primitive(*p),
+        TypeKind::Named { definition, .. } => PartKey::Named(*definition),
+        TypeKind::Builtin { kind, .. } => PartKey::Builtin(*kind),
+        TypeKind::Box(_) => PartKey::Box,
+        TypeKind::Tuple(_) => PartKey::Tuple,
+        TypeKind::Record(_) => PartKey::Record,
+        TypeKind::Variant(_) => PartKey::Variant,
+        _ => unreachable!("unknown parts stop counted_parts"),
+    }
+}
+
 /// Every counted part of `root`, nominal representations included, or None
-/// when some part could be anything.
+/// when some part could be anything. A resource failure is never an unknown
+/// part: the caller must propagate it before publishing an analysis result.
 fn counted_parts(
     store: &TypeInterner,
     memo: &TypeMemo,
     root: TypeId,
     lookup: &mut impl FnMut(DefId) -> Option<SignatureRef>,
-) -> Option<Vec<TypeId>> {
-    const LIMIT: usize = 256;
+) -> Result<Option<Vec<TypeId>>, QueryError> {
     let mut parts = vec![];
-    let mut pending = vec![root];
+    let mut pending = vec![(root, false)];
     let mut seen = HashSet::new();
-    while let Some(ty) = pending.pop() {
+    let mut expansions = NominalExpansions::default();
+    while let Some((ty, exit)) = pending.pop() {
+        if exit {
+            expansions.leave(ty, 0);
+            continue;
+        }
         if !seen.insert(ty) {
             continue;
         }
-        if seen.len() > LIMIT {
-            return None;
-        }
-        let kind = store.get(ty)?.kind.clone();
-        match &kind {
+        work::count(Counter::ContentRelationRows);
+        let Some(row) = store.get(ty) else {
+            return Ok(None);
+        };
+        match &row.kind {
             TypeKind::Primitive(Primitive::String | Primitive::Bytes) => parts.push(ty),
             TypeKind::Primitive(_) => {}
             TypeKind::Parameter(_)
@@ -143,20 +189,25 @@ fn counted_parts(
             | TypeKind::Builtin {
                 kind: BuiltinType::Iter,
                 ..
-            } => return None,
+            } => return Ok(None),
             TypeKind::Named { definition, .. } => {
-                let signature = lookup(*definition)?;
+                let Some(signature) = lookup(*definition) else {
+                    return Ok(None);
+                };
                 let SignatureKind::Type(declaration) = &signature.kind else {
-                    return None;
+                    return Ok(None);
                 };
                 // A checked public Plain bound proves there is no counted
-                // storage. An opaque export need not reveal its representation
-                // to preserve this proof (for example std's checked Date).
+                // storage, including an opaque export such as std's Date.
                 if declaration.bounds.contains(&Bound::Plain) {
                     continue;
                 }
                 parts.push(ty);
-                let representation = expand_representation(
+                if !expansions.enter(ty, 0, store)? {
+                    continue;
+                }
+                pending.push((ty, true));
+                let representation = match expand_representation(
                     store,
                     memo,
                     ty,
@@ -166,76 +217,111 @@ fn counted_parts(
                         }))
                     },
                     None,
-                )
-                .ok()?;
-                let row = store.get(representation)?;
-                if matches!(row.kind, TypeKind::Named { .. }) {
-                    return None;
-                }
-                pending.push(representation);
+                ) {
+                    Ok(ty) => ty,
+                    Err(RepresentationError {
+                        failure: RepresentationFailure::Query(error),
+                        ..
+                    }) => return Err(error),
+                    Err(_) => return Ok(None),
+                };
+                pending.push((representation, false));
             }
-            _ => {
+            kind => {
                 parts.push(ty);
-                pending.extend(kind.value_parts());
+                pending.extend(kind.value_parts().into_iter().map(|ty| (ty, false)));
             }
         }
     }
-    Some(parts)
+    Ok(Some(parts))
 }
-/// Structural equality of two types, ignoring modes, brands and relations.
-fn same_shape(store: &TypeInterner, a: TypeId, b: TypeId, depth: u32) -> bool {
-    if a == b || depth > 16 {
-        return true;
-    }
-    let (Some(x), Some(y)) = (store.get(a), store.get(b)) else {
-        return true;
-    };
-    let arguments = |p: &[GenericArgument], q: &[GenericArgument]| {
-        p.len() == q.len()
-            && p.iter().zip(q).all(|pair| match pair {
-                (GenericArgument::Type(p), GenericArgument::Type(q)) => {
-                    same_shape(store, *p, *q, depth + 1)
-                }
-                (p, q) => p == q,
-            })
-    };
-    let all = |p: &[TypeId], q: &[TypeId]| {
-        p.len() == q.len()
-            && p.iter()
-                .zip(q)
-                .all(|(p, q)| same_shape(store, *p, *q, depth + 1))
-    };
-    match (&x.kind, &y.kind) {
-        (TypeKind::Parameter(_) | TypeKind::Function(_) | TypeKind::Error, _)
-        | (_, TypeKind::Parameter(_) | TypeKind::Function(_) | TypeKind::Error) => true,
-        (TypeKind::Primitive(p), TypeKind::Primitive(q)) => p == q,
-        (
-            TypeKind::Builtin {
-                kind: p,
-                arguments: a,
-            },
-            TypeKind::Builtin {
-                kind: q,
-                arguments: b,
-            },
-        ) => p == q && arguments(a, b),
-        (
-            TypeKind::Named {
-                definition: p,
-                arguments: a,
-            },
-            TypeKind::Named {
-                definition: q,
-                arguments: b,
-            },
-        ) => p == q && arguments(a, b),
-        (TypeKind::Box(p), TypeKind::Box(q)) => same_shape(store, *p, *q, depth + 1),
-        (TypeKind::Tuple(_) | TypeKind::Record(_) | TypeKind::Variant(_), _) => {
-            std::mem::discriminant(&x.kind) == std::mem::discriminant(&y.kind)
-                && all(&x.kind.value_parts(), &y.kind.value_parts())
+
+/// The storage-shape relation, ignoring modes, brands, relations and field
+/// labels. Unknown, generic and callable rows match any shape, as before.
+/// The finite pair worklist follows graph.rs's structural comparison, with
+/// this relation's own constructor and wildcard rules.
+fn same_shape(
+    store: &TypeInterner,
+    a: TypeId,
+    b: TypeId,
+    memo: &mut HashMap<(TypeId, TypeId), bool>,
+) -> bool {
+    let mut pending = vec![(a, b)];
+    let mut seen = HashSet::new();
+    while let Some((p, q)) = pending.pop() {
+        work::count(Counter::ContentRelationRows);
+        if p == q || !seen.insert((p, q)) {
+            continue;
         }
-        _ => false,
+        if let Some(equal) = memo.get(&(p, q)) {
+            if *equal {
+                continue;
+            }
+            memo.insert((a, b), false);
+            return false;
+        }
+        let (Some(x), Some(y)) = (store.get(p), store.get(q)) else {
+            continue;
+        };
+        let mut arguments = |p: &[GenericArgument], q: &[GenericArgument]| {
+            p.len() == q.len()
+                && p.iter().zip(q).all(|pair| match pair {
+                    (GenericArgument::Type(p), GenericArgument::Type(q)) => {
+                        pending.push((*p, *q));
+                        true
+                    }
+                    (p, q) => p == q,
+                })
+        };
+        let equal = match (&x.kind, &y.kind) {
+            (TypeKind::Parameter(_) | TypeKind::Function(_) | TypeKind::Error, _)
+            | (_, TypeKind::Parameter(_) | TypeKind::Function(_) | TypeKind::Error) => true,
+            (TypeKind::Primitive(p), TypeKind::Primitive(q)) => p == q,
+            (
+                TypeKind::Builtin {
+                    kind: p,
+                    arguments: a,
+                },
+                TypeKind::Builtin {
+                    kind: q,
+                    arguments: b,
+                },
+            ) => p == q && arguments(a, b),
+            (
+                TypeKind::Named {
+                    definition: p,
+                    arguments: a,
+                },
+                TypeKind::Named {
+                    definition: q,
+                    arguments: b,
+                },
+            ) => p == q && arguments(a, b),
+            (TypeKind::Box(p), TypeKind::Box(q)) => {
+                pending.push((*p, *q));
+                true
+            }
+            (TypeKind::Tuple(_) | TypeKind::Record(_) | TypeKind::Variant(_), _) => {
+                let p = x.kind.value_parts();
+                let q = y.kind.value_parts();
+                let equal = std::mem::discriminant(&x.kind) == std::mem::discriminant(&y.kind)
+                    && p.len() == q.len();
+                if equal {
+                    pending.extend(p.into_iter().zip(q));
+                }
+                equal
+            }
+            _ => false,
+        };
+        if !equal {
+            memo.insert((a, b), false);
+            return false;
+        }
     }
+    for pair in seen {
+        memo.insert(pair, true);
+    }
+    true
 }
 
 #[cfg(test)]
@@ -329,7 +415,7 @@ mod tests {
         let mut lookup = |_: DefId| Some(signature.clone());
         let memo = TypeMemo::new();
         let mut holds = |store: &TypeInterner, holder, content| {
-            may_hold_content(store, &memo, holder, content, &mut lookup)
+            may_hold_content(store, &memo, holder, content, &mut lookup).unwrap()
         };
         assert!(!holds(&store, byte_list, text_list));
         assert!(!holds(&store, byte_list, wrap));
@@ -337,13 +423,59 @@ mod tests {
         assert!(holds(&store, text_list, wrap));
         assert!(holds(&store, byte_list, generic));
         let mut missing = |_: DefId| None;
-        assert!(may_hold_content(
-            &store,
-            &memo,
-            byte_list,
-            wrap,
-            &mut missing
-        ));
+        assert!(may_hold_content(&store, &memo, byte_list, wrap, &mut missing).unwrap());
+    }
+
+    #[test]
+    fn counted_graphs_have_no_width_cutoff() {
+        let store = TypeInterner::new(None);
+        let memo = TypeMemo::new();
+        let mut holder = store.intern(row(TypeKind::Primitive(Primitive::U8)));
+        for _ in 0..256 {
+            holder = store.intern(row(TypeKind::Box(holder)));
+        }
+        let text = store.intern(row(TypeKind::Primitive(Primitive::String)));
+        assert!(!may_hold_content(&store, &memo, holder, text, &mut |_| None).unwrap());
+    }
+
+    #[test]
+    fn counted_shapes_remain_exact_beyond_sixteen_levels() {
+        let store = TypeInterner::new(None);
+        let memo = TypeMemo::new();
+        let mut byte = store.intern(row(TypeKind::Primitive(Primitive::U8)));
+        let mut flag = store.intern(row(TypeKind::Primitive(Primitive::Bool)));
+        for _ in 0..17 {
+            let list = |element| {
+                store.intern(row(TypeKind::Builtin {
+                    kind: BuiltinType::List,
+                    arguments: vec![GenericArgument::Type(element)].into(),
+                }))
+            };
+            byte = list(byte);
+            flag = list(flag);
+        }
+        assert!(!may_hold_content(&store, &memo, byte, flag, &mut |_| None).unwrap());
+        // A real relationship must survive differences at every depth, or
+        // a caller could release storage while a returned value still holds it.
+        let mut changed = row(TypeKind::Primitive(Primitive::U8));
+        changed.modes.uniqueness = Uniqueness::Unique;
+        changed.brand = Brand {
+            alternatives: vec![Origin {
+                root: OriginRoot::Definition(path("DeepBrand")),
+                fields: SharedPath::new(),
+            }]
+            .into(),
+        };
+        let mut changed = store.intern(changed);
+        for _ in 0..17 {
+            let mut next = row(TypeKind::Builtin {
+                kind: BuiltinType::List,
+                arguments: vec![GenericArgument::Type(changed)].into(),
+            });
+            next.modes.uniqueness = Uniqueness::Unique;
+            changed = store.intern(next);
+        }
+        assert!(may_hold_content(&store, &memo, byte, changed, &mut |_| None).unwrap());
     }
 
     #[test]
@@ -359,19 +491,31 @@ mod tests {
         // A public Plain contract proves no counted storage, even when the
         // opaque representation is unavailable (as for std's checked Date).
         let plain = nominal(None, vec![Bound::Plain]);
-        assert!(!may_hold_content(&store, &memo, holder, bytes, &mut |_| {
-            Some(plain.clone())
-        }));
-        assert!(!may_hold_content(&store, &memo, bytes, holder, &mut |_| {
-            Some(plain.clone())
-        }));
+        assert!(
+            !may_hold_content(&store, &memo, holder, bytes, &mut |_| {
+                Some(plain.clone())
+            })
+            .unwrap()
+        );
+        assert!(
+            !may_hold_content(&store, &memo, bytes, holder, &mut |_| {
+                Some(plain.clone())
+            })
+            .unwrap()
+        );
         let unknown = nominal(None, vec![]);
-        assert!(may_hold_content(&store, &memo, holder, bytes, &mut |_| {
-            Some(unknown.clone())
-        }));
-        assert!(may_hold_content(&store, &memo, bytes, holder, &mut |_| {
-            Some(unknown.clone())
-        }));
+        assert!(
+            may_hold_content(&store, &memo, holder, bytes, &mut |_| {
+                Some(unknown.clone())
+            })
+            .unwrap()
+        );
+        assert!(
+            may_hold_content(&store, &memo, bytes, holder, &mut |_| {
+                Some(unknown.clone())
+            })
+            .unwrap()
+        );
     }
 
     #[test]
@@ -550,6 +694,31 @@ mod tests {
                     RepresentationFailure::Query(type_proof_limit())
                 } else {
                     RepresentationFailure::RecursiveRepresentation
+                }
+            );
+            let text = store.intern(row(TypeKind::Primitive(Primitive::String)));
+            assert_eq!(
+                may_hold_content(&store, &TypeMemo::new(), root, text, &mut |_| Some(
+                    signature.clone()
+                )),
+                if growing {
+                    Err(type_proof_limit())
+                } else {
+                    Ok(true)
+                }
+            );
+            // Growth through a storage edge needs the same resource outcome;
+            // returning to the row worklist must not reset the active proof.
+            let boxed = declaration.intern(row(TypeKind::Box(next)));
+            let through_storage = nominal(Some(boxed), vec![]);
+            assert_eq!(
+                may_hold_content(&store, &TypeMemo::new(), root, text, &mut |_| Some(
+                    through_storage.clone()
+                )),
+                if growing {
+                    Err(type_proof_limit())
+                } else {
+                    Ok(false)
                 }
             );
             assert!(matches!(

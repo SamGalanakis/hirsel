@@ -6,10 +6,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+hirsel-intern = { path = "../hirsel-intern" }
 hirsel-graph = { path = "../hirsel-graph" }
 hirsel-types = { path = "../hirsel-types" }
 hirsel-syntax = { path = "../hirsel-syntax" }
 
 [dev-dependencies]
-hirsel-intern = { path = "../hirsel-intern" }
 hirsel-guard = { path = "../hirsel-guard" }

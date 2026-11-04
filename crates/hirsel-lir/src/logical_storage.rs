@@ -143,7 +143,7 @@ impl MapStorage {
             else {
                 continue;
             };
-            let (Some(logical), SizeSpec::Fixed(stride), Ok(first)) = (
+            let (Ok(logical), SizeSpec::Fixed(stride), Ok(first)) = (
                 logical_size(table, pair.layout),
                 &entry.size,
                 sequence_elements_offset(entry),

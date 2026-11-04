@@ -689,65 +689,111 @@ pub const LOGICAL_CALLABLE: u64 = 16;
 /// The logical size of a value of `id` (MEM-6): the target-independent bytes a
 /// bounded arena charges, read from layout structure alone, and so independent
 /// of offsets, padding and niches. It is the table `hirsel_type_analysis::logical`
-/// computes from types. None for a layout that is no inline value (a block
-/// payload, a header or a flat encoding).
-pub fn logical_size(table: &LayoutTable, id: LayoutId) -> Option<u64> {
-    logical_at(table, id, 0)
-}
-
-fn logical_at(table: &LayoutTable, id: LayoutId, depth: usize) -> Option<u64> {
-    if depth > 256 {
-        return None;
-    }
-    let record = table.layout(id)?;
-    let sum = |fields: &[FieldLayout]| -> Option<u64> {
-        fields.iter().try_fold(0u64, |total, field| {
-            Some(total.saturating_add(logical_at(table, field.layout, depth + 1)?))
-        })
-    };
-    Some(match &record.kind {
-        LayoutKind::Unit => 0,
-        LayoutKind::Scalar(kind) => match kind {
-            ScalarKind::Bool | ScalarKind::U8 | ScalarKind::I8 => 1,
-            ScalarKind::U16 | ScalarKind::I16 => 2,
-            ScalarKind::U32 | ScalarKind::I32 | ScalarKind::F32 => 4,
-            ScalarKind::U64 | ScalarKind::I64 | ScalarKind::F64 | ScalarKind::Pointer => 8,
-            ScalarKind::U128 | ScalarKind::I128 => 16,
-        },
-        LayoutKind::Aggregate | LayoutKind::Resource => sum(&record.fields)?,
-        LayoutKind::Variant | LayoutKind::Packed => {
-            let mut largest = 0u64;
-            for variant in &record.tag.as_ref()?.variants {
-                largest = largest.max(sum(&variant.fields)?);
+/// computes from types. An unavailable kind has no inline logical value;
+/// missing rows and inline cycles are malformed. Allocation exhaustion stops
+/// the process through the resource guard, never as either layout error.
+pub fn logical_size(table: &LayoutTable, root: LayoutId) -> Result<u64, LayoutError> {
+    // Like type sizing, inline layout sizing follows a DAG in postorder.
+    // References stop the walk. Inline cycles are a property of the graph,
+    // independent of its size.
+    let mut sizes = std::collections::HashMap::new();
+    let mut active = std::collections::HashSet::new();
+    let mut pending = vec![(root, false)];
+    while let Some((id, exit)) = pending.pop() {
+        if sizes.contains_key(&id) {
+            continue;
+        }
+        let record = table
+            .layout(id)
+            .ok_or_else(|| LayoutError::Invalid(format!("missing logical layout {}", id.0)))?;
+        if !exit {
+            if !active.insert(id) {
+                return Err(LayoutError::InfiniteSize(format!(
+                    "logical layout {}",
+                    id.0
+                )));
             }
-            LOGICAL_VARIANT_TAG.saturating_add(largest)
+            pending.push((id, true));
+            let mut visit = |child| pending.push((child, false));
+            match &record.kind {
+                LayoutKind::Aggregate | LayoutKind::Resource => {
+                    record.fields.iter().for_each(|f| visit(f.layout));
+                }
+                LayoutKind::Variant | LayoutKind::Packed => {
+                    record
+                        .tag
+                        .as_ref()
+                        .ok_or_else(|| LayoutError::Invalid("logical variant without tags".into()))?
+                        .variants
+                        .iter()
+                        .flat_map(|v| &v.fields)
+                        .for_each(|f| visit(f.layout));
+                }
+                LayoutKind::Inline { element, .. } | LayoutKind::Simd { element, .. } => {
+                    visit(*element)
+                }
+                _ => (),
+            }
+            continue;
         }
-        LayoutKind::Inline { element, count } => {
-            count.saturating_mul(logical_at(table, *element, depth + 1)?)
-        }
-        LayoutKind::Simd { element, lanes } => {
-            u64::from(*lanes).saturating_mul(logical_at(table, *element, depth + 1)?)
-        }
-        LayoutKind::Block { .. }
-        | LayoutKind::Box { .. }
-        | LayoutKind::Shared { .. }
-        | LayoutKind::Slice { .. }
-        | LayoutKind::Opaque { .. }
-        | LayoutKind::Handle
-        | LayoutKind::HostCapability { .. }
-        | LayoutKind::Path
-        | LayoutKind::Arena
-        | LayoutKind::SealedRegion { .. } => LOGICAL_REFERENCE,
-        LayoutKind::Callable { .. } | LayoutKind::Iterator { .. } => LOGICAL_CALLABLE,
-        LayoutKind::Environment { .. }
-        | LayoutKind::PayloadReceipt { .. }
-        | LayoutKind::Header
-        | LayoutKind::Frozen { .. }
-        | LayoutKind::Flat
-        | LayoutKind::SoaColumns { .. }
-        | LayoutKind::Sequence { .. }
-        | LayoutKind::Sequential { .. } => return None,
-    })
+        let sum = |fields: &[FieldLayout]| {
+            fields.iter().fold(0u64, |total, field| {
+                total.saturating_add(sizes[&field.layout])
+            })
+        };
+        let size = match &record.kind {
+            LayoutKind::Unit => 0,
+            LayoutKind::Scalar(kind) => match kind {
+                ScalarKind::Bool | ScalarKind::U8 | ScalarKind::I8 => 1,
+                ScalarKind::U16 | ScalarKind::I16 => 2,
+                ScalarKind::U32 | ScalarKind::I32 | ScalarKind::F32 => 4,
+                ScalarKind::U64 | ScalarKind::I64 | ScalarKind::F64 | ScalarKind::Pointer => 8,
+                ScalarKind::U128 | ScalarKind::I128 => 16,
+            },
+            LayoutKind::Aggregate | LayoutKind::Resource => sum(&record.fields),
+            LayoutKind::Variant | LayoutKind::Packed => {
+                let mut largest = 0u64;
+                for variant in &record
+                    .tag
+                    .as_ref()
+                    .ok_or_else(|| LayoutError::Invalid("logical variant without tags".into()))?
+                    .variants
+                {
+                    largest = largest.max(sum(&variant.fields));
+                }
+                LOGICAL_VARIANT_TAG.saturating_add(largest)
+            }
+            LayoutKind::Inline { element, count } => count.saturating_mul(sizes[element]),
+            LayoutKind::Simd { element, lanes } => u64::from(*lanes).saturating_mul(sizes[element]),
+            LayoutKind::Block { .. }
+            | LayoutKind::Box { .. }
+            | LayoutKind::Shared { .. }
+            | LayoutKind::Slice { .. }
+            | LayoutKind::Opaque { .. }
+            | LayoutKind::Handle
+            | LayoutKind::HostCapability { .. }
+            | LayoutKind::Path
+            | LayoutKind::Arena
+            | LayoutKind::SealedRegion { .. } => LOGICAL_REFERENCE,
+            LayoutKind::Callable { .. } | LayoutKind::Iterator { .. } => LOGICAL_CALLABLE,
+            LayoutKind::Environment { .. }
+            | LayoutKind::PayloadReceipt { .. }
+            | LayoutKind::Header
+            | LayoutKind::Frozen { .. }
+            | LayoutKind::Flat
+            | LayoutKind::SoaColumns { .. }
+            | LayoutKind::Sequence { .. }
+            | LayoutKind::Sequential { .. } => {
+                return Err(LayoutError::Unavailable {
+                    issue: None,
+                    what: "a payload without an inline logical size".into(),
+                });
+            }
+        };
+        sizes.insert(id, size);
+        active.remove(&id);
+    }
+    Ok(sizes[&root])
 }
 
 /// How a block of payload layout `payload` is charged (MEM-6): a sequence by
@@ -768,20 +814,24 @@ impl LogicalCharge {
     }
 }
 
-/// The charge of a block whose payload layout is `payload`; None for a payload
-/// with no logical size (a flat encoding or an environment). A Map's or Set's
+/// The charge of a block whose payload layout is `payload`; unavailable for a payload
+/// with no logical size (a flat encoding or an environment). Malformed
+/// layouts remain distinct from unsupported kinds. A Map's or Set's
 /// own block charges nothing: its entries List charges its entries, and its
 /// metadata nothing.
-pub fn block_charge(table: &LayoutTable, payload: LayoutId) -> Option<LogicalCharge> {
-    match &table.layout(payload)?.kind {
+pub fn block_charge(table: &LayoutTable, payload: LayoutId) -> Result<LogicalCharge, LayoutError> {
+    let record = table
+        .layout(payload)
+        .ok_or_else(|| LayoutError::Invalid(format!("missing logical payload {}", payload.0)))?;
+    Ok(match &record.kind {
         LayoutKind::Sequence { element }
         | LayoutKind::Sequential { element }
         | LayoutKind::SoaColumns { element } => {
-            Some(LogicalCharge::PerElement(logical_size(table, *element)?))
+            LogicalCharge::PerElement(logical_size(table, *element)?)
         }
-        _ if keyed(table, payload) => Some(LogicalCharge::Fixed(0)),
-        _ => Some(LogicalCharge::Fixed(logical_size(table, payload)?)),
-    }
+        _ if keyed(table, payload) => LogicalCharge::Fixed(0),
+        _ => LogicalCharge::Fixed(logical_size(table, payload)?),
+    })
 }
 
 /// Whether `payload` is a Map's, Set's or SortedMap's block payload (MEM-6): its field 0 is

@@ -2679,6 +2679,7 @@ impl<'a, 'input> Checker<'a, 'input> {
                         self.place_type(a.value.place),
                         &mut |path| self.signatures.get(path).cloned().map(std::sync::Arc::new),
                     )
+                    .unwrap_or_else(|error| self.proof_failure(error, false))
             })
         });
         let placement = if carries {

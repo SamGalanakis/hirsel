@@ -809,8 +809,11 @@ impl<'a> FnEmitter<'_, 'a, '_> {
     fn construction_charge(&self, site: &ConstructSite) -> Emitted<u64> {
         let fields = self.pool(site.fields, &self.unit.pools.fields)?.len() as u64;
         match hirsel_lir::layout::block_charge(self.em.layouts(), site.layout) {
-            Some(charge) => Ok(charge.bytes(fields)),
-            None => self.unsupported("a bounded-arena charge of a flat payload"),
+            Ok(charge) => Ok(charge.bytes(fields)),
+            Err(hirsel_lir::layout::LayoutError::Unavailable { what, .. }) => {
+                self.unsupported(what)
+            }
+            Err(error) => self.invalid(format!("a malformed bounded-arena charge: {error:?}")),
         }
     }
 

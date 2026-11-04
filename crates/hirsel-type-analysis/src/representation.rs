@@ -115,13 +115,30 @@ pub fn may_hold_content(
     // A nominal only compares with the same declaration, and a structural
     // part only with the same constructor. Disjoint nominal sets therefore
     // cost one index insertion/lookup each, rather than all pairs.
-    let mut index: HashMap<PartKey, Vec<TypeId>> = HashMap::new();
+    let mut shapes = Shapes::default();
+    let mut index: HashMap<PartKey, ShapeBucket> = HashMap::new();
     for part in contents {
-        index.entry(part_key(store, part)).or_default().push(part);
+        work::count(Counter::ContentRelationRows);
+        let bucket = index.entry(part_key(store, part)).or_default();
+        bucket.all.push(part);
+        if let Some(shape) = shapes.class(store, part) {
+            bucket.exact.insert(shape);
+        } else {
+            bucket.unknown.push(part);
+        }
     }
     let mut comparisons = HashMap::new();
     for holder in holders {
-        if let Some(contents) = index.get(&part_key(store, holder)) {
+        work::count(Counter::ContentRelationRows);
+        if let Some(bucket) = index.get(&part_key(store, holder)) {
+            let contents = if let Some(shape) = shapes.class(store, holder) {
+                if bucket.exact.contains(&shape) {
+                    return Ok(true);
+                }
+                &bucket.unknown
+            } else {
+                &bucket.all
+            };
             for content in contents {
                 if same_shape(store, holder, *content, &mut comparisons) {
                     return Ok(true);
@@ -130,6 +147,114 @@ pub fn may_hold_content(
         }
     }
     Ok(false)
+}
+
+#[derive(Default)]
+struct ShapeBucket {
+    exact: HashSet<usize>,
+    unknown: Vec<TypeId>,
+    all: Vec<TypeId>,
+}
+
+#[derive(Eq, PartialEq, Hash)]
+enum ShapeArgument {
+    Type(usize),
+    Size(Size),
+}
+
+#[derive(Eq, PartialEq, Hash)]
+struct ShapeKey {
+    constructor: PartKey,
+    arguments: Vec<ShapeArgument>,
+}
+
+/// Hash-cons the relation's exact constructors, following graph.rs's finite
+/// structural worklist. Labels and modes do not participate. A wildcard has
+/// no exact class, so its pairs still go through same_shape, never a rejection.
+#[derive(Default)]
+struct Shapes {
+    rows: HashMap<TypeId, Option<usize>>,
+    classes: HashMap<ShapeKey, usize>,
+}
+impl Shapes {
+    fn class(&mut self, store: &TypeInterner, root: TypeId) -> Option<usize> {
+        work::count(Counter::ContentRelationRows);
+        if let Some(class) = self.rows.get(&root) {
+            return *class;
+        }
+        let mut pending = vec![(root, false)];
+        let mut active = HashSet::new();
+        while let Some((ty, exit)) = pending.pop() {
+            work::count(Counter::ContentRelationRows);
+            if self.rows.contains_key(&ty) {
+                continue;
+            }
+            let Some(row) = store.get(ty) else {
+                self.rows.insert(ty, None);
+                continue;
+            };
+            if matches!(
+                row.kind,
+                TypeKind::Parameter(_) | TypeKind::Function(_) | TypeKind::Error
+            ) {
+                self.rows.insert(ty, None);
+                continue;
+            }
+            if !exit {
+                if !active.insert(ty) {
+                    self.rows.insert(ty, None);
+                    continue;
+                }
+                pending.push((ty, true));
+                pending.extend(
+                    row.kind
+                        .value_parts()
+                        .into_iter()
+                        .map(|child| (child, false)),
+                );
+                continue;
+            }
+            active.remove(&ty);
+            let arguments = match &row.kind {
+                TypeKind::Named { arguments, .. } | TypeKind::Builtin { arguments, .. } => {
+                    arguments
+                        .iter()
+                        .map(|argument| {
+                            work::count(Counter::ContentRelationRows);
+                            match argument {
+                                GenericArgument::Type(child) => {
+                                    self.rows[child].map(ShapeArgument::Type)
+                                }
+                                GenericArgument::Size(size) => {
+                                    Some(ShapeArgument::Size(size.clone()))
+                                }
+                            }
+                        })
+                        .collect::<Option<Vec<_>>>()
+                }
+                kind => kind
+                    .value_parts()
+                    .iter()
+                    .map(|child| {
+                        work::count(Counter::ContentRelationRows);
+                        self.rows[child].map(ShapeArgument::Type)
+                    })
+                    .collect(),
+            };
+            let class = arguments.map(|arguments| {
+                let next = self.classes.len();
+                *self
+                    .classes
+                    .entry(ShapeKey {
+                        constructor: part_key(store, ty),
+                        arguments,
+                    })
+                    .or_insert(next)
+            });
+            self.rows.insert(ty, class);
+        }
+        self.rows[&root]
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
@@ -248,6 +373,7 @@ fn same_shape(
 ) -> bool {
     let mut pending = vec![(a, b)];
     let mut seen = HashSet::new();
+    let mut parents: HashMap<_, Vec<_>> = HashMap::new();
     while let Some((p, q)) = pending.pop() {
         work::count(Counter::ContentRelationRows);
         if p == q || !seen.insert((p, q)) {
@@ -257,17 +383,18 @@ fn same_shape(
             if *equal {
                 continue;
             }
-            memo.insert((a, b), false);
+            reject_shape_pair((p, q), memo, &parents);
             return false;
         }
         let (Some(x), Some(y)) = (store.get(p), store.get(q)) else {
             continue;
         };
+        let mut children = vec![];
         let mut arguments = |p: &[GenericArgument], q: &[GenericArgument]| {
             p.len() == q.len()
                 && p.iter().zip(q).all(|pair| match pair {
                     (GenericArgument::Type(p), GenericArgument::Type(q)) => {
-                        pending.push((*p, *q));
+                        children.push((*p, *q));
                         true
                     }
                     (p, q) => p == q,
@@ -298,7 +425,7 @@ fn same_shape(
                 },
             ) => p == q && arguments(a, b),
             (TypeKind::Box(p), TypeKind::Box(q)) => {
-                pending.push((*p, *q));
+                children.push((*p, *q));
                 true
             }
             (TypeKind::Tuple(_) | TypeKind::Record(_) | TypeKind::Variant(_), _) => {
@@ -307,21 +434,42 @@ fn same_shape(
                 let equal = std::mem::discriminant(&x.kind) == std::mem::discriminant(&y.kind)
                     && p.len() == q.len();
                 if equal {
-                    pending.extend(p.into_iter().zip(q));
+                    children.extend(p.into_iter().zip(q));
                 }
                 equal
             }
             _ => false,
         };
         if !equal {
-            memo.insert((a, b), false);
+            reject_shape_pair((p, q), memo, &parents);
             return false;
+        }
+        for child in children {
+            work::count(Counter::ContentRelationRows);
+            parents.entry(child).or_default().push((p, q));
+            pending.push(child);
         }
     }
     for pair in seen {
         memo.insert(pair, true);
     }
     true
+}
+
+fn reject_shape_pair(
+    failed: (TypeId, TypeId),
+    memo: &mut HashMap<(TypeId, TypeId), bool>,
+    parents: &HashMap<(TypeId, TypeId), Vec<(TypeId, TypeId)>>,
+) {
+    let mut pending = vec![failed];
+    let mut seen = HashSet::new();
+    while let Some(pair) = pending.pop() {
+        work::count(Counter::ContentRelationRows);
+        if seen.insert(pair) {
+            memo.insert(pair, false);
+            pending.extend(parents.get(&pair).into_iter().flatten().copied());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -436,6 +584,110 @@ mod tests {
         }
         let text = store.intern(row(TypeKind::Primitive(Primitive::String)));
         assert!(!may_hold_content(&store, &memo, holder, text, &mut |_| None).unwrap());
+    }
+
+    #[test]
+    fn incompatible_box_suffixes_have_linear_relation_work() {
+        let measure = |n| {
+            let store = TypeInterner::new(None);
+            let memo = TypeMemo::new();
+            let mut a = store.intern(row(TypeKind::Primitive(Primitive::U8)));
+            let mut b = store.intern(row(TypeKind::Primitive(Primitive::U16)));
+            let mut suffixes = vec![(a, b)];
+            for _ in 0..n {
+                a = store.intern(row(TypeKind::Box(a)));
+                b = store.intern(row(TypeKind::Box(b)));
+                suffixes.push((a, b));
+            }
+            let before = work::read(Counter::ContentRelationRows);
+            assert!(!may_hold_content(&store, &memo, a, b, &mut |_| None).unwrap());
+            let relation = work::read(Counter::ContentRelationRows) - before;
+            let before = work::read(Counter::ContentRelationRows);
+            let mut comparisons = HashMap::new();
+            for (a, b) in suffixes.into_iter().rev() {
+                assert!(!same_shape(&store, a, b, &mut comparisons));
+            }
+            [relation, work::read(Counter::ContentRelationRows) - before]
+        };
+        let [small, large] = [32, 256].map(measure);
+        eprintln!("box relation and negative suffix work {small:?} -> {large:?}");
+        // Each row/edge is classified once; each failed pair reaches only
+        // its dependency ancestors. Neither path enumerates suffix products.
+        for i in 0..2 {
+            assert!(
+                small[i] > 0 && large[i] <= 16 * small[i],
+                "{small:?} -> {large:?}"
+            );
+        }
+        assert!(large[0] <= 200_480, "{large:?}");
+        negative_pair_reuse_does_not_reject_unrelated_siblings_or_wildcards();
+        storage_classes_ignore_labels_but_preserve_sizes_and_nested_wildcards();
+    }
+
+    fn negative_pair_reuse_does_not_reject_unrelated_siblings_or_wildcards() {
+        let store = TypeInterner::new(None);
+        let byte = store.intern(row(TypeKind::Primitive(Primitive::U8)));
+        let word = store.intern(row(TypeKind::Primitive(Primitive::U16)));
+        let generic = store.intern(row(TypeKind::Parameter(TypeParameterRef::bound(
+            TypeParamId(0),
+        ))));
+        let wrap = |ty| store.intern(row(TypeKind::Box(ty)));
+        let left = store.intern(row(TypeKind::Tuple(vec![wrap(byte), wrap(generic)].into())));
+        let right = store.intern(row(TypeKind::Tuple(vec![wrap(word), wrap(word)].into())));
+        let mut memo = HashMap::new();
+        assert!(!same_shape(&store, left, right, &mut memo));
+        assert!(same_shape(&store, wrap(generic), wrap(word), &mut memo));
+        assert!(same_shape(&store, wrap(word), wrap(generic), &mut memo));
+    }
+
+    fn storage_classes_ignore_labels_but_preserve_sizes_and_nested_wildcards() {
+        let store = TypeInterner::new(None);
+        let memo = TypeMemo::new();
+        let byte = store.intern(row(TypeKind::Primitive(Primitive::U8)));
+        let generic = store.intern(row(TypeKind::Parameter(TypeParameterRef::bound(
+            TypeParamId(0),
+        ))));
+        let record = |name, growable| {
+            store.intern(row(TypeKind::Record(
+                vec![Field {
+                    name: hirsel_intern::Symbol::intern(name),
+                    growable,
+                    ty: byte,
+                }]
+                .into(),
+            )))
+        };
+        assert!(
+            may_hold_content(
+                &store,
+                &memo,
+                record("a", false),
+                record("b", true),
+                &mut |_| None
+            )
+            .unwrap()
+        );
+        let declaration = nominal(Some(byte), vec![]);
+        let named = |arguments: Vec<GenericArgument>| {
+            store.intern(row(TypeKind::Named {
+                definition: DefId::intern(&path("Wrap")),
+                arguments: arguments.into(),
+            }))
+        };
+        let unknown = named(vec![GenericArgument::Type(generic)]);
+        let known = named(vec![GenericArgument::Type(byte)]);
+        for (a, b) in [(unknown, known), (known, unknown)] {
+            assert!(
+                may_hold_content(&store, &memo, a, b, &mut |_| Some(declaration.clone())).unwrap()
+            );
+        }
+        let sized = |n| named(vec![GenericArgument::Size(Size::Constant(n))]);
+        assert!(
+            !may_hold_content(&store, &memo, sized(1), sized(2), &mut |_| Some(
+                declaration.clone()
+            ))
+            .unwrap()
+        );
     }
 
     #[test]

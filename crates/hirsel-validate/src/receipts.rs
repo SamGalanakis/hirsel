@@ -526,6 +526,9 @@ impl VerifierCache {
     fn remember(&self, stamp: &crate::views::EnvironmentStamp, lease: &Arc<dyn Send + Sync>) {
         let mut owners = self.4.lock().unwrap();
         owners.retain(|owner| owner.facts.strong_count() != 0);
+        if owners.capacity() > 4 * owners.len().max(1) {
+            owners.shrink_to_fit();
+        }
         let facts = Arc::downgrade(&stamp.facts);
         if !owners.iter().any(|seen| seen.facts.ptr_eq(&facts)) {
             owners.push(EnvironmentOwner {

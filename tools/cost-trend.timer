@@ -1,0 +1,10 @@
+[Unit]
+Description=Check hourly for a new Hirsel main release toolchain
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=cost-trend.service
+
+[Install]
+WantedBy=timers.target

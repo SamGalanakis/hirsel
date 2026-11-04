@@ -402,6 +402,59 @@ class Startup(unittest.TestCase):
             self.assertNotEqual(done.returncode, 0)
             self.assertNotIn('compiler-startup:', done.stderr)
 
+trend_loader = importlib.machinery.SourceFileLoader('cost_trend', str(ROOT / 'tools/cost-trend'))
+trend = importlib.util.module_from_spec(importlib.util.spec_from_loader(trend_loader.name, trend_loader))
+trend_loader.exec_module(trend)
+
+
+class CostTrend(unittest.TestCase):
+    def test_refusal_stops_that_workload_and_never_publishes_its_partial_median(self):
+        calls = []
+        def sample(toolchain, path, cpu, scratch, fresh):
+            calls.append(path)
+            if path == 'refused' and calls.count(path) == 2:
+                return None, 'CPU cap reached'
+            return {'instructions:u': 100, 'peak_rss_kib': 10, 'work/parse': 3}, ''
+        observations, refused = trend.collect(Path('/unused'), 0,
+                                              {'fresh-std': 'refused', 'csvjson': 'ok'}, sample)
+        self.assertEqual((calls.count('refused'), calls.count('ok')), (2, 3))
+        rows = trend.rows_for('commit', 'contract', observations, refused)
+        bad = [r for r in rows if r['workload'] == 'fresh-std']
+        self.assertTrue(bad)
+        self.assertTrue(all(r['status'] == 'refused' and r['value'] == '' for r in bad))
+        self.assertEqual([r['value'] for r in rows if r['metric'] == 'instructions:u' and r['status'] == 'ok'], [100])
+
+    def test_trend_diff_never_crosses_contracts_or_hides_a_previous_refusal(self):
+        observations = {'csvjson': [{'instructions:u': n} for n in (9, 10, 50)]}
+        [row] = trend.rows_for('new', 'release', observations, {})
+        self.assertEqual(row['value'], 10)
+        prior = [dict(row, commit='old', value='5'),
+                 dict(row, contract='checked', commit='different', value='100')]
+        self.assertIn('+100.000%', trend.text_diff([row], prior)[0])
+        self.assertIn('previous old', trend.text_diff([row], prior)[0])
+        prior.append(dict(row, commit='refusal', value='', status='refused'))
+        self.assertIn('first successful row', trend.text_diff([row], prior)[0])
+
+    def test_missing_counters_or_signalled_compiler_are_refused_even_if_perf_exits_zero(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            directory = Path(scratch)
+            def process(*args, **kwargs):
+                (directory / 'perf').write_text('100;;instructions:u;1;100.00;\n200;;instructions;1;100.00;\n')
+                (directory / 'status').write_text(json.dumps({'exit': -9, 'rss_kib': 100}))
+                return SimpleNamespace(returncode=0)
+            with patch.object(trend.subprocess, 'run', side_effect=process):
+                values, reason = trend.measure(directory, Path('input.hir'), 0, directory, True)
+            self.assertIsNone(values)
+            self.assertIn('compiler -9', reason)
+            def missing(*args, **kwargs):
+                (directory / 'status').write_text(json.dumps({'exit': 0, 'rss_kib': 100}))
+                return SimpleNamespace(returncode=0)
+            with patch.object(trend.subprocess, 'run', side_effect=missing):
+                values, reason = trend.measure(directory, Path('input.hir'), 0, directory, True)
+            self.assertIsNone(values)
+            self.assertIn('work counters missing', reason)
+
+
 TIMINGS = ROOT / 'crates/hirsel-intern/src/timings.rs'
 
 

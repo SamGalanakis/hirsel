@@ -82,6 +82,48 @@ never downloads or unpacks them here. Only targets that name
 the pool's client listener serves the action cache read-only, so a local
 result could not be uploaded (`allow_cache_uploads`) anyway.
 
+## Compiler cost trend
+
+`tools/cost-trend` accepts an already-built **release** bundle and builds nothing:
+
+```sh
+tools/cost-trend --toolchain /path/to/release/hirsel-toolchain --commit <built-sha>
+```
+
+The caller supplies the commit built into the bundle; it must match the clean
+tracked checkout. Distribution/PGO and checked bundles use different contracts
+and must not be supplied as release bundles. Binary hashes are saved beside the
+TSV for provenance; they may change between compared commits.
+
+The runner measures fresh std with products absent, as `tools/perf-counts
+--fresh-std` does, then csvjson, strbuild and todo-api checks with the bundle's
+installed std. All use `none@1` result storage, a fresh process, one job,
+`perf stat` instructions:u and inclusive instructions, the compiler's JSON work
+counts and peak compiler RSS. Three seeded interleaved rounds produce medians.
+Each process uses `tools/capped`, 2 GiB and 60 CPU seconds. The lowest available
+allowed CPU is the default; `--cpu` can select another, except 12-15 or 28-31.
+Only one process is measured at a time. Refusals stop that workload's remaining
+rounds and write refused rows instead of partial medians.
+
+Rows append to `~/.cache/hirsel-cost-trend/trend.tsv`, one per commit, workload
+and metric. The text diff uses the previous observation of the same contract,
+including refused observations. Profile, workload set, counters, machine/CPU,
+cache policy, sampling protocol and pinned build tools define the contract.
+Missing work counters or masked compiler failures are refused, not measurements.
+A previously recorded commit/contract is skipped, including refused workloads.
+This records cost; it never changes `tools/perf-fresh-std.json` or its +3% gate.
+
+`tools/cost-trend.service` and `tools/cost-trend.timer` are supplied **disabled**.
+The orchestrator installs them into `~/.config/systemd/user/` and enables the
+timer after landing. The hourly timer samples the latest published main release
+at most once for each commit and contract. Its EnvironmentFile,
+`~/.config/hirsel/cost-trend.env`, contains `HIRSEL_COST_TOOLCHAIN` and
+`HIRSEL_COST_COMMIT`. The existing release publisher must update these to the
+already-built main bundle and its commit, and keep `/workspace/code/agentlang`
+at that clean commit with origin/main fetched. The service refuses a stale
+bundle/checkout instead of building or labeling an older compiler as main.
+Commits superseded between hourly samples are not backfilled.
+
 ## Stale outputs
 
 Each checkout's daemon prunes its own inactive outputs: a six-hour TTL, an

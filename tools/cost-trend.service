@@ -1,0 +1,9 @@
+[Unit]
+Description=Record Hirsel compiler costs for a new main release toolchain
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/hirsel/cost-trend.env
+WorkingDirectory=/workspace/code/agentlang
+ExecStart=/workspace/code/agentlang/tools/cost-trend --main-only --toolchain ${HIRSEL_COST_TOOLCHAIN} --commit ${HIRSEL_COST_COMMIT}
+Nice=10

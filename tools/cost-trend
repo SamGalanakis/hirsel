@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""Record compiler cost from an already-built release bundle. Builds nothing.
+
+    tools/cost-trend --toolchain DIR --commit SHA [--main-only]
+
+The caller supplies the commit built into DIR. The checkout must be that commit.
+Each process uses tools/capped, 2 GiB, 60 CPU seconds and an allowed CPU. Three
+seeded interleaved rounds produce medians; a refused workload is recorded once
+and omitted from later rounds. A timer never retries a recorded commit/contract.
+"""
+import argparse
+import csv
+import fcntl
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import random
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = Path(__file__).resolve().parents[1]
+COLUMNS = ('timestamp', 'commit', 'contract', 'workload', 'metric', 'value', 'status', 'detail')
+FORBIDDEN = set(range(12, 16)) | set(range(28, 32))
+ROUNDS = 3
+SEED = 407
+# The wrapper preserves the compiler's actual wait status even if perf returns
+# success for a signalled child, and reports that child's RSS, not perf's.
+CHILD = '''import json, resource, subprocess, sys
+p = subprocess.run(sys.argv[2:])
+with open(sys.argv[1], 'w') as f:
+    json.dump({'exit': p.returncode, 'rss_kib': resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss}, f)
+raise SystemExit(p.returncode if p.returncode >= 0 else 128 - p.returncode)
+'''
+
+
+def load_script(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(name, loader))
+    loader.exec_module(module)
+    return module
+
+
+perf = load_script('cost_trend_perf', ROOT / 'tools/perf-counts')
+
+
+def digest(path):
+    with path.open('rb') as f:
+        return hashlib.file_digest(f, 'sha256').hexdigest()
+
+
+def git(*args):
+    return subprocess.check_output(['git', '-C', str(ROOT), *args], text=True).strip()
+
+
+def workloads():
+    # Use the compiler corpus's example inputs and the existing strbuild
+    # control, without generating Rust pairs or invoking any build helpers.
+    return {
+        'fresh-std': ROOT / 'stdlib/std@1/hirsel.json',
+        'csvjson': ROOT / 'examples/csvjson/hirsel.json',
+        'strbuild': ROOT / 'bench/micro/programs/strbuild.hir',
+        'todo-api': ROOT / 'examples/todo-api/hirsel.json',
+    }
+
+
+def environment(toolchain, scratch, fresh):
+    env = {key: os.environ[key] for key in
+           ('PATH', 'HOME', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS') if key in os.environ}
+    llvm = ROOT / 'tools/buck2/toolchains/llvm-files'
+    env.update(LC_ALL='C', HIRSEL_DAEMON='off', HIRSEL_PROGRAM_CACHE='off',
+               HIRSEL_RESULTS='none@1', HIRSEL_JOBS='1', HIRSEL_MEMORY_LIMIT='2G',
+               LLVM_SYS_231_PREFIX=str(llvm), LD_LIBRARY_PATH=str(llvm / 'lib'),
+               LLVM_PROFILE_FILE=os.devnull,
+               HIRSEL_PRODUCTS=str(scratch / 'absent-products' if fresh else toolchain / 'hirsel-std.products'))
+    return env
+
+
+def measure(toolchain, path, cpu, scratch, fresh):
+    counters, status, stderr = (scratch / name for name in ('perf', 'status', 'stderr'))
+    command = [str(ROOT / 'tools/capped'), '--timeout', '120', 'taskset', '-c', str(cpu),
+               'prlimit', '--cpu=60:60', '--', 'perf', 'stat', '-x', ';', '-o', str(counters),
+               '-e', 'instructions:u,instructions', '--', sys.executable, '-c', CHILD, str(status),
+               str(toolchain / 'hirsel'), 'check', '--timings=json', str(path)]
+    try:
+        with stderr.open('w') as err:
+            done = subprocess.run(command, cwd=ROOT, env=environment(toolchain, scratch, fresh),
+                                  stdout=subprocess.DEVNULL, stderr=err)
+    except OSError as error:
+        return None, str(error)
+    text = stderr.read_text()
+    child = json.loads(status.read_text()) if status.exists() else {}
+    if done.returncode or child.get('exit') != 0:
+        return None, f'exit {done.returncode}, compiler {child.get("exit", "unobserved")}; ' + text[-2000:]
+    try:
+        counts = perf.perf_instructions(counters.read_text())
+        reports = []
+        for line in text.splitlines():
+            try:
+                report = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(report, dict) and report.get('schema') == 1 and 'phases' in report:
+                reports.append(report)
+        if not reports or not isinstance(reports[-1].get('counts'), dict) or not reports[-1]['counts']:
+            raise ValueError('compiler work counters missing')
+        if child.get('rss_kib', 0) <= 0:
+            raise ValueError('compiler peak RSS missing')
+        return dict({'instructions:u': counts['instructions:u'], 'peak_rss_kib': child['rss_kib']},
+                    **{'work/' + key: value for key, value in reports[-1]['counts'].items()}), ''
+    except (OSError, ValueError) as error:
+        return None, str(error)
+
+
+def contract(cpu):
+    # Binary hashes identify observations, not the contract: a compiler edit
+    # must still compare against the same release build environment.
+    model = next((line.split(':', 1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines()
+                  if line.startswith('model name')), 'unknown')
+    return {'schema': 1, 'profile': 'release', 'workloads': sorted(workloads()),
+            'counter': 'instructions:u', 'cache': 'fresh std; installed std for checks; results none@1',
+            'jobs': 1, 'cpu': cpu, 'cpu_model': model, 'rounds': ROUNDS, 'seed': SEED,
+            'toolchain': {str(p): digest(ROOT / p) for p in
+                          ('tools/buck2/toolchain-lock.json', 'tools/buck2/pins.json',
+                           'tools/native-toolchain/native.lock.json')}}
+
+
+def prior_rows(path):
+    if not path.exists():
+        return []
+    with path.open(newline='') as f:
+        reader = csv.DictReader(f, delimiter='\t')
+        if tuple(reader.fieldnames or ()) != COLUMNS:
+            raise ValueError(f'{path}: unknown trend columns')
+        return list(reader)
+
+
+def text_diff(rows, prior):
+    # A refusal is an observation too: never silently jump past it to an
+    # older successful value and call that the immediately previous result.
+    previous = {(r['contract'], r['workload'], r['metric']): r for r in prior}
+    lines = []
+    for row in rows:
+        label = f"{row['workload']} {row['metric']}"
+        old = previous.get((row['contract'], row['workload'], row['metric']))
+        if row['status'] != 'ok':
+            lines.append(f"{label}: refused: {row['detail']}")
+        elif not old or old['status'] != 'ok':
+            lines.append(f"{label}: {row['value']} (first successful row of this contract)")
+        else:
+            before, after = float(old['value']), float(row['value'])
+            delta = f'{100 * (after - before) / before:+.3f}%' if before else f'{after - before:+g}'
+            lines.append(f"{label}: {old['value']} -> {row['value']} ({delta}; previous {old['commit'][:12]})")
+    return lines
+
+
+def collect(toolchain, cpu, selected, sample=measure):
+    observations = {name: [] for name in selected}
+    refused = {}
+    rng = random.Random(SEED)
+    for _ in range(ROUNDS):
+        order = list(selected)
+        rng.shuffle(order)
+        for name in order:
+            if name in refused:
+                continue
+            with tempfile.TemporaryDirectory(prefix='hirsel-cost-trend-') as directory:
+                values, reason = sample(toolchain, selected[name], cpu, Path(directory), name == 'fresh-std')
+            if values is None:
+                refused[name] = reason
+            elif observations[name] and values.keys() != observations[name][0].keys():
+                refused[name] = 'work counter set changed between rounds'
+            else:
+                observations[name].append(values)
+    return observations, refused
+
+
+def rows_for(commit, identity, observations, refused):
+    rows = []
+    timestamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    for name, samples in sorted(observations.items()):
+        metrics = sorted(samples[0]) if samples else ['instructions:u', 'peak_rss_kib']
+        for metric in metrics:
+            reason = refused.get(name, '')
+            rows.append(dict(zip(COLUMNS, (timestamp, commit, identity, name, metric,
+                             '' if reason else statistics.median(s[metric] for s in samples),
+                             'refused' if reason else 'ok',
+                             ' '.join(reason.split())[:2000] if reason else f'{len(samples)} seeded rounds'))))
+    return rows
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--toolchain', type=Path, required=True, help='already-built release bundle')
+    parser.add_argument('--commit', required=True, help='commit the caller built into the supplied bundle')
+    parser.add_argument('--main-only', action='store_true', help='require this checkout and bundle to name origin/main')
+    parser.add_argument('--cpu', type=int, help='allowed CPU, defaults to the lowest available one')
+    parser.add_argument('--cache', type=Path, default=Path.home() / '.cache/hirsel-cost-trend')
+    args = parser.parse_args()
+    available = os.sched_getaffinity(0) - FORBIDDEN
+    cpu = min(available) if args.cpu is None and available else args.cpu
+    if cpu not in available:
+        parser.error('CPU is unavailable or in the forbidden ranges 12-15 and 28-31')
+    try:
+        commit = git('rev-parse', args.commit + '^{commit}')
+        if commit != git('rev-parse', 'HEAD'):
+            raise ValueError('checkout and supplied toolchain commit differ')
+        if git('status', '--porcelain', '--untracked-files=no'):
+            raise ValueError('tracked checkout changes would mislabel the measured commit')
+        if args.main_only and commit != git('rev-parse', 'refs/remotes/origin/main'):
+            raise ValueError('release toolchain is not for the latest locally fetched origin/main; publish it first')
+        toolchain = args.toolchain.resolve(strict=True)
+        if not (toolchain / 'hirsel').is_file() or not (toolchain / 'hirsel-std.products').is_dir():
+            raise ValueError('release bundle requires hirsel and hirsel-std.products')
+        manifest = toolchain / 'hirsel-build.json'
+        if manifest.exists():
+            build = json.loads(manifest.read_text())
+            if build.get('profile') != 'release' or build.get('commit') != commit:
+                raise ValueError('bundle metadata disagrees with the release profile or commit')
+        args.cache.mkdir(parents=True, exist_ok=True)
+        with (args.cache / 'lock').open('w') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print('cost-trend: another run holds the trend lock', file=sys.stderr)
+                return 75
+            description = contract(cpu)
+            identity = hashlib.sha256(json.dumps(description, sort_keys=True).encode()).hexdigest()
+            table = args.cache / 'trend.tsv'
+            prior = prior_rows(table)
+            run_record = args.cache / f'run-{commit}-{identity}.json'
+            if any(r['commit'] == commit and r['contract'] == identity for r in prior):
+                if not run_record.is_file():
+                    raise ValueError('incomplete prior recording; inspect the TSV before retrying this commit')
+                print(f'cost-trend: {commit[:12]} already recorded under {identity[:12]}')
+                return 0
+            (args.cache / f'contract-{identity}.json').write_text(json.dumps(description, indent=2) + '\n')
+            observations, refused = collect(toolchain, cpu, workloads())
+            rows = rows_for(commit, identity, observations, refused)
+            # One append under the lock, so partial rounds cannot look complete.
+            with table.open('a', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=COLUMNS, delimiter='\t')
+                if not prior:
+                    writer.writeheader()
+                writer.writerows(rows)
+                f.flush()
+                os.fsync(f.fileno())
+            provenance = {'commit': commit, 'compiler_sha256': digest(toolchain / 'hirsel'),
+                          'toolchain': str(toolchain), 'contract': identity,
+                          'samples': observations, 'refused': refused}
+            run_record.write_text(json.dumps(provenance, indent=2) + '\n')
+            print('\n'.join(text_diff(rows, prior)))
+            print(f'cost-trend: {commit[:12]} recorded in {table}; {len(refused)} refused workloads')
+            return 1 if refused else 0
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        print(f'cost-trend: {error}', file=sys.stderr)
+        return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main())

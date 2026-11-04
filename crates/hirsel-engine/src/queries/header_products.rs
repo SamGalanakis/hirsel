@@ -594,7 +594,7 @@ impl HeaderProducts {
         if settled {
             self.generation.fetch_add(1, Ordering::Relaxed);
         }
-        product.result.clone()
+        self.use_product(engine, id, &product)
     }
     fn use_product(
         &self,
@@ -618,13 +618,19 @@ impl HeaderProducts {
     /// Charge one settled row or proof to the front's header grant, evicting
     /// unpinned entries first. A refusal is a resource failure, never a verdict.
     fn admit(&self, bytes: u64) -> Result<Charge, QueryError> {
+        self.admit_charge(bytes, true)
+    }
+    fn admit_source(&self, bytes: u64) -> Result<Charge, QueryError> {
+        self.admit_charge(bytes, false)
+    }
+    fn admit_charge(&self, bytes: u64, release_with_partition: bool) -> Result<Charge, QueryError> {
         let admission = self
             .admission
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let Some(admission) = admission else {
-            return Ok(if self.standalone {
+            return Ok(if self.standalone || !release_with_partition {
                 Charge(Arc::new(std::sync::Mutex::new(HeaderCharge::Standalone(
                     self.reserve_standalone(bytes)?,
                 ))))
@@ -637,7 +643,13 @@ impl HeaderProducts {
         // ended source pool cannot lend another reservation.
         let Some(partition) = admission.partition.upgrade() else {
             admission.release();
-            return Ok(Charge::engine());
+            return if release_with_partition {
+                Ok(Charge::engine())
+            } else {
+                Ok(Charge(Arc::new(std::sync::Mutex::new(
+                    HeaderCharge::Standalone(self.reserve_standalone(bytes)?),
+                ))))
+            };
         };
         // The charge cell itself is part of what the partition retains.
         let bytes =
@@ -673,12 +685,18 @@ impl HeaderProducts {
             })
         })?;
         drop(grant);
-        Ok(admission.lend(FrontCharge {
+        let charge = FrontCharge {
             partition: admission.partition.clone(),
             credit: admission.remaining.clone(),
             bytes,
             allowance,
-        }))
+        };
+        Ok(if release_with_partition {
+            admission.lend(charge)
+        } else {
+            // Source syntax stays charged until its last shared owner drops.
+            Charge(Arc::new(std::sync::Mutex::new(HeaderCharge::Front(charge))))
+        })
     }
     /// Retain a payload a module proof settled, when the header grant admits it.
     fn seed(&self, id: DefId, entry: Arc<Entry<hirsel_types::SignatureRef>>) {
@@ -949,6 +967,11 @@ impl QueryEngine {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static PROJECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn project(
     entry: &Arc<Entry<hirsel_types::SignatureRef>>,
 ) -> Arc<Entry<hirsel_types::SignatureRef>> {
@@ -959,6 +982,8 @@ fn project(
     {
         return entry.clone();
     }
+    #[cfg(test)]
+    PROJECTIONS.update(|count| count + 1);
     Arc::new(Entry {
         memo: entry.memo.clone(),
         detail: DependencyReads {

@@ -17,16 +17,71 @@ pub(super) struct HeaderSources {
     /// digest, so an execution engine that has not materialized it observes
     /// the values the capturing engine observes.
     texts: hirsel_syntax::DefMap<CapturedText>,
-    files: BTreeMap<FileId, Vec<Arc<ItemSyntax>>>,
-    indexed: BTreeMap<FileId, Vec<std::sync::Weak<ItemSyntax>>>,
+    files: BTreeMap<FileId, Arc<SyntaxOwner>>,
+    sources: SourceMap,
 }
 pub(crate) struct SourceInputs {
     sources: SourceMap,
     catalog: catalog::Catalog,
-    syntax: HeaderSources,
+    syntax: Arc<HeaderSources>,
     declarations: crate::DeclarationIndex,
     installed: BTreeSet<FileId>,
 }
+type SyntaxBinding = (DefId, ContentHash, hirsel_span::Anchor, u32);
+struct SyntaxOwner {
+    bindings: Vec<SyntaxBinding>,
+    transport: bool,
+    // Indexed payloads have their own source-inference reservation; capture
+    // admission counts their control allocations, not the same payload again.
+    indexed: bool,
+    // A file is produced once, while the request or any header demander owns it.
+    // Parsing does not recurse into headers, so demanders can share this lock.
+    live: std::sync::Mutex<Result<Option<LiveSyntax>, QueryError>>,
+}
+struct LiveSyntax {
+    items: Vec<Arc<ItemSyntax>>,
+    _charge: Charge,
+}
+impl LiveSyntax {
+    fn new(
+        mut items: Vec<Arc<ItemSyntax>>,
+        charge: impl FnOnce(u64) -> Result<Charge, QueryError>,
+    ) -> Result<Self, QueryError> {
+        items.shrink_to_fit();
+        let bytes = items
+            .iter()
+            .try_fold(0u64, |n, syntax| {
+                n.checked_add(crate::memo::retained::retained_syntax_bytes(syntax))
+            })
+            .and_then(|n| n.checked_add(std::mem::size_of_val(items.as_slice()) as u64))
+            .ok_or_else(|| source_refusal("syntax size overflow"))?;
+        let charge = charge(bytes)?;
+        Ok(Self {
+            items,
+            _charge: charge,
+        })
+    }
+}
+fn source_refusal(message: impl ToString) -> QueryError {
+    QueryError::Operational(hirsel_types::OperationalFailure {
+        operation: "source syntax admission".into(),
+        message: message.to_string(),
+    })
+}
+fn standalone_syntax(bytes: u64) -> Result<Charge, QueryError> {
+    let bytes = bytes
+        .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+            std::sync::Mutex<HeaderCharge>,
+        >::uninit()))
+        .ok_or_else(|| source_refusal("syntax size overflow"))?;
+    let reservation = private_unique::scheduled::standalone_budget()
+        .reserve(bytes)
+        .map_err(source_refusal)?;
+    Ok(Charge(Arc::new(std::sync::Mutex::new(
+        HeaderCharge::Standalone(reservation),
+    ))))
+}
+
 impl SourceInputs {
     pub(crate) fn capture(engine: &QueryEngine) -> Arc<Self> {
         Arc::new(Self {
@@ -35,7 +90,26 @@ impl SourceInputs {
                 .catalog
                 .source_carry(&engine.sources, &engine.items, &engine.indexed_sources)
                 .restore(),
-            syntax: HeaderSources::capture(engine),
+            syntax: Arc::new(HeaderSources::capture_with_parent(
+                engine,
+                engine
+                    .source_inputs
+                    .as_ref()
+                    .map(|inputs| inputs.syntax.clone())
+                    .or_else(|| {
+                        engine.snapshot.as_ref().and_then(|(_, snapshot)| {
+                            snapshot
+                                .header_products()
+                                .map(|headers| headers.syntax.clone())
+                        })
+                    })
+                    .or_else(|| {
+                        engine
+                            .header_products
+                            .as_ref()
+                            .map(|headers| headers.syntax.clone())
+                    }),
+            )),
             declarations: engine.declarations.header_inputs(),
             installed: engine.installed_sources.clone(),
         })
@@ -50,7 +124,8 @@ impl SourceInputs {
             .checked_add(engine.declarations.observation_bytes()?)?
             .checked_add((size_of::<Self>() + 2 * size_of::<usize>()) as u64)
     }
-    pub(crate) fn install(&self, engine: &mut QueryEngine) {
+    pub(crate) fn install(self: &Arc<Self>, engine: &mut QueryEngine) {
+        engine.source_inputs = Some(self.clone());
         engine.sources = self.sources.clone();
         engine.catalog = self.catalog.clone();
         engine
@@ -67,45 +142,102 @@ impl SourceInputs {
         &self,
         engine: &mut QueryEngine,
         path: &DefPath,
-    ) -> Result<(), QueryError> {
-        if !self.syntax.materialize(engine, path)? {
-            engine.header_products = None;
-            engine.materialize(path)?;
-        }
-        Ok(())
+    ) -> Result<bool, QueryError> {
+        self.syntax.materialize(engine, path)
     }
 }
 impl HeaderSources {
-    fn needs_live(engine: &QueryEngine, syntax: &ItemSyntax) -> bool {
-        syntax.item.generated.is_some()
-            || engine.adapters.lexer.is_none()
-            || engine.adapters.parser.is_none()
-            || !engine
-                .indexed_sources
-                .contains_key(&engine.item_file(syntax))
-    }
     pub(super) fn capture(engine: &QueryEngine) -> Self {
-        let mut files = BTreeMap::<_, Vec<_>>::new();
-        let mut indexed = BTreeMap::<_, Vec<_>>::new();
+        let parent = engine
+            .source_inputs
+            .as_ref()
+            .map(|inputs| inputs.syntax.clone())
+            .or_else(|| {
+                engine
+                    .header_products
+                    .as_ref()
+                    .map(|headers| headers.syntax.clone())
+            })
+            .or_else(|| {
+                engine.snapshot.as_ref().and_then(|(_, snapshot)| {
+                    snapshot
+                        .header_products()
+                        .map(|headers| headers.syntax.clone())
+                })
+            });
+        Self::capture_with_parent(engine, parent)
+    }
+    fn capture_with_parent(engine: &QueryEngine, reuse: Option<Arc<Self>>) -> Self {
+        let mut written = BTreeMap::<_, Vec<_>>::new();
+        let mut bindings = BTreeMap::<_, Vec<_>>::new();
         let mut by_definition = hirsel_syntax::DefMap::<Vec<FileId>>::default();
+        for (id, file, body, anchor, occurrence) in engine.catalog.syntax_bindings() {
+            bindings
+                .entry(file)
+                .or_default()
+                .push((id, body, anchor, occurrence));
+            by_definition.entry(id).or_default().push(file);
+        }
         for (path, candidates) in &engine.items {
-            let mut selected = BTreeSet::new();
+            let id = DefId::intern(path);
             for syntax in candidates {
                 let file = engine.item_file(syntax);
-                selected.insert(file);
-                if Self::needs_live(engine, syntax) {
-                    files.entry(file).or_default().push(syntax.clone());
-                } else {
-                    indexed
-                        .entry(file)
-                        .or_default()
-                        .push(Arc::downgrade(syntax));
-                }
-            }
-            if !selected.is_empty() {
-                by_definition.insert(DefId::intern(path), selected.into_iter().collect());
+                bindings.entry(file).or_default().push((
+                    id,
+                    syntax.text_hash,
+                    syntax.anchor,
+                    syntax.occurrence,
+                ));
+                by_definition.entry(id).or_default().push(file);
+                written.entry(file).or_default().push(syntax.clone());
             }
         }
+        for files in by_definition.values_mut() {
+            files.sort_unstable();
+            files.dedup();
+        }
+        let files = bindings
+            .into_iter()
+            .map(|(file, mut bindings)| {
+                bindings.sort_unstable();
+                bindings.dedup();
+                let inherited = reuse
+                    .as_ref()
+                    .and_then(|parent| parent.owner(file, &bindings, &engine.sources));
+                let owner = inherited.unwrap_or_else(|| {
+                    let indexed = engine.indexed_sources.contains_key(&file)
+                        && engine.adapters.lexer.is_some()
+                        && engine.adapters.parser.is_some();
+                    Arc::new(SyntaxOwner {
+                        indexed,
+                        bindings,
+                        transport: written.get(&file).is_some_and(|items| {
+                            items.iter().any(|syntax| {
+                                syntax.item.generated.is_some()
+                                    || engine.adapters.lexer.is_none()
+                                    || engine.adapters.parser.is_none()
+                                    || !engine.indexed_sources.contains_key(&file)
+                            })
+                        }),
+                        live: std::sync::Mutex::new(
+                            written
+                                .remove(&file)
+                                .map(|items| {
+                                    LiveSyntax::new(items, |bytes| {
+                                        if indexed {
+                                            standalone_syntax(bytes)
+                                        } else {
+                                            Ok(Charge::engine())
+                                        }
+                                    })
+                                })
+                                .transpose(),
+                        ),
+                    })
+                });
+                (file, owner)
+            })
+            .collect();
         let facts = engine
             .items
             .iter()
@@ -141,7 +273,7 @@ impl HeaderSources {
             facts,
             texts,
             files,
-            indexed,
+            sources: engine.sources.clone(),
         }
     }
     pub(super) fn facts(&self, id: DefId) -> Option<catalog::SourceFacts> {
@@ -158,42 +290,45 @@ impl HeaderSources {
     }
     pub(super) fn facts_index_bytes(definitions: usize) -> u64 {
         let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(size_of::<Self>() + 2 * size_of::<usize>());
         weight.tree::<DefId, Arc<catalog::SourceFacts>>(definitions);
         weight.tree::<DefId, CapturedText>(definitions);
-        weight.add(definitions.saturating_mul(size_of::<std::sync::Weak<ItemSyntax>>()));
+        weight.tree::<DefId, Vec<FileId>>(definitions);
+        weight.tree::<FileId, Arc<SyntaxOwner>>(definitions);
+        weight.add(definitions.saturating_mul(
+            size_of::<SyntaxOwner>()
+                + 2 * size_of::<usize>()
+                + size_of::<SyntaxBinding>()
+                + size_of::<Arc<ItemSyntax>>()
+                + size_of::<FileId>(),
+        ));
         weight.bytes()
     }
     pub(super) fn written_bytes(engine: &QueryEngine) -> u64 {
-        fn charge(seen: &mut BTreeMap<usize, u64>, pointer: usize, bytes: u64) -> u64 {
-            let old = seen.entry(pointer).or_default();
+        fn add(seen: &mut BTreeMap<usize, u64>, syntax: &Arc<ItemSyntax>, indexed: bool) -> u64 {
+            let bytes = if indexed {
+                crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<ItemSyntax>::uninit())
+            } else {
+                crate::memo::retained::retained_syntax_bytes(syntax)
+            };
+            let old = seen.entry(Arc::as_ptr(syntax) as usize).or_default();
             let added = bytes.saturating_sub(*old);
             *old = (*old).max(bytes);
             added
         }
-        fn add(seen: &mut BTreeMap<usize, u64>, syntax: &Arc<ItemSyntax>) -> u64 {
-            charge(
-                seen,
-                Arc::as_ptr(syntax) as usize,
-                crate::memo::retained::retained_syntax_bytes(syntax),
-            )
-        }
-        fn indexed(seen: &mut BTreeMap<usize, u64>, pointer: usize) -> u64 {
-            charge(
-                seen,
-                pointer,
-                crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<ItemSyntax>::uninit()),
-            )
-        }
         fn inherited(owner: &HeaderSources, seen: &mut BTreeMap<usize, u64>) -> u64 {
-            let live = owner
-                .files
-                .values()
-                .flatten()
-                .fold(0u64, |n, syntax| n.saturating_add(add(seen, syntax)));
-            let weak = owner.indexed.values().flatten().fold(0u64, |n, syntax| {
-                n.saturating_add(indexed(seen, syntax.as_ptr() as usize))
+            let live = owner.files.values().fold(0u64, |n, file| {
+                let live = file.live.lock().unwrap_or_else(|e| e.into_inner());
+                n.saturating_add(live.as_ref().ok().and_then(|live| live.as_ref()).map_or(
+                    0,
+                    |live| {
+                        live.items.iter().fold(0u64, |n, syntax| {
+                            n.saturating_add(add(seen, syntax, file.indexed))
+                        })
+                    },
+                ))
             });
-            live.saturating_add(weak).saturating_add(
+            live.saturating_add(
                 owner
                     .parent
                     .as_ref()
@@ -206,11 +341,12 @@ impl HeaderSources {
             .values()
             .flatten()
             .fold(0u64, |n, syntax| {
-                n.saturating_add(if Self::needs_live(engine, syntax) {
-                    add(&mut seen, syntax)
-                } else {
-                    indexed(&mut seen, Arc::as_ptr(syntax) as usize)
-                })
+                let indexed = engine
+                    .indexed_sources
+                    .contains_key(&engine.item_file(syntax))
+                    && engine.adapters.lexer.is_some()
+                    && engine.adapters.parser.is_some();
+                n.saturating_add(add(&mut seen, syntax, indexed))
             })
             .saturating_add(
                 engine
@@ -220,46 +356,90 @@ impl HeaderSources {
             )
     }
     pub(super) fn owns(&self, syntax: &Arc<ItemSyntax>) -> bool {
-        self.files
-            .values()
-            .flatten()
-            .any(|written| Arc::ptr_eq(written, syntax))
-            || self
-                .parent
+        self.files.values().any(|file| {
+            file.live
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
-                .is_some_and(|parent| parent.owns(syntax))
+                .ok()
+                .and_then(|live| live.as_ref())
+                .is_some_and(|live| {
+                    live.items
+                        .iter()
+                        .any(|written| Arc::ptr_eq(written, syntax))
+                })
+        }) || self
+            .parent
+            .as_ref()
+            .is_some_and(|parent| parent.owns(syntax))
+    }
+    fn owner(
+        &self,
+        file: FileId,
+        bindings: &[SyntaxBinding],
+        sources: &SourceMap,
+    ) -> Option<Arc<SyntaxOwner>> {
+        if self
+            .sources
+            .file(file)
+            .zip(sources.file(file))
+            .is_some_and(|(old, current)| {
+                old.logical_path() == current.logical_path()
+                    && old.anchor == current.anchor
+                    && old.text() == current.text()
+            })
+            && let Some(owner) = self.files.get(&file)
+            && owner.bindings == bindings
+        {
+            return Some(owner.clone());
+        }
+        self.parent.as_ref()?.owner(file, bindings, sources)
     }
     fn install_live(&self, engine: &mut QueryEngine) {
         if let Some(parent) = &self.parent {
             parent.install_live(engine);
         }
-        for (file, syntaxes) in &self.files {
-            let mut listed = Vec::new();
-            for syntax in syntaxes {
-                if engine.catalog.body(&syntax.item.definition) == Some(syntax.text_hash)
-                    && engine
-                        .catalog
-                        .anchor(&syntax.item.definition, syntax.occurrence)
-                        == Some(syntax.anchor)
-                {
-                    let items = engine
-                        .items
-                        .entry(syntax.item.definition.clone())
-                        .or_default();
-                    if !items.iter().any(|old| {
-                        old.anchor == syntax.anchor && old.occurrence == syntax.occurrence
-                    }) {
-                        items.push(syntax.clone());
-                        items.sort_by_key(|syntax| syntax.occurrence);
-                    }
-                    listed.push(syntax.clone());
-                }
+        for (file, owner) in &self.files {
+            if !owner.transport {
+                continue;
             }
-            if !listed.is_empty() {
-                engine
-                    .declarations
-                    .place_file(*file, listed, &engine.sources);
+            let live = owner.live.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(live) = live.as_ref().ok().and_then(|live| live.as_ref()) else {
+                continue;
+            };
+            let syntaxes: Vec<_> = live
+                .items
+                .iter()
+                .filter(|syntax| {
+                    engine.catalog.body(&syntax.item.definition) == Some(syntax.text_hash)
+                        && engine
+                            .catalog
+                            .anchor(&syntax.item.definition, syntax.occurrence)
+                            == Some(syntax.anchor)
+                })
+                .cloned()
+                .collect();
+            Self::install_file(engine, *file, &syntaxes);
+        }
+    }
+    fn install_file(engine: &mut QueryEngine, file: FileId, syntaxes: &[Arc<ItemSyntax>]) {
+        for syntax in syntaxes {
+            let candidates = engine
+                .items
+                .entry(syntax.item.definition.clone())
+                .or_default();
+            if !candidates
+                .iter()
+                .any(|old| old.anchor == syntax.anchor && old.occurrence == syntax.occurrence)
+            {
+                candidates.push(syntax.clone());
+                candidates.sort_by_key(|s| s.occurrence);
             }
+        }
+        if !syntaxes.is_empty() {
+            engine
+                .declarations
+                .place_file(file, syntaxes.to_vec(), &engine.sources);
         }
     }
     pub(super) fn materialize(
@@ -283,34 +463,30 @@ impl HeaderSources {
             })
         };
         for file in files {
-            hirsel_intern::timings::count(hirsel_intern::timings::Count::HeaderSourceFiles);
-            let mut syntaxes = self.files.get(file).cloned().unwrap_or_default();
-            let indexed = self.indexed.get(file).map(|written| {
-                written
-                    .iter()
-                    .map(std::sync::Weak::upgrade)
-                    .collect::<Option<Vec<_>>>()
-            });
-            match indexed {
-                Some(Some(written)) => syntaxes.extend(written),
-                Some(None)
-                    if syntaxes
-                        .iter()
-                        .any(|syntax| syntax.item.definition == *path) =>
-                {
-                    engine.materialize_source(*file)?;
-                    syntaxes.extend(
-                        engine
-                            .items
-                            .values()
-                            .flatten()
-                            .filter(|syntax| engine.item_file(syntax) == *file)
-                            .cloned(),
-                    );
+            let owner = self.files.get(file).ok_or_else(refused)?;
+            let mut guard = owner.live.lock().unwrap_or_else(|e| e.into_inner());
+            let live = guard.as_mut().map_err(|error| error.clone())?;
+            if live.is_none() {
+                hirsel_intern::timings::count(hirsel_intern::timings::Count::HeaderSourceFiles);
+                engine.materialize_source(*file)?;
+                let items: Vec<_> = engine
+                    .items
+                    .values()
+                    .flatten()
+                    .filter(|syntax| engine.item_file(syntax) == *file)
+                    .cloned()
+                    .collect();
+                if items.is_empty() {
+                    return Err(refused());
                 }
-                Some(None) => return Ok(false),
-                None => {}
+                *live = Some(LiveSyntax::new(items, |bytes| {
+                    engine.header_products.as_ref().map_or_else(
+                        || standalone_syntax(bytes),
+                        |headers| headers.admit_source(bytes),
+                    )
+                })?);
             }
+            let syntaxes = &live.as_ref().unwrap().items;
             if syntaxes.iter().any(|syntax| {
                 syntax.occurrence == 0
                     && engine
@@ -318,31 +494,15 @@ impl HeaderSources {
                         .body(&syntax.item.definition)
                         .is_some_and(|expected| {
                             syntax.text_hash != expected
-                                || engine.catalog.anchor(&syntax.item.definition, 0)
+                                || engine
+                                    .catalog
+                                    .anchor(&syntax.item.definition, syntax.occurrence)
                                     != Some(syntax.anchor)
                         })
             }) {
                 return Ok(false);
             }
-            if syntaxes.is_empty() {
-                return Err(refused());
-            }
-            for syntax in &syntaxes {
-                let candidates = engine
-                    .items
-                    .entry(syntax.item.definition.clone())
-                    .or_default();
-                if !candidates
-                    .iter()
-                    .any(|old| old.anchor == syntax.anchor && old.occurrence == syntax.occurrence)
-                {
-                    candidates.push(syntax.clone());
-                    candidates.sort_by_key(|s| s.occurrence);
-                }
-            }
-            engine
-                .declarations
-                .place_file(*file, syntaxes, &engine.sources);
+            Self::install_file(engine, *file, syntaxes);
         }
         Ok(true)
     }

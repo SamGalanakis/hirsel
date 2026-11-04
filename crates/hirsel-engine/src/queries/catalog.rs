@@ -212,6 +212,23 @@ impl Clone for Catalog {
     }
 }
 impl Catalog {
+    pub(super) fn syntax_bindings(
+        &self,
+    ) -> impl Iterator<Item = (DefId, FileId, ContentHash, hirsel_span::Anchor, u32)> + '_ {
+        self.candidates.iter().flat_map(|(path, candidates)| {
+            let id = DefId::intern(path);
+            candidates.iter().map(move |candidate| {
+                (
+                    id,
+                    candidate.file,
+                    candidate.head.body,
+                    candidate.head.name.anchor,
+                    candidate.occurrence,
+                )
+            })
+        })
+    }
+
     fn installed_bytes(&self, weight: &mut crate::NativeMetadataWeight) {
         weight.tree::<PackageId, Arc<crate::store::InstalledSourceRecords>>(self.installed.len());
         for (package, owner) in &self.installed {
@@ -1066,6 +1083,11 @@ impl QueryEngine {
         self.retire_snapshot();
     }
     pub(crate) fn materialize(&mut self, path: &DefPath) -> Result<(), QueryError> {
+        if let Some(inputs) = self.source_inputs.clone()
+            && inputs.materialize(self, path)?
+        {
+            return Ok(());
+        }
         if let Some(headers) = self.header_products.clone()
             && headers.materialize(self, path)?
         {

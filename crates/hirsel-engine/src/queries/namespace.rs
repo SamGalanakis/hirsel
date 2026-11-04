@@ -291,7 +291,7 @@ impl NamespaceCapture {
             .ok_or_else(|| refused("missing captured source owner"))?;
         let mut engine = headers.execution();
         self.inputs.install(&mut engine);
-        self.inputs.materialize(&mut engine, path)?;
+        engine.materialize(path)?;
         Ok(engine)
     }
     pub(crate) fn header(&self, path: &DefPath) -> Result<HeaderInput, QueryError> {
@@ -735,7 +735,7 @@ mod tests {
 
     #[derive(Default)]
     struct StoreOff {
-        installed: MemStore,
+        installed: Arc<MemStore>,
         writes: AtomicUsize,
     }
     impl ResultStore for StoreOff {
@@ -816,6 +816,186 @@ mod tests {
                 );
             }
             assert_eq!(store.writes.load(Ordering::Relaxed), 0);
+        });
+    }
+    #[test]
+    fn request_demanders_parse_and_project_one_live_source_once() {
+        struct Parser {
+            inner: Arc<dyn crate::ParserPhase>,
+            calls: Arc<AtomicUsize>,
+        }
+        impl crate::ParserPhase for Parser {
+            fn parse(
+                &self,
+                file: FileId,
+                tokens: Vec<hirsel_syntax::Token>,
+                context: &FileContext,
+                sources: &mut SourceMap,
+            ) -> Result<QueryOutput<SyntaxFile>, QueryError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.inner.parse(file, tokens, context, sources)
+            }
+        }
+        struct Header;
+        impl SignaturePhase for Header {
+            fn signature(
+                &self,
+                types: &hirsel_types::TypeInterner,
+                _: &hirsel_types::TypeMemo,
+                syntax: Arc<ItemSyntax>,
+                _: &Declarations,
+                products: &mut PhaseProducts,
+                _: &mut dyn SignatureProvider,
+            ) -> Result<QueryOutput<hirsel_types::Signature>, QueryError> {
+                products.resolution = Some(crate::ResolverSnapshot {
+                    syntax: syntax.clone(),
+                    output: output(Default::default()),
+                });
+                Ok(output(hirsel_types::Signature {
+                    metadata: Default::default(),
+                    definition: DefId::intern(&syntax.item.definition),
+                    kind: hirsel_types::SignatureKind::Const {
+                        ty: types.intern(hirsel_types::Type::unit()),
+                        generics: Default::default(),
+                    },
+                    fingerprint: syntax.text_hash,
+                }))
+            }
+        }
+        crate::with_compiler_stack(|| {
+            for cold in [false, true] {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let mut adapters = crate::phases::engine_only_adapters();
+                adapters.parser = Some(Arc::new(Parser {
+                    inner: adapters.parser.take().unwrap(),
+                    calls: calls.clone(),
+                }));
+                adapters.signature = Some(Arc::new(Header));
+                let store = Arc::new(StoreOff::default());
+                if cold {
+                    let mut seed = QueryEngine::new(
+                        default_environment(),
+                        crate::phases::engine_only_adapters(),
+                    )
+                    .with_result_store(store.installed.clone());
+                    let file = seed
+                        .sources
+                        .add("shared.hir", "pub fn main(){()}\n".into())
+                        .unwrap();
+                    seed.index_source(file, &default_context()).unwrap();
+                }
+                let provider: Arc<dyn ResultStore> = if cold {
+                    store.installed.clone()
+                } else {
+                    store.clone()
+                };
+                let mut engine =
+                    QueryEngine::new(default_environment(), adapters).with_result_store(provider);
+                let file = engine
+                    .sources
+                    .add("shared.hir", "pub fn main(){()}\n".into())
+                    .unwrap();
+                engine.index_source(file, &default_context()).unwrap();
+                if cold {
+                    assert!(
+                        engine.items.is_empty(),
+                        "warm indexing must leave syntax undemanded"
+                    );
+                    engine.verify_store = crate::store::VerifyStore::Recompute;
+                    engine = engine.with_result_store(store.clone());
+                    engine.signature_inputs();
+                    engine.sources = engine.sources.clone().retain_owner(Arc::new(()));
+                }
+                let definitions = engine.source_paths();
+                let capture = engine
+                    .capture_namespace(&definitions, &[], 8 << 20)
+                    .unwrap();
+                drop(engine);
+                header_products::PROJECTIONS.set(0);
+                if cold {
+                    capture.header(&definitions[0]).unwrap();
+                    let barrier = std::sync::Barrier::new(8);
+                    std::thread::scope(|scope| {
+                        let workers: Vec<_> = (0..8)
+                            .map(|_| {
+                                scope.spawn(|| {
+                                    barrier.wait();
+                                    capture.syntax(&definitions[0]).unwrap()
+                                })
+                            })
+                            .collect();
+                        let syntax: Vec<_> = workers
+                            .into_iter()
+                            .map(|worker| worker.join().unwrap())
+                            .collect();
+                        assert!(syntax.iter().all(|item| Arc::ptr_eq(item, &syntax[0])));
+                    });
+                }
+                for _ in 0..8 {
+                    let mut demander = capture.source_engine(&definitions[0]).unwrap();
+                    demander.item_signature(&definitions[0]).unwrap();
+                    demander.signature_inputs();
+                }
+                // One immutable source and one declared header, shared by eight
+                // demanders of the same request: each producer runs exactly once.
+                assert_eq!(
+                    (
+                        calls.load(Ordering::Relaxed),
+                        header_products::PROJECTIONS.get()
+                    ),
+                    (1, 1),
+                    "source parses and header projections",
+                );
+                assert_eq!(store.writes.load(Ordering::Relaxed), 0);
+            }
+        });
+    }
+    #[test]
+    fn demanded_syntax_keeps_its_charge_after_the_front_partition_ends() {
+        struct Allowance(Arc<crate::runtime::MemoryReservationPool>);
+        impl header_products::HeaderAllowance for Allowance {
+            fn take_header(&self, bytes: u64) -> Option<crate::runtime::MemoryReservation> {
+                self.0.take(bytes)
+            }
+        }
+        crate::with_compiler_stack(|| {
+            let store = Arc::new(MemStore::default());
+            drop(indexed(store.clone()));
+            let (mut engine, definitions) = indexed(store);
+            assert!(engine.items.is_empty());
+            let capture = engine
+                .capture_namespace(&definitions, &[], 8 << 20)
+                .unwrap();
+            drop(engine);
+            let headers = capture.snapshot.header_products().unwrap().clone();
+            let budget = crate::runtime::ProcessBudget::new(8 << 20);
+            let pool = Arc::new(
+                crate::runtime::MemoryReservationPool::new(budget.reserve(8 << 20).unwrap())
+                    .ok()
+                    .unwrap(),
+            );
+            let before = pool.available_bytes();
+            let partition = headers.configure_source_backing(
+                Arc::new(Allowance(pool.clone())),
+                Arc::new(std::sync::Mutex::new(before)),
+            );
+            drop(capture.syntax(&definitions[0]).unwrap());
+            let retained = pool.available_bytes();
+            assert!(retained < before, "the live source owns its syntax charge");
+            drop(partition);
+            headers.release_ended_partition();
+            assert_eq!(
+                pool.available_bytes(),
+                retained,
+                "a live syntax owner keeps its reservation"
+            );
+            drop(capture);
+            drop(headers);
+            assert_eq!(
+                pool.available_bytes(),
+                before,
+                "the final source owner releases the reservation"
+            );
         });
     }
 }

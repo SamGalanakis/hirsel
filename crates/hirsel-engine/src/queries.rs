@@ -331,6 +331,7 @@ pub struct QueryEngine {
     adopted_headers: Option<header_products::AdoptedHeaders>,
     adopted_private: Option<header_products::AdoptedPrivate>,
     header_products: Option<Arc<header_products::HeaderProducts>>,
+    source_inputs: Option<Arc<header_products::SourceInputs>>,
     /// A header or module proof read refused while this engine produces a row.
     header_refusal: std::sync::Mutex<Option<QueryError>>,
     resolutions: Table<Resolution>,
@@ -745,6 +746,7 @@ impl QueryEngine {
             adopted_headers: None,
             adopted_private: None,
             header_products: None,
+            source_inputs: None,
             header_refusal: Default::default(),
             resolutions: Default::default(),
             specialization_dependencies: Default::default(),

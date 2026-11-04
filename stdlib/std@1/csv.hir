@@ -93,8 +93,7 @@ pub fn reader(config: Config) -> Result[Reader, CsvError] uses {} {
 }
 
 fn finish_field(mut r: Reader) -> Result[(), CsvError] uses {} {
-  let field = unique r.field
-  r.field = []
+  let field = replace(mut r.field, [])
   let Ok(value) = core@1/string.from_bytes(core@1/bytes.from_list(take field)) else {
     return Error(InvalidUtf8())
   }
@@ -114,8 +113,7 @@ fn finish_row(mut r: Reader) -> Result[Option[List[String]], CsvError] uses {} {
       )
     }
   }
-  let row = unique r.row
-  r.row = []
+  let row = replace(mut r.row, [])
   r.record_bytes = 0
   Ok(Some(take row))
 }

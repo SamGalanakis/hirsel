@@ -426,8 +426,12 @@ pub struct VerifierCache(
     Mutex<Option<Arc<hirsel_product_codec::TypeRecords>>>,
     Arc<()>,
     Mutex<Vec<Arc<DecodedFact>>>,
-    Mutex<Vec<Weak<crate::views::EnvironmentFacts>>>,
+    Mutex<Vec<EnvironmentOwner>>,
 );
+struct EnvironmentOwner {
+    facts: Weak<crate::views::EnvironmentFacts>,
+    _lease: Arc<dyn Send + Sync>,
+}
 impl std::fmt::Debug for VerifierCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("VerifierCache")
@@ -519,12 +523,15 @@ impl VerifierCache {
         ))
     }
 
-    fn remember(&self, stamp: &crate::views::EnvironmentStamp) {
+    fn remember(&self, stamp: &crate::views::EnvironmentStamp, lease: &Arc<dyn Send + Sync>) {
         let mut owners = self.4.lock().unwrap();
-        owners.retain(|owner| owner.strong_count() != 0);
-        let owner = Arc::downgrade(&stamp.facts);
-        if !owners.iter().any(|seen| seen.ptr_eq(&owner)) {
-            owners.push(owner);
+        owners.retain(|owner| owner.facts.strong_count() != 0);
+        let facts = Arc::downgrade(&stamp.facts);
+        if !owners.iter().any(|seen| seen.facts.ptr_eq(&facts)) {
+            owners.push(EnvironmentOwner {
+                facts,
+                _lease: lease.clone(),
+            });
         }
     }
     /// Reclaim optional local facts before the host refuses its existing
@@ -535,10 +542,12 @@ impl VerifierCache {
         let mut count = decoded.len() as u64;
         drop(decoded);
         let owners = std::mem::take(&mut *self.4.lock().unwrap());
-        for owner in owners.into_iter().filter_map(|owner| owner.upgrade()) {
-            let reads = std::mem::take(&mut *owner.reads.lock().unwrap());
-            let execution = std::mem::take(&mut *owner.execution.lock().unwrap());
-            count += (reads.len() + execution.len()) as u64;
+        for owner in owners {
+            if let Some(facts) = owner.facts.upgrade() {
+                let reads = std::mem::take(&mut *facts.reads.lock().unwrap());
+                let execution = std::mem::take(&mut *facts.execution.lock().unwrap());
+                count += (reads.len() + execution.len()) as u64;
+            }
         }
         hirsel_intern::work::count_by(hirsel_intern::work::Counter::VerifierFactEvictions, count);
         hirsel_intern::timings::count_by(
@@ -575,7 +584,14 @@ impl VerifierCache {
             return Ok(*holds);
         }
         let observed = crate::input::observe_read(Some(types), read, signatures.lookup());
-        let lease = self.retain_fact((size_of::<VRead>() + 256) as u64)?;
+        // Four buckets per entry bound HashMap's minimum and spare capacity.
+        // The registry keeps this lease until its weak owner is pruned, so its
+        // allocation and the empty environment metadata remain charged too.
+        let bytes = 4 * size_of::<(VRead, (bool, Arc<dyn Send + Sync>))>()
+            + size_of::<crate::views::EnvironmentFacts>()
+            + 4 * size_of::<EnvironmentOwner>()
+            + 128;
+        let lease = self.retain_fact(bytes as u64)?;
         let mut reads = stamp.facts.reads.lock().unwrap();
         if let Some((holds, _)) = reads.get(read) {
             return Ok(*holds);
@@ -585,7 +601,7 @@ impl VerifierCache {
         let holds = crate::input::compare_read(read, observed.as_ref());
         if let Some(lease) = lease {
             if reads.is_empty() {
-                self.remember(stamp);
+                self.remember(stamp, &lease);
             }
             reads.insert(read.clone(), (holds, lease));
         }
@@ -1256,7 +1272,7 @@ impl VerifierCache {
         for (stamp, fact) in pending {
             let mut execution = stamp.facts.execution.lock().unwrap();
             if execution.is_empty() {
-                self.remember(stamp);
+                self.remember(stamp, &fact._lease);
             }
             execution.push(fact);
         }

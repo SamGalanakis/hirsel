@@ -545,9 +545,9 @@ fn span_order(at: Span) -> (u32, std::cmp::Reverse<u32>) {
     (at.start, std::cmp::Reverse(at.end))
 }
 
-/// Syntax frames and calls form nested or disjoint intervals. Processing
-/// outer spans first lets each frame enter and leave this stack at most once.
-/// Equal spans keep source/site order, matching the previous last match.
+/// Source-ordered frames with nonincreasing ends. A later frame with a
+/// larger end dominates each popped frame for every later starting position.
+/// Equal spans remain on the stack, preserving the previous last match.
 struct SpanNesting<'a> {
     spans: &'a [Span],
     stack: Vec<u32>,
@@ -575,6 +575,13 @@ impl<'a> SpanNesting<'a> {
         self.stack.push(index);
         parent
     }
+    fn owner(&self, at: Span) -> u32 {
+        let containing = self.stack.partition_point(|&index| {
+            work::count(Counter::SummaryComparisons);
+            self.spans[index as usize].end >= at.end
+        });
+        containing.checked_sub(1).map_or(0, |i| self.stack[i])
+    }
 }
 fn enclosing_frames(spans: &[Span], queries: &[Span]) -> Vec<u32> {
     if spans.len() == 1 {
@@ -588,12 +595,12 @@ fn enclosing_frames(spans: &[Span], queries: &[Span]) -> Vec<u32> {
     let mut next = 1;
     for query in ordered {
         while next < spans.len()
-            && summary_compare(&span_order(spans[next]), &span_order(queries[query])).is_le()
+            && summary_compare(&spans[next].start, &queries[query].start).is_le()
         {
             nesting.enter(next as u32);
             next += 1;
         }
-        owners[query] = nesting.enclosing(queries[query]);
+        owners[query] = nesting.owner(queries[query]);
     }
     owners
 }
@@ -693,5 +700,62 @@ fn owned<P: Copy>(
             parameter,
         } if bound == depth => owner_binder.map(|scope| BinderRef::Body { scope, parameter }),
         BinderRef::Bound { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn span_queries_preserve_crossing_ranges_equal_spans_and_inclusive_boundaries() {
+        let span = |(start, end)| Span {
+            start,
+            end,
+            ..Span::default()
+        };
+        let spans = [
+            (0, 200),
+            (10, 50),
+            (20, 80),
+            (30, 40),
+            (100, 140),
+            (100, 140),
+            (110, 120),
+        ]
+        .map(span);
+        let mut nesting = SpanNesting::new(&spans);
+        let parents: Vec<_> = (1..spans.len()).map(|i| nesting.enter(i as u32)).collect();
+        assert_eq!(parents, [0, 0, 2, 0, 4, 5]);
+        let queries = [
+            (25, 90),
+            (26, 38),
+            (105, 150),
+            (106, 130),
+            (100, 140),
+            (15, 45),
+            (35, 38),
+            (100, 100),
+            (140, 140),
+            (201, 201),
+        ]
+        .map(span);
+        let expected = [0, 2, 0, 5, 5, 1, 3, 5, 5, 0];
+        assert_eq!(enclosing_frames(&spans, &queries), expected);
+        // The defining relation is the last containing frame, including for
+        // recovered spans that cross lexical boundaries or lie outside the item.
+        let queries: Vec<_> = (0..=201)
+            .flat_map(|start| (start..=201).map(move |end| span((start, end))))
+            .collect();
+        let expected: Vec<_> = queries
+            .iter()
+            .map(|at| {
+                spans
+                    .iter()
+                    .rposition(|s| s.start <= at.start && s.end >= at.end)
+                    .unwrap_or(0) as u32
+            })
+            .collect();
+        assert_eq!(enclosing_frames(&spans, &queries), expected);
     }
 }

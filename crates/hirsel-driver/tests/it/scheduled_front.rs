@@ -1843,81 +1843,100 @@ fn archived_front_releases_observation_arrays_when_their_readers_finish() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("main.hir");
         std::fs::write(&path, "pub fn main()->u8{1u8}\n").unwrap();
-        let mut program = COMPILER
-            .with_config(CompileConfig {
-                store: Arc::new(MemStore::default().with_installed_products()),
-                hold_bytes: 0,
-                ..Default::default()
-            })
-            .with_owned_engines()
-            .load_program(&path)
-            .unwrap();
-        let budget = ProcessBudget::new(1 << 30);
-        let weight = MemoryWeight {
-            retained: 1 << 20,
-            scratch: 8 << 20,
-            stack: 0,
-        };
-        let front = program
-            .engine
-            .front_body_queries(
-                &[program.entry.clone()],
-                weight,
-                budget.reserve(8 << 20).unwrap(),
+        for held in [true, false] {
+            let mut program = COMPILER
+                .with_config(CompileConfig {
+                    store: Arc::new(MemStore::default().with_installed_products()),
+                    hold_bytes: 0,
+                    ..Default::default()
+                })
+                .with_owned_engines()
+                .load_program(&path)
+                .unwrap();
+            let budget = ProcessBudget::new(1 << 30);
+            let weight = MemoryWeight {
+                retained: 1 << 20,
+                scratch: 8 << 20,
+                stack: 0,
+            };
+            let front = program
+                .engine
+                .front_body_queries(
+                    &[program.entry.clone()],
+                    weight,
+                    budget.reserve(8 << 20).unwrap(),
+                    errors(),
+                )
+                .unwrap();
+            front.compact_retained_reads();
+            let mut runtime = AdmittedRuntime::with_query_capacity(
+                hirsel_intern::jobs::Jobs::ONE,
+                budget.reserve(512 << 20).unwrap(),
                 errors(),
+                2,
             )
             .unwrap();
-        front.compact_retained_reads();
-        let mut runtime = AdmittedRuntime::with_query_capacity(
-            hirsel_intern::jobs::Jobs::ONE,
-            budget.reserve(512 << 20).unwrap(),
-            errors(),
-            2,
-        )
-        .unwrap();
-        runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
-        let evict = QueryId {
-            kind: 0x281,
-            address: front.query(&program.entry).unwrap().address,
-        };
-        runtime
-            .register(
-                evict.kind,
-                Arc::new(EvictCompact(
-                    evict,
-                    MemoryWeight {
-                        scratch: weight.scratch,
-                        ..Default::default()
-                    },
-                )),
-            )
-            .unwrap();
-        let request = runtime.request(&[front.query(&program.entry).unwrap()]);
-        drop(runtime.wait(request).unwrap());
-        let readers = front.memo_snapshot().unwrap();
-        let expected = readers
-            .iter()
-            .map(|(key, reads)| (*key, reads.observed().copied().collect::<Vec<_>>()))
-            .collect::<Vec<_>>();
-        assert!(!expected.is_empty());
-        let request = runtime.request(&[evict]);
-        drop(runtime.wait(request).unwrap());
-        assert_eq!(runtime.stats().body_evictions, 1);
-        let pinned = front.retained_bytes();
-        drop(readers);
-        assert!(
-            front.retained_bytes() < pinned,
-            "archived entries must release their read arrays after the last reader finishes"
-        );
-        let reopened = front.memo_snapshot().unwrap();
-        assert_eq!(
-            reopened
+            runtime.register(FRONT_BODY_KIND, front.factory()).unwrap();
+            let evict = QueryId {
+                kind: 0x281,
+                address: front.query(&program.entry).unwrap().address,
+            };
+            runtime
+                .register(
+                    evict.kind,
+                    Arc::new(EvictCompact(
+                        evict,
+                        MemoryWeight {
+                            scratch: weight.scratch,
+                            ..Default::default()
+                        },
+                    )),
+                )
+                .unwrap();
+            let _header = front
+                .signatures()
+                .signature(hirsel_syntax::DefId::intern(&program.entry))
+                .unwrap()
+                .unwrap()
+                .clone();
+            let _proof = front.module_proof(&program.entry);
+            let initial = front.retained_bytes();
+            let request = runtime.request(&[front.query(&program.entry).unwrap()]);
+            drop(runtime.wait(request).unwrap());
+            let readers = front.memo_snapshot().unwrap();
+            let expected = readers
                 .iter()
-                .map(|(key, reads)| { (*key, reads.observed().copied().collect::<Vec<_>>()) })
-                .collect::<Vec<_>>(),
-            expected
-        );
-        assert_eq!(front.recompute_count(&program.entry, QueryKind::Modes), 1);
-        runtime.shutdown();
+                .map(|(key, reads)| (*key, reads.observed().copied().collect::<Vec<_>>()))
+                .collect::<Vec<_>>();
+            assert!(!expected.is_empty());
+            let readers = held.then_some(readers);
+            let request = runtime.request(&[evict]);
+            drop(runtime.wait(request).unwrap());
+            assert_eq!(runtime.stats().body_evictions, 1);
+            let pinned = front.retained_bytes();
+            drop(readers);
+            if held {
+                assert!(
+                    front.retained_bytes() < pinned,
+                    "archived entries must release their read arrays after the last reader finishes"
+                );
+            } else {
+                assert_eq!(
+                    front.retained_bytes(),
+                    initial,
+                    "an archived root with no readers retains only its admitted reference metadata"
+                );
+            }
+            let reopened = front.memo_snapshot().unwrap();
+            assert_eq!(
+                reopened
+                    .iter()
+                    .map(|(key, reads)| { (*key, reads.observed().copied().collect::<Vec<_>>()) })
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(front.recompute_count(&program.entry, QueryKind::Modes), 1);
+            runtime.shutdown();
+        }
     });
 }

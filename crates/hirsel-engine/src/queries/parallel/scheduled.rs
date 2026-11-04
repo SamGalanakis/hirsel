@@ -149,7 +149,7 @@ struct ArchivedFront {
 }
 struct FrontObservations {
     rows: observations::Rows,
-    _backing: Arc<LiveSourceBacking>,
+    _backing: Option<Arc<LiveSourceBacking>>,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct FrontMemoryRefusal {
@@ -571,6 +571,8 @@ impl FrontBodyQueries {
                     + std::mem::size_of::<FrontSlot>()
                     + 3 * std::mem::size_of::<(crate::memo::MemoKey, Arc<Reads>)>()
                     + 8 * std::mem::size_of::<crate::memo::MemoKey>()
+                    // Includes the per-root archived observation owner.
+                    // Its memo keys use the reserved memo slots above.
                     + 32 * std::mem::size_of::<usize>()
                     + std::mem::size_of::<(DefId, Key)>()
                     + std::mem::size_of::<(Key, Key)>()) as u64,
@@ -1023,6 +1025,10 @@ impl FrontBodyQueries {
     /// Captured rows and actual settled metadata owned by this producer view.
     /// Provider content bytes and active decode scratch have separate owners.
     pub fn retained_bytes(&self) -> u64 {
+        // Runtime eviction drops its final Summary alias after the factory
+        // returns. Collect dictionary rows that became unused on that drop
+        // before reporting the retained live set.
+        self.reclaim_reads();
         let remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
         self._allowance.admitted - *remaining
     }
@@ -2949,7 +2955,11 @@ impl QueryEngine {
             })
             .collect::<Vec<_>>();
         body_demands.sort_unstable_by_key(|&(demand, _)| demand);
-        let admitted = available;
+        // Include the pool owner as well as the bytes it lends. Reserving
+        // this reported live set again must cover construction of its pool.
+        let admitted = available
+            .checked_add(MemoryReservationPool::metadata_bytes())
+            .ok_or_else(|| refusal("pool size overflow"))?;
         let mut inputs_allowance = allowance
             .take(required)
             .ok_or_else(|| refusal("shared Front input partition"))?;

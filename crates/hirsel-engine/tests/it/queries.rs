@@ -557,7 +557,8 @@ fn admitted_memo_reads(
 ) -> Option<Arc<Reads>> {
     front
         .queries
-        .memo_snapshot()?
+        .memo_snapshot()
+        .expect("admitted Front observations remain readable")
         .into_iter()
         .find_map(|(key, reads)| {
             (key == MemoKey::new(kind, DefId::intern(definition))).then_some(reads)

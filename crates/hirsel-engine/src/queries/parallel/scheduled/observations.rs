@@ -61,6 +61,9 @@ impl FrontBodyQueries {
         scratch: u64,
     ) -> Option<Arc<FrontObservations>> {
         let archived = (|| {
+            // Flat observations still borrow their producer's lease. Only
+            // pooled readers carry the independent, last-reader refund needed
+            // to release that producer while an inspection holds its reads.
             if self.read_pool.get().is_none() || !self.store.transports() {
                 return None;
             }
@@ -85,26 +88,36 @@ impl FrontBodyQueries {
                 reference,
             })
         })();
-        let mut weight = crate::memo::retained::Weight::default();
-        let rows = if let Some(rows) = archived {
-            rows
+        let (rows, backing) = if let Some(rows) = archived {
+            // The reference-only owner fits the per-root metadata admitted by
+            // input_bytes. It owns no read payload and needs no second lease.
+            const {
+                assert!(
+                    size_of::<FrontObservations>() + 2 * size_of::<usize>()
+                        <= 32 * size_of::<usize>()
+                )
+            };
+            (rows, None)
         } else {
+            let mut weight = crate::memo::retained::Weight::default();
             for (_, reads) in &outcome.memos {
                 weight.reads(reads);
             }
-            Rows::Retained(outcome.memos.clone())
+            let charge = weight
+                .bytes
+                .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                    FrontObservations,
+                >::uninit(
+                )))?
+                .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                    LiveSourceBacking,
+                >::uninit(
+                )))?;
+            (
+                Rows::Retained(outcome.memos.clone()),
+                Some(outcome._backing.split(charge)?),
+            )
         };
-        let charge = weight
-            .bytes
-            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                FrontObservations,
-            >::uninit()))?
-            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                LiveSourceBacking,
-            >::uninit()))?;
-        // Per-root memo slots were admitted in input_bytes. Only this owner
-        // and any retained read payload transfer out of the live value's debit.
-        let backing = outcome._backing.split(charge)?;
         Some(Arc::new(FrontObservations {
             rows,
             _backing: backing,

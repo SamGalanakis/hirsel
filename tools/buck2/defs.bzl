@@ -355,6 +355,9 @@ def _rust_test_impl(ctx):
         "HIRSEL_MEMORY_LIMIT": "{}K".format(test_memory_limit(ctx.attrs.test_binary, int(ctx.attrs.request[1]))),
     }
     env.update(ctx.attrs.extra_env)
+    if ctx.attrs.test_binary == "hirsel-conformance-unittest":
+        # Reuse freed heap across compiler threads inside the existing data guard.
+        env["MALLOC_ARENA_MAX"] = "1"
     exact_cpus = ctx.attrs.exact_cpus or EXACT_TEST_CPUS.get(ctx.attrs.test_binary, 0)
     if exact_cpus:
         env["HIRSEL_TEST_EXACT_CPUS"] = str(exact_cpus)

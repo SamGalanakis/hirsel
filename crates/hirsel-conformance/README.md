@@ -536,6 +536,12 @@ retains that smaller control set. An empty selection fails.
 
 `// expect: test` checks and runs all `@test` functions with ordinary and checked interpretation. Native matrices run every selected test independently under every configured engine, using its stable default seed. Smoke record/replay records and replays each test independently. A suite selecting no tests fails conformance.
 
+## Unit-test memory
+
+The Buck unit-test wrapper bounds glibc to one allocation arena so compiler
+threads reuse freed heap within the existing 1408M data guard. The harness
+keeps its normal test-thread count and witness checks.
+
 ## Architecture oracles
 
 `oracle` runs the compiler-architecture oracles (`src/oracle/`) against this

@@ -247,30 +247,40 @@ fn check_case(
 
 #[test]
 fn settled_front_check_does_not_decode_an_evicted_modes_body() {
-    check_settled_front_eviction(false, false, 0);
+    check_settled_front_eviction(false, false, 0, false);
 }
 
 #[test]
 fn demanded_lower_rematerializes_only_its_evicted_modes_body_after_settled_check() {
-    check_settled_front_eviction(true, false, 0);
+    check_settled_front_eviction(true, false, 0, false);
 }
 
 #[test]
 fn portable_front_facts_survive_fresh_graphs_and_modes_eviction_before_real_lower_demand() {
-    check_settled_front_eviction(true, true, 0);
+    check_settled_front_eviction(true, true, 0, false);
 }
 
 #[test]
 fn portable_front_facts_reject_changed_own_text_without_retaining_old_bodies() {
-    check_settled_front_eviction(false, true, 1);
+    check_settled_front_eviction(false, true, 1, false);
 }
 
 #[test]
 fn portable_front_facts_recheck_changed_representation_reads_and_reuse_unrelated_main() {
-    check_settled_front_eviction(false, true, 2);
+    check_settled_front_eviction(false, true, 2, false);
 }
 
-fn check_settled_front_eviction(demand_lower: bool, carry_across_graphs: bool, edit: u8) {
+#[test]
+fn completed_check_releases_root_readers_after_front_eviction() {
+    check_settled_front_eviction(false, false, 0, true);
+}
+
+fn check_settled_front_eviction(
+    demand_lower: bool,
+    carry_across_graphs: bool,
+    edit: u8,
+    archive_readers: bool,
+) {
     use hirsel_engine::store::{Bytes, EntryKey, Reference, ResultStore};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     #[derive(Default)]
@@ -431,6 +441,29 @@ fn check_settled_front_eviction(demand_lower: bool, carry_across_graphs: bool, e
                 .register(FRONT_GROWTH_KIND, growth.factory())
                 .unwrap();
             runtime.register(FRONT_CHECK_KIND, check.factory()).unwrap();
+            let warmed = archive_readers.then(|| {
+                front.compact_retained_reads();
+                let header = front
+                    .signatures()
+                    .signature(hirsel_syntax::DefId::intern(&program.entry))
+                    .unwrap()
+                    .unwrap()
+                    .clone();
+                let proof = front.module_proof(&program.entry);
+                let eviction = crate::scheduled_front::EvictCompact(
+                    QueryId {
+                        kind: 0x410c,
+                        address: front.query(&program.entry).unwrap().address,
+                    },
+                    MemoryWeight {
+                        scratch: weight.scratch,
+                        ..Default::default()
+                    },
+                );
+                let evict = eviction.0;
+                runtime.register(evict.kind, Arc::new(eviction)).unwrap();
+                (header, proof, front.retained_bytes(), evict)
+            });
             let request = runtime.request(&[front.query(&program.entry).unwrap()]);
             runtime.wait(request).unwrap();
             assert_eq!(front.live_body_count(), 0, "settled P owns no body");
@@ -463,6 +496,33 @@ fn check_settled_front_eviction(demand_lower: bool, carry_across_graphs: bool, e
                 );
             }
             assert_eq!(front.live_body_count(), 0);
+            if archive_readers {
+                let evict = warmed.as_ref().unwrap().3;
+                let request = runtime.request(&[evict]);
+                drop(runtime.wait(request).unwrap());
+                assert_eq!(
+                    front.retained_bytes(),
+                    warmed.as_ref().unwrap().2,
+                    "completed Check/Growth root readers must not retain Front read arrays or dictionary rows"
+                );
+                let scope = check
+                    .completed_scope(
+                        products[0].clone(),
+                        budget
+                            .reserve(check.completed_scope_bytes(products[0].clone()).unwrap())
+                            .unwrap(),
+                    )
+                    .unwrap();
+                let expected = scope.reads().get(&program.entry).unwrap();
+                let restored = front.memo_snapshot().unwrap();
+                let modes = restored
+                    .iter()
+                    .find(|(key, _)| key.kind == QueryKind::Modes)
+                    .unwrap();
+                assert_eq!(expected.as_ref(), modes.1.as_ref());
+                assert!(expected.observed().eq(modes.1.observed()));
+                assert_eq!(front.recompute_count(&program.entry, QueryKind::Modes), 1);
+            }
             if demand_lower && (!carry_across_graphs || revision == 1) {
                 let retained = front.retained_bytes();
                 let request = runtime.request(&[lower.query(&program.entry).unwrap()]);

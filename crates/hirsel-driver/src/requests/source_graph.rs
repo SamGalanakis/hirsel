@@ -758,10 +758,10 @@ impl GraphProducts for SourceProducts {
                                     "source check readiness received another root".into(),
                                 ));
                             }
-                            let completed = check.outcome(product.clone()).ok_or_else(|| {
+                            let completed = check.checked(product.clone()).ok_or_else(|| {
                                 ToolError::Runtime("selected check product is unavailable".into())
                             })?;
-                            CompileResult::Check(completed.checked)
+                            CompileResult::Check(completed)
                         }
                         CompileOperation::CheckedProducts { canonical, .. } => {
                             let [product] = products else {
@@ -770,7 +770,7 @@ impl GraphProducts for SourceProducts {
                             if product.address != expected.address {
                                 return Err(uninstalled());
                             }
-                            let completed = check.outcome(product.clone()).ok_or_else(|| {
+                            let completed = check.checked(product.clone()).ok_or_else(|| {
                                 ToolError::Runtime("selected check product is unavailable".into())
                             })?;
                             let receipt = receipt.as_ref().ok_or_else(|| uninstalled())?;
@@ -781,7 +781,7 @@ impl GraphProducts for SourceProducts {
                                 receipt.digest_view(&check, product.clone(), &entry)?
                             };
                             CompileResult::CheckedProducts {
-                                checked: completed.checked,
+                                checked: completed,
                                 products,
                             }
                         }

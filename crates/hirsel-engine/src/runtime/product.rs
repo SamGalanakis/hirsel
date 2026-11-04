@@ -675,9 +675,6 @@ impl LiveGrowthProduct {
         weight.arc(&value.diagnostics, |w, diagnostics| {
             w.vec(diagnostics, |w, diagnostic| w.diagnostic(diagnostic));
         });
-        if value._reads_owner.is_none() {
-            weight.reads(&value.reads);
-        }
         weight
             .bytes
             .checked_add(owner_bytes::<Arc<crate::source_components::SourceGrowthData>>())
@@ -752,12 +749,12 @@ pub(crate) enum SourceGrowthQueryData {
 }
 pub(crate) struct GrowthPublicationSource {
     source: ProductSource,
-    pub(crate) reads: Mutex<crate::memo::ReadPool>,
+    pub(crate) store: Arc<dyn crate::store::ResultStore>,
+    pub(crate) scratch: u64,
     _reservation: MemoryReservation,
 }
 pub(crate) struct SourceGrowthPublication {
-    pub(crate) reads: Arc<Reads>,
-    source: Arc<GrowthPublicationSource>,
+    pub(crate) reads: Arc<crate::queries::ArchivedReader>,
 }
 #[derive(Clone)]
 enum SourceGrowthValue {
@@ -781,18 +778,21 @@ impl LiveSourceGrowthProduct {
     }
     pub(crate) fn admit_source(
         source: ProductSourceInput,
+        store: Arc<dyn crate::store::ResultStore>,
+        scratch: u64,
         allowance: &mut MemoryReservation,
     ) -> Option<Arc<GrowthPublicationSource>> {
         let mut reservation = allowance.split(Self::source_bytes())?;
         let source = source.admit(&mut reservation)?;
         Some(Arc::new(GrowthPublicationSource {
             source,
-            reads: Mutex::default(),
+            store,
+            scratch,
             _reservation: reservation,
         }))
     }
-    /// Values own their allocation grant. Observations are self-admitted by
-    /// this publication source's pool, independently of Front's policy.
+    /// Values own their allocation grant. Reader references retain this source
+    /// and use Front's existing per-root metadata reservation.
     pub(crate) fn new(
         identity: (Address, Action),
         value: SourceGrowthQueryData,
@@ -803,16 +803,18 @@ impl LiveSourceGrowthProduct {
                 if (value.product.address, value.product.action) != identity {
                     return None;
                 }
-                Arc::get_mut(&mut value)?.publication =
-                    Some(SourceGrowthPublication { reads, source });
+                Arc::get_mut(&mut value)?.publication = Some(SourceGrowthPublication {
+                    reads: crate::queries::ArchivedReader::capture(source, &reads)?,
+                });
                 (SourceGrowthValue::Membership(value), None)
             }
             SourceGrowthQueryData::Component { mut value, reads } => {
                 if (value.product.address, value.product.action) != identity {
                     return None;
                 }
-                Arc::get_mut(&mut value)?.publication =
-                    Some(SourceGrowthPublication { reads, source });
+                Arc::get_mut(&mut value)?.publication = Some(SourceGrowthPublication {
+                    reads: crate::queries::ArchivedReader::capture(source, &reads)?,
+                });
                 let facet = SummaryFacet::component(value.clone());
                 (SourceGrowthValue::Component(value), Some(facet))
             }
@@ -830,9 +832,24 @@ impl LiveSourceGrowthProduct {
             SourceGrowthValue::Component(v) => v.publication.as_ref().unwrap(),
         }
     }
-    pub(crate) fn value(&self) -> SourceGrowthQueryData {
-        let reads = self.publication().reads.clone();
+    pub(crate) fn reader(&self) -> Arc<crate::queries::ArchivedReader> {
+        self.publication().reads.clone()
+    }
+    pub(crate) fn membership(&self) -> Option<Arc<crate::source_components::SourceMembership>> {
         match &self.0 {
+            SourceGrowthValue::Membership(value) => Some(value.clone()),
+            _ => None,
+        }
+    }
+    pub(crate) fn component(&self) -> Option<Arc<crate::SourceGrowthComponent>> {
+        match &self.0 {
+            SourceGrowthValue::Component(value) => Some(value.clone()),
+            _ => None,
+        }
+    }
+    pub(crate) fn value(&self) -> Option<SourceGrowthQueryData> {
+        let reads = self.publication().reads.load()?;
+        Some(match &self.0 {
             SourceGrowthValue::Membership(value) => SourceGrowthQueryData::Membership {
                 value: value.clone(),
                 reads,
@@ -841,7 +858,7 @@ impl LiveSourceGrowthProduct {
                 value: value.clone(),
                 reads,
             },
-        }
+        })
     }
     fn identity(&self) -> crate::SourceGrowthIdentity {
         match &self.0 {
@@ -898,7 +915,7 @@ impl LiveSourceGrowthProduct {
         &self,
         admission: ArchiveAdmission<'_>,
     ) -> io::Result<ProductArchive> {
-        let source = &self.publication().source.source;
+        let source = &self.publication().reads.source().source;
         materialize_archive(self.domain(), admission, |grant| {
             self.publication()
                 .reads
@@ -906,7 +923,7 @@ impl LiveSourceGrowthProduct {
                 .and_then(|working| {
                     source.records().encode_with_admission(
                         source.context(),
-                        &self.value(),
+                        &self.value()?,
                         grant,
                         working,
                     )
@@ -1332,6 +1349,21 @@ mod tests {
         );
         ProductSource::prepare(context, records, backing).unwrap()
     }
+    fn archived_growth_fixture_reader(
+        context: &NativeRecordContext,
+    ) -> Arc<crate::queries::ArchivedReader> {
+        let store = Arc::new(crate::store::MemStore::default());
+        let records = NativeRecords::new(context.record_types().clone(), store.clone());
+        let source = ProductSource::prepare(context.clone(), records, Arc::new(())).unwrap();
+        let budget = ProcessBudget::new(1 << 20);
+        let pool = super::super::MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
+            .ok()
+            .unwrap();
+        let mut allowance = pool.take(LiveSourceGrowthProduct::source_bytes()).unwrap();
+        let source =
+            LiveSourceGrowthProduct::admit_source(source, store, 64 << 10, &mut allowance).unwrap();
+        crate::queries::ArchivedReader::capture_owned(source, &Reads::empty(), &pool).unwrap()
+    }
     fn growth_fixture() -> (
         Arc<crate::source_components::SourceGrowthData>,
         NativeRecordContext,
@@ -1361,8 +1393,7 @@ mod tests {
             Arc::new(crate::source_components::SourceGrowthData {
                 facets: Arc::new(facets),
                 diagnostics: Arc::new(Vec::new()),
-                reads: Arc::new(Reads::empty()),
-                _reads_owner: None,
+                reads: archived_growth_fixture_reader(&source),
             }),
             source,
         )
@@ -2067,7 +2098,13 @@ mod source_component_tests {
         let mut allowance = budget
             .reserve(LiveSourceGrowthProduct::source_bytes())
             .unwrap();
-        let source = LiveSourceGrowthProduct::admit_source(input, &mut allowance).unwrap();
+        let source = LiveSourceGrowthProduct::admit_source(
+            input,
+            Arc::new(crate::store::MemStore::default()),
+            64 << 10,
+            &mut allowance,
+        )
+        .unwrap();
         let owner = DefId::intern(&DefPath::core("component-facet"));
         let make = |label: &[u8], reads: Arc<Reads>| {
             let value = producer
@@ -2102,7 +2139,8 @@ mod source_component_tests {
         let reused = fresh.backdated(&old).unwrap();
         assert!(reused.facet().unwrap().same_owner(old.facet().unwrap()));
         assert_eq!(reused.action(), fresh.action());
-        let SourceGrowthQueryData::Component { reads: current, .. } = reused.value() else {
+        let SourceGrowthQueryData::Component { reads: current, .. } = reused.value().unwrap()
+        else {
             unreachable!()
         };
         assert_eq!(current.as_ref(), reads.as_ref());

@@ -46,7 +46,7 @@ pub(super) fn synthetic_fixture(
     imported_fixture(&store, address, action, reference)
 }
 
-struct EvictCompact(QueryId, MemoryWeight);
+pub(super) struct EvictCompact(pub(super) QueryId, pub(super) MemoryWeight);
 impl QueryFactory for EvictCompact {
     fn create(&self, _: QueryId) -> Result<Box<dyn QueryTask>, hirsel_engine::store::Reference> {
         Ok(Box::new(EvictCompact(self.0, self.1)))

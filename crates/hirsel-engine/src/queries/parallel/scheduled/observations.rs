@@ -55,11 +55,20 @@ impl FrontObservations {
     }
 }
 impl FrontBodyQueries {
+    // Completed P observations and at most three concurrent Growth reader
+    // references per source root use the existing fixed metadata slots.
+    const READER_METADATA: () = assert!(
+        size_of::<FrontObservations>()
+            + 2 * size_of::<usize>()
+            + 3 * (size_of::<crate::queries::ArchivedReader>() + 2 * size_of::<usize>())
+            <= 32 * size_of::<usize>() + 3 * size_of::<(crate::memo::MemoKey, Arc<Reads>)>()
+    );
     pub(super) fn archive_observations(
         &self,
         outcome: &FrontOutcome,
         scratch: u64,
     ) -> Option<Arc<FrontObservations>> {
+        let () = Self::READER_METADATA;
         let archived = (|| {
             // Flat observations still borrow their producer's lease. Only
             // pooled readers carry the independent, last-reader refund needed

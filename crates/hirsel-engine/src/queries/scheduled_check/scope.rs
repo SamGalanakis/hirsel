@@ -56,7 +56,11 @@ impl FrontCheckQueries {
         weight.tree::<DefPath, ()>(data.failed_lowered.len());
         for (path, observed) in &data.front {
             weight.path(path);
-            weight.add(crate::memo::retained_arc_bytes(&*observed.reads) as usize);
+            weight.add(
+                usize::try_from(observed.reads.decoding_bytes().ok_or_else(missing)?)
+                    .map_err(|_| missing())?,
+            );
+            weight.add(crate::memo::retained_arc_bytes(&Reads::empty()) as usize);
             weight.add(
                 observed
                     .reads
@@ -137,7 +141,8 @@ impl FrontCheckQueries {
             _allowance: allowance,
         };
         for (path, observed) in &data.front {
-            scope.reads.insert(path.clone(), observed.reads.clone());
+            let reads = observed.reads.load(&*self.store).ok_or_else(missing)?;
+            scope.reads.insert(path.clone(), reads);
         }
         for (path, reference) in &data.failed_front {
             let reads = self

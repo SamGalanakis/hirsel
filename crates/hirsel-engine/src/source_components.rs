@@ -224,9 +224,7 @@ pub(crate) enum SourceGrowthQueryRecord {
 pub(crate) struct SourceGrowthData {
     pub facets: Arc<SourceGrowthFacets>,
     pub diagnostics: Arc<Vec<hirsel_diag::Diagnostic>>,
-    pub reads: Arc<Reads>,
-    #[serde(skip)]
-    pub(crate) _reads_owner: Option<Arc<SourceMembership>>,
+    pub reads: Arc<crate::queries::ArchivedReader>,
 }
 
 /// Accepted typed call/growth facts retained by the admitted source task.

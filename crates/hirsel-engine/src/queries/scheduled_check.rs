@@ -2,6 +2,7 @@
 //! The admission producer streams P/Lower work independently of SCC acceptance.
 //! This owner reduces settled observations in source order. An unavailable P or
 //! failed Lower still withholds its publication suffix, never independent work.
+use super::reader_receipts::{ReaderReceipt, ReaderSequence};
 use super::*;
 use crate::runtime::*;
 use crate::store::{Domain, Reference, ResultStore};
@@ -82,7 +83,7 @@ pub struct FrontObservation {
     pub address: hirsel_artifact_store::Address,
     pub action: hirsel_artifact_store::Action,
     domain: Domain,
-    reads: Arc<Reads>,
+    reads: ReaderReceipt,
 }
 impl FrontObservation {
     pub fn domain(&self) -> Domain {
@@ -95,7 +96,7 @@ struct Data {
     lowered: Vec<(DefPath, ProductRef)>,
     failed_front: Vec<(DefPath, Reference)>,
     failed_lowered: Vec<(DefPath, Reference)>,
-    reads: Arc<Reads>,
+    reads: ReaderReceipt,
 }
 /// Source and receipt owners remain admitted until the last inspection or
 /// execution consumer releases the completed check.
@@ -163,7 +164,12 @@ impl FrontCheckQueries {
             + 2 * std::mem::size_of::<(DefPath, Reference)>()
             + std::mem::size_of::<DefId>()
             + 2 * std::mem::size_of::<DefPath>()
-            + 128) as u64;
+            + 128
+            - (std::mem::size_of::<ReaderReceipt>() - std::mem::size_of::<Arc<Reads>>()))
+            as u64;
+        const {
+            assert!(std::mem::size_of::<ReaderReceipt>() <= 128);
+        };
         let base = weight
             .retained
             .checked_mul(2)?
@@ -248,8 +254,21 @@ impl FrontCheckQueries {
             },
             front: data.front.clone(),
             lowered: data.lowered.clone(),
-            reads: data.reads.clone(),
+            reads: data.reads.load(&*self.store)?,
             _owner: self.clone(),
+        })
+    }
+    pub fn checked(&self, product: ProductRef) -> Option<CheckOutput> {
+        let completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
+        let (selected, data) = completed.as_ref()?;
+        if *selected != product {
+            return None;
+        }
+        Some(CheckOutput {
+            completion: data.checked.completion,
+            sources: data.checked.sources.clone(),
+            diagnostics: data.checked.diagnostics.clone(),
+            unsafe_ffi: data.checked.unsafe_ffi.clone(),
         })
     }
     /// Inspect acceptance without cloning the ordered file/product inventory.
@@ -309,7 +328,7 @@ impl QueryFactory for Factory {
             selecting_instances: false,
             staged: None,
             instances: Vec::new(),
-            reads: ReadsBuilder::new(),
+            reads: ReaderSequence::default(),
             front: Vec::new(),
             lowered: Vec::new(),
             failed_front: Vec::new(),
@@ -378,7 +397,7 @@ struct Task {
     selecting_instances: bool,
     instances: Vec<DefPath>,
     staged: Option<Vec<super::scheduled_lower::staged_runtime::Selection>>,
-    reads: ReadsBuilder,
+    reads: ReaderSequence,
     front: Vec<(DefPath, FrontObservation)>,
     lowered: Vec<(DefPath, ProductRef)>,
     failed_front: Vec<(DefPath, Reference)>,
@@ -487,7 +506,14 @@ impl Task {
                         else {
                             return Err(reference.err().unwrap_or(self.queries.errors.protocol));
                         };
-                        self.reads.merge(&facts.reads);
+                        self.reads
+                            .record(
+                                &*self.queries.store,
+                                &facts.reads,
+                                self.queries.weight.scratch,
+                                self.queries.weight.retained,
+                            )
+                            .ok_or(self.queries.errors.resource)?;
                         if self
                             .queries
                             .lint
@@ -521,12 +547,12 @@ impl Task {
                             Ok(diagnostics) => {
                                 file.diagnostics.extend(diagnostics);
                                 if let Ok(product) = selected {
-                                    let observed = self
-                                        .queries
-                                        .plan
-                                        .front
-                                        .retained_reads(cx, &facts.reads)
-                                        .ok_or(self.queries.errors.resource)?;
+                                    let observed = ReaderReceipt::capture(
+                                        &*self.queries.store,
+                                        &facts.reads,
+                                        self.queries.weight.scratch,
+                                    )
+                                    .ok_or(self.queries.errors.resource)?;
                                     self.front.push((
                                         path.clone(),
                                         FrontObservation {
@@ -585,7 +611,14 @@ impl Task {
                                     .growth
                                     .outcome(product)
                                     .ok_or(self.queries.errors.protocol)?;
-                                self.reads.merge(&output.reads);
+                                self.reads
+                                    .record(
+                                        &*self.queries.store,
+                                        &output.reads,
+                                        self.queries.weight.scratch,
+                                        self.queries.weight.retained,
+                                    )
+                                    .ok_or(self.queries.errors.resource)?;
                                 for file in self.files.iter_mut().filter(|file| file.clean()) {
                                     file.diagnostics.extend(output.diagnostics.iter().cloned());
                                 }
@@ -631,7 +664,14 @@ impl Task {
                                     let output = storage
                                         .outcome(product)
                                         .ok_or(self.queries.errors.protocol)?;
-                                    self.reads.merge(&output.reads);
+                                    self.reads
+                                        .record(
+                                            &*self.queries.store,
+                                            &output.reads,
+                                            self.queries.weight.scratch,
+                                            self.queries.weight.retained,
+                                        )
+                                        .ok_or(self.queries.errors.resource)?;
                                     for file in self.files.iter_mut().filter(|file| file.clean()) {
                                         file.diagnostics.extend(output.diagnostics.iter().cloned());
                                     }
@@ -720,7 +760,14 @@ impl Task {
                                     .lower
                                     .outcome(product.clone())
                                     .ok_or(self.queries.errors.protocol)?;
-                                self.reads.merge(&output.reads);
+                                self.reads
+                                    .record(
+                                        &*self.queries.store,
+                                        &output.reads,
+                                        self.queries.weight.scratch,
+                                        self.queries.weight.retained,
+                                    )
+                                    .ok_or(self.queries.errors.resource)?;
                                 file.diagnostics.extend(output.output.diagnostics);
                                 self.lowered.push((
                                     path.clone(),
@@ -739,7 +786,14 @@ impl Task {
                                     .lower
                                     .selected_reads(id, Err(reference))
                                     .ok_or(reference)?;
-                                self.reads.merge(&reads);
+                                self.reads
+                                    .record(
+                                        &*self.queries.store,
+                                        &reads,
+                                        self.queries.weight.scratch,
+                                        self.queries.weight.retained,
+                                    )
+                                    .ok_or(self.queries.errors.resource)?;
                                 self.failed_lowered.push((path.clone(), reference));
                                 file.error(
                                     self.queries
@@ -810,7 +864,14 @@ impl Task {
                             .lower
                             .selected_reads(id, selected.clone())
                             .ok_or(reference)?;
-                        self.reads.merge(&reads);
+                        self.reads
+                            .record(
+                                &*self.queries.store,
+                                &reads,
+                                self.queries.weight.scratch,
+                                self.queries.weight.retained,
+                            )
+                            .ok_or(self.queries.errors.resource)?;
                         if selected.is_err() {
                             file.error(
                                 self.queries
@@ -833,7 +894,8 @@ impl Task {
         let queries = &self.queries;
         queries.plan.front.release_handoff();
         let reads = std::mem::take(&mut self.reads)
-            .finish()
+            .finish(&*queries.store, queries.weight.scratch)
+            .ok_or(queries.errors.resource)?
             .map_err(|_| queries.errors.protocol)?;
         let stopped = self.files.iter().find_map(|file| match &file.error {
             Some(error) if *error != QueryError::NotImplemented => {
@@ -966,7 +1028,8 @@ impl Task {
             lowered: std::mem::take(&mut self.lowered),
             failed_front: std::mem::take(&mut self.failed_front),
             failed_lowered: std::mem::take(&mut self.failed_lowered),
-            reads: Arc::new(reads),
+            reads: ReaderReceipt::capture(&*queries.store, &reads, queries.weight.scratch)
+                .ok_or(queries.errors.resource)?,
         });
         *queries.completed.lock().unwrap_or_else(|e| e.into_inner()) =
             Some((product.clone(), data));

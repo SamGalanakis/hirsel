@@ -444,6 +444,12 @@ impl Reads {
             SORT_COMPARISONS.with(|n| n.set(n.get() + 1));
             a.0.cmp(&b.0)
         });
+        Ok(Self::from_canonical_observations(unique))
+    }
+    /// Freeze already canonical unique rows with their first-read ordinals.
+    /// Both callers construct uniqueness before reaching this boundary.
+    pub(crate) fn from_canonical_observations(unique: Vec<(ReadKey, ContentHash, usize)>) -> Self {
+        debug_assert!(unique.windows(2).all(|pair| pair[0].0 < pair[1].0));
         let observation = if unique.windows(2).all(|pair| pair[0].2 < pair[1].2) {
             None
         } else {
@@ -455,11 +461,11 @@ impl Reads {
             .into_iter()
             .map(|(key, value, _)| (key, value))
             .collect::<Vec<_>>();
-        Ok(Self {
+        Self {
             rows: rows.into(),
             indices: None,
             observation,
-        })
+        }
     }
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &(ReadKey, ContentHash)> {
         (0..self.len())
@@ -633,17 +639,52 @@ impl Reads {
             out.extend(logical.to_le_bytes());
         }
     }
-    pub(crate) fn encoding_working_bytes(&self) -> Option<u64> {
+    pub(crate) fn encoded_bytes(&self) -> Option<u64> {
         let bytes = self.iter().try_fold(8u64, |bytes, (key, value)| {
             bytes
                 .checked_add(u64::try_from(key.encoded_bytes()?).ok()?)?
                 .checked_add(value.0.len() as u64)
         })?;
-        bytes
-            .checked_add((self.len() as u64).checked_mul(4)?)?
+        bytes.checked_add((self.len() as u64).checked_mul(4)?)
+    }
+    pub(crate) fn encoding_working_bytes(&self) -> Option<u64> {
+        self.encoded_bytes()?
             .max(8)
             .checked_mul(4)?
             .checked_add(size_of::<Vec<u8>>() as u64)
+    }
+    /// Visit HRD3's canonical rows, then its exact observation indices.
+    /// This uses the same framing, row-order and permutation checks as decode.
+    pub(crate) fn visit_encoded(
+        mut input: &[u8],
+        mut visit: impl FnMut(usize, Option<(ReadKey, ContentHash)>) -> Option<()>,
+    ) -> Option<usize> {
+        if take(&mut input, 4)? != b"HRD3" {
+            return None;
+        }
+        let count = take_u32(&mut input)? as usize;
+        if count > input.len() / (1 + size_of::<ContentHash>() + size_of::<u32>()) {
+            return None;
+        }
+        let mut previous = None;
+        for index in 0..count {
+            let key = decode_key(&mut input)?;
+            if previous.is_some_and(|old| old >= key) {
+                return None;
+            }
+            previous = Some(key);
+            let value = ContentHash(take(&mut input, 32)?.try_into().ok()?);
+            visit(index, Some((key, value)))?;
+        }
+        let mut seen = vec![false; count];
+        for _ in 0..count {
+            let index = take_u32(&mut input)? as usize;
+            if index >= count || std::mem::replace(&mut seen[index], true) {
+                return None;
+            }
+            visit(index, None)?;
+        }
+        input.is_empty().then_some(count)
     }
     pub fn decode(input: &mut &[u8]) -> Option<Reads> {
         if take(input, 4)? != b"HRD3" {

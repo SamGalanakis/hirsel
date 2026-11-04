@@ -538,16 +538,19 @@ impl VerifierCache {
         if !Arc::ptr_eq(&stamp.types, types) {
             return Ok(false);
         }
-        // Checked lookups only inspect V's immutable table rows. No producer
-        // or private inference runs while the guard table is locked.
+        if let Some((holds, _)) = stamp.reads.lock().unwrap().get(read) {
+            return Ok(*holds);
+        }
+        let observed = crate::input::observe_read(Some(types), read, signatures.lookup());
+        let lease = self.retain_fact((size_of::<VRead>() + 256) as u64)?;
         let mut reads = stamp.reads.lock().unwrap();
         if let Some((holds, _)) = reads.get(read) {
             return Ok(*holds);
         }
         hirsel_intern::work::count(hirsel_intern::work::Counter::SealedReadComparisons);
         hirsel_intern::timings::count(hirsel_intern::timings::Count::SealedReadComparisons);
-        let holds = crate::input::read_holds_for_types(types, read, signatures.lookup());
-        if let Some(lease) = self.retain_fact((size_of::<VRead>() + 256) as u64)? {
+        let holds = crate::input::compare_read(read, observed.as_ref());
+        if let Some(lease) = lease {
             reads.insert(read.clone(), (holds, lease));
         }
         Ok(holds)

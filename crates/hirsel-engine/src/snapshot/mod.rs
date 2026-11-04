@@ -1236,7 +1236,7 @@ impl SignatureSnapshot {
                 let visible = self
                     .visible(package)
                     .expect("installed closures are complete");
-                let full = Arc::new(ViewTable::from_views(
+                let full = ViewTable::from_views(
                     t,
                     self.membership()
                         .definitions
@@ -1265,7 +1265,45 @@ impl SignatureSnapshot {
                         .collect::<Result<Vec<_>, _>>()?,
                     &mut store,
                     Some(&state.validated),
-                )?);
+                )?;
+                let full = if let Some(mut bytes) = full.retained_control_bytes() {
+                    let refusal = || hirsel_validate::ViewRefusal::Unreadable {
+                        definition: signature.definition,
+                        cause: QueryError::Operational(hirsel_types::OperationalFailure {
+                            operation: "validation base retention".into(),
+                            message: "full table size overflow".into(),
+                        }),
+                    };
+                    for view in full.views() {
+                        if let Some(payload) = view.identified().held_signature() {
+                            bytes = bytes
+                                .checked_add(
+                                    crate::memo::retained::retained_signature_payload_bytes(
+                                        payload,
+                                    ),
+                                )
+                                .ok_or_else(refusal)?;
+                        }
+                    }
+                    let mut weight = crate::NativeMetadataWeight::default();
+                    weight.tree::<PackageId, Arc<ViewTable>>(1);
+                    weight.add(package.name.capacity() + package.version.capacity());
+                    bytes = bytes.checked_add(weight.bytes()).ok_or_else(refusal)?;
+                    let lease = match &self.headers {
+                        Some(headers) => headers.validation_lease(bytes).map_err(|cause| {
+                            hirsel_validate::ViewRefusal::Unreadable {
+                                definition: signature.definition,
+                                cause,
+                            }
+                        })?,
+                        None => Arc::new(()) as Arc<dyn Send + Sync>,
+                    };
+                    Arc::new(full.retain_owner(lease))
+                } else {
+                    // Failed tables remain exact transient inputs. A later
+                    // request can retry after its resource/context changes.
+                    break Arc::new(full);
+                };
                 state
                     .overlay_bases
                     .lock()
@@ -1735,6 +1773,19 @@ mod tests {
                 ..Default::default()
             })
         };
+        let (table, allocation) = crate::test_alloc::measured(|| {
+            ViewTable::new(
+                &types,
+                rows.iter().cloned(),
+                None,
+                &mut ValidatedSignatures::default(),
+                None,
+            )
+            .unwrap()
+        });
+        assert!(allocation.live > 0);
+        assert!(allocation.live as u64 <= table.retained_control_bytes().unwrap());
+        drop(table);
         let source = build(&rows, BTreeMap::new());
         let installed = BTreeMap::from([(
             package.clone(),
@@ -1757,7 +1808,7 @@ mod tests {
                 *ty = types.intern(Type::with_kind(TypeKind::Primitive(primitive)));
                 let replacement = Arc::new(replacement);
                 let expected = View::new(&types, replacement.clone(), None).digest();
-                identities.insert((row.definition, expected));
+                identities.insert((row.definition, primitive as u8));
                 let mut shared = None;
                 for _ in 0..2 {
                     let views = snapshot

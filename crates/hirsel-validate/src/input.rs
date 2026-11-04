@@ -146,6 +146,14 @@ impl IdentifiedSignature {
             digest,
         }
     }
+    /// The payload retained by this identity; sourced views retain their
+    /// original cache owner instead of pinning a signature payload.
+    pub fn held_signature(&self) -> Option<&hirsel_types::SignatureRef> {
+        match &self.payload {
+            Payload::Held(signature) => Some(signature),
+            Payload::Sourced { .. } => None,
+        }
+    }
     pub fn belongs_to(&self, types: &TypeInterner) -> bool {
         std::ptr::eq(&*self.types, types)
     }
@@ -363,18 +371,33 @@ pub fn errors_digest(errors: &[Violation]) -> ContentHash {
     ContentHash::of_parts("hirsel.validate.universe-errors.v1", [text.as_bytes()])
 }
 
-/// Whether `read` observes the same value in `signatures` now.
-pub fn read_holds(read: &VRead, signatures: &dyn SignatureLookup) -> bool {
+/// Capture the current immutable observation before comparing it. Sourced
+/// view lookup may invoke a producer, so callers hold no fact-cache lock here.
+pub(crate) fn observe_read(
+    types: Option<&TypeInterner>,
+    read: &VRead,
+    signatures: &dyn SignatureLookup,
+) -> Option<VRead> {
+    match read {
+        VRead::View(d, _) => {
+            let view = signatures.view(*d)?;
+            types
+                .is_none_or(|t| view.for_types(t))
+                .then(|| VRead::View(*d, view.digest()))
+        }
+        VRead::Missing(d) => signatures.view(*d).is_none().then_some(VRead::Missing(*d)),
+        VRead::FirstHeap(_) => Some(VRead::FirstHeap(signatures.first_heap().map(|(d, _)| d))),
+        VRead::UniverseErrors(_) => Some(VRead::UniverseErrors(signatures.universe_errors().0)),
+    }
+}
+pub(crate) fn compare_read(read: &VRead, observed: Option<&VRead>) -> bool {
     hirsel_intern::work::count(hirsel_intern::work::Counter::ValidationReadComparisons);
     hirsel_intern::timings::count(hirsel_intern::timings::Count::ValidationReadComparisons);
-    match read {
-        VRead::View(d, digest) => signatures
-            .view(*d)
-            .is_some_and(|view| view.digest() == *digest),
-        VRead::Missing(d) => signatures.view(*d).is_none(),
-        VRead::FirstHeap(selected) => signatures.first_heap().map(|(d, _)| d) == *selected,
-        VRead::UniverseErrors(digest) => signatures.universe_errors().0 == *digest,
-    }
+    observed == Some(read)
+}
+/// Whether `read` observes the same value in `signatures` now.
+pub fn read_holds(read: &VRead, signatures: &dyn SignatureLookup) -> bool {
+    compare_read(read, observe_read(None, read, signatures).as_ref())
 }
 
 /// The same witness, also bound to the type universe actually being checked.
@@ -385,16 +408,7 @@ pub(crate) fn read_holds_for_types(
     read: &VRead,
     signatures: &dyn SignatureLookup,
 ) -> bool {
-    match read {
-        VRead::View(d, digest) => {
-            hirsel_intern::work::count(hirsel_intern::work::Counter::ValidationReadComparisons);
-            hirsel_intern::timings::count(hirsel_intern::timings::Count::ValidationReadComparisons);
-            signatures
-                .view(*d)
-                .is_some_and(|view| view.for_types(t) && view.digest() == *digest)
-        }
-        _ => read_holds(read, signatures),
-    }
+    compare_read(read, observe_read(Some(t), read, signatures).as_ref())
 }
 
 /// The recording lookup V's checks read through, for one validation.

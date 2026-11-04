@@ -184,6 +184,23 @@ impl Installed {
     }
 }
 
+fn heap_bytes(heap: &HeapRole) -> Option<u64> {
+    [&heap.arena, &heap.operation]
+        .into_iter()
+        .try_fold(0u64, |n, path| {
+            let n = n.checked_add(
+                (path.0.package.name.capacity()
+                    + path.0.package.version.capacity()
+                    + path.0.name.capacity()
+                    + path.0.modules.capacity() * size_of::<String>()) as u64,
+            )?;
+            path.0
+                .modules
+                .iter()
+                .try_fold(n, |n, module| n.checked_add(module.capacity() as u64))
+        })
+}
+
 /// The public universe of one snapshot, with V's verdict on every view.
 pub struct ViewTable {
     views: Vec<View>,
@@ -198,6 +215,7 @@ pub struct ViewTable {
     input_digest: OnceLock<ContentHash>,
     stamp: EnvironmentStamp,
     installed: Option<Installed>,
+    _retention: Option<Arc<dyn Send + Sync>>,
 }
 impl ViewTable {
     /// The table of `signatures` (one per path), reusing the digests of
@@ -268,6 +286,7 @@ impl ViewTable {
             errors: UniverseErrors::default(),
             input_digest: OnceLock::new(),
             stamp: EnvironmentStamp::new(t, store),
+            _retention: None,
         };
         let verdicts: Vec<_> = table
             .views
@@ -286,6 +305,55 @@ impl ViewTable {
             UniverseErrors::new(verdicts.iter().filter_map(|v| v.error.clone()).collect());
         table.verdicts = verdicts;
         Ok(table)
+    }
+    /// Control allocations of a complete error-free table. Signature payloads
+    /// held by its identified views are charged separately by the host; sourced
+    /// payloads retain their original cache owners. Installed tables and failed
+    /// verdict payloads are not retained through this optional memo.
+    pub fn retained_control_bytes(&self) -> Option<u64> {
+        if self.installed.is_some() || !self.errors.errors.is_empty() {
+            return None;
+        }
+        let mut bytes = (size_of::<Self>() + 2 * size_of::<usize>() + 256) as u64;
+        for allocated in [
+            self.views.capacity().checked_mul(size_of::<View>())?,
+            self.verdicts
+                .capacity()
+                .checked_mul(size_of::<Arc<ViewVerdict>>())?,
+            self.index
+                .capacity()
+                .checked_mul(3 * size_of::<(DefId, u32)>() + 1)?,
+            self.readers
+                .capacity()
+                .checked_mul(3 * size_of::<(DefId, Vec<u32>)>() + 1)?,
+            self.heap_readers.capacity().checked_mul(size_of::<u32>())?,
+        ] {
+            bytes = bytes.checked_add(allocated as u64)?;
+        }
+        for readers in self.readers.values() {
+            bytes = bytes.checked_add(readers.capacity().checked_mul(size_of::<u32>())? as u64)?;
+        }
+        for verdict in &self.verdicts {
+            bytes =
+                bytes.checked_add((size_of::<ViewVerdict>() + 2 * size_of::<usize>()) as u64)?;
+            bytes = bytes
+                .checked_add(verdict.reads.capacity().checked_mul(size_of::<VRead>())? as u64)?;
+        }
+        for view in &self.views {
+            bytes = bytes.checked_add((size_of::<crate::IdentifiedSignature>() + 128) as u64)?;
+            if let Some(heap) = view.input.heap() {
+                bytes = bytes.checked_add(heap_bytes(heap)?)?;
+            }
+        }
+        if let Some((_, heap)) = &self.first_heap {
+            bytes = bytes.checked_add(heap_bytes(heap)?)?;
+        }
+        Some(bytes)
+    }
+    /// Keep the host's reservation with every owner of the shared table.
+    pub fn retain_owner(mut self, owner: Arc<dyn Send + Sync>) -> Self {
+        self._retention = Some(owner);
+        self
     }
     pub fn get(&self, d: DefId) -> Option<&View> {
         match self.index.get(&d) {
@@ -461,7 +529,10 @@ impl PackageViews {
     /// Incremental control storage of a successful overlay, excluding its
     /// shared base and signature payloads. Failed verdict payloads stay transient.
     pub fn retained_delta_bytes(&self) -> Option<u64> {
-        if !self.errors.errors.is_empty() || self.verdicts.values().any(|v| v.error.is_some()) {
+        if !self.base.errors.errors.is_empty()
+            || !self.errors.errors.is_empty()
+            || self.verdicts.values().any(|v| v.error.is_some())
+        {
             return None;
         }
         let mut bytes = (size_of::<Self>() + 2 * size_of::<usize>()) as u64;
@@ -474,23 +545,6 @@ impl PackageViews {
         for verdict in self.verdicts.values() {
             bytes = bytes.checked_add((verdict.reads.capacity() * size_of::<VRead>()) as u64)?;
         }
-        let heap_bytes = |heap: &HeapRole| -> Option<u64> {
-            [&heap.arena, &heap.operation]
-                .into_iter()
-                .try_fold(0u64, |n, path| {
-                    let n = n.checked_add(
-                        (path.0.package.name.capacity()
-                            + path.0.package.version.capacity()
-                            + path.0.name.capacity()
-                            + path.0.modules.capacity() * size_of::<String>())
-                            as u64,
-                    )?;
-                    path.0
-                        .modules
-                        .iter()
-                        .try_fold(n, |n, module| n.checked_add(module.capacity() as u64))
-                })
-        };
         if let Some((_, heap)) = &self.first_heap {
             bytes = bytes.checked_add(heap_bytes(heap)?)?;
         }

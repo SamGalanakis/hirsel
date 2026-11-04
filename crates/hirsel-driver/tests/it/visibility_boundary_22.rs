@@ -8,6 +8,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_syntax::{DefPath, ItemPath, PackageId};
 use serde_json::json;
 

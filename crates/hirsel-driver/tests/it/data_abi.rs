@@ -5,6 +5,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -337,11 +338,11 @@ fn declaration_export_refuses_source_and_manifest_errors_without_link_inputs() {
 #[test]
 fn declaration_export_graph_cannot_supply_a_check_without_foreign_link_inputs() {
     with_compiler_stack(|| {
-        use hirsel_driver::requests::CompileOperation;
-        use hirsel_driver::requests::CompileRequest;
-        use hirsel_driver::requests::CompileResult;
-        use hirsel_driver::requests::CompilerRequests;
         use hirsel_engine::requests::RequestEngine;
+        use hirsel_requests::CompileOperation;
+        use hirsel_requests::CompileRequest;
+        use hirsel_requests::CompileResult;
+        use hirsel_requests::CompilerRequests;
         let fixture = fixture("export-graph", LIBRARY);
         let compiler = COMPILER;
         let mut selector = CompilerRequests::for_host(compiler.clone(), compiler.configuration());

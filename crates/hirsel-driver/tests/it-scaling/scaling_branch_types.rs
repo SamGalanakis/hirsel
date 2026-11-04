@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 #[test]
 fn unchanged_branch_bindings_do_not_multiply_type_rows() {
     with_compiler_stack(|| {

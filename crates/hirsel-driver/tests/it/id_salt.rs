@@ -2,6 +2,7 @@
 //! session ids (Symbol, DefId) were assigned. Each salt runs in its own process.
 use hirsel_driver::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use std::path::{Path, PathBuf};
 
 /// Every 149th corpus program in path order: a fixed sample across every chapter.

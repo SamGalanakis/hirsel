@@ -110,7 +110,7 @@ fn campaign(name: &str, source: &str, gate: FileReadScript) {
             file_reads: file_reads.clone(),
             ..Default::default()
         };
-        use hirsel_driver::requests::*;
+        use hirsel_requests::*;
         let compiler = hirsel_front_phases::COMPILER;
         let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
         let request = CompileRequest::source(

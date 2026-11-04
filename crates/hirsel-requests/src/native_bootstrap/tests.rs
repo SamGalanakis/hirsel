@@ -842,12 +842,7 @@ fn native_bootstrap_policy_case(bind_run: bool) {
             } else {
                 None
             };
-            let validated_run = bound.as_ref().map(|bound| {
-                Arc::new(match bound {
-                    crate::BoundHostRun::Live(bound) => bound.run().clone(),
-                    crate::BoundHostRun::Replay { run, .. } => run.clone(),
-                })
-            });
+            let validated_run = bound.as_ref().map(|bound| Arc::new(bound.run().clone()));
             let mut program = crate::COMPILER
                 .with_config(CompileConfig {
                     jobs: Jobs::new(jobs),

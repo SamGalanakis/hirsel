@@ -12,6 +12,8 @@ test = false
 doctest = false
 
 [dev-dependencies]
+hirsel-host-io = { path = "../hirsel-host-io" }
+hirsel-requests = { path = "../hirsel-requests" }
 hirsel-native-cache = { path = "../hirsel-native-cache" }
 hirsel-native-batch = { path = "../hirsel-native-batch" }
 hirsel-front-phases = { path = "../hirsel-front-phases" }

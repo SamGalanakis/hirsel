@@ -1,7 +1,7 @@
-use hirsel_driver::requests::*;
 use hirsel_driver::testing;
 use hirsel_driver::testing::Selection;
 use hirsel_driver::testing::Test;
+use hirsel_requests::*;
 use std::{path::Path, sync::Arc};
 pub fn suite(path: &Path, seed: Option<u64>) -> (Vec<Test>, Arc<TirBatchExecution>) {
     let (discovery, mut requests) = testing::discover_with_selector(

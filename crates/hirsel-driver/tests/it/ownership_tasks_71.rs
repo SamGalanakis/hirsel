@@ -1,9 +1,9 @@
 //! Child-local resources bind to actual native task paths, with no payload identity.
 use hirsel_driver::native;
-use hirsel_driver::requests::*;
 use hirsel_driver::resident::ObservedSession;
 use hirsel_engine::{CompileConfig, runtime::ProcessBudget, store::MemStore};
 use hirsel_front_phases::COMPILER;
+use hirsel_requests::*;
 use std::sync::Arc;
 
 #[test]
@@ -41,8 +41,8 @@ fn child_local_source(source_text: &str, expected_tasks: usize, require_spawn_bi
         for checked in [false, true] {
             let run = hirsel_driver::ownership_trace::run_resources_on_host(
                 &path,
-                hirsel_driver::HostLaunch::Live {
-                    config: hirsel_driver::LaunchConfig::Grants {
+                hirsel_host_io::launch::HostLaunch::Live {
+                    config: hirsel_host_io::launch::LaunchConfig::Grants {
                         input: grants,
                         arguments: None,
                     },
@@ -140,8 +140,8 @@ fn child_local_source(source_text: &str, expected_tasks: usize, require_spawn_bi
                     &tools,
                     &directory.path().join(backend.name()),
                     1000,
-                    hirsel_driver::HostLaunch::Live {
-                        config: hirsel_driver::LaunchConfig::Grants {
+                    hirsel_host_io::launch::HostLaunch::Live {
+                        config: hirsel_host_io::launch::LaunchConfig::Grants {
                             input: std::ffi::OsStr::new(
                                 r#"{"io":{"tasks":"tasks.cooperative@1","dirs":[]}}"#,
                             ),

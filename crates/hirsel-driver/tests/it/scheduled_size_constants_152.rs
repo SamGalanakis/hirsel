@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::MemStore, *};
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use std::sync::Arc;
 
 #[test]
@@ -227,7 +228,9 @@ fn check_size_instances(nested: bool) {
 
 #[test]
 fn runtime_calls_select_staged_sizes_from_settled_summaries_after_restore() {
-    use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
+    use hirsel_requests::CompileOperation;
+    use hirsel_requests::CompileResult;
+    use hirsel_requests::CompilerRequests;
     use hirsel_tir::TirProvider;
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();

@@ -239,12 +239,12 @@ fn artifacts(path: &Path, config: &Config, store: Arc<dyn ResultStore>) -> Artif
 /// Fresh, store-warm and resident oracle cells consume the same selected
 /// products. Exporting artifacts never exposes a mutable resident compiler.
 fn request_artifacts(session: &mut hirsel_driver::session::Session, config: &Config) -> Artifacts {
-    let selected = session.request(hirsel_driver::requests::CompileOperation::Artifacts {
+    let selected = session.request(hirsel_requests::CompileOperation::Artifacts {
         native: config.native,
     });
     match selected {
         Ok(selected) => match &selected.result {
-            hirsel_driver::requests::CompileResult::Artifacts(artifacts) => artifacts.clone(),
+            hirsel_requests::CompileResult::Artifacts(artifacts) => artifacts.clone(),
             _ => [(
                 "diagnostics".into(),
                 b"tool error: artifacts request returned another operation\n".to_vec(),

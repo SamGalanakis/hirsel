@@ -8,12 +8,6 @@ use hirsel_cli_args::{
     parse_or_exit,
 };
 use hirsel_driver::native;
-use hirsel_driver::requests::CompileOperation;
-use hirsel_driver::requests::CompileResult;
-use hirsel_driver::requests::CompilerRequests;
-use hirsel_driver::requests::NativeOutput;
-use hirsel_driver::requests::NativeReady;
-use hirsel_driver::requests::NativeRequest;
 use hirsel_native::BuildOptions;
 use hirsel_native::OptLevel;
 use hirsel_native::Options;
@@ -21,6 +15,12 @@ use hirsel_native::Partition;
 use hirsel_native::RuntimeBuild;
 use hirsel_native::TargetSpec;
 use hirsel_native::Toolchain;
+use hirsel_requests::CompileOperation;
+use hirsel_requests::CompileResult;
+use hirsel_requests::CompilerRequests;
+use hirsel_requests::NativeOutput;
+use hirsel_requests::NativeReady;
+use hirsel_requests::NativeRequest;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

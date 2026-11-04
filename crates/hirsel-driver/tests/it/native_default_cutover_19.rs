@@ -29,8 +29,8 @@ fn public_record_replay(backend: Backend) {
             );
             (outcome, stdout, stderr)
         };
-        let launch = hirsel_driver::HostLaunch::Live {
-            config: hirsel_driver::LaunchConfig::Grants {
+        let launch = hirsel_host_io::launch::HostLaunch::Live {
+            config: hirsel_host_io::launch::LaunchConfig::Grants {
                 input: std::ffi::OsStr::new(
                     r#"{"io":{"stdout":"stdout.bytes@1","stderr":"stderr.bytes@1","dirs":[]},"args":[]}"#,
                 ),
@@ -45,12 +45,12 @@ fn public_record_replay(backend: Backend) {
         assert!(stderr.is_empty(), "{backend:?}: {stderr:?}");
         assert!(tape.is_file(), "recording was not published");
         let (replayed, replay_stdout, replay_stderr) =
-            run(hirsel_driver::HostLaunch::Replay(&tape));
+            run(hirsel_host_io::launch::HostLaunch::Replay(&tape));
         assert_eq!(replayed.unwrap().unwrap().exit_code(), 0);
         assert_eq!(replay_stdout, stdout);
         assert_eq!(replay_stderr, stderr);
         std::fs::write(&source, text.replace("cutover replay", "changed replay")).unwrap();
-        let (refused, stdout, stderr) = run(hirsel_driver::HostLaunch::Replay(&tape));
+        let (refused, stdout, stderr) = run(hirsel_host_io::launch::HostLaunch::Replay(&tape));
         let Err(hirsel_engine::ToolError::Runtime(message)) = refused else {
             panic!("changed source replay was not refused");
         };

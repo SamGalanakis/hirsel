@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 #[test]
 fn mutual_alias_cycles_are_language_failures_in_either_declaration_order() {

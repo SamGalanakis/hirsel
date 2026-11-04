@@ -2,6 +2,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_types::QueryError;
 
 fn check(source: &str, expected: Option<&str>) {

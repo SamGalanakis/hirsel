@@ -382,6 +382,12 @@ pub struct NativeExecution {
     pub(crate) owner: Arc<dyn Send + Sync>,
 }
 impl NativeExecution {
+    pub fn validate_image(&self, path: &std::path::Path) -> Result<(), String> {
+        self.platform.validate_image(path)
+    }
+    pub fn executable(&self, path: PathBuf) -> Result<hirsel_native::Runnable, String> {
+        self.platform.executable(path)
+    }
     /// Keep admitted executable/launch owners alive through a child process.
     pub fn retain(&self) -> Arc<dyn Send + Sync> {
         self.owner.clone()

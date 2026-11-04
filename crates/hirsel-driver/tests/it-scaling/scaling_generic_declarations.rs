@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 #[test]
 fn closure_proofs_share_generic_declarations_in_smoke() {
     closure_proofs_at(&[16, 64]);

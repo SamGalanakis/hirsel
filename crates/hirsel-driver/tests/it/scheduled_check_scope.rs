@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::MemStore, *};
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use std::sync::Arc;
 
 fn scope_case(source: &str, failed_front: bool, failed_lower: bool) {
@@ -394,9 +395,10 @@ fn front_capture_registers_nested_closed_specializations_and_refuses_generators(
 
 #[test]
 fn source_requests_discover_closed_instances_from_lazy_declarations() {
-    use hirsel_driver::requests::{
-        CompileOperation, CompileResult, CompilerRequests, RequestLimits,
-    };
+    use hirsel_requests::CompileOperation;
+    use hirsel_requests::CompileResult;
+    use hirsel_requests::CompilerRequests;
+    use hirsel_requests::RequestLimits;
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let manifest = directory.path().join("hirsel.json");

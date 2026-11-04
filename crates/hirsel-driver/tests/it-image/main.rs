@@ -11,6 +11,7 @@ mod image_fixture;
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use image_fixture::*;
 
 const STD_PROGRAM: &str = "pub type AppError = Grant(GrantError) | Output(OutputError)
@@ -27,8 +28,8 @@ pub fn main(rt: Io) -> Result[(), AppError] {
 mod canonical_debug;
 use canonical_debug::{canonical_ids, placed};
 
-use hirsel_driver::requests::*;
 use hirsel_engine::runtime::ProcessBudget;
+use hirsel_requests::*;
 use std::{path::Path, sync::Arc};
 
 fn requests(path: &Path, products: Option<&Path>) -> CompilerRequests {

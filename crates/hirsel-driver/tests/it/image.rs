@@ -5,6 +5,7 @@ use crate::image_fixture::*;
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_syntax::DefId;
 use std::{path::PathBuf, sync::Arc};
 
@@ -719,8 +720,10 @@ fn imaged_helper_lowering_preserves_dependency_depth() {
 #[test]
 fn frozen_s1_products_do_not_export_root_validation_universe_receipts() {
     with_compiler_stack(|| {
-        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
         use hirsel_engine::memo::MemoKey;
+        use hirsel_requests::CompileOperation;
+        use hirsel_requests::CompileResult;
+        use hirsel_requests::CompilerRequests;
         let f = Fixture::new();
         let library =
             f.library("pub opaque type Hidden: plain uses {} { value: u32 }\npub fn helper()->u32{let h=Hidden(value:7u32);h.value}\npub const VALUE:u32=comptime helper()\n");
@@ -808,8 +811,10 @@ fn frozen_s1_products_do_not_export_root_validation_universe_receipts() {
 #[test]
 fn image_releases_unrecorded_files_after_parallel_constant_publication() {
     with_compiler_stack(|| {
-        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
         use hirsel_engine::memo::MemoKey;
+        use hirsel_requests::CompileOperation;
+        use hirsel_requests::CompileResult;
+        use hirsel_requests::CompilerRequests;
         let f = Fixture::new();
         let library = f.library("pub fn first()->u32{1u32}\n");
         std::fs::write(

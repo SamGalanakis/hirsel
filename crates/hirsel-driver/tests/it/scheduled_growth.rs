@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::MemStore, *};
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use std::sync::Arc;
 #[test]
 fn admitted_source_growth_demands_unexecuted_required_roots() {

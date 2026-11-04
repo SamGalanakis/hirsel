@@ -2,6 +2,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 const HEADER: &str = "fn need[T](take x:unique T) {}\nfn relay[T](take source:unique List[unique T]) {for x in take source {need(take x)}}\n";
 

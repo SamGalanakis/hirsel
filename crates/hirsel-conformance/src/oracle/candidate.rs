@@ -41,9 +41,9 @@ pub fn bounded_package(entry: &Path) -> Result<(), String> {
 /// reuse. The caller independently materializes this tree (Scenario::write),
 /// not from a candidate input map.
 pub fn cold(path: &Path, config: &Config) -> Result<Artifacts, String> {
-    use hirsel_driver::requests::CompileOperation;
-    use hirsel_driver::requests::CompileResult;
-    use hirsel_driver::requests::CompilerRequests;
+    use hirsel_requests::CompileOperation;
+    use hirsel_requests::CompileResult;
+    use hirsel_requests::CompilerRequests;
     let compiler = compiler(config);
     hirsel_engine::with_compiler_stack(|| {
         // The loader alone selects the package scope; it checks nothing.

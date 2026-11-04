@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 const MINIMAL: &str = "fn probe(files:List[String]) {let f=fn(){for name in files {}};f()}\npub fn main()->Result[(),()] {probe([\"a\"]);Ok(())}";
 const MATRIX: &str =

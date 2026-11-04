@@ -1,14 +1,14 @@
 use crate::*;
-use hirsel_driver::requests::CompileOperation;
-use hirsel_driver::requests::CompileOutput;
-use hirsel_driver::requests::CompileRequest;
-use hirsel_driver::requests::CompileResult;
-use hirsel_driver::requests::CompilerRequests;
 use hirsel_engine::{QueryError, ToolError};
+use hirsel_requests::CompileOperation;
+use hirsel_requests::CompileOutput;
+use hirsel_requests::CompileRequest;
+use hirsel_requests::CompileResult;
+use hirsel_requests::CompilerRequests;
 
 struct RequestedProgram {
     path: std::path::PathBuf,
-    inputs: hirsel_driver::requests::CompileInputs,
+    inputs: hirsel_requests::CompileInputs,
     requests: CompilerRequests,
 }
 impl RequestedProgram {

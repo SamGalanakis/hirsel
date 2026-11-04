@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_tir::Constant;
 fn path(name: &str) -> DefPath {
     let mut p = entry_path(&default_context());
@@ -384,9 +385,9 @@ fn size_constant_instances_cache_separately_and_refresh_executed_dependencies() 
 
 #[test]
 fn a_failed_size_instantiation_retains_its_selecting_site() {
-    use hirsel_driver::requests::CompileOperation;
-    use hirsel_driver::requests::CompileResult;
-    use hirsel_driver::requests::CompilerRequests;
+    use hirsel_requests::CompileOperation;
+    use hirsel_requests::CompileResult;
+    use hirsel_requests::CompilerRequests;
     with_compiler_stack(|| {
         let source = include_str!("../../../../conformance/CT/CT-1-size-instantiation-bad.hir");
         let directory = tempfile::tempdir().unwrap();
@@ -673,8 +674,8 @@ struct FrontierText {
 }
 struct RequestFrontier {
     text: FrontierText,
-    sources: Option<std::sync::Arc<hirsel_driver::requests::PrecomputedSources>>,
-    inspection: Option<std::sync::Arc<hirsel_driver::requests::CompileInspection>>,
+    sources: Option<std::sync::Arc<hirsel_requests::PrecomputedSources>>,
+    inspection: Option<std::sync::Arc<hirsel_requests::CompileInspection>>,
     budget: std::sync::Arc<hirsel_engine::runtime::ProcessBudget>,
 }
 fn diagnostic_text(
@@ -732,9 +733,9 @@ fn scalar_frontier_text(engine: &mut QueryEngine, paths: &[DefPath]) -> Frontier
 /// Each declaration has its own file. A failed root cannot withhold another
 /// file, while Check remains one source-ordered request over the package.
 fn frontier_text(engine: &mut QueryEngine, paths: Vec<DefPath>, jobs: usize) -> RequestFrontier {
-    use hirsel_driver::requests::CompileOperation;
-    use hirsel_driver::requests::CompileResult;
-    use hirsel_driver::requests::CompilerRequests;
+    use hirsel_requests::CompileOperation;
+    use hirsel_requests::CompileResult;
+    use hirsel_requests::CompilerRequests;
     use std::sync::Arc;
     let file = engine
         .sources
@@ -871,9 +872,9 @@ fn frontier_text(engine: &mut QueryEngine, paths: Vec<DefPath>, jobs: usize) -> 
 /// stored LEAF value; an unchanged repeat reopens it.
 #[test]
 fn frozen_frontier_values_refresh_and_preserve_input_order() {
-    use hirsel_driver::requests::CompileOperation;
-    use hirsel_driver::requests::CompileResult;
-    use hirsel_driver::requests::CompilerRequests;
+    use hirsel_requests::CompileOperation;
+    use hirsel_requests::CompileResult;
+    use hirsel_requests::CompilerRequests;
     use std::sync::Arc;
     with_compiler_stack(|| {
         let source = |leaf| {
@@ -978,9 +979,9 @@ fn frozen_frontier_cycles_and_failures_match_serial() {
 /// times out here instead of accidentally passing the value differential.
 #[test]
 fn frozen_frontier_evaluation_tasks_overlap() {
-    use hirsel_driver::requests::CompileOperation;
-    use hirsel_driver::requests::CompileResult;
-    use hirsel_driver::requests::CompilerRequests;
+    use hirsel_requests::CompileOperation;
+    use hirsel_requests::CompileResult;
+    use hirsel_requests::CompilerRequests;
     use std::sync::{Arc, Condvar, Mutex};
     struct Overlap {
         inner: Arc<dyn LoweringPhase>,
@@ -1165,9 +1166,9 @@ fn frozen_frontier_staged_rounds_evaluate_on_workers() {
                     "{expected:?}; jobs={jobs}; source={source}; phase={:?}",
                     control.last_phase
                 );
-                use hirsel_driver::requests::CompileOperation;
-                use hirsel_driver::requests::CompileResult;
-                use hirsel_driver::requests::CompilerRequests;
+                use hirsel_requests::CompileOperation;
+                use hirsel_requests::CompileResult;
+                use hirsel_requests::CompilerRequests;
                 let directory = tempfile::tempdir().unwrap();
                 let manifest = directory.path().join("hirsel.json");
                 std::fs::write(directory.path().join("comptime.hir"), source).unwrap();

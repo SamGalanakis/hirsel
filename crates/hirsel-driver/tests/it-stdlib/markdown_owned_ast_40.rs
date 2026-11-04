@@ -3,6 +3,7 @@ use crate::source_std::load_program_source;
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use std::path::Path;
 
 fn seal_native(dir: &Path, tools: &hirsel_native::Toolchain, engine: &str, part: &str) {

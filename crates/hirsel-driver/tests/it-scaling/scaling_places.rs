@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 #[test]
 fn ownership_accesses_inspect_only_their_storage_root() {

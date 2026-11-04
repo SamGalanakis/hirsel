@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 fn check(source: &str) -> CheckOutput {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -449,6 +450,7 @@ mod verdict {
     use hirsel_driver::*;
     use hirsel_engine::*;
     use hirsel_front_phases::*;
+    use hirsel_host_io::launch::*;
     use hirsel_intern::work::{Counter, read};
     use hirsel_syntax::ContentHash;
 

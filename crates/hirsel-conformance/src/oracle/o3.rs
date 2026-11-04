@@ -74,21 +74,19 @@ fn one(scenario: &Scenario, report: &mut Report) -> Result<(), String> {
         })
         .collect::<Vec<_>>();
     let inspect =
-        |session: &mut Session| -> Result<Arc<hirsel_driver::requests::CompileInspection>, String> {
+        |session: &mut Session| -> Result<Arc<hirsel_requests::CompileInspection>, String> {
             let selected = session
-                .request_applied(hirsel_driver::requests::CompileOperation::Inspect {
+                .request_applied(hirsel_requests::CompileOperation::Inspect {
                     definitions: definitions.clone(),
                 })
                 .map_err(|error| error.to_string())?;
             match &selected.result {
-                hirsel_driver::requests::CompileResult::Inspect(inspection) => {
-                    Ok(inspection.clone())
-                }
+                hirsel_requests::CompileResult::Inspect(inspection) => Ok(inspection.clone()),
                 _ => Err("inspection request returned another operation".into()),
             }
         };
     let counts =
-        |inspection: &hirsel_driver::requests::CompileInspection| -> Result<Vec<[u64; 5]>, String> {
+        |inspection: &hirsel_requests::CompileInspection| -> Result<Vec<[u64; 5]>, String> {
             definitions
                 .iter()
                 .map(|definition| {
@@ -110,13 +108,22 @@ fn one(scenario: &Scenario, report: &mut Report) -> Result<(), String> {
                 })
                 .collect()
         };
-    let validations = |inspection: &hirsel_driver::requests::CompileInspection| -> Result<Vec<(u64,u64)>, String> {
-        definitions.iter().map(|definition| {
-            let work = inspection.definitions.iter().find(|work| &work.definition == definition)
-                .ok_or_else(|| format!("inspection omitted physical work for {definition}"))?;
-            Ok((work.body_validations, work.lower_calls))
-        }).collect()
-    };
+    let validations =
+        |inspection: &hirsel_requests::CompileInspection| -> Result<Vec<(u64, u64)>, String> {
+            definitions
+                .iter()
+                .map(|definition| {
+                    let work = inspection
+                        .definitions
+                        .iter()
+                        .find(|work| &work.definition == definition)
+                        .ok_or_else(|| {
+                            format!("inspection omitted physical work for {definition}")
+                        })?;
+                    Ok((work.body_validations, work.lower_calls))
+                })
+                .collect()
+        };
     let initial = inspect(&mut session)?;
     let snapshot = initial.memos.clone();
     let stats = initial.stats.clone();

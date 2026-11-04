@@ -1,7 +1,7 @@
 use hirsel_driver::CompilerRequestsExt;
-use hirsel_driver::requests::*;
 use hirsel_engine::{CompileConfig, QueryKind, store::DirStore, with_compiler_stack};
 use hirsel_front_phases::COMPILER;
+use hirsel_requests::*;
 use hirsel_syntax::{DefPath, ItemPath, PackageId};
 use std::sync::Arc;
 

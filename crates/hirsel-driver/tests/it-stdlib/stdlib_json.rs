@@ -2,6 +2,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use std::{path::PathBuf, process::Command};
 
 fn root() -> PathBuf {
@@ -59,11 +60,11 @@ fn seeded_bounded_json_fuzz_matches_python_policy_and_exact_numbers() {
 
 fn native_measurement(source: &str, label: &str) -> String {
     use hirsel_driver::native;
-    use hirsel_driver::requests::*;
     use hirsel_native::OptLevel;
     use hirsel_native::RuntimeBuild;
     use hirsel_native::TargetSpec;
     use hirsel_native::Toolchain;
+    use hirsel_requests::*;
     use std::sync::Arc;
     let dir_scratch = tempfile::Builder::new()
         .prefix(&format!("hirsel-json-{label}-"))

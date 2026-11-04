@@ -932,8 +932,8 @@ pub fn main(rt: Io) -> Result[(), FileError] {
             let mut live = None;
             hirsel_driver::run_path_on_host_observed(
                 &source,
-                hirsel_driver::HostLaunch::Live {
-                    config: hirsel_driver::LaunchConfig::Grants {
+                hirsel_host_io::launch::HostLaunch::Live {
+                    config: hirsel_host_io::launch::LaunchConfig::Grants {
                         input: std::ffi::OsStr::new(&grants),
                         arguments: None,
                     },

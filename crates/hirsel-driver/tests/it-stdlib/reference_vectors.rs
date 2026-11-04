@@ -4,6 +4,7 @@ use crate::source_std::tir;
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use std::{fmt::Write, path::Path};
 
 pub struct Case {

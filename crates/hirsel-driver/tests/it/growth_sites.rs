@@ -2,6 +2,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_span::{Anchor, Span};
 use hirsel_syntax::{DefId, DefPath, LexicalOwner, StmtId};
 use hirsel_types::{NameSite, SizeParamId, SizeParameterRef, TypeParamId, TypeParameterRef};

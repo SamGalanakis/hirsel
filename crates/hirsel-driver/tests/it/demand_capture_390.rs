@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::*, *};
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use std::sync::{Arc, Mutex};
 
 struct Observed {
@@ -329,11 +330,11 @@ pub fn main(rt: Io, args: Args) -> Result[(), AppError] {
             },
         );
         let output = session
-            .request(hirsel_driver::requests::CompileOperation::NativeSources { roots: vec![] })
+            .request(hirsel_requests::CompileOperation::NativeSources { roots: vec![] })
             .unwrap_or_else(|error| panic!("startup native sources: {error}"));
         assert!(matches!(
             output.result,
-            hirsel_driver::requests::CompileResult::NativeSources(_)
+            hirsel_requests::CompileResult::NativeSources(_)
         ));
     });
 }

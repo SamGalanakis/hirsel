@@ -2,6 +2,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 fn vector(name: &str) -> String {
     std::fs::read_to_string(

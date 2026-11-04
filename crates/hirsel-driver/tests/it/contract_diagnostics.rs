@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 #[test]
 fn contract_pseudo_values_are_rejected_before_lowering_outside_ensures() {

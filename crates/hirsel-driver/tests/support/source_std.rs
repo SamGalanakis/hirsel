@@ -138,7 +138,7 @@ fn compiler_for(
         .with_comptime_limits(limits);
     let inputs = key.inputs.clone();
     if existing.is_none() {
-        use hirsel_driver::requests::*;
+        use hirsel_requests::*;
         let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
         let result = requests.execute_request(&CompileRequest {
             path: path.to_owned(),
@@ -182,7 +182,7 @@ pub struct TirFixture {
     primary: PathBuf,
     inputs: FrozenInputs,
     entry: hirsel_syntax::DefPath,
-    requests: hirsel_driver::requests::CompilerRequests,
+    requests: hirsel_requests::CompilerRequests,
 }
 #[allow(dead_code)]
 impl TirFixture {
@@ -211,7 +211,7 @@ impl TirFixture {
                 primary,
                 inputs,
                 entry,
-                requests: hirsel_driver::requests::CompilerRequests::for_host(
+                requests: hirsel_requests::CompilerRequests::for_host(
                     compiler.clone(),
                     compiler.configuration(),
                 ),
@@ -222,8 +222,8 @@ impl TirFixture {
         &mut self,
         replacement: Option<&str>,
         name: Option<&str>,
-    ) -> Result<Arc<hirsel_driver::requests::TirExecution>, ToolError> {
-        use hirsel_driver::requests::*;
+    ) -> Result<Arc<hirsel_requests::TirExecution>, ToolError> {
+        use hirsel_requests::*;
         let mut entry = self.entry.clone();
         if let Some(name) = name {
             entry.0.name = name.into();
@@ -245,8 +245,8 @@ impl TirFixture {
         &mut self,
         source: &str,
         names: &[String],
-    ) -> Result<Vec<Arc<hirsel_driver::requests::TirExecution>>, ToolError> {
-        use hirsel_driver::requests::*;
+    ) -> Result<Vec<Arc<hirsel_requests::TirExecution>>, ToolError> {
+        use hirsel_requests::*;
         let definitions = names
             .iter()
             .map(|name| {
@@ -271,9 +271,9 @@ impl TirFixture {
     fn select(
         &mut self,
         replacement: Option<&str>,
-        operation: hirsel_driver::requests::CompileOperation,
-    ) -> Result<Arc<hirsel_driver::requests::CompileOutput>, ToolError> {
-        use hirsel_driver::requests::*;
+        operation: hirsel_requests::CompileOperation,
+    ) -> Result<Arc<hirsel_requests::CompileOutput>, ToolError> {
+        use hirsel_requests::*;
         let inputs = if let Some(source) = replacement {
             self.inputs.replace_sources(
                 &[(self.primary.clone(), Arc::<[u8]>::from(source.as_bytes()))].into(),
@@ -296,7 +296,7 @@ pub fn tir(
     path: &Path,
     replacement: Option<&str>,
     name: Option<&str>,
-) -> Result<Arc<hirsel_driver::requests::TirExecution>, ToolError> {
+) -> Result<Arc<hirsel_requests::TirExecution>, ToolError> {
     TirFixture::new(path)?.tir(replacement, name)
 }
 
@@ -320,8 +320,8 @@ pub fn observe(
 pub fn tir_memory(
     source: &str,
     definition: Option<hirsel_syntax::DefPath>,
-) -> Result<Arc<hirsel_driver::requests::TirExecution>, ToolError> {
-    use hirsel_driver::requests::*;
+) -> Result<Arc<hirsel_requests::TirExecution>, ToolError> {
+    use hirsel_requests::*;
     let compiler = hirsel_front_phases::COMPILER;
     let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
     let request = CompileRequest::source(
@@ -345,11 +345,11 @@ pub fn tests(
 ) -> Result<
     (
         Vec<hirsel_driver::testing::Test>,
-        Arc<hirsel_driver::requests::TirBatchExecution>,
+        Arc<hirsel_requests::TirBatchExecution>,
     ),
     ToolError,
 > {
-    use hirsel_driver::requests::*;
+    use hirsel_requests::*;
     let compiler = hirsel_front_phases::COMPILER;
     let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
     let request = CompileRequest::source(

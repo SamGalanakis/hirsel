@@ -717,11 +717,11 @@ mod matrix {
             std::fs::write(cold.join("main.hir"), texts[index]).unwrap();
             let expected = hirsel_engine::with_compiler_stack(|| {
                 let compiler = hirsel_front_phases::COMPILER.with_config(config.clone());
-                let engine = hirsel_driver::requests::CompilerRequests::new(
+                let engine = super::requests::CompilerRequests::new(
                     compiler.clone(),
                     config.clone(),
                     hirsel_engine::runtime::ProcessBudget::new(2 << 30),
-                    hirsel_driver::requests::RequestLimits {
+                    super::requests::RequestLimits {
                         runtime_bytes: 512 << 20,
                         snapshot_bytes: 64 << 20,
                         transport_bytes: 256 << 20,

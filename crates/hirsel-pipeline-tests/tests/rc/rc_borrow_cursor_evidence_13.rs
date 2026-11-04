@@ -65,6 +65,7 @@ fn borrow_cursor_evidence_13_native_import_rejects_owned_refill_with_old_audit()
     use hirsel_driver::*;
     use hirsel_engine::*;
     use hirsel_front_phases::*;
+    use hirsel_host_io::launch::*;
     use hirsel_tir::*;
     use hirsel_types::UseKind;
     use std::sync::Arc;
@@ -224,6 +225,7 @@ pub(super) fn bounds_failure_evidence() {
     use hirsel_driver::*;
     use hirsel_engine::*;
     use hirsel_front_phases::*;
+    use hirsel_host_io::launch::*;
     use hirsel_tir::*;
     let program = with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());

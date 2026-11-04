@@ -1,10 +1,3 @@
-use hirsel_driver::requests::CompileOperation;
-use hirsel_driver::requests::CompileRequest;
-use hirsel_driver::requests::CompileResult;
-use hirsel_driver::requests::CompilerRequests;
-use hirsel_driver::requests::NativeOutput;
-use hirsel_driver::requests::NativeReady;
-use hirsel_driver::requests::NativeRequest;
 use hirsel_engine::{ToolError, requests::observe_inputs};
 use hirsel_native::Backend;
 use hirsel_native::BuildOptions;
@@ -13,6 +6,13 @@ use hirsel_native::OptLevel;
 use hirsel_native::Options;
 use hirsel_native::StageName;
 use hirsel_native::Toolchain;
+use hirsel_requests::CompileOperation;
+use hirsel_requests::CompileRequest;
+use hirsel_requests::CompileResult;
+use hirsel_requests::CompilerRequests;
+use hirsel_requests::NativeOutput;
+use hirsel_requests::NativeReady;
+use hirsel_requests::NativeRequest;
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 pub fn supplier(

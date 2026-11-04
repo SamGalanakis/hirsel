@@ -118,9 +118,9 @@ fn request_objects(
             },
         );
         let selected = session
-            .request(hirsel_driver::requests::CompileOperation::NativeSources { roots: vec![] })
+            .request(hirsel_requests::CompileOperation::NativeSources { roots: vec![] })
             .unwrap();
-        let hirsel_driver::requests::CompileResult::NativeSources(facts) = &selected.result else {
+        let hirsel_requests::CompileResult::NativeSources(facts) = &selected.result else {
             panic!("fixture NativeSources failed")
         };
         FixtureSources {
@@ -755,10 +755,10 @@ fn depth_helpers_have_the_certified_fixed_machine_extent_in_every_runtime_varian
 #[test]
 fn cli_request_builds_define_and_adopt_ahead_on_both_backends() {
     with_compiler_stack(|| {
-        use hirsel_driver::requests::CompileOperation;
-        use hirsel_driver::requests::CompileResult;
-        use hirsel_driver::requests::NativeOutput;
-        use hirsel_driver::requests::NativeRequest;
+        use hirsel_requests::CompileOperation;
+        use hirsel_requests::CompileResult;
+        use hirsel_requests::NativeOutput;
+        use hirsel_requests::NativeRequest;
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("main.hir");
         std::fs::write(&source, SOURCE.replace("..64u64", "..1000000u64")).unwrap();

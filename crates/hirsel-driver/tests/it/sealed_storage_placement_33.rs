@@ -2,6 +2,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 fn rejected(source: &str, primary: &str) {
     rejected_by(source, "MODE-1", primary);

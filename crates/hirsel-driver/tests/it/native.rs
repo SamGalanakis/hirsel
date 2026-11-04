@@ -806,15 +806,15 @@ fn an_index_failure_site_is_the_index_expression_in_every_engine() {
 /// own site tables.
 #[test]
 fn requested_ready_views_agree_with_the_reference_under_the_smoke_matrix() {
-    use hirsel_driver::requests::CompileOperation;
-    use hirsel_driver::requests::CompileResult;
-    use hirsel_driver::requests::CompilerRequests;
-    use hirsel_driver::requests::NativeOutput;
-    use hirsel_driver::requests::NativeReady;
-    use hirsel_driver::requests::NativeRequest;
     use hirsel_native::BuildOptions;
     use hirsel_native::NativeError;
     use hirsel_native::Options;
+    use hirsel_requests::CompileOperation;
+    use hirsel_requests::CompileResult;
+    use hirsel_requests::CompilerRequests;
+    use hirsel_requests::NativeOutput;
+    use hirsel_requests::NativeReady;
+    use hirsel_requests::NativeRequest;
     const PRINT: &str = "pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
   let _ = out.print(io.stdout(rt)?, \"hi\\n\")
   Ok(())
@@ -2046,8 +2046,8 @@ fn generated_request_products(
     std::sync::Arc<hirsel_engine::FrontNativeProducts>,
     Observation,
 ) {
-    use hirsel_driver::requests::*;
     use hirsel_front_phases::COMPILER;
+    use hirsel_requests::*;
     let directory = tempfile::tempdir().unwrap();
     let manifest = directory.path().join("hirsel.json");
     std::fs::write(directory.path().join("native.hir"), source).unwrap();

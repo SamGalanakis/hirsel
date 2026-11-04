@@ -5,11 +5,17 @@ mod edits;
 pub mod protocol;
 pub mod v2;
 pub use edits::{ByteEdit, EditError};
+#[cfg(test)]
 use hirsel_driver::requests::CompileInputs;
+#[cfg(test)]
 use hirsel_driver::requests::CompileOperation;
+#[cfg(test)]
 use hirsel_driver::requests::CompileRequest;
+#[cfg(test)]
 use hirsel_driver::requests::CompileResult;
+#[cfg(test)]
 use hirsel_driver::requests::CompilerRequests;
+#[cfg(test)]
 use hirsel_driver::requests::RequestWork;
 use hirsel_engine::loader_inputs::{
     CaptureInputs, FrozenInputs, InputLimit, InputLimits, InputUnavailable, LoaderInputs,
@@ -18,6 +24,18 @@ use hirsel_engine::{
     CheckCompletion, CheckOutput, CheckedProducts, CompileConfig, Compiler, LoweringPolicy,
     QueryError, ToolError, Verify,
 };
+#[cfg(not(test))]
+use hirsel_requests::CompileInputs;
+#[cfg(not(test))]
+use hirsel_requests::CompileOperation;
+#[cfg(not(test))]
+use hirsel_requests::CompileRequest;
+#[cfg(not(test))]
+use hirsel_requests::CompileResult;
+#[cfg(not(test))]
+use hirsel_requests::CompilerRequests;
+#[cfg(not(test))]
+use hirsel_requests::RequestWork;
 use hirsel_syntax::{ContentHash, PackageId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -2262,3 +2280,6 @@ mod tests {
         assert_eq!(failed.verdict, Verdict::Undecided);
     }
 }
+
+#[cfg(test)]
+use hirsel_driver::requests;

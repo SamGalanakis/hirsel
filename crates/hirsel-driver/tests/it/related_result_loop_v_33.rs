@@ -3,6 +3,7 @@ use hirsel_engine::{
     LoweringPolicy, RunConfiguration, SimulationConfig, run_observed_snapshot, with_compiler_stack,
 };
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_native::Observation;
 
 #[test]

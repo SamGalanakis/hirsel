@@ -1037,8 +1037,8 @@ fn instance_bootstrap_keeps_ordinary_failure_local_until_selected_front_demand()
 #[test]
 fn source_requests_install_nested_instance_views_for_check_run_and_native_ownership() {
     use hirsel_driver::native;
-    use hirsel_driver::requests::*;
     use hirsel_driver::resident::ObservedSession;
+    use hirsel_requests::*;
     with_compiler_stack(|| {
         for jobs in [1, 2] {
             let directory = tempfile::tempdir().unwrap();

@@ -1,10 +1,10 @@
 //! Field attribution and incorrect custom hook vectors follow Serde's
 //! internals/check.rs:29–53 and tests/ui/with/incorrect_type.rs (MIT OR Apache-2.0).
 //! Contracts are handwritten independently of the generator.
-use hirsel_driver::requests::CompileOperation;
-use hirsel_driver::requests::CompileResult;
 use hirsel_driver::session::Session;
 use hirsel_engine::{LoweringPolicy, with_compiler_stack};
+use hirsel_requests::CompileOperation;
+use hirsel_requests::CompileResult;
 use std::{fs, path::PathBuf};
 
 fn checked(session: &mut Session) -> hirsel_engine::CheckOutput {

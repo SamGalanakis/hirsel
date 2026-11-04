@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 #[test]
 fn closure_inputs_inspect_only_their_bindings_and_captures() {
     with_compiler_stack(|| {

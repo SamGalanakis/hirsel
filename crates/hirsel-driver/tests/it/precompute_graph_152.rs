@@ -1,9 +1,9 @@
-use hirsel_driver::requests::*;
 use hirsel_engine::{
     CompileConfig, LoweringPolicy, QueryKind, runtime::ProcessBudget, store::DirStore,
     with_compiler_stack,
 };
 use hirsel_front_phases::COMPILER;
+use hirsel_requests::*;
 use std::sync::Arc;
 
 #[test]

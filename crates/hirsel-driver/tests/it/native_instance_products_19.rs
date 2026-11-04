@@ -2,6 +2,7 @@ use hirsel_artifact_store::Action;
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_layout::layout::LayoutBuilder;
 use hirsel_native::query_model::InstanceAddress;
 use hirsel_native_cache::instance::*;

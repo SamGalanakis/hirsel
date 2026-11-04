@@ -1,5 +1,7 @@
 //! The affine sealed owner has lineage independent of its pointer-free root.
-use hirsel_driver::{HostLaunch, LaunchConfig, ownership_trace::run_resources_on_host};
+use hirsel_driver::ownership_trace::run_resources_on_host;
+use hirsel_host_io::launch::HostLaunch;
+use hirsel_host_io::launch::LaunchConfig;
 use hirsel_run_schema::ownership_trace::Action;
 
 #[test]

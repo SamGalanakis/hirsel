@@ -2,6 +2,7 @@ use crate::image_fixture::*;
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_syntax::DefId;
 use std::{path::PathBuf, sync::Arc};
 #[path = "../support/canonical_debug.rs"]

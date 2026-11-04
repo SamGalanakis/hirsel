@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::MemStore, *};
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -277,11 +278,10 @@ fn native_source_requests_complete_storage_and_preserve_root_escape_rejection() 
                 let program = compiler.load_program(&manifest).unwrap();
                 let root = program.entry.clone();
                 drop(program);
-                let mut requests =
-                    hirsel_driver::requests::CompilerRequests::for_host(compiler, config);
+                let mut requests = hirsel_requests::CompilerRequests::for_host(compiler, config);
                 let result = requests.execute(
                     &manifest,
-                    hirsel_driver::requests::CompileOperation::NativeSources {
+                    hirsel_requests::CompileOperation::NativeSources {
                         roots: vec![root.clone()],
                     },
                 );
@@ -300,8 +300,7 @@ fn native_source_requests_complete_storage_and_preserve_root_escape_rejection() 
                     );
                 } else {
                     let output = result.unwrap();
-                    let hirsel_driver::requests::CompileResult::NativeSources(facts) =
-                        &output.result
+                    let hirsel_requests::CompileResult::NativeSources(facts) = &output.result
                     else {
                         panic!("expected completed original source products");
                     };

@@ -1,9 +1,9 @@
 //! Explicit grants and tape selection preserve checked diagnostic source binding.
 use hirsel_driver::native;
-use hirsel_driver::requests::*;
 use hirsel_driver::resident::ObservedSession;
 use hirsel_engine::{CompileConfig, runtime::ProcessBudget, store::MemStore};
 use hirsel_front_phases::COMPILER;
+use hirsel_requests::*;
 use std::sync::Arc;
 
 #[test]
@@ -75,7 +75,7 @@ fn ownership_native_granted_args_record_and_replay_keep_the_selected_resource_li
                         &tools,
                         &denied,
                         1000,
-                        hirsel_driver::HostLaunch::empty()
+                        hirsel_host_io::launch::HostLaunch::empty()
                     )
                     .is_err()
             );
@@ -92,8 +92,8 @@ fn ownership_native_granted_args_record_and_replay_keep_the_selected_resource_li
                     &tools,
                     &fuel_denied,
                     1000,
-                    hirsel_driver::HostLaunch::Live {
-                        config: hirsel_driver::LaunchConfig::Grants {
+                    hirsel_host_io::launch::HostLaunch::Live {
+                        config: hirsel_host_io::launch::LaunchConfig::Grants {
                             input: std::ffi::OsStr::new(
                                 r#"{"args":["kept"],"budgets":{"provider":"budgets.limits@2","fuel":1000000}}"#,
                             ),
@@ -113,10 +113,10 @@ fn ownership_native_granted_args_record_and_replay_keep_the_selected_resource_li
             let tape = directory.path().join(format!("{}.tape", backend.name()));
             for replay in [false, true] {
                 let launch = if replay {
-                    hirsel_driver::HostLaunch::Replay(&tape)
+                    hirsel_host_io::launch::HostLaunch::Replay(&tape)
                 } else {
-                    hirsel_driver::HostLaunch::Live {
-                        config: hirsel_driver::LaunchConfig::Grants {
+                    hirsel_host_io::launch::HostLaunch::Live {
+                        config: hirsel_host_io::launch::LaunchConfig::Grants {
                             input: std::ffi::OsStr::new(r#"{"args":["kept"]}"#),
                             arguments: None,
                         },

@@ -276,3 +276,6 @@ pub enum NativeOutput {
 }
 
 use hirsel_native::NativeObservation;
+
+use hirsel_compiler_identity::COMPILER_IDENTITY;
+use hirsel_front_phases::{COMPILER, compiler_adapters};

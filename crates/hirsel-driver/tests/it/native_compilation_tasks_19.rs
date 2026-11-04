@@ -2,6 +2,7 @@ use hirsel_compiler_identity::COMPILER_IDENTITY;
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::ResultStore, *};
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_native::object_queries::linked_product;
 use hirsel_native::object_queries::materialize_executable;
 use hirsel_native::query_model::NativeRootKey;

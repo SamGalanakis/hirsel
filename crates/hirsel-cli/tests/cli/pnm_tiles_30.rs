@@ -292,14 +292,14 @@ fn pnm_tiles_30_native_record_replay() {
         // Each replay opens fresh tape/provider state. Only the immutable source
         // query graph is shared across tapes and reference/checked consumers.
         let config = compiler.configuration();
-        let mut requests = hirsel_driver::requests::CompilerRequests::for_host(compiler, config);
+        let mut requests = hirsel_requests::CompilerRequests::for_host(compiler, config);
         let output = requests
             .execute(
                 &manifest,
-                hirsel_driver::requests::CompileOperation::Tir { definition: None },
+                hirsel_requests::CompileOperation::Tir { definition: None },
             )
             .unwrap();
-        let hirsel_driver::requests::CompileResult::Tir(prepared) = &output.result else {
+        let hirsel_requests::CompileResult::Tir(prepared) = &output.result else {
             panic!("expected prepared TIR")
         };
         for row in records {
@@ -329,7 +329,7 @@ fn pnm_tiles_30_native_record_replay() {
                     } else {
                         let outcome = hirsel_driver::run_path_on_host(
                             &manifest,
-                            hirsel_driver::HostLaunch::Replay(&tape),
+                            hirsel_host_io::launch::HostLaunch::Replay(&tape),
                             Some(bound),
                             hirsel_driver::session::Policy::default(),
                         )

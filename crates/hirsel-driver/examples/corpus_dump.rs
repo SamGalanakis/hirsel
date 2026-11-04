@@ -6,6 +6,7 @@ hirsel_guard::install!();
 mod canonical_tir;
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_host_io::launch::*;
 fn main() {
     with_compiler_stack(|| {
         let args: Vec<_> = std::env::args().collect();

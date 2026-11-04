@@ -105,6 +105,7 @@ fn configcheck_23_pure_reference_vectors_checked_h() {
     use hirsel_driver::*;
     use hirsel_engine::*;
     use hirsel_front_phases::*;
+    use hirsel_host_io::launch::*;
 
     with_compiler_stack(|| {
         let scratch = package();

@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 #[test]
 fn header_diagnostics_point_to_the_offending_name_and_earlier_binding() {

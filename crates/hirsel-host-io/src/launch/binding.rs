@@ -1,12 +1,13 @@
 //! Host-owned launch selection and binding over immutable checked source facts.
 //! Reading a tape selects its entry before compiler roots are requested. Binding
 //! grants or a recording never needs a retained mutable compiler program.
-use crate::{BoundHostRun, HostLaunch, ToolError};
+use super::*;
+use hirsel_engine::ToolError;
 use hirsel_run_schema::{CodeReach, LaunchKind, ProgramRevision};
 use hirsel_syntax::DefPath;
 use hirsel_types::{Signature, TypeInterner};
 
-pub(crate) struct LaunchSelection {
+pub struct LaunchSelection {
     entry: Option<DefPath>,
     replay: Option<(hirsel_rt::io_sim::SimIo, hirsel_run_config::ValidatedRun)>,
     captured: Option<CapturedConfig>,
@@ -17,13 +18,13 @@ fn refused(error: hirsel_run_schema::RunRefusal) -> ToolError {
 }
 
 impl LaunchSelection {
-    pub(crate) fn read(launch: HostLaunch<'_>) -> Result<Self, ToolError> {
+    pub fn read(launch: HostLaunch<'_>) -> Result<Self, ToolError> {
         let (entry, replay) =
             match launch {
                 HostLaunch::Replay(tape) => {
                     let (io, run) = hirsel_rt::host_launch::replay(tape).map_err(refused)?;
                     let entry = if run.record().launch == LaunchKind::Call {
-                        Some(crate::def_path(&run.record().entry).ok_or_else(|| {
+                        Some(super::def_path(&run.record().entry).ok_or_else(|| {
                             ToolError::Runtime("replay refused: the callee entry's path".into())
                         })?)
                     } else {
@@ -32,7 +33,7 @@ impl LaunchSelection {
                     (entry, Some((io, run)))
                 }
                 HostLaunch::Callee { run, .. } => (
-                    Some(crate::def_path(&run.record().entry).ok_or_else(|| {
+                    Some(super::def_path(&run.record().entry).ok_or_else(|| {
                         ToolError::Runtime("launch: the callee entry's path".into())
                     })?),
                     None,
@@ -48,7 +49,7 @@ impl LaunchSelection {
 
     /// Capture launch policy once. Its inputs select diagnostic emission, but
     /// only binding to the selected source below can admit an execution.
-    pub(crate) fn read_for_compilation(launch: HostLaunch<'_>) -> Result<Self, ToolError> {
+    pub fn read_for_compilation(launch: HostLaunch<'_>) -> Result<Self, ToolError> {
         let mut selected = Self::read(launch)?;
         selected.captured = match launch {
             HostLaunch::Live { config, .. } => Some(
@@ -65,7 +66,7 @@ impl LaunchSelection {
         Ok(selected)
     }
 
-    pub(crate) fn compiler_inputs(&self) -> Result<(hirsel_run_schema::Inputs, bool), ToolError> {
+    pub fn compiler_inputs(&self) -> Result<(hirsel_run_schema::Inputs, bool), ToolError> {
         let record = self
             .captured
             .as_ref()
@@ -81,11 +82,11 @@ impl LaunchSelection {
         ))
     }
 
-    pub(crate) fn entry(&self) -> Option<&DefPath> {
+    pub fn entry(&self) -> Option<&DefPath> {
         self.entry.as_ref()
     }
 
-    pub(crate) fn requires_replayable(&self, launch: HostLaunch<'_>) -> bool {
+    pub fn requires_replayable(&self, launch: HostLaunch<'_>) -> bool {
         self.replay.is_some()
             || matches!(
                 launch,
@@ -99,7 +100,7 @@ impl LaunchSelection {
             )
     }
 
-    pub(crate) fn bind(
+    pub fn bind(
         self,
         launch: HostLaunch<'_>,
         types: &TypeInterner,
@@ -128,13 +129,13 @@ impl LaunchSelection {
                     code,
                 )
                 .map_err(ToolError::Launch)?;
-                Ok(BoundHostRun::Live(bound))
+                Ok(BoundHostRun::live(bound))
             }
             (HostLaunch::Callee { run, .. }, _) => {
                 let bound =
                     hirsel_engine::bind_run(types, signature, revision, kind, Some(run), code)
                         .map_err(ToolError::Launch)?;
-                Ok(BoundHostRun::Live(bound))
+                Ok(BoundHostRun::live(bound))
             }
             (HostLaunch::Replay(_), Some((io, run))) => {
                 let roots = hirsel_engine::entry_roots(types, signature, kind).map_err(refused)?;
@@ -144,7 +145,7 @@ impl LaunchSelection {
                     ))
                     .map_err(refused)?
                     .into_run();
-                Ok(BoundHostRun::Replay { run, io })
+                Ok(BoundHostRun::replay(run, io))
             }
             (HostLaunch::Replay(_), None) => unreachable!("a replay reads its tape first"),
         }
@@ -159,8 +160,8 @@ struct CapturedConfig {
     cores: Option<u64>,
 }
 impl CapturedConfig {
-    fn read(config: crate::LaunchConfig<'_>) -> Result<Self, hirsel_run_schema::RunRefusal> {
-        use crate::LaunchConfig;
+    fn read(config: super::LaunchConfig<'_>) -> Result<Self, hirsel_run_schema::RunRefusal> {
+        use super::LaunchConfig;
         let (input, template, arguments, cores) = match config {
             LaunchConfig::Record(input) => (input, false, None, None),
             LaunchConfig::Grants { input, arguments } => (input, true, arguments, None),
@@ -224,7 +225,7 @@ mod tests {
     ) {
         let mut engine = QueryEngine::new(
             hirsel_engine::default_environment(),
-            crate::compiler_adapters(),
+            hirsel_front_phases::compiler_adapters(),
         );
         let file = engine
             .sources
@@ -262,7 +263,7 @@ mod tests {
                 ))
             ));
             let granted = HostLaunch::Live {
-                config: crate::LaunchConfig::Grants {
+                config: super::LaunchConfig::Grants {
                     input: std::ffi::OsStr::new("{\"args\":[]}"),
                     arguments: None,
                 },
@@ -270,9 +271,10 @@ mod tests {
                 revocations: None,
             };
             let selected = LaunchSelection::read(granted).unwrap();
-            let BoundHostRun::Live(bound) = selected
+            let BoundHostRunParts::Live(bound) = selected
                 .bind(granted, &types, &signature, &revision, CodeReach::Safe)
                 .unwrap()
+                .into_parts()
             else {
                 panic!("grants must bind a live launch")
             };
@@ -305,9 +307,10 @@ mod tests {
             assert_eq!(inputs, run.record().inputs);
             assert!(!fuel);
             assert_eq!(selected.entry().unwrap().to_string(), revision.entry());
-            let BoundHostRun::Live(bound) = selected
+            let BoundHostRunParts::Live(bound) = selected
                 .bind(launch, &types, &signature, &revision, CodeReach::Safe)
                 .unwrap()
+                .into_parts()
             else {
                 panic!("a callee binds a live call")
             };
@@ -323,7 +326,7 @@ mod tests {
             let path = directory.path().join("grants.json");
             std::fs::write(&path, r#"{"args":["kept"],"inputs":{"hash_seed":17,"random_seed":0,"test_seed":0,"scheduler":null},"budgets":{"provider":"budgets.limits@2","fuel":1000}}"#).unwrap();
             let launch = HostLaunch::Live {
-                config: crate::LaunchConfig::Grants {
+                config: super::LaunchConfig::Grants {
                     input: path.as_os_str(),
                     arguments: None,
                 },
@@ -335,9 +338,10 @@ mod tests {
             assert_eq!(inputs.hash_seed, 17);
             assert!(fuel);
             std::fs::write(&path, "no longer a grants template").unwrap();
-            let BoundHostRun::Live(bound) = selection
+            let BoundHostRunParts::Live(bound) = selection
                 .bind(launch, &types, &signature, &revision, CodeReach::Safe)
                 .unwrap()
+                .into_parts()
             else {
                 panic!("captured grants bind a live run")
             };
@@ -356,7 +360,7 @@ mod tests {
             record.program = hirsel_run_schema::hex(&[7; 32]);
             let json = serde_json::to_string(&record).unwrap();
             let launch = HostLaunch::Live {
-                config: crate::LaunchConfig::Record(std::ffi::OsStr::new(&json)),
+                config: super::LaunchConfig::Record(std::ffi::OsStr::new(&json)),
                 record: None,
                 revocations: None,
             };

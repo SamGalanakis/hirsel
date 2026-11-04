@@ -5,6 +5,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_proof_export::{DefinitionSection, Detail, Export, FORMAT, ImportError, ObligationKind};
 use hirsel_tir::TIR_VERSION;
 use std::path::{Path, PathBuf};

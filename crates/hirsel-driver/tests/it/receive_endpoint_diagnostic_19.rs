@@ -2,6 +2,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 const DIRECT: &str = "// café 🐑\npub type Status { url: String }\npub fn main(tasks: Tasks, mut incoming: Receiver[unique Status], mut rows: List[Status]) -> Result[(), ChannelError] {\n  list.push(mut rows, channel.receive(tasks, mut incoming)?)\n  Ok(())\n}\n";
 

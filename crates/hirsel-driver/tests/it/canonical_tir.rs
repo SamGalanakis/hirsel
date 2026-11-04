@@ -3,6 +3,7 @@ mod canonical_tir;
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_types::*;
 #[test]
 fn comparison_preserves_qualifiers_and_ignores_equal_row_sharing() {

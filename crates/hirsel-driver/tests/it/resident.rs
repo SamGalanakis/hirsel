@@ -3,6 +3,7 @@ mod canonical_tir;
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_types::Signature;
 use std::sync::Arc;
 
@@ -429,9 +430,7 @@ fn manifest_session_preserves_the_cold_loader_syntax_error_boundary() {
         // Checking exposes diagnostics, but requesting a program still cannot
         // return the old valid product while its source no longer parses.
         assert!(matches!(
-            session.request_applied(hirsel_driver::requests::CompileOperation::Tir {
-                definition: None
-            }),
+            session.request_applied(hirsel_requests::CompileOperation::Tir { definition: None }),
             Err(ToolError::Query {
                 error: QueryError::Diagnostics(_),
                 ..
@@ -664,9 +663,9 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
         }
     }
     with_compiler_stack(|| {
-        use hirsel_driver::requests::CompileOperation;
-        use hirsel_driver::requests::CompileResult;
-        use hirsel_driver::requests::CompilerRequests;
+        use hirsel_requests::CompileOperation;
+        use hirsel_requests::CompileResult;
+        use hirsel_requests::CompilerRequests;
         let source = "fn a(x:u8) -> u8 { x + 1u8 }\nfn main() -> u8 { a(2u8) }\n";
         let directory = tempfile::tempdir().unwrap();
         let source_path = directory.path().join("resident.hir");
@@ -2385,9 +2384,9 @@ fn evicted_lower_receipts_preserve_program_reuse_and_edit_invalidation() {
 #[test]
 fn evicted_generated_lowerings_preserve_cold_semantic_content() {
     with_compiler_stack(|| {
-        use hirsel_driver::requests::CompileOperation;
-        use hirsel_driver::requests::CompileResult;
-        use hirsel_driver::requests::CompilerRequests;
+        use hirsel_requests::CompileOperation;
+        use hirsel_requests::CompileResult;
+        use hirsel_requests::CompilerRequests;
         let source = r#"type Point { x:u64 }
 fn gen[T](s:TypeShape[T])->Result[Body[fn(T)->u64 uses {}],String] { Ok(codegen.body("fn(p:standalone@0/Point)->u64 uses {} { p.x + 12u64 }")) }
 fn sum(p:Point)->u64 uses {} = comptime gen(shape(Point))
@@ -2870,18 +2869,16 @@ fn library_session_checks_every_source_and_cannot_launch() {
         assert!(session.check().unwrap().diagnostics.is_empty());
         assert_eq!(session.stats().loads, 1);
         let safe = session
-            .request(hirsel_driver::requests::CompileOperation::SafeCheck)
+            .request(hirsel_requests::CompileOperation::SafeCheck)
             .unwrap();
         assert!(matches!(
             &safe.result,
-            hirsel_driver::requests::CompileResult::SafeCheck { reach: None, .. }
+            hirsel_requests::CompileResult::SafeCheck { reach: None, .. }
         ));
         drop(safe);
         assert!(
             session
-                .request_applied(hirsel_driver::requests::CompileOperation::Tir {
-                    definition: None
-                })
+                .request_applied(hirsel_requests::CompileOperation::Tir { definition: None })
                 .err()
                 .unwrap()
                 .to_string()

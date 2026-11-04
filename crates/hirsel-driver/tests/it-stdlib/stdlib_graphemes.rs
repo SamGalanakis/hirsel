@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_interp::{Limits, Outcome, Value, library::Library};
 use hirsel_tir::{DefinitionRef, MaterializedRef};
 use hirsel_types::BuiltinType;

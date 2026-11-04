@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 #[test]
 fn expiry_queries_only_brand_rows_of_its_owner() {
     with_compiler_stack(|| {

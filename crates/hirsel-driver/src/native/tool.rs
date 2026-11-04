@@ -144,10 +144,7 @@ pub fn run_path_native_backend_with_trace_events(
         // Binding owns the compact launch record. Release the completed TIR
         // closure before the native request admits its own source graph.
         drop(selected_facts);
-        let run = match &bound {
-            crate::BoundHostRun::Live(bound) => bound.run(),
-            crate::BoundHostRun::Replay { run, .. } => run,
-        };
+        let run = bound.run();
         let selected = session.request_applied(crate::requests::CompileOperation::NativeRun(
             crate::requests::NativeRequest {
                 definition,

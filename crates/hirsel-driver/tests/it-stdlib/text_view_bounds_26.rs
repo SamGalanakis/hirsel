@@ -4,6 +4,7 @@ use crate::source_std::load_program_source;
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
 use std::path::PathBuf;

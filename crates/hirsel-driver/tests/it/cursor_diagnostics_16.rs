@@ -2,6 +2,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 const TAGGED: &str = "// λ cursor witness\ntype Value = Leaf | Tagged(value: box Value)\nfn unboxed(value: box Value) -> Value in value uses {} {\n  match value { Leaf() => Leaf(), Tagged(value: inner) => Tagged(value: copy inner) }\n}\nfn probe(value: Value) {\n  let mut cursor = value\n  match cursor { Tagged(value: inner) => { cursor = unboxed(inner) }, _ => () }\n}\n";
 const PAIR: &str = "// λ computed pair\ntype Value = Leaf | Array(List[Value])\nfn probe(a: Value, b: Value) {\n  let mut left: Value in {a, b} = a\n  match (left, b) { (Array(xs), Array(_)) => { left = xs[0u64] }, _ => () }\n}\n";

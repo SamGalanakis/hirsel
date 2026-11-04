@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_run_config::*;
 use hirsel_run_schema::*;
 use hirsel_run_schema::*;

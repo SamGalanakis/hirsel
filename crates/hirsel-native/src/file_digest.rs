@@ -415,5 +415,3 @@ mod tests {
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }
-
-// Compile-boundary measurement edit.

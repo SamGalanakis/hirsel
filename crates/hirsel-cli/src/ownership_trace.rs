@@ -15,7 +15,7 @@ const EVENT_LIMIT: usize = 1 << 20;
 /// that outcome, so a run is never mistaken for a fully traced one.
 pub(super) fn run(
     path: &Path,
-    launch: hirsel_driver::HostLaunch<'_>,
+    launch: hirsel_host_io::launch::HostLaunch<'_>,
     max_steps: Option<u64>,
     policy: hirsel_driver::session::Policy,
     sidecar: &Path,
@@ -138,7 +138,7 @@ pub(super) fn test(
 /// the executable wrote it; the exit status is the executable's.
 pub(super) fn run_native(
     path: &Path,
-    launch: hirsel_driver::HostLaunch<'_>,
+    launch: hirsel_host_io::launch::HostLaunch<'_>,
     backend: hirsel_native::Backend,
     policy: hirsel_driver::session::Policy,
     sidecar: &Path,

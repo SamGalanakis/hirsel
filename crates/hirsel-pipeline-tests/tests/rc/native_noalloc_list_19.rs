@@ -134,6 +134,7 @@ fn parity(cases: &[(&str, &str)]) {
     use hirsel_driver::*;
     use hirsel_engine::*;
     use hirsel_front_phases::*;
+    use hirsel_host_io::launch::*;
     let matrix = matrix();
     let directory =
         std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("native-noalloc-list-19");
@@ -611,6 +612,7 @@ fn capacity_and_hash_native_controls() {
     use hirsel_driver::*;
     use hirsel_engine::*;
     use hirsel_front_phases::*;
+    use hirsel_host_io::launch::*;
     use hirsel_lir::validate::{Inputs, validate};
     let matrix = matrix();
     let root = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
@@ -838,6 +840,7 @@ fn empty_variant_observers_preserve_regional_construction_provenance() {
     use hirsel_driver::*;
     use hirsel_engine::*;
     use hirsel_front_phases::*;
+    use hirsel_host_io::launch::*;
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
         let context = default_context();

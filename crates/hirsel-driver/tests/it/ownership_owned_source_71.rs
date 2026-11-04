@@ -15,11 +15,11 @@ fn source_owned_string_and_byte_leaves_keep_their_original_lifetimes() {
 #[test]
 fn source_owned_and_resource_selections_keep_distinct_products_in_the_same_session() {
     use hirsel_driver::native;
-    use hirsel_driver::requests::*;
     use hirsel_driver::resident::ObservedSession;
     use hirsel_engine::{CompileConfig, runtime::ProcessBudget, store::MemStore};
     use hirsel_front_phases::COMPILER;
     use hirsel_lir::ownership_trace::{Kind, Selection};
+    use hirsel_requests::*;
     use std::{collections::BTreeSet, sync::Arc};
 
     hirsel_engine::with_compiler_stack(|| {

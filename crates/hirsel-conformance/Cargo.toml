@@ -7,6 +7,7 @@ rust-version.workspace = true
 default-run = "hirsel-conformance"
 
 [dependencies]
+hirsel-requests = { path = "../hirsel-requests" }
 hirsel-compiler-identity = { path = "../hirsel-compiler-identity" }
 hirsel-native-batch = { path = "../hirsel-native-batch" }
 hirsel-front-phases = { path = "../hirsel-front-phases" }

@@ -9,6 +9,7 @@ rust-version.workspace = true
 native-tsan = ["hirsel-native/native-tsan"]
 
 [dependencies]
+hirsel-requests = { path = "../hirsel-requests" }
 hirsel-project-info = { path = "../hirsel-project-info" }
 hirsel-native-cache = { path = "../hirsel-native-cache" }
 hirsel-native-batch = { path = "../hirsel-native-batch" }

@@ -3,12 +3,13 @@
 //! from-scratch fresh request at one job, across cold, no-op and edit
 //! sequences. The edits are data and each (mode, jobs) column is one case: a
 //! new request mode adds a `Mode` variant and its three column cases.
-use hirsel_driver::requests::{CompileOperation, CompileResult};
 use hirsel_driver::session::Session;
 use hirsel_engine::CompileConfig;
 use hirsel_engine::memo::Retention;
 use hirsel_engine::store::store_by_name;
 use hirsel_intern::jobs::Jobs;
+use hirsel_requests::CompileOperation;
+use hirsel_requests::CompileResult;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

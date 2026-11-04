@@ -5,6 +5,7 @@ fn a_match_that_moves_only_the_ok_payload_agrees_in_all_configurations() {
     use hirsel_driver::*;
     use hirsel_engine::*;
     use hirsel_front_phases::*;
+    use hirsel_host_io::launch::*;
     use hirsel_native::Observation;
     use hirsel_native::Toolchain;
     use hirsel_native_testing::Outcome;

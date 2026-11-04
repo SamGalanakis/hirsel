@@ -46,20 +46,20 @@ fn rejected_representation_edit_matches_cold(text: &str) {
         let actual_check = warm.check_applied().unwrap();
         assert!(!actual_check.diagnostics.is_empty());
         let actual = warm.checked_products(true).unwrap();
-        let mut cold = hirsel_driver::requests::CompilerRequests::for_host(
+        let mut cold = hirsel_requests::CompilerRequests::for_host(
             COMPILER.with_config(config.clone()),
             config.clone(),
         );
         let completed = cold
             .execute(
                 &manifest,
-                hirsel_driver::requests::CompileOperation::CheckedProducts {
+                hirsel_requests::CompileOperation::CheckedProducts {
                     lowering: config.lowering,
                     canonical: true,
                 },
             )
             .unwrap();
-        let hirsel_driver::requests::CompileResult::CheckedProducts {
+        let hirsel_requests::CompileResult::CheckedProducts {
             checked: expected_check,
             products: expected,
         } = &completed.result

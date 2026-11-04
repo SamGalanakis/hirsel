@@ -1,8 +1,3 @@
-use hirsel_driver::requests::CompileOperation;
-use hirsel_driver::requests::CompileRequest;
-use hirsel_driver::requests::CompileResult;
-use hirsel_driver::requests::CompilerRequests;
-use hirsel_driver::requests::RequestLimits;
 use hirsel_engine::{
     CompileConfig, LoweringPolicy,
     requests::{OutputReadiness, RequestEngine, observe_inputs},
@@ -11,6 +6,11 @@ use hirsel_engine::{
     with_compiler_stack,
 };
 use hirsel_front_phases::COMPILER;
+use hirsel_requests::CompileOperation;
+use hirsel_requests::CompileRequest;
+use hirsel_requests::CompileResult;
+use hirsel_requests::CompilerRequests;
+use hirsel_requests::RequestLimits;
 use std::sync::Arc;
 
 #[test]

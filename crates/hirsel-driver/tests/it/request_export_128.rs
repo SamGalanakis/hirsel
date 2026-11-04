@@ -1,6 +1,9 @@
-use hirsel_driver::{requests::*, session::Session, *};
+use hirsel_driver::session::Session;
+use hirsel_driver::*;
 use hirsel_engine::{store::MemStore, *};
 use hirsel_front_phases::COMPILER;
+use hirsel_host_io::launch::*;
+use hirsel_requests::*;
 use std::sync::Arc;
 
 #[test]

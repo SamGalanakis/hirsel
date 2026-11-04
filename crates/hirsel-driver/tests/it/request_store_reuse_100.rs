@@ -41,15 +41,15 @@ impl ResultStore for ReadScopes {
 
 #[test]
 fn selected_request_keeps_one_read_epoch_and_releases_it_before_retained_outputs() {
-    use hirsel_driver::requests::CompileOperation;
-    use hirsel_driver::requests::CompileRequest;
-    use hirsel_driver::requests::CompilerRequests;
-    use hirsel_driver::requests::RequestLimits;
     use hirsel_engine::{
         LoweringPolicy,
         requests::{OutputReadiness, RequestEngine, observe_inputs},
         runtime::{ProcessBudget, QueryRuntime},
     };
+    use hirsel_requests::CompileOperation;
+    use hirsel_requests::CompileRequest;
+    use hirsel_requests::CompilerRequests;
+    use hirsel_requests::RequestLimits;
     hirsel_engine::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let manifest = directory.path().join("hirsel.json");
@@ -191,15 +191,15 @@ fn directory_request_products_reuse_unchanged_bodies_across_sessions_and_edits()
 
 #[test]
 fn unfinished_equal_requests_have_independent_abort_owners_and_completed_graphs_reuse() {
-    use hirsel_driver::requests::CompileOperation;
-    use hirsel_driver::requests::CompileRequest;
-    use hirsel_driver::requests::CompilerRequests;
-    use hirsel_driver::requests::RequestLimits;
     use hirsel_engine::{
         LoweringPolicy,
         requests::{OutputReadiness, RequestEngine, observe_inputs},
         runtime::{ProcessBudget, QueryRuntime},
     };
+    use hirsel_requests::CompileOperation;
+    use hirsel_requests::CompileRequest;
+    use hirsel_requests::CompilerRequests;
+    use hirsel_requests::RequestLimits;
     hirsel_engine::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let manifest = directory.path().join("hirsel.json");
@@ -260,7 +260,7 @@ fn unfinished_equal_requests_have_independent_abort_owners_and_completed_graphs_
             runtime.wait(demand).unwrap()
         };
         let output = second.output.ready(&products).unwrap();
-        let hirsel_driver::requests::CompileResult::Check(checked) = &output.result else {
+        let hirsel_requests::CompileResult::Check(checked) = &output.result else {
             panic!()
         };
         assert_eq!(checked.completion, CheckCompletion::Complete);
@@ -272,9 +272,9 @@ fn unfinished_equal_requests_have_independent_abort_owners_and_completed_graphs_
 
 #[test]
 fn check_diagnostics_do_not_require_a_valid_run_or_export_entry() {
-    use hirsel_driver::requests::CompileOperation;
-    use hirsel_driver::requests::CompileResult;
     use hirsel_engine::LoweringPolicy;
+    use hirsel_requests::CompileOperation;
+    use hirsel_requests::CompileResult;
     hirsel_engine::with_compiler_stack(|| {
         let tree = tempfile::tempdir().unwrap();
         let source = tree.path().join("main.hir");
@@ -304,13 +304,13 @@ fn check_diagnostics_do_not_require_a_valid_run_or_export_entry() {
 
 #[test]
 fn source_operations_share_one_graph_only_for_exact_inputs_and_compiler() {
-    use hirsel_driver::requests::*;
     use hirsel_engine::{
         LoweringPolicy,
         requests::OutputReadiness,
         requests::{RequestEngine, observe_inputs},
         runtime::QueryRuntime,
     };
+    use hirsel_requests::*;
     hirsel_engine::with_compiler_stack(|| {
         for provider in ["none@1", "mem@1", "dir@1"] {
             let tree = tempfile::tempdir().unwrap();

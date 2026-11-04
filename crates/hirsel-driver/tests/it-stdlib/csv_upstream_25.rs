@@ -5,6 +5,7 @@ use hirsel_driver::native;
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;

@@ -1,9 +1,9 @@
 //! Field-attributed failures, following Serde check.rs:29–53 (MIT OR Apache-2.0).
 //! Expected hook contracts below are written independently of generated text.
-use hirsel_driver::requests::CompileOperation;
-use hirsel_driver::requests::CompileResult;
 use hirsel_driver::session::Session;
 use hirsel_engine::{LoweringPolicy, with_compiler_stack};
+use hirsel_requests::CompileOperation;
+use hirsel_requests::CompileResult;
 use std::{fs, path::PathBuf};
 
 fn checked(session: &mut Session) -> hirsel_engine::CheckOutput {

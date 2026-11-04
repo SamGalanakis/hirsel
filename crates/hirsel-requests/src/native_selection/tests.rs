@@ -166,10 +166,7 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
                             execution.code.clone(),
                         )
                         .unwrap();
-                    native.run = Some(Arc::new(match &selected {
-                        crate::BoundHostRun::Live(bound) => bound.run().clone(),
-                        crate::BoundHostRun::Replay { run, .. } => run.clone(),
-                    }));
+                    native.run = Some(Arc::new(selected.run().clone()));
                     native.options.passes.launch =
                         native.run.as_ref().unwrap().record().inputs.clone();
                     bound = Some(selected);

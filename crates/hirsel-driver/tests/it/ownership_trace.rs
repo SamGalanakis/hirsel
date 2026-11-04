@@ -1,8 +1,8 @@
 //! The admitted source program runs independently of its resource diagnostics.
-use hirsel_driver::HostLaunch;
-use hirsel_driver::LaunchConfig;
 use hirsel_driver::ownership_trace::run_resources_on_host;
 use hirsel_engine::Verify;
+use hirsel_host_io::launch::HostLaunch;
+use hirsel_host_io::launch::LaunchConfig;
 
 #[test]
 fn ownership_host_reference_and_checked_h_agree_on_real_source_lifetimes() {

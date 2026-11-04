@@ -1,8 +1,9 @@
 use crate::image_fixture::*;
-use hirsel_driver::requests::*;
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
+use hirsel_requests::*;
 use std::sync::Arc;
 
 #[test]

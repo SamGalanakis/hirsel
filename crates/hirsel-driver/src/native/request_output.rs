@@ -3,6 +3,7 @@
 //! and observation decoder without reconstructing a native program.
 use crate::requests::NativeExecution;
 use crate::{BoundHostRun, HostLaunch, RunOutcome, ToolError, launch_binding::LaunchSelection};
+use hirsel_host_io::launch::BoundHostRunParts;
 use hirsel_native::NativeError;
 use hirsel_native::Scratch;
 use hirsel_native::StageName;
@@ -19,7 +20,7 @@ pub(crate) fn materialize_output(
         .map_err(error)?;
     object_queries::materialize_executable(input.store.as_ref(), &linked, destination)
         .map_err(error)?;
-    input.platform.validate_image(destination).map_err(error)?;
+    input.validate_image(destination).map_err(error)?;
     Ok(input.report.clone())
 }
 
@@ -67,7 +68,7 @@ pub(crate) fn run_bound_output(
             "launch: a runner host runs its callees interpreted".into(),
         ));
     }
-    if (matches!(&bound, BoundHostRun::Replay { .. })
+    if (bound.is_replay()
         || matches!(
             launch,
             HostLaunch::Live {
@@ -82,9 +83,9 @@ pub(crate) fn run_bound_output(
              deterministic model, so this run cannot be recorded or replayed (PROG-4)"
         )));
     }
-    let (run, tape) = match (bound, launch) {
+    let (run, tape) = match (bound.into_parts(), launch) {
         (
-            BoundHostRun::Live(bound),
+            BoundHostRunParts::Live(bound),
             HostLaunch::Live {
                 record,
                 revocations,
@@ -101,7 +102,7 @@ pub(crate) fn run_bound_output(
                 },
             )
         }
-        (BoundHostRun::Replay { run, .. }, HostLaunch::Replay(path)) => {
+        (BoundHostRunParts::Replay { run, .. }, HostLaunch::Replay(path)) => {
             (run, link::Tape::Replay(path))
         }
         _ => unreachable!("selected launch binding preserves its form"),
@@ -141,7 +142,6 @@ pub(crate) fn run_bound_output(
                 .map_err(|e| NativeError::new(StageName::Launch, e.to_string()))?;
         }
         let runnable = input
-            .platform
             .executable(executable)
             .map_err(|message| NativeError::new(StageName::Launch, message))?;
         let launched = link::launch_live(

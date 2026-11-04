@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::MemStore, *};
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use std::sync::Arc;
 
 #[test]
@@ -195,7 +196,8 @@ fn changing_the_root_does_not_reinfer_unchanged_dependency_modules() {
 
 #[test]
 fn generated_private_results_keep_their_inferred_unique_proof() {
-    use hirsel_driver::{requests::*, resident::ObservedSession};
+    use hirsel_driver::resident::ObservedSession;
+    use hirsel_requests::*;
     with_compiler_stack(|| {
         let helpers = r#"
 fn make()->Result[Body[fn()->Bytes uses {}],String] uses {} {
@@ -281,7 +283,8 @@ fn generated()->Bytes uses {} = comptime make()
 
 #[test]
 fn a_changed_registration_reinfers_only_the_modules_that_read_it() {
-    use hirsel_driver::{requests::*, resident::ObservedSession};
+    use hirsel_driver::resident::ObservedSession;
+    use hirsel_requests::*;
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let manifest = directory.path().join("hirsel.json");
@@ -381,8 +384,9 @@ fn a_changed_registration_reinfers_only_the_modules_that_read_it() {
 /// decodes only the edited file. The exports equal a cold compile's.
 #[test]
 fn a_warm_check_materializes_only_the_edited_definitions_source() {
-    use hirsel_driver::{requests::*, resident::ObservedSession};
+    use hirsel_driver::resident::ObservedSession;
     use hirsel_intern::timings::{self, Count};
+    use hirsel_requests::*;
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let manifest = directory.path().join("hirsel.json");
@@ -959,7 +963,8 @@ pub fn main()->u8 uses {} {generated(Value(x:7u8))}
 
 #[test]
 fn demanded_private_headers_preserve_canonical_records_under_cache_verification() {
-    use hirsel_driver::{requests::*, resident::ObservedSession};
+    use hirsel_driver::resident::ObservedSession;
+    use hirsel_requests::*;
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let manifest = directory.path().join("hirsel.json");

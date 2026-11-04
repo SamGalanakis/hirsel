@@ -614,10 +614,7 @@ fn visit_test_suite(
     trace_roots: bool,
     toolchain: &Toolchain,
     probe: impl Fn(
-        &mut hirsel_native_testing::ReadySupplier<
-            '_,
-            std::sync::Arc<hirsel_driver::requests::NativeReady>,
-        >,
+        &mut hirsel_native_testing::ReadySupplier<'_, std::sync::Arc<hirsel_requests::NativeReady>>,
         &hirsel_driver::testing::Test,
         &Observation,
         &Path,
@@ -632,12 +629,12 @@ fn visit_test_suite(
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             std::fs::write(&fallback, source).map_err(|e| e.to_string())?;
         }
-        use hirsel_driver::requests::CompileOperation;
-        use hirsel_driver::requests::CompileRequest;
-        use hirsel_driver::requests::CompileResult;
-        use hirsel_driver::requests::CompilerRequests;
-        use hirsel_driver::requests::NativeOutput;
-        use hirsel_driver::requests::NativeRequest;
+        use hirsel_requests::CompileOperation;
+        use hirsel_requests::CompileRequest;
+        use hirsel_requests::CompileResult;
+        use hirsel_requests::CompilerRequests;
+        use hirsel_requests::NativeOutput;
+        use hirsel_requests::NativeRequest;
         let path = path.unwrap_or(&fallback);
         let compiler = crate::compiler::verifying_compiler();
         let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration())

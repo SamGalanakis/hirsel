@@ -4,6 +4,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_rt::io::{Completion, Event, IoError, Request};
 use std::path::{Path, PathBuf};
 use std::process::Command;

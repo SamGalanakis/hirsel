@@ -2,6 +2,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_span::Span;
 use hirsel_tir::*;
 use hirsel_types::{Destination, Primitive, SignatureKind, Type, TypeKind, UseKind};
@@ -571,8 +572,10 @@ fn frozen_frontier_diagnostics_and_tir_are_identical_at_three_salts() {
 #[test]
 fn frozen_frontier_keeps_serial_generation_between_source_frontiers() {
     with_compiler_stack(|| {
-        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
         use hirsel_engine::memo::MemoKey;
+        use hirsel_requests::CompileOperation;
+        use hirsel_requests::CompileResult;
+        use hirsel_requests::CompilerRequests;
         let source = "fn make() -> Result[Body[fn() -> u64 uses {}], String] uses {} { Ok(codegen.body(\"fn() -> u64 uses {} { 7 }\")) }\nfn first() -> u64 uses {} { 1 }\nfn generated() -> u64 uses {} = comptime make()\nfn last() -> u64 uses {} { generated() }\n";
         let directory = tempfile::tempdir().unwrap();
         let source_path = directory.path().join("parallel-generated.hir");
@@ -749,7 +752,9 @@ fn validation_universe_receipts_distinguish_valid_changes_and_originating_privat
 #[test]
 fn installed_std_publishes_the_universe_summary_its_full_table_computes() {
     with_compiler_stack(|| {
-        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
+        use hirsel_requests::CompileOperation;
+        use hirsel_requests::CompileResult;
+        use hirsel_requests::CompilerRequests;
         use hirsel_validate::{SignatureLookup, ValidatedSignatures};
         use std::sync::Arc;
         let dir = tempfile::tempdir().unwrap();
@@ -896,8 +901,10 @@ fn hello_on_installed_std_answers_v_universe_questions_without_reading_std_rows(
 #[test]
 fn dependency_universe_summary_without_local_verifier_is_ignored() {
     with_compiler_stack(|| {
-        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
         use hirsel_engine::store::ResultStore;
+        use hirsel_requests::CompileOperation;
+        use hirsel_requests::CompileResult;
+        use hirsel_requests::CompilerRequests;
         use std::sync::Arc;
         let dir = tempfile::tempdir().unwrap();
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

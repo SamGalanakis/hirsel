@@ -1,4 +1,3 @@
-use hirsel_driver::requests::*;
 use hirsel_driver::testing::observe_tir;
 use hirsel_engine::loader_inputs::namespace::{
     CapturePlan, Change, DiskCapture, Inspection, Key, LeaseBudget, Limits as NamespaceLimits, Root,
@@ -9,6 +8,7 @@ use hirsel_engine::{
     with_compiler_stack,
 };
 use hirsel_front_phases::COMPILER;
+use hirsel_requests::*;
 use std::{collections::BTreeSet, sync::Arc};
 
 #[test]

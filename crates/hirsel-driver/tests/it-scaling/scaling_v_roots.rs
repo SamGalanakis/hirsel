@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 #[test]
 fn temporary_ordering_visits_current_live_temporaries() {
     with_compiler_stack(|| {

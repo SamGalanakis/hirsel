@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::MemStore, *};
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use std::sync::Arc;
 
 #[test]
@@ -135,9 +136,9 @@ fn generated_ps9_headers_require_the_admitted_registration_view() {
         };
         let mut session = session::Session::open_configured(&manifest, config);
         let output = session
-            .request(hirsel_driver::requests::CompileOperation::ExportTir)
+            .request(hirsel_requests::CompileOperation::ExportTir)
             .unwrap();
-        let hirsel_driver::requests::CompileResult::ExportTir(text) = &output.result else {
+        let hirsel_requests::CompileResult::ExportTir(text) = &output.result else {
             panic!("wrong export operation")
         };
         let verifier = COMPILER.load_program(&manifest).unwrap();

@@ -63,8 +63,8 @@ fn reuseaddr(backend: Option<hirsel_native::Backend>) {
             drop(reservation);
             let outcome = hirsel_driver::run_path_on_host(
                 &source,
-                hirsel_driver::HostLaunch::Live {
-                    config: hirsel_driver::LaunchConfig::Grants {
+                hirsel_host_io::launch::HostLaunch::Live {
+                    config: hirsel_host_io::launch::LaunchConfig::Grants {
                         input: std::ffi::OsStr::new(&grants),
                         arguments: None,
                     },

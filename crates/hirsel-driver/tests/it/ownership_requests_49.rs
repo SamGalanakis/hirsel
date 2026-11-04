@@ -1,6 +1,5 @@
 //! Actual source/native diagnostic roots; no linked executable or old Session.
 use hirsel_driver::native;
-use hirsel_driver::requests::*;
 use hirsel_driver::resident::ObservedSession;
 use hirsel_engine::{
     CompileConfig,
@@ -10,6 +9,7 @@ use hirsel_engine::{
 use hirsel_front_phases::COMPILER;
 use hirsel_lir::ownership_trace::Kind;
 use hirsel_lir::ownership_trace::native::LeafPlan;
+use hirsel_requests::*;
 use std::sync::Arc;
 
 #[test]

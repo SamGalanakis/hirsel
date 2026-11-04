@@ -2,6 +2,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 const INCIDENT: &str = r#"fn add(mut xs: List[u64]) {
   list.push(mut xs, 1)

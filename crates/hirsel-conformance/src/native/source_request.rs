@@ -1,4 +1,3 @@
-use hirsel_driver::requests::*;
 use hirsel_engine::{
     CheckOutput, LoweringPolicy, ToolError, loader_inputs::FrozenInputs, requests::observe_inputs,
 };
@@ -8,6 +7,7 @@ use hirsel_native::NativeError;
 use hirsel_native::OptLevel;
 use hirsel_native::Options;
 use hirsel_native::StageName;
+use hirsel_requests::*;
 use hirsel_syntax::DefPath;
 use std::{
     cell::RefCell,

@@ -1,0 +1,65 @@
+[package]
+name = "hirsel-requests"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+native-tsan = ["hirsel-native/native-tsan"]
+
+[dependencies]
+hirsel-project-info = { path = "../hirsel-project-info" }
+hirsel-native-cache = { path = "../hirsel-native-cache" }
+hirsel-native-batch = { path = "../hirsel-native-batch" }
+hirsel-front-phases = { path = "../hirsel-front-phases" }
+hirsel-compiler-identity = { path = "../hirsel-compiler-identity" }
+hirsel-host-io = { path = "../hirsel-host-io" }
+hirsel-native = { path = "../hirsel-native" }
+hirsel-native-queries = { path = "../hirsel-native-queries" }
+hirsel-native-testing = { path = "../hirsel-native-testing" }
+hirsel-artifact-store = { path = "../hirsel-artifact-store" }
+hirsel-validate = { path = "../hirsel-validate" }
+base64 = "=0.22.1"
+hirsel-graph = { path = "../hirsel-graph" }
+hirsel-guard = { path = "../hirsel-guard" }
+hirsel-codec = { path = "../hirsel-codec" }
+hirsel-code-store = { path = "../hirsel-code-store" }
+hirsel-type-analysis = { path = "../hirsel-type-analysis" }
+hirsel-layout = { path = "../hirsel-layout" }
+hirsel-engine = { path = "../hirsel-engine" }
+hirsel-check-protocol = { path = "../hirsel-check-protocol" }
+hirsel-signature = { path = "../hirsel-signature" }
+hirsel-check = { path = "../hirsel-check" }
+hirsel-lower = { path = "../hirsel-lower" }
+hirsel-run-config = { path = "../hirsel-run-config" }
+hirsel-run-schema = { path = "../hirsel-run-schema" }
+hirsel-remote = { path = "../hirsel-remote" }
+hirsel-diag = { path = "../hirsel-diag" }
+hirsel-span = { path = "../hirsel-span" }
+hirsel-syntax = { path = "../hirsel-syntax" }
+hirsel-types = { path = "../hirsel-types" }
+hirsel-tir = { path = "../hirsel-tir" }
+hirsel-interp = { path = "../hirsel-interp" }
+hirsel-free = { path = "../hirsel-free" }
+hirsel-core-contract = { path = "../hirsel-core-contract" }
+hirsel-lir = { path = "../hirsel-lir" }
+hirsel-rc = { path = "../hirsel-rc" }
+hirsel-heapcheck = { path = "../hirsel-heapcheck" }
+hirsel-llvm = { path = "../hirsel-llvm" }
+hirsel-cranelift = { path = "../hirsel-cranelift" }
+hirsel-rt = { path = "../hirsel-rt" }
+hirsel-rt-operations = { path = "../hirsel-rt-operations" }
+hirsel-proof-export = { path = "../hirsel-proof-export" }
+hirsel-intern = { path = "../hirsel-intern" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tar = { version = "=0.4.46", default-features = false }
+tempfile = "3"
+libc = { version = "0.2", default-features = false }
+object = { version = "=0.40.0", default-features = false, features = ["archive", "elf", "read_core", "std", "write"] }
+sha2 = "0.10"
+
+
+[lib]
+test = false

@@ -3,6 +3,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use std::{
     collections::BTreeSet,
     path::PathBuf,
@@ -88,7 +89,9 @@ fn lowered(source: &str, lowering: LoweringPolicy) -> BTreeSet<String> {
     )
     .unwrap();
     let names = with_compiler_stack(|| {
-        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
+        use hirsel_requests::CompileOperation;
+        use hirsel_requests::CompileResult;
+        use hirsel_requests::CompilerRequests;
         let calls = Calls::default();
         CALLS.with(|slot| *slot.borrow_mut() = Some(calls.clone()));
         let config = CompileConfig {

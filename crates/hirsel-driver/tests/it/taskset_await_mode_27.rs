@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 const MINIMAL: &str = r#"pub fn main(rt: Io) -> Result[(), GrantError] {
   let tasks = io.tasks(rt)?

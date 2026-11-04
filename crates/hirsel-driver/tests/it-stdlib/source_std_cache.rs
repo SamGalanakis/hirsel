@@ -168,7 +168,7 @@ fn prepared_source_edits_keep_frozen_inputs_old_outputs_and_error_recovery() {
         let ok = "pub fn main()->Result[(),()]{Ok(())}";
         std::fs::write(&source, ok).unwrap();
         std::fs::write(&path, r#"{"schema":1,"package":{"name":"source_edits","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
-        let check = |input: std::sync::Arc<hirsel_driver::requests::TirExecution>, returned| {
+        let check = |input: std::sync::Arc<hirsel_requests::TirExecution>, returned| {
             let config = RunConfiguration {
                 entry: input.entry.clone(),
                 hash_seed: 0,

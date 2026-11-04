@@ -4,6 +4,7 @@ hirsel_guard::install!();
 
 use hirsel_driver::*;
 use hirsel_engine::*;
+use hirsel_host_io::launch::*;
 use hirsel_syntax::ItemKind;
 use std::{path::Path, time::Instant};
 

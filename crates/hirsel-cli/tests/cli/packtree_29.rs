@@ -451,7 +451,7 @@ fn replay_batch(path: &std::path::Path) {
             }
             let outcome = hirsel_driver::run_path_on_host(
                 std::path::Path::new(request["manifest"].as_str().unwrap()),
-                hirsel_driver::HostLaunch::Replay(std::path::Path::new(
+                hirsel_host_io::launch::HostLaunch::Replay(std::path::Path::new(
                     request["tape"].as_str().unwrap(),
                 )),
                 Some(1_000_000),

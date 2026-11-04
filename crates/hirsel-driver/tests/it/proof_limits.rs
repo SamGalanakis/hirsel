@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 fn checked(source: String, name: &str) {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());

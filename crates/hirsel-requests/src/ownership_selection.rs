@@ -7,7 +7,6 @@ use super::ownership_admission::Footprint;
 use super::ownership_admission::SourceInputs;
 use super::ownership_bootstrap;
 use super::ownership_bootstrap::OwnershipBootstrap;
-use crate::native;
 use hirsel_engine::{
     FrontNativeProducts, FrontNativeQueries, LoadedProgram, ToolError,
     runtime::*,
@@ -123,25 +122,25 @@ impl OwnershipExecution {
         tools: &hirsel_native::Toolchain,
         directory: &std::path::Path,
         event_limit: usize,
-        launch: crate::HostLaunch<'_>,
+        launch: hirsel_host_io::launch::HostLaunch<'_>,
     ) -> Result<hirsel_native_testing::ownership_trace::LeafExecution, String> {
-        let selection = crate::launch_binding::LaunchSelection::read(launch)
+        let selection = hirsel_host_io::launch::binding::LaunchSelection::read(launch)
             .map_err(|error| error.to_string())?;
         self.launch_with_selection(objects, tools, directory, event_limit, launch, selection)
     }
-    pub(crate) fn launch_with_selection(
+    pub fn launch_with_selection(
         &self,
         objects: &OwnershipObjects,
         tools: &hirsel_native::Toolchain,
         directory: &std::path::Path,
         event_limit: usize,
-        launch: crate::HostLaunch<'_>,
-        selection: crate::launch_binding::LaunchSelection,
+        launch: hirsel_host_io::launch::HostLaunch<'_>,
+        selection: hirsel_host_io::launch::binding::LaunchSelection,
     ) -> Result<hirsel_native_testing::ownership_trace::LeafExecution, String> {
         if objects.root != self.root || !std::ptr::eq(&*objects._owner, self) {
             return Err("ownership objects belong to another selected completion".into());
         }
-        if matches!(launch, crate::HostLaunch::Callee { .. }) {
+        if matches!(launch, hirsel_host_io::launch::HostLaunch::Callee { .. }) {
             return Err("ownership launch does not execute runner callees".into());
         }
         let source = &self._owner._source;
@@ -170,17 +169,17 @@ impl OwnershipExecution {
         tools: &hirsel_native::Toolchain,
         directory: &std::path::Path,
         event_limit: usize,
-        launch: crate::HostLaunch<'_>,
-        bound: crate::BoundHostRun,
+        launch: hirsel_host_io::launch::HostLaunch<'_>,
+        bound: hirsel_host_io::launch::BoundHostRun,
     ) -> Result<hirsel_native_testing::ownership_trace::LeafExecution, String> {
-        use crate::BoundHostRun;
+        use hirsel_host_io::launch::BoundHostRunParts;
         if objects.root != self.root || !std::ptr::eq(&*objects._owner, self) {
             return Err("ownership objects belong to another selected completion".into());
         }
-        let (run, tape) = match (bound, launch) {
+        let (run, tape) = match (bound.into_parts(), launch) {
             (
-                BoundHostRun::Live(bound),
-                crate::HostLaunch::Live {
+                BoundHostRunParts::Live(bound),
+                hirsel_host_io::launch::HostLaunch::Live {
                     record,
                     revocations,
                     ..
@@ -196,9 +195,10 @@ impl OwnershipExecution {
                     },
                 )
             }
-            (BoundHostRun::Replay { run, .. }, crate::HostLaunch::Replay(path)) => {
-                (run, hirsel_native::Tape::Replay(path))
-            }
+            (
+                BoundHostRunParts::Replay { run, .. },
+                hirsel_host_io::launch::HostLaunch::Replay(path),
+            ) => (run, hirsel_native::Tape::Replay(path)),
             _ => return Err("ownership launch binding changed form".into()),
         };
         self.tasks.with_execution_context(

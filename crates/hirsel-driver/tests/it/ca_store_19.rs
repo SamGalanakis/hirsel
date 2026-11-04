@@ -2,6 +2,7 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::QueryRuntime, *};
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1234,8 +1235,10 @@ fn damaged_or_misnamed_remote_closures_recompute_with_cold_parity() {
 fn private_evaluation_uses_independent_receipts_in_scalar_and_worker_sessions() {
     let run = || {
         with_compiler_stack(|| {
-            use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
             use hirsel_intern::timings::{self, Count};
+            use hirsel_requests::CompileOperation;
+            use hirsel_requests::CompileResult;
+            use hirsel_requests::CompilerRequests;
             timings::enable();
             let runs = || {
                 timings::report()
@@ -1437,7 +1440,9 @@ fn scalar_evaluation_products_require_local_completion_and_skip_analyzed_bodies(
 #[test]
 fn worker_evaluation_products_adopt_only_local_complete_verdicts() {
     with_compiler_stack(|| {
-        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
+        use hirsel_requests::CompileOperation;
+        use hirsel_requests::CompileResult;
+        use hirsel_requests::CompilerRequests;
         let source =
             "fn helper()->u32{7u32}\nconst A:u32=comptime helper()\nconst B:u32=comptime A+1u32\n";
         let paths = vec![definition("A"), definition("B")];
@@ -1742,8 +1747,10 @@ fn staged_evaluation_products_bind_arguments_and_local_completion_before_body_de
 #[test]
 fn worker_staged_products_publish_only_prefix_selected_instances() {
     with_compiler_stack(|| {
-        use hirsel_driver::requests::{CompileOperation, CompileResult, CompilerRequests};
         use hirsel_engine::memo::MemoKey;
+        use hirsel_requests::CompileOperation;
+        use hirsel_requests::CompileResult;
+        use hirsel_requests::CompilerRequests;
         use hirsel_tir::TirProvider;
         let source = "fn scaled[n:size](xs:Inline[u8,n])->u64{let _=xs;comptime (n*n)}\nconst FIRST:u64=comptime {let xs:Inline[u8,2]=[1,2];scaled(xs)}\nfn BAD()->u64{comptime {let zero=0u64;1u64/zero}}\nfn LATER()->u64{comptime {let xs:Inline[u8,3]=[1,2,3];scaled(xs)}}\n";
         let directory = tempfile::tempdir().unwrap();
@@ -3255,8 +3262,9 @@ fn ordinary_precomputed_dependency_products_do_not_recheck_bodies_during_native_
         let entry = cached.entry.clone();
         drop(cached);
         let config = shared.configuration();
-        let mut requests = hirsel_driver::requests::CompilerRequests::for_host(shared, config);
-        use hirsel_driver::requests::{CompileOperation, CompileResult};
+        let mut requests = hirsel_requests::CompilerRequests::for_host(shared, config);
+        use hirsel_requests::CompileOperation;
+        use hirsel_requests::CompileResult;
         for operation in [
             CompileOperation::Check {
                 lowering: LoweringPolicy::Reachable,

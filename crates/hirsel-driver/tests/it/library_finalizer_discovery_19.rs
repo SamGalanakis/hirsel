@@ -1,16 +1,16 @@
 //! Library-created message storage retains exact source finalizer instances.
 use hirsel_driver::native;
-use hirsel_driver::requests::CompileOperation;
-use hirsel_driver::requests::CompileRequest;
-use hirsel_driver::requests::CompileResult;
-use hirsel_driver::requests::CompilerRequests;
-use hirsel_driver::requests::NativeOutput;
-use hirsel_driver::requests::NativeRequest;
 use hirsel_engine::{
     requests::{OutputReadiness, RequestEngine, observe_inputs},
     runtime::QueryRuntime,
 };
 use hirsel_native::Backend;
+use hirsel_requests::CompileOperation;
+use hirsel_requests::CompileRequest;
+use hirsel_requests::CompileResult;
+use hirsel_requests::CompilerRequests;
+use hirsel_requests::NativeOutput;
+use hirsel_requests::NativeRequest;
 use std::sync::Arc;
 
 #[test]

@@ -1,5 +1,5 @@
 use hirsel_driver::native;
-use hirsel_driver::requests;
+use hirsel_requests;
 use std::{path::Path, sync::Arc};
 
 pub(crate) fn supplier(

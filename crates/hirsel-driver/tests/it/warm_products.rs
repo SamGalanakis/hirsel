@@ -1,8 +1,8 @@
-use hirsel_driver::requests::CompileOperation;
-use hirsel_driver::requests::CompileResult;
-use hirsel_driver::requests::CompilerRequests;
 use hirsel_engine::{memo::MemoKey, store::DirStore, *};
 use hirsel_front_phases::COMPILER;
+use hirsel_requests::CompileOperation;
+use hirsel_requests::CompileResult;
+use hirsel_requests::CompilerRequests;
 use std::sync::Arc;
 
 #[test]

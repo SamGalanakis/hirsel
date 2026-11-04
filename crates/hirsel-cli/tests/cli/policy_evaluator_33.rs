@@ -115,7 +115,7 @@ fn fixture(row: &Value, jobs: u64) -> Fixture {
 }
 
 fn simulation(
-    prepared: &hirsel_driver::requests::TirExecution,
+    prepared: &hirsel_requests::TirExecution,
     row: &Value,
     recipe: &Fixture,
 ) -> Option<Observation> {

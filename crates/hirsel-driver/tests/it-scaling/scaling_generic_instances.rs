@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 /// A body selecting many flat instances of one size-generic declaration once
 /// expanded each argument's crossing receipts into a clone of the body's
 /// store, so the first expansion copied every body row: quadratic in the

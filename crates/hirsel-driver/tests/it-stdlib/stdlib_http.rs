@@ -4,6 +4,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 fn execute_text(source: &str) {
     with_compiler_stack(|| {
@@ -467,7 +468,7 @@ impl hirsel_interp::OperationsAdapter for HttpClockProgress {
 }
 
 fn http_progress_events(
-    prepared: &hirsel_driver::requests::TirExecution,
+    prepared: &hirsel_requests::TirExecution,
     run: &RunConfiguration,
     config: SimulationConfig,
     ticks: u64,

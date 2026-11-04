@@ -140,7 +140,6 @@ impl Executable {
             _ => return Err(failed(&"test request completed another operation")),
         };
         let runnable = execution
-            .platform
             .executable(execution.executable.clone())
             .map_err(|error| NativeError::new(StageName::Launch, error))?;
         Ok(Self {

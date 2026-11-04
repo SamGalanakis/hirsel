@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 #[test]
 fn expiration_visits_only_dependencies_of_the_ended_owner() {
     with_compiler_stack(|| {

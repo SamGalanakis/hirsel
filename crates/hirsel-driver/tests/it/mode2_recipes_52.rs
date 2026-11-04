@@ -2,6 +2,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 fn checked(engine: &mut QueryEngine, source: &str) -> CheckOutput {
     let file = engine.sources.add("recipes.hir", source.into()).unwrap();

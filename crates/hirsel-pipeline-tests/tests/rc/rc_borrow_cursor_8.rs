@@ -8,6 +8,7 @@ fn borrow_cursor_8_projection_native_parity() {
     use hirsel_driver::*;
     use hirsel_engine::*;
     use hirsel_front_phases::*;
+    use hirsel_host_io::launch::*;
     use hirsel_native::*;
     use hirsel_native_batch::*;
     use hirsel_native_testing::*;
@@ -610,6 +611,7 @@ fn cursor_native_parity_with_stack(cases: &[(&str, &str)], stack: Option<u64>) {
     use hirsel_driver::*;
     use hirsel_engine::*;
     use hirsel_front_phases::*;
+    use hirsel_host_io::launch::*;
     use hirsel_native::*;
     use hirsel_native_batch::*;
     use hirsel_native_testing::*;
@@ -810,6 +812,7 @@ fn borrow_cursor_8_native_cost_evidence() {
     use hirsel_driver::*;
     use hirsel_engine::*;
     use hirsel_front_phases::*;
+    use hirsel_host_io::launch::*;
     use hirsel_lir::ir::Inst;
     use hirsel_native::*;
     use hirsel_native_batch::*;

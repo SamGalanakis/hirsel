@@ -104,18 +104,15 @@ fn registered_installation_and_deleted_private_state_preserve_diagnostics_and_ti
             } else {
                 COMPILER.clone()
             };
-            let mut requests = hirsel_driver::requests::CompilerRequests::for_host(
+            let mut requests = hirsel_requests::CompilerRequests::for_host(
                 compiler.clone(),
                 compiler.configuration(),
             );
-            let output = requests.execute(
-                &manifest,
-                hirsel_driver::requests::CompileOperation::ExportTir,
-            );
+            let output = requests.execute(&manifest, hirsel_requests::CompileOperation::ExportTir);
             if mode == "tamper" {
                 assert!(corrupted.load(std::sync::atomic::Ordering::Relaxed));
                 let output = output.unwrap();
-                let hirsel_driver::requests::CompileResult::ExportTir(tir) = &output.result else {
+                let hirsel_requests::CompileResult::ExportTir(tir) = &output.result else {
                     panic!("expected TIR")
                 };
                 assert_eq!(
@@ -126,7 +123,7 @@ fn registered_installation_and_deleted_private_state_preserve_diagnostics_and_ti
                 return;
             }
             let output = output.unwrap();
-            let hirsel_driver::requests::CompileResult::ExportTir(tir) = &output.result else {
+            let hirsel_requests::CompileResult::ExportTir(tir) = &output.result else {
                 panic!("expected TIR")
             };
             std::fs::write(

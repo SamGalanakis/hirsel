@@ -3,13 +3,13 @@
 #[allow(dead_code, reason = "shared four-engine test support")]
 mod history;
 use hirsel_driver::native;
-use hirsel_driver::requests::*;
 use hirsel_engine::{
     requests::{OutputReadiness, RequestEngine, observe_inputs},
     runtime::QueryRuntime,
     with_compiler_stack,
 };
 use hirsel_front_phases::COMPILER;
+use hirsel_requests::*;
 use std::sync::Arc;
 
 const UPSERT: &str = "pub fn main() {\n  let mut counts: unique Map[u32, u64] = map.empty()\n  core@1/map.upsert_with(\n    mut counts, 0u32,\n    fn() -> unique u64 uses {} { 1 },\n    fn(mut count: unique u64) -> () uses {} { count += 1 }\n  )\n}\n";

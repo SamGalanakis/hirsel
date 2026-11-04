@@ -1,6 +1,7 @@
 use hirsel_driver::*;
 use hirsel_engine::{runtime::*, store::MemStore, *};
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use std::sync::Arc;
 
 #[test]
@@ -236,11 +237,11 @@ fn admitted_native_roots_preserve_selection_constants_and_detached_metadata_owne
                     },
                 );
                 let expected_output = oracle
-                    .request(hirsel_driver::requests::CompileOperation::NativeSources {
+                    .request(hirsel_requests::CompileOperation::NativeSources {
                         roots: seeds.clone(),
                     })
                     .unwrap();
-                let hirsel_driver::requests::CompileResult::NativeSources(expected) =
+                let hirsel_requests::CompileResult::NativeSources(expected) =
                     &expected_output.result
                 else {
                     panic!("native source oracle returned another operation");

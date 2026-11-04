@@ -1,9 +1,9 @@
 //! Original Value plans across graph-owned source, call transport and execution.
 use hirsel_driver::native;
-use hirsel_driver::requests::*;
 use hirsel_driver::resident::ObservedSession;
 use hirsel_engine::{CompileConfig, runtime::ProcessBudget, store::MemStore};
 use hirsel_front_phases::COMPILER;
+use hirsel_requests::*;
 use hirsel_run_schema::ownership_trace::{Action, Trace};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -70,8 +70,8 @@ fn source_calls_selected(
             };
             let host = run_host(
                 &manifest,
-                hirsel_driver::HostLaunch::Live {
-                    config: hirsel_driver::LaunchConfig::Grants {
+                hirsel_host_io::launch::HostLaunch::Live {
+                    config: hirsel_host_io::launch::LaunchConfig::Grants {
                         input: std::ffi::OsStr::new(grants),
                         arguments: None,
                     },
@@ -186,8 +186,8 @@ fn source_calls_selected(
                     &tools,
                     &directory.path().join(backend.name()),
                     1000,
-                    hirsel_driver::HostLaunch::Live {
-                        config: hirsel_driver::LaunchConfig::Grants {
+                    hirsel_host_io::launch::HostLaunch::Live {
+                        config: hirsel_host_io::launch::LaunchConfig::Grants {
                             input: std::ffi::OsStr::new(grants),
                             arguments: None,
                         },

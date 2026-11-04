@@ -303,7 +303,7 @@ struct FrozenEngine {
     budget: Arc<ProcessBudget>,
 }
 impl RequestEngine for FrozenEngine {
-    type Request = hirsel_driver::requests::CompileRequest;
+    type Request = hirsel_requests::CompileRequest;
     type Error = String;
     type Runtime = AdmittedRuntime;
     type Readiness = Readiness;
@@ -316,9 +316,9 @@ impl RequestEngine for FrozenEngine {
             .read(&request.path)
             .map_err(|e| e.to_string())?;
         let parts = match &request.inputs {
-            hirsel_driver::requests::CompileInputs::Frozen(inputs) => inputs.identity_parts(),
-            hirsel_driver::requests::CompileInputs::Namespace(_)
-            | hirsel_driver::requests::CompileInputs::Memory(_) => unreachable!(),
+            hirsel_requests::CompileInputs::Frozen(inputs) => inputs.identity_parts(),
+            hirsel_requests::CompileInputs::Namespace(_)
+            | hirsel_requests::CompileInputs::Memory(_) => unreachable!(),
         };
         let product = crate::fixture_product(
             &*self.store,
@@ -362,8 +362,8 @@ impl RequestEngine for FrozenEngine {
     }
 }
 
-fn check_operation() -> hirsel_driver::requests::CompileOperation {
-    hirsel_driver::requests::CompileOperation::Check {
+fn check_operation() -> hirsel_requests::CompileOperation {
+    hirsel_requests::CompileOperation::Check {
         lowering: hirsel_engine::LoweringPolicy::Comptime,
     }
 }

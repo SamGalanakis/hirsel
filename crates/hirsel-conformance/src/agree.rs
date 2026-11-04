@@ -223,12 +223,12 @@ impl Native {
         if needs_files {
             std::fs::create_dir_all(&dir).expect("scratch directory");
         }
-        use hirsel_driver::requests::CompileOperation;
-        use hirsel_driver::requests::CompileRequest;
-        use hirsel_driver::requests::CompileResult;
-        use hirsel_driver::requests::CompilerRequests;
-        use hirsel_driver::requests::NativeOutput;
-        use hirsel_driver::requests::NativeRequest;
+        use hirsel_requests::CompileOperation;
+        use hirsel_requests::CompileRequest;
+        use hirsel_requests::CompileResult;
+        use hirsel_requests::CompilerRequests;
+        use hirsel_requests::NativeOutput;
+        use hirsel_requests::NativeRequest;
         let mut requests =
             CompilerRequests::for_host(program.compiler.clone(), program.compiler.configuration())
                 .with_toolchain(std::sync::Arc::new(self.toolchain.clone()));
@@ -388,7 +388,7 @@ fn limits() -> hirsel_interp::Limits {
 /// source replaced by `source`.
 fn variant_inputs(
     compiler: &hirsel_engine::Compiler,
-    requests: &hirsel_driver::requests::CompilerRequests,
+    requests: &hirsel_requests::CompilerRequests,
     source: &str,
     path: &Path,
 ) -> Result<hirsel_engine::loader_inputs::FrozenInputs, ToolError> {
@@ -413,10 +413,10 @@ fn classify_requested(
     path: &Path,
     hash_seed: u64,
 ) -> Classification {
-    use hirsel_driver::requests::CompileOperation;
-    use hirsel_driver::requests::CompileRequest;
-    use hirsel_driver::requests::CompileResult;
-    use hirsel_driver::requests::CompilerRequests;
+    use hirsel_requests::CompileOperation;
+    use hirsel_requests::CompileRequest;
+    use hirsel_requests::CompileResult;
+    use hirsel_requests::CompilerRequests;
     let compiler = crate::compiler::verifying_compiler();
     let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration());
     let inputs = match variant_inputs(&compiler, &requests, source, path) {
@@ -593,7 +593,7 @@ fn classify_standalone(
 struct NativeProgram {
     compiler: hirsel_engine::Compiler,
     path: std::path::PathBuf,
-    inputs: hirsel_driver::requests::CompileInputs,
+    inputs: hirsel_requests::CompileInputs,
 }
 
 /// Run `config` normally, then under checked execution (`observe(program,

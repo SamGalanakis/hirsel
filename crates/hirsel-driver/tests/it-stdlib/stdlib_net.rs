@@ -4,6 +4,7 @@ use crate::source_std::TirFixture;
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 pub(super) fn execute(body: &str) {
     execute_text(&format!(
@@ -34,7 +35,7 @@ fn execute_text_in(fixture: &mut TirFixture, source: &str) {
     });
 }
 
-pub(super) fn execute_tir(prepared: &hirsel_driver::requests::TirExecution, source: &str) {
+pub(super) fn execute_tir(prepared: &hirsel_requests::TirExecution, source: &str) {
     with_compiler_stack(|| {
         let config = RunConfiguration {
             entry: prepared.entry.clone(),

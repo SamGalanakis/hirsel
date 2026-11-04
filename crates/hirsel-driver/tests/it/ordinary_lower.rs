@@ -1,8 +1,9 @@
 //! Program checking must consume ordinary Lower products through current V.
-use hirsel_driver::requests::*;
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
+use hirsel_requests::*;
 use hirsel_syntax::{DefPath, ItemPath, PackageId};
 use std::sync::Arc;
 

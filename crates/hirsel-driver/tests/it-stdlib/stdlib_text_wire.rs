@@ -2,6 +2,7 @@
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 use hirsel_lir::ir::UnitOrigin;
 use std::path::PathBuf;
 
@@ -231,7 +232,7 @@ fn full_gate_deflate_matches_zlib_native() {
         let mut stderr = Vec::new();
         let outcome = native::run_path_native_backend_with_validation(
             &path,
-            hirsel_driver::HostLaunch::empty(),
+            hirsel_host_io::launch::HostLaunch::empty(),
             None,
             hirsel_native::Backend::Llvm,
             native::Output::Streams {

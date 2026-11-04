@@ -4,6 +4,7 @@ mod model;
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 #[test]
 fn ordered_vector_traces_interpreted_and_checked_heap() {

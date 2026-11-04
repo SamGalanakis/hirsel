@@ -186,6 +186,7 @@ fn annotated_nested_receivers_keep_their_declared_payload_contract() {
 use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
+use hirsel_host_io::launch::*;
 
 fn capture_crossing_matrix(payload: &str, initial: &str, measure: &str, stable: bool) {
     with_compiler_stack(|| {

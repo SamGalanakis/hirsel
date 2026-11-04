@@ -291,7 +291,10 @@ enum Launch {
     Replay(OsString),
 }
 impl Launch {
-    fn host<'a>(&'a self, arguments: Option<&'a [OsString]>) -> hirsel_driver::HostLaunch<'a> {
+    fn host<'a>(
+        &'a self,
+        arguments: Option<&'a [OsString]>,
+    ) -> hirsel_host_io::launch::HostLaunch<'a> {
         match self {
             Self::Live {
                 grants,
@@ -299,26 +302,26 @@ impl Launch {
                 config,
                 record,
                 revocations,
-            } => hirsel_driver::HostLaunch::Live {
+            } => hirsel_host_io::launch::HostLaunch::Live {
                 config: if let Some(cores) = cores {
-                    hirsel_driver::LaunchConfig::Cores {
+                    hirsel_host_io::launch::LaunchConfig::Cores {
                         input: config,
                         grants: *grants,
                         arguments,
                         cores: *cores,
                     }
                 } else if *grants {
-                    hirsel_driver::LaunchConfig::Grants {
+                    hirsel_host_io::launch::LaunchConfig::Grants {
                         input: config,
                         arguments,
                     }
                 } else {
-                    hirsel_driver::LaunchConfig::Record(config)
+                    hirsel_host_io::launch::LaunchConfig::Record(config)
                 },
                 record: record.as_deref().map(Path::new),
                 revocations: revocations.as_deref().map(Path::new),
             },
-            Self::Replay(tape) => hirsel_driver::HostLaunch::Replay(Path::new(tape)),
+            Self::Replay(tape) => hirsel_host_io::launch::HostLaunch::Replay(Path::new(tape)),
         }
     }
 }

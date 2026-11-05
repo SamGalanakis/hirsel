@@ -78,10 +78,21 @@ impl Checks {
         self.facts.get_or_init(|| Table::new(graph))
     }
     pub(in crate::queries) fn evict(&self) -> bool {
-        let removed = std::mem::take(&mut *self.recipes.lock().unwrap());
+        // Weak promotion uses this lock too. Keep it through eviction so no
+        // reader can acquire a key between the pin check and lease release.
+        let mut recipes = self.recipes.lock().unwrap();
+        let removed = std::mem::take(&mut *recipes);
         let any = !removed.is_empty();
         drop(removed);
-        self.facts.get().map_or(0, Table::evict_ready) != 0 || any
+        self.facts.get().map_or(0, |table| {
+            table.evict_ready_entries_when(|key, result| {
+                Arc::strong_count(key) == 1
+                    && result
+                        .as_ref()
+                        .map_or(true, |value| Arc::strong_count(value) == 1)
+            })
+        }) != 0
+            || any
     }
 }
 fn retain(result: &Result<Arc<QueryOutput<TypedBody>>, QueryError>) -> bool {

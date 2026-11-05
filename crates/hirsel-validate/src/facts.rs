@@ -106,12 +106,20 @@ impl<K, V, E> FactTable<K, V, E> {
     where
         K: Eq + Hash,
     {
+        self.evict_ready_entries_when(|_, result| match result {
+            Ok(value) => evict(value),
+            Err(_) => true,
+        })
+    }
+    pub fn evict_ready_entries_when(&self, evict: impl Fn(&K, &Result<Arc<V>, E>) -> bool) -> u64
+    where
+        K: Eq + Hash,
+    {
         let removed = {
             let mut rows = self.rows.lock().unwrap();
             let keys = rows
-                .extract_if(|_, row| match &row.slot {
-                    Slot::Ready(Ok(value)) => evict(value),
-                    Slot::Ready(Err(_)) => true,
+                .extract_if(|key, row| match &row.slot {
+                    Slot::Ready(result) => evict(key, result),
                     Slot::Pending { .. } => false,
                 })
                 .collect::<Vec<_>>();
@@ -228,6 +236,37 @@ mod tests {
     }
     fn keep(value: &Result<Arc<u32>, FactError>) -> bool {
         value.is_ok()
+    }
+
+    #[test]
+    fn eviction_keeps_the_lease_until_key_and_result_readers_finish() {
+        let table = FactTable::<Arc<u32>, u32>::default();
+        let charge = Arc::new(());
+        let key = Arc::new(17);
+        let value = table
+            .get_or_try_init(
+                key.clone(),
+                || Ok(charge.clone()),
+                || Ok(Arc::new(42)),
+                keep,
+            )
+            .unwrap();
+        let evict = || {
+            table.evict_ready_entries_when(|key, result| {
+                Arc::strong_count(key) == 1
+                    && result
+                        .as_ref()
+                        .map_or(true, |value| Arc::strong_count(value) == 1)
+            })
+        };
+        assert_eq!(evict(), 0);
+        assert_eq!(Arc::strong_count(&charge), 2);
+        drop(key);
+        assert_eq!(evict(), 0);
+        assert_eq!(Arc::strong_count(&charge), 2);
+        drop(value);
+        assert_eq!(evict(), 1);
+        assert_eq!(Arc::strong_count(&charge), 1);
     }
 
     #[test]

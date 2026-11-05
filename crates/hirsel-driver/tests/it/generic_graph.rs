@@ -2,7 +2,6 @@ use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
-use hirsel_intern::jobs::with_compiler_stack;
 
 fn check(source: &str) -> CheckOutput {
     let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
@@ -457,7 +456,7 @@ mod verdict {
 
     #[test]
     fn unchanged_program_audit_does_not_rewalk_checked_bodies() {
-        with_compiler_stack(|| {
+        hirsel_intern::jobs::with_compiler_stack(|| {
             for (body, rejected) in [("grow((copy x,copy x))", true), ("grow(x)", false)] {
                 let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
                 let file = engine

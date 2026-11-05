@@ -7,6 +7,9 @@ struct State {
     base: u64,
     live: u64,
     peak: u64,
+    parts: [u64; 8],
+    peak_parts: [u64; 8],
+    peak_base: u64,
 }
 pub(crate) struct WindowBudget {
     owner: Arc<hirsel_engine_admission::MemoryReservation>,
@@ -15,8 +18,12 @@ pub(crate) struct WindowBudget {
 pub(crate) struct WindowRead {
     budget: Arc<WindowBudget>,
     bytes: u64,
+    kind: usize,
 }
 impl WindowBudget {
+    pub fn retained_bytes() -> u64 {
+        (size_of::<Self>() + 2 * size_of::<usize>()) as u64
+    }
     pub fn new(owner: Arc<hirsel_engine_admission::MemoryReservation>) -> Arc<Self> {
         Arc::new(Self {
             owner,
@@ -35,10 +42,31 @@ impl WindowBudget {
             ));
         }
         state.base = bytes;
-        state.peak = state.peak.max(total);
+        if total > state.peak {
+            state.peak = total;
+            state.peak_base = state.base;
+            state.peak_parts = state.parts;
+        }
         Ok(())
     }
     pub fn read(self: &Arc<Self>, bytes: u64) -> Result<Arc<WindowRead>, String> {
+        self.read_for("facts", bytes)
+    }
+    pub fn read_for(
+        self: &Arc<Self>,
+        kind: &'static str,
+        bytes: u64,
+    ) -> Result<Arc<WindowRead>, String> {
+        let kind = match kind {
+            "facts" => 0,
+            "callable-index" => 1,
+            "operations" => 2,
+            "scc" => 3,
+            "published-index" => 4,
+            "native-plan" => 5,
+            "template" => 6,
+            _ => 7,
+        };
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let live = state
             .live
@@ -57,11 +85,36 @@ impl WindowBudget {
             ));
         }
         state.live = live;
-        state.peak = state.peak.max(total);
+        state.parts[kind] += bytes;
+        if total > state.peak {
+            state.peak = total;
+            state.peak_base = state.base;
+            state.peak_parts = state.parts;
+        }
         Ok(Arc::new(WindowRead {
             budget: self.clone(),
             bytes,
+            kind,
         }))
+    }
+    pub fn report(&self, label: &str) {
+        if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some() {
+            let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            eprintln!(
+                "NATIVE_WINDOW_ATTRIBUTION {label} peak={} quota={} base={} facts={} index={} operations={} scc={} published={} native-plan={} template={} other={}",
+                s.peak,
+                self.owner.bytes(),
+                s.peak_base,
+                s.peak_parts[0],
+                s.peak_parts[1],
+                s.peak_parts[2],
+                s.peak_parts[3],
+                s.peak_parts[4],
+                s.peak_parts[5],
+                s.peak_parts[6],
+                s.peak_parts[7]
+            );
+        }
     }
     pub fn peak(&self) -> (u64, u64) {
         (
@@ -94,7 +147,12 @@ impl WindowRead {
             ));
         }
         state.live = live;
-        state.peak = state.peak.max(total);
+        state.parts[self.kind] = state.parts[self.kind] - self.bytes + bytes;
+        if total > state.peak {
+            state.peak = total;
+            state.peak_base = state.base;
+            state.peak_parts = state.parts;
+        }
         self.bytes = bytes;
         Ok(())
     }
@@ -102,6 +160,7 @@ impl WindowRead {
 impl Drop for WindowRead {
     fn drop(&mut self) {
         let mut state = self.budget.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.parts[self.kind] -= self.bytes;
         state.live = state
             .live
             .checked_sub(self.bytes)

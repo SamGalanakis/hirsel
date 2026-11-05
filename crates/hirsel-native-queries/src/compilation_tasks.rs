@@ -322,7 +322,7 @@ impl CompilationTasks {
         let snapshot_bytes = Arc::get_mut(&mut snapshot)
             .unwrap()
             .retained_dispatch_bytes();
-        let mut native = NativeTasks::new(snapshot, self.weight)?;
+        let mut native = NativeTasks::for_ready(snapshot, self.weight)?;
         let native_bytes = Arc::get_mut(&mut native).unwrap().retained_dispatch_bytes();
         let roots = NativeRootTasks::new(
             native.clone(),
@@ -419,6 +419,7 @@ impl CompilationTasks {
         let mut copied = hirsel_engine::NativeMetadataWeight::default();
         // Fixed controller/factory envelopes plus every owned variable buffer.
         copied.add(16384);
+        copied.add(super::demand::window::WindowBudget::retained_bytes() as usize);
         copied.vec(&self.root.roots, |w, path| w.path(path));
         super::ownership_compilation::metadata::emission(&mut copied, &self.emission);
         copied.vec(&self.backends, |w, backend| {
@@ -454,6 +455,13 @@ impl CompilationTasks {
         if bytes > self.allowance.bytes() {
             return Err("native compilation dispatch allowance exhausted".into());
         }
+        let window = super::demand::window::WindowBudget::new(self.allowance.clone());
+        window.set_base(bytes)?;
+        native
+            .snapshot
+            .dispatch_window
+            .set(window)
+            .map_err(|_| "native dispatch window installed twice")?;
         let leaf: Arc<dyn QueryFactory> = Arc::new(LinkInputFactory::new(link.clone()));
         let mut factories: BTreeMap<u32, Arc<dyn QueryFactory>> = BTreeMap::from([
             (
@@ -583,6 +591,13 @@ impl CompilationTasks {
     }
 
     fn publish(&self, outputs: Vec<ProductRef>) -> Result<ProductRef, String> {
+        if let Some(window) = self
+            .dispatch
+            .get()
+            .and_then(|d| d.native.snapshot.dispatch_window.get())
+        {
+            window.report("dispatch");
+        }
         if self.output == CompilationOutput::Executable {
             hirsel_intern::memory::checkpoint("link complete");
         }

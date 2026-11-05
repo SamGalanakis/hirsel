@@ -85,6 +85,7 @@ impl EmissionOptions {
 /// Owned immutable dependency inputs shared by task-local product views. The
 /// only shared mutable state is C's own acceptance map, never a query controller.
 pub struct NativeSnapshot {
+    pub(crate) dispatch_window: std::sync::OnceLock<Arc<super::demand::window::WindowBudget>>,
     pub execution: std::sync::OnceLock<Arc<hirsel_native::execution_plan::ExecutionProduct>>,
     pub store: Arc<dyn ResultStore>,
     pub instances: DemandInstances,
@@ -97,8 +98,7 @@ pub struct NativeSnapshot {
     operations: Arc<dyn hirsel_lir::operation::OperationDeclarations + Send + Sync>,
     pub owners: BTreeMap<ContentHash, InstanceAddress>,
     pub summaries: BTreeMap<ContentHash, Arc<ArenaSummary>>,
-    templates:
-        BTreeMap<super::optimizer::Function, (InstanceAddress, super::optimizer::TemplateFacts)>,
+    templates: BTreeMap<super::optimizer::Function, Reference>,
     native: Arc<hirsel_lir::validate::NativeCache>,
     materializations: AtomicU64,
     pub needs_guard: bool,
@@ -109,7 +109,27 @@ pub struct NativeSnapshot {
     // clients still own admission of their supplied inputs themselves.
     pub retained_allowances: Vec<Arc<hirsel_engine_admission::MemoryReservation>>,
 }
+pub struct DispatchOwners {
+    values: Vec<InstanceAddress>,
+    _lease: Option<Arc<super::demand::window::WindowRead>>,
+}
+impl std::ops::Deref for DispatchOwners {
+    type Target = [InstanceAddress];
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
 impl NativeSnapshot {
+    pub(crate) fn dispatch_read(
+        &self,
+        kind: &'static str,
+        bytes: u64,
+    ) -> Result<Option<Arc<super::demand::window::WindowRead>>, String> {
+        self.dispatch_window
+            .get()
+            .map(|window| window.read_for(kind, bytes))
+            .transpose()
+    }
     pub fn retained_dispatch_bytes(&mut self) -> u64 {
         use super::ownership_compilation::metadata as m;
         let mut w = hirsel_engine::NativeMetadataWeight::default();
@@ -120,11 +140,7 @@ impl NativeSnapshot {
         m::manifest(&mut w, &self.manifest);
         w.packed_map(&mut self.owners, |w, _, key| m::address(w, key));
         w.packed_map(&mut self.summaries, |_, _, _| ());
-        w.packed_map(&mut self.templates, |w, (path, _), (key, facts)| {
-            w.path(path);
-            m::address(w, key);
-            w.vec(&facts.references, |w, (path, _)| w.path(path));
-        });
+        w.packed_map(&mut self.templates, |w, (path, _), _| w.path(path));
         w.flat_vec(&self.retained_allowances);
         w.bytes()
             .saturating_add(self.instances.retained_index_bytes())
@@ -195,7 +211,13 @@ impl NativeSnapshot {
                 let output = stored.read(&instances, &owner)?;
                 Ok((
                     (owner.instance.definition().clone(), owner.instance.digest()),
-                    (owner, output.facts.body.templates.clone()),
+                    super::dispatch::put(
+                        store.as_ref(),
+                        &(
+                            owner.ready_query_id().address.0,
+                            &output.facts.body.templates,
+                        ),
+                    )?,
                 ))
             })
             .collect::<Result<_, String>>()?;
@@ -215,6 +237,7 @@ impl NativeSnapshot {
                     )
                 })?;
         Ok(Arc::new(Self {
+            dispatch_window: Default::default(),
             execution: Default::default(),
             native: super::ready::ReadyQueries::validator(&store),
             store,
@@ -255,33 +278,60 @@ impl NativeSnapshot {
         &self,
         key: &InstanceAddress,
         backend: &str,
-    ) -> Result<Vec<InstanceAddress>, String> {
+    ) -> Result<DispatchOwners, String> {
         if self.owners.get(&key.address(READY_KIND).0) != Some(key) {
             return Err("unregistered Codegen owner".into());
         }
         let mut owners = vec![key.clone()];
         if backend != "llvm" || self.emission.opt == OptLevel::None || self.emission.debug {
-            return Ok(owners);
+            let mut w = hirsel_engine::NativeMetadataWeight::default();
+            w.vec(&owners, super::ownership_compilation::metadata::address);
+            return Ok(DispatchOwners {
+                values: owners,
+                _lease: self.dispatch_read("template", w.bytes())?,
+            });
         }
         let function = (key.instance.definition().clone(), key.instance.digest());
-        let mut copies = super::optimizer::copy_closure(
-            &function,
-            |member| {
-                self.templates
-                    .get(member)
-                    .map_or_else(Vec::new, |(_, facts)| facts.references.clone())
-            },
-            |member| {
-                self.templates.get(member).is_some_and(|(_, facts)| {
-                    facts.library
-                        || facts.small
-                        || self.emission.inline_instances.contains(&member.1)
-                })
-            },
-        )
-        .into_iter()
-        .map(|member| self.templates[&member].0.clone())
-        .collect::<Vec<_>>();
+        let load = |member: &super::optimizer::Function| -> Result<Option<(ContentHash, super::optimizer::TemplateFacts)>, String> {
+            self.templates.get(member).map(|reference| super::dispatch::read(self.store.as_ref(), *reference)).transpose()
+        };
+        // Same exact traversal as optimizer.rs and native/units.rs:187-201.
+        // Only copyable members expose their references; each read ends here.
+        let mut pending = load(&function)?.map_or_else(Vec::new, |(_, facts)| facts.references);
+        let mut seen = BTreeSet::new();
+        let mut copies = Vec::new();
+        let mut lease = self.dispatch_read("template", 0)?;
+        while let Some(member) = pending.pop() {
+            if member == function || seen.contains(&member) {
+                continue;
+            }
+            let Some((ready, facts)) = load(&member)? else {
+                continue;
+            };
+            if !(facts.library || facts.small || self.emission.inline_instances.contains(&member.1))
+            {
+                continue;
+            }
+            let owner = self
+                .owners
+                .get(&ready)
+                .ok_or("missing copied dispatch owner")?;
+            seen.insert(member);
+            copies.push(owner.clone());
+            pending.extend(facts.references);
+            let mut w = hirsel_engine::NativeMetadataWeight::default();
+            w.vec(&pending, |w, (path, _)| w.path(path));
+            w.tree::<super::optimizer::Function, ()>(seen.len());
+            for (path, _) in &seen {
+                w.path(path);
+            }
+            w.vec(&copies, super::ownership_compilation::metadata::address);
+            if let Some(lease) = &mut lease {
+                Arc::get_mut(lease)
+                    .ok_or("shared template reader")?
+                    .resize(w.bytes())?;
+            }
+        }
         copies.sort_by_cached_key(|member| {
             hirsel_lir::emission::symbol_name(
                 member.instance.definition(),
@@ -289,7 +339,17 @@ impl NativeSnapshot {
             )
         });
         owners.extend(copies);
-        Ok(owners)
+        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        w.vec(&owners, super::ownership_compilation::metadata::address);
+        if let Some(lease) = &mut lease {
+            Arc::get_mut(lease)
+                .ok_or("shared template reader")?
+                .resize(w.bytes())?;
+        }
+        Ok(DispatchOwners {
+            values: owners,
+            _lease: lease,
+        })
     }
 
     pub fn environment(&self) -> NativeEnvironment<'_> {

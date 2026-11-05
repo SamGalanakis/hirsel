@@ -221,6 +221,7 @@ impl InstanceTasks {
         }
         let mut metadata = hirsel_engine::NativeMetadataWeight::default();
         metadata.add(size_of::<Self>() + 2 * size_of::<usize>());
+        metadata.add(super::demand::window::WindowBudget::retained_bytes() as usize);
         metadata
             .add(size_of::<hirsel_engine_admission::MemoryReservation>() + 2 * size_of::<usize>());
         metadata.vec(&roots, |w, key| {
@@ -1263,6 +1264,7 @@ impl InstanceTasks {
         if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some() {
             let (peak, quota) = self.window.peak();
             eprintln!("NATIVE_WINDOW_PEAK\t{peak}\t{quota}");
+            self.window.report("callable");
         }
         Ok(product)
     }

@@ -14,6 +14,7 @@ use hirsel_native::object_queries::ObjectProducts;
 use hirsel_native::object_queries::ObjectQueries;
 use hirsel_native::object_queries::ObjectTaskRequest;
 use hirsel_native::object_queries::ObjectTaskSnapshot;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     sync::atomic::{AtomicU64, Ordering},
@@ -42,18 +43,42 @@ enum Work {
     Arena(ComponentKey),
     Ready(InstanceAddress),
 }
+#[derive(Serialize, Deserialize)]
+enum WorkIndex {
+    Instance(ContentHash),
+    Arena(usize),
+    Ready(ContentHash),
+}
+#[derive(Serialize, Deserialize)]
+struct RequestRecipe {
+    work: WorkIndex,
+    reads: Vec<(u32, ContentHash, Reference)>,
+    guard: Option<(u32, ContentHash)>,
+}
 struct Request {
-    key: QueryId,
     work: Work,
-    reads: Vec<(QueryId, hirsel_engine::store::Reference)>,
+    reads: Vec<(QueryId, Reference)>,
     guard: Option<QueryId>,
 }
-
+impl Request {
+    fn retained_bytes(&self) -> u64 {
+        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        w.add(size_of::<Self>());
+        w.flat_vec(&self.reads);
+        match &self.work {
+            Work::Instance(key) | Work::Ready(key) => {
+                super::ownership_compilation::metadata::address(&mut w, key)
+            }
+            Work::Arena(key) => super::ownership_compilation::metadata::component(&mut w, key),
+        }
+        w.bytes()
+    }
+}
 /// Immutable dispatch/read plans, built during snapshot admission. Factory
 /// creation below performs only a bounded lookup and boxes one continuation.
 pub struct NativeTasks {
     pub snapshot: Arc<NativeSnapshot>,
-    requests: BTreeMap<Id, Arc<Request>>,
+    requests: BTreeMap<Id, Reference>,
     weight: MemoryWeight,
     fallback: hirsel_engine::store::Reference,
     pub created: AtomicU64,
@@ -61,20 +86,109 @@ pub struct NativeTasks {
 }
 impl NativeTasks {
     pub fn retained_dispatch_bytes(&mut self) -> u64 {
-        use super::ownership_compilation::metadata as m;
         let mut w = hirsel_engine::NativeMetadataWeight::default();
         w.add(size_of::<Self>() + 2 * size_of::<usize>());
-        w.packed_map(&mut self.requests, |w, _, request| {
-            w.arc(request);
-            w.flat_vec(&request.reads);
-            match &request.work {
-                Work::Instance(key) | Work::Ready(key) => m::address(w, key),
-                Work::Arena(key) => m::component(w, key),
-            }
-        });
+        w.packed_map(&mut self.requests, |_, _, _| ());
         w.bytes()
     }
+    fn open_request(&self, key: QueryId) -> Result<Request, String> {
+        let record = self
+            .requests
+            .get(&id(key))
+            .ok_or("unregistered native task")?;
+        let recipe: RequestRecipe = super::dispatch::read(self.snapshot.store.as_ref(), *record)?;
+        let (work, expected) = match recipe.work {
+            WorkIndex::Instance(owner) => {
+                let owner = self
+                    .snapshot
+                    .owners
+                    .get(&owner)
+                    .ok_or("missing native task owner")?
+                    .clone();
+                let product = self
+                    .snapshot
+                    .instances
+                    .completed_inputs()?
+                    .into_iter()
+                    .find(|(candidate, _)| candidate == &owner)
+                    .ok_or("missing native task instance")?
+                    .1;
+                let expected = instance_query(&owner, product.product.product.clone());
+                (Work::Instance(owner), expected)
+            }
+            WorkIndex::Ready(owner) => {
+                let owner = self
+                    .snapshot
+                    .owners
+                    .get(&owner)
+                    .ok_or("missing Ready task owner")?
+                    .clone();
+                let expected = owner.ready_query_id();
+                (Work::Ready(owner), expected)
+            }
+            WorkIndex::Arena(index) => {
+                let component = self
+                    .snapshot
+                    .arena
+                    .component_keys
+                    .get(index)
+                    .ok_or("missing native task component")?
+                    .clone();
+                let address = component.address()?;
+                let summary = self
+                    .snapshot
+                    .summaries
+                    .get(&address.0)
+                    .ok_or("missing native task summary")?;
+                let expected = query(
+                    if component.stratum == ArenaStratum::Chosen {
+                        ARENA_CHOSEN_KIND
+                    } else {
+                        ARENA_CANDIDATES_KIND
+                    },
+                    summary.product.clone(),
+                );
+                (Work::Arena(component), expected)
+            }
+        };
+        if expected != key {
+            return Err("native task recipe names another query".into());
+        }
+        Ok(Request {
+            work,
+            reads: recipe
+                .reads
+                .into_iter()
+                .map(|(kind, address, record)| {
+                    (
+                        QueryId {
+                            kind,
+                            address: hirsel_engine::store::Address(address),
+                        },
+                        record,
+                    )
+                })
+                .collect(),
+            guard: recipe.guard.map(|(kind, address)| QueryId {
+                kind,
+                address: hirsel_engine::store::Address(address),
+            }),
+        })
+    }
     pub fn new(snapshot: Arc<NativeSnapshot>, weight: MemoryWeight) -> Result<Arc<Self>, String> {
+        Self::build(snapshot, weight, false)
+    }
+    pub fn for_ready(
+        snapshot: Arc<NativeSnapshot>,
+        weight: MemoryWeight,
+    ) -> Result<Arc<Self>, String> {
+        Self::build(snapshot, weight, true)
+    }
+    fn build(
+        snapshot: Arc<NativeSnapshot>,
+        weight: MemoryWeight,
+        ready_only: bool,
+    ) -> Result<Arc<Self>, String> {
         let fallback = snapshot
             .store
             .put_content(FAILURE, b"native task resource or protocol failure")
@@ -151,6 +265,32 @@ impl NativeTasks {
             })
             .collect::<BTreeMap<_, _>>();
         let mut requests = BTreeMap::new();
+        let mut register = |q: QueryId,
+                            work: WorkIndex,
+                            reads: Vec<(QueryId, Reference)>,
+                            guard: Option<QueryId>|
+         -> Result<(), String> {
+            if (size_of::<NativeTask>() + reads.len() * size_of::<(QueryId, Reference)>()) as u64
+                > weight.scratch
+            {
+                return Err("native reads exceed declared scratch allowance".into());
+            }
+            let record = super::dispatch::put(
+                snapshot.store.as_ref(),
+                &RequestRecipe {
+                    work,
+                    reads: reads
+                        .into_iter()
+                        .map(|(q, r)| (q.kind, q.address.0, r))
+                        .collect(),
+                    guard: guard.map(|q: QueryId| (q.kind, q.address.0)),
+                },
+            )?;
+            if requests.insert(id(q), record).is_some() {
+                return Err("duplicate native task recipe".into());
+            }
+            Ok(())
+        };
         let summary_read = |index: usize| -> Result<_, String> {
             let key = &snapshot.arena.component_keys[index];
             let address = addresses[index];
@@ -177,15 +317,14 @@ impl NativeTasks {
         for (key, stored) in &inputs {
             let output = stored.read(&snapshot.instances, key)?;
             let q = instance_query(key, output.product.product.clone());
-            requests.insert(
-                id(q),
-                Arc::new(Request {
-                    key: q,
-                    work: Work::Instance(key.clone()),
-                    reads: vec![],
-                    guard: None,
-                }),
-            );
+            if !ready_only {
+                register(
+                    q,
+                    WorkIndex::Instance(key.ready_query_id().address.0),
+                    vec![],
+                    None,
+                )?;
+            }
             let mut reads = BTreeMap::new();
             for member in
                 std::iter::once(owner(key)).chain(output.facts.body.callees.iter().cloned())
@@ -213,17 +352,20 @@ impl NativeTasks {
                 reads.insert(id(read.0), read);
             }
             let q = key.ready_query_id();
-            requests.insert(
-                id(q),
-                Arc::new(Request {
-                    key: q,
-                    work: Work::Ready(key.clone()),
-                    reads: reads.into_values().collect(),
-                    guard: guard.as_ref().map(|g| g.query_id()),
-                }),
-            );
+            register(
+                q,
+                WorkIndex::Ready(q.address.0),
+                reads.into_values().collect(),
+                guard.as_ref().map(|g| g.query_id()),
+            )?;
         }
-        for (index, key) in snapshot.arena.component_keys.iter().enumerate() {
+        for (index, key) in snapshot
+            .arena
+            .component_keys
+            .iter()
+            .enumerate()
+            .filter(|_| !ready_only)
+        {
             let mut reads = BTreeMap::new();
             for member in &key.members {
                 let (_, input) = by_owner
@@ -261,26 +403,15 @@ impl NativeTasks {
                 reads.insert(id(read.0), read);
             }
             let (q, _) = summary_read(index)?;
-            requests.insert(
-                id(q),
-                Arc::new(Request {
-                    key: q,
-                    work: Work::Arena(key.clone()),
-                    reads: reads.into_values().collect(),
-                    guard: None,
-                }),
-            );
+            register(
+                q,
+                WorkIndex::Arena(index),
+                reads.into_values().collect(),
+                None,
+            )?;
         }
         if std::mem::size_of::<NativeTask>() as u64 > weight.retained {
             return Err("native continuation exceeds its declared retained allowance".into());
-        }
-        if requests.values().any(|request| {
-            (std::mem::size_of::<NativeTask>()
-                + request.reads.len() * std::mem::size_of::<(QueryId, Reference)>())
-                as u64
-                > weight.scratch
-        }) {
-            return Err("native reads exceed declared scratch allowance".into());
         }
         Ok(Arc::new(Self {
             snapshot,
@@ -291,29 +422,11 @@ impl NativeTasks {
             ready_transformations: AtomicU64::new(0),
         }))
     }
-    /// Ownership diagnostics install the existing InstanceTasks and ArenaTasks
-    /// factories. Their settled descriptors remain in the snapshot; retaining
-    /// a second set of producer requests here serves no diagnostic dependency.
-    pub fn for_ownership(
-        snapshot: Arc<NativeSnapshot>,
-        weight: MemoryWeight,
-    ) -> Result<Arc<Self>, String> {
-        let mut tasks = Self::new(snapshot, weight)?;
-        Arc::get_mut(&mut tasks)
-            .expect("native dispatch is private during construction")
-            .requests
-            .retain(|_, request| matches!(request.work, Work::Ready(_)));
-        Ok(tasks)
-    }
     pub fn ownership_reads(
         &self,
         owner: &InstanceAddress,
-    ) -> Result<&[(QueryId, Reference)], String> {
-        let request = self
-            .requests
-            .get(&id(owner.ready_query_id()))
-            .ok_or("ownership diagnostic has no settled Ready dependency plan")?;
-        Ok(&request.reads)
+    ) -> Result<Vec<(QueryId, Reference)>, String> {
+        Ok(self.open_request(owner.ready_query_id())?.reads)
     }
     pub fn receipt_queries(&self) -> Vec<QueryId> {
         let mut owners = self.snapshot.owners.values().collect::<Vec<_>>();
@@ -364,28 +477,25 @@ impl NativeTaskFactory {
 }
 impl QueryFactory for NativeTaskFactory {
     fn create(&self, key: QueryId) -> Result<Box<dyn QueryTask>, Reference> {
-        let request = self
-            .tasks
-            .requests
-            .get(&id(key))
-            .ok_or_else(|| self.tasks.failure("unregistered native task"))?
-            .clone();
+        if !self.tasks.requests.contains_key(&id(key)) {
+            return Err(self.tasks.failure("unregistered native task"));
+        }
         self.tasks.created.fetch_add(1, Ordering::Relaxed);
         Ok(Box::new(NativeTask {
             tasks: self.tasks.clone(),
-            request,
+            key,
             terminal: None,
         }))
     }
 }
 struct NativeTask {
     tasks: Arc<NativeTasks>,
-    request: Arc<Request>,
+    key: QueryId,
     terminal: Option<Result<ProductRef, Reference>>,
 }
 impl QueryTask for NativeTask {
     fn id(&self) -> QueryId {
-        self.request.key
+        self.key
     }
     fn weight(&self) -> MemoryWeight {
         // The immutable request and completed products retain their snapshot
@@ -405,8 +515,23 @@ impl QueryTask for NativeTask {
                 Err(e) => QueryPoll::Failed(e),
             };
         }
+        let request = match self.tasks.open_request(self.key) {
+            Ok(request) => request,
+            Err(message) => return QueryPoll::Failed(self.tasks.failure(&message)),
+        };
+        let bytes = request.retained_bytes();
+        if bytes.saturating_add(size_of::<Self>() as u64) > self.tasks.weight.scratch {
+            return QueryPoll::Failed(
+                self.tasks
+                    .failure("native task recipe exceeds scratch allowance"),
+            );
+        }
+        let _lease = match self.tasks.snapshot.dispatch_read("native-plan", bytes) {
+            Ok(lease) => lease,
+            Err(message) => return QueryPoll::Failed(self.tasks.failure(&message)),
+        };
         let mut waiting = Vec::new();
-        for (key, record) in &self.request.reads {
+        for (key, record) in &request.reads {
             match cx.read(*key) {
                 Poll::Pending => waiting.push(*key),
                 Poll::Ready(Err(error)) => {
@@ -427,7 +552,7 @@ impl QueryTask for NativeTask {
                 }
             }
         }
-        if let Some(key) = self.request.guard {
+        if let Some(key) = request.guard {
             match cx.read(key) {
                 Poll::Pending => waiting.push(key),
                 Poll::Ready(Err(error)) => {
@@ -457,7 +582,7 @@ impl QueryTask for NativeTask {
             return QueryPoll::Waiting(waiting);
         }
         let mut products = DemandProducts::new(self.tasks.snapshot.clone());
-        let result = match &self.request.work {
+        let result = match &request.work {
             Work::Instance(key) => products.instance(key).map(|p| p.product.clone()),
             Work::Arena(key) => products.arena_summary(key).map(|p| p.product.clone()),
             Work::Ready(key) => products.ready(key).map(|p| p.product.clone()),
@@ -618,7 +743,7 @@ impl ObjectTaskSnapshot for CodegenTasks {
             .codegen_owners(&key.owner, &key.backend)
             .map(|owners| {
                 owners
-                    .into_iter()
+                    .iter()
                     .skip(1)
                     .map(|owner| (owner.ready_query_id(), None))
                     .collect()

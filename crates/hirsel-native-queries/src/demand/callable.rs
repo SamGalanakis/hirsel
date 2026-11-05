@@ -226,15 +226,16 @@ impl DemandInstances {
         let mut graph_charge = self
             .window
             .as_ref()
-            .map(|w| w.read(index_bytes))
+            .map(|w| w.read_for("callable-index", index_bytes))
             .transpose()?;
         let mut operations_charge = self
             .window
             .as_ref()
             .map(|w| {
-                w.read(super::super::ownership_compilation::metadata::operations(
-                    &mut operations,
-                ))
+                w.read_for(
+                    "operations",
+                    super::super::ownership_compilation::metadata::operations(&mut operations),
+                )
             })
             .transpose()?;
         if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some() {
@@ -288,9 +289,15 @@ impl DemandInstances {
             );
         }
         let mut freedom = BTreeMap::new();
+        let mut largest_scc = 0;
         for members in &components {
             let mut equations = BTreeMap::new();
-            let mut equation_charge = self.window.as_ref().map(|w| w.read(0)).transpose()?;
+            let mut scc_demand = 0;
+            let mut equation_charge = self
+                .window
+                .as_ref()
+                .map(|w| w.read_for("scc", 0))
+                .transpose()?;
             for &i in members {
                 let (key, stored) = &originals[i];
                 let output = stored.read(self, key).map_err(|e| {
@@ -303,6 +310,10 @@ impl DemandInstances {
                             .collect::<Vec<_>>()
                     )
                 })?;
+                scc_demand = scc_demand.max(
+                    equation_charge.as_ref().map_or(0, |c| c.bytes())
+                        + output.retained_metadata_bytes(),
+                );
                 equations.insert(
                     (key.instance.definition().clone(), key.instance.digest()),
                     output.facts.body.operation_freedom.clone(),
@@ -325,6 +336,20 @@ impl DemandInstances {
                             .collect::<Vec<_>>()
                     )
                 })?;
+            }
+            scc_demand = scc_demand.max(equation_charge.as_ref().map_or(0, |c| c.bytes()));
+            if scc_demand > largest_scc {
+                largest_scc = scc_demand;
+                if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some() {
+                    eprintln!(
+                        "NATIVE_SCC_DEMAND bytes={scc_demand} members={} names={:?}",
+                        members.len(),
+                        members
+                            .iter()
+                            .map(|&i| originals[i].0.instance.definition().to_string())
+                            .collect::<Vec<_>>()
+                    );
+                }
             }
             freedom.extend(hirsel_rc::closure_calls::settle_operation_freedom(
                 &equations, &freedom,
@@ -868,7 +893,7 @@ impl DemandInstances {
         let index = self
             .window
             .as_ref()
-            .map(|window| window.read(w.bytes()))
+            .map(|window| window.read_for("published-index", w.bytes()))
             .transpose()?;
         Ok(PublishedCallables {
             records: rows,

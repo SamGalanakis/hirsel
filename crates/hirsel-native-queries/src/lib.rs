@@ -4,6 +4,7 @@ pub mod arena_tasks;
 pub mod batch_sources;
 pub mod compilation_tasks;
 pub mod demand;
+mod dispatch;
 use hirsel_native_cache::discharge;
 pub mod emission;
 pub mod execution;

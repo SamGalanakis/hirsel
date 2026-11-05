@@ -2,6 +2,7 @@
 //! Adapter calls retain no Scheduler, Frontier or parked TaskCtx borrow.
 use super::super::{Logical, Scheduler, TaskKey, Wait, handle, readiness, role};
 use crate::{context::RunShared, stop::Stopped};
+use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 
 /// Called under the scheduler role after a saved frame is published. An
@@ -161,7 +162,7 @@ pub(super) unsafe fn poll(run: *mut RunShared, retiring: bool, idle: bool) -> St
             .collect();
         let batch = unsafe { crate::host_waits::process_batch_home(run, &canceled) }?;
         let mut ready = Vec::new();
-        for (_, _, task, token, cause, available) in candidates {
+        for (deadline, _, task, token, cause, available) in candidates {
             let available = available || batch.contains(token);
             let (done, attempt) = if observing {
                 unsafe { crate::host_waits::poll_observed_home(run, token, cause, available) }?
@@ -203,16 +204,32 @@ pub(super) unsafe fn poll(run: *mut RunShared, retiring: bool, idle: bool) -> St
                     let s = unsafe { (*(*run).tasks.get()).as_deref_mut().unwrap() };
                     super::events::record_host_poll(s, task, result.result, !retiring);
                 }
-                ready.push(task);
+                ready.push((task, deadline));
             }
         }
         {
             let _guard = unsafe { role::IdleGuard::home(run) };
             let s = unsafe { (*(*run).tasks.get()).as_deref_mut().unwrap() };
-            for task in ready {
+            let first = s.runnable.len();
+            let deadlines: BTreeMap<_, _> = ready.iter().copied().collect();
+            for (task, _) in ready {
                 s.unpark(task);
             }
-            if !unsafe { readiness::poll_ordered_after_hosts(s, crate::pool::has_slot_run(run)) } {
+            let polled =
+                unsafe { readiness::poll_ordered_after_hosts(s, crate::pool::has_slot_run(run)) };
+            // Match the worker poll and interpreter: runtime waits precede
+            // timers, then request deadlines and park order break ties. Host
+            // attempts run outside the role, but their continuations must join
+            // the same ordered wake batch as runtime completions.
+            let mut woken = s.runnable.split_off(first);
+            woken.make_contiguous().sort_unstable_by_key(|&task| {
+                (
+                    deadlines.get(&task).copied().flatten(),
+                    s.task(task).parked_at,
+                )
+            });
+            s.runnable.append(&mut woken);
+            if !polled {
                 let Logical::Ordered(driver) = &mut s.logical else {
                     unreachable!()
                 };

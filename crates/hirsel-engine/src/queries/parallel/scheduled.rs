@@ -162,7 +162,7 @@ impl FrontFacts {
 }
 #[derive(Clone)]
 struct ArchivedFront {
-    facts: Arc<TerminalFront>,
+    facts: Option<Arc<TerminalFront>>,
     observations: Arc<FrontObservations>,
 }
 struct TerminalFront {
@@ -864,6 +864,24 @@ impl FrontBodyQueries {
     }
     pub(in crate::queries) fn evict_idle(&self, scratch: u64) -> bool {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        // Compact payloads are optional too. Keep the completed observations
+        // for inspectors, but release an unpinned payload before growing Front.
+        let retired = slots.values_mut().find_map(|slot| match slot {
+            FrontSlot::Archived(archived)
+                if archived
+                    .facts
+                    .as_ref()
+                    .is_some_and(|facts| Arc::strong_count(facts) == 1) =>
+            {
+                archived.facts.take()
+            }
+            _ => None,
+        });
+        if let Some(retired) = retired {
+            drop(slots);
+            drop(retired);
+            return true;
+        }
         let selected = slots.iter().find_map(|(key, slot)| match slot {
             FrontSlot::Archived(_) => None,
             FrontSlot::Live { outcome, .. } => match &outcome.state {
@@ -1413,7 +1431,7 @@ impl FrontBodyQueries {
                 queries: self,
                 scratch,
             };
-            let task = BodyTask {
+            let mut task = BodyTask {
                 queries: self.clone(),
                 query,
                 input: query.address.0,
@@ -1426,7 +1444,7 @@ impl FrontBodyQueries {
             };
             let restored = task
                 .load_evicted(&mut context)
-                .unwrap_or(Err(self.errors.protocol));
+                .unwrap_or_else(|| task.run(&mut context));
             if let Err(reference) = restored {
                 return Err(self
                     .outcome(Err(reference))

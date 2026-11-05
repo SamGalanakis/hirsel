@@ -153,10 +153,10 @@ impl FrontBodyQueries {
             >::uninit()))?;
         let backing = outcome._backing.split(charge)?;
         Some(ArchivedFront {
-            facts: Arc::new(TerminalFront {
+            facts: Some(Arc::new(TerminalFront {
                 bytes: bytes.into_boxed_slice(),
                 _backing: backing,
-            }),
+            })),
             observations,
         })
     }
@@ -240,12 +240,11 @@ impl BodyTask {
             .get(&self.input)?
         {
             FrontSlot::Live { .. } => return None,
-            FrontSlot::Archived(archived) => archived.facts.clone(),
+            FrontSlot::Archived(archived) => archived.facts.clone()?,
         };
-        Some(
-            self.load_terminal(cx, &facts.bytes)
-                .unwrap_or(Err(self.queries.errors.protocol)),
-        )
+        // Restoring optional compact facts can decline decoding or admission.
+        // Recompute from the immutable source on a miss, as for other caches.
+        self.load_terminal(cx, &facts.bytes)
     }
     fn load_terminal(
         &self,

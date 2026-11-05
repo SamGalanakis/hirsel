@@ -185,7 +185,10 @@ impl RecordOwner {
 }
 impl PartialEq for RecordOwner {
     fn eq(&self, other: &Self) -> bool {
-        self.path() == other.path()
+        match (self, other) {
+            (Self::Interned(left), Self::Interned(right)) => left == right,
+            _ => self.path() == other.path(),
+        }
     }
 }
 impl Eq for RecordOwner {}
@@ -196,7 +199,11 @@ impl PartialOrd for RecordOwner {
 }
 impl Ord for RecordOwner {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.path().cmp(other.path())
+        if self == other {
+            std::cmp::Ordering::Equal
+        } else {
+            self.path().cmp(other.path())
+        }
     }
 }
 /// Recomputable projections of current source products, never semantic read
@@ -365,7 +372,7 @@ impl NativeRecordContext {
                 Some(
                     old_base == new_base
                         && old.logical_path() == new.logical_path()
-                        && old.text() == new.text(),
+                        && (std::ptr::eq(old, new) || old.text() == new.text()),
                 )
             };
             match anchors.entry(owner.clone()) {

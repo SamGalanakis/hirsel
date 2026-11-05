@@ -22,6 +22,9 @@ pub(super) struct HeaderSources {
 }
 pub(crate) struct SourceInputs {
     sources: SourceMap,
+    origin_catalog: catalog::CatalogIdentity,
+    origin_items: Weak<BTreeMap<DefPath, Vec<Arc<ItemSyntax>>>>,
+    origin_placement: u64,
     pub(super) catalog: catalog::Catalog,
     pub(super) syntax: Arc<HeaderSources>,
     declarations: crate::DeclarationIndex,
@@ -30,6 +33,12 @@ pub(crate) struct SourceInputs {
     admission: OnceLock<crate::runtime::MemoryReservation>,
 }
 type SyntaxBinding = (DefId, ContentHash, hirsel_span::Anchor, u32);
+fn compare_binding(left: &SyntaxBinding, right: &SyntaxBinding) -> std::cmp::Ordering {
+    left.0
+        .fingerprint()
+        .cmp(&right.0.fingerprint())
+        .then_with(|| left.cmp(right))
+}
 struct SyntaxOwner {
     bindings: Vec<SyntaxBinding>,
     transport: bool,
@@ -117,48 +126,59 @@ impl SourceInputs {
         {
             return false;
         }
+        if self.origin_placement == engine.sources.placement_revision()
+            && self.origin_catalog.matches(&engine.catalog)
+            && self.origin_items.ptr_eq(&engine.items.owner())
+        {
+            return true;
+        }
         // Reconstruction installs this complete catalog. Materializing one of
         // its items adds an alias, not a new binding. Check those aliases while
         // the source generation and table owners prove the unchanged catalog.
         if self.sources.placement_revision() == engine.sources.placement_revision()
             && self.catalog.identity().matches(&engine.catalog)
             && engine.items.values().flatten().all(|syntax| {
+                let binding = (
+                    DefId::intern(&syntax.item.definition),
+                    syntax.text_hash,
+                    syntax.anchor,
+                    syntax.occurrence,
+                );
                 self.syntax
                     .files
                     .get(&engine.item_file(syntax))
                     .is_some_and(|owner| {
                         owner
                             .bindings
-                            .binary_search(&(
-                                DefId::intern(&syntax.item.definition),
-                                syntax.text_hash,
-                                syntax.anchor,
-                                syntax.occurrence,
-                            ))
+                            .binary_search_by(|candidate| compare_binding(candidate, &binding))
                             .is_ok()
                     })
             })
         {
             return true;
         }
-        let mut observed = BTreeSet::new();
+        let mut observed = std::collections::HashSet::new();
+        let mut files = BTreeMap::new();
         let mut binding = |id, file, body, anchor, occurrence| {
             let matches = self.syntax.files.get(&file).is_some_and(|owner| {
                 owner
                     .bindings
-                    .binary_search(&(id, body, anchor, occurrence))
+                    .binary_search_by(|binding| {
+                        compare_binding(binding, &(id, body, anchor, occurrence))
+                    })
                     .is_ok()
             }) && self.sources.anchor(anchor) == engine.sources.anchor(anchor)
-                && self
-                    .sources
-                    .file(file)
-                    .zip(engine.sources.file(file))
-                    .is_some_and(|(previous, current)| {
-                        std::ptr::eq(previous, current)
-                            || (previous.logical_path() == current.logical_path()
-                                && previous.anchor == current.anchor
-                                && previous.text() == current.text())
-                    });
+                && *files.entry(file).or_insert_with(|| {
+                    self.sources
+                        .file(file)
+                        .zip(engine.sources.file(file))
+                        .is_some_and(|(previous, current)| {
+                            std::ptr::eq(previous, current)
+                                || (previous.logical_path() == current.logical_path()
+                                    && previous.anchor == current.anchor
+                                    && previous.text() == current.text())
+                        })
+                });
             if matches {
                 observed.insert((id, file, body, anchor, occurrence));
             }
@@ -194,8 +214,13 @@ impl SourceInputs {
         if let Some(inputs) = Self::reusable(engine) {
             return inputs;
         }
+        let origin_catalog = engine.catalog.identity();
+        let origin_bytes = origin_catalog.retained_bytes();
         let inputs = Arc::new(Self {
             sources: engine.sources.clone(),
+            origin_catalog,
+            origin_items: engine.items.owner(),
+            origin_placement: engine.sources.placement_revision(),
             catalog: engine
                 .catalog
                 .source_carry(&engine.sources, &engine.items, &engine.indexed_sources)
@@ -225,6 +250,7 @@ impl SourceInputs {
             installed: engine.installed_sources.clone(),
             retained: Self::metadata_bytes(engine)
                 .unwrap_or(u64::MAX)
+                .saturating_add(origin_bytes)
                 .saturating_add(
                     (size_of::<Self>() - 288
                         + size_of::<operation_inputs::OperationOwner>()
@@ -333,7 +359,12 @@ impl HeaderSources {
             {
                 if owner
                     .bindings
-                    .binary_search(&(id, syntax.text_hash, syntax.anchor, syntax.occurrence))
+                    .binary_search_by(|binding| {
+                        compare_binding(
+                            binding,
+                            &(id, syntax.text_hash, syntax.anchor, syntax.occurrence),
+                        )
+                    })
                     .is_err()
                 {
                     return Err(source_refusal("captured syntax binding changed"));
@@ -401,7 +432,7 @@ impl HeaderSources {
         let files = bindings
             .into_iter()
             .map(|(file, mut bindings)| {
-                bindings.sort_unstable();
+                bindings.sort_unstable_by(compare_binding);
                 bindings.dedup();
                 let inherited = reuse
                     .as_ref()

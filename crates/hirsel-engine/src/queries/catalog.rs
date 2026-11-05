@@ -1663,15 +1663,15 @@ impl QueryEngine {
     pub(crate) fn source_paths(&self) -> Vec<DefPath> {
         self.items
             .keys()
-            .cloned()
-            .chain(self.catalog.paths().cloned())
+            .chain(self.catalog.paths())
             .chain(
                 self.header_products
                     .iter()
-                    .flat_map(|headers| headers.definitions().map(|id| id.path().clone())),
+                    .flat_map(|headers| headers.definitions().map(|id| id.path())),
             )
             .collect::<BTreeSet<_>>()
             .into_iter()
+            .cloned()
             .collect()
     }
 }

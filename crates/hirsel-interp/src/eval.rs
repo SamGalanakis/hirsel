@@ -551,7 +551,7 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                                 .map(|(i, value)| {
                                     value
                                         .as_ref()
-                                        .map(|v| shadow.part(i).for_value(v))
+                                        .map(|v| shadow.capture(i).for_value(v))
                                         .unwrap_or_default()
                                 })
                                 .collect(),
@@ -1094,7 +1094,7 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                                     .enumerate()
                                     .map(|(i, v)| {
                                         v.as_ref()
-                                            .map(|v| shadow.part(i).for_value(v))
+                                            .map(|v| shadow.capture(i).for_value(v))
                                             .unwrap_or_default()
                                     })
                                     .collect(),

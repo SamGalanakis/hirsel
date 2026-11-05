@@ -35,6 +35,39 @@ pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
     });
 }
 
+// CLO-1/MODE-1: invoking a borrowed callable consumes its access view.
+// An owned capture keeps its own content bounds, independently of that view.
+#[test]
+fn native_callback_owned_capture_keeps_its_global_storage() {
+    with_compiler_stack(|| {
+        let source = r#"
+fn first(take data: Bytes) -> Bytes { bytes.slice(data, 0u64, 1u64) }
+fn insert(mut entries: Map[u64, Bytes], initial: fn(mut cursor: u64) -> Result[Bytes, ()] uses {}) -> Result[bool, ()] {
+  let mut cursor = 0u64
+  map.try_insert_with(mut entries, 1u64, mut cursor, initial)
+}
+pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {
+  let data = b"xy"
+  let initial: fn(mut cursor: u64) -> Result[Bytes, ()] uses {} = fn(mut cursor: u64) -> Result[Bytes, ()] uses {} {
+    Ok(first(copy data))
+  }
+  let mut entries: Map[u64, Bytes] = map.empty()
+  match insert(mut entries, initial) {
+    Ok(true) => match map.get(entries, 1u64) {
+      Some(value) => if value == b"x" { let _ = out.print(io.stdout(rt)?, "x") },
+      None => {},
+    },
+    _ => {},
+  }
+  Ok(())
+}
+"#;
+        let mut engine = accepted(source);
+        assert_eq!(printed(run(&mut engine, &[], false)), "x");
+        assert_eq!(printed(run(&mut engine, &[], true)), "x");
+    });
+}
+
 /// Serves edited definitions in place of the engine's own.
 struct Edited<'a> {
     engine: &'a mut QueryEngine,

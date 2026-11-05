@@ -89,9 +89,12 @@ impl FrontSourceProducts {
 }
 impl FrontRunQueries {
     pub fn source_definitions(&self) -> impl Iterator<Item = &DefPath> {
-        self.inputs
-            .iter()
-            .filter_map(|(path, input)| input.source.then_some(path))
+        self.inputs.keys().filter(|path| {
+            self.operation
+                .capture()
+                .bodies
+                .contains_key(&DefId::intern(path))
+        })
     }
     pub fn completed_semantic_product(&self, path: &DefPath) -> Option<ProductRef> {
         let query = self.semantic_query(path)?;

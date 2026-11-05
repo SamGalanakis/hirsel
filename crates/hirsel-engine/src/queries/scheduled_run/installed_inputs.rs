@@ -11,11 +11,8 @@ impl FrontRunQueries {
         let Some(writer) = self.store.installation_output() else {
             return Ok(());
         };
-        let namespace = self.front.namespace();
-        let input = self
-            .inputs
-            .get(path)
-            .ok_or_else(|| operational("missing installed semantic input"))?;
+        let namespace = self.operation.capture();
+        let input = self.input(path)?;
         if !input.source {
             return Ok(());
         }

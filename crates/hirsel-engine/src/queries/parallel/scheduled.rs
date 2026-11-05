@@ -2854,27 +2854,40 @@ impl QueryEngine {
             if !seen.insert(definition.clone()) {
                 continue;
             }
-            if self
-                .source_facts(&definition)
-                .is_some_and(|facts| facts.specializes)
-                && self.materialize(&definition).is_err()
+            let id = DefId::intern(&definition);
+            let facts = self.source_facts(&definition);
+            if facts.as_ref().is_some_and(|facts| !facts.specializes)
+                && !self.specialization_dependencies.contains_key(&id)
             {
                 continue;
             }
-            // A source carry can own an exact selection receipt before its
-            // expression arenas are materialized. Validate that receipt below;
-            // absent With syntax in a body-free head cannot invalidate it.
-            if !self
-                .specialization_dependencies
-                .contains_key(&DefId::intern(&definition))
-                && !self
-                    .snapshot(&definition)
-                    .is_ok_and(|syntax| crate::families::closes(&syntax))
-            {
-                continue;
-            }
-            let Some(dependencies) = self.specialization_dependencies(&definition) else {
-                continue;
+            let dependencies = if self.installed_definition(&definition) {
+                // The immutable package already published exact registrations.
+                // Reading them does not resolve or reconstruct its With body.
+                let Ok(Some(record)) =
+                    self.installed_semantic_input(&definition, crate::store::MAX_RECORD as u64)
+                else {
+                    continue;
+                };
+                let Some(registration) = record.specializations else {
+                    continue;
+                };
+                registration.definitions
+            } else {
+                if facts.is_none()
+                    && !self
+                        .snapshot(&definition)
+                        .is_ok_and(|syntax| crate::families::closes(&syntax))
+                {
+                    continue;
+                }
+                if self.materialize(&definition).is_err() {
+                    continue;
+                }
+                let Some(dependencies) = self.specialization_dependencies(&definition) else {
+                    continue;
+                };
+                dependencies
             };
             for dependency in dependencies {
                 if self.materialize(&dependency).is_ok() {

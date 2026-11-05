@@ -3,6 +3,7 @@ use super::*;
 mod acceptance;
 mod content;
 mod graph_reader;
+mod inputs;
 mod installed_inputs;
 mod precompute;
 mod proof_export;
@@ -78,7 +79,9 @@ struct Input {
 pub struct FrontRunInputs {
     namespace: Arc<NamespaceCapture>,
     source_paths: Vec<DefPath>,
-    inputs: BTreeMap<DefPath, Input>,
+    inputs: BTreeMap<DefPath, std::sync::OnceLock<Result<Input, QueryError>>>,
+    specializations: BTreeMap<DefPath, Arc<crate::store::InstalledSpecializations>>,
+    operation: OperationLease,
     store: Arc<dyn ResultStore>,
     required: u64,
 }
@@ -104,7 +107,9 @@ pub struct FrontRunQueries {
     export_hashes: bool,
     source_products: bool,
     native_roots: Vec<DefPath>,
-    inputs: BTreeMap<DefPath, Input>,
+    inputs: BTreeMap<DefPath, std::sync::OnceLock<Result<Input, QueryError>>>,
+    specializations: BTreeMap<DefPath, Arc<crate::store::InstalledSpecializations>>,
+    operation: OperationLease,
     ids: BTreeMap<DefPath, QueryId>,
     semantic_ids: BTreeMap<DefPath, QueryId>,
     semantic_paths: BTreeMap<ContentHash, DefId>,
@@ -269,7 +274,7 @@ impl FrontRunQueries {
             |n, path| {
                 n.checked_add(bincode::serialized_size(path).ok()?.checked_mul(5)?)?
                     .checked_add(
-                        (std::mem::size_of::<Input>()
+                        (std::mem::size_of::<std::sync::OnceLock<Result<Input, QueryError>>>()
                             + std::mem::size_of::<QueryId>()
                             + 32 * std::mem::size_of::<usize>()) as u64,
                     )
@@ -509,19 +514,31 @@ impl Task {
                 .extend(self.queries.native_roots.iter().map(DefId::intern));
             // Legacy served_entries selects every eligible source entry in the
             // launch package, even when the root never references it.
-            for (path, input) in &self.queries.inputs {
+            for path in self.queries.inputs.keys() {
                 let launch_package = path.0.package == self.root.0.package
                     || self.queries.batch.as_ref().is_some_and(|(_, roots)| {
                         roots.iter().any(|root| root.0.package == path.0.package)
                     });
-                if launch_package
-                    && input.source
-                    && crate::admission::entry_roots(
-                        self.queries.lower.signatures().types(),
-                        &input.signature,
-                        hirsel_run_schema::LaunchKind::Call,
-                    )
-                    .is_ok()
+                if !launch_package
+                    || !self
+                        .queries
+                        .operation
+                        .capture()
+                        .bodies
+                        .contains_key(&DefId::intern(path))
+                {
+                    continue;
+                }
+                let input = match self.queries.input(path) {
+                    Ok(input) => input,
+                    Err(error) => return Poll::Ready(Err(self.queries.failure_record(error))),
+                };
+                if crate::admission::entry_roots(
+                    self.queries.lower.signatures().types(),
+                    &input.signature,
+                    hirsel_run_schema::LaunchKind::Call,
+                )
+                .is_ok()
                 {
                     self.pending.push(DefId::intern(path));
                 }
@@ -626,10 +643,9 @@ impl Task {
         >,
     > {
         let queries = self.queries.clone();
-        let Some(input) = queries.inputs.get(path) else {
-            return Poll::Ready(Err(queries.failure_record(operational(format!(
-                "missing signature input for {path}"
-            )))));
+        let input = match queries.input(path) {
+            Ok(input) => input,
+            Err(error) => return Poll::Ready(Err(queries.failure_record(error))),
         };
         let mut dependencies = input.dependencies.clone();
         let mut tir = None;
@@ -780,7 +796,9 @@ impl Task {
         }
         let source_content = (|| -> Result<Vec<Vec<u8>>, QueryError> {
             use bincode::Options;
-            if input.content.len > queries.weight.scratch {
+            if input.content.len > queries.weight.scratch
+                || input.content_decode_bytes > queries.weight.scratch
+            {
                 return Err(operational("Run input content exceeds scratch admission"));
             }
             let bytes = queries
@@ -1101,7 +1119,7 @@ impl Task {
             .map(|(path, _)| path)
             .collect();
         let escapes: BTreeMap<_, _> = self.entries.keys().map(|id| id.path()).filter_map(|path| {
-            let signature = &queries.inputs.get(path)?.signature;
+            let signature = &queries.input(path).ok()?.signature;
             if unsafe_operations.contains(path) { Some((path.clone(), Escape::UnsafeOperation)) }
             else if matches!(&signature.kind, SignatureKind::Function(f) if f.foreign.is_some()) { Some((path.clone(), Escape::Extern)) }
             else { None }
@@ -1113,11 +1131,7 @@ impl Task {
                 .map_or(CodeReach::Safe, |r| CodeReach::Escapes(r.spelled())))
         };
         let facts = |path: &DefPath| -> Result<Option<(CalleeFacts, CallForm)>, QueryError> {
-            let signature = &queries
-                .inputs
-                .get(path)
-                .ok_or_else(|| operational(format!("Run callable has no signature: {path}")))?
-                .signature;
+            let signature = &queries.input(path)?.signature;
             let Ok(roots) = crate::admission::entry_roots(
                 snapshot.types(),
                 signature,
@@ -1175,8 +1189,12 @@ impl Task {
             entries.clone()
         } else {
             let mut entries = BTreeMap::new();
-            for (path, input) in &queries.inputs {
-                if input.source
+            for path in queries.inputs.keys() {
+                if queries
+                    .operation
+                    .capture()
+                    .bodies
+                    .contains_key(&DefId::intern(path))
                     && path.0.package == root.0.package
                     && let Some(facts) = facts(path)?
                 {
@@ -1185,7 +1203,7 @@ impl Task {
             }
             Arc::new(entries)
         };
-        let foreign = foreign_use(&program, &queries.inputs);
+        let foreign = foreign_use(&program, queries);
         // PROG-4: C called outside a deterministic wrapper makes every run of
         // this entry unrecordable, as the checked package decides it.
         let unreplayable = !queries
@@ -1210,7 +1228,7 @@ impl Task {
                 .definitions
                 .iter()
                 .filter_map(|path| {
-                    let input = queries.inputs.get(path)?;
+                    let input = queries.input(path).ok()?;
                     input.source.then(|| {
                         (
                             path.clone(),
@@ -1326,12 +1344,12 @@ fn extend_reads(
         _ => None,
     }));
 }
-fn foreign_use(program: &SemanticProgram, inputs: &BTreeMap<DefPath, Input>) -> ForeignUse {
+fn foreign_use(program: &SemanticProgram, queries: &FrontRunQueries) -> ForeignUse {
     let externs: BTreeSet<_> = program
         .definitions
         .iter()
         .filter(|path| {
-            inputs.get(*path).is_some_and(
+            queries.input(path).is_ok_and(
                 |i| matches!(&i.signature.kind, SignatureKind::Function(f) if f.foreign.is_some()),
             )
         })
@@ -1341,7 +1359,7 @@ fn foreign_use(program: &SemanticProgram, inputs: &BTreeMap<DefPath, Input>) -> 
     for (user, uses) in &program.uses {
         if !externs.contains(user)
             && let Some(called) = uses.iter().find(|p| externs.contains(*p))
-            && !inputs.get(user).is_some_and(|i| {
+            && !queries.input(user).is_ok_and(|i| {
                 i.signature
                     .metadata
                     .wrapper
@@ -1372,7 +1390,7 @@ impl QueryEngine {
     /// the planner and producer consume this one catalog's exact byte count.
     pub fn front_run_inputs(&mut self, limit: u64) -> Result<FrontRunInputs, QueryError> {
         self.prepare_private_summaries();
-        let definitions = self.front_source_roots();
+        let definitions = self.source_paths();
         let namespace = self.capture_namespace(&definitions, &[], limit)?;
         self.front_run_inputs_in(namespace, limit)
     }
@@ -1382,151 +1400,59 @@ impl QueryEngine {
         limit: u64,
     ) -> Result<FrontRunInputs, QueryError> {
         namespace.require_environment(self)?;
-        // Preparation captures the semantic catalogue once. A source Check
-        // does not demand its Run or Precompute producers.
-        let signatures = namespace.snapshot.clone();
-        let store = self
-            .result_store
-            .clone()
-            .ok_or(QueryError::NotImplemented)?;
-        let declarations = namespace.declarations.clone();
         let source_paths = namespace
             .source_paths
             .iter()
             .map(|id| id.path().clone())
             .collect::<Vec<_>>();
-        let mut paths: BTreeSet<_> = source_paths.iter().cloned().collect();
-        paths.extend(
-            namespace
-                .snapshot
-                .definitions()
-                .iter()
-                .map(|id| id.path().clone()),
-        );
-        let mut inputs = BTreeMap::new();
-        let mut required = FrontRunQueries::input_bytes(&paths.iter().cloned().collect::<Vec<_>>())
-            .ok_or_else(|| operational("Run input inventory overflow"))?;
-        for path in paths {
-            let source = source_paths.binary_search(&path).is_ok();
-            let namespace::HeaderInput {
-                output,
-                reads: signature_reads,
-                semantic,
-            } = namespace.header(&path)?;
-            let signature = output.value.clone();
-            let owner_signature = signatures
-                .body_view(&path.0.package, DefId::intern(&path))
-                .ok_or(QueryError::NotImplemented)??
-                .clone();
-            let mut content = vec![
-                hirsel_types::encoding::canonical_encoding(
-                    &self.types,
-                    &signature,
-                    &output.dependencies,
-                )
-                .map_err(|e| operational(format!("signature encoding: {e:?}")))?,
-            ];
-            let mut dependencies: BTreeSet<_> = output
-                .dependencies
-                .iter()
-                .map(|d| d.definition.path().clone())
-                .collect();
-            // Scalar semantic_body_node follows the complete Signature
-            // observations too: normalized coverage can omit aliases and
-            // primitive lookups whose spelling still belongs to PS9 closure.
-            if let Some(reads) = signature_reads {
-                extend_reads(&mut dependencies, &reads, |key| {
-                    FrontBodyQueries::lookup_in(&signatures, &declarations, key)
-                });
-            }
-            dependencies.extend(semantic.into_iter().map(|id| id.path().clone()));
-            let mut executable = false;
-            let mut generated = false;
-            let mut implementation = ContentHash::default();
-            if source {
-                let syntax = namespace.syntax(&path)?;
-                executable = generation::executable(&syntax);
-                generated = generation::generator(&syntax).is_some();
-                implementation = syntax.text_hash;
-                content.extend(
-                    hirsel_fmt::semantic_item(&syntax)
-                        .ok_or_else(|| operational("invalid semantic source item"))?,
-                );
-            }
-            if let SignatureKind::Type(declaration) = &signature.kind {
-                dependencies.extend(declaration.drop.iter().cloned());
-                if declaration.fact.is_some() {
-                    dependencies.insert(hirsel_check_protocol::fact::fact_path(&path));
-                }
-                if let Some(check) = &declaration.serializable_check {
-                    dependencies.insert(check.function.clone());
-                }
-            }
-            let specializations = if source
-                && self
-                    .source_facts(&path)
-                    .is_some_and(|facts| facts.specializes)
-            {
-                let definitions = self.specialization_dependencies(&path).ok_or_else(|| {
-                    operational("installed specialization discovery is unavailable")
-                })?;
+        let paths = source_paths
+            .iter()
+            .cloned()
+            .chain(
+                namespace
+                    .snapshot
+                    .definitions()
+                    .iter()
+                    .map(|id| id.path().clone()),
+            )
+            .collect::<BTreeSet<_>>();
+        let store = self
+            .result_store
+            .clone()
+            .ok_or(QueryError::NotImplemented)?;
+        let mut specializations = BTreeMap::new();
+        let mut weight = crate::NativeMetadataWeight::default();
+        if store.installation_output().is_some() {
+            for (id, receipt) in &self.specialization_dependencies {
                 let mut reads = Vec::new();
-                self.specialization_dependencies
-                    .get(&DefId::intern(&path))
-                    .ok_or_else(|| operational("installed specialization receipt is unavailable"))?
-                    .reads
-                    .encode(&mut reads);
-                let specializations =
-                    Arc::new(crate::store::InstalledSpecializations { reads, definitions });
-                let mut weight = crate::NativeMetadataWeight::default();
-                weight.arc(&specializations);
-                weight.flat_vec(&specializations.reads);
-                weight.vec(&specializations.definitions, |weight, path| {
-                    weight.path(path)
+                receipt.reads.encode(&mut reads);
+                let receipt = Arc::new(crate::store::InstalledSpecializations {
+                    reads,
+                    definitions: receipt.paths.clone(),
                 });
-                required = required
-                    .checked_add(weight.bytes())
-                    .ok_or_else(|| operational("Run specialization inputs overflow"))?;
-                Some(specializations)
-            } else {
-                None
-            };
-            if required > limit {
-                return Err(operational("Run inputs exceed admission"));
+                weight.path(id.path());
+                weight.arc(&receipt);
+                weight.flat_vec(&receipt.reads);
+                weight.vec(&receipt.definitions, |weight, path| weight.path(path));
+                specializations.insert(id.path().clone(), receipt);
             }
-            let bytes = bincode::serialize(&content)
-                .map_err(|_| operational("Run input content encoding"))?;
-            let mut content_weight = crate::NativeMetadataWeight::default();
-            content_weight.add(std::mem::size_of::<Vec<Vec<u8>>>());
-            content_weight.vec(&content, |weight, field| weight.flat_vec(field));
-            let content_decode_bytes = content_weight
-                .bytes()
-                .checked_add(bytes.len() as u64)
-                .ok_or_else(|| operational("Run input content size overflow"))?;
-            let content = store
-                .put_content(INPUT_CONTENT, &bytes)
-                .filter(|reference| INPUT_CONTENT.reference(&bytes) == Some(*reference))
-                .ok_or_else(|| operational("Run input content exceeds transport admission"))?;
-            inputs.insert(
-                path,
-                Input {
-                    signature,
-                    owner_signature,
-                    content,
-                    content_decode_bytes,
-                    specializations,
-                    dependencies,
-                    source,
-                    executable,
-                    generated,
-                    implementation,
-                },
-            );
+        }
+        weight.tree::<DefPath, Arc<crate::store::InstalledSpecializations>>(specializations.len());
+        let required = FrontRunQueries::input_bytes(&paths.iter().cloned().collect::<Vec<_>>())
+            .and_then(|bytes| bytes.checked_add(weight.bytes()))
+            .ok_or_else(|| operational("Run input inventory overflow"))?;
+        if required > limit {
+            return Err(operational("Run inputs exceed admission"));
         }
         Ok(FrontRunInputs {
+            operation: namespace.lease(),
             namespace,
             source_paths,
-            inputs,
+            inputs: paths
+                .into_iter()
+                .map(|path| (path, std::sync::OnceLock::new()))
+                .collect(),
+            specializations,
             store,
             required,
         })
@@ -1595,8 +1521,10 @@ impl QueryEngine {
         }
         let FrontRunInputs {
             namespace,
+            operation,
             source_paths,
             inputs,
+            specializations,
             store,
             required,
         } = inputs;
@@ -1663,6 +1591,8 @@ impl QueryEngine {
             source_products,
             native_roots: Vec::new(),
             inputs,
+            specializations,
+            operation,
             ids,
             semantic_ids,
             semantic_paths,

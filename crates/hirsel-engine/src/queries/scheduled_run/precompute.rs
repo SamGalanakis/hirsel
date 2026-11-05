@@ -41,7 +41,15 @@ impl FrontRunQueries {
         let roots = this
             .semantic_ids
             .iter()
-            .map(|(path, query)| (*query, this.inputs[path].source))
+            .map(|(path, query)| {
+                (
+                    *query,
+                    this.operation
+                        .capture()
+                        .bodies
+                        .contains_key(&DefId::intern(path)),
+                )
+            })
             .collect::<Vec<_>>();
         let bytes = roots
             .capacity()
@@ -65,7 +73,12 @@ impl FrontRunQueries {
         let universes = this
             .inputs
             .iter()
-            .filter(|(_, input)| input.source)
+            .filter(|(path, _)| {
+                this.operation
+                    .capture()
+                    .bodies
+                    .contains_key(&DefId::intern(path))
+            })
             .map(|(path, _)| path.0.package.clone())
             .collect::<BTreeSet<_>>()
             .into_iter()

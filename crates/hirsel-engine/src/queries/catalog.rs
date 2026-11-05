@@ -246,6 +246,13 @@ impl Clone for Catalog {
     }
 }
 impl Catalog {
+    pub(super) fn installed_owner(
+        &self,
+        path: &DefPath,
+    ) -> Option<&Arc<crate::store::InstalledSourceRecords>> {
+        self.installed.get(&path.0.package)
+    }
+
     pub(super) fn identity(&self) -> CatalogIdentity {
         CatalogIdentity {
             files: self.files.owner(),
@@ -1146,6 +1153,44 @@ impl QueryEngine {
         {
             return self.materialize(&owner);
         }
+        if !self.items.contains_key(path) && self.installed_definition(path) {
+            let record = self
+                .installed_semantic_input(path, crate::store::MAX_RECORD as u64)?
+                .ok_or(QueryError::NotImplemented)?;
+            let owner = self
+                .catalog
+                .installed
+                .get(&path.0.package)
+                .ok_or(QueryError::NotImplemented)?;
+            let bytes = owner
+                .content(record.ownership.body, crate::store::MAX_RECORD as u64)
+                .map_err(|message| {
+                    QueryError::Operational(hirsel_types::OperationalFailure {
+                        operation: "installed body".into(),
+                        message,
+                    })
+                })?;
+            let records = crate::NativeRecords::new(
+                self.types.clone(),
+                self.result_store
+                    .clone()
+                    .ok_or(QueryError::NotImplemented)?,
+            );
+            let syntax: Arc<ItemSyntax> = records
+                .decode(&self.source_records(), &bytes)
+                .ok_or(QueryError::NotImplemented)?;
+            if syntax.item.definition != *path
+                || syntax.text_hash != record.implementation
+                || crate::memo::retained::retained_syntax_bytes(&syntax)
+                    > record.ownership.body_decode_bytes
+            {
+                return Err(QueryError::NotImplemented);
+            }
+            self.items.insert(path.clone(), vec![syntax]);
+            self.note_inputs([path.clone()]);
+            self.retire_snapshot();
+            return Ok(());
+        }
         if !self.items.contains_key(path)
             && let Some((base, bindings)) = hirsel_types::specialization_parts(path)
         {
@@ -1659,6 +1704,37 @@ impl QueryEngine {
                 .header_products
                 .as_ref()
                 .is_some_and(|headers| headers.contains(DefId::intern(path)))
+    }
+    pub(crate) fn installed_definition(&self, path: &DefPath) -> bool {
+        self.catalog
+            .installed
+            .get(&path.0.package)
+            .is_some_and(|owner| owner.definition(path).is_some())
+    }
+    pub(crate) fn installed_semantic_input(
+        &self,
+        path: &DefPath,
+        limit: u64,
+    ) -> Result<Option<crate::store::InstalledSemanticInput>, QueryError> {
+        let Some(owner) = self.catalog.installed.get(&path.0.package) else {
+            return Ok(None);
+        };
+        let implementation = self
+            .implementation_hash(path)
+            .or_else(|| {
+                owner
+                    .definition(path)
+                    .map(|definition| definition.key.implementation)
+            })
+            .ok_or(QueryError::NotImplemented)?;
+        owner
+            .semantic(path, self.environment_value(), implementation, limit)
+            .map_err(|message| {
+                QueryError::Operational(hirsel_types::OperationalFailure {
+                    operation: "installed semantic input".into(),
+                    message,
+                })
+            })
     }
     pub(crate) fn source_paths(&self) -> Vec<DefPath> {
         self.items

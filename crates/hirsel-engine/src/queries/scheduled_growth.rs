@@ -840,7 +840,11 @@ impl QueryEngine {
         // The source-only index restores every declaration but no legacy
         // growth controller. Its pending set therefore contains only edited
         // declarations, never the complete source Check obligation set.
-        let mut roots: BTreeSet<_> = self.source_paths().into_iter().collect();
+        let mut roots: BTreeSet<_> = self
+            .source_paths()
+            .into_iter()
+            .filter(|path| !self.installed_definition(path))
+            .collect();
         // A warm source catalog carries only the written declaration. Its fact
         // helper is still a required body of the source check transaction.
         for path in roots.clone() {

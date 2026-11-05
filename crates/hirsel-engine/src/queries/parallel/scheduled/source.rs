@@ -185,10 +185,14 @@ impl QueryEngine {
         instance_weight
             .instance_bodies(&mut self.instance_bodies(&definitions.iter().cloned().collect()));
         let paths = self.source_paths();
-        let mut roots = paths.iter().cloned().collect::<BTreeSet<_>>();
-        for path in &paths {
-            if self.source_facts(path).is_some_and(|facts| facts.fact) {
-                roots.insert(hirsel_check_protocol::fact::fact_path(path));
+        let mut roots = paths
+            .iter()
+            .filter(|path| !self.installed_definition(path))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for path in roots.clone() {
+            if self.source_facts(&path).is_some_and(|facts| facts.fact) {
+                roots.insert(hirsel_check_protocol::fact::fact_path(&path));
             }
         }
         let source_rows = paths

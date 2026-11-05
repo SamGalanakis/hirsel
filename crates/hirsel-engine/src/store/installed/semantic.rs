@@ -43,7 +43,7 @@ impl InstalledDefinitionKey {
 
 /// Physical ownership descriptors, separate from source Check obligations and
 /// from the bodies a namespace permits a consumer to demand.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InstalledDefinitionOwnership {
     pub header: Reference,
     pub header_decode_bytes: u64,
@@ -98,7 +98,7 @@ impl InstalledSemanticInput {
             [bytes.as_slice()],
         ))
     }
-    fn decode(bytes: &[u8]) -> Result<Self, String> {
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, String> {
         bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .with_limit(MAX_RECORD as u64)
@@ -227,5 +227,54 @@ impl InstalledPackage {
             }
         }
         Ok(())
+    }
+}
+
+impl InstalledSourceRecords {
+    pub(crate) fn definition(&self, path: &DefPath) -> Option<&InstalledDefinition> {
+        self.definitions.get(path)
+    }
+
+    pub(crate) fn semantic(
+        &self,
+        path: &DefPath,
+        config: ContentHash,
+        implementation: ContentHash,
+        limit: u64,
+    ) -> Result<Option<InstalledSemanticInput>, String> {
+        let Some(descriptor) = self.definitions.get(path) else {
+            return Ok(None);
+        };
+        if descriptor.key.config != config || descriptor.key.implementation != implementation {
+            return Err("installed semantic input identity mismatch".into());
+        }
+        let bytes = self.content(descriptor.record, limit)?;
+        let record = InstalledSemanticInput::decode(&bytes)?;
+        if record.definition != *path
+            || record.config != config
+            || record.implementation != implementation
+            || record.ownership != descriptor.ownership
+            || record
+                .dependency_identity()
+                .map_err(|error| error.to_string())?
+                != descriptor.key.dependencies
+        {
+            return Err("installed semantic input differs from manifest".into());
+        }
+        Ok(Some(record))
+    }
+    pub(crate) fn content(&self, reference: Reference, limit: u64) -> Result<Bytes, String> {
+        if reference.len > limit {
+            return Err("installed content exceeds admission".into());
+        }
+        let bytes = match self.operation.upgrade() {
+            Some(operation) => operation.content(reference),
+            None => self.store.get(reference),
+        }
+        .ok_or_else(|| "missing installed semantic content".to_owned())?;
+        if reference.domain.reference(&bytes) != Some(reference) {
+            return Err("corrupt installed semantic content".into());
+        }
+        Ok(bytes)
     }
 }

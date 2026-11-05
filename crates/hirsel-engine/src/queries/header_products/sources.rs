@@ -92,6 +92,13 @@ fn standalone_syntax(bytes: u64) -> Result<Charge, QueryError> {
 }
 
 impl SourceInputs {
+    pub(crate) fn installed_owner(
+        &self,
+        path: &DefPath,
+    ) -> Option<&Arc<crate::store::InstalledSourceRecords>> {
+        self.catalog.installed_owner(path)
+    }
+
     pub(crate) fn retained_bytes(&self) -> u64 {
         self.retained
     }

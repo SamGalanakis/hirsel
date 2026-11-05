@@ -476,11 +476,47 @@ impl NamespaceCapture {
     pub fn generation_manifest(&self) -> Reference {
         self.manifest
     }
+    pub(crate) fn installed_input(
+        &self,
+        path: &DefPath,
+        limit: u64,
+    ) -> Result<Option<crate::store::InstalledSemanticInput>, QueryError> {
+        let Some(owner) = self.inputs.installed_owner(path) else {
+            return Ok(None);
+        };
+        let Some(input) = self.bodies.get(&DefId::intern(path)) else {
+            return Ok(None);
+        };
+        owner
+            .semantic(path, self.environment, input.implementation, limit)
+            .map_err(|message| refused(&message))
+    }
     pub(crate) fn syntax(&self, path: &DefPath) -> Result<Arc<ItemSyntax>, QueryError> {
         let input = self
             .bodies
             .get(&DefId::intern(path))
             .ok_or_else(|| refused("body outside capture"))?;
+        if let Some(record) = self.installed_input(path, self.capture_inputs.limit)? {
+            let owner = self
+                .inputs
+                .installed_owner(path)
+                .ok_or_else(|| refused("missing installed source owner"))?;
+            let bytes = owner
+                .content(record.ownership.body, self.capture_inputs.limit)
+                .map_err(|message| refused(&message))?;
+            let syntax: Arc<ItemSyntax> = self
+                .records
+                .decode(&*self.anchors, &bytes)
+                .ok_or_else(|| refused("invalid installed body"))?;
+            if syntax.text_hash != input.implementation
+                || syntax.item.definition != *path
+                || crate::memo::retained::retained_syntax_bytes(&syntax)
+                    > record.ownership.body_decode_bytes
+            {
+                return Err(refused("installed body differs from captured binding"));
+            }
+            return Ok(syntax);
+        }
         let syntax = match self.inputs.syntax(path)? {
             Some(syntax) => syntax,
             None => self.source_engine(path)?.snapshot(path)?,

@@ -298,6 +298,7 @@ pub(crate) struct InstalledSourceRecords {
     store: hirsel_artifact_store::Store,
     rows: BTreeMap<ContentHash, Reference>,
     operation: std::sync::Weak<InstalledRecords>,
+    definitions: BTreeMap<DefPath, InstalledDefinition>,
 }
 impl InstalledSourceRecords {
     pub(crate) fn get(&self, key: &EntryKey) -> Option<Bytes> {
@@ -319,6 +320,16 @@ impl InstalledSourceRecords {
                 + self.store.root().as_os_str().len(),
         );
         weight.tree::<ContentHash, Reference>(self.rows.len());
+        weight.tree::<DefPath, InstalledDefinition>(self.definitions.len());
+        for (path, definition) in &self.definitions {
+            weight.path(path);
+            weight.path(&definition.key.definition);
+            weight.vec(&definition.key.specialization, |weight, (name, path)| {
+                weight.add(name.capacity());
+                weight.path(path);
+            });
+            weight.add(definition.ownership.source_logical.as_os_str().len());
+        }
         weight.bytes().try_into().unwrap_or(usize::MAX)
     }
 }
@@ -539,6 +550,7 @@ impl InstalledPackage {
                     .map(|(address, _, reference)| (*address, *reference))
                     .collect(),
                 operation: Arc::downgrade(&records),
+                definitions: installed.definitions.clone(),
             }));
             installed.records = Arc::downgrade(&records);
             Ok(OpenedInstallation {

@@ -795,7 +795,12 @@ fn plan_source(
                 Some(namespace) => {
                     engine.front_run_inputs_in(namespace.clone(), limits.snapshot_bytes)
                 }
-                None => engine.front_run_inputs(limits.snapshot_bytes),
+                None => {
+                    if !shape.check_variants || store.installation_output().is_some() {
+                        engine.prepare_private_summaries();
+                    }
+                    engine.front_run_inputs(limits.snapshot_bytes)
+                }
             };
             match captured {
                 Ok(inputs) => {
@@ -1040,7 +1045,9 @@ pub fn install(
         if let Err(error) = engine.prepare_namespace_registrations(&registrations) {
             return Err(loading.failed(engine_error(engine, error)));
         }
-        engine.prepare_private_summaries();
+        if !shape.check_variants || store.installation_output().is_some() {
+            engine.prepare_private_summaries();
+        }
     }
     let namespace = match namespace {
         Some(capture) => {

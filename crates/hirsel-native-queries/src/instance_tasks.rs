@@ -503,12 +503,14 @@ impl InstanceTasks {
     }
     fn retention_attribution(
         &self,
+        stage: &str,
         registry: &Registry,
         scope: &mut super::demand::callable::Scope,
     ) {
         if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_none() {
             return;
         }
+        eprintln!("NATIVE_RETENTION_STAGE\t{stage}");
         let accounted = std::cell::Cell::new(0u64);
         let row = |owner: &str, kind: &str, bytes: u64, last: &str| {
             accounted.set(accounted.get().saturating_add(bytes));
@@ -526,6 +528,14 @@ impl InstanceTasks {
                 registration.bytes(),
                 "original instance/discovery traversal completed; original aliases pending",
             );
+            if let Some(selected) = entry.output.selected.get() {
+                row(
+                    &owner,
+                    "completion dependency identities",
+                    (selected.dependencies.len() * size_of::<ContentHash>()) as u64,
+                    "original completion; replay/discovery dependency checks pending",
+                );
+            }
             row(
                 &owner,
                 "request",
@@ -541,6 +551,8 @@ impl InstanceTasks {
         for binding in registry.sources.values() {
             let mut weight = hirsel_engine::NativeMetadataWeight::default();
             weight.path(&binding.original.definition);
+            weight.path(&binding.original.definition);
+            weight.add(size_of::<SourceBinding>() + 2 * size_of::<usize>());
             row(
                 &binding.original.definition.to_string(),
                 "canonical Lower binding",
@@ -553,12 +565,35 @@ impl InstanceTasks {
                 "callable source inventory completed; independent C/receipt consumers pending",
             );
         }
+        for root in &self.roots {
+            let mut weight = hirsel_engine::NativeMetadataWeight::default();
+            weight.path(root.instance.definition());
+            weight.add(root.instance.retained_encoding_bytes());
+            row(
+                &root.instance.definition().to_string(),
+                "root identity",
+                weight.bytes(),
+                "original discovery selected; snapshot root binding pending",
+            );
+        }
+        if let Some(front) = &self.front {
+            for path in front.bindings.keys() {
+                let mut weight = hirsel_engine::NativeMetadataWeight::default();
+                weight.path(path);
+                row(
+                    &path.to_string(),
+                    "Front dispatch key",
+                    weight.bytes(),
+                    "Lower dispatch completed; explicit task replay/read dependencies pending",
+                );
+            }
+        }
         let remainder = registry.charged.saturating_sub(accounted.get());
         row(
             "InstanceTasks",
-            "indices, registrations, roots and front dispatch",
+            "index nodes, vector allocations and registry frame",
             remainder,
-            "discovery traversal completed; original aliases/discovery publication pending",
+            "discovery completed; task replay and snapshot consumers pending",
         );
         eprintln!(
             "NATIVE_RETAINED_TOTAL\t{}\t{}",
@@ -1400,7 +1435,7 @@ impl InstanceTasks {
         {
             let entries = self.entries();
             let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
-            self.retention_attribution(&registry, &mut scope);
+            self.retention_attribution("before retirement", &registry, &mut scope);
             let released = entries
                 .iter()
                 .map(|entry| {
@@ -1423,6 +1458,7 @@ impl InstanceTasks {
                 .checked_sub(released)
                 .ok_or("original descriptor charge underflow")?;
             let total = registry.charged.checked_add(retained);
+            self.retention_attribution("live after retirement", &registry, &mut scope);
             if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some() {
                 eprintln!(
                     "NATIVE_HANDOFF\treleased={released}\tremaining={}\tcallable={retained}\tquota={}",

@@ -13,7 +13,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::Poll,
 };
@@ -29,12 +29,130 @@ struct Registered {
     ordinal: usize,
     address: ContentHash,
     key: InstanceAddress,
-    request: Request,
+    request: StoredRequest,
     input: OnceLock<ProductRef>,
-    source: OnceLock<((Address, Action), hirsel_engine::NativeOriginalProduct)>,
-    output: OnceLock<Arc<DiscoveredInstance>>,
+    output: OriginalOutput,
+}
+const REQUEST_ARCHIVE: Domain = Domain {
+    kind: INSTANCE_INPUT_KIND,
+    schema: 2,
+};
+#[derive(Debug)]
+struct StoredRequest {
+    record: Reference,
+    source: bool,
+    receipts: bool,
+    cached: Mutex<Option<Request>>,
+}
+impl StoredRequest {
+    fn capture(store: &dyn ResultStore, request: Request) -> Result<Self, String> {
+        let bytes = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
+        let record = store
+            .put_content(REQUEST_ARCHIVE, &bytes)
+            .ok_or("native request archive publication failed")?;
+        if REQUEST_ARCHIVE.reference(&bytes) != Some(record) {
+            return Err("native request archive identity differs".into());
+        }
+        Ok(Self {
+            record,
+            source: request.source_definition().is_some(),
+            receipts: request.has_receipt_roots(),
+            cached: Mutex::new(Some(request)),
+        })
+    }
+    fn open(&self, store: &dyn ResultStore) -> Result<Request, String> {
+        if let Some(request) = self
+            .cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            return Ok(request.clone());
+        }
+        let bytes = store
+            .get_content(self.record)
+            .ok_or("missing native request archive")?;
+        if REQUEST_ARCHIVE.reference(&bytes) != Some(self.record) {
+            return Err("native request archive identity differs".into());
+        }
+        let request: Request = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        if request.source_definition().is_some() != self.source
+            || request.has_receipt_roots() != self.receipts
+        {
+            return Err("native request archive flags differ".into());
+        }
+        Ok(request)
+    }
+    fn retained_metadata_bytes(&self) -> u64 {
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map_or(0, Request::retained_metadata_bytes)
+    }
+    fn retire(&self) {
+        self.cached.lock().unwrap_or_else(|e| e.into_inner()).take();
+    }
+}
+#[derive(Default)]
+struct OriginalOutput {
+    selected: OnceLock<OriginalSelection>,
+    cached: Mutex<Option<Arc<DiscoveredInstance>>>,
+    retired: AtomicBool,
+}
+struct OriginalSelection {
+    product: ProductRef,
+    dependencies: Box<[ContentHash]>,
+    callable: bool,
+}
+impl OriginalOutput {
+    fn get(&self) -> Option<Arc<DiscoveredInstance>> {
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    fn product(&self) -> Option<&ProductRef> {
+        self.selected.get().map(|selected| &selected.product)
+    }
+    fn set(&self, output: Arc<DiscoveredInstance>) -> Result<(), Arc<DiscoveredInstance>> {
+        let selected = OriginalSelection {
+            product: output.product.product.clone(),
+            dependencies: output
+                .facts
+                .body
+                .dependencies
+                .iter()
+                .map(|key| key.address(INSTANCE_KIND).0)
+                .collect(),
+            callable: output.facts.body.templates.execution,
+        };
+        if let Err(other) = self.selected.set(selected) {
+            let previous = self.selected.get().unwrap();
+            if previous.product != other.product
+                || previous.dependencies != other.dependencies
+                || previous.callable != other.callable
+            {
+                return Err(output);
+            }
+        }
+        let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.retired.load(Ordering::Acquire) {
+            *cached = Some(output);
+        }
+        Ok(())
+    }
+    fn retire(&self) {
+        self.retired.store(true, Ordering::Release);
+        self.cached.lock().unwrap_or_else(|e| e.into_inner()).take();
+    }
+}
+struct SourceBinding {
+    selected: (Address, Action),
+    original: hirsel_engine::NativeOriginalProduct,
 }
 struct Registry {
+    sources: BTreeMap<hirsel_syntax::DefPath, Arc<SourceBinding>>,
     entries: Index,
     inputs: Index,
     charged: u64,
@@ -54,6 +172,7 @@ pub struct InstanceTasks {
     roots: Vec<InstanceAddress>,
     discovery: QueryId,
     completed: OnceLock<ProductRef>,
+    original_discovery: OnceLock<(ProductRef, bool)>,
     callables: OnceLock<(ProductRef, super::demand::callable::Scope)>,
     weight: MemoryWeight,
     allowance: Arc<hirsel_engine_admission::MemoryReservation>,
@@ -154,11 +273,13 @@ impl InstanceTasks {
             roots,
             discovery,
             registry: Mutex::new(Registry {
+                sources: BTreeMap::new(),
                 entries: BTreeMap::new(),
                 inputs: BTreeMap::new(),
                 charged: metadata.bytes(),
             }),
             completed: OnceLock::new(),
+            original_discovery: OnceLock::new(),
             callables: OnceLock::new(),
             weight,
             allowance: Arc::new(allowance),
@@ -209,6 +330,20 @@ impl InstanceTasks {
         tasks.front = Some(front);
         Ok(self)
     }
+    /// Completed original read caches, separate from the live dispatch/source
+    /// identities. Callable handoff releases these bytes at their last use.
+    pub fn completed_read_cache_bytes(&self) -> u64 {
+        self.entries()
+            .iter()
+            .map(|entry| {
+                entry.request.retained_metadata_bytes()
+                    + entry
+                        .output
+                        .get()
+                        .map_or(0, |output| output.retained_metadata_bytes())
+            })
+            .sum()
+    }
     pub fn retained_allowance(&self) -> Arc<hirsel_engine_admission::MemoryReservation> {
         self.allowance.clone()
     }
@@ -243,7 +378,8 @@ impl InstanceTasks {
                 let charge = weight
                     .bytes()
                     .saturating_add(request.retained_metadata_bytes());
-                (
+                let request = StoredRequest::capture(self.store.as_ref(), request)?;
+                Ok((
                     key.address(INSTANCE_KIND).0,
                     key.address(INSTANCE_INPUT_KIND).0,
                     charge,
@@ -253,12 +389,11 @@ impl InstanceTasks {
                         key,
                         request,
                         input: OnceLock::new(),
-                        source: OnceLock::new(),
-                        output: OnceLock::new(),
+                        output: OriginalOutput::default(),
                     }),
-                )
+                ))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, String>>()?;
         let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
         let index_bytes = |len| {
             let mut weight = hirsel_engine::NativeMetadataWeight::default();
@@ -267,7 +402,7 @@ impl InstanceTasks {
         };
         for (id, input, mut charge, mut entry) in entries {
             if let Some(previous) = registry.entries.get(&id) {
-                if previous.key != entry.key || previous.request != entry.request {
+                if previous.key != entry.key || previous.request.record != entry.request.record {
                     return Err(format!(
                         "inconsistent native request registration for {}: previous={:?}, requested={:?}",
                         entry.key.instance.definition(),
@@ -332,12 +467,6 @@ impl InstanceTasks {
         let mut largest = (0, String::new());
         for entry in registry.entries.values() {
             requests += entry.request.retained_metadata_bytes();
-            if let Some((_, original)) = entry.source.get() {
-                let mut weight = hirsel_engine::NativeMetadataWeight::default();
-                weight.path(&original.definition);
-                bindings +=
-                    weight.bytes() + original.body.retained_metadata_bytes().unwrap_or(u64::MAX);
-            }
             if let Some(output) = entry.output.get() {
                 let bytes = output.retained_metadata_bytes();
                 descriptors += bytes;
@@ -349,6 +478,16 @@ impl InstanceTasks {
                     largest = (bytes, entry.key.instance.definition().to_string());
                 }
             }
+        }
+        for binding in registry.sources.values() {
+            let mut weight = hirsel_engine::NativeMetadataWeight::default();
+            weight.path(&binding.original.definition);
+            bindings += weight.bytes()
+                + binding
+                    .original
+                    .body
+                    .retained_metadata_bytes()
+                    .unwrap_or(u64::MAX);
         }
         format!(
             "native source binding exceeds retained allowance: owner {owner}, requested {requested}, retained {}, allowance {}, entries {}, requests {requests}, source bindings {bindings}, descriptors {descriptors} [ready {ready}, seal {seal}, freedom {freedom}, discharge {discharge}], registry/frame {}, largest descriptor {} {}",
@@ -362,8 +501,153 @@ impl InstanceTasks {
             largest.1
         )
     }
-    fn charge_output(&self, output: &DiscoveredInstance) -> Result<(), String> {
-        let charge = output.retained_metadata_bytes();
+    fn retention_attribution(
+        &self,
+        registry: &Registry,
+        scope: &mut super::demand::callable::Scope,
+    ) {
+        if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_none() {
+            return;
+        }
+        let accounted = std::cell::Cell::new(0u64);
+        let row = |owner: &str, kind: &str, bytes: u64, last: &str| {
+            accounted.set(accounted.get().saturating_add(bytes));
+            eprintln!("NATIVE_RETAINER\t{owner}\t{kind}\t{bytes}\t{last}");
+        };
+        for entry in registry.entries.values() {
+            let owner = entry.key.instance.definition().to_string();
+            let mut registration = hirsel_engine::NativeMetadataWeight::default();
+            registration.add(size_of::<Registered>() + 2 * size_of::<usize>());
+            registration.path(entry.key.instance.definition());
+            registration.add(entry.key.instance.retained_encoding_bytes());
+            row(
+                &owner,
+                "registration frame and key",
+                registration.bytes(),
+                "original instance/discovery traversal completed; original aliases pending",
+            );
+            row(
+                &owner,
+                "request",
+                entry.request.retained_metadata_bytes(),
+                "callable specialization completed; later products() reconstructs originals",
+            );
+            if let Some(output) = entry.output.get() {
+                for (kind, bytes, last) in output.retention_rows() {
+                    row(&owner, kind, bytes, last);
+                }
+            }
+        }
+        for binding in registry.sources.values() {
+            let mut weight = hirsel_engine::NativeMetadataWeight::default();
+            weight.path(&binding.original.definition);
+            row(
+                &binding.original.definition.to_string(),
+                "canonical Lower binding",
+                weight.bytes()
+                    + binding
+                        .original
+                        .body
+                        .retained_metadata_bytes()
+                        .unwrap_or(u64::MAX),
+                "callable source inventory completed; independent C/receipt consumers pending",
+            );
+        }
+        let remainder = registry.charged.saturating_sub(accounted.get());
+        row(
+            "InstanceTasks",
+            "indices, registrations, roots and front dispatch",
+            remainder,
+            "discovery traversal completed; original aliases/discovery publication pending",
+        );
+        eprintln!(
+            "NATIVE_RETAINED_TOTAL\t{}\t{}",
+            registry.charged,
+            self.allowance.bytes()
+        );
+        eprintln!(
+            "NATIVE_SOURCE_PARTITION\t{}\t{}",
+            self.source.retained_metadata_bytes(),
+            self.retained_source_allowance().bytes()
+        );
+        let originals = registry
+            .entries
+            .values()
+            .filter_map(|entry| entry.output.get())
+            .collect::<Vec<_>>();
+        let requests = registry
+            .entries
+            .values()
+            .filter_map(|entry| {
+                entry
+                    .request
+                    .cached
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        scope.trace_retention(
+            requests.iter(),
+            originals.iter().map(|output| &output.facts),
+        );
+    }
+    fn bind_source(
+        &self,
+        selected: (Address, Action),
+        original: hirsel_engine::NativeOriginalProduct,
+    ) -> Result<(), String> {
+        let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(previous) = registry.sources.get(&original.definition) {
+            if previous.selected != selected || !original.same_binding(&previous.original) {
+                return Err("front Lower changed within a native input".into());
+            }
+            return Ok(());
+        }
+        let mut weight = hirsel_engine::NativeMetadataWeight::default();
+        weight.path(&original.definition);
+        weight.path(&original.definition);
+        weight.add(size_of::<SourceBinding>() + 2 * size_of::<usize>());
+        weight.add(
+            original
+                .body
+                .retained_metadata_bytes()
+                .and_then(|bytes| usize::try_from(bytes).ok())
+                .ok_or("native source binding metadata overflow")?,
+        );
+        let nodes = |len| {
+            let mut w = hirsel_engine::NativeMetadataWeight::default();
+            w.tree::<hirsel_syntax::DefPath, Arc<SourceBinding>>(len);
+            w.bytes()
+        };
+        let charge =
+            weight
+                .bytes()
+                .saturating_add(nodes(registry.sources.len() + 1).saturating_sub(
+                    if registry.sources.is_empty() {
+                        0
+                    } else {
+                        nodes(registry.sources.len())
+                    },
+                ));
+        registry.charged = registry
+            .charged
+            .checked_add(charge)
+            .filter(|bytes| *bytes <= self.allowance.bytes())
+            .ok_or_else(|| self.binding_refusal(&registry, charge, &original.definition))?;
+        registry.sources.insert(
+            original.definition.clone(),
+            Arc::new(SourceBinding { selected, original }),
+        );
+        Ok(())
+    }
+    fn charge_output(&self, entry: &Registered, output: &DiscoveredInstance) -> Result<(), String> {
+        if entry.output.product().is_some() {
+            return Ok(());
+        }
+        let charge = output.retained_metadata_bytes().saturating_add(
+            (output.facts.body.dependencies.len() * size_of::<ContentHash>()) as u64,
+        );
         let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
         if charge > self.allowance.bytes().saturating_sub(registry.charged) {
             let declarations = &self.source.declarations;
@@ -467,28 +751,17 @@ impl InstanceTasks {
     /// Current independent source V rows for all actual completed source
     /// selections, assembled without source or candidate native body reads.
     fn current_source(&self) -> Result<super::source_inputs::FrozenNativeSource, String> {
-        let entries = self.entries();
         let source = if let Some(front) = &self.front {
-            let mut selected = BTreeMap::new();
-            for entry in &entries {
-                if let Some(path) = entry.request.source_definition() {
-                    let (product, original) = entry
-                        .source
-                        .get()
-                        .ok_or("completed source instance has no settled Lower selection")?;
-                    if let Some((previous, previous_original)) = selected.get(path) {
-                        if previous != product || !original.same_binding(previous_original) {
-                            return Err("source instances selected different Lower outputs".into());
-                        }
-                    } else {
-                        selected.insert(path.clone(), (*product, original.clone()));
-                    }
-                }
-            }
-            self.source.provider_from_products(
-                &front.context,
-                selected.into_values().map(|(_, original)| original),
-            )?
+            let products = self
+                .registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .sources
+                .values()
+                .map(|binding| binding.original.clone())
+                .collect::<Vec<_>>();
+            self.source
+                .provider_from_products(&front.context, products)?
         } else {
             self.source.provider()
         };
@@ -510,13 +783,14 @@ impl InstanceTasks {
         let entries = self.entries();
         let mut source = self.current_source()?;
         let mut registry = self.source.declarations.program.operation_registry();
-        self.producer().bind_planned_adapters(
-            &source,
-            entries.iter().map(|entry| &entry.request),
-            &mut registry,
-        )?;
+        let requests = entries
+            .iter()
+            .map(|entry| entry.request.open(self.store.as_ref()))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.producer()
+            .bind_planned_adapters(&source, requests.iter(), &mut registry)?;
         for entry in entries {
-            let Some(path) = entry.request.source_definition() else {
+            let Some(path) = (entry.request.source).then(|| entry.key.instance.definition()) else {
                 continue;
             };
             let selected = hirsel_lir::ir::Symbol {
@@ -556,17 +830,20 @@ impl InstanceTasks {
         if self.completed.get() != Some(&settled) {
             return Err("native discovery is not settled at this output".into());
         }
-        let mut products = self.original_products()?;
         if let Some((_, scope)) = self.callables.get() {
+            let mut products = self.producer();
             products.use_callable_scope(scope);
+            products.recheck_receipts(&self.current_source()?)?;
+            products.bind_original_roots(&self.roots)?;
+            return Ok(products);
         }
-        Ok(products)
+        self.original_products()
     }
     fn original_products(&self) -> Result<DemandInstances, String> {
         let mut products = self.producer();
         let entries = self.entries();
         for entry in &entries {
-            products.admit(entry.request.clone())?;
+            products.admit(entry.request.open(self.store.as_ref())?)?;
         }
         for entry in entries {
             let output = entry
@@ -712,12 +989,16 @@ impl QueryTask for InstanceTask {
             return finish(result);
         }
         let mut receipt_products = Vec::new();
-        let source_owner = self.entry.request.source_definition();
+        let source_owner = self
+            .entry
+            .request
+            .source
+            .then(|| self.entry.key.instance.definition());
         if let Some(front) = &self.tasks.front
             && ((source_owner.is_some() && self.id.kind == INSTANCE_INPUT_KIND)
-                || self.entry.request.has_receipt_roots())
+                || self.entry.request.receipts)
         {
-            let paths = if self.entry.request.has_receipt_roots() {
+            let paths = if self.entry.request.receipts {
                 self.tasks
                     .source
                     .declarations
@@ -763,42 +1044,10 @@ impl QueryTask for InstanceTask {
                             return Err("front Lower names another source definition".into());
                         }
                         if Some(path) == source_owner {
-                            if let Some((previous, previous_original)) = self.entry.source.get() {
-                                if *previous != (selected.address, selected.action)
-                                    || !product.same_binding(previous_original)
-                                {
-                                    return Err("front Lower changed within a native input".into());
-                                }
-                            } else {
-                                let mut weight = hirsel_engine::NativeMetadataWeight::default();
-                                weight.path(&product.definition);
-                                weight.add(
-                                    product
-                                        .body
-                                        .retained_metadata_bytes()
-                                        .and_then(|bytes| usize::try_from(bytes).ok())
-                                        .ok_or("native source binding metadata overflow")?,
-                                );
-                                let mut registry = self
-                                    .tasks
-                                    .registry
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner());
-                                registry.charged = registry
-                                    .charged
-                                    .checked_add(weight.bytes())
-                                    .filter(|total| *total <= self.tasks.allowance.bytes())
-                                    .ok_or_else(|| {
-                                        self.tasks.binding_refusal(&registry, weight.bytes(), path)
-                                    })?;
-                                drop(registry);
-                                self.entry
-                                    .source
-                                    .set(((selected.address, selected.action), product.clone()))
-                                    .map_err(|_| {
-                                        "front Lower completion raced within one task".to_owned()
-                                    })?;
-                            }
+                            self.tasks.bind_source(
+                                (selected.address, selected.action),
+                                product.clone(),
+                            )?;
                         }
                         receipt_products.push(product);
                         Ok(())
@@ -832,19 +1081,24 @@ impl QueryTask for InstanceTask {
         }
         let result = (|| {
             let mut producer = self.tasks.producer();
-            producer.admit(self.entry.request.clone())?;
+            producer.admit(self.entry.request.open(self.tasks.store.as_ref())?)?;
             let mut source = if let Some(front) = &self.tasks.front
-                && (source_owner.is_some() || self.entry.request.has_receipt_roots())
+                && (source_owner.is_some() || self.entry.request.receipts)
             {
-                let products = if self.entry.request.has_receipt_roots() {
+                let products = if self.entry.request.receipts {
                     receipt_products
                 } else {
-                    let (_, product) = self
-                        .entry
-                        .source
-                        .get()
-                        .ok_or("native input has no settled front Lower")?;
-                    vec![product.clone()]
+                    vec![
+                        self.tasks
+                            .registry
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .sources
+                            .get(source_owner.unwrap())
+                            .ok_or("source instance lost its settled Lower selection")?
+                            .original
+                            .clone(),
+                    ]
                 };
                 self.tasks
                     .source
@@ -875,11 +1129,9 @@ impl QueryTask for InstanceTask {
                 .source_body_demands
                 .fetch_add(source.body_demands, Ordering::Relaxed);
             self.tasks.register(producer.registered_requests()?)?;
-            self.tasks.charge_output(&output)?;
+            self.tasks.charge_output(&self.entry, &output)?;
             let product = output.product.product.clone();
-            if let Err(other) = self.entry.output.set(output)
-                && self.entry.output.get().unwrap().product.product != other.product.product
-            {
+            if self.entry.output.set(output).is_err() {
                 return Err("native instance completion changed".into());
             }
             Ok(product)
@@ -966,11 +1218,11 @@ impl DiscoveryTask {
                 Poll::Pending => self.frontier.push(entry),
                 Poll::Ready(Err(error)) => return Err(error),
                 Poll::Ready(Ok(product)) => {
-                    let output = entry.output.get().ok_or_else(|| {
+                    let selected = entry.output.selected.get().ok_or_else(|| {
                         self.tasks
                             .failure("native task returned no completed descriptor")
                     })?;
-                    if output.product.product != product {
+                    if selected.product != product {
                         return Err(self.tasks.failure("native discovery read another output"));
                     }
                     mark(&mut self.seen, entry.ordinal);
@@ -979,13 +1231,10 @@ impl DiscoveryTask {
                         .registry
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
-                    for key in &output.facts.body.dependencies {
-                        let dependency = registry
-                            .entries
-                            .get(&key.address(INSTANCE_KIND).0)
-                            .ok_or_else(|| {
-                                self.tasks.failure("unregistered native discovery address")
-                            })?;
+                    for address in &selected.dependencies {
+                        let dependency = registry.entries.get(address).ok_or_else(|| {
+                            self.tasks.failure("unregistered native discovery address")
+                        })?;
                         frontier.push(dependency.clone());
                     }
                 }
@@ -1007,12 +1256,10 @@ impl DiscoveryTask {
         if !self.frontier.is_empty() {
             return Ok(None);
         }
-        let needs_callable = self.tasks.entries().iter().any(|entry| {
-            entry
-                .output
-                .get()
-                .is_some_and(|out| out.facts.body.templates.execution)
-        });
+        let (discovery, needs_callable) = self
+            .tasks
+            .original_discovery()
+            .map_err(|e| self.tasks.failure(&e))?;
         if needs_callable {
             match cx.read(self.tasks.callable_id()) {
                 Poll::Pending => return Ok(None),
@@ -1034,51 +1281,12 @@ impl DiscoveryTask {
             }
         }
         let result = (|| {
-            // A source definition's licensed sites may span several bodies.
-            // Only the complete fixed point can prove none were missed.
-            let entries = self.tasks.entries();
-            let facts = entries
-                .iter()
-                .map(|entry| {
-                    let output = entry.output.get().ok_or("discovery output is unfinished")?;
-                    Ok((
-                        entry.key.instance.definition(),
-                        &output.facts.source.discharge,
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            super::discharge::complete(&self.tasks.options.discharge, facts)?;
-            let mut rows = self
-                .tasks
-                .entries()
-                .into_iter()
-                .map(|entry| {
-                    let product = entry
-                        .output
-                        .get()
-                        .ok_or("discovery output is unfinished")?
-                        .product
-                        .product
-                        .clone();
-                    Ok((
-                        entry.key.instance.encoding().to_vec(),
-                        product.address.0,
-                        product
-                            .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
-                            .map_err(|e| e.to_string())?
-                            .reference(),
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            rows.sort_by(|a, b| a.0.cmp(&b.0));
-            let bytes = serde_json::to_vec(&rows).map_err(|e| e.to_string())?;
-            let product = self.tasks.put(self.tasks.discovery, bytes)?;
-            if self.tasks.completed.set(product.clone()).is_err()
-                && self.tasks.completed.get() != Some(&product)
+            if self.tasks.completed.set(discovery.clone()).is_err()
+                && self.tasks.completed.get() != Some(&discovery)
             {
                 return Err("native discovery completion changed".into());
             }
-            Ok(Some(product))
+            Ok(Some(discovery))
         })();
         result.map_err(|e: String| self.tasks.failure(&e))
     }
@@ -1094,6 +1302,56 @@ impl InstanceTasks {
                 [self.discovery.address.0.0.as_slice()],
             )),
         }
+    }
+    fn original_discovery(&self) -> Result<(ProductRef, bool), String> {
+        if let Some(selected) = self.original_discovery.get() {
+            return Ok(selected.clone());
+        }
+        let entries = self.entries();
+        let outputs = entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .output
+                    .get()
+                    .ok_or_else(|| "discovery output is unfinished".to_string())
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        super::discharge::complete(
+            &self.options.discharge,
+            entries.iter().zip(&outputs).map(|(entry, output)| {
+                (
+                    entry.key.instance.definition(),
+                    &output.facts.source.discharge,
+                )
+            }),
+        )?;
+        let needs_callable = outputs.iter().any(|out| out.facts.body.templates.execution);
+        let mut rows = entries
+            .iter()
+            .zip(&outputs)
+            .map(|(entry, output)| {
+                Ok((
+                    entry.key.instance.encoding().to_vec(),
+                    output.product.product.address.0,
+                    output
+                        .product
+                        .product
+                        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                        .map_err(|e| e.to_string())?
+                        .reference(),
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        let product = self.put(
+            self.discovery,
+            serde_json::to_vec(&rows).map_err(|e| e.to_string())?,
+        )?;
+        self.original_discovery
+            .set((product.clone(), needs_callable))
+            .map_err(|_| "original discovery published twice")?;
+        Ok((product, needs_callable))
     }
     fn callable_scope(&self) -> Result<ProductRef, String> {
         if let Some((product, _)) = self.callables.get() {
@@ -1136,27 +1394,43 @@ impl InstanceTasks {
                 Ok(())
             },
         )?;
+        drop(products);
+        drop(source);
+        drop(manifest);
         {
             let entries = self.entries();
-            let retained = scope.retained_bytes(
-                entries.iter().map(|entry| &entry.request),
-                entries
-                    .iter()
-                    .filter_map(|entry| entry.output.get().map(|output| &output.facts)),
-            );
             let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            self.retention_attribution(&registry, &mut scope);
+            let released = entries
+                .iter()
+                .map(|entry| {
+                    entry.request.retained_metadata_bytes()
+                        + entry
+                            .output
+                            .get()
+                            .map_or(0, |output| output.retained_metadata_bytes())
+                })
+                .sum::<u64>();
+            let retained = scope.retained_bytes(std::iter::empty(), std::iter::empty());
+            // Source/body facts shared into the new scope are counted there,
+            // once, before the old descriptor caches surrender their charge.
+            for entry in &entries {
+                entry.output.retire();
+                entry.request.retire();
+            }
             registry.charged = registry
                 .charged
-                .checked_add(retained)
-                .filter(|bytes| *bytes <= self.allowance.bytes())
-                .ok_or_else(|| format!(
-                    "callable graph metadata exceeds retained allowance: requested {retained} bytes, retained {}, allowance {}, original instances {}, callable instances {}, inline members {}",
+                .checked_sub(released)
+                .ok_or("original descriptor charge underflow")?;
+            let total = registry.charged.checked_add(retained);
+            if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some() {
+                eprintln!(
+                    "NATIVE_HANDOFF\treleased={released}\tremaining={}\tcallable={retained}\tquota={}",
                     registry.charged,
-                    self.allowance.bytes(),
-                    entries.len(),
-                    scope.outputs.len(),
-                    scope.outputs.iter().map(|(_, output)| output.facts.emission.inline.len()).max().unwrap_or(0),
-                ))?;
+                    self.allowance.bytes()
+                );
+            }
+            registry.charged = total.filter(|bytes| *bytes <= self.allowance.bytes()).ok_or_else(|| format!("callable graph live metadata exceeds retained allowance: original dispatch/source {}, callable {}, quota {}", registry.charged, retained, self.allowance.bytes()))?;
         }
         let rows = scope
             .outputs
@@ -1218,14 +1492,7 @@ impl QueryTask for CallableTask {
                         self.terminal = Some(Err(error));
                         return finish(Err(error));
                     }
-                    Poll::Ready(Ok(product))
-                        if entry
-                            .output
-                            .get()
-                            .is_some_and(|o| o.product.product == product) =>
-                    {
-                        ()
-                    }
+                    Poll::Ready(Ok(product)) if entry.output.product() == Some(&product) => (),
                     _ => {
                         let error = self.tasks.failure("callable original output differs");
                         self.terminal = Some(Err(error));

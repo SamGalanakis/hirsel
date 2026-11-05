@@ -26,7 +26,6 @@ struct InlineOwner {
 }
 struct InlineArchive {
     reference: Reference,
-    bytes: Vec<u8>,
 }
 const MAX_INLINE_MEMBERS: usize =
     hirsel_rc::instance::MAX_INSTANCES + hirsel_rc::closure_calls::MAX_SPECIALIZATIONS;
@@ -66,15 +65,7 @@ impl InlineInstances {
     }
     pub fn retained_bytes(&self) -> u64 {
         self.0.as_ref().map_or(0, |owner| {
-            let archive = owner
-                .archive
-                .get()
-                .and_then(|archive| archive.as_ref().ok())
-                .map_or(0, |archive| archive.bytes.capacity());
-            (size_of::<InlineOwner>()
-                + 2 * size_of::<usize>()
-                + size_of_val(&*owner.values)
-                + archive) as u64
+            (size_of::<InlineOwner>() + 2 * size_of::<usize>() + size_of_val(&*owner.values)) as u64
         })
     }
     fn archive(&self) -> Result<Option<&InlineArchive>, String> {
@@ -93,7 +84,7 @@ impl InlineInstances {
                 let reference = INLINE_SELECTION
                     .reference(&bytes)
                     .ok_or("inline selection archive exceeds the record limit")?;
-                Ok(InlineArchive { reference, bytes })
+                Ok(InlineArchive { reference })
             })
             .as_ref()
             .map(Some)
@@ -115,7 +106,11 @@ impl InlineInstances {
         let Some(archive) = self.archive()? else {
             return Ok(None);
         };
-        if store.put_content(INLINE_SELECTION, &archive.bytes) != Some(archive.reference) {
+        let bytes = serde_json::to_vec(&self.0.as_ref().unwrap().values)
+            .map_err(|error| error.to_string())?;
+        if INLINE_SELECTION.reference(&bytes) != Some(archive.reference)
+            || store.put_content(INLINE_SELECTION, &bytes) != Some(archive.reference)
+        {
             return Err("inline selection publication differs".into());
         }
         Ok(Some(archive.reference))
@@ -153,10 +148,7 @@ impl InlineInstances {
         Ok(Self(Some(Arc::new(InlineOwner {
             values,
             _grant: grant,
-            archive: OnceLock::from(Ok(InlineArchive {
-                reference,
-                bytes: bytes.to_vec(),
-            })),
+            archive: OnceLock::from(Ok(InlineArchive { reference })),
         }))))
     }
 }
@@ -345,22 +337,26 @@ mod component_tests {
         let reference = facts.inline.publish(&store).unwrap().unwrap();
         let archive = facts.inline.archive().unwrap().unwrap();
         assert_eq!(archive.reference, reference);
-        assert_eq!(archive.bytes, serde_json::to_vec(&values).unwrap());
+        let archived = serde_json::to_vec(&values).unwrap();
         assert_eq!(
-            facts.inline.retained_bytes() - before,
-            archive.bytes.capacity() as u64
+            store.get_content(reference).unwrap().as_ref(),
+            archived.as_slice()
         );
-        let archived_bytes = archive.bytes.as_ptr();
         assert_eq!(
-            facts.inline.archive().unwrap().unwrap().bytes.as_ptr(),
-            archived_bytes
+            facts.inline.retained_bytes(),
+            before,
+            "completed publication retains no encoded buffer"
+        );
+        assert_eq!(
+            facts.inline.archive().unwrap().unwrap().reference,
+            reference
         );
         let record = || EmissionRecord::new(&facts, Some(reference)).unwrap();
         let loaded = record()
             .read(&store, &Default::default(), Some(grant.clone()))
             .unwrap();
         assert_eq!(loaded, facts);
-        let mut corrupted = archive.bytes.clone();
+        let mut corrupted = archived.clone();
         corrupted[1] ^= 1;
         let changed = ChangedBytes(corrupted);
         assert!(
@@ -388,7 +384,7 @@ mod component_tests {
         );
         for bytes in [
             serde_json::to_vec(&[values.first().unwrap(); 2]).unwrap(),
-            [b" ".as_slice(), archive.bytes.as_slice()].concat(),
+            [b" ".as_slice(), archived.as_slice()].concat(),
         ] {
             let reference = store.put_content(INLINE_SELECTION, &bytes).unwrap();
             assert!(InlineInstances::read(reference, &store, Some(grant.clone())).is_err());

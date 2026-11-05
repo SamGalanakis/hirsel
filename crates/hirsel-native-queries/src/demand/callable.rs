@@ -8,6 +8,116 @@ pub(crate) struct Scope {
     requests: BTreeMap<Vec<u8>, Request>,
 }
 impl Scope {
+    pub(crate) fn trace_retention<'a>(
+        &mut self,
+        admitted: impl IntoIterator<Item = &'a Request>,
+        facts: impl IntoIterator<Item = &'a Arc<InstanceFacts>>,
+    ) {
+        let admitted_rows = admitted.into_iter().collect::<Vec<_>>();
+        let admitted = admitted_rows
+            .iter()
+            .map(|request| Arc::as_ptr(&request.0))
+            .collect::<std::collections::HashSet<_>>();
+        let facts = facts.into_iter().collect::<Vec<_>>();
+        let expected = self.retained_bytes(admitted_rows.iter().copied(), facts.iter().copied());
+        let mut sources = facts
+            .iter()
+            .map(|f| Arc::as_ptr(&f.source))
+            .collect::<std::collections::HashSet<_>>();
+        let mut bodies = facts
+            .iter()
+            .map(|f| Arc::as_ptr(&f.body))
+            .collect::<std::collections::HashSet<_>>();
+        let mut inline = facts
+            .iter()
+            .filter_map(|f| f.emission.inline.identity())
+            .collect::<std::collections::HashSet<_>>();
+        let mut facts = facts
+            .into_iter()
+            .map(Arc::as_ptr)
+            .collect::<std::collections::HashSet<_>>();
+        let total = std::cell::Cell::new(0u64);
+        let row = |owner: &str, kind: &str, bytes: u64, last: &str| {
+            total.set(total.get().saturating_add(bytes));
+            eprintln!("CALLABLE_RETAINER\t{owner}\t{kind}\t{bytes}\t{last}");
+        };
+        for (key, output) in &self.outputs {
+            let owner = key.instance.definition().to_string();
+            let mut w = hirsel_engine::NativeMetadataWeight::default();
+            w.path(key.instance.definition());
+            w.add(key.instance.retained_encoding_bytes());
+            row(
+                &owner,
+                "key and product wrapper",
+                w.bytes() + output.wrapper_bytes(),
+                "callable C publication completed; alias/Ready/codegen pending",
+            );
+            if facts.insert(Arc::as_ptr(&output.facts)) {
+                let shared = output
+                    .facts
+                    .emission
+                    .inline
+                    .identity()
+                    .is_some_and(|id| !inline.insert(id));
+                row(
+                    &owner,
+                    "emission and fact wrapper",
+                    output
+                        .facts
+                        .local_metadata_bytes()
+                        .saturating_sub(if shared {
+                            output.facts.emission.inline.retained_bytes()
+                        } else {
+                            0
+                        }),
+                    "callable emission extracted; Ready/codegen pending",
+                );
+                if bodies.insert(Arc::as_ptr(&output.facts.body)) {
+                    row(
+                        &owner,
+                        "body facts",
+                        output.facts.body.retained_metadata_bytes(),
+                        "callable C publication completed; arena/Ready consumers pending",
+                    );
+                }
+                if sources.insert(Arc::as_ptr(&output.facts.source)) {
+                    row(
+                        &owner,
+                        "source facts",
+                        output.facts.source.retained_metadata_bytes(),
+                        "callable C publication completed; Ready/C/discharge pending",
+                    );
+                }
+            }
+        }
+        for (key, request) in &self.requests {
+            row(
+                &request.key.definition.to_string(),
+                "request map key and new recipe",
+                key.capacity() as u64
+                    + if admitted.contains(&Arc::as_ptr(&request.0)) {
+                        0
+                    } else {
+                        request.retained_metadata_bytes()
+                    },
+                "callable dependency binding completed; later products() request binding pending",
+            );
+        }
+        row(
+            "callable scope",
+            "operations",
+            super::super::ownership_compilation::metadata::operations(&mut self.operations),
+            "callable C publication completed; later independent C/Ready consumers pending",
+        );
+        let remainder = expected.saturating_sub(total.get());
+        row(
+            "callable scope",
+            "vector and request index nodes",
+            remainder,
+            "callable completion; later alias/snapshot consumers pending",
+        );
+        eprintln!("CALLABLE_TRACE_TOTAL\t{}\texpected={expected}", total.get());
+    }
     pub(crate) fn retained_bytes<'a>(
         &mut self,
         admitted: impl IntoIterator<Item = &'a Request>,

@@ -785,6 +785,13 @@ fn ready_case_inner_mutation(
                 })
                 .count();
             assert_eq!(specializations, expected_specializations);
+            if specializations > 0 {
+                assert_eq!(
+                    tasks.completed_read_cache_bytes(),
+                    0,
+                    "callable handoff releases completed original recipes and descriptors"
+                );
+            }
             let original_count = completed.len() - specializations;
             assert_eq!(
                 completed

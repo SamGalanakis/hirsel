@@ -304,6 +304,30 @@ impl DiscoveredInstance {
         weight.arc(&self.product);
         weight.bytes()
     }
+    pub(crate) fn retention_rows(&self) -> Vec<(&'static str, u64, &'static str)> {
+        vec![
+            (
+                "product and descriptor wrapper",
+                self.wrapper_bytes(),
+                "callable C publication completed; original aliases/discovery publication pending",
+            ),
+            (
+                "emission and fact wrapper",
+                self.facts.local_metadata_bytes(),
+                "callable emission extracted; original emission superseded",
+            ),
+            (
+                "source facts: Ready, reads, discharge, adapters",
+                self.facts.source.retained_metadata_bytes(),
+                "callable C publication completed; later Ready/C/discharge consumers pending",
+            ),
+            (
+                "body facts: seal identity, callees, dependencies, templates, freedom",
+                self.facts.body.retained_metadata_bytes(),
+                "callable rewrite completed; original graph superseded unless shared by callable outputs",
+            ),
+        ]
+    }
     pub fn retained_metadata_bytes(&self) -> u64 {
         self.wrapper_bytes()
             .saturating_add(self.facts.retained_metadata_bytes())

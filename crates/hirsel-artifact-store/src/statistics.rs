@@ -46,6 +46,7 @@ counters!(
     IndexOpens,
     SegmentOpens,
     StandaloneOpens,
+    PathBuilds,
     RegionLoads,
     RegionRemaps,
     RegionCacheHits,

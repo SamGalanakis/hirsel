@@ -79,10 +79,17 @@ fn checked_slots_never_accept_a_colliding_reference_or_a_different_pack_range() 
         .map(|number| store.put(DOMAIN, &number.to_le_bytes()).unwrap())
         .collect();
     batch.finish().unwrap();
+    let statistics = store.enable_statistics();
     let operation = store.request();
     for reference in &references {
-        assert_eq!(store.get(*reference).unwrap().len(), 4);
+        let bytes = store.get(*reference).unwrap();
+        assert_eq!(bytes.len(), 4);
+        assert!(bytes.matches_reference(*reference));
     }
+    assert_eq!(
+        statistics.snapshot().counters["ContentChecks"],
+        references.len() as u64
+    );
     for pair in references.windows(2) {
         let other = store.raw_container(pair[0]).unwrap();
         assert!(checked_container(other, pair[1]).is_none());
@@ -1390,4 +1397,43 @@ fn checked_payloads_refuse_substitution_and_retain_the_full_parent_owner() {
     assert!(child.matches_reference(child_reference));
     drop(child);
     assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn installation_path_work_follows_pack_count_instead_of_reference_count() {
+    for count in [8u64, 64] {
+        let directory = tempfile::tempdir().unwrap();
+        let writer = Store::rebuildable(directory.path().to_owned());
+        let batch = writer.batch();
+        let mut rows = Vec::new();
+        let mut references = Vec::new();
+        for number in 0..count {
+            let bytes = number.to_le_bytes();
+            let reference = writer.put(DOMAIN, &bytes).unwrap();
+            let address = Address(ContentHash::of_bytes(&bytes));
+            let action = Action(ContentHash::of_bytes(b"action"));
+            writer.associate(address, action, reference).unwrap();
+            rows.push((address, Association { action, reference }));
+            references.push(reference);
+        }
+        batch.finish().unwrap();
+        let reader = Store::rebuildable(directory.path().to_owned());
+        let statistics = reader.enable_statistics();
+        let records = reader
+            .verify_records(rows, references.iter().chain(&references).copied())
+            .unwrap();
+        let counters = statistics.snapshot().counters;
+        assert_eq!(counters["ContentChecks"], count);
+        // Both sizes fit one publication segment: 2*64 records, each <=152
+        // bytes, are below the 1024-record and 1 MiB segment limits. Grouping
+        // by immutable file identity needs one resolved path for that segment.
+        assert_eq!(counters["SegmentOpens"], 1);
+        assert!(counters["PathBuilds"] <= 1, "count={count}: {counters:?}");
+        for (number, reference) in references.iter().enumerate() {
+            assert_eq!(
+                &*records.get(*reference).unwrap(),
+                &(number as u64).to_le_bytes()
+            );
+        }
+    }
 }

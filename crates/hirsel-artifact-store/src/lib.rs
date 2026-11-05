@@ -588,7 +588,13 @@ fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid artifact store record")
 }
 fn hex(hash: ContentHash) -> String {
-    hash.0.iter().map(|b| format!("{b:02x}")).collect()
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(64);
+    for byte in hash.0 {
+        output.push(HEX[usize::from(byte >> 4)] as char);
+        output.push(HEX[usize::from(byte & 0xf)] as char);
+    }
+    output
 }
 fn number(bytes: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes(
@@ -775,6 +781,7 @@ impl Store {
         // touches would recreate the small-record syscall amplification.
     }
     fn path(&self, hash: ContentHash, kind: &str) -> PathBuf {
+        self.count(Counter::PathBuilds, 1);
         let hex = hex(hash);
         self.root.join(kind).join(&hex[..2]).join(hex)
     }
@@ -1205,5 +1212,10 @@ fn checked_container(bytes: Bytes, reference: Reference) -> Option<Bytes> {
             reference,
         });
     }
-    bytes.range(HEADER as u64, reference.len, 1)
+    let payload = bytes.range(HEADER as u64, reference.len, 1)?;
+    Some(if payload.has_reference(reference) {
+        payload
+    } else {
+        payload.with_reference(reference)
+    })
 }

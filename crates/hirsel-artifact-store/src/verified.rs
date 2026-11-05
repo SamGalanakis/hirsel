@@ -204,7 +204,12 @@ impl Store {
     ) -> io::Result<VerifiedRecords> {
         let _scope = self.batch();
         let mut unique: BTreeSet<_> = references.into_iter().collect();
-        let mut files: BTreeMap<(PathBuf, bool), Vec<(u64, u64, Expected)>> = BTreeMap::new();
+        #[derive(Eq, PartialEq, Ord, PartialOrd)]
+        enum FileKey {
+            Published(ContentHash),
+            Other(PathBuf, bool),
+        }
+        let mut files: BTreeMap<FileKey, Vec<(u64, u64, Expected)>> = BTreeMap::new();
         let mut contents = Vec::new();
         let mut backings = Vec::new();
         let mut route = |source, expected: Expected, packed| -> io::Result<()> {
@@ -212,12 +217,22 @@ impl Store {
                 pack::Source::Pending(bytes) => {
                     expected.check(bytes, &mut contents, &mut backings, &mut None, &mut None)?
                 }
-                pack::Source::File { path, offset, len } => {
-                    files.entry((path, packed)).or_default().push((
+                pack::Source::Published {
+                    segment,
+                    offset,
+                    len,
+                } => {
+                    files.entry(FileKey::Published(segment)).or_default().push((
                         u64::from(offset),
                         u64::from(len),
                         expected,
                     ));
+                }
+                pack::Source::File { path, offset, len } => {
+                    files
+                        .entry(FileKey::Other(path, packed))
+                        .or_default()
+                        .push((u64::from(offset), u64::from(len), expected));
                 }
             }
             Ok(())
@@ -253,7 +268,11 @@ impl Store {
             };
             route(source, Expected::Content(reference), packed)?;
         }
-        for ((path, packed), mut records) in files {
+        for (key, mut records) in files {
+            let (path, packed) = match key {
+                FileKey::Published(segment) => (self.path(segment, "packs"), true),
+                FileKey::Other(path, packed) => (path, packed),
+            };
             records.sort_unstable_by_key(|(offset, _, _)| *offset);
             let bytes = if packed {
                 self.open_segment(&path, true)?

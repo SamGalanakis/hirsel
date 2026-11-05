@@ -84,6 +84,11 @@ impl Index {
 type Stamp = (u64, std::time::SystemTime, u64);
 pub(super) enum Source {
     Pending(Bytes),
+    Published {
+        segment: ContentHash,
+        offset: u32,
+        len: u32,
+    },
     File {
         path: PathBuf,
         offset: u32,
@@ -248,31 +253,37 @@ impl Store {
         self.read_packed(self.packed_source(tag, key)?)
     }
     pub(super) fn read_packed(&self, source: Source) -> Option<Bytes> {
-        match source {
-            Source::Pending(bytes) => Some(bytes),
-            Source::File { path, offset, len } => {
-                self.open_segment(&path, false)
-                    .ok()?
-                    .range(u64::from(offset), u64::from(len), 8)
-            }
-        }
+        let (path, offset, len) = match source {
+            Source::Pending(bytes) => return Some(bytes),
+            Source::Published {
+                segment,
+                offset,
+                len,
+            } => (self.path(segment, "packs"), offset, len),
+            Source::File { path, offset, len } => (path, offset, len),
+        };
+        self.open_segment(&path, false)
+            .ok()?
+            .range(u64::from(offset), u64::from(len), 8)
     }
     pub(super) fn packed_source(&self, tag: u8, key: ContentHash) -> Option<Source> {
         let mut state = self.state();
         if let Some(bytes) = state.pending.get(&(tag, key)) {
             return Some(Source::Pending(bytes.clone()));
         }
-        let (location, path) = if let Some(epoch) = &state.epoch
+        if let Some(epoch) = &state.epoch
             && let Some(location) = epoch.locations.get(&(tag, key))
         {
-            (*location, epoch.segment_path(location.segment))
-        } else {
-            self.refresh_index(&mut state);
-            let location = index::find(&state.index.as_ref()?.generation, index_key(tag, key)?)?;
-            (location, self.path(location.segment, "packs"))
-        };
-        Some(Source::File {
-            path,
+            return Some(Source::File {
+                path: epoch.segment_path(location.segment),
+                offset: location.offset,
+                len: location.len,
+            });
+        }
+        self.refresh_index(&mut state);
+        let location = index::find(&state.index.as_ref()?.generation, index_key(tag, key)?)?;
+        Some(Source::Published {
+            segment: location.segment,
             offset: location.offset,
             len: location.len,
         })

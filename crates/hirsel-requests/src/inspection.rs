@@ -289,7 +289,13 @@ impl GraphMeter {
                 .position(|selected| *selected == kind)
                 .ok_or_else(unavailable)?;
             let slot = &mut current.entry(path).or_default().phases[index];
-            *slot = slot.checked_add(count).ok_or_else(unavailable)?;
+            // Private inference has one shared operation counter, already
+            // present in S0. Front can observe later work on that same counter.
+            *slot = if kind == QueryKind::PrivateInference {
+                (*slot).max(count)
+            } else {
+                slot.checked_add(count).ok_or_else(unavailable)?
+            };
         }
         for (path, work) in self.lower.work_snapshot() {
             let counts = current.entry(path).or_default();

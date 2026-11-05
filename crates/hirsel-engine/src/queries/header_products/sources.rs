@@ -554,6 +554,8 @@ impl HeaderSources {
     pub(super) fn facts_index_bytes(definitions: usize) -> u64 {
         let mut weight = crate::NativeMetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
+        // The operation ledger has at most one counter per source definition.
+        weight.tree::<DefId, usize>(definitions);
         weight.tree::<DefId, Arc<catalog::SourceFacts>>(definitions);
         weight.tree::<DefId, CapturedText>(definitions);
         weight.tree::<DefId, Vec<FileId>>(definitions);

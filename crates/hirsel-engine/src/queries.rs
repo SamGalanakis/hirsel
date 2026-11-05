@@ -839,6 +839,9 @@ impl QueryEngine {
             .collect()
     }
     pub fn recompute_count(&self, definition: &DefPath, kind: QueryKind) -> usize {
+        if kind == QueryKind::PrivateInference {
+            return self.operation.private_work_count(definition);
+        }
         let pending = if kind == QueryKind::Signature {
             self.snapshot
                 .as_ref()

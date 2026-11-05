@@ -188,13 +188,6 @@ impl QueryEngine {
         let initial = prepared.map_err(|error| {
             FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
         })?;
-        let private_before: BTreeMap<_, _> = initial
-            .body_front()
-            .work_snapshot()
-            .into_iter()
-            .filter(|(_, kind, _)| *kind == QueryKind::PrivateInference)
-            .map(|(path, _, count)| (path, count))
-            .collect();
         let producer = demand::DemandProducer::new(
             self,
             initial.clone(),
@@ -251,18 +244,6 @@ impl QueryEngine {
             }
         };
         let namespace = successor.namespace().clone();
-        let mut private_work = BTreeMap::<_, u64>::new();
-        for (path, kind, count) in
-            producer.previous_private_work(initial.body_front(), &namespace.snapshot)
-        {
-            if kind == QueryKind::PrivateInference {
-                *private_work.entry(path).or_default() += count;
-            }
-        }
-        for (path, count) in private_work {
-            let count = count.saturating_sub(private_before.get(&path).copied().unwrap_or(0));
-            self.record_worker_recomputes(&path, QueryKind::PrivateInference, count);
-        }
         let failure = producer.front_failure(roots);
         let rounds = producer.rounds();
         let definitions = namespace

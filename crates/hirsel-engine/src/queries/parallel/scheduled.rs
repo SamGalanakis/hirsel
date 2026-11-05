@@ -1390,12 +1390,13 @@ impl FrontBodyQueries {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
+            .filter(|((_, kind), _)| *kind != QueryKind::PrivateInference)
             .map(|((path, kind), count)| (path.path().clone(), *kind, *count))
             .collect::<Vec<_>>();
         if let Some(headers) = self.namespace.snapshot.header_products() {
             work.extend(headers.work_snapshot());
-            headers.private_work(&mut work);
         }
+        work.extend(self.namespace.operation.private_work_snapshot());
         work
     }
     pub fn recompute_count(&self, definition: &DefPath, kind: QueryKind) -> u64 {

@@ -833,7 +833,15 @@ impl QueryEngine {
             } else {
                 crate::with_compiler_stack(|| inference.produce())?
             };
+            let mut private_work = self
+                .operation
+                .private_work
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             for input in &inference.inputs {
+                *private_work
+                    .entry(DefId::intern(&input.syntax.item.definition))
+                    .or_default() += 1;
                 *self
                     .recomputes
                     .entry((
@@ -842,6 +850,7 @@ impl QueryEngine {
                     ))
                     .or_default() += 1;
             }
+            drop(private_work);
             self.adopt_inference(facts, &mut inferred);
         }
         self.adopt_completed_headers();

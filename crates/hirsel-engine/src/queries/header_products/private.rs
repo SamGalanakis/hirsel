@@ -636,21 +636,6 @@ impl HeaderProducts {
         });
         Ok(())
     }
-    pub(in crate::queries) fn private_work(&self, work: &mut Vec<(DefPath, QueryKind, u64)>) {
-        if let Some(private) = &self.private {
-            for slot in private.modules.values() {
-                let Some(Ok(product)) = slot.current() else {
-                    continue;
-                };
-                work.extend(
-                    product
-                        .work
-                        .iter()
-                        .map(|((id, kind), count)| (id.path().clone(), *kind, *count as u64)),
-                );
-            }
-        }
-    }
     pub(super) fn reserve_standalone(
         &self,
         bytes: u64,

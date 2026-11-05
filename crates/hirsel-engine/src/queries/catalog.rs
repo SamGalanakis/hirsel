@@ -1164,8 +1164,9 @@ impl QueryEngine {
                     .clone()
                     .ok_or(QueryError::NotImplemented)?,
             );
+            let context = self.source_records();
             let syntax: Arc<ItemSyntax> = records
-                .decode(&self.source_records(), &bytes)
+                .decode(&context, &bytes)
                 .ok_or(QueryError::NotImplemented)?;
             if syntax.item.definition != *path
                 || syntax.text_hash != record.implementation
@@ -1174,7 +1175,7 @@ impl QueryEngine {
             {
                 return Err(QueryError::NotImplemented);
             }
-            self.items.insert(path.clone(), vec![syntax]);
+            self.materialize_bound_syntax(path, syntax, &context);
             return Ok(());
         }
         if let Some(inputs) = self.source_inputs.clone()

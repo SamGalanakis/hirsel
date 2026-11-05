@@ -350,6 +350,53 @@ fn ownership_product_tracks_removal_reordering_relocation_and_parse_eviction() {
         "retired products are released after their last worker"
     );
     assert!(old.record_owner(gone).is_some());
+    let store = Arc::new(crate::store::MemStore::default());
+    let mut producer = QueryEngine::new(crate::default_environment(), Default::default());
+    producer.result_store = Some(store.clone());
+    let file = producer
+        .sources
+        .add("hydrated.hir", "fn body()->u8{9u8}".into())
+        .unwrap();
+    producer.index_source(file, &context).unwrap();
+    let (path, syntax) = producer
+        .items
+        .iter()
+        .next()
+        .map(|(path, items)| (path.clone(), items[0].clone()))
+        .unwrap();
+    let mut consumer = QueryEngine::new(crate::default_environment(), Default::default());
+    consumer.result_store = Some(store);
+    consumer.sources = producer.sources.clone();
+    consumer.index_source(file, &context).unwrap();
+    assert!(
+        !consumer.items.contains_key(&path),
+        "fixture restores declaration heads without bodies"
+    );
+    let before = consumer.source_records();
+    let bytes = before.input_bytes().unwrap();
+    let budget = hirsel_engine_admission::ProcessBudget::new(bytes);
+    let mut allowance = budget.reserve(bytes).unwrap();
+    before.admit(&mut allowance).unwrap();
+    consumer.materialize_bound_syntax(&path, syntax.clone(), &before);
+    assert_scalar_bindings(&consumer);
+    assert_eq!(
+        consumer.source_records().unadmitted_bytes(),
+        Some(0),
+        "hydrating identical bindings requires no second ownership reservation"
+    );
+    consumer.items.remove(&path);
+    assert_scalar_bindings(&consumer);
+    let mut alias = (*syntax).clone();
+    alias.item.definition.0.name = "aaa_alias".into();
+    let alias_path = alias.item.definition.clone();
+    consumer.materialize_bound_syntax(&alias_path, Arc::new(alias), &before);
+    assert_scalar_bindings(&consumer);
+    assert_eq!(
+        before.record_owner(syntax.anchor),
+        Some((path.clone(), syntax.occurrence))
+    );
+    consumer.items.clear();
+    assert_scalar_bindings(&consumer);
 }
 
 #[test]

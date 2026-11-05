@@ -297,6 +297,34 @@ impl<K: Ord, V> FromIterator<(K, V)> for SourceTable<K, V> {
     }
 }
 impl QueryEngine {
+    pub(crate) fn materialize_bound_syntax(
+        &mut self,
+        path: &DefPath,
+        syntax: Arc<hirsel_syntax::ItemSyntax>,
+        context: &NativeRecordContext,
+    ) {
+        let equivalent = Arc::ptr_eq(self.types(), &context.types)
+            && syntax.item.definition == *path
+            && !self.items.contains_key(path)
+            && context.record_owner_ref(syntax.anchor) == Some((path, syntax.occurrence))
+            && context.record_source_anchor(path, syntax.occurrence) == Some(syntax.anchor)
+            && context.bindings.definition(syntax.anchor) == DefId::get(path);
+        if equivalent {
+            let ownership = self.source_ownership.clone();
+            let current = ownership.current.lock().unwrap_or_else(|e| e.into_inner());
+            if current.as_ref().is_some_and(|projection| {
+                projection.placement == self.sources.placement_revision()
+                    && projection.types.ptr_eq(&Arc::downgrade(self.types()))
+                    && projection
+                        .bindings
+                        .ptr_eq(&Arc::downgrade(&context.bindings))
+            }) {
+                Arc::make_mut(&mut self.items.values).insert(path.clone(), vec![syntax]);
+                return;
+            }
+        }
+        self.items.insert(path.clone(), vec![syntax]);
+    }
     pub(crate) fn inherit_source_records(&self, context: NativeRecordContext) {
         // Both reconstruction paths install the capture's exact source tables
         // before binding its records. A later source mutation invalidates this

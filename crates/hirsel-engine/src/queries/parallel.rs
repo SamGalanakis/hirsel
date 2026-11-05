@@ -1030,6 +1030,9 @@ mod frozen_task_tests {
                 2 << 20,
                 "held body metadata owns its snapshot reservation"
             );
+            // The originating assembler also owns the operation's fixed inputs.
+            // The retained result remains the final holder of this snapshot.
+            drop(engine);
             drop(held);
             assert_eq!(budget.reserved(), 0);
         });

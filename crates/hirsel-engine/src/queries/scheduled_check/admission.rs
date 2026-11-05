@@ -1,35 +1,127 @@
 //! One bounded body window, independent of source-wide acceptance reductions.
-//! This producer owns only cursors. The existing Front/Lower owners charge
-//! outputs and retain complete observations for the ordered Check publisher.
+//! Front/Lower owners retain observations for the ordered Check publisher.
 use super::*;
 
+enum RootRead {
+    Front,
+    Lower,
+}
+enum AdmissionState {
+    Roots {
+        file: usize,
+        root: usize,
+        read: RootRead,
+    },
+    Instances {
+        file: usize,
+        paths: Vec<DefPath>,
+        next: usize,
+    },
+    Staged {
+        file: usize,
+        selections: Vec<super::super::scheduled_lower::staged_runtime::Selection>,
+        next: usize,
+    },
+    Extra {
+        next: usize,
+    },
+    Finished(Result<ProductRef, Reference>),
+}
+impl AdmissionState {
+    fn enter_file(queries: &FrontCheckQueries, mut file: usize) -> Self {
+        while let Some(input) = queries.files.get(file) {
+            if input.error.is_none() && !has_errors(&input.diagnostics) {
+                return Self::Roots {
+                    file,
+                    root: 0,
+                    read: RootRead::Front,
+                };
+            }
+            file += 1;
+        }
+        Self::Extra { next: 0 }
+    }
+    fn front_done(self, lower: bool) -> Self {
+        if lower {
+            let Self::Roots { file, root, .. } = self else {
+                unreachable!()
+            };
+            Self::Roots {
+                file,
+                root,
+                read: RootRead::Lower,
+            }
+        } else {
+            self.root_done()
+        }
+    }
+    fn root_done(self) -> Self {
+        let Self::Roots { file, root, .. } = self else {
+            unreachable!()
+        };
+        Self::Roots {
+            file,
+            root: root + 1,
+            read: RootRead::Front,
+        }
+    }
+    fn instances_selected(self, paths: Vec<DefPath>) -> Self {
+        let Self::Roots { file, .. } = self else {
+            unreachable!()
+        };
+        Self::Instances {
+            file,
+            paths,
+            next: 0,
+        }
+    }
+    fn instances_done(self, queries: &FrontCheckQueries) -> Self {
+        let Self::Instances { file, .. } = self else {
+            unreachable!()
+        };
+        let input = &queries.files[file];
+        let selections = queries
+            .plan
+            .lower
+            .runtime_staged_queries(
+                input.paths.iter().map(|(path, _)| path.clone()),
+                queries.weight.scratch,
+                queries.weight.retained,
+            )
+            .unwrap_or_default();
+        Self::staged_selected(file, selections)
+    }
+    fn staged_selected(
+        file: usize,
+        selections: Vec<super::super::scheduled_lower::staged_runtime::Selection>,
+    ) -> Self {
+        Self::Staged {
+            file,
+            selections,
+            next: 0,
+        }
+    }
+    fn staged_done(self, queries: &FrontCheckQueries) -> Self {
+        let Self::Staged { file, .. } = self else {
+            unreachable!()
+        };
+        Self::enter_file(queries, file + 1)
+    }
+    fn finish(self, result: Result<ProductRef, Reference>) -> Self {
+        Self::Finished(result)
+    }
+}
 pub(super) struct Task {
     queries: Arc<FrontCheckQueries>,
-    file: usize,
-    root: usize,
-    ready: Option<bool>,
-    instances: Option<Vec<DefPath>>,
-    instance: usize,
-    staged: Option<Vec<super::super::scheduled_lower::staged_runtime::Selection>>,
-    staged_root: usize,
-    extra: usize,
+    state: AdmissionState,
     digest: ContentHash,
-    terminal: Option<Result<ProductRef, Reference>>,
 }
 impl Task {
     pub(super) fn new(queries: Arc<FrontCheckQueries>) -> Self {
         Self {
+            state: AdmissionState::enter_file(&queries, 0),
             queries,
-            file: 0,
-            root: 0,
-            ready: None,
-            instances: None,
-            instance: 0,
-            staged: None,
-            staged_root: 0,
-            extra: 0,
             digest: ContentHash::of_bytes(b"source admission"),
-            terminal: None,
         }
     }
     fn read(
@@ -56,41 +148,59 @@ impl Task {
         result
     }
     fn advance(&mut self, cx: &mut dyn QueryContext) -> Result<Option<QueryId>, Reference> {
-        while self.file < self.queries.files.len() {
+        loop {
             let queries = self.queries.clone();
-            let file = &queries.files[self.file];
-            if file.error.is_some() || has_errors(&file.diagnostics) {
-                self.next_file();
-                continue;
-            }
-            while let Some((path, executable)) = file.paths.get(self.root) {
-                let lower = if let Some(lower) = self.ready {
-                    lower
-                } else {
-                    let id = queries
-                        .plan
-                        .front
-                        .query(path)
-                        .ok_or(queries.errors.protocol)?;
+            match &self.state {
+                AdmissionState::Roots { file, root, read } => {
+                    let input = &queries.files[*file];
+                    let Some((path, executable)) = input.paths.get(*root) else {
+                        let paths = queries
+                            .plan
+                            .lower
+                            .selected_instances(
+                                input.paths.iter().map(|(path, _)| path.clone()),
+                                queries.weight.scratch,
+                            )
+                            .map(|paths| paths.into_iter().collect())
+                            .unwrap_or_default();
+                        self.transition(|state| state.instances_selected(paths));
+                        continue;
+                    };
+                    let front = matches!(read, RootRead::Front);
+                    let id = if front {
+                        queries.plan.front.query(path)
+                    } else {
+                        queries.plan.lower.query(path)
+                    }
+                    .ok_or(queries.errors.protocol)?;
+                    let executable = *executable;
+                    let lowering = input.lowering;
                     let selected = match self.read(cx, id) {
                         Poll::Pending => return Ok(Some(id)),
                         Poll::Ready(selected) => selected,
                     };
-                    let facts = queries
-                        .plan
-                        .front
-                        .check_facts(selected.clone())
-                        .ok_or_else(|| selected.err().unwrap_or(queries.errors.protocol))?;
-                    let lower = *executable
-                        && facts.result.as_ref().is_ok_and(|d| !has_errors(d))
-                        && (file.lowering == LoweringPolicy::Reachable
-                            || facts.lowering.as_ref().is_some_and(|lowering| {
-                                lowering.needed_with(|id| queries.constants.contains(&id))
-                            }));
-                    self.ready = Some(lower);
-                    lower
-                };
-                if lower {
+                    if front {
+                        let facts = queries
+                            .plan
+                            .front
+                            .check_facts(selected.clone())
+                            .ok_or_else(|| selected.err().unwrap_or(queries.errors.protocol))?;
+                        let lower = executable
+                            && facts.result.as_ref().is_ok_and(|d| !has_errors(d))
+                            && (lowering == LoweringPolicy::Reachable
+                                || facts.lowering.as_ref().is_some_and(|lowering| {
+                                    lowering.needed_with(|id| queries.constants.contains(&id))
+                                }));
+                        self.transition(|state| state.front_done(lower));
+                    } else {
+                        self.transition(AdmissionState::root_done);
+                    }
+                }
+                AdmissionState::Instances { paths, next, .. } => {
+                    let Some(path) = paths.get(*next) else {
+                        self.transition(|state| state.instances_done(&queries));
+                        continue;
+                    };
                     let id = queries
                         .plan
                         .lower
@@ -99,91 +209,53 @@ impl Task {
                     if self.read(cx, id).is_pending() {
                         return Ok(Some(id));
                     }
+                    let AdmissionState::Instances { next, .. } = &mut self.state else {
+                        unreachable!()
+                    };
+                    *next += 1;
                 }
-                self.root += 1;
-                self.ready = None;
-            }
-            if self.instances.is_none() {
-                // The selection is a consequence of these roots' completed
-                // Lower work. Another file's Check cannot delay it.
-                self.instances = Some(
-                    queries
+                AdmissionState::Staged {
+                    selections, next, ..
+                } => {
+                    let Some((id, _)) = selections.get(*next).copied() else {
+                        self.transition(|state| state.staged_done(&queries));
+                        continue;
+                    };
+                    if self.read(cx, id).is_pending() {
+                        return Ok(Some(id));
+                    }
+                    let AdmissionState::Staged { next, .. } = &mut self.state else {
+                        unreachable!()
+                    };
+                    *next += 1;
+                }
+                AdmissionState::Extra { next } => {
+                    let Some(path) = queries.instances.get(*next) else {
+                        return Ok(None);
+                    };
+                    let id = queries
                         .plan
-                        .lower
-                        .selected_instances(
-                            file.paths.iter().map(|(path, _)| path.clone()),
-                            queries.weight.scratch,
-                        )
-                        .map(|paths| paths.into_iter().collect())
-                        .unwrap_or_default(),
-                );
-            }
-            while let Some(path) = self
-                .instances
-                .as_ref()
-                .and_then(|rows| rows.get(self.instance))
-            {
-                let id = queries
-                    .plan
-                    .lower
-                    .query(path)
-                    .ok_or(queries.errors.protocol)?;
-                if self.read(cx, id).is_pending() {
-                    return Ok(Some(id));
+                        .front
+                        .query(path)
+                        .ok_or(queries.errors.protocol)?;
+                    if self.read(cx, id).is_pending() {
+                        return Ok(Some(id));
+                    }
+                    let AdmissionState::Extra { next } = &mut self.state else {
+                        unreachable!()
+                    };
+                    *next += 1;
                 }
-                self.instance += 1;
+                AdmissionState::Finished(_) => return Ok(None),
             }
-            self.instances = Some(Vec::new());
-            if self.staged.is_none() {
-                self.staged = Some(
-                    queries
-                        .plan
-                        .lower
-                        .runtime_staged_queries(
-                            file.paths.iter().map(|(path, _)| path.clone()),
-                            queries.weight.scratch,
-                            queries.weight.retained,
-                        )
-                        .unwrap_or_default(),
-                );
-            }
-            while let Some((id, _)) = self
-                .staged
-                .as_ref()
-                .and_then(|rows| rows.get(self.staged_root))
-                .copied()
-            {
-                if self.read(cx, id).is_pending() {
-                    return Ok(Some(id));
-                }
-                self.staged_root += 1;
-            }
-            self.next_file();
         }
-        // Generated instance Front obligations are independent as well. Their
-        // diagnostics remain selected by the ordered source owner.
-        while let Some(path) = self.queries.instances.get(self.extra) {
-            let id = self
-                .queries
-                .plan
-                .front
-                .query(path)
-                .ok_or(self.queries.errors.protocol)?;
-            if self.read(cx, id).is_pending() {
-                return Ok(Some(id));
-            }
-            self.extra += 1;
-        }
-        Ok(None)
     }
-    fn next_file(&mut self) {
-        self.file += 1;
-        self.root = 0;
-        self.ready = None;
-        self.instances = None;
-        self.instance = 0;
-        self.staged = None;
-        self.staged_root = 0;
+    fn transition(&mut self, change: impl FnOnce(AdmissionState) -> AdmissionState) {
+        let state = std::mem::replace(
+            &mut self.state,
+            AdmissionState::Finished(Err(self.queries.errors.protocol)),
+        );
+        self.state = change(state);
     }
 }
 impl QueryTask for Task {
@@ -197,7 +269,7 @@ impl QueryTask for Task {
         self.weight().retained
     }
     fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
-        if let Some(result) = &self.terminal {
+        if let AdmissionState::Finished(result) = &self.state {
             return finish(result.clone());
         }
         let result = match self.advance(cx) {
@@ -219,7 +291,7 @@ impl QueryTask for Task {
                 }),
             )),
         };
-        self.terminal = Some(result.clone());
+        self.transition(|state| state.finish(result.clone()));
         finish(result)
     }
 }

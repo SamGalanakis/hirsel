@@ -935,7 +935,37 @@ mod frozen_task_tests {
                         closures: vec![],
                     },
                     syntax,
-                    plans: Default::default(),
+                    plans: hirsel_check_protocol::body::Plans {
+                        loops: vec![hirsel_check_protocol::body::ForPlan {
+                            protocol: hirsel_check_protocol::body::ForProtocol::BorrowedSource(
+                                dependency.definition.path().clone(),
+                            ),
+                            kind: hirsel_check_protocol::body::ForPlanKind::Cursor {
+                                cursor: hirsel_types::CursorPlan {
+                                    association: Some(hirsel_types::ProtocolAssociation {
+                                        source: dependency.definition.path().clone(),
+                                        fingerprint: dependency.fingerprint,
+                                    }),
+                                    statement: hirsel_syntax::StmtId(0),
+                                    source: hirsel_syntax::ExprId(0),
+                                    source_use: hirsel_types::UseKind::Borrow,
+                                    open: DefPath::core("open"),
+                                    open_arguments: vec![],
+                                    next: DefPath::core("next"),
+                                    next_arguments: vec![],
+                                    cursor: function.result,
+                                    step: hirsel_types::OptionLayout {
+                                        result: function.result,
+                                        item: function.result,
+                                        definition: DefPath::core("Option"),
+                                        none_variant: hirsel_types::VariantId(0),
+                                        some_variant: hirsel_types::VariantId(1),
+                                    },
+                                },
+                            },
+                        }],
+                        ..Default::default()
+                    },
                     unit: function.result,
                     boolean: types.intern(hirsel_types::Type::boolean()),
                 },
@@ -1057,6 +1087,16 @@ mod frozen_task_tests {
                 assert_eq!(output.value.unit, expected_type);
                 assert_eq!(output.dependencies[0].fingerprint, signature.fingerprint);
                 assert_eq!(output.dependencies[1].fingerprint, dependency.fingerprint);
+                assert_eq!(
+                    output.value.plans.loops[0]
+                        .cursor()
+                        .unwrap()
+                        .association
+                        .as_ref()
+                        .unwrap()
+                        .fingerprint,
+                    dependency.fingerprint,
+                );
                 assert_eq!(
                     checker.0.load(std::sync::atomic::Ordering::SeqCst),
                     computations

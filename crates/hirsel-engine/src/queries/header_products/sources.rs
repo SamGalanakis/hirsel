@@ -341,6 +341,29 @@ impl SourceInputs {
     }
 }
 impl HeaderSources {
+    /// Reparseable syntax is optional once every consumer releases its item.
+    /// Skip the file currently being produced: source admission can reclaim
+    /// other files while that file's live lock is held.
+    pub(super) fn evict(&self) -> bool {
+        for owner in self.files.values().filter(|owner| owner.indexed) {
+            let Ok(mut slot) = owner.live.try_lock() else {
+                continue;
+            };
+            let Ok(Some(live)) = &*slot else {
+                continue;
+            };
+            if live._charge.0.is_some()
+                && live
+                    .items
+                    .iter()
+                    .all(|syntax| Arc::strong_count(syntax) == 1)
+            {
+                *slot = Ok(None);
+                return true;
+            }
+        }
+        self.parent.as_ref().is_some_and(|parent| parent.evict())
+    }
     fn syntax(&self, id: DefId) -> Result<Option<Arc<ItemSyntax>>, QueryError> {
         let Some(files) = self.by_definition.get(&id) else {
             return self

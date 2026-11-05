@@ -1244,6 +1244,7 @@ impl HeaderProducts {
             || self.evict_validation_cache()
             || self.evict_row()
             || self.evict_proof()
+            || self.syntax.evict()
         {
             return true;
         }
@@ -1266,7 +1267,7 @@ impl HeaderProducts {
         tables
             .iter()
             .filter(|table| !std::ptr::eq(self, &***table))
-            .any(|table| table.evict_row() || table.evict_proof())
+            .any(|table| table.evict_row() || table.evict_proof() || table.syntax.evict())
     }
     fn reclaim_header_rows(&self) -> bool {
         let payloads = self

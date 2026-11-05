@@ -173,6 +173,20 @@ impl Provider<'_> {
     }
     fn restore(&self, mut result: ResultBody) -> ResultBody {
         if let Ok(output) = &mut result {
+            for plan in &mut output.value.plans.loops {
+                if let hirsel_check_protocol::body::ForPlanKind::Cursor { cursor } = &mut plan.kind
+                    && let Some(association) = &mut cursor.association
+                {
+                    association.fingerprint = *self
+                        .actual
+                        .get(&DefId::intern(&association.source))
+                        .ok_or_else(|| {
+                            header_products::source_refusal(
+                                "Check protocol association was not a consumed signature",
+                            )
+                        })?;
+                }
+            }
             for dependency in &mut output.dependencies {
                 dependency.fingerprint =
                     *self.actual.get(&dependency.definition).ok_or_else(|| {

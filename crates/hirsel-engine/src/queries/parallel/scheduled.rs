@@ -832,7 +832,11 @@ impl FrontBodyQueries {
         })
     }
     fn make_room(&self, cx: &mut dyn QueryContext, charge: u64) -> Option<()> {
-        while *self.retention.lock().unwrap_or_else(|e| e.into_inner()) < charge {
+        // Headers and source syntax borrow from the same pool without reducing
+        // this metadata counter. Reclaim idle consumers on either limit.
+        while *self.retention.lock().unwrap_or_else(|e| e.into_inner()) < charge
+            || self._allowance.allowance.available_bytes() < charge
+        {
             if self.reclaim_reads() {
                 continue;
             }

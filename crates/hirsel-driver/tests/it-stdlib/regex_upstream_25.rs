@@ -3,6 +3,7 @@ use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};

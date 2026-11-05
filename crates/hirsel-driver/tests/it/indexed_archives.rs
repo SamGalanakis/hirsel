@@ -2,9 +2,9 @@
 use hirsel_engine::{
     CheckedTir, CompileConfig, DefinitionQueries, NativeRecordContext, NativeRecords, TirView,
     store::{MemStore, ResultStore},
-    with_compiler_stack,
 };
 use hirsel_front_phases::COMPILER;
+use hirsel_intern::jobs::with_compiler_stack;
 use std::sync::Arc;
 
 #[test]

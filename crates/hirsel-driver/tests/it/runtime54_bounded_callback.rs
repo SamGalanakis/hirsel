@@ -7,6 +7,7 @@
 use hirsel_driver::native;
 use hirsel_driver::native::*;
 use hirsel_engine::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::continuation::{
     ContinuationError, ContinuationPlan, ContinuationPlans, RegionKind, Representation,
 };

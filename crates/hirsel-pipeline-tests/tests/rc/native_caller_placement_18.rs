@@ -1,5 +1,6 @@
 //! Parameter-only construction receipts are lifetime sources, not ABI destinations.
 use crate::rc_support::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::ir::{DestinationClass, Placement, StorageOwner};
 use hirsel_rc::placement::{Options as PlaceOptions, PlaceError, place};
 

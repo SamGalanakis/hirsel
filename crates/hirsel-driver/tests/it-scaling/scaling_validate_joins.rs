@@ -2,6 +2,7 @@ use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+use hirsel_intern::jobs::with_compiler_stack;
 
 /// A constructor's failure edge joins the state after every operand prefix.
 /// Each join visits only what its operand changed, so a long table literal

@@ -1,5 +1,6 @@
 //! Different string cursors must compose in one native descriptor registry.
 use crate::rc_support::target;
+use hirsel_intern::jobs::with_compiler_stack;
 
 const EMPTY: &str = r#"
 pub fn main() -> Result[(), ()] {

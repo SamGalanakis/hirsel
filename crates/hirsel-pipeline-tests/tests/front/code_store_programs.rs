@@ -7,6 +7,7 @@ use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_object_storage::{DirObjects, MemoryObjects, ObjectStorage};
 use hirsel_proof_export::DefinitionGroup;
 use hirsel_syntax::ContentHash;

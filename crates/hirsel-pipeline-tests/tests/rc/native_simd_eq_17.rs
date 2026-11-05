@@ -1,5 +1,6 @@
 //! Structural SIMD equality must agree across all execution engines.
 use crate::rc_support::target;
+use hirsel_intern::jobs::with_compiler_stack;
 
 const MINIMAL: &str =
     include_str!("../../../../conformance/MEM/MEM-8-structural-equality-native-17-run.hir");

@@ -2,6 +2,7 @@ use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+use hirsel_intern::jobs::with_compiler_stack;
 
 #[test]
 fn calls_query_only_required_binding_origins() {

@@ -1,6 +1,7 @@
 //! V's flow state scales with live facts, not with snapshot copies: the two
 //! largest std bodies validate within a fixed heap budget.
 //! It keeps its own test binary: its global allocator meters every allocation.
+use hirsel_intern::jobs::with_compiler_stack;
 #[path = "support/image_fixture.rs"]
 mod image_fixture;
 

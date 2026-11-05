@@ -1,6 +1,7 @@
 //! Inject a real filesystem event only after entered WatchNext returns its stack.
 use hirsel_driver::native;
 use hirsel_engine::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::Backend;
 use hirsel_native::OptLevel;
 use hirsel_native::Partition;

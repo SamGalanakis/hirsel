@@ -881,6 +881,7 @@ dependencies = [
  "hirsel-engine",
  "hirsel-graph",
  "hirsel-guard",
+ "hirsel-intern",
  "hirsel-lower",
  "hirsel-ownership",
  "hirsel-query-products",

@@ -1,12 +1,10 @@
 //! Keyed writes locate Map fields after an earlier write may detach the parent.
+use hirsel_intern::jobs::with_compiler_stack;
 #[path = "../support/history.rs"]
 #[allow(dead_code, reason = "shared four-engine test support")]
 mod history;
 use hirsel_driver::native;
-use hirsel_engine::{
-    requests::{OutputReadiness, RequestEngine, observe_inputs},
-    with_compiler_stack,
-};
+use hirsel_engine::requests::{OutputReadiness, RequestEngine, observe_inputs};
 use hirsel_engine_runtime::QueryRuntime;
 
 use hirsel_front_phases::COMPILER;

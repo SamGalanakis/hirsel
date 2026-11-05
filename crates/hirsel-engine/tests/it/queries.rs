@@ -6,6 +6,7 @@ use hirsel_engine_runtime::AdmittedRuntime;
 use hirsel_engine_runtime::MemoryWeight;
 use hirsel_engine_runtime::QueryRuntime;
 use hirsel_engine_runtime::RuntimeErrors;
+use hirsel_intern::jobs::with_compiler_stack;
 
 use hirsel_intern::Symbol;
 use hirsel_span::{FileId, SourceMap, Span};

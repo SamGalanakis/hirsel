@@ -2,6 +2,7 @@ use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+use hirsel_intern::jobs::with_compiler_stack;
 #[test]
 fn temporary_identities_query_their_actual_surviving_holders() {
     with_compiler_stack(|| {

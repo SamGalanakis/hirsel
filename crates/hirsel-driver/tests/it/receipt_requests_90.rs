@@ -1,6 +1,7 @@
 use hirsel_engine::store::ResultStore;
 use hirsel_engine::*;
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_layout::layout::LayoutBuilder;
 use hirsel_lir::validate::{Inputs, NativeEnvironment};
 use hirsel_native::receipt_source::factory::NamedInput;
@@ -201,14 +202,14 @@ pub fn inspect(root: List[u64]) -> u64 { forward(root)+forward_again(root) }
         drop(front);
         let inputs = NativeInstanceInputs::from_products(declarations, reader).unwrap();
         if forward {
+            use hirsel_engine_runtime::MemoryWeight;
+            use hirsel_engine_runtime::QueryFactory;
+            use hirsel_engine_runtime::QueryId;
+            use hirsel_engine_runtime::QueryPoll;
             use hirsel_native_cache::source_inputs::NativeFrontLower;
             use hirsel_native_queries::instance_tasks::INSTANCE_INPUT_KIND;
             use hirsel_native_queries::instance_tasks::InstanceTaskFactory;
             use hirsel_native_queries::instance_tasks::InstanceTasks;
-            use runtime::MemoryWeight;
-            use runtime::QueryFactory;
-            use runtime::QueryId;
-            use runtime::QueryPoll;
             let bindings = products
                 .iter()
                 .map(|(path, product)| {
@@ -422,12 +423,14 @@ pub fn inspect(root:List[u64])->u64 {forward(root)+forward_again(root)}
     });
 }
 
-struct LowerRows(std::collections::BTreeMap<DefPath, (runtime::ProductRef, NativeOriginalProduct)>);
+struct LowerRows(
+    std::collections::BTreeMap<DefPath, (hirsel_engine_runtime::ProductRef, NativeOriginalProduct)>,
+);
 impl hirsel_native_cache::source_inputs::NativeLowerProducts for LowerRows {
     fn lower_product(
         &self,
         path: &DefPath,
-        selected: runtime::ProductRef,
+        selected: hirsel_engine_runtime::ProductRef,
     ) -> Result<NativeOriginalProduct, String> {
         self.0
             .get(path)
@@ -437,14 +440,17 @@ impl hirsel_native_cache::source_inputs::NativeLowerProducts for LowerRows {
     }
 }
 struct LowerReads {
-    rows: Vec<(runtime::QueryId, runtime::ProductRef)>,
-    waiting: Option<runtime::QueryId>,
+    rows: Vec<(
+        hirsel_engine_runtime::QueryId,
+        hirsel_engine_runtime::ProductRef,
+    )>,
+    waiting: Option<hirsel_engine_runtime::QueryId>,
 }
-impl runtime::QueryContext for LowerReads {
+impl hirsel_engine_runtime::QueryContext for LowerReads {
     fn read(
         &mut self,
-        query: runtime::QueryId,
-    ) -> std::task::Poll<Result<runtime::ProductRef, store::Reference>> {
+        query: hirsel_engine_runtime::QueryId,
+    ) -> std::task::Poll<Result<hirsel_engine_runtime::ProductRef, store::Reference>> {
         if self.waiting == Some(query) {
             return std::task::Poll::Pending;
         }

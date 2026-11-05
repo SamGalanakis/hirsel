@@ -2,6 +2,7 @@ use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+use hirsel_intern::jobs::with_compiler_stack;
 
 /// Value nodes the interpreter copies while a loop pushes onto a List that it
 /// also reads through a borrowed parameter and a borrowed core operation each

@@ -1,6 +1,7 @@
 //! Missing-arm rendering vectors adapted from rust-analyzer (MIT/Apache-2.0),
 //! 3131751e, missing_match_arms.rs:80-157 and expr.rs:725-768. Reuse the
 //! independent finite model; Hirsel guards never establish complete coverage.
+use hirsel_intern::jobs::with_compiler_stack;
 #[allow(dead_code)]
 #[path = "../../../hirsel-validate/tests/it/match_coverage_22/model.rs"]
 mod model;

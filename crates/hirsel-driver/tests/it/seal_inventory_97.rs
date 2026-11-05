@@ -1,6 +1,7 @@
 //! Production demand import and C replay of original constructor obligations.
 use hirsel_engine::*;
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::validate::{Inputs, NativeEnvironment};
 use hirsel_native_cache::declarations::NativeDeclarations;
 use hirsel_native_cache::instance::InstanceQueries;

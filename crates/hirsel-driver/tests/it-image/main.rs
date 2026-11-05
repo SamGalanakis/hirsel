@@ -3,6 +3,7 @@
 //! (`HIRSEL_PRODUCTS`). It checks std from source once, so it links as its own
 //! binary with its own measured request.
 
+use hirsel_intern::jobs::with_compiler_stack;
 hirsel_guard::install!();
 
 #[path = "../support/image_fixture.rs"]

@@ -3,6 +3,7 @@
 //! Reuses history21's runner/persistence/reduction interfaces. Call-edge shapes
 //! follow rustc initialized.rs:255-303 and framework/tests.rs:1-68 at
 //! 19833af7224424e8b53e288097d56b6af43d5bcf; no upstream code is copied.
+use hirsel_intern::jobs::with_compiler_stack;
 #[path = "../support/history.rs"]
 #[allow(dead_code)]
 mod history;

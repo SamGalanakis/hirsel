@@ -1,6 +1,7 @@
 //! Actual V-owned original closure sites, independent of native environments.
 use hirsel_engine::*;
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_layout::instance::InstanceKey;
 use hirsel_native::receipt_source;
 use hirsel_rc::sealed_source::{SourceEntryKind, SourceError};

@@ -4,6 +4,7 @@ use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_interp::{Integer, Limits, Outcome, Value, library::Library};
 use hirsel_syntax::{DefPath, ItemPath, PackageId};
 use hirsel_types::Primitive;

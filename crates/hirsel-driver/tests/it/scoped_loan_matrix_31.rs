@@ -3,6 +3,7 @@
 //! initialized.rs:255-303 / framework/tests.rs:1-68 at 19833af7 (distinct
 //! before/after-call and normal/error edges). No upstream code is copied;
 //! Hirsel's CLO/OWN/MODE rules, never Rust borrowing, define validity.
+use hirsel_intern::jobs::with_compiler_stack;
 #[path = "../support/history.rs"]
 mod history;
 use hirsel_driver::native::*;

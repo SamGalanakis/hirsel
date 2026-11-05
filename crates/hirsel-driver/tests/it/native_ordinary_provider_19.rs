@@ -1,10 +1,10 @@
 //! Ordinary local library donor vectors from the former plan/seed controls.
 use hirsel_driver::native;
 use hirsel_engine::{
-    runtime,
     store::{DirStore, RequestStore, ResultStore, VerifyStore},
     *,
 };
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::Backend;
 use std::sync::Arc;
 fn compile(

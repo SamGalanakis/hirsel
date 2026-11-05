@@ -5,6 +5,7 @@
 use crate::rc_support::*;
 use hirsel_heapcheck::ledger::{AllocId, Owner};
 use hirsel_heapcheck::{Config, FlatStorage, NoOperations, Observed};
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::layout_types::{CopyRecipe, LayoutId, LayoutKind, LayoutTable, ScalarKind};
 use hirsel_lir::stage::Rc;
 use hirsel_lir::validate::Inputs;

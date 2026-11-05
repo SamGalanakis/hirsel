@@ -2,6 +2,7 @@ use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+use hirsel_intern::jobs::with_compiler_stack;
 /// Mode checking `fn f(x: Wrap[...Leaf]) -> Wrap[Wrap[...Leaf]]` once compared
 /// every nested instantiation a property proof entered with every earlier
 /// one, walking both complete graphs each time, and recomputed heights per

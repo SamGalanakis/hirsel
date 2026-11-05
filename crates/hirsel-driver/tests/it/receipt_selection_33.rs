@@ -1,6 +1,7 @@
 //! Original direct-call discovery through current source/V and CT-5 providers.
 use hirsel_engine::*;
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::receipt_source::provider::*;
 use hirsel_native::receipt_source::selection::*;
 use hirsel_rc::instance::{Actuals, key_of};

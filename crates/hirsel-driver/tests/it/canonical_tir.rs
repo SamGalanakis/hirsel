@@ -1,3 +1,4 @@
+use hirsel_intern::jobs::with_compiler_stack;
 #[path = "../support/canonical_tir.rs"]
 mod canonical_tir;
 use hirsel_driver::*;

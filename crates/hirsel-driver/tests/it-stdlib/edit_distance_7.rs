@@ -2,6 +2,7 @@
 //! The oracle deliberately uses a full matrix, independently of std's one row.
 use crate::source_std::tir;
 use hirsel_engine::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_interp::{Integer, Limits, Outcome, Value, library::Library};
 use hirsel_types::Primitive;
 use std::{fmt::Write, path::PathBuf};

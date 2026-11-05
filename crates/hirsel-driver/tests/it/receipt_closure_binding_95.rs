@@ -1,5 +1,6 @@
 use hirsel_engine::*;
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_layout::layout::LayoutBuilder;
 use hirsel_native::receipt_source::factory::NamedInput;
 use hirsel_native::receipt_source::factory::named_graph;

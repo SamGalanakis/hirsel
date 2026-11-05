@@ -4,6 +4,7 @@
 //! (MIT, The Rust Project Contributors; license in third-party/NOTICES.md).
 //! Source loops and independent scalar/vector answers replace MIR cursor seeks.
 use crate::rc_support::*;
+use hirsel_intern::jobs::with_compiler_stack;
 
 const ORIGINAL: &str =
     include_str!("../../../../conformance/PROV/PROV-4-nested-loop-field-element-run.hir");

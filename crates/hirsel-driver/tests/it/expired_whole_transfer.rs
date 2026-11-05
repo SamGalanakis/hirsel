@@ -2,6 +2,7 @@
 use hirsel_driver::native;
 use hirsel_engine::*;
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_types::{Signature, SignatureProvider, TypeInterner, TypeMemo};
 use std::sync::{Arc, Mutex};
 

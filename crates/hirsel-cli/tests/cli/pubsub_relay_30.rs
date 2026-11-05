@@ -1,5 +1,6 @@
 //! Full six-module entry with public simulation and checked host-replay adapters.
 use hirsel_engine::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use serde_json::{Value, json};
 use std::{
     fs,

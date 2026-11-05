@@ -1,4 +1,5 @@
 //! Private body summaries are evidence of direct calls, never callable types.
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_driver::*;
 use hirsel_front_phases::{COMPILER, compiler_adapters};
 use hirsel_engine::*;

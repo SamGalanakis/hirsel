@@ -2,6 +2,7 @@ use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+use hirsel_intern::jobs::with_compiler_stack;
 #[test]
 fn ownership_snapshots_copy_only_changed_binding_rows() {
     with_compiler_stack(|| {

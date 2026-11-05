@@ -1,4 +1,5 @@
 //! Mixed SEM-5 traces; the oracle is shared with the private native seed harness.
+use hirsel_intern::jobs::with_compiler_stack;
 #[path = "../../../hirsel-pipeline-tests/tests/rc/maps/model.rs"]
 mod model;
 use hirsel_driver::*;

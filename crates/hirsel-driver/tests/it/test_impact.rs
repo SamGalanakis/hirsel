@@ -1,6 +1,7 @@
 //! Bounded shadow oracle: explicit graph edits plus fresh checked executions.
 use hirsel_engine::*;
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_project_info::impact::*;
 use hirsel_run_schema::ProgramNode;
 use hirsel_syntax::ContentHash;

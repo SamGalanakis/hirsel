@@ -1,4 +1,5 @@
 //! Authority checking of real source, from hirsel-authority's unit tests.
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_types::*;
 
 #[test]

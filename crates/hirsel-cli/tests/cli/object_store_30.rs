@@ -1,5 +1,6 @@
 //! Whole app entry/config/module acceptance. Oracles never execute Hirsel.
 use hirsel_engine::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_interp::observation::Effect;
 use serde_json::Value;
 use std::{

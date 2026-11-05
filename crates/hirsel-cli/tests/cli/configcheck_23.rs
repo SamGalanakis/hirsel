@@ -1,4 +1,5 @@
 //! One application model, upstream vectors and bounded real CLI execution.
+use hirsel_intern::jobs::with_compiler_stack;
 use std::{fs, path::PathBuf, process::Command};
 
 fn package() -> tempfile::TempDir {

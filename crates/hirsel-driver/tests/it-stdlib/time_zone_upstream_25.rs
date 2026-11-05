@@ -2,6 +2,7 @@
 use crate::source_std::load_program_source;
 use hirsel_driver::native;
 use hirsel_engine::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{fmt::Write, path::Path};

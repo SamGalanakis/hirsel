@@ -2,6 +2,7 @@
 //! no receipt-aware ABI, Some native provider or public seal is activated here.
 use hirsel_engine::*;
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::receipt_source::factory::closure as factory_closure;
 use hirsel_native::receipt_source::factory::*;
 use hirsel_native::receipt_source::provider::*;

@@ -1,5 +1,6 @@
 //! Written literal contracts must survive checking, lowering and independent V.
 use hirsel_engine::*;
+use hirsel_intern::jobs::with_compiler_stack;
 
 const RELATED: &str = "fn use_read(read:fn(value:List[String])->List[String] in value uses {}, xs:List[String])->List[String] in xs uses {} {read(xs)}\nfn f(xs:List[String])->List[String] in xs {use_read(fn(value:List[String])->List[String] in value uses {} {copy value},xs)}\npub fn main()->Result[(),u64] {Ok(())}";
 const ONCE: &str = "fn relay[T](take x:T)->T uses{} {take x}\nfn need(take f:once fn()->u64 uses{}){}\npub fn main(){need(relay(fn()->u64{7u64}))}";

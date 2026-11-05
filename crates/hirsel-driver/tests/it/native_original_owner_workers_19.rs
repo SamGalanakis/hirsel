@@ -6,6 +6,7 @@ use hirsel_engine::{
 };
 use hirsel_front_phases::compiler_adapters;
 use hirsel_intern::jobs::Jobs;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::ir::UnitOrigin;
 use std::sync::Arc;
 

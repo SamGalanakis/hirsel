@@ -1,5 +1,6 @@
 //! Per-module SCC inference, using the existing body ownership proof.
 use super::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_types::{SignatureRef, UniqueInference, UniqueSummary};
 use std::collections::BTreeMap;
 #[path = "private_unique/nonretention.rs"]

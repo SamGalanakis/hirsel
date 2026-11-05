@@ -1,5 +1,6 @@
 //! Related data calls through body-local borrowed views.
 use crate::rc_support::*;
+use hirsel_intern::jobs::with_compiler_stack;
 
 const JOIN: &str =
     include_str!("../../../../conformance/MODE/MODE-1-borrow-cursor-compose-join-run.hir");

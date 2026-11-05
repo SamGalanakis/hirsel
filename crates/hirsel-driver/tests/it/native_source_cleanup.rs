@@ -1,3 +1,4 @@
+use hirsel_intern::jobs::with_compiler_stack;
 #[path = "../support/history.rs"]
 #[allow(
     dead_code,

@@ -1,5 +1,6 @@
 //! Regression evidence for audit gaps G02–G04; no synthetic graph is attested.
 use crate::rc_support::*;
+use hirsel_intern::jobs::with_compiler_stack;
 
 #[test]
 fn borrow_cursor_evidence_13_environment_diagnostic_preserves_ordinary_bindings() {

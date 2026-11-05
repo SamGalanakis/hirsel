@@ -1,5 +1,6 @@
 //! Borrowed captures cannot cross global storage by `copy` or `take`.
 use hirsel_engine::*;
+use hirsel_intern::jobs::with_compiler_stack;
 
 fn checked(source: &str) -> CheckOutput {
     checked_in(&mut crate::source_std::engine(), source)

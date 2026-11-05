@@ -2,6 +2,7 @@
 use crate::image_fixture::*;
 use hirsel_driver::CompilerRequestsExt;
 use hirsel_engine::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_syntax::{DefPath, ItemPath};
 
 #[test]

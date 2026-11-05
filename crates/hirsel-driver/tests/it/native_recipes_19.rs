@@ -2,6 +2,7 @@ use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native_cache::declarations::NativeDeclarations;
 use hirsel_native_cache::recipes::SourceRecipe;
 use hirsel_native_cache::source_inputs::NativeSourceProvider;

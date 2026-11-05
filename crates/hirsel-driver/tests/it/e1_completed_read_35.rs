@@ -4,6 +4,7 @@ use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+use hirsel_intern::jobs::with_compiler_stack;
 
 #[test]
 fn public_completed_read_compute_agrees_on_four_engines() {

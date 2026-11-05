@@ -1,5 +1,6 @@
 //! Stage an explicit package check to separate phase costs from artifact reuse.
 
+use hirsel_intern::jobs::with_compiler_stack;
 hirsel_guard::install!();
 
 use hirsel_engine::*;

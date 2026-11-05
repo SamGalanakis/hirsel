@@ -1,5 +1,6 @@
 //! FAIL-2 and MODE-4: isolate transfers sendable unique results to its caller.
 use crate::rc_support::target;
+use hirsel_intern::jobs::with_compiler_stack;
 
 const UNIQUE_BYTES: &str = r#"
 pub fn main(rt: Io, args: Args) -> Result[(), GrantError] {

@@ -1,5 +1,6 @@
 //! Explicitly bounded reference application work; tooling usage is reviewable.
 use hirsel_engine::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use std::{fs, path::PathBuf};
 
 fn program(source: &str) -> (tempfile::TempDir, LoadedProgram) {

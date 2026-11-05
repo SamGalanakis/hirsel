@@ -1,6 +1,7 @@
 //! Actual original-Lower/V observations; no receipt-aware native activation.
 use hirsel_engine::*;
 use hirsel_front_phases::compiler_adapters;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_native::receipt_source;
 use hirsel_rc::instance::{Actuals, key_of};
 use hirsel_rc::sealed_source::SourceError;

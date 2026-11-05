@@ -2,6 +2,7 @@
 //! cannot distinguish. Inputs double together, so a nested scan grows by four.
 use crate::source_std::tir;
 use hirsel_engine::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_interp::{Limits, Outcome, Value, library::Library};
 use std::path::PathBuf;
 

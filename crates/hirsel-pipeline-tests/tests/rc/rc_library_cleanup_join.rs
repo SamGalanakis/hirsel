@@ -1,4 +1,5 @@
 //! The originally failing payload join through all 42 execution configurations.
+use hirsel_intern::jobs::with_compiler_stack;
 #[test]
 #[ignore = "native: full matrix"]
 fn a_match_that_moves_only_the_ok_payload_agrees_in_all_configurations() {

@@ -1,5 +1,6 @@
 //! Actual six-module application entry, deterministic providers, full bytes and cleanup.
 use hirsel_engine::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_interp::library::simulation::{Fault, FileError, ObservedGrant};
 use serde_json::Value;
 use std::{

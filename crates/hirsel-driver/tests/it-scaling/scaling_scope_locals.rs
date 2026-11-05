@@ -2,6 +2,7 @@ use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+use hirsel_intern::jobs::with_compiler_stack;
 #[test]
 fn lexical_scope_exits_visit_only_descendant_locals() {
     with_compiler_stack(|| {

@@ -1,5 +1,6 @@
 //! Dump every root, with optional canonical numbering of equal full type graphs.
 
+use hirsel_intern::jobs::with_compiler_stack;
 hirsel_guard::install!();
 
 #[path = "../tests/support/canonical_tir.rs"]

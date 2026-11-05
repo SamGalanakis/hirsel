@@ -9,6 +9,7 @@ use hirsel_driver::*;
 use hirsel_engine::{store::MemStore, *};
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use std::sync::Arc;
 
 /// A diagnostic as lines: rule, primary line, secondary lines and notes.

@@ -1,5 +1,6 @@
 //! Full workqueue entry: explicit modules, Args, file/network/task projections.
 use hirsel_engine::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use serde_json::{Value, json};
 use std::{
     fs,

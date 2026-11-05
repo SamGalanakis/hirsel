@@ -5,6 +5,7 @@
 //! ports; Hirsel copies may share, so buffer identity is deliberately unobserved.
 use crate::rc_support::{self as support, history};
 use hirsel_driver::native::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::ir::{Inst, Placement, StorageOwner, ValueRepr};
 use hirsel_native::*;
 use hirsel_native_batch::*;

@@ -1,5 +1,6 @@
 //! Field and enum payload descent must keep the cursor's borrowed owner.
 use crate::rc_support::*;
+use hirsel_intern::jobs::with_compiler_stack;
 
 const MATCH: &str =
     include_str!("../../../../conformance/LANG/LANG-15-borrow-cursor-field-match-ok.hir");

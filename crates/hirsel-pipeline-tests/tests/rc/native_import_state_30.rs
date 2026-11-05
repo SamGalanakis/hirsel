@@ -1,5 +1,6 @@
 //! Native import must tolerate paths removed by its own proven tag tests.
 use crate::rc_support::*;
+use hirsel_intern::jobs::with_compiler_stack;
 
 const WITNESS: &str = r#"
 type Choice = First(String) | Second(String)

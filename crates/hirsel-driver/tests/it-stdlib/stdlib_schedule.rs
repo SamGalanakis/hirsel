@@ -2,6 +2,7 @@
 //! injected wait/entropy failures, which source fixtures cannot configure.
 use crate::source_std;
 use hirsel_engine::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_interp::{library::simulation::Fault, observation::Effect};
 
 fn run_replayed(engine: &mut QueryEngine, entry: hirsel_syntax::DefPath, config: SimulationConfig) {

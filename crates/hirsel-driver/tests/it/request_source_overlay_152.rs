@@ -5,9 +5,9 @@ use hirsel_engine::loader_inputs::namespace::{
 use hirsel_engine::{
     CompileConfig, RunConfiguration, RunOutcome, SimulationConfig,
     loader_inputs::{CaptureInputs, InputLimits, namespace::NamespaceLease},
-    with_compiler_stack,
 };
 use hirsel_front_phases::COMPILER;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_requests::*;
 use std::{collections::BTreeSet, sync::Arc};
 

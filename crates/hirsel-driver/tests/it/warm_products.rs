@@ -1,5 +1,6 @@
 use hirsel_engine::{memo::MemoKey, store::DirStore, *};
 use hirsel_front_phases::COMPILER;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_requests::CompileOperation;
 use hirsel_requests::CompileResult;
 use hirsel_requests::CompilerRequests;

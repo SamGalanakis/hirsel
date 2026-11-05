@@ -1,6 +1,7 @@
 //! Clock faults and overdue host polls need injected provider behavior.
 use crate::source_std;
 use hirsel_engine::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_interp::observation::Effect;
 
 fn run(source: &str, config: SimulationConfig) {

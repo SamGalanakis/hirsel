@@ -1,6 +1,7 @@
 //! MEM-5: only a proved nonretaining scalar observation permits local List placement.
 use crate::rc_support::{dump, lower_valid, manifest, target, try_compile, unit_named};
 use hirsel_driver::native::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_lir::ir::{
     ArgumentValue, Inst, LirUnit, Placement, StorageOwner, Terminator, ValueRepr,
 };

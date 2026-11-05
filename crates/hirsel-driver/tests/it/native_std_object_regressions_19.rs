@@ -6,6 +6,7 @@ use hirsel_engine::{
     *,
 };
 use hirsel_front_phases::COMPILER;
+use hirsel_intern::jobs::with_compiler_stack;
 use std::sync::Arc;
 
 fn manifest() -> std::path::PathBuf {

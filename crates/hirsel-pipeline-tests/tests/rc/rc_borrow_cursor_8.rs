@@ -1,5 +1,6 @@
 //! Existing-construct feasibility probes, before enabling source rebinds.
 use crate::rc_support::*;
+use hirsel_intern::jobs::with_compiler_stack;
 
 #[test]
 #[ignore = "native: focused borrow-cursor projection parity"]

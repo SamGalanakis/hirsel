@@ -2,6 +2,7 @@
 //! library/alloctests/tests/str.rs:1412-1427,2278-2282 (MIT).
 use crate::source_std::tir;
 use hirsel_engine::*;
+use hirsel_intern::jobs::with_compiler_stack;
 use hirsel_interp::{Integer, Limits, Outcome, Value, library::Library};
 use hirsel_types::Primitive;
 use std::path::PathBuf;

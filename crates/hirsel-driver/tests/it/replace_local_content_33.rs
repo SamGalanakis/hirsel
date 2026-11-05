@@ -3,6 +3,7 @@ use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
+use hirsel_intern::jobs::with_compiler_stack;
 
 const ORIGINAL: &str = include_str!("../fixtures/replace-local-content-33/original.hir");
 

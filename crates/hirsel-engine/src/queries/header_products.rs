@@ -72,8 +72,11 @@ impl Charge {
         )
     }
 }
+type ValidationCaches =
+    Arc<std::sync::Mutex<Vec<(Weak<crate::snapshot::ValidationState>, Arc<dyn Send + Sync>)>>>;
 #[derive(Clone)]
 struct HeaderAdmission {
+    validation_caches: ValidationCaches,
     remaining: Arc<std::sync::Mutex<u64>>,
     partition: Weak<dyn HeaderAllowance>,
     /// Every charge cell this partition lent, rows and proofs alike.
@@ -167,12 +170,7 @@ pub(crate) struct HeaderProducts {
     /// adopts the completed rows once per revision, not once per read.
     revision: AtomicU64,
     admission: std::sync::Mutex<Option<HeaderAdmission>>,
-    validation_caches: std::sync::Mutex<
-        Vec<(
-            std::sync::Weak<crate::snapshot::ValidationState>,
-            Arc<dyn Send + Sync>,
-        )>,
-    >,
+    validation_caches: ValidationCaches,
     environment: QueryEnvironment,
     adapters: HeaderPhases,
     sources: SourceMap,
@@ -749,35 +747,27 @@ impl HeaderProducts {
             bytes.saturating_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
                 std::sync::Mutex<HeaderCharge>,
             >::uninit()));
-        while *admission
-            .remaining
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            < bytes
-        {
-            if !self.evict() {
-                break;
+        let allowance = loop {
+            let mut grant = admission
+                .remaining
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if *grant >= bytes {
+                if let Some(allowance) = partition.take_header(bytes) {
+                    *grant -= bytes;
+                    break allowance;
+                }
             }
-        }
-        // Held past the grant's lock: the partition's last owner may drop it,
-        // and its drop returns charges to this same grant.
-        let mut grant = admission
-            .remaining
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let allowance = partition.take_header(bytes).ok_or_else(|| {
-            QueryError::Operational(hirsel_types::OperationalFailure {
-                operation: "header admission".into(),
-                message: format!("header source allowance cannot retain {bytes} bytes"),
-            })
-        })?;
-        *grant = grant.checked_sub(bytes).ok_or_else(|| {
-            QueryError::Operational(hirsel_types::OperationalFailure {
-                operation: "header admission".into(),
-                message: format!("demanded header exceeds the existing front partition; required {bytes} bytes, available {} bytes", *grant),
-            })
-        })?;
-        drop(grant);
+            // Syntax and other source owners share the backing pool without
+            // debiting this row grant. Reclaim optional facts on either limit.
+            drop(grant);
+            if !self.evict() {
+                return Err(QueryError::Operational(hirsel_types::OperationalFailure {
+                    operation: "header admission".into(),
+                    message: format!("header source allowance cannot retain {bytes} bytes"),
+                }));
+            }
+        };
         Ok(admission.lend(FrontCharge {
             partition: admission.partition.clone(),
             credit: admission.remaining.clone(),
@@ -836,6 +826,7 @@ impl HeaderProducts {
             ended.release();
         }
         *admission = Some(HeaderAdmission {
+            validation_caches: self.validation_caches.clone(),
             remaining,
             partition: Arc::downgrade(&backing),
             lent: Arc::default(),
@@ -896,7 +887,8 @@ impl HeaderProducts {
                 cause,
             }
         })?;
-        let mut caches = self.validation_caches.lock().unwrap();
+        let registry = self.validation_cache_registry();
+        let mut caches = registry.lock().unwrap();
         caches.retain(|(state, _)| state.strong_count() != 0);
         if caches.capacity() > 4 * caches.len().max(1) {
             caches.shrink_to_fit();
@@ -904,8 +896,19 @@ impl HeaderProducts {
         caches.push((Arc::downgrade(state), lease));
         Ok(())
     }
+    fn validation_cache_registry(&self) -> ValidationCaches {
+        self.admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map_or_else(
+                || self.validation_caches.clone(),
+                |scope| scope.validation_caches.clone(),
+            )
+    }
     fn evict_validation_cache(&self) -> bool {
-        let mut caches = self.validation_caches.lock().unwrap();
+        let registry = self.validation_cache_registry();
+        let mut caches = registry.lock().unwrap();
         caches.retain(|(state, _)| state.strong_count() != 0);
         for (state, _) in caches.iter() {
             if let Some(state) = state.upgrade()

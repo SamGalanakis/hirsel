@@ -33,11 +33,7 @@ impl Inputs {
                 .map(|input| (input.definition, input))
                 .collect(),
             previous.map(|previous| &previous.rows),
-            |len| {
-                let mut weight = crate::NativeMetadataWeight::default();
-                weight.tree::<DefId, Input>(len);
-                Some(weight.bytes())
-            },
+            |_| Some(0),
         )?;
         Ok(Self { rows, addresses })
     }
@@ -72,11 +68,7 @@ impl std::ops::Index<&Key> for Inputs {
 }
 
 pub(super) fn capture_map<K: Ord + Clone, V: PartialEq>(rows: BTreeMap<K, V>, previous: Option<&InputIndex<K, V>>) -> Result<InputIndex<K, V>, QueryError> {
-    InputIndex::capture(rows, previous, |len| {
-        let mut weight = crate::NativeMetadataWeight::default();
-        weight.tree::<K, V>(len);
-        Some(weight.bytes())
-    })
+    InputIndex::capture(rows, previous, |_| Some(0))
 }
 #[derive(Clone)]
 pub(in crate::queries) struct OperationFrontInputs {

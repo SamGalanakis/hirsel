@@ -73,7 +73,7 @@ impl Charge {
 }
 /// The payload's aliases hold one reservation. Distinct memo rows retain their
 /// own allocation charge until both their entry and output leases have ended.
-struct HeaderPayload {
+pub(in crate::queries) struct HeaderPayload {
     charge: Charge,
     rows: std::sync::Mutex<Vec<HeaderRowLease>>,
 }
@@ -370,7 +370,7 @@ impl HeaderProducts {
             let versions = rows.entry(id).or_default();
             versions.retain(|row| row.strong_count() != 0);
             if let Some(existing) = versions.iter().filter_map(Weak::upgrade).find(|existing| {
-                existing.entry.as_ref().zip(product.entry.as_ref()).is_some_and(|(old, new)| Arc::ptr_eq(old, new))
+                existing.publication == product.publication && existing.entry.as_ref().zip(product.entry.as_ref()).is_some_and(|(old, new)| Arc::ptr_eq(old, new))
             }) { existing } else {
                 let product = Arc::new(product);
                 versions.push(Arc::downgrade(&product));
@@ -849,12 +849,17 @@ impl HeaderProducts {
         let payload = match signature.metadata.retention.get::<HeaderPayload>() {
             Some(payload) => payload,
             None => {
-                let overhead = (size_of::<HeaderPayload>() + 2 * size_of::<usize>()) as u64;
+                let overhead = (size_of::<HeaderPayload>() + 2 * size_of::<usize>() + 4 * size_of::<Weak<HeaderPayload>>()) as u64;
                 let charge = self.admit(payload_bytes.saturating_add(overhead))?;
                 if matches!(&*charge.0.lock().unwrap_or_else(|e| e.into_inner()), HeaderCharge::Engine) {
                     return Ok((charge, Charge::engine()));
                 }
-                signature.metadata.retention.retain(Arc::new(HeaderPayload { charge, rows: Default::default() }))
+                let payload = signature.metadata.retention.retain(Arc::new(HeaderPayload { charge, rows: Default::default() }));
+                let mut payloads = self.operation.payloads.lock().unwrap_or_else(|e| e.into_inner());
+                payloads.retain(|payload| payload.strong_count() != 0);
+                if payloads.capacity() > 4 * payloads.len().max(1) { payloads.shrink_to_fit(); }
+                payloads.push(Arc::downgrade(&payload));
+                payload
             }
         };
         let wrapper_bytes = crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<HeaderProduct>::uninit());
@@ -1037,7 +1042,7 @@ impl HeaderProducts {
     }
     /// Evict one unpinned settled entry: a header row, else a module proof.
     pub(crate) fn evict(&self) -> bool {
-        if self.evict_validation_cache() || self.evict_row() || self.evict_proof() {
+        if self.reclaim_header_rows() || self.evict_validation_cache() || self.evict_row() || self.evict_proof() {
             return true;
         }
         let tables = self
@@ -1059,6 +1064,19 @@ impl HeaderProducts {
             .iter()
             .filter(|table| !std::ptr::eq(self, &***table))
             .any(|table| table.evict_row() || table.evict_proof())
+    }
+    fn reclaim_header_rows(&self) -> bool {
+        let payloads = self.operation.payloads.lock().unwrap_or_else(|e| e.into_inner())
+            .iter().filter_map(Weak::upgrade).collect::<Vec<_>>();
+        let mut reclaimed = false;
+        for payload in payloads {
+            let Ok(mut rows) = payload.rows.try_lock() else { continue; };
+            let before = rows.len();
+            rows.retain(|row| row.entry.strong_count() != 0 || row.output.strong_count() != 0);
+            reclaimed |= before != rows.len();
+            if rows.capacity() > 4 * rows.len().max(1) { rows.shrink_to_fit(); }
+        }
+        reclaimed
     }
     fn evict_row(&self) -> bool {
         for cell in self.rows.values() {
@@ -1285,7 +1303,7 @@ impl operation_inputs::OperationOwner {
                 _ => false,
             } { return projected; }
         }
-        entries.retain(|_, entry| entry.strong_count() != 0);
+        if entries.len().is_multiple_of(256) { entries.retain(|_, entry| entry.strong_count() != 0); }
         let projected = project(entry);
         entries.insert(key, Arc::downgrade(&projected));
         projected

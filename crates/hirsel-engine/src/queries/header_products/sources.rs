@@ -89,9 +89,8 @@ impl SourceInputs {
         self.retained
     }
     pub(super) fn reusable(engine: &QueryEngine) -> Option<Arc<Self>> {
-        engine
-            .source_inputs
-            .iter()
+        let operation_inputs = engine.operation.inputs.lock().unwrap_or_else(|e| e.into_inner());
+        operation_inputs.iter().chain(engine.source_inputs.iter())
             .chain(engine.header_products.iter().map(|headers| &headers.inputs))
             .chain(engine.snapshot.iter().filter_map(|(_, snapshot)| {
                 snapshot.header_products().map(|headers| &headers.inputs)
@@ -158,7 +157,7 @@ impl SourceInputs {
         if let Some(inputs) = Self::reusable(engine) {
             return inputs;
         }
-        Arc::new(Self {
+        let inputs = Arc::new(Self {
             sources: engine.sources.clone(),
             catalog: engine
                 .catalog
@@ -190,7 +189,9 @@ impl SourceInputs {
                 .unwrap_or(u64::MAX)
                 .saturating_add(HeaderSources::written_bytes(engine)),
             admission: OnceLock::new(),
-        })
+        });
+        *engine.operation.inputs.lock().unwrap_or_else(|e| e.into_inner()) = Some(inputs.clone());
+        inputs
     }
     pub(crate) fn metadata_bytes(engine: &QueryEngine) -> Option<u64> {
         engine
@@ -200,7 +201,7 @@ impl SourceInputs {
                 engine.source_paths().len(),
             ))?
             .checked_add(engine.declarations.observation_bytes()?)?
-            .checked_add((size_of::<Self>() + 2 * size_of::<usize>()) as u64)
+            .checked_add((size_of::<Self>() + size_of::<operation_inputs::OperationOwner>() + 4 * size_of::<usize>()) as u64)
     }
     pub(crate) fn unadmitted_bytes(&self) -> u64 {
         if self.admission.get().is_some() {

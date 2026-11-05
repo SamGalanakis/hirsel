@@ -591,6 +591,8 @@ impl FrontBodyQueries {
             .checked_add(NamespaceCapture::input_bytes(definitions)?)?
             .checked_add(
                 (std::mem::size_of::<Self>()
+                    + std::mem::size_of::<OperationFrontInputs>()
+                    + 2 * size_of::<usize>()
                     + std::mem::size_of::<FrontSourceBacking>()
                     + std::mem::size_of::<Mutex<u64>>()
                     + 4 * std::mem::size_of::<usize>()) as u64

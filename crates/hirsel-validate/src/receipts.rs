@@ -1091,14 +1091,14 @@ impl VerifierCache {
                 artifacts.push(accepted);
                 continue;
             }
-            if changed || !checked.is_empty() {
+            {
                 hirsel_intern::work::count(hirsel_intern::work::Counter::ExecutionReplayRequests);
                 hirsel_intern::timings::count(
                     hirsel_intern::timings::Count::ExecutionReplayRequests,
                 );
                 let held: Vec<_> = checked
                     .iter()
-                    .flat_map(|(_, input)| {
+                    .flat_map(|(package, input)| {
                         input
                             .stamp()
                             .facts
@@ -1106,6 +1106,7 @@ impl VerifierCache {
                             .lock()
                             .unwrap()
                             .iter()
+                            .filter(|fact| &fact.package == *package)
                             .cloned()
                             .collect::<Vec<_>>()
                     })
@@ -1262,7 +1263,7 @@ impl VerifierCache {
             }
             artifacts.push(accepted);
         }
-        if (changed || !checked.is_empty()) && contexts.iter().any(|(p, _)| !covered.contains(p)) {
+        if contexts.iter().any(|(p, _)| !covered.contains(p)) {
             return None;
         }
         // The independently observed environment must remain the same through V.
@@ -2611,6 +2612,12 @@ mod tests {
         assert!(replay(&environment).is_some());
         assert!(environment.calls.get() >= 2);
         assert!(cache.execution(subject, |_| Some(new)).is_some());
+        environment.signatures = None;
+        assert!(
+            replay(&environment).is_none(),
+            "an unchanged raw digest cannot replace current observations"
+        );
+        environment.signatures = Some(&f.signatures);
         let mut other = package.clone();
         other.name = "uncovered".into();
         let mut contexts = vec![(package, old), (other, old)];

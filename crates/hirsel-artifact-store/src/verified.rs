@@ -268,11 +268,20 @@ impl Store {
             };
             route(source, Expected::Content(reference), packed)?;
         }
-        for (key, mut records) in files {
-            let (path, packed) = match key {
-                FileKey::Published(segment) => (self.path(segment, "packs"), true),
-                FileKey::Other(path, packed) => (path, packed),
-            };
+        let mut files: Vec<_> = files
+            .into_iter()
+            .map(|(key, records)| {
+                let (path, packed) = match key {
+                    FileKey::Published(segment) => (self.path(segment, "packs"), true),
+                    FileKey::Other(path, packed) => (path, packed),
+                };
+                (path, packed, records)
+            })
+            .collect();
+        // Keep the original physical-file order, including standalone outputs:
+        // verification order determines which mappings the bounded cache keeps.
+        files.sort_unstable_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+        for (path, packed, mut records) in files {
             records.sort_unstable_by_key(|(offset, _, _)| *offset);
             let bytes = if packed {
                 self.open_segment(&path, true)?

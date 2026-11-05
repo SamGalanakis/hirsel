@@ -1853,12 +1853,16 @@ fn shutdown_returns_one_charge_after_cleanup_and_reuses_it_across_admitted_round
 
 fn bare_node() -> super::Node {
     super::Node {
-        execution: Some(Box::new(Execution {
-            task: super::Task::Send(None),
-            weight: MemoryWeight::default(),
-            continuation: 0,
+        state: NodeState::Ready(Box::new(ParkedExecution {
+            task: ParkedTask::Send(Box::new(Task {
+                id: query(0),
+                spec: Spec::deps(&[]),
+            })),
+            charge: Charge {
+                weight: MemoryWeight::default(),
+                continuation: 0,
+            },
         })),
-        status: Status::Ready,
         dependencies: Vec::new(),
         subscribers: Vec::new(),
         generation: 0,
@@ -1868,7 +1872,6 @@ fn bare_node() -> super::Node {
         live: true,
         in_flight: false,
         settled_at: 0,
-        discard: false,
     }
 }
 fn exact_reaches(edges: &[Vec<usize>], from: usize, target: usize) -> bool {
@@ -2034,10 +2037,16 @@ fn tokens_ignore_old_producer_and_waiter_generations_and_preserve_failed_edges()
     let producer = nodes.node_id(key(query(1))).unwrap();
     assert!(nodes.consume(old_producer, 0).is_none());
     assert_eq!(nodes[&key(query(0))].unsatisfied, 1);
-    nodes[&key(query(0))].status = Status::Waiting;
+    let node = &mut nodes[&key(query(0))];
+    if let NodeState::Ready(execution) = std::mem::take(&mut node.state) {
+        node.state = NodeState::Waiting(execution);
+    }
     assert_eq!(nodes.consume(producer, 0), Some(key(query(0))));
     assert!(nodes.consume(producer, 0).is_none());
-    nodes[&key(query(0))].status = Status::Settled(Box::new(Err(errors().protocol)));
+    nodes[&key(query(0))].state = NodeState::Settled {
+        outcome: Box::new(Err(errors().protocol)),
+        retained: 0,
+    };
     // A failed node's read still closes the opposing cycle.
     assert!(nodes.insert_edge(producer, old_waiter).is_none());
     nodes.remove(&key(query(0)));
@@ -2154,7 +2163,7 @@ fn repeated_pending_then_settled_reads_keep_one_token_and_one_ready_transition()
         size_of::<super::Node>(),
         size_of::<Edge>(),
         size_of::<Subscriber>(),
-        size_of::<Execution>(),
+        size_of::<ParkedExecution>(),
         size_of::<Outcome>(),
         rt.metadata_capacity_bytes(),
         stats.bookkeeping_bytes
@@ -2211,7 +2220,10 @@ fn consumed_failed_records_detect_cycles_after_slot_reuse() {
     let b = nodes.insert(key(query(1)), bare_node());
     let edge = nodes.insert_edge(a, b).unwrap();
     assert!(nodes.subscribe(a, edge, b));
-    nodes.get_id_mut(b).unwrap().status = Status::Settled(Box::new(Err(errors().protocol)));
+    nodes.get_id_mut(b).unwrap().state = NodeState::Settled {
+        outcome: Box::new(Err(errors().protocol)),
+        retained: 0,
+    };
     nodes.consume(b, 0);
     assert!(nodes.consume_read(a, key(query(1))));
     assert!(nodes.reclaimable(key(query(1))));
@@ -2627,7 +2639,10 @@ fn ordered_publication_advances_past_a_released_dormant_body() {
         nodes.insert_edge(root, first).unwrap();
         nodes.insert_edge(root, next).unwrap();
         assert!(!nodes.publication_frontier(key(query(0)), next));
-        nodes.get_id_mut(first).unwrap().status = Status::Settled(Box::new(result));
+        nodes.get_id_mut(first).unwrap().state = NodeState::Settled {
+            outcome: Box::new(result),
+            retained: 0,
+        };
         nodes.release_body(root, key(query(1)));
         nodes.remove(&key(query(1)));
         assert!(nodes.publication_frontier(key(query(0)), next));

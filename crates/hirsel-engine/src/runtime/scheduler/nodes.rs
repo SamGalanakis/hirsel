@@ -88,11 +88,11 @@ impl Nodes {
     }
     pub fn get(&self, key: &Key) -> Option<&Node> {
         let node = &self.rows[*self.index.get(key)? as usize];
-        (!matches!(node.status, Status::Dormant)).then_some(node)
+        (!matches!(node.state, NodeState::Dormant)).then_some(node)
     }
     pub fn get_mut(&mut self, key: &Key) -> Option<&mut Node> {
         let node = &mut self.rows[*self.index.get(key)? as usize];
-        (!matches!(node.status, Status::Dormant)).then_some(node)
+        (!matches!(node.state, NodeState::Dormant)).then_some(node)
     }
     pub fn lookup(&self, key: Key) -> Option<NodeId> {
         let &slot = self.index.get(&key)?;
@@ -106,17 +106,19 @@ impl Nodes {
     }
     pub fn get_id(&self, id: NodeId) -> Option<&Node> {
         let node = self.rows.get(id.slot as usize)?;
-        (node.generation == id.generation && !matches!(node.status, Status::Dormant))
+        (node.generation == id.generation && !matches!(node.state, NodeState::Dormant))
             .then_some(node)
     }
     pub fn get_id_mut(&mut self, id: NodeId) -> Option<&mut Node> {
         let node = self.rows.get_mut(id.slot as usize)?;
-        (node.generation == id.generation && !matches!(node.status, Status::Dormant))
+        (node.generation == id.generation && !matches!(node.state, NodeState::Dormant))
             .then_some(node)
     }
     pub fn result(&self, id: NodeId) -> Option<Outcome> {
-        match &self.get_id(id)?.status {
-            Status::Settled(result) => Some((**result).clone()),
+        match &self.get_id(id)?.state {
+            NodeState::Settled {
+                outcome: result, ..
+            } => Some((**result).clone()),
             _ => None,
         }
     }
@@ -132,7 +134,7 @@ impl Nodes {
             .collect();
         while let Some(slot) = pending.pop() {
             let node = &mut self.rows[slot as usize];
-            if !node.live && !matches!(node.status, Status::Dormant) {
+            if !node.live && !matches!(node.state, NodeState::Dormant) {
                 node.live = true;
                 pending.extend(node.dependencies.iter().map(|edge| edge.target()));
             }
@@ -147,11 +149,11 @@ impl Nodes {
             .collect();
         while let Some(slot) = pending.pop() {
             let node = &mut self.rows[slot as usize];
-            if !node.in_flight && !matches!(node.status, Status::Dormant) {
+            if !node.in_flight && !matches!(node.state, NodeState::Dormant) {
                 node.in_flight = true;
                 // Completed producers own their results; their historical reads
                 // no longer pin the payloads consumed during computation.
-                if !matches!(node.status, Status::Settled(_)) {
+                if !matches!(node.state, NodeState::Settled { .. }) {
                     pending.extend(
                         node.dependencies
                             .iter()
@@ -165,7 +167,7 @@ impl Nodes {
     pub fn iter(&self) -> impl Iterator<Item = (&Key, &Node)> {
         self.index.iter().filter_map(|(key, &slot)| {
             let node = &self.rows[slot as usize];
-            (!matches!(node.status, Status::Dormant)).then_some((key, node))
+            (!matches!(node.state, NodeState::Dormant)).then_some((key, node))
         })
     }
     pub fn insert(&mut self, key: Key, mut node: Node) -> NodeId {
@@ -173,7 +175,7 @@ impl Nodes {
         node.generation = self.serial;
         let slot = if let Some(&slot) = self.index.get(&key) {
             let old = &mut self.rows[slot as usize];
-            assert!(matches!(old.status, Status::Dormant));
+            assert!(matches!(old.state, NodeState::Dormant));
             node.position = old.position;
             node.subscribers = std::mem::take(&mut old.subscribers);
             *old = node;
@@ -202,7 +204,7 @@ impl Nodes {
     }
     fn reclaim(&mut self, slot: u32) {
         let node = &self.rows[slot as usize];
-        if matches!(node.status, Status::Dormant)
+        if matches!(node.state, NodeState::Dormant)
             && node.subscribers.is_empty()
             && let Some(key) = self.keys[slot as usize].take()
         {
@@ -210,10 +212,10 @@ impl Nodes {
             self.free.push(slot);
         }
     }
-    pub fn remove(&mut self, key: &Key) -> Option<Box<Execution>> {
+    pub fn remove(&mut self, key: &Key) -> Option<NodeState> {
         let &slot = self.index.get(key)?;
         let node = &mut self.rows[slot as usize];
-        if !matches!(node.status, Status::Settled(_) | Status::Dormant) {
+        if !matches!(node.state, NodeState::Settled { .. } | NodeState::Dormant) {
             // Cancellation discards this unfinished generation's reads. Slot
             // retirement of terminal results retains all successful/failed reads.
             if let Some(recorded) = self.history.get_mut(key) {
@@ -223,10 +225,9 @@ impl Nodes {
                 }
             }
         }
-        node.status = Status::Dormant;
+        let removed = std::mem::take(&mut node.state);
         node.unsatisfied = 0;
         let generation = node.generation;
-        let execution = node.execution.take();
         let dependencies = std::mem::take(&mut node.dependencies);
         for edge in dependencies {
             self.edges.remove(&(slot, edge.target()));
@@ -236,7 +237,7 @@ impl Nodes {
             self.reclaim(edge.target());
         }
         self.reclaim(slot);
-        execution
+        Some(removed)
     }
     pub fn edge_count(&self) -> usize {
         self.edges.len()
@@ -267,8 +268,8 @@ impl Nodes {
             let Some(next) = node.dependencies.iter().find_map(|edge| {
                 let slot = edge.target();
                 (!edge.body_consumed()
-                    && (!matches!(self.rows[slot as usize].status, Status::Settled(_))
-                        || matches!(self.rows[slot as usize].status, Status::Settled(ref result) if result.is_err())))
+                    && (!matches!(self.rows[slot as usize].state, NodeState::Settled { .. })
+                        || matches!(self.rows[slot as usize].state, NodeState::Settled { outcome: ref result, .. } if result.is_err())))
                     .then_some(NodeId { slot, generation: self.rows[slot as usize].generation })
             }) else { return false; };
             cursor = next;
@@ -393,7 +394,7 @@ impl Nodes {
     pub fn cancelled_record_bytes(&self, query: Key) -> u64 {
         if self
             .get(&query)
-            .is_none_or(|node| matches!(node.status, Status::Settled(_) | Status::Dormant))
+            .is_none_or(|node| matches!(node.state, NodeState::Settled { .. } | NodeState::Dormant))
         {
             return 0;
         }
@@ -437,7 +438,10 @@ impl Nodes {
         let source_key = self.key_at(source.slot);
         let target = self.rows[source.slot as usize].dependencies[edge].target();
         let target_key = self.key_at(target);
-        let terminal = matches!(self.rows[source.slot as usize].status, Status::Settled(_));
+        let terminal = matches!(
+            self.rows[source.slot as usize].state,
+            NodeState::Settled { .. }
+        );
         let recorded = self.history.entry(source_key).or_default();
         if !recorded.settled.contains(&target_key) {
             if terminal {
@@ -477,7 +481,10 @@ impl Nodes {
             return false;
         };
         if self.rows[source.slot as usize].dependencies[edge].token != 0
-            || !matches!(self.rows[producer.slot as usize].status, Status::Settled(_))
+            || !matches!(
+                self.rows[producer.slot as usize].state,
+                NodeState::Settled { .. }
+            )
         {
             return false;
         }
@@ -495,7 +502,7 @@ impl Nodes {
     }
     pub fn reclaimable(&self, query: Key) -> bool {
         self.get(&query).is_some_and(|node| {
-            matches!(node.status, Status::Settled(_))
+            matches!(node.state, NodeState::Settled { .. })
                 && node.subscribers.is_empty()
                 && node.unsatisfied == 0
         })
@@ -635,8 +642,8 @@ impl Nodes {
             .unsatisfied
             .checked_sub(1)
             .expect("one pending token");
-        if waiter.unsatisfied == 0 && matches!(waiter.status, Status::Waiting) {
-            waiter.status = Status::Ready;
+        if waiter.unsatisfied == 0 && matches!(waiter.state, NodeState::Waiting(_)) {
+            waiter.state = std::mem::take(&mut waiter.state).wake();
             Some(self.key_at(subscription.waiter.slot))
         } else {
             None
@@ -688,13 +695,16 @@ impl Nodes {
                 .map(|n| {
                     n.dependencies.capacity() * size_of::<Edge>()
                         + n.subscribers.capacity() * size_of::<Subscriber>()
-                        + n.execution
-                            .as_ref()
-                            .map_or(0, |_| size_of::<Execution>() + 16)
-                        + if matches!(n.status, Status::Settled(_)) {
-                            size_of::<Outcome>() + 16
-                        } else {
-                            0
+                        + match n.state {
+                            NodeState::Ready(_) | NodeState::Waiting(_) => {
+                                size_of::<ParkedExecution>() + 16
+                            }
+                            NodeState::Running(_) | NodeState::Draining(_) => {
+                                size_of::<InFlightExecution>() + 16
+                            }
+                            NodeState::Cancelling(_) => size_of::<LocalCleanup>() + 16,
+                            NodeState::Settled { .. } => size_of::<Outcome>() + 16,
+                            NodeState::Dormant => 0,
                         }
                 })
                 .sum::<usize>();

@@ -170,7 +170,7 @@ impl FrontRunQueries {
 /// refunding their debit. The catalogue itself keeps no decoded allocation.
 pub(super) struct InputCharge {
     remaining: Arc<Mutex<u64>>,
-    _allowance: Arc<MemoryReservation>,
+    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
     bytes: u64,
 }
 impl Drop for InputCharge {

@@ -21,7 +21,7 @@ fn iterator_dispatch_preserves_the_exact_activation_boundary() {
             },
         );
         let tools = hirsel_native_testing::toolchain_for_matrix(
-            &hirsel_native::runtime_cache().unwrap(),
+            &hirsel_conformance::native::runtime_cache().unwrap(),
             &matrix,
         )
         .unwrap();

@@ -21,7 +21,7 @@ fn append_depth_failure_preserves_the_callers_cleanup_observation() {
             },
         );
         let tools = hirsel_native_testing::toolchain_for_matrix(
-            &hirsel_native::runtime_cache().unwrap(),
+            &hirsel_conformance::native::runtime_cache().unwrap(),
             &matrix,
         )
         .unwrap();

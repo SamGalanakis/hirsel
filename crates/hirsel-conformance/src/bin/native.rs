@@ -89,8 +89,11 @@ impl Filter {
 }
 
 fn toolchain(matrix: &[Configuration]) -> Result<Toolchain, String> {
-    hirsel_native_testing::toolchain_for_matrix(&hirsel_native::runtime_cache()?, matrix)
-        .map_err(|e| e.to_string())
+    hirsel_native_testing::toolchain_for_matrix(
+        &hirsel_conformance::native::runtime_cache()?,
+        matrix,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// `toolchain` launching every executable through the glibc 2.28 floor

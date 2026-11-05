@@ -26,7 +26,7 @@ fn p1_recursion_and_self_restart_preserve_the_invocation_boundary() {
     hirsel_engine::with_compiler_stack(|| {
         let matrix = matrix();
         let toolchain = hirsel_native_testing::toolchain_for_matrix(
-            &hirsel_native::runtime_cache().unwrap(),
+            &hirsel_conformance::native::runtime_cache().unwrap(),
             &matrix,
         )
         .unwrap();
@@ -98,7 +98,7 @@ fn agreement(name: &str, source: &str, rules: &[&str]) {
 fn agreement_output(name: &str, source: &str, rules: &[&str], output: Option<&[u8]>) {
     let matrix = matrix();
     let toolchain = hirsel_native_testing::toolchain_for_matrix(
-        &hirsel_native::runtime_cache().unwrap(),
+        &hirsel_conformance::native::runtime_cache().unwrap(),
         &matrix,
     )
     .unwrap();
@@ -876,7 +876,7 @@ fn optimized_inlining_keeps_the_leaf_invocation_at_full_foreground_depth() {
             }
         }
         let toolchain = hirsel_native_testing::toolchain_for_matrix(
-            &hirsel_native::runtime_cache().unwrap(),
+            &hirsel_conformance::native::runtime_cache().unwrap(),
             &matrix,
         )
         .unwrap();

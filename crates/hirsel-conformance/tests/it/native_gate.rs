@@ -551,7 +551,7 @@ fn clock_fixture_recordings_replay_timer_and_script_waits() {
     on_compiler(|| {
         let matrix = hirsel_native_testing::smoke_matrix();
         let toolchain = hirsel_native_testing::toolchain_for_matrix(
-            &hirsel_native::runtime_cache().unwrap(),
+            &hirsel_conformance::native::runtime_cache().unwrap(),
             &matrix,
         )
         .unwrap();
@@ -766,7 +766,7 @@ fn stdout_oracles_reject_wrong_native_answers_and_keep_unmarked_references() {
         let matrix =
             native::cranelift::matrix(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
         let toolchain = hirsel_native_testing::toolchain_for_matrix(
-            &hirsel_native::runtime_cache().unwrap(),
+            &hirsel_conformance::native::runtime_cache().unwrap(),
             &matrix,
         )
         .unwrap();
@@ -894,7 +894,7 @@ fn safe_runner_replay_preserves_the_prepared_callee_facts() {
     on_compiler(|| {
         let matrix = hirsel_native_testing::smoke_matrix();
         let toolchain = hirsel_native_testing::toolchain_for_matrix(
-            &hirsel_native::runtime_cache().unwrap(),
+            &hirsel_conformance::native::runtime_cache().unwrap(),
             &matrix,
         )
         .unwrap();

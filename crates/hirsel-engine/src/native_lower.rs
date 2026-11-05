@@ -46,6 +46,7 @@ impl NativeOriginalProduct {
 #[derive(Clone)]
 pub struct NativeOriginalHandle {
     input: OriginalInput,
+    pinned: Option<crate::runtime::LiveLowerProduct>,
     _admission: Option<Arc<OriginalLease>>,
 }
 #[derive(Clone)]
@@ -100,6 +101,7 @@ impl From<hirsel_product_codec::CheckedTir> for NativeOriginalHandle {
     fn from(value: hirsel_product_codec::CheckedTir) -> Self {
         Self {
             input: OriginalInput::Archive(value),
+            pinned: None,
             _admission: None,
         }
     }
@@ -129,11 +131,15 @@ impl NativeOriginalHandle {
                 signature: observations.signature,
                 verified: observations.verified.clone(),
             })),
+            pinned: None,
             _admission: None,
         }
     }
     /// Upgrade only an already admitted live payload. The caller pins it.
     pub fn live(&self) -> Option<crate::runtime::LiveLowerProduct> {
+        if let Some(live) = &self.pinned {
+            return Some(live.clone());
+        }
         match &self.input {
             OriginalInput::Bound(input) => input.live.upgrade(),
             _ => None,
@@ -171,6 +177,9 @@ impl NativeOriginalHandle {
         }
     }
     fn open(&self, admission: Option<&OriginalAdmission>) -> Option<NativeOriginalValue> {
+        if let Some(live) = &self.pinned {
+            return Some(NativeOriginalValue::Live(live.clone()));
+        }
         match &self.input {
             OriginalInput::Scalar(value) => Some(NativeOriginalValue::Scalar(value.clone())),
             OriginalInput::Archive(value) => Some(NativeOriginalValue::Archive(value.clone())),
@@ -298,7 +307,7 @@ impl NativeOriginalContext {
         let mut selected = BTreeMap::new();
         let mut ordinary = BTreeMap::new();
         let mut seen = BTreeSet::new();
-        for product in products {
+        for mut product in products {
             let path = product.definition.clone();
             if !seen.insert(path.clone())
                 || self.expected.get(&path) != Some(&product.implementation_revision)
@@ -318,6 +327,9 @@ impl NativeOriginalContext {
                     "settled Lower differs from its source snapshot",
                 ));
             }
+            // A selected reader owns the admitted body through runtime shutdown.
+            // Catalogue handles remain weak until a consumer actually selects them.
+            product.body.pinned = product.body.live();
             // Retain the raw owner independently of best-effort verifier storage.
             ordinary.insert(
                 path.clone(),
@@ -851,6 +863,7 @@ impl QueryEngine {
                             implementation_revision: revision,
                             signature,
                         })),
+                        pinned: None,
                         _admission: None,
                     },
                     implementation_revision: revision,

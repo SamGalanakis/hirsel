@@ -63,6 +63,19 @@ impl Constants {
             }
         }
     }
+    pub(super) fn visit_types_mut(
+        &mut self,
+        mut visit: impl FnMut(&mut hirsel_types::TypeId),
+    ) -> Option<()> {
+        let Data::Decoded(value, substitutions) = &mut self.data else {
+            return None;
+        };
+        super::carry::materialized_types(value, &mut visit);
+        for (_, value) in substitutions {
+            super::carry::materialized_types(value, &mut visit);
+        }
+        Some(())
+    }
     pub(super) fn pack(&mut self, record: Reference) {
         if self.data_bytes >= 4096 {
             // The store already owns this immutable descriptor, as it owns

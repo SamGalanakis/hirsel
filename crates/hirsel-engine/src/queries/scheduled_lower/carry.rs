@@ -14,6 +14,7 @@ struct Row {
     demands: Vec<namespace::reopen::ManifestDemand>,
     bindings: BTreeMap<hirsel_span::Anchor, (DefId, u32)>,
     types: std::sync::Weak<hirsel_types::TypeInterner>,
+    type_rows: Option<Arc<hirsel_types::TypeInterner>>,
     charge: u64,
 }
 #[derive(Default)]
@@ -223,7 +224,7 @@ impl FrontLowerQueries {
         let Some(owner) = self.paths.get(&(id.kind, id.address.0)).copied() else {
             return;
         };
-        let Some(demands) = self.namespace.live_demands_for_reads(owner, &outcome.reads) else {
+        let Some(mut demands) = self.namespace.live_demands_for_reads(owner, &outcome.reads) else {
             return;
         };
         let mut estimate = outcome.retained_bytes().unwrap_or(u64::MAX);
@@ -255,7 +256,35 @@ impl FrontLowerQueries {
             lower.verified = None;
             lower.live = None;
         }
+        if let Ok(Value::Constant(constants)) = &mut outcome.result {
+            let Some((value, substitutions)) = constants.decoded(
+                &self.records,
+                &self.namespace.anchors,
+                &*self.store,
+                self.weight.scratch,
+            ) else {
+                return;
+            };
+            **constants = Constants::new(value, substitutions);
+        }
         let mut raw = raw.clone();
+        let mut roots = Vec::new();
+        if visit_types(&mut outcome, &mut raw, &mut demands, |ty| roots.push(*ty)).is_none() {
+            return;
+        }
+        let type_rows = if roots.is_empty() {
+            None
+        } else {
+            let projection = self.namespace.snapshot.types().project_reachable(roots);
+            if estimate
+                .saturating_add(projection.retained_bytes())
+                .saturating_mul(4)
+                > self.weight.scratch
+            {
+                return;
+            }
+            Some(projection.into_interner())
+        };
         let mut bindings = BTreeMap::new();
         let mut valid = true;
         visit(&mut outcome, &mut raw, |span| {
@@ -295,7 +324,11 @@ impl FrontLowerQueries {
                 weight.materialized(value)
             });
         }
-        charge = charge.saturating_add(weight.bytes());
+        charge = charge.saturating_add(weight.bytes()).saturating_add(
+            type_rows
+                .as_ref()
+                .map_or(0, |types| types.retained_local_bytes()),
+        );
         if charge > carry.allowance.bytes() || charge > self.weight.scratch {
             return;
         }
@@ -311,6 +344,7 @@ impl FrontLowerQueries {
                 demands,
                 bindings,
                 types: Arc::downgrade(self.namespace.snapshot.types()),
+                type_rows,
                 charge,
             },
         );
@@ -323,19 +357,43 @@ impl FrontLowerQueries {
         query_reads: &QueryReads,
     ) -> Option<Result<ProductRef, Reference>> {
         let carry = self.carry()?;
-        let row = {
+        let mut row = {
             let rows = carry.rows.lock().unwrap_or_else(|e| e.into_inner());
             let row = rows.entries.get(&(id.kind, key.0))?;
-            if row.text != key.1
-                || row.charge > self.weight.scratch
-                || !row
-                    .types
-                    .ptr_eq(&Arc::downgrade(self.namespace.snapshot.types()))
-            {
+            if row.text != key.1 || row.charge > self.weight.scratch {
                 return None;
             }
             row.clone()
         };
+        if !row
+            .types
+            .ptr_eq(&Arc::downgrade(self.namespace.snapshot.types()))
+        {
+            let mut roots = Vec::new();
+            visit_types(&mut row.outcome, &mut row.raw, &mut row.demands, |ty| {
+                roots.push(*ty)
+            })?;
+            if !roots.is_empty() {
+                let map = live_record::import_types(
+                    row.type_rows.as_ref()?,
+                    self.namespace.snapshot.types(),
+                    &roots,
+                )?;
+                let mut valid = true;
+                visit_types(
+                    &mut row.outcome,
+                    &mut row.raw,
+                    &mut row.demands,
+                    |ty| match map.get(ty) {
+                        Some(mapped) => *ty = *mapped,
+                        None => valid = false,
+                    },
+                )?;
+                if !valid {
+                    return None;
+                }
+            }
+        }
         if let Some(producer) = self.demand_producer() {
             let mut capture = self.namespace.clone();
             let mut successor = None;
@@ -458,4 +516,82 @@ fn visit(
             }
         }
     }
+}
+
+fn arguments_types(
+    arguments: &mut [hirsel_types::GenericArgument],
+    visit: &mut impl FnMut(&mut hirsel_types::TypeId),
+) {
+    for argument in arguments {
+        if let hirsel_types::GenericArgument::Type(ty) = argument {
+            visit(ty);
+        }
+    }
+}
+pub(super) fn materialized_types(
+    value: &mut Materialized,
+    visit: &mut impl FnMut(&mut hirsel_types::TypeId),
+) {
+    let mut pending = vec![&mut value.root];
+    while let Some(value) = pending.pop() {
+        visit(&mut value.ty);
+        match &mut value.kind {
+            hirsel_tir::ValueKind::FunctionReference { arguments, .. } => {
+                arguments_types(arguments, visit)
+            }
+            hirsel_tir::ValueKind::Construct { fields, .. } => pending.extend(fields),
+            hirsel_tir::ValueKind::Constant(_) => {}
+        }
+    }
+}
+fn visit_types(
+    outcome: &mut Outcome,
+    raw: &mut Option<RawLowerOutput>,
+    demands: &mut [namespace::reopen::ManifestDemand],
+    mut visit: impl FnMut(&mut hirsel_types::TypeId),
+) -> Option<()> {
+    for demand in demands {
+        arguments_types(&mut demand.arguments, &mut visit);
+    }
+    if let Ok(Value::Constant(constants)) = &mut outcome.result {
+        constants.visit_types_mut(&mut visit)?;
+    }
+    if let Some((output, materialized)) = raw {
+        let definition = Arc::make_mut(&mut output.value);
+        for ty in Arc::make_mut(&mut definition.types) {
+            visit(ty);
+        }
+        for body in &mut definition.bodies {
+            visit(&mut body.result);
+            for local in &mut body.locals {
+                visit(&mut local.ty);
+            }
+            for place in &mut body.places {
+                visit(&mut place.ty);
+            }
+            for rvalue in &mut body.rvalues {
+                match rvalue {
+                    hirsel_tir::Rvalue::Shape(ty) => visit(ty),
+                    hirsel_tir::Rvalue::FunctionReference { arguments, .. } => {
+                        arguments_types(arguments, &mut visit)
+                    }
+                    _ => {}
+                }
+            }
+            for block in &mut body.blocks {
+                if let hirsel_tir::Terminator::Call { callee, .. } = &mut block.terminator {
+                    match callee {
+                        hirsel_tir::Callee::Definition { arguments, .. }
+                        | hirsel_tir::Callee::Indirect { arguments, .. } => {
+                            arguments_types(arguments, &mut visit)
+                        }
+                    }
+                }
+            }
+        }
+        for (_, value) in materialized {
+            materialized_types(value, &mut visit);
+        }
+    }
+    Some(())
 }

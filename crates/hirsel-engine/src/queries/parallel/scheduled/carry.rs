@@ -165,50 +165,6 @@ fn index_bytes(entries: usize, subscriptions: usize) -> u64 {
     weight.bytes()
 }
 
-fn import_types(
-    source: &hirsel_types::TypeInterner,
-    target: &hirsel_types::TypeInterner,
-    roots: &[hirsel_types::TypeId],
-) -> Option<std::collections::HashMap<hirsel_types::TypeId, hirsel_types::TypeId>> {
-    // hirsel-check-protocol/src/rows.rs:46: iterative postorder. A cyclic or
-    // missing graph declines optional carry and uses the normal query path.
-    let mut map = std::collections::HashMap::new();
-    let mut active = std::collections::HashSet::new();
-    let mut pending: Vec<_> = roots.iter().map(|id| (*id, false)).collect();
-    while let Some((id, expanded)) = pending.pop() {
-        if map.contains_key(&id) {
-            continue;
-        }
-        let row = source.get(id)?;
-        if expanded {
-            let mut row = row.clone();
-            let mut complete = true;
-            hirsel_check_protocol::rows::edges_mut(&mut row.kind, |edge| match map.get(edge) {
-                Some(mapped) => *edge = *mapped,
-                None => complete = false,
-            });
-            if !complete {
-                return None;
-            }
-            map.insert(id, target.intern(row));
-            active.remove(&id);
-        } else {
-            if !active.insert(id) {
-                return None;
-            }
-            pending.push((id, true));
-            pending.extend(
-                row.kind
-                    .graph_edges()
-                    .into_iter()
-                    .rev()
-                    .map(|edge| (edge.ty, false)),
-            );
-        }
-    }
-    Some(map)
-}
-
 pub(super) struct FactsRef<'a> {
     pub(super) summary: Option<Arc<PublishedSummary>>,
     pub(super) checked: &'a CheckedProduct,
@@ -837,7 +793,11 @@ impl BodyTask {
             let mut roots = Vec::new();
             facts.visit_types_mut(|ty| roots.push(*ty));
             if !roots.is_empty() {
-                let map = import_types(row.type_rows.as_ref()?, &queries.types, &roots)?;
+                let map = crate::queries::live_record::import_types(
+                    row.type_rows.as_ref()?,
+                    &queries.types,
+                    &roots,
+                )?;
                 let mut valid = true;
                 facts.visit_types_mut(|ty| match map.get(ty) {
                     Some(mapped) => *ty = *mapped,

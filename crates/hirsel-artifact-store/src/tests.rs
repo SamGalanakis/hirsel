@@ -1422,11 +1422,35 @@ fn installation_path_work_follows_pack_count_instead_of_reference_count() {
         // by immutable file identity needs one resolved path for that segment.
         assert_eq!(counters["SegmentOpens"], 1);
         assert!(counters["PathBuilds"] <= 1, "count={count}: {counters:?}");
-        for (number, reference) in references.iter().enumerate() {
-            assert_eq!(
-                &*records.get(*reference).unwrap(),
-                &(number as u64).to_le_bytes()
-            );
+        let invocation = Arc::new(records);
+        let discovery = invocation.clone();
+        let loading = invocation.clone();
+        let pack = match reader.packed_source(0, references[0].output.0).unwrap() {
+            pack::Source::Published { segment, .. } => reader.path(segment, "packs"),
+            _ => panic!("fixture must publish one pack"),
+        };
+        // Mutate the published inode itself. First overwrite, then truncate;
+        // both consumers must read the original hand-derived integer bytes.
+        let mut file = fs::OpenOptions::new().write(true).open(&pack).unwrap();
+        let len = file.metadata().unwrap().len() as usize;
+        std::io::Write::write_all(&mut file, &vec![0; len]).unwrap();
+        for consumer in [discovery, loading] {
+            for (number, reference) in references.iter().enumerate() {
+                assert_eq!(
+                    &*consumer.get(*reference).unwrap(),
+                    &(number as u64).to_le_bytes()
+                );
+            }
+            file.set_len(0).unwrap();
         }
+        let consumed = statistics.snapshot().counters;
+        assert_eq!(consumed["ContentChecks"], count);
+        assert_eq!(consumed["SegmentOpens"], 1);
+        assert!(
+            reader
+                .for_operation()
+                .verify_records([], references)
+                .is_err()
+        );
     }
 }

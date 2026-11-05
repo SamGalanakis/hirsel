@@ -300,11 +300,13 @@ pub enum Count {
     ExecutionValidationRefusals,
     VerifierFactEvictions,
     ValidationRetentionRefusals,
+    InstalledPackageOpens,
+    ParseSyntaxDecodes,
 }
 
 impl Count {
     /// Every count, in declaration order.
-    pub const ALL: [Count; 86] = [
+    pub const ALL: [Count; 88] = [
         Count::Definitions,
         Count::Units,
         Count::VRuns,
@@ -391,10 +393,14 @@ impl Count {
         Count::ExecutionValidationRefusals,
         Count::VerifierFactEvictions,
         Count::ValidationRetentionRefusals,
+        Count::InstalledPackageOpens,
+        Count::ParseSyntaxDecodes,
     ];
     /// The stable name `--timings` prints.
     pub fn name(self) -> &'static str {
         match self {
+            Count::InstalledPackageOpens => "installed package opens",
+            Count::ParseSyntaxDecodes => "parse syntax decodes",
             Count::ValidationRetentionRefusals => "validation retention refusals",
             Count::VerifierFactEvictions => "verifier fact evictions",
             Count::ExecutionValidationRequests => "execution validation requests",

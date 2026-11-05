@@ -20,16 +20,27 @@ use std::{
     sync::Arc,
 };
 
+/// A compiler selector whose discovery and graph loading share one invocation.
+pub trait ObservedEngine:
+    RequestEngine<
+        Request = CompileRequest,
+        Error = ToolError,
+        Runtime = AdmittedRuntime,
+        Readiness = CompilerReadiness,
+    >
+{
+    fn set_invocation_store(
+        &mut self,
+        store: Option<Arc<dyn hirsel_engine::store::ResultStore>>,
+    ) -> Option<Arc<dyn hirsel_engine::store::ResultStore>>;
+}
+
 pub struct ObservedSession<E>
 where
-    E: RequestEngine<
-            Request = CompileRequest,
-            Error = ToolError,
-            Runtime = AdmittedRuntime,
-            Readiness = CompilerReadiness,
-        >,
+    E: ObservedEngine,
 {
     host: Host<E>,
+    in_invocation: bool,
     compiler: Compiler,
     config: CompileConfig,
     entry: PathBuf,
@@ -49,14 +60,25 @@ where
     logical_entry: Option<hirsel_syntax::DefPath>,
 }
 
+struct InvocationGuard<'a, E: ObservedEngine> {
+    session: &'a mut ObservedSession<E>,
+    previous_compiler: Option<Compiler>,
+    previous_store: Option<Arc<dyn hirsel_engine::store::ResultStore>>,
+}
+impl<E: ObservedEngine> Drop for InvocationGuard<'_, E> {
+    fn drop(&mut self) {
+        self.session.in_invocation = false;
+        self.session
+            .host
+            .engine
+            .set_invocation_store(self.previous_store.take());
+        self.session.compiler = self.previous_compiler.take().expect("invocation compiler");
+    }
+}
+
 impl<E> ObservedSession<E>
 where
-    E: RequestEngine<
-            Request = CompileRequest,
-            Error = ToolError,
-            Runtime = AdmittedRuntime,
-            Readiness = CompilerReadiness,
-        >,
+    E: ObservedEngine,
 {
     /// The caller captures one policy and constructs its selector from the same
     /// compiler/config. Limits come from the selector's admitted host policy.
@@ -70,6 +92,7 @@ where
     ) -> Self {
         Self {
             host: Host::new(engine),
+            in_invocation: false,
             compiler: compiler.with_config(config.clone()).with_owned_engines(),
             config,
             entry,
@@ -242,6 +265,23 @@ where
             .expect("input revision exhausted");
         self.stats.revision
     }
+    fn with_invocation<T>(&mut self, run: impl FnOnce(&mut Self) -> T) -> T {
+        if self.in_invocation {
+            return run(self);
+        }
+        let mut config = self.config.clone();
+        config.store = config.store.for_operation().unwrap_or(config.store);
+        let compiler = self.compiler.clone().with_config(config.clone());
+        let previous_compiler = std::mem::replace(&mut self.compiler, compiler);
+        let previous_store = self.host.engine.set_invocation_store(Some(config.store));
+        self.in_invocation = true;
+        let invocation = InvocationGuard {
+            session: self,
+            previous_compiler: Some(previous_compiler),
+            previous_store,
+        };
+        run(invocation.session)
+    }
     fn observe(&mut self) -> Result<(), ToolError> {
         let prior = self.observer.current().cloned();
         let compiler = &self.compiler;
@@ -291,10 +331,13 @@ where
     }
     /// Observe the actual filesystem before selecting the shared graph.
     pub fn check(&mut self) -> Result<CheckOutput, ToolError> {
-        self.delivery_error = None;
-        self.observe()
-            .and_then(|()| self.check_applied())
-            .or_else(check_error)
+        self.with_invocation(|session| {
+            session.delivery_error = None;
+            session
+                .observe()
+                .and_then(|()| session.check_applied())
+                .or_else(check_error)
+        })
     }
     pub fn check_safe(
         &mut self,
@@ -340,11 +383,19 @@ where
         &mut self,
         operation: CompileOperation,
     ) -> Result<Arc<CompileOutput>, ToolError> {
-        self.delivery_error = None;
-        self.observe()?;
-        self.request_applied(operation)
+        self.with_invocation(|session| {
+            session.delivery_error = None;
+            session.observe()?;
+            session.request_applied(operation)
+        })
     }
     pub fn request_applied(
+        &mut self,
+        operation: CompileOperation,
+    ) -> Result<Arc<CompileOutput>, ToolError> {
+        self.with_invocation(|session| session.request_applied_inner(operation))
+    }
+    fn request_applied_inner(
         &mut self,
         operation: CompileOperation,
     ) -> Result<Arc<CompileOutput>, ToolError> {
@@ -484,6 +535,20 @@ mod tests {
         budget: Arc<ProcessBudget>,
         calls: Arc<AtomicUsize>,
         failure: Option<QueryError>,
+    }
+    impl ObservedEngine for Checker {
+        fn set_invocation_store(
+            &mut self,
+            store: Option<Arc<dyn hirsel_engine::store::ResultStore>>,
+        ) -> Option<Arc<dyn hirsel_engine::store::ResultStore>> {
+            let mut config = self.compiler.configuration();
+            let previous = config.store.clone();
+            if let Some(store) = store {
+                config.store = store;
+                self.compiler = self.compiler.clone().with_config(config);
+            }
+            Some(previous)
+        }
     }
     impl RequestEngine for Checker {
         type Request = CompileRequest;

@@ -12,6 +12,7 @@ use hirsel_engine::requests::source_graph::host_limits;
 /// their products and reservations independently of this constructor's lifetime.
 pub struct CompilerRequests {
     compiler: Compiler,
+    invocation_store: Option<Arc<dyn hirsel_engine::store::ResultStore>>,
     ledger: Arc<super::inspection::InspectionLedger>,
     pub(super) graphs: super::host_selector::GraphSelections,
     config: CompileConfig,
@@ -179,6 +180,7 @@ impl CompilerRequests {
         Self {
             graphs,
             ledger,
+            invocation_store: None,
             compiler: compiler.with_config(config.clone()).with_owned_engines(),
             config,
             budget,
@@ -266,6 +268,15 @@ mod tests {
     }
 }
 
+impl crate::resident::ObservedEngine for CompilerRequests {
+    fn set_invocation_store(
+        &mut self,
+        store: Option<Arc<dyn hirsel_engine::store::ResultStore>>,
+    ) -> Option<Arc<dyn hirsel_engine::store::ResultStore>> {
+        std::mem::replace(&mut self.invocation_store, store)
+    }
+}
+
 impl hirsel_engine::requests::RequestEngine for CompilerRequests {
     type Request = CompileRequest;
     type Error = hirsel_engine::ToolError;
@@ -279,8 +290,11 @@ impl hirsel_engine::requests::RequestEngine for CompilerRequests {
     {
         self.ledger.admit()?;
         let ledger = self.ledger.clone();
-        let compiler = &self.compiler;
-        let config = &self.config;
+        let mut config = self.config.clone();
+        if let Some(store) = &self.invocation_store {
+            config.store = store.clone();
+        }
+        let compiler = self.compiler.clone().with_config(config.clone());
         let limits = self.limits;
         let carry = self.carry.as_ref();
         let source_index = &self.source_index;
@@ -291,8 +305,8 @@ impl hirsel_engine::requests::RequestEngine for CompilerRequests {
         let before_check = self.before_check;
         self.graphs.select(request, |budget, may_wait| {
             super::source_graph::install(
-                compiler,
-                config,
+                &compiler,
+                &config,
                 limits,
                 budget,
                 may_wait,

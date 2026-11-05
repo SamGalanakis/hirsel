@@ -37,7 +37,7 @@ fn bounds(text: &str, bases: &[u32], span: Span) -> Option<(usize, usize)> {
     Some((start, end))
 }
 fn valid_output(
-    output: &QueryOutput<SyntaxFile>,
+    output: &mut QueryOutput<SyntaxFile>,
     context: &FileContext,
     text: &str,
     bases: &[u32],
@@ -77,9 +77,18 @@ fn valid_output(
     if cursor != text.len() {
         return false;
     }
-    output.value.items.iter().all(|syntax| {
+    output.value.items.iter_mut().all(|syntax| {
+        let Some(syntax) = Arc::get_mut(syntax) else {
+            return false;
+        };
+        let syntax_anchor = syntax.anchor;
+        let mut spans_valid = true;
+        syntax.visit_spans_mut(|span| {
+            spans_valid &= span.anchor == syntax_anchor && valid_span(*span);
+        });
         let path = &syntax.item.definition;
-        if path.0.package != context.package
+        if !spans_valid
+            || path.0.package != context.package
             || path.0.modules != context.modules
             || !syntax.structurally_valid(valid_span)
         {
@@ -175,12 +184,13 @@ impl QueryEngine {
         let numbered = (1..=u32::try_from(record.bases.len()).ok()?)
             .map(Anchor)
             .collect();
-        let output: QueryOutput<SyntaxFile> =
+        timings::count(timings::Count::ParseSyntaxDecodes);
+        let mut output: QueryOutput<SyntaxFile> =
             hirsel_span::with_anchor_codec(&mut AnchorCodec::Decode(numbered), || {
                 options().deserialize(&record.payload)
             })
             .ok()?;
-        if !valid_output(&output, context, source.text(), &record.bases) {
+        if !valid_output(&mut output, context, source.text(), &record.bases) {
             return None;
         }
         let mut anchors = vec![None; record.bases.len()];
@@ -215,15 +225,38 @@ impl QueryEngine {
                 *anchor = Some(self.sources.file_anchor(file));
             }
         }
-        // Release the bounded validation tree before materializing placed AST
-        // owners. At most one source-file tree is retained by this operation.
-        drop(output);
         let anchors = anchors.into_iter().collect::<Option<Vec<_>>>()?;
-        let mut output: QueryOutput<SyntaxFile> =
-            hirsel_span::with_anchor_codec(&mut AnchorCodec::Decode(anchors), || {
-                options().deserialize(&record.payload)
-            })
-            .ok()?;
+        for syntax in &mut output.value.items {
+            let syntax = Arc::get_mut(syntax)?;
+            syntax.reanchor(*anchors.get(syntax.anchor.0.checked_sub(1)? as usize)?);
+        }
+        let remap = |span: &mut Span| -> Option<()> {
+            span.anchor = *anchors.get(span.anchor.0.checked_sub(1)? as usize)?;
+            Some(())
+        };
+        for token in &mut output.value.tokens {
+            remap(&mut token.span)?;
+        }
+        for diagnostic in &mut output.diagnostics {
+            remap(&mut diagnostic.primary)?;
+            for secondary in &mut diagnostic.secondary {
+                remap(&mut secondary.span)?;
+            }
+            if let Some(fix) = &mut diagnostic.fix {
+                remap(&mut fix.span)?;
+            }
+            for obligation in &mut diagnostic.obligations {
+                match obligation {
+                    hirsel_diag::Obligation::GenericBound { arguments } => {
+                        for argument in arguments {
+                            remap(argument)?;
+                        }
+                    }
+                    hirsel_diag::Obligation::ParameterMode { argument } => remap(argument)?,
+                    _ => (),
+                }
+            }
+        }
         output.value.file = file;
         Some(output)
     }

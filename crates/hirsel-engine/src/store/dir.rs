@@ -388,9 +388,8 @@ impl ResultStore for DirStore {
                 && let Some(records) = self
                     .installed_records()
                     .filter(|records| records.root == store.root())
-                && let Some(row) = records.lookup(address)
             {
-                return Some(row);
+                return records.lookup(address);
             }
             store.lookup(address)
         })?;
@@ -436,6 +435,13 @@ impl ResultStore for DirStore {
             return Some(bytes);
         }
         for (local, store) in self.roots() {
+            if !local
+                && self
+                    .installed_records()
+                    .is_some_and(|records| records.root == store.root())
+            {
+                continue;
+            }
             if let Some(bytes) = store.get(reference) {
                 if local {
                     store.touch(
@@ -460,8 +466,10 @@ impl ResultStore for DirStore {
                 && let Some(records) = self
                     .installed_records()
                     .filter(|records| records.root == store.root())
-                && let Some(row) = records.lookup(hirsel_artifact_store::Address(key.0))
             {
+                let Some(row) = records.lookup(hirsel_artifact_store::Address(key.0)) else {
+                    continue;
+                };
                 if row.reference.domain != super::entry_domain(key.2) {
                     continue;
                 }

@@ -1506,11 +1506,16 @@ impl ItemSyntax {
     /// survive the edit keep naming the same place.
     pub fn reanchor(&mut self, anchor: Anchor) {
         let from = self.anchor;
-        let span = &mut |s: &mut Span| {
-            if s.anchor == from {
-                s.anchor = anchor;
+        self.visit_spans_mut(|span| {
+            if span.anchor == from {
+                span.anchor = anchor;
             }
-        };
+        });
+        self.anchor = anchor;
+    }
+    /// Visit every source span, including metadata outside the lexical tape.
+    pub fn visit_spans_mut(&mut self, mut visit: impl FnMut(&mut Span)) {
+        let span = &mut visit;
         fn attributes(attributes: &mut [Attribute], span: &mut impl FnMut(&mut Span)) {
             for attribute in attributes {
                 span(&mut attribute.origin.span);
@@ -1532,7 +1537,10 @@ impl ItemSyntax {
         for e in &mut tree.expressions {
             span(&mut e.origin.span);
             match &mut e.kind {
-                ExprKind::Closure { signature, .. } => attributes(&mut signature.attributes, span),
+                ExprKind::Closure { signature, .. } => {
+                    attributes(&mut signature.attributes, span);
+                    sharing(signature, span);
+                }
                 ExprKind::With { bindings, .. } => {
                     for binding in bindings {
                         span(&mut binding.origin.span);
@@ -1545,6 +1553,7 @@ impl ItemSyntax {
             span(&mut s.origin.span);
             if let StmtKind::Function { signature, .. } = &mut s.kind {
                 attributes(&mut signature.attributes, span);
+                sharing(signature, span);
             }
         }
         for p in &mut tree.patterns {
@@ -1553,7 +1562,10 @@ impl ItemSyntax {
         for t in &mut tree.types {
             span(&mut t.origin.span);
             match &mut t.kind {
-                TypeExprKind::Function(signature) => attributes(&mut signature.attributes, span),
+                TypeExprKind::Function(signature) => {
+                    attributes(&mut signature.attributes, span);
+                    sharing(signature, span);
+                }
                 TypeExprKind::Qualified {
                     relation: Some(relation),
                     ..
@@ -1563,6 +1575,9 @@ impl ItemSyntax {
         }
         for g in &mut tree.groups {
             span(&mut g.origin.span);
+        }
+        for analysis in &mut tree.analyses {
+            span(&mut analysis.origin.span);
         }
         let item = &mut self.item;
         span(&mut item.name_span);
@@ -1593,6 +1608,7 @@ impl ItemSyntax {
                         } => {
                             span(&mut origin.span);
                             attributes(&mut signature.attributes, span);
+                            sharing(signature, span);
                         }
                     }
                 }
@@ -1622,7 +1638,6 @@ impl ItemSyntax {
                 span(site);
             }
         }
-        self.anchor = anchor;
     }
 }
 /// The definition occurrence whose item-local syntax a lexical site belongs to.

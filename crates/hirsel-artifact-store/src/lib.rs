@@ -195,6 +195,24 @@ impl Region {
         if !(HEADER..=HEADER + MAX_RECORD).contains(&len) {
             return Err(invalid());
         }
+        if !file.metadata()?.is_file() {
+            return Err(invalid());
+        }
+        #[cfg(target_os = "linux")]
+        let file = if retain_file {
+            Self::sealed_snapshot(file, len)?
+        } else {
+            file
+        };
+        #[cfg(all(unix, not(target_os = "linux")))]
+        if retain_file {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            file.take((len + 1) as u64).read_to_end(&mut bytes)?;
+            return (bytes.len() == len)
+                .then_some(Self::Owned(bytes.into()))
+                .ok_or_else(invalid);
+        }
         #[cfg(unix)]
         {
             let mut region = Self::map_file(Arc::new(file), len)?;
@@ -214,6 +232,39 @@ impl Region {
                 .then_some(Self::Owned(bytes.into()))
                 .ok_or_else(invalid)
         }
+    }
+    // systemd v258, src/basic/memfd-util.c:126-154: populate a private memfd,
+    // seal writes/resize, then map it. Unlike systemd's in-memory input, copy
+    // through the opened source descriptor with a length sentinel before any
+    // integrity check. Portable targets retain owned bytes instead.
+    #[cfg(target_os = "linux")]
+    fn sealed_snapshot(source: File, len: usize) -> io::Result<File> {
+        use std::io::Read;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // SAFETY: the static C string is terminated; a successful descriptor
+        // is uniquely owned below and permits sealing before any mapping.
+        let fd = unsafe {
+            libc::memfd_create(
+                c"hirsel-installation".as_ptr(),
+                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: memfd_create returned a fresh descriptor owned by this call.
+        let mut snapshot = unsafe { File::from_raw_fd(fd) };
+        if std::io::copy(&mut source.take((len + 1) as u64), &mut snapshot)? != len as u64 {
+            return Err(invalid());
+        }
+        let seals =
+            libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+        // SAFETY: snapshot owns the live descriptor and no writable mapping
+        // exists. These seals permanently prevent modification and truncation.
+        if unsafe { libc::fcntl(snapshot.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(snapshot)
     }
     #[cfg(unix)]
     fn map_file(file: Arc<File>, len: usize) -> io::Result<Self> {

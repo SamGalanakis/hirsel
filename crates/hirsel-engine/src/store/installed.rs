@@ -441,6 +441,7 @@ impl InstalledPackage {
         package: &PackageId,
         compiler: ContentHash,
     ) -> Result<OpenedInstallation, String> {
+        hirsel_intern::timings::count(hirsel_intern::timings::Count::InstalledPackageOpens);
         let read = || -> Result<OpenedInstallation, String> {
             let _read = store.batch();
             let row = store
@@ -451,6 +452,7 @@ impl InstalledPackage {
             }
             let bytes = store
                 .get(row.reference)
+                .and_then(|bytes| Bytes::from(bytes.to_vec()).checked(row.reference))
                 .ok_or("corrupt installed package product")?;
             let mut installed: Self = bincode::DefaultOptions::new()
                 .with_fixint_encoding()

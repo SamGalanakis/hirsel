@@ -909,7 +909,10 @@ impl State {
                 });
             } else if !matches!(
                 node.state,
-                NodeState::Ready(_) | NodeState::Running(_) | NodeState::Waiting(_)
+                NodeState::Ready(_)
+                    | NodeState::Running(_)
+                    | NodeState::Draining(_)
+                    | NodeState::Waiting(_)
             ) {
                 self.admission_waiters.remove(&query);
             }
@@ -1420,7 +1423,10 @@ impl QueryContext for Context<'_> {
         let can_progress = state.nodes.iter().any(|(&query, node)| {
             query != self.query
                 && !state.admission_waiters.contains_key(&query)
-                && matches!(node.state, NodeState::Ready(_) | NodeState::Running(_))
+                && matches!(
+                    node.state,
+                    NodeState::Ready(_) | NodeState::Running(_) | NodeState::Draining(_)
+                )
         }) || state.cleanup.iter().any(|queue| !queue.is_empty());
         if can_progress {
             let progress_revision = state.progress_revision;

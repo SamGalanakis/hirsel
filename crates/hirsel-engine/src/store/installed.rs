@@ -484,8 +484,7 @@ impl InstalledPackage {
                 return Err("invalid installed package domain".into());
             }
             let bytes = store
-                .get(row.reference)
-                .and_then(|bytes| Bytes::from(bytes.to_vec()).checked(row.reference))
+                .get_owned(row.reference)
                 .ok_or("corrupt installed package product")?;
             let mut installed: Self = bincode::DefaultOptions::new()
                 .with_fixint_encoding()

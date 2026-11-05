@@ -11,6 +11,7 @@
 hirsel_guard::install!();
 
 use hirsel_syntax::ContentHash;
+use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::ops::{Deref, Range};
@@ -136,14 +137,21 @@ impl Domain {
         })
     }
     fn output(self, bytes: &[u8]) -> Output {
-        Output(ContentHash::of_parts(
-            "hirsel.artifact.output.v1",
-            [
-                self.kind.to_le_bytes().as_slice(),
-                self.schema.to_le_bytes().as_slice(),
-                bytes,
-            ],
-        ))
+        // ContentHash::of_parts frames each part with its little-endian u64
+        // length. Feed the fixed framing together, then every payload byte.
+        const DOMAIN: &[u8] = b"hirsel.artifact.output.v1";
+        let mut prefix = [0u8; 65];
+        prefix[..8].copy_from_slice(&(DOMAIN.len() as u64).to_le_bytes());
+        prefix[8..33].copy_from_slice(DOMAIN);
+        prefix[33..41].copy_from_slice(&4u64.to_le_bytes());
+        prefix[41..45].copy_from_slice(&self.kind.to_le_bytes());
+        prefix[45..53].copy_from_slice(&4u64.to_le_bytes());
+        prefix[53..57].copy_from_slice(&self.schema.to_le_bytes());
+        prefix[57..65].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
+        let mut hash = Sha256::new();
+        hash.update(prefix);
+        hash.update(bytes);
+        Output(ContentHash(hash.finalize().into()))
     }
 }
 
@@ -871,6 +879,19 @@ impl Store {
     /// Mapping alone reads no payload pages; integrity checking necessarily does.
     pub fn get(&self, reference: Reference) -> Option<Bytes> {
         checked_container(self.raw_container(reference)?, reference)
+    }
+    /// Copy an untrusted container before checking it. Consumers needing an
+    /// owned immutable snapshot can validate that snapshot once, rather than
+    /// checking a mapping and then checking its copied payload again.
+    pub fn get_owned(&self, reference: Reference) -> Option<Bytes> {
+        let bytes = self.raw_container(reference)?;
+        self.count(Counter::ContentChecks, 1);
+        if reference.len > MAX_RECORD as u64
+            || usize::try_from(reference.len).ok()?.checked_add(HEADER)? != bytes.len()
+        {
+            return None;
+        }
+        checked_container(Bytes::from(bytes.to_vec()), reference)
     }
     fn raw_container(&self, reference: Reference) -> Option<Bytes> {
         if reference.len <= pack::SMALL as u64 {

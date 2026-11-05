@@ -366,9 +366,6 @@ fn a_changed_registration_reinfers_only_the_modules_that_read_it() {
         assert_eq!(first[1..], [1, 1], "{first:?}");
         std::fs::write(directory.path().join("main.hir"), main("y")).unwrap();
         let second = check(&mut session);
-        // Only the root module reads the changed registration.
-        assert!(second[0] > first[0], "{first:?} {second:?}");
-        assert_eq!(second[1..], first[1..], "{first:?} {second:?}");
         // The retained proofs are the ones a cold compiler infers. The export
         // carries every signature's unique summary; read receipts differ by path.
         let warm = session.checked_products(true).unwrap();
@@ -379,6 +376,11 @@ fn a_changed_registration_reinfers_only_the_modules_that_read_it() {
         assert!(cold.check().unwrap().diagnostics.is_empty());
         let cold = cold.checked_products(true).unwrap();
         assert_eq!(warm.canonical, cold.canonical);
+        // Only the root module reads the changed registration. Keep the work
+        // observation after the semantic oracle so missing counters cannot
+        // hide a stale export.
+        assert!(second[0] > first[0], "{first:?} {second:?}");
+        assert_eq!(second[1..], first[1..], "{first:?} {second:?}");
     });
 }
 

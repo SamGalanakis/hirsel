@@ -41,6 +41,7 @@ fn checked_views_bind_the_mapping_range_and_complete_reference() {
     }
     assert_eq!(statistics.snapshot().counters["ContentChecks"], 1);
     assert_eq!(statistics.snapshot().counters["ContentReuses"], 8);
+    let copied = reader.get_owned(reference).unwrap();
     let verified = reader.verify_records([], [reference]).unwrap();
     for fault in 0..3 {
         let mut forged = reference;
@@ -50,6 +51,7 @@ fn checked_views_bind_the_mapping_range_and_complete_reference() {
             _ => forged.len -= 1,
         }
         assert!(reader.get(forged).is_none());
+        assert!(reader.get_owned(forged).is_none());
     }
     let container = reader.raw_container(reference).unwrap();
     let shifted = container.range(8, container.len() as u64 - 8, 1).unwrap();
@@ -61,6 +63,8 @@ fn checked_views_bind_the_mapping_range_and_complete_reference() {
     fs::write(&path, vec![0; HEADER + 5000]).unwrap();
     let operation = reader.request();
     assert!(reader.get(reference).is_none());
+    assert!(reader.get_owned(reference).is_none());
+    assert_eq!(&*copied, &vec![7; 5000]);
     assert_eq!(&*held, &vec![7; 5000]);
     assert_eq!(&*verified.get(reference).unwrap(), &vec![7; 5000]);
     assert!(
@@ -829,6 +833,28 @@ fn concurrent_readers_see_only_complete_associations() {
 
 #[test]
 fn embedded_products_use_the_mapped_store_integrity_boundary() {
+    // Independent canonical framing oracle, including SHA-256 padding and
+    // block boundaries after the 65-byte output prefix.
+    for domain in [
+        DOMAIN,
+        Domain {
+            kind: u32::MAX,
+            schema: 27,
+        },
+    ] {
+        for len in [0, 1, 54, 55, 56, 63, 64, 65, 118, 119, 120, 127, 128, 4096] {
+            let payload = vec![0xa7; len];
+            let expected = ContentHash::of_parts(
+                "hirsel.artifact.output.v1",
+                [
+                    domain.kind.to_le_bytes().as_slice(),
+                    domain.schema.to_le_bytes().as_slice(),
+                    &payload,
+                ],
+            );
+            assert_eq!(domain.reference(&payload).unwrap().output.0, expected);
+        }
+    }
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_owned());
     let reference = store

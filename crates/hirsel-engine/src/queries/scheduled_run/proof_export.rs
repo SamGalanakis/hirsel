@@ -861,7 +861,11 @@ impl QueryEngine {
             .into_iter()
             .filter(|p| p.0.package == entry.0.package)
             .collect();
-        let run = run.with_source_roots(roots.iter().cloned().collect())?;
+        let mut run = run.with_source_roots(roots.iter().cloned().collect())?;
+        let selected = Arc::get_mut(&mut run).ok_or(QueryError::NotImplemented)?;
+        selected.records = selected
+            .records
+            .for_boundary(crate::store::ArchiveBoundary::Export);
         self.capture_proof_export(
             entry,
             run,
@@ -884,7 +888,11 @@ impl QueryEngine {
             .filter(|p| p.0.package == entry.0.package)
             .collect();
         let headers = self.deferred_proof_signatures(run.front.clone(), headers)?;
-        let run = run.with_source_roots(roots.iter().cloned().collect())?;
+        let mut run = run.with_source_roots(roots.iter().cloned().collect())?;
+        let selected = Arc::get_mut(&mut run).ok_or(QueryError::NotImplemented)?;
+        selected.records = selected
+            .records
+            .for_boundary(crate::store::ArchiveBoundary::Export);
         self.capture_proof_export(entry, run, headers, roots, allowance)
     }
     /// Attach to native's already selected Run. Its selected roots must cover

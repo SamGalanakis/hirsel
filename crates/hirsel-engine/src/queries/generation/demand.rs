@@ -349,14 +349,13 @@ impl DemandProducer {
         declaration: &DefPath,
         site: Span,
     ) -> Result<crate::runtime::QueryId, QueryError> {
-        let bytes = previous
-            .records
-            .encode(
-                &*previous.anchors,
-                &(DefId::intern(declaration), previous.identity()),
-            )
-            .ok_or_else(|| refused("demand key encoding"))?;
-        let key = ContentHash::of_parts("hirsel.front.generation-demand.v1", [bytes.as_slice()]);
+        let key = ContentHash::of_parts(
+            "hirsel.front.generation-demand.v2",
+            [
+                previous.identity().0.as_slice(),
+                declaration.fingerprint().0.as_slice(),
+            ],
+        );
         let mut requests = self.requests.lock().unwrap_or_else(|e| e.into_inner());
         if !requests.contains_key(&key) {
             let allowance = Self::take(
@@ -391,25 +390,31 @@ impl DemandProducer {
         policy: LoweringPolicy,
         stop_on_error: bool,
     ) -> Result<crate::runtime::QueryId, QueryError> {
-        let bytes = previous
-            .records
-            .encode(
-                &*previous.anchors,
-                &(
-                    previous.identity(),
-                    roots,
-                    policy == LoweringPolicy::Reachable,
-                    stop_on_error,
-                ),
+        let seed = ContentHash::of_parts(
+            "hirsel.front.generation-scope.v2",
+            [
+                previous.identity().0.as_slice(),
+                &[
+                    u8::from(policy == LoweringPolicy::Reachable),
+                    u8::from(stop_on_error),
+                ],
+                (roots.len() as u64).to_le_bytes().as_slice(),
+            ],
+        );
+        let key = roots.iter().fold(seed, |key, root| {
+            ContentHash::of_parts(
+                "hirsel.front.generation-scope-root.v2",
+                [key.0.as_slice(), root.fingerprint().0.as_slice()],
             )
-            .ok_or_else(|| refused("scope key encoding"))?;
-        let key = ContentHash::of_parts("hirsel.front.generation-scope.v1", [bytes.as_slice()]);
+        });
         let mut scopes = self.scopes.lock().unwrap_or_else(|e| e.into_inner());
         if !scopes.contains_key(&key) {
-            let allowance = Self::take(
-                &self.syntax,
-                (size_of::<ScopeRequest>() + 12 * size_of::<usize>() + bytes.len() * 3) as u64,
-            )?;
+            let mut weight = crate::NativeMetadataWeight::default();
+            weight.add(size_of::<ScopeRequest>() + 12 * size_of::<usize>() + size_of_val(roots));
+            for root in roots {
+                weight.path(root);
+            }
+            let allowance = Self::take(&self.syntax, weight.bytes())?;
             scopes.insert(
                 key,
                 Arc::new(ScopeRequest {
@@ -623,26 +628,7 @@ impl DemandProducer {
                     }
                     producer.errors.protocol
                 })?;
-                let bytes = namespace
-                    .records
-                    .encode(&*namespace.anchors, &namespace.manifest)
-                    .ok_or(producer.errors.resource)?;
-                let domain = crate::store::Domain {
-                    kind: 0x4601_000b,
-                    schema: 1,
-                };
-                let reference = domain.reference(&bytes).ok_or(producer.errors.resource)?;
-                let archive = crate::runtime::ProductArchive::from_encoded_in(
-                    reference,
-                    bytes.into(),
-                    &producer.text,
-                )
-                .map_err(|_| producer.errors.resource)?;
-                Ok(crate::runtime::ProductRef::import_archive(
-                    id.address,
-                    hirsel_artifact_store::Action(namespace.identity()),
-                    archive,
-                ))
+                producer.scope_product(id, &namespace)
             },
         )?))
     }
@@ -651,24 +637,27 @@ impl DemandProducer {
         id: crate::runtime::QueryId,
         namespace: &NamespaceCapture,
     ) -> Result<crate::runtime::ProductRef, crate::store::Reference> {
-        let bytes = namespace
-            .records
-            .encode(&*namespace.anchors, &namespace.manifest)
-            .ok_or(self.errors.resource)?;
-        let domain = crate::store::Domain {
-            kind: 0x4601_000b,
-            schema: 1,
-        };
-        let reference = domain.reference(&bytes).ok_or(self.errors.resource)?;
-        let archive =
-            crate::runtime::ProductArchive::from_encoded_in(reference, bytes.into(), &self.text)
-                .map_err(|_| self.errors.resource)?;
-        Ok(crate::runtime::ProductRef::import_archive(
+        let bytes = size_of::<crate::queries::live_record::LiveRecord<ContentHash>>()
+            + size_of::<hirsel_engine_admission::MemoryReservation>()
+            + 4 * size_of::<usize>();
+        let allowance = self.text.take(bytes as u64).ok_or(self.errors.resource)?;
+        Ok(crate::runtime::ProductRef::live(
             id.address,
             hirsel_artifact_store::Action(namespace.identity()),
-            archive,
+            Arc::new(crate::queries::live_record::LiveRecord {
+                value: namespace.manifest,
+                domain: crate::store::Domain {
+                    kind: 0x4601_000b,
+                    schema: 1,
+                },
+                records: namespace.records.clone(),
+                source: (*namespace.anchors).clone(),
+                serialization_working: self.weight.scratch,
+                _admission: Arc::new(allowance),
+            }),
         ))
     }
+
     pub(crate) async fn stage_declaration(
         self: &Arc<Self>,
         previous: &Arc<NamespaceCapture>,

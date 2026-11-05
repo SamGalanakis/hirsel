@@ -1581,155 +1581,29 @@ impl FrontLowerQueries {
                 .publish_live(id, &key, outcome, raw, &source.reads)
                 .await;
         }
-        let descriptor_reads =
-            evidence::archived_reads(&observed, execution.as_ref()).ok_or(self.errors.protocol)?;
         let selections = std::mem::take(&mut *source.selections.borrow_mut());
-        let manifest = self
-            .namespace
-            .manifest_for_reads(DefId::intern(&path), &observed, self.weight.scratch)
-            .ok_or(self.errors.resource)?;
-        let mut reads_decode_bytes = 0;
+        let reads_decode_bytes = 0;
         let diagnostic_sources = source.diagnostic_sources.borrow().clone();
-        let bytes = match &mut result {
-            Ok(Value::Lower(lower)) => {
-                let mut weight = crate::NativeMetadataWeight::default();
-                weight.add(size_of::<reads::Descriptor>());
-                weight.add(
-                    crate::memo::retained_lowering_output_bytes(&lower.diagnostics, &Vec::new())
-                        .try_into()
-                        .map_err(|_| self.errors.resource)?,
-                );
-                weight.add(
-                    lower
-                        .dependencies
-                        .len()
-                        .checked_mul(size_of::<SignatureDependency>())
-                        .ok_or(self.errors.resource)?,
-                );
-                for (_, bytes) in observed.allocations() {
-                    weight.add(bytes);
-                }
-                weight.add(size_of_val(&*depth.first));
-                weight.add(
-                    staged::selection_bytes(&selections)
-                        .try_into()
-                        .map_err(|_| self.errors.resource)?,
-                );
-                let (bytes, working) = self
-                    .records
-                    .encode_with_decode_bytes(
-                        &*self.namespace.anchors,
-                        &(
-                            lower.definition,
-                            lower.body.get().copied().ok_or(self.errors.protocol)?,
-                            &lower.diagnostics,
-                            lower.dependencies.packed(),
-                            lower
-                                .materialized
-                                .get()
-                                .copied()
-                                .ok_or(self.errors.protocol)?,
-                            &descriptor_reads,
-                            &depth,
-                            executed,
-                            &selections,
-                            manifest,
-                        ),
-                    )
-                    .ok_or(self.errors.resource)?;
-                reads_decode_bytes = weight
-                    .bytes()
-                    .checked_mul(2)
-                    .and_then(|n| n.checked_add(working))
-                    .ok_or(self.errors.resource)?;
-                Some(bytes)
-            }
-            Ok(Value::Constant(value)) => value.encode(
-                &self.records,
-                &*self.namespace.anchors,
-                &observed,
-                &descriptor_reads,
-                &depth,
-                executed,
-                &selections,
-                manifest,
-            ),
-            Err(error) => self.records.encode(
+        let error = result.as_ref().err().ok_or(self.errors.protocol)?;
+        let bytes = self
+            .records
+            .encode_at(
                 &namespace::DiagnosticRecordSource {
                     base: &self.namespace.anchors,
                     diagnostics: diagnostic_sources.as_deref(),
                 },
                 &(&path, error, &observed, &depth, executed),
-            ),
-        }
-        .ok_or(self.errors.resource)?;
+                crate::store::ArchiveBoundary::Ordinary,
+            )
+            .ok_or(self.errors.resource)?;
+
         // The archive is an active encoding buffer. Settled descriptor/value
         // metadata is debited below from this producer's separate grant.
         if bytes.len() as u64 > self.weight.scratch {
             return Err(self.errors.resource);
         }
-        // Descriptor domains are explicit: an S5 transport descriptor must
-        // never overwrite a scalar Lower/Evaluate archive of another schema.
-        let domain = if result.is_err() {
-            FAILURE
-        } else if id.kind == FRONT_LOWER_KIND {
-            LOWER_DESCRIPTOR
-        } else {
-            CONSTANT_DESCRIPTOR
-        };
+        let domain = FAILURE;
         let execution_subject = persistent::evaluation_subject(&key, &bytes);
-        if let Some((definition, evidence)) = verification
-            && let Ok(Value::Lower(lower)) = &mut result
-            && let Some(cache) = self.store.verifier()
-        {
-            // Keep the checked body alive only until V binds this exact
-            // descriptor, including its read/depth/selection/execution fields.
-            let working = lower
-                .definition_decode_layout
-                .retained
-                .checked_add(bytes.capacity() as u64)
-                .and_then(|n| {
-                    n.checked_add(
-                        evidence
-                            .reads()
-                            .capacity()
-                            .checked_mul(size_of::<hirsel_validate::VRead>())?
-                            as u64,
-                    )
-                })
-                .ok_or(self.errors.resource)?;
-            if working > self.weight.scratch {
-                return Err(self.errors.resource);
-            }
-            // A refused universe publishes no output; the body stays local.
-            lower.verified = self
-                .namespace
-                .snapshot
-                .validation(&path.0.package)
-                .ok()
-                .and_then(|views| {
-                    cache.publish_definition(
-                        execution_subject,
-                        &definition,
-                        self.namespace.snapshot.types().clone(),
-                        self.namespace.snapshot.source_verification_policy(),
-                        views,
-                        &evidence,
-                        &[],
-                    )
-                })
-                .and_then(|output| {
-                    let (authority, bytes) = cache.compact_definition_output(&output)?;
-                    if bytes.len() as u64 > self.weight.scratch {
-                        return None;
-                    }
-                    let metadata = self.store.put_content(LOWER_VERIFICATION, &bytes)?;
-                    Some(StoredVerification {
-                        authority,
-                        metadata,
-                    })
-                });
-        }
         let outcome = Outcome {
             diagnostic_sources: source.diagnostic_sources.borrow().clone(),
             result,
@@ -1743,7 +1617,6 @@ impl FrontLowerQueries {
             action: hirsel_artifact_store::Action(execution_subject),
             observations: None,
         };
-        self.remember_carry(id, &key, &bytes, &outcome);
         self.publish(
             id,
             &key,
@@ -2344,12 +2217,25 @@ impl FrontLowerQueries {
     async fn publish_live(
         &self,
         id: QueryId,
-        _key: &EntryKey,
+        key: &EntryKey,
         mut outcome: Outcome,
         raw: Option<RawLowerOutput>,
         query_reads: &QueryReads,
     ) -> Result<ProductRef, Reference> {
-        let action = outcome.action;
+        self.remember_live_carry(id, key, &outcome, &raw);
+        let action = hirsel_artifact_store::Action(ContentHash::of_parts(
+            "hirsel.front.live-action.v1",
+            [
+                key.0.0.as_slice(),
+                key.1.0.as_slice(),
+                self.namespace.manifest.0.as_slice(),
+                crate::store::payload_reads_hash(&outcome.reads)
+                    .0
+                    .as_slice(),
+                id.kind.to_le_bytes().as_slice(),
+            ],
+        ));
+        outcome.action = action;
         let metadata = (
             outcome.reads.clone(),
             outcome.depth.evidence(),

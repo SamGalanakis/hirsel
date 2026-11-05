@@ -33,14 +33,6 @@ fn address(key: Key) -> hirsel_artifact_store::Address {
 fn storage_key(key: &EntryKey) -> EntryKey {
     EntryKey(address(key.0).0, key.1, QueryKind::Summary)
 }
-fn remember(
-    store: &dyn ResultStore,
-    key: &EntryKey,
-    reads: &Reads,
-    bytes: &[u8],
-) -> Option<Reference> {
-    store.cache_query(&storage_key(key), reads.clone(), bytes)
-}
 fn load_record(
     store: &dyn ResultStore,
     key: &EntryKey,
@@ -278,45 +270,6 @@ impl BodyTask {
         let facts = self.decode_facts(&record.facts, &reads)?;
         self.install_cached_facts(cx, record.body, reads, facts)
     }
-    pub(super) fn store_compact(
-        &self,
-        body: Option<Reference>,
-        reads: &Reads,
-        facts: &[u8],
-        decode_bytes: u64,
-    ) {
-        let queries = &self.queries;
-        if !queries.store.persistence().retains() {
-            return;
-        }
-        let record = RecordRef {
-            key: queries.inputs[&self.input].key.0,
-            body,
-            reads,
-            decode_bytes,
-            facts,
-        };
-        let Ok(encoded) = bincode::serialized_size(&record) else {
-            return;
-        };
-        if encoded
-            .checked_mul(8)
-            .and_then(|outer| outer.checked_add(decode_bytes))
-            .is_none_or(|peak| peak > self.weight.scratch)
-        {
-            return;
-        }
-        let Ok(bytes) = bincode::serialize(&record) else {
-            return;
-        };
-        remember(
-            &*queries.store,
-            &queries.inputs[&self.input].key,
-            reads,
-            &bytes,
-        );
-    }
-
     pub(super) fn load_compact(
         &self,
         cx: &mut dyn QueryContext,

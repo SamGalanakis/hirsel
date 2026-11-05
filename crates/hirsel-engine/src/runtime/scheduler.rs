@@ -1309,7 +1309,10 @@ impl QueryContext for Context<'_> {
             && state.nodes.consume_read(self.generation, dependency)
         {
             state.edges = state.nodes.edge_count();
-            state.retire_node(dependency, false);
+            let keep_lower = state
+                .result(dependency)
+                .is_some_and(|result| result.is_ok_and(|product| product.lower_value().is_some()));
+            state.retire_node(dependency, keep_lower);
             state.advance_progress();
             state.account();
             self.shared.changed.notify_all();
@@ -1365,9 +1368,7 @@ impl QueryContext for Context<'_> {
                     let body = product
                         .analyzed_value()
                         .is_some_and(|body| body.cache_only())
-                        || product.lower_value().is_some_and(|body| {
-                            body.cache_only() && body.prepare_eviction(scratch)
-                        });
+                        || product.lower_value().is_some_and(|body| body.cache_only());
                     let summary = product.summary_value().is_some();
                     (body || summary).then_some((order, body))
                 })
@@ -1375,10 +1376,22 @@ impl QueryContext for Context<'_> {
             let Some(((settled, key), body)) = oldest else {
                 return false;
             };
-            if body {
-                break key;
-            }
             previous = Some((settled, key));
+            if body {
+                let NodeState::Settled { outcome, .. } = &state.nodes[&key].state else {
+                    continue;
+                };
+                if outcome
+                    .as_ref()
+                    .as_ref()
+                    .ok()
+                    .and_then(|product| product.lower_value())
+                    .is_none_or(|body| body.prepare_eviction(scratch))
+                {
+                    break key;
+                }
+                continue;
+            }
             let Some(Factory::Send(factory)) = state.factories.get(&key.0) else {
                 continue;
             };

@@ -997,6 +997,7 @@ impl LiveLowerProduct {
             weight.add(bytes);
         }
         weight.add(size_of_val(&*value.depth.first));
+        weight.add(2 * (size_of::<std::sync::OnceLock<Reference>>() + 2 * size_of::<usize>()));
         let mut materialized = crate::NativeMetadataWeight::default();
         materialized.add(
             value

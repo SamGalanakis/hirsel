@@ -27,6 +27,11 @@ struct TableKeyCall {
     arguments: Vec<GenericArgument>,
 }
 impl TableKeyUse {
+    pub(crate) fn visit_spans_mut(&mut self, mut visit: impl FnMut(&mut Span)) {
+        for call in &mut self.calls {
+            visit(&mut call.site);
+        }
+    }
     pub(crate) fn retained(&self, weight: &mut crate::memo::retained::Weight) {
         self.generics
             .visit_retained_allocations(|id, bytes| weight.allocation(id, bytes));

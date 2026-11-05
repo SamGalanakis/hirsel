@@ -299,19 +299,28 @@ mod tests {
             },
             Vec::new(),
         );
-        let depth = DepthEvidence::leaf(32);
-        let bytes = constants
-            .encode(
-                &records,
+        let depth = DepthEvidence::<Span>::leaf(32);
+        let (value, substitutions) = constants.decoded(&records, &anchors, &*store, 0).unwrap();
+        let (bytes, working) = records
+            .encode_with_decode_bytes(
                 &anchors,
-                &reads,
-                &reads,
-                &depth,
-                false,
-                &Vec::new(),
-                CONSTANT_DESCRIPTOR.reference(b"manifest fixture").unwrap(),
+                &(
+                    value,
+                    substitutions,
+                    &reads,
+                    &depth,
+                    false,
+                    Vec::<(DefId, Vec<u64>)>::new(),
+                    CONSTANT_DESCRIPTOR.reference(b"manifest fixture").unwrap(),
+                ),
             )
             .unwrap();
+        let metadata = reads
+            .allocations()
+            .map(|(_, bytes)| bytes as u64)
+            .sum::<u64>()
+            + size_of_val(&*depth.first) as u64;
+        constants.set_working_bytes(2 * (constants.retained_bytes() + metadata) + working);
         let reference = store.put_content(CONSTANT_DESCRIPTOR, &bytes).unwrap();
         let bound = constants.working_bytes();
         let mut outcome = Outcome {

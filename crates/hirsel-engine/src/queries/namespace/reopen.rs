@@ -4,6 +4,7 @@ const SCOPED: Domain = Domain {
     kind: MANIFEST.kind,
     schema: 4,
 };
+#[derive(Clone)]
 pub(in crate::queries) struct ManifestDemand {
     pub declaration: DefPath,
     pub arguments: Vec<hirsel_types::GenericArgument>,
@@ -75,6 +76,53 @@ impl NamespaceCapture {
                 )
             },
         ))
+    }
+    pub(in crate::queries) fn live_demands_for_reads(
+        &self,
+        root: DefId,
+        reads: &Reads,
+    ) -> Option<Vec<ManifestDemand>> {
+        let mut manifest = self.manifest_inputs.clone();
+        let mut needed = BTreeSet::new();
+        let mut pending = std::iter::once(root)
+            .chain(reads.iter().filter_map(|(key, _)| key.definition()))
+            .collect::<Vec<_>>();
+        while let Some(id) = pending.pop() {
+            if let Some(registration) = self.registrations.get(&id)
+                && needed.insert(id)
+            {
+                pending.extend(
+                    registration
+                        .reads()
+                        .iter()
+                        .filter_map(|(key, _)| key.definition()),
+                );
+            }
+        }
+        manifest.dependencies.retain(|(id, _)| needed.contains(id));
+        manifest.trace.retain(|id| needed.contains(id));
+        let instances = Arc::make_mut(&mut manifest.instances);
+        instances.instances.retain(|_, rows| {
+            rows.retain(|_, row| needed.contains(&row.definition));
+            !rows.is_empty()
+        });
+        instances.declarations = instances.instances.keys().copied().collect();
+        manifest.base = self.scope_base(&manifest)?;
+        let mut demands = Vec::new();
+        for id in &manifest.trace {
+            let declaration = declaration(&manifest, *id);
+            let arguments = manifest
+                .instances
+                .instances
+                .get(&declaration)
+                .and_then(|rows| rows.values().find(|row| row.definition == *id))
+                .map_or_else(Vec::new, |row| row.arguments.clone());
+            demands.push(ManifestDemand {
+                declaration: declaration.path().clone(),
+                arguments,
+            });
+        }
+        Some(demands)
     }
     pub(in crate::queries) fn manifest_for_reads(
         &self,

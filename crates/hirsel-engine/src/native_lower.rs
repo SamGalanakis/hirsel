@@ -145,6 +145,10 @@ impl NativeOriginalHandle {
         weight.add(size_of::<NativeOriginalProduct>() + 2 * size_of::<usize>());
         if let OriginalInput::Bound(input) = &self.input {
             weight.add(size_of::<BoundOriginal>() + 2 * size_of::<usize>());
+            weight.add(
+                size_of::<std::sync::OnceLock<hirsel_artifact_store::Reference>>()
+                    + 2 * size_of::<usize>(),
+            );
             weight.add(size_of::<OriginalLease>() + 2 * size_of::<usize>());
             weight.path(input.definition.path());
             weight.add(crate::runtime::WeakLowerProduct::metadata_bytes());

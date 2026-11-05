@@ -1,33 +1,19 @@
-//! Bounded accepted Lower/Evaluate outcomes across fresh source graphs. The
-//! ordinary type/anchor codec relocates each descriptor and its stored body and
-//! materialized constants; V evidence names content only and is kept as
-//! captured. A row is adopted only while its input text and every read still
-//! observe their recorded values, so a later graph never lowers it again.
+//! Admitted typed Lower/Evaluate outcomes across fresh source graphs. Each row
+//! retains complete reads and source bindings; adoption replays generation
+//! demands and rebinds spans before publishing a current live product.
 use super::*;
 
-/// What the descriptor bytes do not encode: content-addressed V evidence and
-/// layout facts measured when the body was lowered.
-#[derive(Clone)]
-struct Retained {
-    verified: Option<StoredVerification>,
-    acceptance: Option<hirsel_validate::AcceptedArtifact>,
-    definition_decode_layout: DefinitionDecodeLayout,
-    constant_selection_bytes: u64,
-}
 #[derive(Clone)]
 struct Row {
-    manifest: Reference,
     generation: u64,
     owner: DefId,
     text: ContentHash,
     reads: Reads,
-    descriptor: Arc<[u8]>,
-    /// Store content the descriptor names: a Lower body and its constants.
-    contents: Box<[(Domain, Arc<[u8]>)]>,
-    lower: Option<Retained>,
-    constant_decode_bytes: u64,
-    reads_decode_bytes: u64,
-    execution: Option<hirsel_validate::ExecutionReceipt>,
+    outcome: Outcome,
+    raw: Option<RawLowerOutput>,
+    demands: Vec<namespace::reopen::ManifestDemand>,
+    bindings: BTreeMap<hirsel_span::Anchor, (DefId, u32)>,
+    types: std::sync::Weak<hirsel_types::TypeInterner>,
     charge: u64,
 }
 #[derive(Default)]
@@ -200,149 +186,135 @@ impl FrontLowerQueries {
             _ => self.front.observe(owner, read),
         }
     }
-    /// Keep one successful outcome for later graphs, with the store content
-    /// its descriptor names. A full carry keeps its existing rows.
-    pub(super) fn remember_carry(
+    pub(super) fn remember_imported_carry(&self, id: QueryId, key: &EntryKey, outcome: &Outcome) {
+        if self.carry().is_none() {
+            return;
+        }
+        let raw = match &outcome.result {
+            Ok(Value::Lower(lower)) => {
+                let Some(output) = lower.decode(self) else {
+                    return;
+                };
+                let Some(materialized) = lower
+                    .materialized
+                    .get()
+                    .and_then(|reference| self.store.get_content(*reference))
+                    .and_then(|bytes| self.records.decode(&*self.namespace.anchors, &bytes))
+                else {
+                    return;
+                };
+                Some((output, materialized))
+            }
+            Ok(Value::Constant(_)) => None,
+            Err(_) => return,
+        };
+        self.remember_live_carry(id, key, outcome, &raw);
+    }
+    pub(super) fn remember_live_carry(
         &self,
         id: QueryId,
         key: &EntryKey,
-        descriptor: &[u8],
         outcome: &Outcome,
+        raw: &Option<RawLowerOutput>,
     ) {
         let Some(carry) = self.carry() else {
             return;
         };
-        let (lower, mut references) = match &outcome.result {
-            Ok(Value::Lower(lower)) => (
-                Some(Retained {
-                    verified: lower.verified.clone(),
-                    acceptance: lower.acceptance.clone(),
-                    definition_decode_layout: lower.definition_decode_layout,
-                    constant_selection_bytes: lower.constant_selection_bytes,
-                }),
-                [
-                    lower
-                        .body
-                        .get()
-                        .copied()
-                        .map(|body| (crate::NATIVE_ORIGINAL_BODY, body)),
-                    lower
-                        .materialized
-                        .get()
-                        .copied()
-                        .map(|body| (LOWER_MATERIALIZED, body)),
-                    lower
-                        .verified
-                        .as_ref()
-                        .map(|stored| (LOWER_VERIFICATION, stored.metadata)),
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>(),
-            ),
-            Ok(Value::Constant(..)) => (None, vec![]),
-            Err(_) => return,
-        };
-        let Some(scope) = self.manifest_for_outcome(id, &outcome.reads) else {
-            return;
-        };
-        let Some(manifest) = self
-            .namespace
-            .manifest_references(scope, self.weight.scratch)
-        else {
-            return;
-        };
-        references.extend(
-            manifest
-                .into_iter()
-                .map(|reference| (reference.domain, reference)),
-        );
-        let mut weight = crate::NativeMetadataWeight::default();
-        // At most one full internal node per row bounds every BTree split.
-        weight.tree::<(u32, ContentHash), Row>(0);
-        weight.add(descriptor.len());
-        for (_, bytes) in outcome.reads.allocations() {
-            weight.add(bytes);
-        }
-        if let Some(receipt) = &outcome.execution {
-            let Some(bytes) = receipt.retained_bytes() else {
-                return;
-            };
-            weight.add(bytes.try_into().unwrap_or(usize::MAX));
-        }
-        let mut contents = Vec::new();
-        for (domain, reference) in references {
-            weight.add(size_of::<(Domain, Arc<[u8]>)>() + 2 * size_of::<usize>());
-            weight.add(reference.len.try_into().unwrap_or(usize::MAX));
-            if weight.bytes() > carry.allowance.bytes() {
-                return;
-            }
-            let Some(bytes) = self.store.get_content(reference) else {
-                return;
-            };
-            contents.push((domain, Arc::<[u8]>::from(&*bytes)));
-        }
-        // Ordinary records refer to canonical type components outside their
-        // payload. Carry those components too, including their transitive edges.
-        // Otherwise a fresh graph publishes a body it cannot decode.
-        let mut types = BTreeMap::new();
-        for bytes in
-            std::iter::once(descriptor).chain(contents.iter().filter_map(|(domain, bytes)| {
-                (*domain != LOWER_VERIFICATION).then_some(bytes.as_ref())
-            }))
-        {
-            let captured = self.records.visit_record_types(bytes, |reference| {
-                if types.contains_key(&reference.output.0) {
-                    return Some(false);
-                }
-                weight.add(size_of::<(Domain, Arc<[u8]>)>() + 2 * size_of::<usize>());
-                weight.add(reference.len.try_into().ok()?);
-                // Bound both retained bytes and the temporary deduplication map.
-                let mut peak = crate::NativeMetadataWeight::default();
-                peak.tree::<ContentHash, Arc<[u8]>>(types.len() + 1);
-                if weight.bytes().saturating_add(peak.bytes()) > carry.allowance.bytes() {
-                    return None;
-                }
-                let bytes = self.store.get_content(reference)?;
-                types.insert(reference.output.0, Arc::<[u8]>::from(&*bytes));
-                Some(true)
-            });
-            if captured.is_none() {
-                return;
-            }
-        }
-        contents.extend(
-            types
-                .into_values()
-                .map(|bytes| (hirsel_product_codec::TypeRecords::DOMAIN, bytes)),
-        );
-        let charge = weight.bytes();
         let Some(owner) = self.paths.get(&(id.kind, id.address.0)).copied() else {
             return;
         };
+        let Some(demands) = self.namespace.live_demands_for_reads(owner, &outcome.reads) else {
+            return;
+        };
+        let mut estimate = outcome.retained_bytes().unwrap_or(u64::MAX);
+        if let Some((output, materialized)) = raw {
+            estimate = estimate
+                .saturating_add(crate::memo::retained_tir_bytes(&output.value))
+                .saturating_add(crate::memo::retained_lowering_output_bytes(
+                    &output.diagnostics,
+                    &output.dependencies,
+                ));
+            let mut weight = crate::NativeMetadataWeight::default();
+            weight.vec(materialized, |weight, (_, value)| {
+                weight.materialized(value)
+            });
+            estimate = estimate.saturating_add(weight.bytes());
+        }
+        // Cloning and collecting source bindings uses the active task's scratch.
+        if estimate.saturating_mul(4) > self.weight.scratch {
+            return;
+        }
+        let mut outcome = outcome.clone();
+        outcome.observations = None;
+        outcome.diagnostic_sources = None;
+        if let Ok(Value::Lower(lower)) = &mut outcome.result {
+            let Some(verified) = lower.verified(self) else {
+                return;
+            };
+            lower.local_verified = verified;
+            lower.verified = None;
+            lower.live = None;
+        }
+        let mut raw = raw.clone();
+        let mut bindings = BTreeMap::new();
+        let mut valid = true;
+        visit(&mut outcome, &mut raw, |span| {
+            if span.anchor == hirsel_span::Anchor(0) {
+                return;
+            }
+            if let Some((path, occurrence)) = self.namespace.anchors.record_owner(span.anchor) {
+                bindings.insert(span.anchor, (DefId::intern(&path), occurrence));
+            } else {
+                valid = false;
+            }
+        });
+        if !valid {
+            return;
+        }
+        let Some(mut charge) = outcome.retained_bytes() else {
+            return;
+        };
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.tree::<hirsel_span::Anchor, (DefId, u32)>(bindings.len());
+        weight.add(demands.capacity() * size_of::<namespace::reopen::ManifestDemand>());
+        for demand in &demands {
+            weight.path(&demand.declaration);
+            weight.flat_vec(&demand.arguments);
+        }
+        if let Some((output, materialized)) = &raw {
+            let Some(bytes) = crate::memo::retained_tir_bytes(&output.value).checked_add(
+                crate::memo::retained_lowering_output_bytes(
+                    &output.diagnostics,
+                    &output.dependencies,
+                ),
+            ) else {
+                return;
+            };
+            charge = charge.saturating_add(bytes);
+            weight.vec(materialized, |weight, (_, value)| {
+                weight.materialized(value)
+            });
+        }
+        charge = charge.saturating_add(weight.bytes());
+        if charge > carry.allowance.bytes() || charge > self.weight.scratch {
+            return;
+        }
         carry.remember(
             (id.kind, key.0),
             Row {
-                manifest: scope,
                 generation: 0,
                 owner,
                 text: key.1,
                 reads: outcome.reads.clone(),
-                descriptor: descriptor.into(),
-                contents: contents.into_boxed_slice(),
-                lower,
-                constant_decode_bytes: match &outcome.result {
-                    Ok(Value::Constant(value)) => value.working_bytes(),
-                    _ => 0,
-                },
-                reads_decode_bytes: outcome.reads_decode_bytes,
-                execution: outcome.execution.clone(),
+                outcome,
+                raw,
+                demands,
+                bindings,
+                types: Arc::downgrade(self.namespace.snapshot.types()),
                 charge,
             },
         );
     }
-    /// The carried outcome of this query, adopted when its text and reads are
-    /// current. Its content returns to this graph's store before publication.
     pub(super) async fn load_carry(
         self: &Arc<Self>,
         id: QueryId,
@@ -351,45 +323,61 @@ impl FrontLowerQueries {
         query_reads: &QueryReads,
     ) -> Option<Result<ProductRef, Reference>> {
         let carry = self.carry()?;
-        let rows = carry.rows.lock().unwrap_or_else(|e| e.into_inner());
-        let row = rows.entries.get(&(id.kind, key.0))?.clone();
-        drop(rows);
+        let row = {
+            let rows = carry.rows.lock().unwrap_or_else(|e| e.into_inner());
+            let row = rows.entries.get(&(id.kind, key.0))?;
+            if row.text != key.1
+                || row.charge > self.weight.scratch
+                || !row
+                    .types
+                    .ptr_eq(&Arc::downgrade(self.namespace.snapshot.types()))
+            {
+                return None;
+            }
+            row.clone()
+        };
+        if let Some(producer) = self.demand_producer() {
+            let mut capture = self.namespace.clone();
+            let mut successor = None;
+            for demand in &row.demands {
+                let site = capture
+                    .bodies
+                    .get(&DefId::intern(&demand.declaration))
+                    .and_then(|body| body.queries.as_ref())
+                    .map(|keys| keys.site)
+                    .unwrap_or_default();
+                let product = producer
+                    .demand(
+                        &capture,
+                        &demand.declaration,
+                        &demand.arguments,
+                        site,
+                        query_reads.clone(),
+                    )
+                    .await
+                    .ok()?;
+                product.result.ok()?;
+                if let Some(next) = product.successor {
+                    capture = next.namespace().clone();
+                    successor = Some(next);
+                }
+            }
+            if let Some(successor) = successor
+                && capture.identity() != self.namespace.identity()
+            {
+                let owner = successor.owner().clone();
+                let actual = owner.id(path, id.kind)?;
+                return Some(self.forward_capture(id, actual, owner, query_reads).await);
+            }
+        } else if !row.demands.is_empty() {
+            return None;
+        }
         let clean = self
             .carry_changes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .is_some_and(|changes| changes.clean.get(&(id.kind, key.0)) == Some(&row.generation));
-        if row.text != key.1
-            || row.descriptor.len() as u64 > self.weight.scratch
-            || row.reads_decode_bytes > self.weight.scratch
-            || row.constant_decode_bytes > self.weight.scratch
-        {
-            return None;
-        }
-        for (domain, bytes) in &row.contents {
-            self.store.put_content(*domain, bytes)?;
-        }
-        if !self
-            .namespace
-            .manifest_inputs_hold(row.manifest, self.weight.scratch)
-        {
-            if !self.namespace.manifest_source_reads_hold(
-                row.manifest,
-                self.weight.scratch,
-                &row.reads,
-                |read| self.observe(path, read),
-            ) {
-                return None;
-            }
-            let producer = self.demand_producer()?;
-            let successor = producer
-                .reopen_manifest(&self.namespace, row.manifest, query_reads.clone())
-                .await?;
-            let owner = successor.owner().clone();
-            let actual = owner.id(path, id.kind)?;
-            return Some(self.forward_capture(id, actual, owner, query_reads).await);
-        }
         if !clean
             && row
                 .reads
@@ -398,151 +386,76 @@ impl FrontLowerQueries {
         {
             return None;
         }
-        if let Some(producer) = self.demand_producer() {
-            producer
-                .charge_manifest(
-                    &self.namespace,
-                    row.manifest,
-                    self.inputs
-                        .get(path)
-                        .map_or(Span::default(), |input| input.captured.site),
-                    query_reads,
-                )
-                .await
-                .ok()?;
-        }
-        let result = if id.kind == FRONT_LOWER_KIND {
-            let retained = row.lower.clone()?;
-            let (
-                definition,
-                body,
-                diagnostics,
-                dependencies,
-                materialized,
-                reads,
-                depth,
-                executed,
-                selections,
-                manifest,
-            ): reads::Descriptor = self
-                .records
-                .decode(&*self.namespace.anchors, &row.descriptor)?;
-            if !self
-                .namespace
-                .manifest_inputs_hold(manifest, self.weight.scratch)
+        let mut outcome = row.outcome;
+        let mut raw = row.raw;
+        let mut valid = true;
+        visit(&mut outcome, &mut raw, |span| {
+            if span.anchor == hirsel_span::Anchor(0) {
+                return;
+            }
+            if let Some(anchor) = row
+                .bindings
+                .get(&span.anchor)
+                .and_then(|(path, occurrence)| {
+                    self.namespace
+                        .anchors
+                        .record_source_anchor(path.path(), *occurrence)
+                })
             {
-                return None;
+                span.anchor = anchor;
+            } else {
+                valid = false;
             }
-            let lower = LowerProduct {
-                live: None,
-                local_verified: None,
-                definition,
-                body: Arc::new(std::sync::OnceLock::from(body)),
-                diagnostics,
-                dependencies: dependencies.into_inner(),
-                archived_metadata: None,
-                verified: retained.verified,
-                acceptance: retained.acceptance,
-                materialized: Arc::new(std::sync::OnceLock::from(materialized)),
-                definition_decode_layout: retained.definition_decode_layout,
-                constant_selection_bytes: retained.constant_selection_bytes,
-            };
-            (
-                Value::Lower(Box::new(lower)),
-                reads,
-                depth,
-                executed,
-                selections,
-            )
-        } else {
-            if row.constant_decode_bytes > self.weight.scratch {
-                return None;
-            }
-            let (value, substitutions, reads, depth, executed, selections, manifest): (
-                Materialized,
-                Vec<(hirsel_syntax::ExprId, Materialized)>,
-                Reads,
-                DepthEvidence<Span>,
-                bool,
-                staged::Selections,
-                Reference,
-            ) = self
-                .records
-                .decode(&*self.namespace.anchors, &row.descriptor)?;
-            if !self
-                .namespace
-                .manifest_inputs_hold(manifest, self.weight.scratch)
-            {
-                return None;
-            }
-            let mut constants = Constants::new(value, substitutions);
-            constants.set_working_bytes(row.constant_decode_bytes);
-            (
-                Value::Constant(Box::new(constants)),
-                reads,
-                depth,
-                executed,
-                selections,
-            )
-        };
-        let (value, reads, depth, executed, selections) = result;
-        let reads = evidence::current_reads(reads, row.execution.as_ref())?;
-        if reads.len() != row.reads.len() {
+        });
+        if !valid {
             return None;
         }
-        let reads_decode_bytes = row.reads_decode_bytes;
-        let execution = row.execution.clone();
-        let descriptor = row.descriptor.clone();
-        let domain = if id.kind == FRONT_LOWER_KIND {
-            LOWER_DESCRIPTOR
-        } else {
-            CONSTANT_DESCRIPTOR
-        };
-        if let Err(error) = self.restore_selections(&selections, query_reads).await {
+        if let Ok(Value::Lower(lower)) = &mut outcome.result {
+            lower.body = Arc::new(std::sync::OnceLock::new());
+            lower.materialized = Arc::new(std::sync::OnceLock::new());
+            lower.archived_metadata = None;
+        }
+        if let Err(error) = self
+            .restore_selections(&outcome.selections, query_reads)
+            .await
+        {
             return Some(Err(error));
         }
-        let result = self
-            .publish(
-                id,
-                key,
-                Outcome {
-                    diagnostic_sources: None,
-                    result: Ok(value),
-                    reads,
-                    reads_decode_bytes,
-                    selections,
-                    depth: depth.into(),
-                    executed,
-                    execution,
-                    execution_subject: persistent::evaluation_subject(key, &descriptor),
-                    action: hirsel_artifact_store::Action(persistent::evaluation_subject(
-                        key,
-                        &descriptor,
-                    )),
-                    observations: None,
-                },
-                Publication {
-                    domain,
-                    bytes: descriptor.clone().into(),
-                    persist: false,
-                    raw: None,
-                },
-                query_reads,
-            )
-            .await;
-        if clean && result.is_ok() {
-            self.clean_memos
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(crate::memo::MemoKey::new(
-                    if id.kind == FRONT_LOWER_KIND {
-                        QueryKind::Lower
-                    } else {
-                        QueryKind::Evaluate
-                    },
-                    DefId::intern(path),
-                ));
+        Some(self.publish_live(id, key, outcome, raw, query_reads).await)
+    }
+}
+fn visit(
+    outcome: &mut Outcome,
+    raw: &mut Option<RawLowerOutput>,
+    mut visit: impl FnMut(&mut Span),
+) {
+    let mut depth = outcome.depth.evidence();
+    for span in depth.first.iter_mut().flatten() {
+        visit(span);
+    }
+    outcome.depth = depth.into();
+    if let Ok(Value::Lower(lower)) = &mut outcome.result {
+        for diagnostic in &mut lower.diagnostics {
+            namespace::diagnostic_spans(diagnostic, &mut visit);
         }
-        Some(result)
+    }
+    if let Some((output, _)) = raw {
+        for diagnostic in &mut output.diagnostics {
+            namespace::diagnostic_spans(diagnostic, &mut visit);
+        }
+        for body in &mut Arc::make_mut(&mut output.value).bodies {
+            for local in &mut body.locals {
+                visit(&mut local.span);
+            }
+            for scope in &mut body.scopes {
+                visit(&mut scope.span);
+            }
+            for block in &mut body.blocks {
+                visit(&mut block.span);
+                for instruction in &mut block.instructions {
+                    visit(&mut instruction.span);
+                }
+            }
+        }
     }
 }

@@ -450,7 +450,7 @@ impl FrontLowerQueries {
         {
             return Some(Err(error));
         }
-        self.remember_carry(id, key, &descriptor, &outcome);
+        self.remember_imported_carry(id, key, &outcome);
         // A store view can pin an entire packed container. The descriptor's
         // length was bounded by this task's scratch partition above; detach
         // that payload before its archive takes a settled retention lease.

@@ -1,5 +1,5 @@
-//! Bounded accepted front facts across fresh source graphs. The ordinary
-//! type/anchor codec relocates data; no body, source map or controller survives.
+//! Admitted typed front facts across fresh source graphs. Complete read checks
+//! and bounded source bindings validate and relocate facts without archives.
 use super::*;
 use crate::memo::retained::Weight;
 
@@ -10,7 +10,9 @@ struct Row {
     text: ContentHash,
     reads: Arc<Reads>,
     reference: Option<Reference>,
-    bytes: Arc<[u8]>,
+    facts: Facts,
+    bindings: BTreeMap<hirsel_span::Anchor, (DefId, u32)>,
+    types: std::sync::Weak<hirsel_types::TypeInterner>,
     decode_bytes: u64,
     charge: u64,
 }
@@ -72,14 +74,17 @@ impl FrontCarry {
         text: ContentHash,
         reads: Arc<Reads>,
         reference: Option<Reference>,
-        bytes: Vec<u8>,
+        facts: Facts,
+        bindings: BTreeMap<hirsel_span::Anchor, (DefId, u32)>,
+        types: std::sync::Weak<hirsel_types::TypeInterner>,
         decode_bytes: u64,
     ) {
-        let mut charge = crate::NativeMetadataWeight::default();
-        charge.add(2 * size_of::<usize>() + bytes.len());
-        let mut read_weight = Weight::default();
-        read_weight.reads(&reads);
-        let charge = charge.bytes().saturating_add(read_weight.bytes);
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.tree::<hirsel_span::Anchor, (DefId, u32)>(bindings.len());
+        let charge = facts
+            .view()
+            .weight(false, Some(&reads), false)
+            .saturating_add(weight.bytes());
         let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
         let old = rows.entries.get(&key).map_or(0, |r| r.charge);
         let Some(used) = rows
@@ -131,7 +136,9 @@ impl FrontCarry {
                 text,
                 reads,
                 reference,
-                bytes: bytes.into(),
+                facts,
+                bindings,
+                types,
                 decode_bytes,
                 charge,
             },
@@ -159,7 +166,7 @@ pub(super) struct FactsRef<'a> {
     pub(super) lowering: Option<&'a lowering::LoweringUse>,
     pub(super) table_keys: Option<&'a Arc<crate::table_keys::TableKeyUse>>,
 }
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 #[serde(try_from = "PackedFacts")]
 pub(super) struct Facts {
     pub(super) summary: Option<Arc<PublishedSummary>>,
@@ -169,6 +176,74 @@ pub(super) struct Facts {
     pub(super) diagnostic_phases: Vec<(Diagnostic, String)>,
     pub(super) lowering: Option<lowering::LoweringUse>,
     pub(super) table_keys: Option<Arc<crate::table_keys::TableKeyUse>>,
+}
+impl Facts {
+    fn view(&self) -> FactsRef<'_> {
+        FactsRef {
+            summary: self.summary.clone(),
+            checked: &self.checked,
+            dead_arms: &self.dead_arms,
+            diagnostics: &self.diagnostics,
+            diagnostic_phases: &self.diagnostic_phases,
+            lowering: self.lowering.as_ref(),
+            table_keys: self.table_keys.as_ref(),
+        }
+    }
+    fn visit_spans_mut(&mut self, mut visit: impl FnMut(&mut Span)) {
+        fn checked(summary: &mut CheckedSummary, visit: &mut impl FnMut(&mut Span)) {
+            for call in &mut summary.summary.calls {
+                visit(&mut call.site);
+            }
+            for edge in &mut summary.growth.edges {
+                visit(&mut edge.3);
+            }
+        }
+        if let Some((summary, _, _)) = &mut self.checked {
+            checked(Arc::make_mut(summary), &mut visit);
+        }
+        if let Some(summary) = &mut self.summary {
+            let summary = Arc::make_mut(summary);
+            for call in &mut summary.summary.calls {
+                visit(&mut call.site);
+            }
+            for edge in &mut summary.growth.edges {
+                visit(&mut edge.3);
+            }
+            if let Some(value) = &mut summary.checked {
+                checked(Arc::make_mut(value), &mut visit);
+            }
+            summary.share_checked_storage();
+        }
+        fn diagnostic(diagnostic: &mut Diagnostic, visit: &mut impl FnMut(&mut Span)) {
+            visit(&mut diagnostic.primary);
+            for label in &mut diagnostic.secondary {
+                visit(&mut label.span);
+            }
+            if let Some(fix) = &mut diagnostic.fix {
+                visit(&mut fix.span);
+            }
+            for obligation in &mut diagnostic.obligations {
+                match obligation {
+                    hirsel_diag::Obligation::GenericBound { arguments } => {
+                        for argument in arguments {
+                            visit(argument);
+                        }
+                    }
+                    hirsel_diag::Obligation::ParameterMode { argument } => visit(argument),
+                    hirsel_diag::Obligation::Multiplicity | hirsel_diag::Obligation::CopyProof => {}
+                }
+            }
+        }
+        for value in &mut self.diagnostics {
+            diagnostic(value, &mut visit);
+        }
+        for (value, _) in &mut self.diagnostic_phases {
+            diagnostic(value, &mut visit);
+        }
+        if let Some(keys) = &mut self.table_keys {
+            Arc::make_mut(keys).visit_spans_mut(visit);
+        }
+    }
 }
 impl Facts {
     fn share_summary_reads(&mut self, reads: &Arc<Reads>) -> Option<()> {
@@ -518,7 +593,7 @@ impl BodyTask {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        if carry.is_none() && !queries.store.persistence().retains() {
+        if carry.is_none() {
             return;
         }
         let slots = queries.slots.lock().unwrap_or_else(|e| e.into_inner());
@@ -557,52 +632,49 @@ impl BodyTask {
         if facts.summary.as_ref().is_some_and(|s| s.storage.is_some()) {
             return;
         }
-        queries
-            .store
-            .archive_encoded(crate::store::ArchiveBoundary::Ordinary);
-        let Some((bytes, outer)) = queries
-            .records
-            .encode_record_with_decode_bytes(&facts, |anchor| {
-                queries.citations.record_owner(anchor)
-            })
-        else {
+        if facts.bytes(true) > self.weight.scratch {
             return;
+        }
+        let facts = Facts {
+            summary: facts.summary.clone(),
+            checked: facts.checked.clone(),
+            dead_arms: facts.dead_arms.clone(),
+            diagnostics: facts.diagnostics.clone(),
+            diagnostic_phases: facts.diagnostic_phases.clone(),
+            lowering: facts.lowering.cloned(),
+            table_keys: facts.table_keys.cloned(),
         };
-        let Some(decode_bytes) = outer.checked_add(facts.bytes(true)) else {
+        if let Some(carry) = carry {
+            self.remember_live_facts(&carry, reference, outcome.reads.clone(), facts);
+        }
+    }
+    fn remember_live_facts(
+        &self,
+        carry: &FrontCarry,
+        reference: Option<Reference>,
+        reads: Arc<Reads>,
+        mut facts: Facts,
+    ) {
+        let queries = &self.queries;
+        let mut bindings = BTreeMap::new();
+        let mut valid = true;
+        facts.visit_spans_mut(|span| {
+            if span.anchor == hirsel_span::Anchor(0) {
+                return;
+            }
+            if let Some((owner, occurrence)) = queries.citations.record_owner(span.anchor) {
+                bindings.insert(span.anchor, (DefId::intern(&owner), occurrence));
+            } else {
+                valid = false;
+            }
+        });
+        if !valid {
             return;
-        };
+        }
+        let decode_bytes = facts.view().bytes(true);
         if decode_bytes > self.weight.scratch {
             return;
         }
-        self.store_compact(reference, &outcome.reads, &bytes, decode_bytes);
-        if let Some(carry) = carry {
-            carry.remember(
-                queries.inputs[&self.input].key.0,
-                queries.inputs[&self.input].definition,
-                queries.inputs[&self.input].key.1,
-                outcome.reads.clone(),
-                reference,
-                bytes,
-                decode_bytes,
-            );
-        }
-    }
-    pub(super) fn remember_cached_carry(
-        &self,
-        reference: Option<Reference>,
-        reads: Arc<Reads>,
-        bytes: Vec<u8>,
-        decode_bytes: u64,
-    ) {
-        let queries = &self.queries;
-        let Some(carry) = queries
-            .carry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        else {
-            return;
-        };
         let input = &queries.inputs[&self.input];
         carry.remember(
             input.key.0,
@@ -610,9 +682,32 @@ impl BodyTask {
             input.key.1,
             reads,
             reference,
-            bytes,
+            facts,
+            bindings,
+            Arc::downgrade(&queries.types),
             decode_bytes,
         );
+    }
+    pub(super) fn remember_cached_carry(
+        &self,
+        reference: Option<Reference>,
+        reads: Arc<Reads>,
+        bytes: Vec<u8>,
+        _decode_bytes: u64,
+    ) {
+        let Some(carry) = self
+            .queries
+            .carry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        else {
+            return;
+        };
+        let Some(facts) = self.decode_facts(&bytes, &reads) else {
+            return;
+        };
+        self.remember_live_facts(&carry, reference, reads, facts);
     }
     pub(super) fn load_carry(
         &self,
@@ -645,7 +740,33 @@ impl BodyTask {
         {
             return None;
         }
-        let facts = self.decode_facts(&row.bytes, &row.reads)?;
+        if !row.types.ptr_eq(&Arc::downgrade(&queries.types)) {
+            return None;
+        }
+        let mut facts = row.facts.clone();
+        let mut valid = true;
+        facts.visit_spans_mut(|span| {
+            if span.anchor == hirsel_span::Anchor(0) {
+                return;
+            }
+            if let Some(anchor) = row
+                .bindings
+                .get(&span.anchor)
+                .and_then(|(owner, occurrence)| {
+                    queries
+                        .citations
+                        .owners
+                        .record_source_anchor(owner.path(), *occurrence)
+                })
+            {
+                span.anchor = anchor;
+            } else {
+                valid = false;
+            }
+        });
+        if !valid {
+            return None;
+        }
         let reference = row.reference;
         let reads = row.reads.clone();
         // Completion takes the slots lock, while capture takes it before carry.
@@ -800,7 +921,21 @@ mod tests {
                         *key,
                         Arc::new(Reads::from_vec(vec![(ReadKey::Environment, *key)]).unwrap()),
                         Some(reference),
-                        vec![9; 64],
+                        Facts {
+                            summary: None,
+                            checked: None,
+                            dead_arms: None,
+                            diagnostics: vec![Diagnostic::error(
+                                const { hirsel_diag::RuleId::of("CT-4") },
+                                Span::default(),
+                                "9".repeat(64),
+                            )],
+                            diagnostic_phases: vec![],
+                            lowering: None,
+                            table_keys: None,
+                        },
+                        BTreeMap::new(),
+                        std::sync::Weak::new(),
                         1024,
                     );
                 }
@@ -829,7 +964,21 @@ mod tests {
                     *key,
                     Arc::new(Reads::from_vec(vec![(ReadKey::Environment, *key)]).unwrap()),
                     Some(reference),
-                    vec![9; 64],
+                    Facts {
+                        summary: None,
+                        checked: None,
+                        dead_arms: None,
+                        diagnostics: vec![Diagnostic::error(
+                            const { hirsel_diag::RuleId::of("CT-4") },
+                            Span::default(),
+                            "9".repeat(64),
+                        )],
+                        diagnostic_phases: vec![],
+                        lowering: None,
+                        table_keys: None,
+                    },
+                    BTreeMap::new(),
+                    std::sync::Weak::new(),
                     1024,
                 );
             }

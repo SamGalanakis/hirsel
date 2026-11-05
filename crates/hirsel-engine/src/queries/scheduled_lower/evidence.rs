@@ -12,31 +12,6 @@ pub(super) fn persisted_reads(reads: &Reads, receipt: Option<&ExecutionReceipt>)
     }
 }
 
-/// Retain observation positions in transport without persisting a validation
-/// stamp as a source input. Only a locally revalidated receipt fills these slots.
-pub(super) fn archived_reads(reads: &Reads, receipt: Option<&ExecutionReceipt>) -> Option<Reads> {
-    let Some(receipt) = receipt else {
-        return Some(reads.clone());
-    };
-    persisted_reads(reads, Some(receipt))?;
-    Reads::from_vec(
-        reads
-            .observed()
-            .map(|(key, hash)| {
-                (
-                    *key,
-                    if matches!(key, ReadKey::ValidationUniverse(_)) {
-                        hirsel_syntax::ContentHash::default()
-                    } else {
-                        *hash
-                    },
-                )
-            })
-            .collect(),
-    )
-    .ok()
-}
-
 /// Only V's current opaque receipt restores archived validation observations.
 pub(in crate::queries) fn current_reads(
     reads: Reads,

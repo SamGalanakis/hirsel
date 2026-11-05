@@ -3,7 +3,7 @@
 use super::*;
 use crate::store::{Domain, EntryKey, Reference};
 use crate::{NativeRecordContext, NativeRecords};
-mod reopen;
+pub(in crate::queries) mod reopen;
 
 const GENERATION: Domain = Domain {
     kind: 0x4601_0008,
@@ -1646,5 +1646,29 @@ mod tests {
                 "the final payload lease releases its reservation"
             );
         });
+    }
+}
+
+pub(in crate::queries) fn diagnostic_spans(
+    diagnostic: &mut Diagnostic,
+    mut visit: impl FnMut(&mut Span),
+) {
+    visit(&mut diagnostic.primary);
+    for label in &mut diagnostic.secondary {
+        visit(&mut label.span);
+    }
+    if let Some(fix) = &mut diagnostic.fix {
+        visit(&mut fix.span);
+    }
+    for obligation in &mut diagnostic.obligations {
+        match obligation {
+            hirsel_diag::Obligation::GenericBound { arguments } => {
+                for argument in arguments {
+                    visit(argument);
+                }
+            }
+            hirsel_diag::Obligation::ParameterMode { argument } => visit(argument),
+            hirsel_diag::Obligation::Multiplicity | hirsel_diag::Obligation::CopyProof => {}
+        }
     }
 }

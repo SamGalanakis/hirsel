@@ -4,10 +4,6 @@ use super::*;
 use crate::queries::generation::task::PreparedGenerator;
 
 pub const FRONT_REGISTRATION_KIND: u32 = 0x4601_0004;
-const INPUT: Domain = Domain {
-    kind: 0x4601_0005,
-    schema: 1,
-};
 const OUTPUT: Domain = Domain {
     kind: 0x4601_0006,
     schema: 3,
@@ -19,7 +15,7 @@ const FAILURE: Domain = Domain {
 struct Input {
     key: EntryKey,
     definition: DefId,
-    syntax: Reference,
+    syntax: Arc<ItemSyntax>,
     implementation: ContentHash,
     site: Span,
     instance_reads: Reads,
@@ -41,7 +37,7 @@ pub(in crate::queries) struct Data {
     dependencies: Vec<SignatureDependency>,
     depth: DepthEvidence<Span>,
     acceptance: Option<hirsel_validate::ExecutionReceipt>,
-    decode_bytes: u64,
+    failure: Option<Reference>,
     _allowance: Option<hirsel_engine_admission::MemoryReservation>,
 }
 type Completed = (ProductRef, Arc<Data>);
@@ -50,6 +46,20 @@ type Completed = (ProductRef, Arc<Data>);
 #[derive(Clone)]
 pub struct FrontRegistrationOutput {
     data: Arc<Data>,
+}
+impl serde::Serialize for Data {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(
+            &(
+                &self.definition,
+                &self.text,
+                &self.reads,
+                &self.depth,
+                &self.dependencies,
+            ),
+            serializer,
+        )
+    }
 }
 impl Data {
     pub(in crate::queries) fn manifest(&self) -> ContentHash {
@@ -154,10 +164,9 @@ impl FrontRegistrationQueries {
     }
     pub fn failed(self: &Arc<Self>, reference: Reference) -> Option<FrontRegistrationOutput> {
         let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
-        let (_, (_, data)) = outcomes.iter().find(|(_, (p, _))| {
-            p.archive(ArchiveAdmission::Retained)
-                .is_ok_and(|archive| archive.reference() == reference)
-        })?;
+        let (_, (_, data)) = outcomes
+            .iter()
+            .find(|(_, (_, data))| data.failure == Some(reference))?;
         Some(FrontRegistrationOutput { data: data.clone() })
     }
     pub(in crate::queries) async fn run(
@@ -288,34 +297,15 @@ impl FrontRegistrationQueries {
                     dependencies,
                     depth,
                     acceptance,
-                    decode_bytes: 0,
+                    failure: None,
                     _allowance: None,
                 }),
                 source.capture(),
             )
         };
-        let (bytes, record_decode_bytes) = self
-            .lower
-            .records
-            .encode_with_decode_bytes(
-                &namespace::DiagnosticRecordSource {
-                    base: &namespace.anchors,
-                    diagnostics: data.diagnostic_sources.as_deref(),
-                },
-                &(
-                    input.definition,
-                    &data.text,
-                    &data.reads,
-                    &data.depth,
-                    &data.dependencies,
-                ),
-            )
-            .ok_or(self.errors.resource)?;
-        if bytes.len() as u64 > self.weight.scratch {
-            return Err(self.errors.resource);
-        }
         let mut weight = crate::NativeMetadataWeight::default();
         weight.arc(&data);
+        weight.add(size_of::<live_record::LiveRecord<Arc<Data>>>() + 2 * size_of::<usize>());
         match &data.text {
             Ok(text) => weight.add(text.capacity()),
             Err(error) => weight.add(
@@ -345,41 +335,78 @@ impl FrontRegistrationQueries {
         Arc::get_mut(&mut data)
             .expect("unpublished generator output")
             ._allowance = Some(allowance);
-        let failed = data.text.is_err();
-        let record = self
-            .lower
-            .store
-            .put_content(if failed { FAILURE } else { OUTPUT }, &bytes)
-            .ok_or(self.errors.resource)?;
+        let failed = if data.text.is_err() {
+            let bytes = self
+                .lower
+                .records
+                .encode(
+                    &namespace::DiagnosticRecordSource {
+                        base: &namespace.anchors,
+                        diagnostics: data.diagnostic_sources.as_deref(),
+                    },
+                    &*data,
+                )
+                .ok_or(self.errors.resource)?;
+            if bytes.len() as u64 > self.weight.scratch {
+                return Err(self.errors.resource);
+            }
+            let record = self
+                .lower
+                .store
+                .put_content(FAILURE, &bytes)
+                .ok_or(self.errors.resource)?;
+            Arc::get_mut(&mut data)
+                .expect("unpublished generator failure")
+                .failure = Some(record);
+            Some((record, bytes))
+        } else {
+            None
+        };
+        let identity = match &data.text {
+            Ok(text) => ContentHash::of_bytes(text.as_bytes()),
+            Err(_) => failed.as_ref().expect("encoded failure").0.output.0,
+        };
         let action = hirsel_artifact_store::Action(ContentHash::of_parts(
-            "hirsel.front.registration.action.v1",
+            "hirsel.front.registration.action.v2",
             [
                 id.address.0.0.as_slice(),
                 namespace.manifest.0.as_slice(),
                 data.reads.digest().0.as_slice(),
-                record.output.0.0.as_slice(),
+                identity.0.as_slice(),
             ],
         ));
-        let product = ProductRef::import_archive(
-            id.address,
-            action,
-            ProductArchive::from_encoded_in(record, bytes, &self.output_pool)
-                .map_err(|_| self.errors.resource)?,
-        );
-        Arc::get_mut(&mut data)
-            .expect("unpublished generator output")
-            .decode_bytes = weight
-            .bytes()
-            .checked_mul(2)
-            .and_then(|bytes| bytes.checked_add(record_decode_bytes))
-            .ok_or(self.errors.resource)?;
+        let failure = failed.as_ref().map(|(record, _)| *record);
+        let product = if let Some((record, bytes)) = failed {
+            ProductRef::import_archive(
+                id.address,
+                action,
+                ProductArchive::from_encoded_in(record, bytes, &self.output_pool)
+                    .map_err(|_| self.errors.resource)?,
+            )
+        } else {
+            ProductRef::live(
+                id.address,
+                action,
+                Arc::new(live_record::LiveRecord {
+                    value: data.clone(),
+                    domain: OUTPUT,
+                    records: self.lower.records.clone(),
+                    source: (*namespace.anchors).clone(),
+                    serialization_working: self.weight.scratch,
+                    _admission: data.clone(),
+                }),
+            )
+        };
         self.outcomes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id.address.0, (product.clone(), data));
-        if failed { Err(record) } else { Ok(product) }
+        failure.map_or(Ok(product), Err)
     }
     pub(in crate::queries) fn commit(&self, product: &ProductRef) {
+        if !self.lower.store.persistence().retains() {
+            return;
+        }
         let Some(input) = self.inputs.get(&product.address.0) else {
             return;
         };
@@ -391,16 +418,28 @@ impl FrontRegistrationQueries {
         if &current != product || data.text.is_err() {
             return;
         }
-        let Ok(archive) = product.archive(ArchiveAdmission::Retained) else {
+        let Some((bytes, working)) = self
+            .lower
+            .records
+            .encode_with_decode_bytes(&*data.namespace.anchors, &*data)
+        else {
             return;
         };
-        self.remember(
-            input,
-            archive.reference(),
-            &data,
-            data.decode_bytes,
-            data.namespace.manifest,
-        );
+        if bytes.len() as u64 > self.weight.scratch {
+            return;
+        }
+        let Some(decode_bytes) = data
+            ._allowance
+            .as_ref()
+            .and_then(|grant| grant.bytes().checked_mul(2))
+            .and_then(|bytes| bytes.checked_add(working))
+        else {
+            return;
+        };
+        let Some(output) = self.lower.store.put_content(OUTPUT, &bytes) else {
+            return;
+        };
+        self.remember(input, output, &data, decode_bytes, data.namespace.manifest);
     }
     fn storage_key(input: &Input) -> EntryKey {
         EntryKey(
@@ -498,7 +537,7 @@ impl FrontRegistrationQueries {
             dependencies,
             depth,
             acceptance,
-            decode_bytes: stored.decode_bytes,
+            failure: None,
             _allowance: None,
         })
     }
@@ -541,17 +580,7 @@ impl FrontRegistrationQueries {
         source: &mut Source,
         dependencies: &mut Vec<SignatureDependency>,
     ) -> Result<String, QueryError> {
-        let bytes = self
-            .lower
-            .store
-            .get_content(input.syntax)
-            .ok_or(QueryError::NotImplemented)?;
-        let (mut syntax, occurrence): (ItemSyntax, u32) = self
-            .lower
-            .records
-            .decode(&*self.lower.namespace.anchors, &bytes)
-            .ok_or(QueryError::NotImplemented)?;
-        syntax.occurrence = occurrence;
+        let syntax = input.syntax.clone();
         if syntax.item.definition != *input.definition.path()
             || syntax.text_hash != input.implementation
             || !syntax.structurally_valid(|span| self.lower.namespace.sources.slice(span).is_some())
@@ -562,7 +591,7 @@ impl FrontRegistrationQueries {
             return Err(QueryError::NotImplemented);
         }
         let prepared = self.lower.front.prepare_generator(
-            Arc::new(syntax),
+            syntax,
             &*self.signer,
             !input.instance_reads.is_empty(),
         );
@@ -721,11 +750,12 @@ impl QueryEngine {
             let key = self
                 .store_key(definition, QueryKind::Generate)
                 .ok_or_else(refused)?;
-            let bytes = lower
-                .records
-                .encode(&*lower.namespace.anchors, &(&syntax, syntax.occurrence))
+            required = required
+                .checked_add(crate::memo::retained::retained_syntax_bytes(&syntax))
                 .ok_or_else(refused)?;
-            let archived = lower.store.put_content(INPUT, &bytes).ok_or_else(refused)?;
+            if required > available {
+                return Err(refused());
+            }
             // Generator declarations are absent from the ordinary-body front.
             // Capture their original header requests here, before workers run.
             let signature = self.signature_output(definition)?;
@@ -756,7 +786,7 @@ impl QueryEngine {
                 Input {
                     key,
                     definition: DefId::intern(definition),
-                    syntax: archived,
+                    syntax: syntax.clone(),
                     implementation: syntax.text_hash,
                     site: syntax.item.name_span,
                     instance_reads,

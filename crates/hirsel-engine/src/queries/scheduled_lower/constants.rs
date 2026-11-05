@@ -63,45 +63,6 @@ impl Constants {
             }
         }
     }
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn encode(
-        &mut self,
-        records: &crate::NativeRecords,
-        anchors: &crate::NativeRecordContext,
-        reads: &Reads,
-        descriptor_reads: &Reads,
-        depth: &DepthEvidence<Span>,
-        executed: bool,
-        selections: &staged::Selections,
-        manifest: Reference,
-    ) -> Option<Vec<u8>> {
-        let Data::Decoded(value, substitutions) = &self.data else {
-            return None;
-        };
-        let (bytes, record_working) = records.encode_with_decode_bytes(
-            anchors,
-            &(
-                value,
-                substitutions,
-                descriptor_reads,
-                depth,
-                executed,
-                selections,
-                manifest,
-            ),
-        )?;
-        let metadata = reads
-            .allocations()
-            .map(|(_, bytes)| bytes as u64)
-            .try_fold(size_of_val(&*depth.first) as u64, u64::checked_add)?;
-        self.decode_bytes = self
-            .data_bytes
-            .checked_add(metadata)?
-            .checked_add(staged::selection_bytes(selections))?
-            .checked_mul(2)?
-            .checked_add(record_working)?;
-        Some(bytes)
-    }
     pub(super) fn pack(&mut self, record: Reference) {
         if self.data_bytes >= 4096 {
             // The store already owns this immutable descriptor, as it owns
@@ -158,18 +119,24 @@ mod tests {
         let substitutions = vec![(hirsel_syntax::ExprId(0), value.clone())];
         let mut constants = Constants::new(value.clone(), substitutions.clone());
         let decoded_bytes = constants.retained_bytes();
-        let bytes = constants
-            .encode(
-                &records,
+        let (bytes, working) = records
+            .encode_with_decode_bytes(
                 &anchors,
-                &Reads::default(),
-                &Reads::default(),
-                &DepthEvidence::leaf(32),
-                false,
-                &Vec::new(),
-                CONSTANT_DESCRIPTOR.reference(b"manifest fixture").unwrap(),
+                &(
+                    &value,
+                    &substitutions,
+                    &Reads::default(),
+                    &DepthEvidence::<Span>::leaf(32),
+                    false,
+                    &Vec::<(DefId, Vec<u64>)>::new(),
+                    CONSTANT_DESCRIPTOR.reference(b"manifest fixture").unwrap(),
+                ),
             )
             .unwrap();
+        constants.set_working_bytes(
+            2 * (decoded_bytes + size_of_val(&*DepthEvidence::<Span>::leaf(32).first) as u64)
+                + working,
+        );
         let record = store.put_content(CONSTANT_DESCRIPTOR, &bytes).unwrap();
         constants.pack(record);
         assert!(matches!(constants.data, Data::Packed(_)));

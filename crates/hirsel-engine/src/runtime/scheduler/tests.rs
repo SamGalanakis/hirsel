@@ -1852,12 +1852,21 @@ fn shutdown_returns_one_charge_after_cleanup_and_reuses_it_across_admitted_round
 }
 
 fn bare_node() -> super::Node {
+    struct EmptyTask;
+    impl QueryTask for EmptyTask {
+        fn id(&self) -> QueryId {
+            query(0)
+        }
+        fn weight(&self) -> MemoryWeight {
+            MemoryWeight::default()
+        }
+        fn poll(&mut self, _: &mut dyn QueryContext) -> QueryPoll {
+            QueryPoll::Complete(product(self.id()))
+        }
+    }
     super::Node {
         state: NodeState::Ready(Box::new(ParkedExecution {
-            task: ParkedTask::Send(Box::new(Task {
-                id: query(0),
-                spec: Spec::deps(&[]),
-            })),
+            task: ParkedTask::Send(Box::new(EmptyTask)),
             charge: Charge {
                 weight: MemoryWeight::default(),
                 continuation: 0,

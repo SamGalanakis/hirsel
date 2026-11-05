@@ -1306,9 +1306,9 @@ impl QueryContext for Context<'_> {
             && state.nodes.consume_read(self.generation, dependency)
         {
             state.edges = state.nodes.edge_count();
-            let keep_lower = state
-                .result(dependency)
-                .is_some_and(|result| result.is_ok_and(|product| product.lower_value().is_some()));
+            let keep_lower = state.result(dependency).is_some_and(|result| {
+                result.is_ok_and(|product| product.retain_after_consumption())
+            });
             state.retire_node(dependency, keep_lower);
             state.advance_progress();
             state.account();
@@ -1379,8 +1379,7 @@ impl QueryContext for Context<'_> {
                     .as_ref()
                     .as_ref()
                     .ok()
-                    .and_then(|product| product.lower_value())
-                    .is_none_or(|body| body.prepare_eviction(scratch))
+                    .is_none_or(|product| product.prepare_eviction(scratch))
                 {
                     break key;
                 }

@@ -10,6 +10,10 @@ pub trait LiveProductValue: Any + Send + Sync {
     fn cache_only(&self) -> bool {
         false
     }
+    /// Keep a settled value available after its dependency read is consumed.
+    fn retain_after_consumption(&self) -> bool {
+        false
+    }
     fn prepare_eviction(&self, _scratch: u64) -> bool {
         self.cache_only()
     }
@@ -85,6 +89,9 @@ impl ProductRef {
     }
     pub fn cache_only(&self) -> bool {
         matches!(&self.value, Value::Live(value) if Arc::strong_count(&value.value) == 1 && value.value.cache_only())
+    }
+    pub fn retain_after_consumption(&self) -> bool {
+        matches!(&self.value, Value::Live(value) if value.value.retain_after_consumption())
     }
     pub fn prepare_eviction(&self, scratch: u64) -> bool {
         matches!(&self.value, Value::Live(value) if Arc::strong_count(&value.value) == 1 && value.value.prepare_eviction(scratch))

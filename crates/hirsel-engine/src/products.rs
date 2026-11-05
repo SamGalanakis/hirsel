@@ -5,7 +5,7 @@ use crate::memo::{DepthEvidence, retained::Weight};
 use crate::{
     NativeRecordContext, NativeRecordSource, NativeRecords, PublishedSummary, Reads, SummaryView,
 };
-use hirsel_artifact_store::{Action, Address, Domain};
+use hirsel_artifact_store::{Action, Address, Domain, Reference};
 use hirsel_engine_admission::{RetainedArchiveLease, retained_arc_bytes};
 use hirsel_engine_runtime::{ArchiveAdmission, ProductArchive};
 use hirsel_span::Span;
@@ -1738,7 +1738,7 @@ mod dependency_tests {
     use crate::store::Reference;
     use crate::store::RequestStore;
     use crate::store::ResultStore;
-    use hirsel_artifact_store::{Action, Address, Domain};
+    use hirsel_artifact_store::{Action, Address, Domain, Reference};
     use hirsel_engine_runtime::{ArchiveAdmission, LiveDependencyProduct, ProductRef};
     use std::sync::Arc;
 
@@ -1998,6 +1998,9 @@ impl hirsel_engine_runtime::LiveProductValue for LiveLowerProduct {
         (other as &dyn std::any::Any)
             .downcast_ref::<Self>()
             .is_some_and(|other| self.same_owner(other))
+    }
+    fn retain_after_consumption(&self) -> bool {
+        true
     }
     fn prepare_eviction(&self, scratch: u64) -> bool {
         self.cache_only() && LiveLowerProduct::prepare_eviction(self, scratch)

@@ -2348,7 +2348,8 @@ impl FrontLowerQueries {
                     }
                 };
                 lower.live = Some(live.downgrade());
-                ProductRef::lower(live)
+                live.publish(self.store.as_ref())
+                    .map_err(|_| self.errors.resource)?
             }
             (Ok(Value::Constant(value)), _) => {
                 let (root, substitutions) = value

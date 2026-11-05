@@ -15,7 +15,7 @@ fn settled_native_declaration_assembly_runs_without_a_source_controller() {
         engine.parse_file(file, &default_context()).unwrap();
         let facts = crate::native_front_fixture::products(&mut engine, &[]).unwrap();
         let roots = facts.roots.clone();
-        let catalogue = facts
+        let mut catalogue = facts
             .catalogue
             .iter()
             .map(|product| (**product).clone())
@@ -56,6 +56,38 @@ fn settled_native_declaration_assembly_runs_without_a_source_controller() {
                 &signatures,
                 roots.clone(),
                 crossed,
+                statics.clone(),
+                extra.clone()
+            )
+            .is_err()
+        );
+        // A reclaimed header may reopen in a fresh allocation. Exact source
+        // identity survives that lifetime boundary; changed content does not.
+        for product in &mut catalogue {
+            let source = Arc::make_mut(&mut product.source);
+            source.signature = Arc::new((*source.signature).clone());
+        }
+        let mut changed_digest = catalogue.clone();
+        Arc::make_mut(&mut Arc::make_mut(&mut changed_digest[0].source).signature).fingerprint =
+            hirsel_syntax::ContentHash::of_bytes(b"different source signature");
+        assert!(
+            NativeDeclarations::from_settled(
+                &signatures,
+                roots.clone(),
+                changed_digest,
+                statics.clone(),
+                extra.clone()
+            )
+            .is_err()
+        );
+        let mut changed_id = catalogue.clone();
+        Arc::make_mut(&mut Arc::make_mut(&mut changed_id[0].source).signature).definition =
+            catalogue.last().unwrap().source.signature.definition;
+        assert!(
+            NativeDeclarations::from_settled(
+                &signatures,
+                roots.clone(),
+                changed_id,
                 statics.clone(),
                 extra.clone()
             )

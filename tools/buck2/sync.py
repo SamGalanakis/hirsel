@@ -208,6 +208,15 @@ FULL_GATE_SKIPS = {
     "hirsel-conformance-test-it": ["native_gate::stored_configuration_retains_independent_seeds_and_baseline_names"],
 }
 
+# Their tests live in integration/proof targets, not these empty entry points.
+EMPTY_UNIT_HARNESSES = {
+    "hirsel-analysis-canary-unittest",
+    "hirsel-code-store-unittest",
+    "hirsel-heaps-loom-unittest",
+    "hirsel-native-build-bin-hirsel-native-build-unittest",
+    "hirsel-remote-unittest",
+}
+
 # Required startup consumers include these existing full-gate HTTP launches.
 CONSUMER_CASES = {
     "hirsel-cli-test-cli": {
@@ -975,7 +984,7 @@ def first_party(meta: dict) -> str:
                     feature_deps=feature_deps(package),
                     **{**attrs, "features": ["default"], "build_script": None},
                 ))
-            if lib.get("test", True):
+            if lib.get("test", True) and f"{name}-unittest" not in EMPTY_UNIT_HARNESSES:
                 binary = f"{name}-unittest"
                 count, costs, case_shards = shards(binary)
                 out.append("\n" + call("hirsel_test", **profile, name=binary, deps=test_deps,
@@ -1000,7 +1009,7 @@ def first_party(meta: dict) -> str:
             )
             if kind == "bin":
                 out.append("\n" + call("hirsel_binary", **profile, name=f"{name}-bin-{target['name']}", bin_name=target["name"], deps=own + normal, **attrs))
-                if target.get("test", True):
+                if target.get("test", True) and f"{name}-bin-{target['name']}-unittest" not in EMPTY_UNIT_HARNESSES:
                     out.append("\n" + call("hirsel_test", **profile, name=f"{name}-bin-{target['name']}-unittest", deps=own + test_deps,
                                              **test_attrs(f"{name}-bin-{target['name']}-unittest", src), **attrs))
             elif kind == "example":

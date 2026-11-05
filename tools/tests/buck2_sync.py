@@ -278,8 +278,8 @@ class NativePoolRouting(unittest.TestCase):
         rust_tests = '\n'.join(block.split('\n)\n', 1)[0] for block in buck.split('hirsel_test(\n')[1:])
         self.assertNotIn('host = True', rust_tests)
         hosts = [block for block in buck.split('\n)\n') if 'host = True' in block]
-        self.assertEqual(len(hosts), 1)
-        self.assertIn('name = \"gate-free-genmc\"', hosts[0])
+        self.assertEqual({block.split('name = "', 1)[1].split('"', 1)[0] for block in hosts},
+                         {'gate-free-genmc', 'test-land'})
 
 
 class GuardedRoots(unittest.TestCase):

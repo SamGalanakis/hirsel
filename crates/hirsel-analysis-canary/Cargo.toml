@@ -5,9 +5,6 @@ edition.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-[lib]
-test = false
-
 # Two toy out-of-process analyses over the TIR export (PS-17..PS-19). They
 # link only the export's importer and the data crates it decodes into.
 [dependencies]

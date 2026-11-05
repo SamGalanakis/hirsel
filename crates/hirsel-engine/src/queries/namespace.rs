@@ -1055,6 +1055,32 @@ mod tests {
             assert_eq!(store.writes.load(Ordering::Relaxed), 0);
         });
     }
+    struct Header;
+    impl SignaturePhase for Header {
+        fn signature(
+            &self,
+            types: &hirsel_types::TypeInterner,
+            _: &hirsel_types::TypeMemo,
+            syntax: Arc<ItemSyntax>,
+            _: &Declarations,
+            products: &mut PhaseProducts,
+            _: &mut dyn SignatureProvider,
+        ) -> Result<QueryOutput<hirsel_types::Signature>, QueryError> {
+            products.resolution = Some(crate::ResolverSnapshot {
+                syntax: syntax.clone(),
+                output: output(Default::default()),
+            });
+            Ok(output(hirsel_types::Signature {
+                metadata: Default::default(),
+                definition: DefId::intern(&syntax.item.definition),
+                kind: hirsel_types::SignatureKind::Const {
+                    ty: types.intern(hirsel_types::Type::unit()),
+                    generics: Default::default(),
+                },
+                fingerprint: syntax.text_hash,
+            }))
+        }
+    }
     #[test]
     fn request_demanders_parse_and_project_one_live_source_once() {
         struct Parser {
@@ -1071,32 +1097,6 @@ mod tests {
             ) -> Result<QueryOutput<SyntaxFile>, QueryError> {
                 self.calls.fetch_add(1, Ordering::Relaxed);
                 self.inner.parse(file, tokens, context, sources)
-            }
-        }
-        struct Header;
-        impl SignaturePhase for Header {
-            fn signature(
-                &self,
-                types: &hirsel_types::TypeInterner,
-                _: &hirsel_types::TypeMemo,
-                syntax: Arc<ItemSyntax>,
-                _: &Declarations,
-                products: &mut PhaseProducts,
-                _: &mut dyn SignatureProvider,
-            ) -> Result<QueryOutput<hirsel_types::Signature>, QueryError> {
-                products.resolution = Some(crate::ResolverSnapshot {
-                    syntax: syntax.clone(),
-                    output: output(Default::default()),
-                });
-                Ok(output(hirsel_types::Signature {
-                    metadata: Default::default(),
-                    definition: DefId::intern(&syntax.item.definition),
-                    kind: hirsel_types::SignatureKind::Const {
-                        ty: types.intern(hirsel_types::Type::unit()),
-                        generics: Default::default(),
-                    },
-                    fingerprint: syntax.text_hash,
-                }))
             }
         }
         crate::with_compiler_stack(|| {
@@ -1213,6 +1213,7 @@ mod tests {
             let store = Arc::new(MemStore::default());
             drop(indexed(store.clone()));
             let (mut engine, definitions) = indexed(store);
+            engine.adapters.signature = Some(Arc::new(Header));
             assert!(engine.items.is_empty());
             let capture = engine
                 .capture_namespace(&definitions, &[], 8 << 20)
@@ -1222,9 +1223,6 @@ mod tests {
             let headers = capture.snapshot.header_products().unwrap().clone();
             let definition = DefId::intern(&definitions[0]);
             let package = definitions[0].0.package.clone();
-            let signature = capture.snapshot.signature(definition).unwrap().unwrap();
-            let expected = hirsel_validate::View::new(&types, signature.clone(), None).digest();
-            capture.snapshot.package_universe(&package).unwrap();
             let budget = crate::runtime::ProcessBudget::new(8 << 20);
             let pool = Arc::new(
                 crate::runtime::MemoryReservationPool::new(budget.reserve(8 << 20).unwrap())
@@ -1236,9 +1234,14 @@ mod tests {
                 Arc::new(Allowance(pool.clone())),
                 Arc::new(std::sync::Mutex::new(before)),
             );
-            drop(capture.syntax(&definitions[0]).unwrap());
+            for definition in &definitions {
+                drop(capture.syntax(definition).unwrap());
+            }
             let retained = pool.available_bytes();
             assert!(retained < before, "the live source owns its syntax charge");
+            let signature = capture.snapshot.signature(definition).unwrap().unwrap();
+            let expected = hirsel_validate::View::new(&types, signature.clone(), None).digest();
+            capture.snapshot.package_universe(&package).unwrap();
             {
                 let held = pool.take(pool.available_bytes()).unwrap();
                 let before = hirsel_intern::work::read(
@@ -1265,7 +1268,6 @@ mod tests {
                 );
                 drop(held);
             }
-            let retained = pool.available_bytes();
             drop(partition);
             headers.release_ended_partition();
             assert_eq!(

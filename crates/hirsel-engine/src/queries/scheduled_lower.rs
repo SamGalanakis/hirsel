@@ -2222,6 +2222,7 @@ impl FrontLowerQueries {
         raw: Option<RawLowerOutput>,
         query_reads: &QueryReads,
     ) -> Result<ProductRef, Reference> {
+        let _ = self.persist_live(id, key, &outcome, &raw);
         self.remember_live_carry(id, key, &outcome, &raw);
         let action = hirsel_artifact_store::Action(ContentHash::of_parts(
             "hirsel.front.live-action.v1",

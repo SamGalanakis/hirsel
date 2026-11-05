@@ -32,6 +32,153 @@ impl FrontLowerQueries {
             .manifest_for_reads(owner, reads, self.weight.scratch)
     }
 
+    /// Materialize a durable variant only for a persistence-capable request.
+    /// Ordinary consumers keep the original admitted live values.
+    pub(super) fn persist_live(
+        &self,
+        id: QueryId,
+        key: &EntryKey,
+        outcome: &Outcome,
+        raw: &Option<RawLowerOutput>,
+    ) -> Option<()> {
+        if !self.store.persistence().retains() {
+            return None;
+        }
+        let manifest = self.manifest_for_outcome(id, &outcome.reads)?;
+        evidence::persisted_reads(&outcome.reads, outcome.execution.as_ref())?;
+        let reads = if outcome.execution.is_some() {
+            Reads::from_vec(
+                outcome
+                    .reads
+                    .observed()
+                    .map(|(key, hash)| {
+                        (
+                            *key,
+                            if matches!(key, ReadKey::ValidationUniverse(_)) {
+                                ContentHash::default()
+                            } else {
+                                *hash
+                            },
+                        )
+                    })
+                    .collect(),
+            )
+            .ok()?
+        } else {
+            outcome.reads.clone()
+        };
+        let depth = outcome.depth.evidence();
+        let mut persisted = outcome.clone();
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(size_of::<reads::Descriptor>());
+        for (_, bytes) in outcome.reads.allocations() {
+            weight.add(bytes);
+        }
+        weight.add(size_of_val(&*depth.first));
+        weight.add(
+            staged::selection_bytes(&outcome.selections)
+                .try_into()
+                .ok()?,
+        );
+        let (domain, bytes, working) = match &mut persisted.result {
+            Ok(Value::Lower(lower)) => {
+                let (output, materialized) = raw.as_ref()?;
+                let (body, decoding) = self
+                    .records
+                    .encode_tir_with_decode_bytes(&*self.namespace.anchors, &output.value)?;
+                if body.len() as u64 > self.weight.scratch {
+                    return None;
+                }
+                let body = self.store.put_content(crate::NATIVE_ORIGINAL_BODY, &body)?;
+                let constants = self
+                    .records
+                    .encode(&*self.namespace.anchors, materialized)?;
+                if constants.len() as u64 > self.weight.scratch {
+                    return None;
+                }
+                let constants = self.store.put_content(LOWER_MATERIALIZED, &constants)?;
+                lower.body.set(body).ok();
+                lower.materialized.set(constants).ok();
+                lower.definition_decode_layout.transient =
+                    lower.definition_decode_layout.transient.max(decoding);
+                weight.add(
+                    crate::memo::retained_lowering_output_bytes(&lower.diagnostics, &Vec::new())
+                        .try_into()
+                        .ok()?,
+                );
+                weight.add(
+                    lower
+                        .dependencies
+                        .len()
+                        .checked_mul(size_of::<SignatureDependency>())?,
+                );
+                let (bytes, working) = self.records.encode_with_decode_bytes(
+                    &*self.namespace.anchors,
+                    &(
+                        lower.definition,
+                        body,
+                        &lower.diagnostics,
+                        lower.dependencies.packed(),
+                        constants,
+                        &reads,
+                        &depth,
+                        outcome.executed,
+                        &outcome.selections,
+                        manifest,
+                    ),
+                )?;
+                (LOWER_DESCRIPTOR, bytes, working)
+            }
+            Ok(Value::Constant(constants)) => {
+                let (value, substitutions) = constants.decoded(
+                    &self.records,
+                    &self.namespace.anchors,
+                    &*self.store,
+                    self.weight.scratch,
+                )?;
+                let (bytes, working) = self.records.encode_with_decode_bytes(
+                    &*self.namespace.anchors,
+                    &(
+                        value,
+                        substitutions,
+                        &reads,
+                        &depth,
+                        outcome.executed,
+                        &outcome.selections,
+                        manifest,
+                    ),
+                )?;
+                let metadata = outcome
+                    .reads
+                    .allocations()
+                    .map(|(_, bytes)| bytes as u64)
+                    .try_fold(size_of_val(&*depth.first) as u64, u64::checked_add)?;
+                constants.set_working_bytes(
+                    constants
+                        .retained_bytes()
+                        .checked_add(metadata)?
+                        .checked_add(staged::selection_bytes(&outcome.selections))?
+                        .checked_mul(2)?
+                        .checked_add(working)?,
+                );
+                (CONSTANT_DESCRIPTOR, bytes, working)
+            }
+            Err(_) => return None,
+        };
+        if bytes.len() as u64 > self.weight.scratch {
+            return None;
+        }
+        persisted.reads_decode_bytes = weight.bytes().checked_mul(2)?.checked_add(working)?;
+        let descriptor = self.store.put_content(domain, &bytes)?;
+        if let Some(receipt) = &outcome.execution
+            && let Some(cache) = self.store.verifier()
+        {
+            cache.publish_execution(persistent::evaluation_subject(key, &bytes), receipt);
+        }
+        self.remember_stored(id, key, descriptor, &persisted);
+        Some(())
+    }
+
     pub(super) fn remember_stored(
         &self,
         id: QueryId,

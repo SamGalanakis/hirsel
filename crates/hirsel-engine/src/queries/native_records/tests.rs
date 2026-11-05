@@ -37,15 +37,33 @@ fn captured_anchor_bindings_match_scalar_selection_with_duplicate_and_generated_
         );
     }
     engine.sources.add("unowned.hir", "".into()).unwrap();
-    let captured = NativeRecordContext::capture(&engine);
-    for (anchor, _, _) in engine.sources.anchors() {
-        let owner = scalar_owner(&engine, anchor);
-        assert_eq!(captured.record_owner(anchor), owner);
-        if let Some((owner, occurrence)) = owner {
-            assert_eq!(
-                captured.record_source_anchor(&owner, occurrence),
-                scalar_anchor(&engine, &owner, occurrence)
-            );
+    let _previous = NativeRecordContext::capture(&engine);
+    // Later aliases preserve the current owner; an earlier alias replaces it.
+    // Both must agree with the independent scalar scan, including reverse
+    // bindings for aliases that are not the selected owner.
+    for name in ["zzz_alias", "000_alias"] {
+        let mut alias = (*engine.items.values().next().unwrap()[0]).clone();
+        alias.item.definition.0.name = name.into();
+        let path = alias.item.definition.clone();
+        engine.materialize_alias_syntax(&path, Arc::new(alias));
+        let captured = NativeRecordContext::capture(&engine);
+        for (anchor, _, _) in engine.sources.anchors() {
+            let owner = scalar_owner(&engine, anchor);
+            assert_eq!(captured.record_owner(anchor), owner);
+            if let Some((owner, occurrence)) = owner {
+                assert_eq!(
+                    captured.record_source_anchor(&owner, occurrence),
+                    scalar_anchor(&engine, &owner, occurrence)
+                );
+            }
+        }
+        for (path, items) in &engine.items {
+            for item in items {
+                assert_eq!(
+                    captured.record_source_anchor(path, item.occurrence),
+                    scalar_anchor(&engine, path, item.occurrence)
+                );
+            }
         }
     }
 }

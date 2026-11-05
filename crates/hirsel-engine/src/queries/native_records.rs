@@ -325,6 +325,77 @@ impl QueryEngine {
         }
         self.items.insert(path.clone(), vec![syntax]);
     }
+    /// A specialization shares its base's placed anchor. When an earlier
+    /// materialized item still wins scalar owner selection, insertion changes
+    /// only the new definition's reverse binding.
+    pub(crate) fn materialize_alias_syntax(
+        &mut self,
+        path: &DefPath,
+        syntax: Arc<hirsel_syntax::ItemSyntax>,
+    ) {
+        let previous = {
+            let current = self
+                .source_ownership
+                .current
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            current.as_ref().and_then(|projection| {
+                if projection.placement != self.sources.placement_revision()
+                    || !projection.types.ptr_eq(&Arc::downgrade(self.types()))
+                    || syntax.item.definition != *path
+                    || self.items.contains_key(path)
+                {
+                    return None;
+                }
+                let context = NativeRecordContext {
+                    types: self.types.clone(),
+                    bindings: projection.bindings.upgrade()?,
+                };
+                let (owner, occurrence) = context.record_owner_ref(syntax.anchor)?;
+                // Catalog and generated fallbacks do not outrank an inserted
+                // item. Reuse only when an existing item remains the winner.
+                if owner >= path
+                    || !self.items.get(owner).is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item.anchor == syntax.anchor && item.occurrence == occurrence
+                        })
+                    })
+                    || context
+                        .record_source_anchor(path, syntax.occurrence)
+                        .is_some()
+                {
+                    return None;
+                }
+                Some(context)
+            })
+        };
+        let (anchor, occurrence) = (syntax.anchor, syntax.occurrence);
+        self.items.insert(path.clone(), vec![syntax]);
+        if let Some(previous) = previous {
+            let context = NativeRecordContext {
+                types: previous.types,
+                bindings: Arc::new(SourceBindings {
+                    owners: Box::new([]),
+                    anchors: Box::new([((RecordOwner::capture(path), occurrence), anchor)]),
+                    source_definitions: Box::new([]),
+                    parent: Some(previous.bindings),
+                    admission: Default::default(),
+                    cache: Arc::downgrade(&self.source_ownership),
+                }),
+            };
+            *self
+                .source_ownership
+                .current
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(SourceProjection {
+                placement: self.sources.placement_revision(),
+                types: Arc::downgrade(&context.types),
+                bindings: Arc::downgrade(&context.bindings),
+                // Hold the new delta until its next capture admits it.
+                scalar: Some(context),
+            });
+        }
+    }
     pub(crate) fn inherit_source_records(&self, context: NativeRecordContext) {
         // Both reconstruction paths install the capture's exact source tables
         // before binding its records. A later source mutation invalidates this
@@ -506,7 +577,8 @@ impl NativeRecordContext {
                 weight.path(path);
             }
         }
-        Some(weight.bytes())
+        // Persistent alias deltas also retain their parent headers and arrays.
+        Some(weight.bytes().max(self.input_bytes()?))
     }
 
     /// The declaration owning this current source generation. A generated
@@ -548,21 +620,18 @@ impl NativeRecordContext {
                         .or_insert_with(|| (RecordOwner::capture(owner.0), owner.1));
                     owners
                 });
-        let mut ordinary_anchors = BTreeMap::new();
+        let mut ordinary_anchors = Vec::new();
         for (path, items) in &engine.items {
             for item in items {
                 if engine.sources.anchor(item.anchor).is_some() {
                     ordinary_anchors
-                        .entry((RecordOwner::capture(path), item.occurrence))
-                        .or_insert(item.anchor);
+                        .push(((RecordOwner::capture(path), item.occurrence), item.anchor));
                 }
             }
         }
         for (anchor, owner) in engine.catalog.bindings() {
             if engine.sources.anchor(anchor).is_some() {
-                ordinary_anchors
-                    .entry((RecordOwner::capture(owner.0), owner.1))
-                    .or_insert(anchor);
+                ordinary_anchors.push(((RecordOwner::capture(owner.0), owner.1), anchor));
             }
         }
         let mut generated = BTreeMap::new();
@@ -600,7 +669,7 @@ impl NativeRecordContext {
         }
         let mut anchors = ordinary_anchors;
         for (owner, anchor) in &current_anchors {
-            anchors.entry(owner.clone()).or_insert(*anchor);
+            anchors.push((owner.clone(), *anchor));
         }
         let mut seen = std::collections::BTreeSet::new();
         for (_, file, _) in engine.sources.anchors() {
@@ -622,7 +691,7 @@ impl NativeRecordContext {
                     .or_else(|| catalog_owners.get(&anchor).cloned())
             });
             if let Some(owner) = owner {
-                anchors.entry(owner.clone()).or_insert(anchor);
+                anchors.push((owner.clone(), anchor));
                 let declaration = generated
                     .get(&file)
                     .map(|(_, declaration)| *declaration)
@@ -631,6 +700,11 @@ impl NativeRecordContext {
                 owners.insert(anchor, owner);
             }
         }
+        // Stable sorting retains the first insertion for every equal key,
+        // exactly as entry().or_insert() did. The item and catalog runs already
+        // arrive in path order, so no tree is needed while building this array.
+        anchors.sort_by(|(left, _), (right, _)| left.cmp(right));
+        anchors.dedup_by(|(left, _), (right, _)| left == right);
         Self {
             types: engine.types().clone(),
             bindings: Arc::new(SourceBindings {
@@ -638,7 +712,7 @@ impl NativeRecordContext {
                 admission: Default::default(),
                 cache: Arc::downgrade(&engine.source_ownership),
                 owners: owners.into_iter().collect(),
-                anchors: anchors.into_iter().collect(),
+                anchors: anchors.into_boxed_slice(),
                 source_definitions: source_definitions.into_iter().collect(),
             }),
         }

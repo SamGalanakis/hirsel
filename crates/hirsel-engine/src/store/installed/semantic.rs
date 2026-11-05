@@ -1,6 +1,7 @@
 //! Installed semantic inputs use the ordinary NativeRecords codec and content
 //! references. The manifest indexes descriptors; opening it decodes no headers.
 use super::*;
+use bincode::Options;
 use hirsel_syntax::DefPath;
 
 pub(crate) const SEMANTIC_INPUT: Domain = Domain {

@@ -1244,7 +1244,7 @@ impl QueryEngine {
                 "its bindings do not name the declaration's binders",
             ));
         };
-        self.items.insert(path.clone(), vec![syntax]);
+        self.materialize_alias_syntax(path, syntax);
         // A new definition, as a CT-5 instance: the signature snapshot now
         // includes it.
         self.note_inputs([path.clone()]);

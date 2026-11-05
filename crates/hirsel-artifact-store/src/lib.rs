@@ -1029,7 +1029,23 @@ impl Store {
         let mut report = GcReport::default();
         loop {
             self.count(Counter::GcScans, 1);
-            let mut oldest = BinaryHeap::new();
+            let mut oldest: BinaryHeap<(SystemTime, u64, PathBuf)> = BinaryHeap::new();
+            let mut consider = |file: &fs::DirEntry, modified, len| {
+                // A max heap holds the oldest bounded batch. Younger entries
+                // cannot enter it; avoid allocating their paths or repairing
+                // the heap. Equal timestamps/sizes still compare full paths.
+                if oldest.len() == BATCH
+                    && oldest
+                        .peek()
+                        .is_some_and(|(time, bytes, _)| (modified, len) > (*time, *bytes))
+                {
+                    return;
+                }
+                oldest.push((modified, len, file.path()));
+                if oldest.len() > BATCH {
+                    oldest.pop();
+                }
+            };
             let mut entries = 0;
             let mut total = 0u64;
             for kind in ["packs", "outputs", "actions"] {
@@ -1052,14 +1068,11 @@ impl Store {
                         entries += 1;
                         self.count(Counter::GcEntries, 1);
                         total = total.saturating_add(meta.len());
-                        oldest.push((
+                        consider(
+                            &file,
                             meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
                             meta.len(),
-                            file.path(),
-                        ));
-                        if oldest.len() > BATCH {
-                            oldest.pop();
-                        }
+                        );
                     }
                 }
             }
@@ -1091,14 +1104,11 @@ impl Store {
                 if protected.contains(&name) {
                     continue;
                 }
-                oldest.push((
+                consider(
+                    &file,
                     meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
                     meta.len(),
-                    file.path(),
-                ));
-                if oldest.len() > BATCH {
-                    oldest.pop();
-                }
+                );
             }
             if report.entries == 0 {
                 report.entries = entries;

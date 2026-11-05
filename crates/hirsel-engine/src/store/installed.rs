@@ -1,8 +1,8 @@
 //! An installed package binds its discovery inputs and complete product closure.
 //! This is ordinary untrusted content. It never imports verifier authority.
 use super::*;
+mod manifest;
 mod semantic;
-use bincode::Options;
 use hirsel_syntax::{FileContext, PackageId};
 pub use semantic::{InstalledDefinition, InstalledDefinitionKey, InstalledDefinitionOwnership};
 pub(crate) use semantic::{
@@ -78,7 +78,41 @@ mod tests {
     fn installed_interface_rejects_stale_corrupt_and_partial_products() {
         let directory = tempfile::tempdir().unwrap();
         let (store, compiler, package, _reference) = fixture(directory.path());
-        assert!(InstalledPackage::open(&store, &package, compiler).is_ok());
+        let installed = InstalledPackage::open(&store, &package, compiler)
+            .unwrap()
+            .package;
+        // The unchanged serializer and generic decoder independently define
+        // the table layout and accept/reject oracle, including corrupt counts.
+        let encoded = bincode::serialize(&*installed).unwrap();
+        let compare = |bytes: &[u8]| {
+            use bincode::Options;
+            let original = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .with_limit(MAX_RECORD as u64)
+                .reject_trailing_bytes()
+                .deserialize::<InstalledPackage>(bytes);
+            let decoded = manifest::decode(bytes);
+            assert_eq!(decoded.is_ok(), original.is_ok());
+            if let (Ok(decoded), Ok(original)) = (decoded, original) {
+                assert_eq!(
+                    bincode::serialize(&decoded).unwrap(),
+                    bincode::serialize(&original).unwrap()
+                );
+            }
+        };
+        compare(&encoded);
+        for end in 0..encoded.len() {
+            compare(&encoded[..end]);
+        }
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        compare(&trailing);
+        for offset in 0..encoded.len() {
+            let mut damaged = encoded.clone();
+            damaged[offset] ^= 0x80;
+            compare(&damaged);
+        }
+        drop(installed);
         assert!(
             InstalledPackage::open(&store, &package, ContentHash::default())
                 .unwrap_err()
@@ -486,11 +520,7 @@ impl InstalledPackage {
             let bytes = store
                 .get_owned(row.reference)
                 .ok_or("corrupt installed package product")?;
-            let mut installed: Self = bincode::DefaultOptions::new()
-                .with_fixint_encoding()
-                .with_limit(MAX_RECORD as u64)
-                .reject_trailing_bytes()
-                .deserialize(&bytes)
+            let mut installed = manifest::decode(&bytes)
                 .map_err(|error| format!("corrupt installed package: {error}"))?;
             if installed.compiler != compiler {
                 return Err("stale installed package: compiler identity mismatch".into());

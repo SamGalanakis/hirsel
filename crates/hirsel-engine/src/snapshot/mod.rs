@@ -278,6 +278,11 @@ const _: () = {
     const fn shared<T: Send + Sync>() {}
     shared::<SignatureSnapshot>();
 };
+fn validation_retention_refused() {
+    hirsel_intern::work::count(hirsel_intern::work::Counter::ValidationRetentionRefusals);
+    hirsel_intern::timings::count(hirsel_intern::timings::Count::ValidationRetentionRefusals);
+}
+
 impl ValidationState {
     pub(crate) fn evict_cached(&self) -> bool {
         let mut overlays = self.overlays.lock().unwrap();
@@ -1174,7 +1179,10 @@ impl SignatureSnapshot {
                 crate::memo::Entered::Run => break,
             }
         }
-        let views = self.compute_validation_with(package, signature.clone())?;
+        let (views, retain) = self.compute_validation_with(package, signature.clone())?;
+        if !retain {
+            return Ok(Arc::new(views));
+        }
         let views = if let Some(delta) = views.retained_delta_bytes() {
             let bytes = delta
                 .checked_add(crate::memo::retained::retained_signature_payload_bytes(
@@ -1198,19 +1206,10 @@ impl SignatureSnapshot {
                 Some(headers) => match headers.validation_lease(bytes) {
                     Ok(lease) => lease,
                     Err(_) => {
-                        // Releasing unpinned results uses the same grant. No
-                        // cache lock is held while admission or a producer runs.
-                        state
-                            .overlays
-                            .lock()
-                            .unwrap()
-                            .retain(|_, views| Arc::strong_count(views) > 1);
-                        headers.validation_lease(bytes).map_err(|cause| {
-                            hirsel_validate::ViewRefusal::Unreadable {
-                                definition: signature.definition,
-                                cause,
-                            }
-                        })?
+                        // The exact transient result is already computed. A
+                        // declined optional retention publishes no cache entry.
+                        validation_retention_refused();
+                        return Ok(Arc::new(views));
                     }
                 },
                 None => Arc::new(()) as Arc<dyn Send + Sync>,
@@ -1232,7 +1231,7 @@ impl SignatureSnapshot {
         &self,
         package: &PackageId,
         signature: SignatureRef,
-    ) -> Result<PackageViews, hirsel_validate::ViewRefusal> {
+    ) -> Result<(PackageViews, bool), hirsel_validate::ViewRefusal> {
         let t = &self.types;
         let state = self.validation_state()?;
         let mut store =
@@ -1242,6 +1241,7 @@ impl SignatureSnapshot {
             // its full table once in this exact immutable snapshot, then check
             // each replacement and all verdicts that read it against that table.
             // A refused construction publishes nothing and remains retryable.
+            let mut retain = true;
             let mut producer = state.producers.thread_worker::<()>();
             let full = loop {
                 if let Some(full) = state.overlay_bases.lock().unwrap().get(package).cloned() {
@@ -1314,18 +1314,21 @@ impl SignatureSnapshot {
                     weight.add(package.name.capacity() + package.version.capacity());
                     bytes = bytes.checked_add(weight.bytes()).ok_or_else(refusal)?;
                     let lease = match &self.headers {
-                        Some(headers) => headers.validation_lease(bytes).map_err(|cause| {
-                            hirsel_validate::ViewRefusal::Unreadable {
-                                definition: signature.definition,
-                                cause,
+                        Some(headers) => match headers.validation_lease(bytes) {
+                            Ok(lease) => lease,
+                            Err(_) => {
+                                validation_retention_refused();
+                                retain = false;
+                                break Arc::new(full);
                             }
-                        })?,
+                        },
                         None => Arc::new(()) as Arc<dyn Send + Sync>,
                     };
                     Arc::new(full.retain_owner(lease))
                 } else {
                     // Failed tables remain exact transient inputs. A later
                     // request can retry after its resource/context changes.
+                    retain = false;
                     break Arc::new(full);
                 };
                 state
@@ -1342,9 +1345,10 @@ impl SignatureSnapshot {
                 [View::new(t, signature, None)],
                 &mut store,
                 Some(&state.validated),
-            );
+            )
+            .map(|views| (views, retain));
         }
-        match state.packages.get(package) {
+        let views = match state.packages.get(package) {
             Some(views) => views.replace(t, signature, &mut store, Some(&state.validated)),
             None => PackageViews::new(
                 t,
@@ -1353,7 +1357,8 @@ impl SignatureSnapshot {
                 &mut store,
                 Some(&state.validated),
             ),
-        }
+        };
+        views.map(|views| (views, true))
     }
 }
 

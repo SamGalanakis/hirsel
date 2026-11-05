@@ -299,11 +299,12 @@ pub enum Count {
     ExecutionValidationRequests,
     ExecutionValidationRefusals,
     VerifierFactEvictions,
+    ValidationRetentionRefusals,
 }
 
 impl Count {
     /// Every count, in declaration order.
-    pub const ALL: [Count; 85] = [
+    pub const ALL: [Count; 86] = [
         Count::Definitions,
         Count::Units,
         Count::VRuns,
@@ -389,10 +390,12 @@ impl Count {
         Count::ExecutionValidationRequests,
         Count::ExecutionValidationRefusals,
         Count::VerifierFactEvictions,
+        Count::ValidationRetentionRefusals,
     ];
     /// The stable name `--timings` prints.
     pub fn name(self) -> &'static str {
         match self {
+            Count::ValidationRetentionRefusals => "validation retention refusals",
             Count::VerifierFactEvictions => "verifier fact evictions",
             Count::ExecutionValidationRequests => "execution validation requests",
             Count::ExecutionValidationRefusals => "execution validation refusals",

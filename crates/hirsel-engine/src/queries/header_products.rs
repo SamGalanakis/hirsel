@@ -752,11 +752,11 @@ impl HeaderProducts {
                 .remaining
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if *grant >= bytes {
-                if let Some(allowance) = partition.take_header(bytes) {
-                    *grant -= bytes;
-                    break allowance;
-                }
+            if *grant >= bytes
+                && let Some(allowance) = partition.take_header(bytes)
+            {
+                *grant -= bytes;
+                break allowance;
             }
             // Syntax and other source owners share the backing pool without
             // debiting this row grant. Reclaim optional facts on either limit.

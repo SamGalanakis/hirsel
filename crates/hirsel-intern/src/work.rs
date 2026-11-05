@@ -123,6 +123,8 @@ pub enum Counter {
     ExecutionValidationRefusals,
     /// Optional verifier facts removed under the existing request allowance.
     VerifierFactEvictions,
+    /// Exact transient validation results declined optional cache retention.
+    ValidationRetentionRefusals,
     /// Cached dependency-node inspections.
     CacheValidationRows,
 }

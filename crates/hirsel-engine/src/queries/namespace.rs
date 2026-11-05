@@ -1216,8 +1216,14 @@ mod tests {
             let capture = engine
                 .capture_namespace(&definitions, &[], 8 << 20)
                 .unwrap();
+            let types = engine.types.clone();
             drop(engine);
             let headers = capture.snapshot.header_products().unwrap().clone();
+            let definition = DefId::intern(&definitions[0]);
+            let package = definitions[0].0.package.clone();
+            let signature = capture.snapshot.signature(definition).unwrap().unwrap();
+            let expected = hirsel_validate::View::new(&types, signature.clone(), None).digest();
+            capture.snapshot.package_universe(&package).unwrap();
             let budget = crate::runtime::ProcessBudget::new(8 << 20);
             let pool = Arc::new(
                 crate::runtime::MemoryReservationPool::new(budget.reserve(8 << 20).unwrap())
@@ -1232,6 +1238,33 @@ mod tests {
             drop(capture.syntax(&definitions[0]).unwrap());
             let retained = pool.available_bytes();
             assert!(retained < before, "the live source owns its syntax charge");
+            {
+                let held = pool.take(pool.available_bytes()).unwrap();
+                let before = hirsel_intern::work::read(
+                    hirsel_intern::work::Counter::ValidationRetentionRefusals,
+                );
+                for _ in 0..2 {
+                    let views = capture
+                        .snapshot
+                        .validation_with(&package, signature.clone())
+                        .unwrap();
+                    assert_eq!(views.view(definition).unwrap().digest(), expected);
+                    assert!(views.universe_errors().1.is_empty());
+                }
+                assert_eq!(
+                    hirsel_intern::work::read(
+                        hirsel_intern::work::Counter::ValidationRetentionRefusals
+                    ) - before,
+                    2
+                );
+                assert_eq!(
+                    pool.available_bytes(),
+                    0,
+                    "transient validation publishes no retained charge"
+                );
+                drop(held);
+            }
+            let retained = pool.available_bytes();
             drop(partition);
             headers.release_ended_partition();
             assert_eq!(

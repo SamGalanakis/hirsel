@@ -491,8 +491,13 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             Callee::Operation(_) => Aliasing::Unstated,
             _ => Aliasing::of(self.inputs.callbacks),
         };
-        let function = match &name {
-            Some(name) => Some(signature.declare(
+        let specialized = name
+            .as_ref()
+            .and_then(|name| self.foreground_calls.as_ref()?.get(name))
+            .copied();
+        let function = match (&name, specialized) {
+            (_, Some(function)) => Some(function),
+            (Some(name), None) => Some(signature.declare(
                 self.module,
                 self.inputs.layouts,
                 name,
@@ -500,7 +505,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
                 false,
                 aliasing,
             )?),
-            None => None,
+            (None, None) => None,
         };
         if name.as_deref() == Some("hirsel_rt_v2_net_read_into")
             && let Some(function) = function

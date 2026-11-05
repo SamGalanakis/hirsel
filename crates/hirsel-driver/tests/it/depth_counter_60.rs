@@ -13,7 +13,7 @@ use hirsel_native_batch::build;
 fn recursive_scalar_calls_use_counters_without_invocation_metadata() {
     with_compiler_stack(|| {
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
-        let file = engine.sources.add("counter.hir", "fn descend(n:u64)->u64 { if n==0u64 {0u64} else {1u64+descend(n-1u64)} }\npub fn main()->u64 { descend(20u64) }\n".to_owned()).unwrap();
+        let file = engine.sources.add("counter.hir", "fn descend(n:u64)->u64 { if n==0u64 {0u64} else {1u64+descend(n-1u64)} }\npub fn main()->u64 { let mut total=0u64; for n in 0u64..20u64 { total+=descend(n) } total }\n".to_owned()).unwrap();
         let output = source_check_request(&mut engine, file, &default_context()).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
         let input = engine.export_native_input().unwrap();
@@ -39,6 +39,18 @@ fn recursive_scalar_calls_use_counters_without_invocation_metadata() {
             assert!(!body.contains("@hirsel_rt_v2_depth_leave("), "{body}");
             assert!(body.contains("icmp uge i16"), "{body}");
             assert!(body.contains("store i16"), "{body}");
+            let body = ir
+                .lines()
+                .skip_while(|line| {
+                    !(line.starts_with("define")
+                        && line.contains("4main")
+                        && !line.contains("@_H1T"))
+                })
+                .take_while(|line| *line != "}")
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!body.is_empty(), "{ir}");
+            assert!(body.matches("load i16").count() <= 2, "{body}");
         }
     });
 }

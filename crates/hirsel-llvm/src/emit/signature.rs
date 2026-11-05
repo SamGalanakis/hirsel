@@ -41,6 +41,7 @@ impl Aliasing {
 /// parameter's physical slots, returning a zero-extended `u8` status. A Hirsel entry whose
 /// result is a plain scalar (`register_result`) has no result pointer and returns
 /// `{ value word, i8 status }` instead, in registers on x86-64 and AArch64.
+#[derive(Clone)]
 pub(super) struct Signature<'m, 'a> {
     pub(super) abi: &'a FnAbi,
     pub(super) ty: Type<'m>,

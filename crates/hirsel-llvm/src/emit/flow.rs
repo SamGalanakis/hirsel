@@ -16,6 +16,7 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
         {
             return self.emit_resume_entry(plan);
         }
+        self.dispatch_foreground();
         self.find_versions()?;
         self.fresh_detaches = self
             .unit

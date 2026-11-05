@@ -66,6 +66,9 @@ impl<'m, 'a> FnEmitter<'m, 'a> {
             no_room: None,
             counters: Default::default(),
             counter_cell: None,
+            depth_mode: None,
+            foreground_entry: None,
+            foreground_calls: None,
             fuel_points: if inputs.fuel || inputs.alternate {
                 hirsel_lir::fuel::fuel_points(unit)
             } else {

@@ -63,6 +63,7 @@ mod construction;
 mod descriptors;
 mod flat;
 mod flow;
+mod foreground;
 mod foreign;
 mod instructions;
 mod ownership;
@@ -922,10 +923,69 @@ fn lower<T>(
         );
         let counter_units =
             hirsel_lir::invocations::room::counter_units(units.iter().map(|u| u.unit()));
-        for (unit, function, signature) in functions {
+        let mut foreground_functions = BTreeMap::new();
+        let mut specialized = Vec::new();
+        if !inputs.alternate && !profile.debug && !inputs.measurement && ownership_plans.is_none() {
+            let recursive = foreground::recursive(functions.iter().map(|(unit, _, _)| *unit));
+            let profitable = foreground::profitable_units(
+                functions.iter().map(|(unit, _, _)| *unit),
+                &depth_leaf,
+                &recursive,
+            );
+            for (unit, _, signature) in &functions {
+                if unit.header.origin != UnitOrigin::Source
+                    || !unit
+                        .instructions
+                        .iter()
+                        .any(|inst| matches!(inst, Inst::FrameEnter { .. }))
+                    || unit.instructions.iter().any(|inst| {
+                        matches!(inst, Inst::FinalizeBegin { .. } | Inst::FinalizeEnd { .. })
+                    })
+                    || inputs
+                        .continuation
+                        .is_some_and(|p| p.task_entry(unit).is_some())
+                {
+                    continue;
+                }
+                if !profitable.contains(&unit.header.instance) {
+                    continue;
+                }
+                let mut name = symbol_name(&unit.header.definition, Some(&unit.header.instance));
+                if !signature.roots.is_empty() || signature.ahead.is_some() {
+                    name.push_str(ROOTS_SUFFIX);
+                }
+                let function = signature.declare(
+                    &module,
+                    inputs.layouts,
+                    &format!("{name}.foreground"),
+                    &unit.header.definition,
+                    true,
+                    Aliasing::of(inputs.callbacks),
+                )?;
+                module.make_private(function);
+                module.add_attribute(function, AttributeSlot::Function, Attribute::InlineHint);
+                foreground_functions.insert(name, function);
+                specialized.push((*unit, function, signature.clone(), true));
+            }
+        }
+        let foreground_functions = std::rc::Rc::new(foreground_functions);
+        let functions = functions
+            .into_iter()
+            .map(|(unit, function, signature)| (unit, function, signature, false))
+            .chain(specialized);
+        for (unit, function, signature, foreground) in functions {
             let rooted = !signature.roots.is_empty();
+            let mut name = symbol_name(&unit.header.definition, Some(&unit.header.instance));
+            if rooted || signature.ahead.is_some() {
+                name.push_str(ROOTS_SUFFIX);
+            }
             let mut emitter =
                 FnEmitter::new(&module, inputs, unit, function, signature, &mut manifested);
+            if foreground {
+                emitter.foreground_calls = Some(foreground_functions.clone());
+            } else {
+                emitter.foreground_entry = foreground_functions.get(&name).copied();
+            }
             emitter.room = hirsel_lir::invocations::room::RoomChecks::of(unit, &depth_leaf);
             // A continuation re-enters with its callee's cleanup mode still
             // live. Its saved admission needs the runtime's retained token.
@@ -1402,7 +1462,23 @@ struct FnEmitter<'m, 'a> {
     /// The prologue's room test, built at the first room check (`no_room`).
     no_room: Option<Value<'m>>,
     counters: hirsel_lir::invocations::room::RoomChecks,
-    counter_cell: Option<(Value<'m>, Value<'m>)>,
+    counter_cell: Option<CounterCell<'m>>,
+    depth_mode: Option<(Value<'m>, Value<'m>)>,
+    foreground_entry: Option<Function<'m>>,
+    foreground_calls: Option<std::rc::Rc<BTreeMap<String, Function<'m>>>>,
+}
+
+#[derive(Clone, Copy)]
+enum CounterCell<'m> {
+    Dynamic {
+        at: Value<'m>,
+        limit: Value<'m>,
+    },
+    Snapshot {
+        at: Value<'m>,
+        count: Value<'m>,
+        full: Value<'m>,
+    },
 }
 
 type Emitted<T = ()> = Result<T, CodegenError>;

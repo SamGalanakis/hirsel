@@ -1169,10 +1169,7 @@ impl HeaderProducts {
     ) -> Result<(), hirsel_validate::ViewRefusal> {
         // Four vector slots per live owner bound minimum/spare allocation.
         // The live validation state owns its registry allocation charge.
-        let bytes = 4 * size_of::<(
-            std::sync::Weak<crate::snapshot::ValidationState>,
-            Arc<dyn Send + Sync>,
-        )>() + 128;
+        let bytes = 4 * size_of::<std::sync::Weak<crate::snapshot::ValidationState>>() + 128;
         let lease = self.validation_lease(bytes as u64).map_err(|cause| {
             hirsel_validate::ViewRefusal::Unreadable {
                 definition: self

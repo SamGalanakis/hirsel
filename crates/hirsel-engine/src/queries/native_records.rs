@@ -291,12 +291,24 @@ impl<K: Ord, V> FromIterator<(K, V)> for SourceTable<K, V> {
 }
 impl QueryEngine {
     pub(crate) fn inherit_source_records(&self, context: NativeRecordContext) {
+        // Both reconstruction paths install the capture's exact source tables
+        // before binding its records. A later source mutation invalidates this
+        // projection and builds a successor against the inherited bindings.
+        *self
+            .source_ownership
+            .current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(SourceProjection {
+            placement: self.sources.placement_revision(),
+            types: Arc::downgrade(&context.types),
+            bindings: Arc::downgrade(&context.bindings),
+            scalar: None,
+        });
         *self
             .source_ownership
             .inherited
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(context);
-        self.source_ownership.changed();
     }
     pub(crate) fn source_records(&self) -> NativeRecordContext {
         let mut current = self

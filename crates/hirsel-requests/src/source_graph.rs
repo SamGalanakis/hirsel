@@ -1475,10 +1475,12 @@ pub(super) fn install(
     let check = installed.check(&mut program.engine, &selection)?;
     let plan = &installed.plan;
     let export_headers = if available_export {
-        let headers = program
-            .engine
-            .front_checked_signatures_bytes(&front)
-            .map_err(&query_error)?;
+        let headers = if shared_source {
+            program.engine.front_proof_signatures_bytes(&front)
+        } else {
+            program.engine.front_checked_signatures_bytes(&front)
+        }
+        .map_err(&query_error)?;
         let minimum = headers
             .checked_add(super::safe_check::BYTES)
             .and_then(|bytes| bytes.checked_add(super::proof_export::BYTES));
@@ -1524,9 +1526,15 @@ pub(super) fn install(
         })
         .transpose()?;
     let export_allowance = if available_export {
-        let headers = run
-            .split(export_headers.ok_or_else(|| uninstalled())?)
-            .ok_or_else(|| uninstalled())?;
+        let headers = export_headers.ok_or_else(|| uninstalled())?;
+        // The deferred factory and its eventual complete table share this
+        // existing Run partition. Insufficient space refuses only export.
+        let headers = if shared_source {
+            headers.max(run.bytes() / 3)
+        } else {
+            headers
+        };
+        let headers = run.split(headers).ok_or_else(|| uninstalled())?;
         let output = run
             .split(super::proof_export::BYTES)
             .ok_or_else(|| uninstalled())?;
@@ -1639,25 +1647,34 @@ pub(super) fn install(
     // view replaces the ordinary Run for this graph.
     let mut export_products = None;
     if let Some((headers, allowance, output)) = export_allowance {
-        let headers = program
-            .engine
-            .front_checked_signatures(front.clone(), headers)
-            .map_err(&query_error)?;
         let entry = program.entry.clone();
-        let export = if let Some((native, _)) = &artifact_assembly {
-            program.engine.front_proof_export_from_native(
-                &entry,
-                native.source(),
-                headers,
-                allowance,
-            )
-        } else {
-            program.engine.front_proof_export(
+        let export = if shared_source {
+            program.engine.front_deferred_proof_export(
                 &entry,
                 run.take().ok_or_else(|| uninstalled())?,
                 headers,
                 allowance,
             )
+        } else {
+            let headers = program
+                .engine
+                .front_checked_signatures(front.clone(), headers)
+                .map_err(&query_error)?;
+            if let Some((native, _)) = &artifact_assembly {
+                program.engine.front_proof_export_from_native(
+                    &entry,
+                    native.source(),
+                    headers,
+                    allowance,
+                )
+            } else {
+                program.engine.front_proof_export(
+                    &entry,
+                    run.take().ok_or_else(|| uninstalled())?,
+                    headers,
+                    allowance,
+                )
+            }
         }
         .map_err(&query_error)?;
         run = Some(export.run().clone());

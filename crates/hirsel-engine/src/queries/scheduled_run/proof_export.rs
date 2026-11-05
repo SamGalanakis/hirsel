@@ -10,7 +10,7 @@ use std::rc::Rc;
 /// producers. A returned ExportInput is data, with no native/V authority.
 pub struct FrontProofExport {
     run: Arc<FrontRunQueries>,
-    headers: Arc<FrontCheckedSignatures>,
+    headers: super::super::checked_signatures::ProofHeaders,
     entry: DefPath,
     roots: BTreeSet<DefPath>,
     sources: SourceMap,
@@ -455,7 +455,7 @@ impl FrontProofExport {
         input_weight
             .add(size_of::<FrontProofInput>() + size_of::<SourceMap>() + 8 * size_of::<usize>());
         input_weight.add(hirsel_proof_export::FORMAT.len());
-        input_weight.add(self.headers.environment().compiler_version.capacity());
+        input_weight.add(self.headers()?.environment().compiler_version.capacity());
         input_weight.path(&self.entry);
         input_weight.source_snapshot(&sources);
         input_weight.tree::<FileId, ()>(modules.len());
@@ -478,7 +478,7 @@ impl FrontProofExport {
         let input_metadata_bytes = input_weight
             .bytes()
             .checked_add(
-                self.headers
+                self.headers()?
                     .sections_clone_bytes()
                     .ok_or(QueryError::NotImplemented)?,
             )
@@ -527,9 +527,9 @@ impl FrontProofExport {
                 let metadata = self.source_metadata(closure)?;
                 let types = self.run.lower.signatures().types().clone();
                 let mut edges = BTreeMap::new();
-                for (path, _) in self.headers.signatures() {
+                for (path, _) in self.headers()?.signatures() {
                     let section = self
-                        .headers
+                        .headers()?
                         .section(path)
                         .ok_or(QueryError::NotImplemented)?;
                     let references = crate::proof_export::signature_references(&types, &section)
@@ -594,7 +594,7 @@ impl FrontProofExport {
             maps.path(path);
             maps.path(path);
             let signature = self
-                .headers
+                .headers()?
                 .signature(path)
                 .ok_or(QueryError::NotImplemented)?;
             if matches!(signature.kind, SignatureKind::Const { .. }) {
@@ -718,8 +718,8 @@ impl FrontProofExport {
         }
         Ok(reads)
     }
-    pub fn headers(&self) -> &Arc<FrontCheckedSignatures> {
-        &self.headers
+    pub fn headers(&self) -> Result<&Arc<FrontCheckedSignatures>, QueryError> {
+        self.headers.get()
     }
     /// Format only the exact completed package selection. Missing signatures,
     /// TIR or values refuse instead of silently making a partial export.
@@ -745,7 +745,7 @@ impl FrontProofExport {
         let mut annotations = Vec::new();
         for path in closure {
             let section = self
-                .headers
+                .headers()?
                 .section(path)
                 .ok_or(QueryError::NotImplemented)?;
             if matches!(section.public.kind, SignatureKind::Const { .. }) {
@@ -784,7 +784,7 @@ impl FrontProofExport {
                 continue;
             }
             let section = self
-                .headers
+                .headers()?
                 .section(path)
                 .ok_or(QueryError::NotImplemented)?;
             pending.extend(
@@ -815,7 +815,7 @@ impl FrontProofExport {
             header: Header {
                 format: hirsel_proof_export::FORMAT.into(),
                 tir_version: hirsel_tir::TIR_VERSION,
-                environment: self.headers.environment().clone(),
+                environment: self.headers()?.environment().clone(),
                 entry: self.entry.clone(),
                 program_revision: Some(ContentHash(output.revision.digest())),
             },
@@ -862,6 +862,29 @@ impl QueryEngine {
             .filter(|p| p.0.package == entry.0.package)
             .collect();
         let run = run.with_source_roots(roots.iter().cloned().collect())?;
+        self.capture_proof_export(
+            entry,
+            run,
+            super::super::checked_signatures::ProofHeaders::Ready(headers),
+            roots,
+            allowance,
+        )
+    }
+    /// Capture the same export producer without demanding its header inventory.
+    pub fn front_deferred_proof_export(
+        &mut self,
+        entry: &DefPath,
+        run: Arc<FrontRunQueries>,
+        headers: hirsel_engine_admission::MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
+    ) -> Result<Arc<FrontProofExport>, QueryError> {
+        let roots: BTreeSet<_> = self
+            .item_paths()
+            .into_iter()
+            .filter(|p| p.0.package == entry.0.package)
+            .collect();
+        let headers = self.deferred_proof_signatures(run.front.clone(), headers)?;
+        let run = run.with_source_roots(roots.iter().cloned().collect())?;
         self.capture_proof_export(entry, run, headers, roots, allowance)
     }
     /// Attach to native's already selected Run. Its selected roots must cover
@@ -882,13 +905,19 @@ impl QueryEngine {
         if !roots.iter().all(|path| run.native_roots.contains(path)) {
             return Err(QueryError::NotImplemented);
         }
-        self.capture_proof_export(entry, run, headers, roots, allowance)
+        self.capture_proof_export(
+            entry,
+            run,
+            super::super::checked_signatures::ProofHeaders::Ready(headers),
+            roots,
+            allowance,
+        )
     }
     fn capture_proof_export(
         &mut self,
         entry: &DefPath,
         run: Arc<FrontRunQueries>,
-        headers: Arc<FrontCheckedSignatures>,
+        headers: super::super::checked_signatures::ProofHeaders,
         roots: BTreeSet<DefPath>,
         allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Arc<FrontProofExport>, QueryError> {

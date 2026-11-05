@@ -136,10 +136,12 @@ fn export_case_with_ownership(
                 .register(FRONT_GROWTH_KIND, growth.factory())
                 .unwrap();
             runtime.register(FRONT_CHECK_KIND, check.factory()).unwrap();
-            let headers = program
-                .engine
-                .front_checked_signatures(front.clone(), budget.reserve(4 << 20).unwrap())
-                .unwrap();
+            let headers = attach_native.then(|| {
+                program
+                    .engine
+                    .front_checked_signatures(front.clone(), budget.reserve(4 << 20).unwrap())
+                    .unwrap()
+            });
             let run = program
                 .engine
                 .front_run_queries(
@@ -189,21 +191,30 @@ fn export_case_with_ownership(
                     .front_proof_export_from_native(
                         &program.entry,
                         native,
-                        headers,
+                        headers.unwrap(),
                         budget.reserve(4 << 20).unwrap(),
                     )
                     .unwrap()
             } else {
                 let run = run.take().unwrap();
-                program
+                let snapshot = front.signatures();
+                let entry = hirsel_syntax::DefId::intern(&program.entry);
+                let header_ready = snapshot.header_ready(entry);
+                let export = program
                     .engine
-                    .front_proof_export(
+                    .front_deferred_proof_export(
                         &program.entry,
                         run,
-                        headers,
+                        budget.reserve(4 << 20).unwrap(),
                         budget.reserve(4 << 20).unwrap(),
                     )
-                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    snapshot.header_ready(entry),
+                    header_ready,
+                    "export capture demanded its unused header inventory"
+                );
+                export
             };
             runtime
                 .register(FRONT_RUN_KIND, export.run().factory())

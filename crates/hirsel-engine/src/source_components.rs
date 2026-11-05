@@ -345,7 +345,10 @@ impl SourceGrowthProducer<'_> {
 
     /// Membership is a query of call topology only. Tarjan's output has no
     /// settled growth verdict and cannot accept a source program.
-    pub(crate) fn membership(&self, facts: &[SourceGrowthFact]) -> Option<SourceMembership> {
+    pub(crate) fn membership_parts(
+        &self,
+        facts: &[SourceGrowthFact],
+    ) -> Option<(SourceGrowthIdentity, Box<[SourceComponentMembers]>)> {
         let mut nodes = BTreeSet::new();
         for node in facts
             .iter()
@@ -414,7 +417,7 @@ impl SourceGrowthProducer<'_> {
             })
             .collect::<Option<Vec<_>>>()?
             .into_boxed_slice();
-        self.membership_value(product, components)
+        Some((product, components))
     }
     pub(crate) fn membership_value(
         &self,

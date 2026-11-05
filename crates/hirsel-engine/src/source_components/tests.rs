@@ -77,7 +77,8 @@ fn settle(
     mut facts: Vec<SourceGrowthFact>,
 ) -> Option<SourceGrowthFacets> {
     facts.sort_by_key(|fact| (fact.owner, fact.definition.0.0));
-    let membership = producer.membership(&facts)?;
+    let (product, components) = producer.membership_parts(&facts)?;
+    let membership = producer.membership_value(product, components)?;
     let components = membership
         .components
         .iter()
@@ -394,7 +395,8 @@ fn membership_record_reopens_through_the_same_native_codec_as_components() {
             selected,
         )
         .unwrap();
-    let membership = producer.membership(&[fact]).unwrap();
+    let (product, components) = producer.membership_parts(&[fact]).unwrap();
+    let membership = producer.membership_value(product, components).unwrap();
     let store = Arc::new(crate::store::MemStore::default());
     let records = crate::NativeRecords::new(engine.types().clone(), store);
     let product = membership.product;

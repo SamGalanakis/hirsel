@@ -332,8 +332,21 @@ impl FactTask {
         self.waiting = None;
         Poll::Ready(self.complete(cx))
     }
+    fn release_inputs(&mut self) -> Result<(), Reference> {
+        drop(std::mem::take(&mut self.facts));
+        drop(std::mem::take(&mut self.reads));
+        let old = std::mem::replace(
+            &mut self.admission,
+            self.queries
+                .output_pool
+                .take(0)
+                .ok_or(self.queries.errors.resource)?,
+        );
+        drop(old);
+        Ok(())
+    }
     fn complete(&mut self, _cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
-        let queries = &self.queries;
+        let queries = self.queries.clone();
         self.facts
             .sort_by_key(|fact| (fact.owner, fact.definition.0.0));
         // Reduce one encoded root receipt at a time in this active scratch
@@ -383,6 +396,7 @@ impl FactTask {
                     .component(members, &self.facts)
                     .ok_or(queries.errors.resource)?
             };
+            self.release_inputs()?;
             (
                 value.product,
                 SourceGrowthQueryData::Component { value, reads },
@@ -405,7 +419,7 @@ impl FactTask {
                 .lookup_product(self.id.address)
                 .filter(|a| a.action == action && a.reference.domain == LIVE_SOURCE_MEMBERSHIP)
                 .and_then(|a| queries.load_record(a.reference));
-            let value = if let Some(SourceGrowthQueryRecord::Membership {
+            let (product, components) = if let Some(SourceGrowthQueryRecord::Membership {
                 product,
                 components,
                 ..
@@ -414,17 +428,21 @@ impl FactTask {
                 if product.address != self.id.address || product.action != action {
                     return Err(queries.errors.protocol);
                 }
-                producer
-                    .membership_value(product, components)
-                    .ok_or(queries.errors.resource)?
+                (product, components)
             } else {
                 queries.memberships.fetch_add(1, Relaxed);
-                let mut value = producer
-                    .membership(&self.facts)
+                let (mut product, components) = producer
+                    .membership_parts(&self.facts)
                     .ok_or(queries.errors.resource)?;
-                value.product.action = action;
-                value
+                product.action = action;
+                (product, components)
             };
+            // The active scratch frame owns construction until publication.
+            // Retire the input vectors before admitting the retained membership.
+            self.release_inputs()?;
+            let value = producer
+                .membership_value(product, components)
+                .ok_or(queries.errors.resource)?;
             (
                 value.product,
                 SourceGrowthQueryData::Membership {
@@ -433,16 +451,6 @@ impl FactTask {
                 },
             )
         };
-        // Drop accepted input facts before charging the settled publication.
-        self.facts.clear();
-        self.facts.shrink_to_fit();
-        self.reads.clear();
-        self.reads.shrink_to_fit();
-        let old = std::mem::replace(
-            &mut self.admission,
-            queries.output_pool.take(0).ok_or(queries.errors.resource)?,
-        );
-        drop(old);
         let value = LiveSourceGrowthProduct::new(
             (identity.address, identity.action),
             data,

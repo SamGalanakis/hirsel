@@ -55,12 +55,8 @@ impl Bytes {
     }
 }
 enum Header {
-    Body(hirsel_types::SignatureRef),
-    Named {
-        signature: hirsel_types::SignatureRef,
-        source: Bytes,
-        reads: Box<[DefId]>,
-    },
+    Body,
+    Named { source: Bytes, reads: Box<[DefId]> },
 }
 pub(super) struct Content {
     header: Header,
@@ -79,14 +75,9 @@ impl Content {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         let (header, body) = match content {
-            DefinitionContent::Body { signature, tir } => (Header::Body(signature), tir.is_some()),
-            DefinitionContent::Named {
-                signature,
-                source,
-                reads,
-            } => (
+            DefinitionContent::Body { tir, .. } => (Header::Body, tir.is_some()),
+            DefinitionContent::Named { source, reads, .. } => (
                 Header::Named {
-                    signature,
                     source: Bytes::new(&*queries.store, queries.weight.scratch, &source)?,
                     reads: reads
                         .iter()
@@ -125,11 +116,13 @@ impl Content {
         path: &DefPath,
         allowance: u64,
     ) -> Result<DefinitionContent, QueryError> {
+        let input = queries.input(path)?;
         let mut weight = crate::NativeMetadataWeight::default();
         weight.add(std::mem::size_of::<DefinitionContent>());
+        weight.add(input.owned_header_bytes as usize);
         let working = match &self.header {
-            Header::Body(_) if self.body => queries.lower.settled_definition_decode_bytes(path)?,
-            Header::Body(_) => 0,
+            Header::Body if self.body => queries.lower.settled_definition_decode_bytes(path)?,
+            Header::Body => 0,
             Header::Named { source, reads, .. } => {
                 weight.add(
                     reads
@@ -152,20 +145,20 @@ impl Content {
             return Err(operational("Run content exceeds scratch admission"));
         }
         Ok(match &self.header {
-            Header::Body(signature) => DefinitionContent::Body {
-                signature: signature.clone(),
+            Header::Body => DefinitionContent::Body {
+                signature: if matches!(input.signature.kind, SignatureKind::Type(_)) {
+                    input.owner_signature.clone()
+                } else {
+                    input.signature.clone()
+                },
                 tir: if self.body {
                     Some(queries.lower.settled_definition(path)?)
                 } else {
                     None
                 },
             },
-            Header::Named {
-                signature,
-                source,
-                reads,
-            } => DefinitionContent::Named {
-                signature: signature.clone(),
+            Header::Named { source, reads } => DefinitionContent::Named {
+                signature: input.signature.clone(),
                 source: source.load(&*queries.store, allowance)?,
                 reads: reads.iter().map(|id| id.path().clone()).collect(),
             },

@@ -56,6 +56,7 @@ pub(super) fn create(queries: &Arc<FrontRunQueries>, query: QueryId) -> Option<B
             started: false,
             pending: Vec::new(),
             entries: BTreeMap::new(),
+            input: None,
             waiting: None,
             terminal,
         },
@@ -95,6 +96,23 @@ impl QueryTask for SemanticTask {
                     .map_err(|error| self.node.queries.failure_record(error)),
             }
         };
+        // The completed descriptors own the semantic result. Neither its
+        // decoded input nor its raw Front/Lower dependencies remain consumers.
+        self.node.input = None;
+        if result.is_ok() {
+            let path = &self.node.root;
+            for query in [
+                self.node.queries.front.query(path),
+                self.node.queries.front.body_query(path),
+                self.node.queries.lower.query(path),
+                self.node.queries.lower.evaluate_query(path),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                cx.consume(query);
+            }
+        }
         self.node.terminal = Some(result.clone());
         match result {
             Ok(product) => QueryPoll::Complete(product),
@@ -112,7 +130,10 @@ impl SemanticTask {
     ) -> Result<ProductRef, QueryError> {
         let queries = &self.node.queries;
         if queries.precompute.is_some() {
-            queries.publish_installed_input(&self.node.root)?;
+            queries.publish_installed_input(
+                &self.node.root,
+                self.node.input.as_ref().ok_or(QueryError::NotImplemented)?,
+            )?;
         }
         let source = source
             .map(|source| source_products::Packed::new(queries, source))

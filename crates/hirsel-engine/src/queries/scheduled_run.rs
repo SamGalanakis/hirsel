@@ -73,6 +73,7 @@ struct Input {
     executable: bool,
     generated: bool,
     implementation: ContentHash,
+    _charge: Option<inputs::InputCharge>,
 }
 /// Prepared immutable Run inputs and their exact charged bytes. The private
 /// catalog moves into the producer once, so sizing never repeats encoding or
@@ -80,7 +81,7 @@ struct Input {
 pub struct FrontRunInputs {
     namespace: Arc<NamespaceCapture>,
     source_paths: Vec<DefPath>,
-    inputs: BTreeMap<DefPath, std::sync::OnceLock<Result<Arc<Input>, QueryError>>>,
+    inputs: BTreeSet<DefPath>,
     specializations: BTreeMap<DefPath, Arc<crate::store::InstalledSpecializations>>,
     operation: OperationLease,
     store: Arc<dyn ResultStore>,
@@ -108,7 +109,7 @@ pub struct FrontRunQueries {
     export_hashes: bool,
     source_products: bool,
     native_roots: Vec<DefPath>,
-    inputs: BTreeMap<DefPath, std::sync::OnceLock<Result<Arc<Input>, QueryError>>>,
+    inputs: BTreeSet<DefPath>,
     specializations: BTreeMap<DefPath, Arc<crate::store::InstalledSpecializations>>,
     operation: OperationLease,
     ids: BTreeMap<DefPath, QueryId>,
@@ -275,9 +276,7 @@ impl FrontRunQueries {
             |n, path| {
                 n.checked_add(bincode::serialized_size(path).ok()?.checked_mul(5)?)?
                     .checked_add(
-                        (std::mem::size_of::<std::sync::OnceLock<Result<Arc<Input>, QueryError>>>()
-                            + std::mem::size_of::<QueryId>()
-                            + 32 * std::mem::size_of::<usize>()) as u64,
+                        (std::mem::size_of::<QueryId>() + 32 * std::mem::size_of::<usize>()) as u64,
                     )
             },
         )
@@ -444,6 +443,7 @@ impl QueryFactory for Factory {
             started: false,
             pending: Vec::new(),
             entries: BTreeMap::new(),
+            input: None,
             waiting: None,
             terminal: completed.map(Ok),
         }))
@@ -462,6 +462,7 @@ struct Task {
     started: bool,
     pending: Vec<DefId>,
     entries: BTreeMap<DefId, Arc<GraphEntry>>,
+    input: Option<Arc<Input>>,
     waiting: Option<QueryId>,
     terminal: Option<Result<ProductRef, Reference>>,
 }
@@ -515,7 +516,7 @@ impl Task {
                 .extend(self.queries.native_roots.iter().map(DefId::intern));
             // Legacy served_entries selects every eligible source entry in the
             // launch package, even when the root never references it.
-            for path in self.queries.inputs.keys() {
+            for path in self.queries.inputs.iter() {
                 let launch_package = path.0.package == self.root.0.package
                     || self.queries.batch.as_ref().is_some_and(|(_, roots)| {
                         roots.iter().any(|root| root.0.package == path.0.package)
@@ -644,10 +645,17 @@ impl Task {
         >,
     > {
         let queries = self.queries.clone();
-        let input = match queries.input(path) {
-            Ok(input) => input,
-            Err(error) => return Poll::Ready(Err(queries.failure_record(error))),
-        };
+        if self.input.is_none() {
+            self.input = match queries.input(path) {
+                Ok(input) => Some(input),
+                Err(error) => return Poll::Ready(Err(queries.failure_record(error))),
+            };
+        }
+        let input = self
+            .input
+            .as_ref()
+            .expect("demanded semantic input")
+            .clone();
         let mut dependencies = input.dependencies.clone();
         let mut tir = None;
         let mut source_products = None;
@@ -1120,7 +1128,8 @@ impl Task {
             .map(|(path, _)| path)
             .collect();
         let escapes: BTreeMap<_, _> = self.entries.keys().map(|id| id.path()).filter_map(|path| {
-            let signature = &queries.input(path).ok()?.signature;
+            let input = queries.input(path).ok()?;
+            let signature = &input.signature;
             if unsafe_operations.contains(path) { Some((path.clone(), Escape::UnsafeOperation)) }
             else if matches!(&signature.kind, SignatureKind::Function(f) if f.foreign.is_some()) { Some((path.clone(), Escape::Extern)) }
             else { None }
@@ -1132,7 +1141,8 @@ impl Task {
                 .map_or(CodeReach::Safe, |r| CodeReach::Escapes(r.spelled())))
         };
         let facts = |path: &DefPath| -> Result<Option<(CalleeFacts, CallForm)>, QueryError> {
-            let signature = &queries.input(path)?.signature;
+            let input = queries.input(path)?;
+            let signature = &input.signature;
             let Ok(roots) = crate::admission::entry_roots(
                 snapshot.types(),
                 signature,
@@ -1190,7 +1200,7 @@ impl Task {
             entries.clone()
         } else {
             let mut entries = BTreeMap::new();
-            for path in queries.inputs.keys() {
+            for path in queries.inputs.iter() {
                 if queries
                     .operation
                     .capture()
@@ -1449,10 +1459,7 @@ impl QueryEngine {
             operation: namespace.lease(),
             namespace,
             source_paths,
-            inputs: paths
-                .into_iter()
-                .map(|path| (path, std::sync::OnceLock::new()))
-                .collect(),
+            inputs: paths,
             specializations,
             store,
             required,
@@ -1539,7 +1546,7 @@ impl QueryEngine {
             )
         });
         let semantic_ids: BTreeMap<_, _> = inputs
-            .keys()
+            .iter()
             .map(|path| {
                 (
                     path.clone(),

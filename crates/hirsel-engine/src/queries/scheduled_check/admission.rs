@@ -51,7 +51,7 @@ impl Task {
                     hash.0.as_slice(),
                 ],
             );
-            cx.release_body(id);
+            cx.consume(id);
         }
         result
     }

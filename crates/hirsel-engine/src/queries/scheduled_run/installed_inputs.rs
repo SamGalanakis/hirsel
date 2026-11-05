@@ -7,12 +7,15 @@ use crate::store::{
 };
 
 impl FrontRunQueries {
-    pub(super) fn publish_installed_input(&self, path: &DefPath) -> Result<(), QueryError> {
+    pub(super) fn publish_installed_input(
+        &self,
+        path: &DefPath,
+        input: &Input,
+    ) -> Result<(), QueryError> {
         let Some(writer) = self.store.installation_output() else {
             return Ok(());
         };
         let namespace = self.operation.capture();
-        let input = self.input(path)?;
         if !input.source {
             return Ok(());
         }

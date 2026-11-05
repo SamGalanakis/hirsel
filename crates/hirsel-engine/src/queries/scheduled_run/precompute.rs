@@ -73,13 +73,13 @@ impl FrontRunQueries {
         let universes = this
             .inputs
             .iter()
-            .filter(|(path, _)| {
+            .filter(|path| {
                 this.operation
                     .capture()
                     .bodies
                     .contains_key(&DefId::intern(path))
             })
-            .map(|(path, _)| path.0.package.clone())
+            .map(|path| path.0.package.clone())
             .collect::<BTreeSet<_>>()
             .into_iter()
             .filter_map(|package| {
@@ -354,6 +354,8 @@ impl Task {
                     ],
                 );
             }
+            drop(product);
+            cx.consume(query);
             self.index += 1;
         }
         // Installed roots publish each source package's universe summary.
@@ -379,6 +381,8 @@ impl Task {
                     archive.reference().output.0.0.as_slice(),
                 ],
             );
+            drop(product);
+            cx.consume(query);
             self.index += 1;
         }
         Poll::Ready((|| {

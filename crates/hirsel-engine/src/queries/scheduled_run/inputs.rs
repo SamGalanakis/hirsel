@@ -1,35 +1,35 @@
 //! Semantic input construction is demanded per definition under one operation lease.
 use super::*;
 impl FrontRunQueries {
-    pub(super) fn input(&self, path: &DefPath) -> Result<&Input, QueryError> {
-        let slot = self
-            .inputs
-            .get(path)
-            .ok_or_else(|| operational(format!("missing signature input for {path}")))?;
-        slot.get_or_init(|| {
-            let input = Arc::new(self.prepare_input(path)?);
-            let mut weight = crate::NativeMetadataWeight::default();
-            weight.arc(&input);
-            weight.tree::<DefPath, ()>(input.dependencies.len());
-            for dependency in &input.dependencies {
-                weight.path(dependency);
-            }
-            let charge = weight
-                .bytes()
-                .checked_add(input.owned_header_bytes)
-                .ok_or_else(|| operational("Run input size overflow"))?;
-            let mut remaining = self
-                .retention
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            *remaining = remaining
-                .checked_sub(charge)
-                .ok_or_else(|| operational("demanded Run input exceeds admission"))?;
-            Ok(input)
-        })
-        .as_ref()
-        .map(AsRef::as_ref)
-        .map_err(Clone::clone)
+    pub(super) fn input(&self, path: &DefPath) -> Result<Arc<Input>, QueryError> {
+        if !self.inputs.contains(path) {
+            return Err(operational(format!("missing signature input for {path}")));
+        }
+        let mut input = self.prepare_input(path)?;
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(std::mem::size_of::<Input>() + 2 * std::mem::size_of::<usize>());
+        weight.tree::<DefPath, ()>(input.dependencies.len());
+        for dependency in &input.dependencies {
+            weight.path(dependency);
+        }
+        let bytes = weight
+            .bytes()
+            .checked_add(input.owned_header_bytes)
+            .ok_or_else(|| operational("Run input size overflow"))?;
+        let mut remaining = self
+            .retention
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *remaining = remaining
+            .checked_sub(bytes)
+            .ok_or_else(|| operational("demanded Run input exceeds admission"))?;
+        drop(remaining);
+        input._charge = Some(InputCharge {
+            remaining: self.retention.clone(),
+            _allowance: self.ownership._allowance.clone(),
+            bytes,
+        });
+        Ok(Arc::new(input))
     }
     fn prepare_input(&self, path: &DefPath) -> Result<Input, QueryError> {
         let namespace = self.operation.capture();
@@ -63,6 +63,7 @@ impl FrontRunQueries {
                     crate::memo::retained::retained_signature_payload_bytes(&owner_signature),
                 );
             return Ok(Input {
+                _charge: None,
                 signature,
                 owner_signature,
                 content: record.ownership.semantic,
@@ -149,6 +150,7 @@ impl FrontRunQueries {
             .filter(|reference| INPUT_CONTENT.reference(&bytes) == Some(*reference))
             .ok_or_else(|| operational("Run input content exceeds transport admission"))?;
         Ok(Input {
+            _charge: None,
             signature,
             owner_signature,
             content,
@@ -161,5 +163,21 @@ impl FrontRunQueries {
             generated,
             implementation,
         })
+    }
+}
+
+/// The last consumer releases decoded headers and dependencies before
+/// refunding their debit. The catalogue itself keeps no decoded allocation.
+pub(super) struct InputCharge {
+    remaining: Arc<Mutex<u64>>,
+    _allowance: Arc<MemoryReservation>,
+    bytes: u64,
+}
+impl Drop for InputCharge {
+    fn drop(&mut self) {
+        *self
+            .remaining
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) += self.bytes;
     }
 }

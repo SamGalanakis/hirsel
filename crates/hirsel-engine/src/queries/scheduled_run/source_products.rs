@@ -89,7 +89,7 @@ impl FrontSourceProducts {
 }
 impl FrontRunQueries {
     pub fn source_definitions(&self) -> impl Iterator<Item = &DefPath> {
-        self.inputs.keys().filter(|path| {
+        self.inputs.iter().filter(|path| {
             self.operation
                 .capture()
                 .bodies

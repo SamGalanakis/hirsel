@@ -427,7 +427,7 @@ impl QueryTask for Task {
             match cx.read(admission) {
                 Poll::Pending => pending.push(admission),
                 Poll::Ready(Err(error)) => return QueryPoll::Failed(error),
-                Poll::Ready(Ok(_)) => cx.release_body(admission),
+                Poll::Ready(Ok(_)) => cx.consume(admission),
             }
             if self.files.iter().any(File::clean) {
                 let growth = self.queries.plan.growth.query();
@@ -592,7 +592,7 @@ impl Task {
                                 }
                             }
                         }
-                        cx.release_body(id);
+                        cx.consume(id);
                         self.root += 1;
                     }
                     self.publication = Publication::Growth;
@@ -783,7 +783,7 @@ impl Task {
                                         .observation_product(product)
                                         .ok_or(self.queries.errors.protocol)?,
                                 ));
-                                cx.release_body(id);
+                                cx.consume(id);
                             }
                             Err(reference) => {
                                 let reads = self

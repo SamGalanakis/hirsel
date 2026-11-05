@@ -351,8 +351,18 @@ fn ownership_product_tracks_removal_reordering_relocation_and_parse_eviction() {
     );
     assert!(old.record_owner(gone).is_some());
     let store = Arc::new(crate::store::MemStore::default());
-    let mut producer = QueryEngine::new(crate::default_environment(), Default::default());
-    producer.result_store = Some(store.clone());
+    let create = || {
+        QueryEngine::new(
+            crate::default_environment(),
+            crate::PhaseAdapters {
+                lexer: Some(Arc::new(crate::LexerAdapter)),
+                parser: Some(Arc::new(crate::ParserAdapter)),
+                ..Default::default()
+            },
+        )
+        .with_result_store(store.clone())
+    };
+    let mut producer = create();
     let file = producer
         .sources
         .add("hydrated.hir", "fn body()->u8{9u8}".into())
@@ -364,8 +374,7 @@ fn ownership_product_tracks_removal_reordering_relocation_and_parse_eviction() {
         .next()
         .map(|(path, items)| (path.clone(), items[0].clone()))
         .unwrap();
-    let mut consumer = QueryEngine::new(crate::default_environment(), Default::default());
-    consumer.result_store = Some(store);
+    let mut consumer = create();
     consumer.sources = producer.sources.clone();
     consumer.index_source(file, &context).unwrap();
     assert!(

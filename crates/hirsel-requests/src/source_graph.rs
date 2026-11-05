@@ -11,8 +11,7 @@ use super::{
 };
 use hirsel_engine::{
     CompileConfig, Compiler, FrontBodyQueries, FrontCheckQueries, FrontGrowthQueries,
-    FrontLowerQueries, FrontRunQueries, LoadedProgram, LoweringPolicy, QueryError, QueryKind,
-    ToolError,
+    FrontLowerQueries, FrontRunQueries, LoweringPolicy, QueryError, QueryKind, ToolError,
     requests::source_graph::{SourceHost, SourceSelection, SourceShape, registration},
     runtime::*,
     store::{RequestStore, ResultStore},
@@ -1011,7 +1010,7 @@ pub(super) fn install(
     scratch_parent: &std::path::Path,
     toolchain: Option<&Arc<hirsel_native::Toolchain>>,
     host_toolchain: bool,
-    #[cfg(test)] before_check: Option<fn(&mut LoadedProgram)>,
+    #[cfg(test)] before_check: Option<fn(&mut hirsel_engine::LoadedProgram)>,
 ) -> Result<Arc<InstalledGraph>, ToolError> {
     let _timing = hirsel_intern::timings::interval(hirsel_intern::timings::Interval::FrontPrepare);
     if matches!(request.operation, CompileOperation::Precompute)

@@ -268,8 +268,9 @@ mod tests {
     }
 }
 
-impl crate::resident::ObservedEngine for CompilerRequests {
-    fn set_invocation_store(
+impl CompilerRequests {
+    /// Swap the invocation store shared by discovery and graph selection.
+    pub fn set_invocation_store(
         &mut self,
         store: Option<Arc<dyn hirsel_engine::store::ResultStore>>,
     ) -> Option<Arc<dyn hirsel_engine::store::ResultStore>> {

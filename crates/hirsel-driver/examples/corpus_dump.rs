@@ -4,9 +4,8 @@ hirsel_guard::install!();
 
 #[path = "../tests/support/canonical_tir.rs"]
 mod canonical_tir;
-use hirsel_driver::*;
 use hirsel_engine::*;
-use hirsel_host_io::launch::*;
+use hirsel_front_phases::compiler_adapters;
 fn main() {
     with_compiler_stack(|| {
         let args: Vec<_> = std::env::args().collect();

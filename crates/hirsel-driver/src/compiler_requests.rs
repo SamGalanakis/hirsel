@@ -92,3 +92,12 @@ impl CompilerRequestsExt for Compiler {
         Session::open_with_compiler(path, compiler).check_safe()
     }
 }
+
+impl crate::resident::ObservedEngine for crate::requests::CompilerRequests {
+    fn set_invocation_store(
+        &mut self,
+        store: Option<std::sync::Arc<dyn hirsel_engine::store::ResultStore>>,
+    ) -> Option<std::sync::Arc<dyn hirsel_engine::store::ResultStore>> {
+        Self::set_invocation_store(self, store)
+    }
+}

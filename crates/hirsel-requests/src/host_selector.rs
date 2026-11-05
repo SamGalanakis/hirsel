@@ -5,7 +5,6 @@ use super::{
     CompilerReadiness, RequestLimits,
 };
 use hirsel_engine::{CheckCompletion, CheckOutput, ToolError, runtime::*};
-use hirsel_span::SourceMap;
 use std::{
     collections::BTreeMap,
     path::PathBuf,

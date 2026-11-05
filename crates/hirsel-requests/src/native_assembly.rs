@@ -19,7 +19,6 @@ use hirsel_native::object_queries;
 use hirsel_native::query_model::{
     ARENA_CANDIDATES_KIND, ARENA_CHOSEN_KIND, INSTANCE_KIND, READY_KIND, ROOT_KIND,
 };
-use hirsel_native_cache::*;
 use hirsel_native_queries::*;
 use hirsel_syntax::DefPath;
 use std::sync::Arc;

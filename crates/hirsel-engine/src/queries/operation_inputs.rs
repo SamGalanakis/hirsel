@@ -4,6 +4,11 @@ use super::*;
 use crate::runtime::MemoryReservation;
 use std::sync::{Mutex, OnceLock, Weak};
 
+type HeaderProjection = (
+    Weak<Entry<hirsel_types::SignatureRef>>,
+    Weak<Entry<hirsel_types::SignatureRef>>,
+);
+
 /// Shared across every metadata assembler belonging to this operation.
 #[derive(Default)]
 pub(crate) struct OperationOwner {
@@ -14,7 +19,7 @@ pub(crate) struct OperationOwner {
     pub(crate) delta: Mutex<Option<Weak<namespace::CaptureDelta>>>,
     pub(crate) front: Mutex<Option<Weak<parallel::OperationFrontInputs>>>,
     pub(crate) headers: Mutex<BTreeMap<DefId, Vec<Weak<header_products::HeaderProduct>>>>,
-    pub(crate) projections: Mutex<BTreeMap<usize, Weak<Entry<hirsel_types::SignatureRef>>>>,
+    pub(crate) projections: Mutex<BTreeMap<usize, HeaderProjection>>,
 }
 
 pub(crate) struct InputIndex<K, V>(Arc<Rows<K, V>>);

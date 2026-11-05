@@ -95,14 +95,21 @@ impl SourceInputs {
             .as_ref()
             .and_then(Weak::upgrade);
         operation_inputs
-            .iter()
-            .chain(engine.source_inputs.iter())
-            .chain(engine.header_products.iter().map(|headers| &headers.inputs))
+            .into_iter()
+            .chain(engine.source_inputs.iter().cloned())
+            .chain(
+                engine
+                    .header_products
+                    .iter()
+                    .map(|headers| headers.inputs.clone()),
+            )
             .chain(engine.snapshot.iter().filter_map(|(_, snapshot)| {
-                snapshot.header_products().map(|headers| &headers.inputs)
+                snapshot
+                    .get()?
+                    .header_products()
+                    .map(|headers| headers.inputs.clone())
             }))
             .find(|inputs| inputs.matches(engine))
-            .cloned()
     }
     fn matches(&self, engine: &QueryEngine) -> bool {
         if self.declarations.revision() != engine.declarations.revision()
@@ -178,6 +185,7 @@ impl SourceInputs {
                     .or_else(|| {
                         engine.snapshot.as_ref().and_then(|(_, snapshot)| {
                             snapshot
+                                .get()?
                                 .header_products()
                                 .map(|headers| headers.syntax.clone())
                         })
@@ -330,6 +338,7 @@ impl HeaderSources {
             .or_else(|| {
                 engine.snapshot.as_ref().and_then(|(_, snapshot)| {
                     snapshot
+                        .get()?
                         .header_products()
                         .map(|headers| headers.syntax.clone())
                 })

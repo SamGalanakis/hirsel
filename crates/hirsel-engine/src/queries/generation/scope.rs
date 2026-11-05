@@ -316,7 +316,10 @@ impl QueryEngine {
                 .cloned()
                 .collect::<Vec<_>>(),
         );
-        self.snapshot = Some((self.snapshot_stamp(), namespace.snapshot.clone()));
+        self.snapshot = Some((
+            self.snapshot_stamp(),
+            crate::snapshot::SnapshotCache::new(&namespace.snapshot),
+        ));
         self.adopt_completed_headers();
         Ok(())
     }

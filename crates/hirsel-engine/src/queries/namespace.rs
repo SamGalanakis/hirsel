@@ -357,7 +357,10 @@ impl NamespaceCapture {
         engine.private_summary_inputs = private_unique::registration_inputs(
             &self.registrations.values().cloned().collect::<Vec<_>>(),
         );
-        engine.snapshot = Some((engine.snapshot_stamp(), self.snapshot.clone()));
+        engine.snapshot = Some((
+            engine.snapshot_stamp(),
+            crate::snapshot::SnapshotCache::new(&self.snapshot),
+        ));
         engine.inherit_source_records((*self.anchors).clone());
         Ok(engine)
     }
@@ -639,7 +642,8 @@ impl QueryEngine {
         let previous = self
             .snapshot
             .as_ref()
-            .and_then(|(_, snapshot)| snapshot.header_products().cloned());
+            .and_then(|(_, snapshot)| snapshot.get())
+            .and_then(|snapshot| snapshot.header_products().cloned());
         let snapshot = self.signature_inputs();
         if let (Some(previous), Some(current)) = (previous, snapshot.header_products())
             && !Arc::ptr_eq(&previous, current)
@@ -655,6 +659,9 @@ impl QueryEngine {
     ) -> Result<Arc<NamespaceCapture>, QueryError> {
         self.prepare_namespace_scope(registrations);
         let snapshot = self.signature_inputs();
+        if let Some((_, cache)) = self.snapshot.as_mut() {
+            cache.release();
+        }
         if let Some(previous) = self
             .operation
             .captures
@@ -1068,6 +1075,9 @@ impl QueryEngine {
             .unwrap_or_else(|e| e.into_inner());
         captures.retain(|capture| capture.strong_count() != 0);
         captures.push(Arc::downgrade(&capture));
+        if let Some((_, cache)) = self.snapshot.as_mut() {
+            cache.release();
+        }
         Ok(capture)
     }
 }

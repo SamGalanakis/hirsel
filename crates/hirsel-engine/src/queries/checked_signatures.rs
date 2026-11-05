@@ -96,7 +96,10 @@ impl FrontCheckedSignatures {
 impl QueryEngine {
     fn retains_signature_inputs(&self, snapshot: &Arc<SignatureSnapshot>) -> bool {
         self.snapshot.as_ref().is_some_and(|(stamp, current)| {
-            *stamp == self.snapshot_stamp() && Arc::ptr_eq(snapshot, current)
+            *stamp == self.snapshot_stamp()
+                && current
+                    .get()
+                    .is_some_and(|current| Arc::ptr_eq(snapshot, &current))
         })
     }
     fn captured_signature_coverage(

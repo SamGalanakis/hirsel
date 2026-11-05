@@ -93,8 +93,7 @@ struct HeaderRowLease {
     output: Weak<QueryOutput<hirsel_types::SignatureRef>>,
     _charge: Charge,
 }
-type ValidationCaches =
-    Arc<std::sync::Mutex<Vec<(Weak<crate::snapshot::ValidationState>, Arc<dyn Send + Sync>)>>>;
+type ValidationCaches = Arc<std::sync::Mutex<Vec<Weak<crate::snapshot::ValidationState>>>>;
 #[derive(Clone)]
 struct HeaderAdmission {
     validation_caches: ValidationCaches,
@@ -211,6 +210,9 @@ pub(crate) struct HeaderProducts {
     failures: BTreeMap<DefId, Vec<hirsel_types::UniqueFailure>>,
 }
 impl HeaderProducts {
+    pub(crate) fn operation_owned(&self) -> bool {
+        self.inputs.unadmitted_bytes() == 0
+    }
     pub(crate) fn needs_written_signatures(&self) -> bool {
         self.adapters.signature.is_none()
     }
@@ -240,7 +242,7 @@ impl HeaderProducts {
                         cell.set_shared(existing);
                     } else {
                         let _ = cell.set(HeaderProduct {
-                            result: entry.result(),
+                            result: projected.result(),
                             entry: Some(projected),
                             recomputes: 0,
                             graph_work: 0,
@@ -692,7 +694,7 @@ impl HeaderProducts {
         };
         let product = HeaderProduct {
             _row_charge: charge.1,
-            result,
+            result: entry.as_ref().map_or(result, |entry| entry.result()),
             entry,
             recomputes,
             graph_work: if local { 0 } else { recomputes },
@@ -1101,7 +1103,7 @@ impl HeaderProducts {
         state: &Arc<crate::snapshot::ValidationState>,
     ) -> Result<(), hirsel_validate::ViewRefusal> {
         // Four vector slots per live owner bound minimum/spare allocation.
-        // Retain the charge until a dead weak owner is pruned.
+        // The live validation state owns its registry allocation charge.
         let bytes = 4 * size_of::<(
             std::sync::Weak<crate::snapshot::ValidationState>,
             Arc<dyn Send + Sync>,
@@ -1119,11 +1121,12 @@ impl HeaderProducts {
         })?;
         let registry = self.validation_cache_registry();
         let mut caches = registry.lock().unwrap();
-        caches.retain(|(state, _)| state.strong_count() != 0);
+        caches.retain(|state| state.strong_count() != 0);
         if caches.capacity() > 4 * caches.len().max(1) {
             caches.shrink_to_fit();
         }
-        caches.push((Arc::downgrade(state), lease));
+        let _ = state.registration.set(lease);
+        caches.push(Arc::downgrade(state));
         Ok(())
     }
     fn validation_cache_registry(&self) -> ValidationCaches {
@@ -1139,8 +1142,8 @@ impl HeaderProducts {
     fn evict_validation_cache(&self) -> bool {
         let registry = self.validation_cache_registry();
         let mut caches = registry.lock().unwrap();
-        caches.retain(|(state, _)| state.strong_count() != 0);
-        for (state, _) in caches.iter() {
+        caches.retain(|state| state.strong_count() != 0);
+        for state in caches.iter() {
             if let Some(state) = state.upgrade()
                 && state.evict_cached()
             {
@@ -1327,9 +1330,10 @@ impl QueryEngine {
             && let Some(previous) = self
                 .snapshot
                 .as_ref()
-                .and_then(|(_, snapshot)| snapshot.header_products())
+                .and_then(|(_, snapshot)| snapshot.get())
+                .and_then(|snapshot| snapshot.header_products().cloned())
         {
-            headers.inherit_snapshot_scope(previous, &self.private_summary_inputs);
+            headers.inherit_snapshot_scope(&previous, &self.private_summary_inputs);
         }
     }
     pub(crate) fn adopt_completed_headers(&mut self) {
@@ -1337,10 +1341,12 @@ impl QueryEngine {
             return;
         };
         let current = *stamp == self.snapshot_stamp();
+        let Some(snapshot) = snapshot.get() else {
+            return;
+        };
         let Some(headers) = snapshot.header_products().cloned() else {
             return;
         };
-        let snapshot = snapshot.clone();
         if current {
             let _ = headers.adopt_private_products(self);
         }
@@ -1358,7 +1364,8 @@ impl QueryEngine {
             self.adopt_header_products(&headers);
             // These signatures and private facts came from this exact table.
             // Their publication advances the engine, not the captured inputs.
-            self.snapshot = Some((self.snapshot_stamp(), snapshot));
+            // Preserve the cache ownership mode when adopting completed rows.
+            self.snapshot.as_mut().unwrap().0 = self.snapshot_stamp();
         } else {
             for (id, product) in headers.completed() {
                 self.account_header_work(id, &product);
@@ -1388,13 +1395,45 @@ impl QueryEngine {
         let Some(entry) = &product.entry else {
             return;
         };
+        let detach = self.header_products.is_none() && product.charge.evictable();
         if self.signatures.get(&id).is_some_and(|current| {
-            Arc::ptr_eq(current, entry)
+            if detach {
+                self.operation
+                    .projections
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&(Arc::as_ptr(current) as usize))
+                    .is_some_and(|(source, reader)| {
+                        source
+                            .upgrade()
+                            .is_some_and(|source| Arc::ptr_eq(&source, current))
+                            && reader
+                                .upgrade()
+                                .is_some_and(|reader| Arc::ptr_eq(&reader, entry))
+                    })
+            } else {
+                Arc::ptr_eq(current, entry)
+                    || product
+                        .origin
+                        .upgrade()
+                        .is_some_and(|origin| Arc::ptr_eq(current, &origin))
+            }
+        }) {
+            return;
+        }
+        if detach
+            && let Some(current) = self.signatures.get(&id)
+            && (Arc::ptr_eq(current, entry)
                 || product
                     .origin
                     .upgrade()
-                    .is_some_and(|origin| Arc::ptr_eq(current, &origin))
-        }) {
+                    .is_some_and(|origin| Arc::ptr_eq(current, &origin)))
+        {
+            // This memo is already published here. Detaching its payload lease
+            // does not re-adopt its graph record or publication provenance.
+            let cached = self.operation.cache_header(current, entry);
+            self.snapshot_sources.insert(id, Arc::downgrade(&cached));
+            self.signatures.insert(id, cached);
             return;
         }
         self.graph.adopt(
@@ -1402,7 +1441,22 @@ impl QueryEngine {
             entry.memo.reads.clone(),
             entry.memo.durability,
         );
-        self.signatures.insert(id, entry.clone());
+        let cached = if detach {
+            let source = self
+                .signatures
+                .get(&id)
+                .filter(|source| {
+                    product
+                        .origin
+                        .upgrade()
+                        .is_some_and(|origin| Arc::ptr_eq(source, &origin))
+                })
+                .unwrap_or(entry);
+            self.operation.cache_header(source, entry)
+        } else {
+            entry.clone()
+        };
+        self.signatures.insert(id, cached.clone());
         if self.private_summary_active {
             if product.publication {
                 self.private_signature_publications.insert(id);
@@ -1410,7 +1464,7 @@ impl QueryEngine {
         } else {
             self.private_signature_publications.remove(&id);
         }
-        self.snapshot_sources.insert(id, Arc::downgrade(entry));
+        self.snapshot_sources.insert(id, Arc::downgrade(&cached));
     }
 }
 
@@ -1477,28 +1531,56 @@ impl operation_inputs::OperationOwner {
                         .is_some_and(|old| Arc::ptr_eq(old, entry))
             })
     }
+    fn cache_header(
+        &self,
+        source: &Arc<Entry<hirsel_types::SignatureRef>>,
+        reader: &Arc<Entry<hirsel_types::SignatureRef>>,
+    ) -> Arc<Entry<hirsel_types::SignatureRef>> {
+        let cached = Arc::new(Entry {
+            memo: source.memo.map_value(|output| QueryOutput {
+                value: Arc::new((*output.value).clone()),
+                diagnostics: output.diagnostics.clone(),
+                dependencies: output.dependencies.clone(),
+            }),
+            detail: source.detail.clone(),
+            products: source.products.clone(),
+            covered: source.covered.clone(),
+            depth: source.depth.clone(),
+            acceptance: source.acceptance.clone(),
+            verification: std::sync::Mutex::new(source.verification.lock().unwrap().clone()),
+            selections: source.selections.clone(),
+            consistent: source.consistent,
+        });
+        self.projections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                Arc::as_ptr(&cached) as usize,
+                (Arc::downgrade(&cached), Arc::downgrade(reader)),
+            );
+        cached
+    }
     fn project_header(
         &self,
         entry: &Arc<Entry<hirsel_types::SignatureRef>>,
     ) -> Arc<Entry<hirsel_types::SignatureRef>> {
         let mut entries = self.projections.lock().unwrap_or_else(|e| e.into_inner());
         let key = Arc::as_ptr(entry) as usize;
-        if let Some(projected) = entries.get(&key).and_then(Weak::upgrade) {
-            // A source address can be recycled after its original entry dies.
-            if Arc::ptr_eq(&projected.memo.reads, &entry.memo.reads)
-                && match (&projected.memo.value, &entry.memo.value) {
-                    (Ok(old), Ok(new)) => Arc::ptr_eq(old, new),
-                    _ => false,
-                }
-            {
-                return projected;
-            }
+        if let Some((source, projected)) = entries.get(&key)
+            && source
+                .upgrade()
+                .is_some_and(|source| Arc::ptr_eq(&source, entry))
+            && let Some(projected) = projected.upgrade()
+        {
+            return projected;
         }
         if entries.len().is_multiple_of(256) {
-            entries.retain(|_, entry| entry.strong_count() != 0);
+            entries.retain(|_, (source, projected)| {
+                source.strong_count() != 0 && projected.strong_count() != 0
+            });
         }
         let projected = project(entry);
-        entries.insert(key, Arc::downgrade(&projected));
+        entries.insert(key, (Arc::downgrade(entry), Arc::downgrade(&projected)));
         projected
     }
 }

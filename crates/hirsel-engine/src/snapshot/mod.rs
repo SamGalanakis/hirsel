@@ -25,6 +25,30 @@ pub use provider::FrozenProvider;
 
 pub use views::{PackageUniverse, PackageViews, View, ViewTable};
 
+/// Scalar snapshots may be cached until an operation admits their inputs.
+/// Once admitted, only live readers keep the snapshot and its charges alive.
+pub(crate) struct SnapshotCache {
+    scalar: Option<Arc<SignatureSnapshot>>,
+    readers: std::sync::Weak<SignatureSnapshot>,
+}
+impl SnapshotCache {
+    pub(crate) fn new(snapshot: &Arc<SignatureSnapshot>) -> Self {
+        Self {
+            scalar: (!snapshot
+                .header_products()
+                .is_some_and(|headers| headers.operation_owned()))
+            .then(|| snapshot.clone()),
+            readers: Arc::downgrade(snapshot),
+        }
+    }
+    pub(crate) fn get(&self) -> Option<Arc<SignatureSnapshot>> {
+        self.readers.upgrade()
+    }
+    pub(crate) fn release(&mut self) {
+        self.scalar = None;
+    }
+}
+
 /// V's identity of a declared view, as compile-time evaluation names it.
 #[derive(Debug)]
 struct Identity(Arc<hirsel_validate::IdentifiedSignature>);
@@ -154,6 +178,7 @@ struct ValidationCandidates {
     previous: Option<Arc<ValidationState>>,
 }
 pub(crate) struct ValidationState {
+    pub(crate) registration: OnceLock<Arc<dyn Send + Sync>>,
     views: Arc<ViewTable>,
     bases: BTreeMap<PackageId, Arc<ViewTable>>,
     packages: BTreeMap<PackageId, PackageViews>,
@@ -738,6 +763,7 @@ impl SignatureSnapshot {
                 })
                 .collect::<Result<_, hirsel_validate::ViewRefusal>>()?;
             let state = Arc::new(ValidationState {
+                registration: OnceLock::new(),
                 views,
                 bases,
                 packages,
@@ -1364,7 +1390,14 @@ impl SignatureSnapshot {
 
 impl hirsel_validate::ReplayEnvironment for SignatureSnapshot {
     fn checked(&self, package: &PackageId) -> Option<&dyn hirsel_validate::CheckedEnvironment> {
-        self.validation(package).ok()
+        self.validation(package)
+            .map_err(|error| {
+                if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
+                    eprintln!("OWNER CHECKED REFUSAL {error:?}");
+                }
+                error
+            })
+            .ok()
     }
 
     fn checked_overlay(
@@ -1372,13 +1405,29 @@ impl hirsel_validate::ReplayEnvironment for SignatureSnapshot {
         package: &PackageId,
         overlay: SignatureRef,
     ) -> Option<Arc<PackageViews>> {
-        self.validation_with(package, overlay).ok()
+        self.validation_with(package, overlay)
+            .map_err(|error| {
+                if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
+                    eprintln!("OWNER OVERLAY REFUSAL {error:?}");
+                }
+                error
+            })
+            .ok()
     }
     fn base_digest(&self, package: &PackageId) -> Option<ContentHash> {
         self.membership()
             .packages
             .contains(package)
-            .then(|| self.validation_input_digest(package).ok())
+            .then(|| {
+                self.validation_input_digest(package)
+                    .map_err(|error| {
+                        if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
+                            eprintln!("OWNER DIGEST REFUSAL {error:?}");
+                        }
+                        error
+                    })
+                    .ok()
+            })
             .flatten()
     }
     fn views(
@@ -1413,8 +1462,9 @@ impl QueryEngine {
         let stamp = self.snapshot_stamp();
         if let Some((kept, snapshot)) = &self.snapshot
             && *kept == stamp
+            && let Some(snapshot) = snapshot.get()
         {
-            return snapshot.clone();
+            return snapshot;
         }
         let headers = self
             .declared_header_inputs()
@@ -1439,7 +1489,7 @@ impl QueryEngine {
             signatures.push((DefId::intern(path), Ok(constant.signature.clone())));
         }
         self.snapshot_epoch = self.snapshot_epoch.next();
-        let previous = self.snapshot.as_ref().map(|(_, s)| s.clone());
+        let previous = self.snapshot.as_ref().and_then(|(_, s)| s.get());
         let sources = self.package_source_bindings();
         let installed = self.installed_universes(&sources);
         let lookup = LookupInput {
@@ -1492,7 +1542,7 @@ impl QueryEngine {
                 ),
             ),
         );
-        self.snapshot = Some((stamp, snapshot.clone()));
+        self.snapshot = Some((stamp, SnapshotCache::new(&snapshot)));
         self.snapshot_sources = row_sources;
         snapshot
     }
@@ -1582,7 +1632,7 @@ impl QueryEngine {
         {
             return None;
         }
-        self.snapshot.as_ref()?.1.signature(d)
+        self.snapshot.as_ref()?.1.get()?.signature(d)
     }
 
     pub(crate) fn unmarked_signature(&self, d: DefId) -> Option<Result<SignatureRef, QueryError>> {

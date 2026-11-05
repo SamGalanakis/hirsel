@@ -402,7 +402,7 @@ pub struct QueryEngine {
     /// The last signature snapshot and the inputs it was built from.
     pub(crate) snapshot: Option<(
         crate::snapshot::SnapshotStamp,
-        Arc<crate::snapshot::SignatureSnapshot>,
+        crate::snapshot::SnapshotCache,
     )>,
     pub(crate) operation: Arc<operation_inputs::OperationOwner>,
     pub(crate) snapshot_epoch: crate::memo::Revision,
@@ -841,7 +841,8 @@ impl QueryEngine {
         let pending = if kind == QueryKind::Signature {
             self.snapshot
                 .as_ref()
-                .and_then(|(_, s)| s.header_products())
+                .and_then(|(_, s)| s.get())
+                .and_then(|s| s.header_products().cloned())
                 .map_or(0, |headers| {
                     headers.pending_recomputes(DefId::intern(definition))
                 })
@@ -1091,8 +1092,8 @@ impl QueryEngine {
             .snapshot
             .as_ref()
             .filter(|(stamp, _)| *stamp == self.snapshot_stamp())
-            .and_then(|(_, snapshot)| snapshot.header_products())
-            .cloned();
+            .and_then(|(_, snapshot)| snapshot.get())
+            .and_then(|snapshot| snapshot.header_products().cloned());
         if let Some(headers) = headers
             && headers.contains(id)
         {
@@ -2117,6 +2118,7 @@ impl QueryEngine {
         let d = hirsel_syntax::DefId::intern(path);
         if let Some((stamp, snapshot)) = &self.snapshot
             && *stamp == self.snapshot_stamp()
+            && let Some(snapshot) = snapshot.get()
             && let Some(view) = snapshot.representation(d)
         {
             return view.map_or_else(|_| ContentHash::default(), |(_, digest)| digest.0);

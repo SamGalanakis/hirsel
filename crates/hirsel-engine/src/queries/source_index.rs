@@ -550,12 +550,14 @@ impl QueryEngine {
             pending_headers: self
                 .snapshot
                 .as_ref()
-                .and_then(|(_, snapshot)| snapshot.header_products())
-                .map_or_else(std::sync::Weak::new, Arc::downgrade),
+                .and_then(|(_, snapshot)| snapshot.get())
+                .and_then(|snapshot| snapshot.header_products().cloned())
+                .map_or_else(std::sync::Weak::new, |headers| Arc::downgrade(&headers)),
             completed_generation: self
                 .snapshot
                 .as_ref()
-                .and_then(|(_, snapshot)| snapshot.header_products())
+                .and_then(|(_, snapshot)| snapshot.get())
+                .and_then(|snapshot| snapshot.header_products().cloned())
                 .map_or(0, |headers| headers.generation()),
         };
         // Carry always owns/reclaims its source engine, independently of CLI

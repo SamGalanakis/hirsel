@@ -547,7 +547,12 @@ impl DemandProducer {
                         .as_ref()
                         .map(|successor| successor.namespace().clone());
                     *scope.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result.clone());
-                    let namespace = namespace.map_err(|_| producer.errors.protocol)?;
+                    let namespace = namespace.map_err(|error| {
+                        if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
+                            eprintln!("OWNER SCOPE PROTOCOL {error:?}");
+                        }
+                        producer.errors.protocol
+                    })?;
                     producer.scope_product(id, &namespace)
                 },
             )?));
@@ -611,7 +616,12 @@ impl DemandProducer {
                     .as_ref()
                     .map(|successor| successor.namespace().clone());
                 *request.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result.clone());
-                let namespace = complete.map_err(|_| producer.errors.protocol)?;
+                let namespace = complete.map_err(|error| {
+                    if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
+                        eprintln!("OWNER DEMAND PROTOCOL {error:?}");
+                    }
+                    producer.errors.protocol
+                })?;
                 let bytes = namespace
                     .records
                     .encode(&*namespace.anchors, &namespace.manifest)

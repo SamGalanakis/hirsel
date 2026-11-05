@@ -633,6 +633,9 @@ impl QueryEngine {
                     .collect()
             });
             let snapshot = self.signature_inputs();
+            if let Some((_, cache)) = self.snapshot.as_mut() {
+                cache.release();
+            }
             for (key, value) in &mut current {
                 if let ReadKey::ValidationUniverse(package) = key {
                     *value = snapshot.validation_input_digest(&package.id()).ok();

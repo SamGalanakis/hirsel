@@ -2,7 +2,18 @@
 //! its parent lease keeps the original rows and their admission alive.
 use super::*;
 use crate::runtime::MemoryReservation;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, Weak};
+
+/// Shared across every metadata assembler belonging to this operation.
+#[derive(Default)]
+pub(crate) struct OperationOwner {
+    pub(crate) captures: Mutex<Vec<Weak<NamespaceCapture>>>,
+    pub(crate) bodies: Mutex<Option<InputIndex<DefId, Arc<namespace::BodyInput>>>>,
+    pub(crate) front: Mutex<Option<Weak<parallel::OperationFrontInputs>>>,
+    pub(crate) headers: Mutex<BTreeMap<DefId, Vec<Weak<header_products::HeaderProduct>>>>,
+    pub(crate) projections: Mutex<BTreeMap<usize, Weak<Entry<hirsel_types::SignatureRef>>>>,
+}
+
 
 pub(crate) struct InputIndex<K, V>(Arc<Rows<K, V>>);
 struct Rows<K, V> {
@@ -144,5 +155,28 @@ impl<K: Ord, V> std::ops::Index<&K> for InputIndex<K, V> {
     type Output = V;
     fn index(&self, key: &K) -> &V {
         self.get(key).expect("captured operation input")
+    }
+}
+
+/// Citation clients outside Front keep ordinary maps. Front binds persistent
+/// operation deltas without copying their fixed citation and edit indexes.
+pub(crate) enum SourceIndex<K, V> {
+    Owned(BTreeMap<K, V>),
+    Operation(InputIndex<K, V>),
+}
+impl<K: Ord, V> SourceIndex<K, V> {
+    pub(crate) fn get(&self, key: &K) -> Option<&V> {
+        match self {
+            Self::Owned(rows) => rows.get(key),
+            Self::Operation(rows) => rows.get(key),
+        }
+    }
+}
+impl<K, V> From<BTreeMap<K, V>> for SourceIndex<K, V> {
+    fn from(rows: BTreeMap<K, V>) -> Self { Self::Owned(rows) }
+}
+impl<K: Ord, V> FromIterator<(K, V)> for SourceIndex<K, V> {
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
+        Self::Owned(iter.into_iter().collect())
     }
 }

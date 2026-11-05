@@ -664,6 +664,7 @@ impl HeaderProducts {
                         graph_work: 0,
                         publication,
                         charge: Charge::engine(),
+                        _row_charge: Charge::engine(),
                         origin: Weak::new(),
                         accounted: AtomicBool::new(true),
                     });
@@ -672,6 +673,7 @@ impl HeaderProducts {
             })
             .collect();
         Arc::new(Self {
+            operation: self.operation.clone(),
             rows,
             generation: AtomicU64::new(0),
             revision: AtomicU64::new(0),

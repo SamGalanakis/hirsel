@@ -22,6 +22,7 @@ use lint_facts::LintFacts;
 mod inputs;
 mod source;
 use inputs::Inputs;
+pub(in crate::queries) use inputs::OperationFrontInputs;
 mod storage;
 pub use source::FrontInputFootprint;
 use source::{SiblingFile, SiblingSources};
@@ -260,8 +261,9 @@ pub struct FrontBodyQueries {
     demand: std::sync::OnceLock<std::sync::Weak<generation::demand::DemandProducer>>,
     forwarded: Mutex<BTreeMap<Key, Forwarded>>,
     inputs: Inputs,
-    by_definition: Box<[(DefId, Key)]>,
-    body_demands: Box<[(Key, Key)]>,
+    _operation_inputs: Arc<OperationFrontInputs>,
+    by_definition: operation_inputs::InputIndex<DefId, Key>,
+    body_demands: operation_inputs::InputIndex<Key, Key>,
     types: Arc<hirsel_types::TypeInterner>,
     memo: Arc<hirsel_types::TypeMemo>,
     namespace: Arc<NamespaceCapture>,
@@ -271,7 +273,7 @@ pub struct FrontBodyQueries {
     checker: Option<Arc<dyn CheckerPhase>>,
     modes: Option<Arc<dyn ModesPhase>>,
     environment: ContentHash,
-    candidates: BTreeMap<DefId, ContentHash>,
+    candidates: operation_inputs::InputIndex<DefId, ContentHash>,
     records: Arc<persistent::TypeRecords>,
     input_records: crate::NativeRecords,
     store: Arc<dyn ResultStore>,
@@ -350,7 +352,7 @@ impl FrontBodyQueries {
     pub(crate) fn owns_query(&self, query: QueryId) -> bool {
         query.kind == FRONT_BODY_KIND
             && (self.inputs.contains_key(&query.address.0)
-                || index_value(&self.body_demands, &query.address.0).is_some())
+                || self.body_demands.get(&query.address.0).is_some())
     }
     pub(crate) fn diagnostic_phase(&self, diagnostic: &Diagnostic) -> Option<String> {
         let matches = |candidate: &Diagnostic| {
@@ -1474,7 +1476,7 @@ impl FrontBodyQueries {
                 let key = if self.inputs.contains_key(&product.address.0) {
                     product.address.0
                 } else {
-                    *index_value(&self.body_demands, &product.address.0)?
+                    *self.body_demands.get(&product.address.0)?
                 };
                 let outcome = match slots.get(&key)? {
                     FrontSlot::Archived(_) => return None,
@@ -1522,7 +1524,7 @@ impl FrontBodyQueries {
     }
 
     pub fn query(&self, definition: &DefPath) -> Option<QueryId> {
-        let address = *index_value(&self.by_definition, &DefId::get(definition)?)?;
+        let address = *self.by_definition.get(&DefId::get(definition)?)?;
         Some(QueryId {
             kind: FRONT_BODY_KIND,
             address: hirsel_artifact_store::Address(address),
@@ -1610,7 +1612,7 @@ impl FrontBodyQueries {
         definition: DefId,
         checked: bool,
     ) -> Option<LiveFrontReads> {
-        let key = index_value(&self.by_definition, &definition)?;
+        let key = self.by_definition.get(&definition)?;
         self.live_query_reads(
             QueryId {
                 kind: FRONT_BODY_KIND,
@@ -1864,7 +1866,7 @@ impl FrontBodyQueries {
         path: &DefPath,
     ) -> Option<&Arc<AcceptedFrontRegistration>> {
         self.inputs
-            .get(index_value(&self.by_definition, &DefId::get(path)?)?)?
+            .get(self.by_definition.get(&DefId::get(path)?)?)?
             .registration
             .as_ref()
     }
@@ -1944,15 +1946,6 @@ impl FrontBodyQueries {
         }
     }
 }
-// The address maps are frozen at capture. Sorted slices keep their exact
-// lookup keys without retaining insertion capacity or B-tree nodes.
-fn index_value<'a, K: Ord, V>(rows: &'a [(K, V)], key: &K) -> Option<&'a V> {
-    let at = rows
-        .binary_search_by(|(candidate, _)| candidate.cmp(key))
-        .ok()?;
-    Some(&rows[at].1)
-}
-
 struct DetachedFrontContext<'a> {
     queries: &'a FrontBodyQueries,
     scratch: u64,
@@ -2022,7 +2015,7 @@ impl QueryFactory for Factory {
         let (key, input, materialize) = if let Some(input) = self.0.inputs.get(&query.address.0) {
             (query.address.0, input, false)
         } else {
-            let key = *index_value(&self.0.body_demands, &query.address.0)
+            let key = *self.0.body_demands.get(&query.address.0)
                 .ok_or(self.0.errors.protocol)?;
             (key, &self.0.inputs[&key], true)
         };
@@ -2934,7 +2927,7 @@ impl QueryEngine {
         weight: MemoryWeight,
         allowance: Arc<MemoryReservationPool>,
         errors: RuntimeErrors,
-        previous: Option<&FrontBodyQueries>,
+        _previous: Option<&FrontBodyQueries>,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
         let available = allowance.available_bytes();
         namespace.require_environment(self)?;
@@ -2962,14 +2955,6 @@ impl QueryEngine {
         // The pool has already reserved its metadata before exposing available
         // bytes. The public footprint includes that owner exactly once.
         let mut required = FrontBodyQueries::input_bytes(&[])
-            .and_then(|bytes| {
-                bytes.checked_add(
-                    (definitions.len()
-                        * (size_of::<(Key, DefId)>()
-                            + size_of::<(DefId, Key)>()
-                            + size_of::<(Key, Key)>())) as u64,
-                )
-            })
             .and_then(|bytes| bytes.checked_sub(MemoryReservationPool::metadata_bytes()))
             .ok_or_else(|| refusal("input size overflow"))?;
         if required > available {
@@ -3075,9 +3060,18 @@ impl QueryEngine {
                 },
             );
         }
+        let mut operation_front = namespace.operation.front.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = operation_front.as_ref().and_then(std::sync::Weak::upgrade);
+        let previous = previous.as_deref();
         let inputs = Inputs::new(inputs, previous.map(|previous| &previous.inputs))?;
+        let arm_fixes = inputs::capture_map(arm_fixes::capture(&self.sources, &self.items), previous.map(|previous| &previous.arm_fixes))?;
+        let cited = inputs::capture_map(self.source_paths().into_iter().map(|path| (DefId::intern(&path), self.cited_value(&path))).collect(), previous.map(|previous| &previous.cited))?;
+        let candidates = inputs::capture_map(inputs.values().map(|input| (input.definition, self.candidates_value(input.definition.path()))).collect(), previous.map(|previous| &previous.candidates))?;
+        let by_definition = inputs::capture_map(inputs.iter().map(|(&key, input)| (input.definition, key)).collect(), previous.map(|previous| &previous.by_definition))?;
+        let body_demands = inputs::capture_map(inputs.keys().map(|&key| (ContentHash::of_parts("hirsel.front.body-demand.v1", [key.0.as_slice()]), key)).collect(), previous.map(|previous| &previous.body_demands))?;
+        let indexes = Arc::new(OperationFrontInputs { inputs: inputs.clone(), by_definition: by_definition.clone(), body_demands: body_demands.clone(), cited: cited.clone(), candidates: candidates.clone(), arm_fixes: arm_fixes.clone() });
         required = required
-            .checked_add(inputs.unadmitted_bytes())
+            .checked_add(indexes.unadmitted_bytes())
             .ok_or_else(|| refusal("input size overflow"))?;
         if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
             eprintln!(
@@ -3094,37 +3088,7 @@ impl QueryEngine {
             return Err(refused_inputs(required));
         }
         let retention = Arc::new(Mutex::new(available - required));
-        let arm_fixes = arm_fixes::capture(&self.sources, &self.items);
         let items = Arc::new(BTreeMap::new());
-        let cited = self
-            .source_paths()
-            .into_iter()
-            .map(|path| (DefId::intern(&path), self.cited_value(&path)))
-            .collect();
-        let candidates = inputs
-            .values()
-            .map(|input| {
-                (
-                    input.definition,
-                    self.candidates_value(input.definition.path()),
-                )
-            })
-            .collect();
-        let mut by_definition = inputs
-            .iter()
-            .map(|(&key, input)| (input.definition, key))
-            .collect::<Vec<_>>();
-        by_definition.sort_unstable_by_key(|&(definition, _)| definition);
-        let mut body_demands = inputs
-            .keys()
-            .map(|&key| {
-                (
-                    ContentHash::of_parts("hirsel.front.body-demand.v1", [key.0.as_slice()]),
-                    key,
-                )
-            })
-            .collect::<Vec<_>>();
-        body_demands.sort_unstable_by_key(|&(demand, _)| demand);
         // Include the pool owner as well as the bytes it lends. Reserving
         // this reported live set again must cover construction of its pool.
         let admitted = available
@@ -3134,7 +3098,9 @@ impl QueryEngine {
             .take(required)
             .ok_or_else(|| refusal("shared Front input partition"))?;
         namespace.admit(&mut inputs_allowance, self.sources.clone())?;
-        inputs.admit(&mut inputs_allowance)?;
+        indexes.admit(&mut inputs_allowance)?;
+        *operation_front = Some(Arc::downgrade(&indexes));
+        drop(operation_front);
         let products = ProductSource::admit_shared(
             anchors.as_ref().clone(),
             input_records.clone(),
@@ -3162,8 +3128,9 @@ impl QueryEngine {
             demand: Default::default(),
             forwarded: Mutex::new(BTreeMap::new()),
             inputs,
-            by_definition: by_definition.into_boxed_slice(),
-            body_demands: body_demands.into_boxed_slice(),
+            _operation_inputs: indexes,
+            by_definition,
+            body_demands,
             types: self.types.clone(),
             memo: self.memo.clone(),
             namespace,
@@ -3175,8 +3142,8 @@ impl QueryEngine {
                 declarations: self.declarations.observations(),
                 catalog: self.catalog.clone(),
                 owners: anchors.clone(),
-                cited,
-                arm_fixes,
+                cited: operation_inputs::SourceIndex::Operation(cited),
+                arm_fixes: operation_inputs::SourceIndex::Operation(arm_fixes),
             },
             resolver: self.adapters.resolver.clone(),
             checker: self.adapters.checker.clone(),

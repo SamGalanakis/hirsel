@@ -671,8 +671,8 @@ impl QueryEngine {
             declarations: self.declarations.observations(),
             catalog: self.catalog.clone(),
             owners: Arc::new(crate::NativeRecordContext::capture(self)),
-            cited: BTreeMap::new(),
-            arm_fixes: BTreeMap::new(),
+            cited: BTreeMap::new().into(),
+            arm_fixes: BTreeMap::new().into(),
         };
         let inputs = AcceptanceInputs {
             original,

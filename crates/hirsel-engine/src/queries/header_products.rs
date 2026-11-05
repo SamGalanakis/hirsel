@@ -22,6 +22,7 @@ pub(crate) struct HeaderProduct {
     graph_work: usize,
     publication: bool,
     charge: Charge,
+    _row_charge: Charge,
     origin: Weak<Entry<hirsel_types::SignatureRef>>,
     accounted: AtomicBool,
 }
@@ -70,6 +71,17 @@ impl Charge {
         )
     }
 }
+/// The payload's aliases hold one reservation. Distinct memo rows retain their
+/// own allocation charge until both their entry and output leases have ended.
+struct HeaderPayload {
+    charge: Charge,
+    rows: std::sync::Mutex<Vec<HeaderRowLease>>,
+}
+struct HeaderRowLease {
+    entry: Weak<Entry<hirsel_types::SignatureRef>>,
+    output: Weak<QueryOutput<hirsel_types::SignatureRef>>,
+    _charge: Charge,
+}
 type ValidationCaches =
     Arc<std::sync::Mutex<Vec<(Weak<crate::snapshot::ValidationState>, Arc<dyn Send + Sync>)>>>;
 #[derive(Clone)]
@@ -99,13 +111,15 @@ impl HeaderSlot {
     /// Settle `product` unless a row is already resident. Returns the
     /// resident row and whether it is this one.
     fn set(&self, product: HeaderProduct) -> (Arc<HeaderProduct>, bool) {
+        self.set_shared(Arc::new(product))
+    }
+    fn set_shared(&self, product: Arc<HeaderProduct>) -> (Arc<HeaderProduct>, bool) {
         let mut slot = self.product.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(resident) = slot.as_ref() {
             return (resident.clone(), false);
         }
         self.work
             .fetch_add(product.graph_work as u64, Ordering::Relaxed);
-        let product = Arc::new(product);
         *slot = Some(product.clone());
         (product, true)
     }
@@ -143,6 +157,7 @@ impl HeaderPhases {
     }
 }
 pub(crate) struct HeaderProducts {
+    operation: Arc<operation_inputs::OperationOwner>,
     rows: hirsel_syntax::DefMap<HeaderSlot>,
     generation: AtomicU64,
     /// Bumped by every row this table publishes after construction. An engine
@@ -209,11 +224,12 @@ impl HeaderProducts {
                     let entry = engine.signatures[&id].clone();
                     let _ = cell.set(HeaderProduct {
                         result: entry.result(),
-                        entry: Some(project(&entry)),
+                        entry: Some(engine.operation.project_header(&entry)),
                         recomputes: 0,
                         graph_work: 0,
                         publication: engine.private_signature_publications.contains(&id),
                         charge: Charge::engine(),
+                        _row_charge: Charge::engine(),
                         origin: Arc::downgrade(&entry),
                         accounted: AtomicBool::new(true),
                     });
@@ -238,6 +254,7 @@ impl HeaderProducts {
             .map(|(id, summary)| (*id, summary.clone()))
             .collect();
         Arc::new(Self {
+            operation: engine.operation.clone(),
             rows,
             generation: AtomicU64::new(0),
             revision: AtomicU64::new(0),
@@ -305,6 +322,7 @@ impl HeaderProducts {
     pub(in crate::queries) fn execution(self: &Arc<Self>) -> QueryEngine {
         let mut engine =
             QueryEngine::new_with_hold_bytes(self.environment.clone(), self.adapters.adapters(), 0);
+        engine.operation = self.operation.clone();
         engine.sources = self.sources.clone();
         engine.source_ownership = Arc::default();
         engine.private_summary_active = self.provisional;
@@ -346,7 +364,21 @@ impl HeaderProducts {
     /// Publish one row; a row already present keeps its product.
     /// Returns the resident row and whether it is this one.
     fn publish(&self, cell: &HeaderSlot, product: HeaderProduct) -> (Arc<HeaderProduct>, bool) {
-        let (product, settled) = cell.set(product);
+        let mut rows = self.operation.headers.lock().unwrap_or_else(|e| e.into_inner());
+        let id = product.entry.as_ref().map(|entry| entry.memo.key.def);
+        let product = if let Some(id) = id {
+            let versions = rows.entry(id).or_default();
+            versions.retain(|row| row.strong_count() != 0);
+            if let Some(existing) = versions.iter().filter_map(Weak::upgrade).find(|existing| {
+                existing.entry.as_ref().zip(product.entry.as_ref()).is_some_and(|(old, new)| Arc::ptr_eq(old, new))
+            }) { existing } else {
+                let product = Arc::new(product);
+                versions.push(Arc::downgrade(&product));
+                product
+            }
+        } else { Arc::new(product) };
+        drop(rows);
+        let (product, settled) = cell.set_shared(product);
         if settled {
             self.revision.fetch_add(1, Ordering::AcqRel);
         }
@@ -589,7 +621,7 @@ impl HeaderProducts {
         let origin = source
             .filter(|_| local)
             .map_or_else(Weak::new, Arc::downgrade);
-        let entry = source.map(project);
+        let entry = source.map(|entry| self.operation.project_header(entry));
         // Never wait while holding a recursive header stack. Concurrent pure
         // normalizations race only to publish the same immutable source product.
         let recomputes = engine.recompute_count(id.path(), QueryKind::Signature);
@@ -612,17 +644,18 @@ impl HeaderProducts {
                         .is_some_and(|required| required <= *scratch)
                 }) =>
             {
-                (Charge::engine(), true)
+                ((Charge::engine(), Charge::engine()), true)
             }
             Err(error) => return Err(error),
         };
         let product = HeaderProduct {
+            _row_charge: charge.1,
             result,
             entry,
             recomputes,
             graph_work: if local { 0 } else { recomputes },
             publication: self.provisional,
-            charge,
+            charge: charge.0,
             origin,
             accounted: AtomicBool::new(local),
         };
@@ -807,25 +840,37 @@ impl HeaderProducts {
         &self,
         entry: Option<&Arc<Entry<hirsel_types::SignatureRef>>>,
         bytes: u64,
-    ) -> Result<Charge, QueryError> {
-        let signature = entry
-            .and_then(|entry| entry.memo.value.as_ref().ok())
-            .map(|output| &output.value);
-        if let Some(lease) =
-            signature.and_then(|signature| signature.metadata.retention.get::<Charge>())
-        {
-            return Ok((*lease).clone());
+    ) -> Result<(Charge, Charge), QueryError> {
+        let Some((entry, output)) = entry.and_then(|entry| Some((entry, entry.memo.value.as_ref().ok()?))) else {
+            return Ok((self.admit(bytes)?, Charge::engine()));
+        };
+        let signature = &output.value;
+        let payload_bytes = crate::memo::retained::retained_signature_payload_bytes(signature);
+        let payload = match signature.metadata.retention.get::<HeaderPayload>() {
+            Some(payload) => payload,
+            None => {
+                let overhead = (size_of::<HeaderPayload>() + 2 * size_of::<usize>()) as u64;
+                let charge = self.admit(payload_bytes.saturating_add(overhead))?;
+                if matches!(&*charge.0.lock().unwrap_or_else(|e| e.into_inner()), HeaderCharge::Engine) {
+                    return Ok((charge, Charge::engine()));
+                }
+                signature.metadata.retention.retain(Arc::new(HeaderPayload { charge, rows: Default::default() }))
+            }
+        };
+        let wrapper_bytes = crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<HeaderProduct>::uninit());
+        let row_bytes = bytes.saturating_sub(payload_bytes).saturating_sub(wrapper_bytes)
+            .saturating_add((4 * size_of::<HeaderRowLease>()) as u64);
+        let mut rows = payload.rows.lock().unwrap_or_else(|e| e.into_inner());
+        rows.retain(|row| row.entry.strong_count() != 0 || row.output.strong_count() != 0);
+        if !rows.iter().any(|row| row.entry.ptr_eq(&Arc::downgrade(entry))) {
+            let charge = self.admit(row_bytes)?;
+            rows.push(HeaderRowLease { entry: Arc::downgrade(entry), output: Arc::downgrade(output), _charge: charge });
         }
-        let charge = self.admit(bytes)?;
-        if matches!(
-            &*charge.0.lock().unwrap_or_else(|e| e.into_inner()),
-            HeaderCharge::Engine
-        ) {
-            return Ok(charge);
-        }
-        Ok(signature.map_or(charge.clone(), |signature| {
-            (*signature.metadata.retention.retain(Arc::new(charge))).clone()
-        }))
+        // Bound spare Vec allocation by the charged four slots per live row.
+        if rows.capacity() > 4 * rows.len().max(1) { rows.shrink_to_fit(); }
+        drop(rows);
+        let wrapper = self.admit(wrapper_bytes.saturating_add((24 * size_of::<usize>()) as u64))?;
+        Ok((payload.charge.clone(), wrapper))
     }
     /// Retain a payload a module proof settled, when the header grant admits it.
     fn seed(&self, id: DefId, entry: Arc<Entry<hirsel_types::SignatureRef>>) {
@@ -848,12 +893,13 @@ impl HeaderProducts {
         self.publish(
             cell,
             HeaderProduct {
+                _row_charge: charge.1,
                 result: entry.result(),
                 entry: Some(entry),
                 recomputes: 0,
                 graph_work: 0,
                 publication: false,
-                charge,
+                charge: charge.0,
                 origin: Weak::new(),
                 accounted: AtomicBool::new(true),
             },
@@ -1226,4 +1272,22 @@ fn project(
         selections: entry.selections.clone(),
         consistent: entry.consistent,
     })
+}
+
+impl operation_inputs::OperationOwner {
+    fn project_header(&self, entry: &Arc<Entry<hirsel_types::SignatureRef>>) -> Arc<Entry<hirsel_types::SignatureRef>> {
+        let mut entries = self.projections.lock().unwrap_or_else(|e| e.into_inner());
+        let key = Arc::as_ptr(entry) as usize;
+        if let Some(projected) = entries.get(&key).and_then(Weak::upgrade) {
+            // A source address can be recycled after its original entry dies.
+            if Arc::ptr_eq(&projected.memo.reads, &entry.memo.reads) && match (&projected.memo.value, &entry.memo.value) {
+                (Ok(old), Ok(new)) => Arc::ptr_eq(old, new),
+                _ => false,
+            } { return projected; }
+        }
+        entries.retain(|_, entry| entry.strong_count() != 0);
+        let projected = project(entry);
+        entries.insert(key, Arc::downgrade(&projected));
+        projected
+    }
 }

@@ -61,6 +61,7 @@ pub struct NamespaceCapture {
     retained: u64,
     admission: std::sync::OnceLock<NamespaceAdmission>,
     capture_inputs: CaptureInputs,
+    pub(crate) operation: Arc<operation_inputs::OperationOwner>,
 }
 
 /// A retained holder's lease over exact operation inputs and header bindings.
@@ -322,6 +323,7 @@ impl NamespaceCapture {
             .ok_or_else(|| refused("missing captured header inputs"))?;
         let mut engine = headers.execution();
         self.inputs.install(&mut engine);
+        engine.operation = self.operation.clone();
         engine.adapters = adapters.adapters();
         engine.verify = self.verify;
         engine.sources = self.sources.clone();
@@ -628,7 +630,7 @@ impl QueryEngine {
         self.prepare_namespace_scope(registrations);
         let snapshot = self.signature_inputs();
         if let Some(previous) = self
-            .namespace_captures
+            .operation.captures.lock().unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter_map(std::sync::Weak::upgrade)
             .find(|previous| {
@@ -851,19 +853,10 @@ impl QueryEngine {
         if store.persistence().retains() && store.put_content(MANIFEST, &bytes) != Some(manifest) {
             return Err(refused("manifest publication"));
         }
-        let previous = self
-            .namespace_captures
-            .iter()
-            .rev()
-            .filter_map(std::sync::Weak::upgrade)
-            .find(|previous| {
-                Arc::ptr_eq(&previous.inputs, &inputs)
-                    && previous.environment == self.environment_value()
-                    && previous.verify == self.verify
-            });
+        let mut previous = self.operation.bodies.lock().unwrap_or_else(|e| e.into_inner());
         let bodies = operation_inputs::InputIndex::capture(
             bodies,
-            previous.as_ref().map(|previous| &previous.bodies),
+            previous.as_ref(),
             |len| {
                 let mut weight = crate::NativeMetadataWeight::default();
                 weight.tree::<DefId, Arc<BodyInput>>(len);
@@ -873,6 +866,8 @@ impl QueryEngine {
                 Some(weight.bytes())
             },
         )?;
+        *previous = Some(bodies.clone());
+        drop(previous);
         let body_identities = bodies
             .iter()
             .map(|(id, body)| {
@@ -999,12 +994,11 @@ impl QueryEngine {
             retained,
             admission: std::sync::OnceLock::new(),
             capture_inputs,
+            operation: self.operation.clone(),
         });
-        if self.namespace_captures.len() == self.namespace_captures.capacity() {
-            self.namespace_captures
-                .retain(|capture| capture.strong_count() != 0);
-        }
-        self.namespace_captures.push(Arc::downgrade(&capture));
+        let mut captures = self.operation.captures.lock().unwrap_or_else(|e| e.into_inner());
+        captures.retain(|capture| capture.strong_count() != 0);
+        captures.push(Arc::downgrade(&capture));
         Ok(capture)
     }
 }
@@ -1317,7 +1311,9 @@ mod tests {
                         engine.implementation_hash(definition).unwrap()
                     );
                 }
+                let reconstructed = capture.assembly(&engine.adapters.source_phases()).unwrap();
                 views.push(capture);
+                engine = reconstructed;
                 // Distinct admission selections retain the same exact written
                 // inputs and query keys, just as a registration successor does.
             }

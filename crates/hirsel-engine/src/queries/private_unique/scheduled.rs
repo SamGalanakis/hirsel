@@ -777,7 +777,7 @@ impl QueryEngine {
                         catalog: self.catalog.clone(),
                         owners: Arc::new(crate::NativeRecordContext::capture(self)),
                         cited,
-                        arm_fixes: BTreeMap::new(),
+                        arm_fixes: BTreeMap::new().into(),
                     });
                     record_context = Some((stamp, context.clone()));
                     context

@@ -43,7 +43,7 @@ impl Bytes {
         let bytes = store
             .get_content(self.reference)
             .ok_or(QueryError::NotImplemented)?;
-        if INPUT_CONTENT.reference(&bytes) != Some(self.reference) {
+        if !bytes.matches_reference(self.reference) {
             return Err(operational("Run content descriptor changed"));
         }
         bincode::DefaultOptions::new()

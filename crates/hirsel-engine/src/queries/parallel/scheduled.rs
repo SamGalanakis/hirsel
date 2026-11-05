@@ -2305,7 +2305,7 @@ impl BodyTask {
             return None;
         }
         let bytes = queries.store.get_content(reference)?;
-        if reference.domain.reference(&bytes) != Some(reference) {
+        if !bytes.matches_reference(reference) {
             return None;
         }
         let signature = queries

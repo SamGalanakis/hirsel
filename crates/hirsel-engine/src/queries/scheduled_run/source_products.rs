@@ -131,7 +131,7 @@ impl FrontRunQueries {
             .store
             .get_content(source.record)
             .ok_or(QueryError::NotImplemented)?;
-        if OUTPUT.reference(&bytes) != Some(source.record) {
+        if !bytes.matches_reference(source.record) {
             return Err(operational(
                 "source product content differs from its descriptor",
             ));

@@ -784,7 +784,7 @@ impl Task {
                 .store
                 .get_content(input.content)
                 .ok_or_else(|| operational("missing Run input content"))?;
-            if INPUT_CONTENT.reference(&bytes) != Some(input.content) {
+            if input.content.domain != INPUT_CONTENT || !bytes.matches_reference(input.content) {
                 return Err(operational(
                     "Run input content differs from captured descriptor",
                 ));

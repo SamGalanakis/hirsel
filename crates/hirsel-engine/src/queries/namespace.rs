@@ -506,7 +506,7 @@ impl NamespaceCapture {
         let Some(bytes) = store.get_content(reference) else {
             return false;
         };
-        if MANIFEST.reference(&bytes) != Some(reference) {
+        if !bytes.matches_reference(reference) {
             return false;
         }
         let Some(manifest): Option<Manifest> = self.records.decode(&**self.anchors(), &bytes)
@@ -519,7 +519,7 @@ impl NamespaceCapture {
                     && reference.len <= limit
                     && store
                         .get_content(*reference)
-                        .is_some_and(|bytes| GENERATION.reference(&bytes) == Some(*reference))
+                        .is_some_and(|bytes| bytes.matches_reference(*reference))
             })
     }
 }

@@ -443,6 +443,14 @@ impl CompilationTasks {
             .saturating_add(object_bytes)
             .saturating_add(link_bytes)
             .saturating_add(copied.bytes());
+        if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some() {
+            eprintln!(
+                "NATIVE_DISPATCH_OWNERS guard={guard_bytes} operations={operations_bytes} snapshot={snapshot_bytes} native={native_bytes} roots={} execution={execution_bytes} objects={object_bytes} link={link_bytes} copied={} total={bytes} allowance={}",
+                roots.retained_dispatch_bytes(),
+                copied.bytes(),
+                self.allowance.bytes(),
+            );
+        }
         if bytes > self.allowance.bytes() {
             return Err("native compilation dispatch allowance exhausted".into());
         }

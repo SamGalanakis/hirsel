@@ -1260,8 +1260,10 @@ impl InstanceTasks {
         self.callables
             .set((product.clone(), graph))
             .map_err(|_| "callable graph published twice")?;
-        let (peak, quota) = self.window.peak();
-        eprintln!("NATIVE_WINDOW_PEAK\t{peak}\t{quota}");
+        if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some() {
+            let (peak, quota) = self.window.peak();
+            eprintln!("NATIVE_WINDOW_PEAK\t{peak}\t{quota}");
+        }
         Ok(product)
     }
 }

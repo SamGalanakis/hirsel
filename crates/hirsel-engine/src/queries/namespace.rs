@@ -1243,6 +1243,10 @@ mod tests {
             let expected = hirsel_validate::View::new(&types, signature.clone(), None).digest();
             capture.snapshot.package_universe(&package).unwrap();
             {
+                let _pinned = definitions
+                    .iter()
+                    .map(|definition| headers.product(DefId::intern(definition)).unwrap().unwrap())
+                    .collect::<Vec<_>>();
                 let held = pool.take(pool.available_bytes()).unwrap();
                 let before = hirsel_intern::work::read(
                     hirsel_intern::work::Counter::ValidationRetentionRefusals,

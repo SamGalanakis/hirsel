@@ -2,7 +2,7 @@
 //! and completed descriptor metadata; each poll owns its importer and source
 //! reader. No source/native work runs under its lock or in factory creation.
 use super::{
-    demand::{DemandInstances, DiscoveredInstance, Request},
+    demand::{DemandInstances, DiscoveredInstance, Request, StoredInstance},
     instance::InstanceQueries,
     source_inputs::{NativeFrontLower, NativeInstanceInputs, NativeSourceProvider},
     *,
@@ -13,7 +13,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     task::Poll,
 };
@@ -42,7 +42,6 @@ struct StoredRequest {
     record: Reference,
     source: bool,
     receipts: bool,
-    cached: Mutex<Option<Request>>,
 }
 impl StoredRequest {
     fn capture(store: &dyn ResultStore, request: Request) -> Result<Self, String> {
@@ -57,18 +56,9 @@ impl StoredRequest {
             record,
             source: request.source_definition().is_some(),
             receipts: request.has_receipt_roots(),
-            cached: Mutex::new(Some(request)),
         })
     }
     fn open(&self, store: &dyn ResultStore) -> Result<Request, String> {
-        if let Some(request) = self
-            .cached
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            return Ok(request.clone());
-        }
         let bytes = store
             .get_content(self.record)
             .ok_or("missing native request archive")?;
@@ -83,41 +73,26 @@ impl StoredRequest {
         }
         Ok(request)
     }
-    fn retained_metadata_bytes(&self) -> u64 {
-        self.cached
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map_or(0, Request::retained_metadata_bytes)
-    }
-    fn retire(&self) {
-        self.cached.lock().unwrap_or_else(|e| e.into_inner()).take();
-    }
 }
 #[derive(Default)]
 struct OriginalOutput {
     selected: OnceLock<OriginalSelection>,
-    cached: Mutex<Option<Arc<DiscoveredInstance>>>,
-    retired: AtomicBool,
 }
 struct OriginalSelection {
-    product: ProductRef,
+    output: StoredInstance,
     dependencies: Box<[ContentHash]>,
     callable: bool,
 }
 impl OriginalOutput {
-    fn get(&self) -> Option<Arc<DiscoveredInstance>> {
-        self.cached
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+    fn get(&self) -> Option<StoredInstance> {
+        self.selected.get().map(|s| s.output.clone())
     }
     fn product(&self) -> Option<&ProductRef> {
-        self.selected.get().map(|selected| &selected.product)
+        self.selected.get().map(|s| &s.output.product.product)
     }
-    fn set(&self, output: Arc<DiscoveredInstance>) -> Result<(), Arc<DiscoveredInstance>> {
+    fn set(&self, output: &DiscoveredInstance, store: &dyn ResultStore) -> Result<(), String> {
         let selected = OriginalSelection {
-            product: output.product.product.clone(),
+            output: StoredInstance::capture(store, output)?,
             dependencies: output
                 .facts
                 .body
@@ -129,22 +104,14 @@ impl OriginalOutput {
         };
         if let Err(other) = self.selected.set(selected) {
             let previous = self.selected.get().unwrap();
-            if previous.product != other.product
+            if previous.output.product.product != other.output.product.product
                 || previous.dependencies != other.dependencies
                 || previous.callable != other.callable
             {
-                return Err(output);
+                return Err("native instance completion changed".into());
             }
         }
-        let mut cached = self.cached.lock().unwrap_or_else(|e| e.into_inner());
-        if !self.retired.load(Ordering::Acquire) {
-            *cached = Some(output);
-        }
         Ok(())
-    }
-    fn retire(&self) {
-        self.retired.store(true, Ordering::Release);
-        self.cached.lock().unwrap_or_else(|e| e.into_inner()).take();
     }
 }
 struct SourceBinding {
@@ -173,7 +140,8 @@ pub struct InstanceTasks {
     discovery: QueryId,
     completed: OnceLock<ProductRef>,
     original_discovery: OnceLock<(ProductRef, bool)>,
-    callables: OnceLock<(ProductRef, super::demand::callable::Scope)>,
+    callables: OnceLock<(ProductRef, super::demand::callable::PublishedCallables)>,
+    window: Arc<super::demand::window::WindowBudget>,
     weight: MemoryWeight,
     allowance: Arc<hirsel_engine_admission::MemoryReservation>,
     fallback: Reference,
@@ -262,7 +230,11 @@ impl InstanceTasks {
         if metadata.bytes() > allowance.bytes() {
             return Err("native task metadata exceeds retained allowance".into());
         }
+        let allowance = Arc::new(allowance);
+        let window = super::demand::window::WindowBudget::new(allowance.clone());
+        window.set_base(metadata.bytes())?;
         let tasks = Arc::new(Self {
+            window,
             source,
             front: None,
             store,
@@ -282,7 +254,7 @@ impl InstanceTasks {
             original_discovery: OnceLock::new(),
             callables: OnceLock::new(),
             weight,
-            allowance: Arc::new(allowance),
+            allowance,
             fallback,
             imports: AtomicU64::new(0),
             recipe_decodes: AtomicU64::new(0),
@@ -326,6 +298,7 @@ impl InstanceTasks {
             .checked_add(metadata.bytes())
             .filter(|total| *total <= tasks.allowance.bytes())
             .ok_or("native front dispatch metadata exceeds retained allowance")?;
+        tasks.window.set_base(registry.charged)?;
         drop(registry);
         tasks.front = Some(front);
         Ok(self)
@@ -333,16 +306,17 @@ impl InstanceTasks {
     /// Completed original read caches, separate from the live dispatch/source
     /// identities. Callable handoff releases these bytes at their last use.
     pub fn completed_read_cache_bytes(&self) -> u64 {
-        self.entries()
-            .iter()
-            .map(|entry| {
-                entry.request.retained_metadata_bytes()
-                    + entry
-                        .output
-                        .get()
-                        .map_or(0, |output| output.retained_metadata_bytes())
-            })
-            .sum()
+        0
+    }
+    pub fn metadata_peak(&self) -> (u64, u64) {
+        self.window.peak()
+    }
+    pub fn read_completed(
+        &self,
+        key: &InstanceAddress,
+        stored: &StoredInstance,
+    ) -> Result<Arc<DiscoveredInstance>, String> {
+        stored.read(&self.producer(), key)
     }
     pub fn retained_allowance(&self) -> Arc<hirsel_engine_admission::MemoryReservation> {
         self.allowance.clone()
@@ -364,6 +338,7 @@ impl InstanceTasks {
         )
         .with_store_verification(self.verify_store)
         .with_retained_owner(self.allowance.clone())
+        .with_window(self.window.clone())
     }
     fn register(&self, requests: Vec<(InstanceAddress, Request)>) -> Result<(), String> {
         // Encoding/validation runs outside the index lock. admit() has already
@@ -375,9 +350,7 @@ impl InstanceTasks {
                 weight.add(size_of::<Registered>() + 2 * size_of::<usize>());
                 weight.path(key.instance.definition());
                 weight.add(key.instance.retained_encoding_bytes());
-                let charge = weight
-                    .bytes()
-                    .saturating_add(request.retained_metadata_bytes());
+                let charge = weight.bytes();
                 let request = StoredRequest::capture(self.store.as_ref(), request)?;
                 Ok((
                     key.address(INSTANCE_KIND).0,
@@ -428,6 +401,7 @@ impl InstanceTasks {
                 .expect("unpublished native registration")
                 .ordinal = registry.entries.len();
             registry.charged += charge;
+            self.window.set_base(registry.charged)?;
             registry.inputs.insert(input, entry.clone());
             registry.entries.insert(id, entry);
         }
@@ -457,175 +431,11 @@ impl InstanceTasks {
         requested: u64,
         owner: &hirsel_syntax::DefPath,
     ) -> String {
-        let mut requests = 0;
-        let mut bindings = 0;
-        let mut descriptors = 0;
-        let mut ready = 0;
-        let mut seal = 0;
-        let mut freedom = 0;
-        let mut discharge = 0;
-        let mut largest = (0, String::new());
-        for entry in registry.entries.values() {
-            requests += entry.request.retained_metadata_bytes();
-            if let Some(output) = entry.output.get() {
-                let bytes = output.retained_metadata_bytes();
-                descriptors += bytes;
-                ready += output.facts.source.ready_source.retained_metadata_bytes();
-                seal += output.facts.body.seal_demand.retained_metadata_bytes();
-                freedom += output.facts.body.operation_freedom.retained_bytes();
-                discharge += output.facts.source.discharge.retained_metadata_bytes();
-                if bytes > largest.0 {
-                    largest = (bytes, entry.key.instance.definition().to_string());
-                }
-            }
-        }
-        for binding in registry.sources.values() {
-            let mut weight = hirsel_engine::NativeMetadataWeight::default();
-            weight.path(&binding.original.definition);
-            bindings += weight.bytes()
-                + binding
-                    .original
-                    .body
-                    .retained_metadata_bytes()
-                    .unwrap_or(u64::MAX);
-        }
         format!(
-            "native source binding exceeds retained allowance: owner {owner}, requested {requested}, retained {}, allowance {}, entries {}, requests {requests}, source bindings {bindings}, descriptors {descriptors} [ready {ready}, seal {seal}, freedom {freedom}, discharge {discharge}], registry/frame {}, largest descriptor {} {}",
-            registry.charged,
-            self.allowance.bytes(),
-            registry.entries.len(),
-            registry
-                .charged
-                .saturating_sub(requests + bindings + descriptors),
-            largest.0,
-            largest.1
-        )
-    }
-    fn retention_attribution(
-        &self,
-        stage: &str,
-        registry: &Registry,
-        scope: &mut super::demand::callable::Scope,
-    ) {
-        if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_none() {
-            return;
-        }
-        eprintln!("NATIVE_RETENTION_STAGE\t{stage}");
-        let accounted = std::cell::Cell::new(0u64);
-        let row = |owner: &str, kind: &str, bytes: u64, last: &str| {
-            accounted.set(accounted.get().saturating_add(bytes));
-            eprintln!("NATIVE_RETAINER\t{owner}\t{kind}\t{bytes}\t{last}");
-        };
-        for entry in registry.entries.values() {
-            let owner = entry.key.instance.definition().to_string();
-            let mut registration = hirsel_engine::NativeMetadataWeight::default();
-            registration.add(size_of::<Registered>() + 2 * size_of::<usize>());
-            registration.path(entry.key.instance.definition());
-            registration.add(entry.key.instance.retained_encoding_bytes());
-            row(
-                &owner,
-                "registration frame and key",
-                registration.bytes(),
-                "original instance/discovery traversal completed; original aliases pending",
-            );
-            if let Some(selected) = entry.output.selected.get() {
-                row(
-                    &owner,
-                    "completion dependency identities",
-                    (selected.dependencies.len() * size_of::<ContentHash>()) as u64,
-                    "original completion; replay/discovery dependency checks pending",
-                );
-            }
-            row(
-                &owner,
-                "request",
-                entry.request.retained_metadata_bytes(),
-                "callable specialization completed; later products() reconstructs originals",
-            );
-            if let Some(output) = entry.output.get() {
-                for (kind, bytes, last) in output.retention_rows() {
-                    row(&owner, kind, bytes, last);
-                }
-            }
-        }
-        for binding in registry.sources.values() {
-            let mut weight = hirsel_engine::NativeMetadataWeight::default();
-            weight.path(&binding.original.definition);
-            weight.path(&binding.original.definition);
-            weight.add(size_of::<SourceBinding>() + 2 * size_of::<usize>());
-            row(
-                &binding.original.definition.to_string(),
-                "canonical Lower binding",
-                weight.bytes()
-                    + binding
-                        .original
-                        .body
-                        .retained_metadata_bytes()
-                        .unwrap_or(u64::MAX),
-                "callable source inventory completed; independent C/receipt consumers pending",
-            );
-        }
-        for root in &self.roots {
-            let mut weight = hirsel_engine::NativeMetadataWeight::default();
-            weight.path(root.instance.definition());
-            weight.add(root.instance.retained_encoding_bytes());
-            row(
-                &root.instance.definition().to_string(),
-                "root identity",
-                weight.bytes(),
-                "original discovery selected; snapshot root binding pending",
-            );
-        }
-        if let Some(front) = &self.front {
-            for path in front.bindings.keys() {
-                let mut weight = hirsel_engine::NativeMetadataWeight::default();
-                weight.path(path);
-                row(
-                    &path.to_string(),
-                    "Front dispatch key",
-                    weight.bytes(),
-                    "Lower dispatch completed; explicit task replay/read dependencies pending",
-                );
-            }
-        }
-        let remainder = registry.charged.saturating_sub(accounted.get());
-        row(
-            "InstanceTasks",
-            "index nodes, vector allocations and registry frame",
-            remainder,
-            "discovery completed; task replay and snapshot consumers pending",
-        );
-        eprintln!(
-            "NATIVE_RETAINED_TOTAL\t{}\t{}",
+            "native source binding admission refused for {owner}: requested {requested}, retained {}, quota {}",
             registry.charged,
             self.allowance.bytes()
-        );
-        eprintln!(
-            "NATIVE_SOURCE_PARTITION\t{}\t{}",
-            self.source.retained_metadata_bytes(),
-            self.retained_source_allowance().bytes()
-        );
-        let originals = registry
-            .entries
-            .values()
-            .filter_map(|entry| entry.output.get())
-            .collect::<Vec<_>>();
-        let requests = registry
-            .entries
-            .values()
-            .filter_map(|entry| {
-                entry
-                    .request
-                    .cached
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone()
-            })
-            .collect::<Vec<_>>();
-        scope.trace_retention(
-            requests.iter(),
-            originals.iter().map(|output| &output.facts),
-        );
+        )
     }
     fn bind_source(
         &self,
@@ -670,6 +480,7 @@ impl InstanceTasks {
             .checked_add(charge)
             .filter(|bytes| *bytes <= self.allowance.bytes())
             .ok_or_else(|| self.binding_refusal(&registry, charge, &original.definition))?;
+        self.window.set_base(registry.charged)?;
         registry.sources.insert(
             original.definition.clone(),
             Arc::new(SourceBinding { selected, original }),
@@ -680,53 +491,17 @@ impl InstanceTasks {
         if entry.output.product().is_some() {
             return Ok(());
         }
-        let charge = output.retained_metadata_bytes().saturating_add(
-            (output.facts.body.dependencies.len() * size_of::<ContentHash>()) as u64,
-        );
+        let stored = StoredInstance::capture(self.store.as_ref(), output)?;
+        let charge = stored.retained_bytes()
+            + (output.facts.body.dependencies.len() * size_of::<ContentHash>()) as u64;
         let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
-        if charge > self.allowance.bytes().saturating_sub(registry.charged) {
-            let declarations = &self.source.declarations;
-            let mut constants = hirsel_engine::NativeMetadataWeight::default();
-            for value in declarations.program.constants.values() {
-                constants.materialized(value);
-            }
-            let mut source_constants = hirsel_engine::NativeMetadataWeight::default();
-            for source in declarations.sources.values() {
-                if let Some(value) = &source.constant {
-                    source_constants.materialized(value);
-                }
-                for (_, value) in &source.materialized {
-                    source_constants.materialized(value);
-                }
-            }
-            let requests = registry
-                .entries
-                .values()
-                .map(|entry| entry.request.retained_metadata_bytes())
-                .sum::<u64>();
-            let descriptors = registry
-                .entries
-                .values()
-                .filter_map(|entry| entry.output.get())
-                .map(|output| output.retained_metadata_bytes())
-                .sum::<u64>();
-            return Err(format!(
-                "native completed descriptor allowance exhausted for {}: requested {charge} bytes, retained {}, allowance {}, registered {}, ready {}, seal {}, freedom {}, discharge {}, source metadata {}, program constants {}, source constants {}, front bindings {}, request payloads {requests}, completed descriptors {descriptors}",
-                output.facts.body.seal_demand.owner().0,
-                registry.charged,
-                self.allowance.bytes(),
-                registry.entries.len(),
-                output.facts.source.ready_source.retained_metadata_bytes(),
-                output.facts.body.seal_demand.retained_bytes(),
-                output.facts.body.operation_freedom.retained_bytes(),
-                output.facts.source.discharge.retained_metadata_bytes(),
-                self.source.retained_metadata_bytes(),
-                constants.bytes(),
-                source_constants.bytes(),
-                self.front.as_ref().map_or(0, |front| front.bindings.len()),
-            ));
-        }
-        registry.charged += charge;
+        let total = registry
+            .charged
+            .checked_add(charge)
+            .filter(|total| *total <= self.allowance.bytes())
+            .ok_or("native completed identity allowance exhausted")?;
+        self.window.set_base(total)?;
+        registry.charged = total;
         Ok(())
     }
     fn put(&self, key: QueryId, bytes: Vec<u8>) -> Result<ProductRef, String> {
@@ -809,10 +584,39 @@ impl InstanceTasks {
         if self.completed.get() != Some(&settled) {
             return Err("source operation inputs require settled native discovery".into());
         }
-        if let Some((_, scope)) = self.callables.get() {
-            return Ok(scope.operations.clone());
+        let mut operations = self.current_operations()?;
+        if let Some((_, graph)) = self.callables.get() {
+            let mut source = self.current_source()?;
+            for (key, _) in graph.outputs(self.store.as_ref())? {
+                if !self
+                    .source
+                    .declarations
+                    .sources
+                    .contains_key(key.instance.definition())
+                {
+                    continue;
+                }
+                let symbol = hirsel_lir::ir::Symbol {
+                    kind: hirsel_lir::ir::SymbolKind::Function,
+                    definition: key.instance.definition().clone(),
+                    instance: Some(key.instance.digest()),
+                };
+                let (evidence, _) = source.source_invocations(
+                    key.instance.definition(),
+                    &symbol,
+                    hirsel_tir::BodyId(key.instance.body()),
+                )?;
+                operations
+                    .invocations
+                    .insert(evidence.body.definition.clone(), evidence.invocations);
+                operations.invocation_bodies.retain(|row| {
+                    row.definition != evidence.body.definition
+                        || row.instance != evidence.body.instance
+                });
+                operations.invocation_bodies.push(evidence.body);
+            }
         }
-        self.current_operations()
+        Ok(operations)
     }
     fn current_operations(&self) -> Result<hirsel_layout::operation::OperationRegistry, String> {
         let entries = self.entries();
@@ -867,7 +671,7 @@ impl InstanceTasks {
         }
         if let Some((_, scope)) = self.callables.get() {
             let mut products = self.producer();
-            products.use_callable_scope(scope);
+            scope.apply(&mut products)?;
             products.recheck_receipts(&self.current_source()?)?;
             products.bind_original_roots(&self.roots)?;
             return Ok(products);
@@ -885,7 +689,7 @@ impl InstanceTasks {
                 .output
                 .get()
                 .ok_or("native discovery has an unfinished instance")?;
-            products.attach_completed(&entry.key, output.clone())?;
+            products.attach_stored(&entry.key, output)?;
         }
         products.recheck_receipts(&self.current_source()?)?;
         products.bind_original_roots(&self.roots)?;
@@ -894,12 +698,12 @@ impl InstanceTasks {
     pub fn completed_instances(
         &self,
         settled: ProductRef,
-    ) -> Result<Vec<(InstanceAddress, Arc<DiscoveredInstance>)>, String> {
+    ) -> Result<Vec<(InstanceAddress, StoredInstance)>, String> {
         if self.completed.get() != Some(&settled) {
             return Err("native discovery has not completed".into());
         }
         if let Some((_, scope)) = self.callables.get() {
-            return Ok(scope.outputs.clone());
+            return scope.outputs(self.store.as_ref());
         }
         let mut outputs = self
             .entries()
@@ -923,11 +727,20 @@ impl InstanceTasks {
         settled: ProductRef,
     ) -> Result<hirsel_lir::discharge::Discharge, String> {
         let completed = self.completed_instances(settled)?;
+        let facts = completed
+            .iter()
+            .map(|(key, stored)| {
+                self.read_completed(key, stored).map(|output| {
+                    (
+                        key.instance.definition().clone(),
+                        output.facts.source.discharge.clone(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         super::discharge::complete(
             &self.options.discharge,
-            completed
-                .iter()
-                .map(|(key, output)| (key.instance.definition(), &output.facts.source.discharge)),
+            facts.iter().map(|(key, facts)| (key, facts)),
         )
     }
 }
@@ -1166,7 +979,12 @@ impl QueryTask for InstanceTask {
             self.tasks.register(producer.registered_requests()?)?;
             self.tasks.charge_output(&self.entry, &output)?;
             let product = output.product.product.clone();
-            if self.entry.output.set(output).is_err() {
+            if self
+                .entry
+                .output
+                .set(&output, self.tasks.store.as_ref())
+                .is_err()
+            {
                 return Err("native instance completion changed".into());
             }
             Ok(product)
@@ -1257,7 +1075,7 @@ impl DiscoveryTask {
                         self.tasks
                             .failure("native task returned no completed descriptor")
                     })?;
-                    if selected.product != product {
+                    if selected.output.product.product != product {
                         return Err(self.tasks.failure("native discovery read another output"));
                     }
                     mark(&mut self.seen, entry.ordinal);
@@ -1343,41 +1161,32 @@ impl InstanceTasks {
             return Ok(selected.clone());
         }
         let entries = self.entries();
-        let outputs = entries
-            .iter()
-            .map(|entry| {
-                entry
-                    .output
-                    .get()
-                    .ok_or_else(|| "discovery output is unfinished".to_string())
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+        let mut facts = Vec::new();
+        let mut rows = Vec::new();
+        let mut needs_callable = false;
+        for entry in &entries {
+            let stored = entry.output.get().ok_or("discovery output is unfinished")?;
+            let output = self.read_completed(&entry.key, &stored)?;
+            facts.push((
+                entry.key.instance.definition().clone(),
+                output.facts.source.discharge.clone(),
+            ));
+            needs_callable |= output.facts.body.templates.execution;
+            rows.push((
+                entry.key.instance.encoding().to_vec(),
+                output.product.product.address.0,
+                output
+                    .product
+                    .product
+                    .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
+                    .map_err(|e| e.to_string())?
+                    .reference(),
+            ));
+        }
         super::discharge::complete(
             &self.options.discharge,
-            entries.iter().zip(&outputs).map(|(entry, output)| {
-                (
-                    entry.key.instance.definition(),
-                    &output.facts.source.discharge,
-                )
-            }),
+            facts.iter().map(|(key, facts)| (key, facts)),
         )?;
-        let needs_callable = outputs.iter().any(|out| out.facts.body.templates.execution);
-        let mut rows = entries
-            .iter()
-            .zip(&outputs)
-            .map(|(entry, output)| {
-                Ok((
-                    entry.key.instance.encoding().to_vec(),
-                    output.product.product.address.0,
-                    output
-                        .product
-                        .product
-                        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
-                        .map_err(|e| e.to_string())?
-                        .reference(),
-                ))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
         rows.sort_by(|a, b| a.0.cmp(&b.0));
         let product = self.put(
             self.discovery,
@@ -1392,15 +1201,15 @@ impl InstanceTasks {
         if let Some((product, _)) = self.callables.get() {
             return Ok(product.clone());
         }
+        self.original_discovery()?;
         let mut products = self.original_products()?;
         let operations = self.current_operations()?;
         let manifest = self.source.declarations.manifest()?;
         let mut source = self.current_source()?;
-        let mut scope = products.specialize_callables(
+        let graph = products.specialize_callables(
             &self.options,
             &manifest,
             operations,
-            source.query_policy().reuse,
             |key, operations| {
                 if source
                     .declarations()
@@ -1429,51 +1238,12 @@ impl InstanceTasks {
                 Ok(())
             },
         )?;
-        drop(products);
-        drop(source);
-        drop(manifest);
-        {
-            let entries = self.entries();
-            let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
-            self.retention_attribution("before retirement", &registry, &mut scope);
-            let released = entries
-                .iter()
-                .map(|entry| {
-                    entry.request.retained_metadata_bytes()
-                        + entry
-                            .output
-                            .get()
-                            .map_or(0, |output| output.retained_metadata_bytes())
-                })
-                .sum::<u64>();
-            let retained = scope.retained_bytes(std::iter::empty(), std::iter::empty());
-            // Source/body facts shared into the new scope are counted there,
-            // once, before the old descriptor caches surrender their charge.
-            for entry in &entries {
-                entry.output.retire();
-                entry.request.retire();
-            }
-            registry.charged = registry
-                .charged
-                .checked_sub(released)
-                .ok_or("original descriptor charge underflow")?;
-            let total = registry.charged.checked_add(retained);
-            self.retention_attribution("live after retirement", &registry, &mut scope);
-            if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some() {
-                eprintln!(
-                    "NATIVE_HANDOFF\treleased={released}\tremaining={}\tcallable={retained}\tquota={}",
-                    registry.charged,
-                    self.allowance.bytes()
-                );
-            }
-            registry.charged = total.filter(|bytes| *bytes <= self.allowance.bytes()).ok_or_else(|| format!("callable graph live metadata exceeds retained allowance: original dispatch/source {}, callable {}, quota {}", registry.charged, retained, self.allowance.bytes()))?;
-        }
-        let rows = scope
-            .outputs
-            .iter()
+        let rows = graph
+            .outputs(self.store.as_ref())?
+            .into_iter()
             .map(|(key, output)| {
                 Ok((
-                    key.instance.encoding(),
+                    key.instance.encoding().to_vec(),
                     output
                         .product
                         .product
@@ -1488,11 +1258,14 @@ impl InstanceTasks {
             serde_json::to_vec(&rows).map_err(|e| e.to_string())?,
         )?;
         self.callables
-            .set((product.clone(), scope))
+            .set((product.clone(), graph))
             .map_err(|_| "callable graph published twice")?;
+        let (peak, quota) = self.window.peak();
+        eprintln!("NATIVE_WINDOW_PEAK\t{peak}\t{quota}");
         Ok(product)
     }
 }
+
 struct CallableTask {
     tasks: Arc<InstanceTasks>,
     id: QueryId,
@@ -1568,17 +1341,17 @@ impl QueryTask for CallableTask {
                     return finish(Err(error));
                 }
             }
-            let result = self
-                .tasks
-                .callables
-                .get()
-                .unwrap()
-                .1
-                .outputs
-                .iter()
-                .find(|(_, o)| o.product.product.address == self.id.address)
-                .map(|(_, o)| o.product.product.clone())
-                .ok_or_else(|| self.tasks.failure("unregistered callable Value alias"));
+            let result = (|| {
+                self.tasks
+                    .callables
+                    .get()
+                    .unwrap()
+                    .1
+                    .find(self.tasks.store.as_ref(), self.id.address)
+                    .map_err(|error| self.tasks.failure(&error))?
+                    .map(|output| output.product.product.clone())
+                    .ok_or_else(|| self.tasks.failure("unregistered callable Value alias"))
+            })();
             self.terminal = Some(result.clone());
             finish(result)
         }

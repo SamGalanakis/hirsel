@@ -86,7 +86,8 @@ impl NativeTasks {
             } else {
                 let mut locals = inputs
                     .iter()
-                    .map(|(key, output)| {
+                    .map(|(key, stored)| {
+                        let output = stored.read(&snapshot.instances, key)?;
                         Ok(super::seal_demand::Input {
                             query: instance_query(key, output.product.product.clone()),
                             product: output.product.product.clone(),
@@ -173,7 +174,8 @@ impl NativeTasks {
                     .reference(),
             ))
         };
-        for (key, output) in &inputs {
+        for (key, stored) in &inputs {
+            let output = stored.read(&snapshot.instances, key)?;
             let q = instance_query(key, output.product.product.clone());
             requests.insert(
                 id(q),
@@ -240,6 +242,7 @@ impl NativeTasks {
                             .reference(),
                     ),
                 );
+                let input = input.read(&snapshot.instances, member)?;
                 for callee in &input.facts.body.callees {
                     let component = components
                         .get(&(key.stratum == ArenaStratum::Chosen, callee.clone()))

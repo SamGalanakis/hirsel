@@ -326,6 +326,65 @@ pub fn rewrite_task_capture(
     ))
 }
 
+/// The same rewrite as specialize_units, over one independently bound window.
+/// Task requests carry code identity across windows; ABI ids stay local.
+#[allow(clippy::too_many_arguments)]
+pub fn rewrite_window(
+    unit: &mut LirUnit<Value>,
+    table: &hirsel_lir::LayoutTable,
+    entries: &HashMap<Symbol, CallableEntry>,
+    seeds: &[(ValueId, CallableTarget)],
+    spawn_flags: u64,
+    mut task: impl FnMut(&CallableEntry, &TaskCaptureRequest) -> bool,
+    specialization: impl FnMut(&CallableEntry, &CallableRequest) -> bool,
+) -> Result<BTreeSet<ContentHash>, String> {
+    // Ported from specialize_units' task.async capture loop below. Original
+    // bodies are demanded by the receiver rather than cloned into a global Vec.
+    let codes = discover(unit, entries, seeds);
+    let mut inline = BTreeSet::new();
+    for closure in 0..unit.tables.closures.len() {
+        let site = &unit.tables.closures[closure];
+        let Some(code) = site.code else { continue };
+        let Some(entry) = entries.get(&unit.tables.symbols[code.symbol.index()]) else {
+            continue;
+        };
+        if !entry.key.definition().is_core("$native.task_main") {
+            continue;
+        }
+        let Some(capture) = site
+            .captures
+            .get(&unit.pools.captures)
+            .and_then(|rows| rows.first())
+        else {
+            continue;
+        };
+        let Code::Known(target) = &codes[capture.value.index()] else {
+            continue;
+        };
+        let request = TaskCaptureRequest::new(&entry.key, target.clone())?;
+        if task(entry, &request) {
+            let digest = request.key.digest();
+            inline.insert(digest);
+            let selected = Symbol {
+                kind: SymbolKind::Function,
+                definition: entry.key.definition().clone(),
+                instance: Some(digest),
+            };
+            let selected = symbol(unit, &selected);
+            unit.tables.closures[closure].code.as_mut().unwrap().symbol = selected;
+        }
+    }
+    inline.extend(rewrite_seeded_instance(
+        unit,
+        table,
+        entries,
+        seeds,
+        spawn_flags,
+        specialization,
+    ));
+    Ok(inline)
+}
+
 fn rewrite_seeded_instance(
     unit: &mut LirUnit<Value>,
     table: &hirsel_lir::layout_types::LayoutTable,

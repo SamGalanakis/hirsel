@@ -16,7 +16,9 @@ use hirsel_rc::instance::{InstanceId, Instances, SelectionRead};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 mod seal_equations;
+pub(crate) mod window;
 pub use seal_equations::StoredSealEquations;
+pub use window::StoredInstance;
 
 const SOURCE_RECIPE: Domain = Domain {
     kind: 0x4e00_0016,
@@ -136,6 +138,7 @@ struct Discovery {
 /// The descriptor returned after one demand has been admitted by actual C or
 /// C's independently rechecked local receipt. It retains neither IR nor types.
 pub struct DiscoveredInstance {
+    _window: Option<Arc<window::WindowRead>>,
     pub product: Arc<InstanceProduct>,
     pub facts: Arc<InstanceFacts>,
 }
@@ -146,6 +149,7 @@ pub struct InstanceFacts {
     pub body: Arc<InstanceBodyFacts>,
     pub emission: super::emission::EmissionFacts,
     _owner: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
+    _window: Option<Arc<window::WindowRead>>,
 }
 
 /// Complete body-derived facts, shared when only request-wide emission changes.
@@ -158,6 +162,7 @@ pub struct InstanceBodyFacts {
     pub templates: super::optimizer::TemplateFacts,
     pub operation_freedom: hirsel_rc::closure_calls::OperationFreedom,
     _owner: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
+    _window: Option<Arc<window::WindowRead>>,
 }
 impl InstanceBodyFacts {
     fn packed(mut self) -> Self {
@@ -190,6 +195,7 @@ impl PartialEq for InstanceBodyFacts {
             templates,
             operation_freedom,
             _owner: _,
+            _window: _,
         } = self;
         seal_demand == &other.seal_demand
             && callees == &other.callees
@@ -222,6 +228,7 @@ pub struct InstanceSourceFacts {
     /// Independent original plan selections, re-derived before C on every hit.
     pub adapters: Vec<hirsel_lir::ir::Symbol>,
     _owner: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
+    _window: Option<Arc<window::WindowRead>>,
 }
 
 impl PartialEq for InstanceFacts {
@@ -231,6 +238,7 @@ impl PartialEq for InstanceFacts {
             body,
             emission,
             _owner: _,
+            _window: _,
         } = self;
         source == &other.source && body == &other.body && emission == &other.emission
     }
@@ -254,6 +262,7 @@ impl PartialEq for InstanceSourceFacts {
             discharge,
             adapters,
             _owner: _,
+            _window: _,
         } = self;
         ready_source == &other.ready_source
             && selection_reads == &other.selection_reads
@@ -296,37 +305,17 @@ impl DiscoveredInstance {
             Some(previous) if *previous.facts == facts => previous.facts.clone(),
             _ => Arc::new(facts),
         };
-        Self { product, facts }
+        Self {
+            product,
+            facts,
+            _window: None,
+        }
     }
     pub fn wrapper_bytes(&self) -> u64 {
         let mut weight = hirsel_engine::NativeMetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
         weight.arc(&self.product);
         weight.bytes()
-    }
-    pub(crate) fn retention_rows(&self) -> Vec<(&'static str, u64, &'static str)> {
-        vec![
-            (
-                "product and descriptor wrapper",
-                self.wrapper_bytes(),
-                "callable C publication completed; original aliases/discovery publication pending",
-            ),
-            (
-                "emission and fact wrapper",
-                self.facts.local_metadata_bytes(),
-                "callable emission extracted; original emission superseded",
-            ),
-            (
-                "source facts: Ready, reads, discharge, adapters",
-                self.facts.source.retained_metadata_bytes(),
-                "callable C publication completed; later Ready/C/discharge consumers pending",
-            ),
-            (
-                "body facts: seal identity, callees, dependencies, templates, freedom",
-                self.facts.body.retained_metadata_bytes(),
-                "callable rewrite completed; original graph superseded unless shared by callable outputs",
-            ),
-        ]
     }
     pub fn retained_metadata_bytes(&self) -> u64 {
         self.wrapper_bytes()
@@ -394,7 +383,8 @@ pub struct DemandInstances {
     target: hirsel_lir::TargetSpec,
     policy: ContentHash,
     requests: BTreeMap<Vec<u8>, Request>,
-    completed: BTreeMap<Vec<u8>, Arc<DiscoveredInstance>>,
+    completed: BTreeMap<Vec<u8>, StoredInstance>,
+    window: Option<Arc<window::WindowBudget>>,
     roots: Vec<InstanceAddress>,
     receipt_sources: super::receipt_requests::Sources,
     seal_inventory: super::seal_inventory::Sources,
@@ -444,6 +434,7 @@ impl DemandInstances {
             policy,
             requests: BTreeMap::new(),
             completed: BTreeMap::new(),
+            window: None,
             roots: vec![],
             receipt_sources: Default::default(),
             seal_inventory: Default::default(),
@@ -451,6 +442,10 @@ impl DemandInstances {
             imports: 0,
             recipe_decodes: 0,
         }
+    }
+    pub(crate) fn with_window(mut self, window: Arc<window::WindowBudget>) -> Self {
+        self.window = Some(window);
+        self
     }
     pub fn with_retained_owner(
         mut self,
@@ -482,8 +477,24 @@ impl DemandInstances {
         {
             return Err("completed descriptor has no selected request".into());
         }
+        self.completed.insert(
+            key.instance.encoding().to_vec(),
+            StoredInstance::capture(self.store.as_ref(), &output)?,
+        );
+        Ok(())
+    }
+    pub(crate) fn attach_stored(
+        &mut self,
+        key: &InstanceAddress,
+        stored: StoredInstance,
+    ) -> Result<(), String> {
+        if !self.requests.contains_key(key.instance.encoding())
+            || stored.product.product.address != self.queries.address(key)
+        {
+            return Err("stored completion has another selected owner".into());
+        }
         self.completed
-            .insert(key.instance.encoding().to_vec(), output);
+            .insert(key.instance.encoding().to_vec(), stored);
         Ok(())
     }
     /// Selected source observations and prior read witnesses, without a source
@@ -587,9 +598,7 @@ impl DemandInstances {
     }
     /// Ordinary completed input metadata for immutable dispatch planning. A
     /// task must still independently admit C before publishing a dependency.
-    pub fn completed_inputs(
-        &self,
-    ) -> Result<Vec<(InstanceAddress, Arc<DiscoveredInstance>)>, String> {
+    pub fn completed_inputs(&self) -> Result<Vec<(InstanceAddress, StoredInstance)>, String> {
         self.completed
             .iter()
             .map(|(encoding, output)| {
@@ -637,6 +646,7 @@ impl DemandInstances {
             .completed
             .get(key.instance.encoding())
             .ok_or("native instance dependency has not completed")?;
+        let output = output.read(self, key)?;
         let operations = self.operations(key, environment)?;
         let scoped = NativeEnvironment {
             operations: &operations,
@@ -676,6 +686,7 @@ impl DemandInstances {
             .completed
             .get(key.instance.encoding())
             .ok_or("native operation scope has no completed original plan")?;
+        let output = output.read(self, key)?;
         let request = self
             .requests
             .get(key.instance.encoding())
@@ -1125,25 +1136,25 @@ impl DemandInstances {
         Ok(discovery)
     }
 
-    fn discovered(
-        &mut self,
+    fn decode_completed(
+        &self,
         key: &InstanceAddress,
         product: Arc<InstanceProduct>,
         adapters: Vec<hirsel_lir::ir::Symbol>,
-    ) -> Result<Arc<DiscoveredInstance>, String> {
+    ) -> Result<DiscoveredInstance, String> {
         let discovery = self.descriptor(key, &product)?;
         let ready_source = ReadySourceFacts::decode(&discovery.ready_source)?;
         let dependencies = discovery
             .requests
             .into_iter()
-            .map(|r| self.admit(r))
+            .map(|r| r.key.bind().map(|key| self.address(key)))
             .collect::<Result<Vec<_>, _>>()?;
         let seal_demand = StoredSealEquations::capture(
             self.store.clone(),
             product.discovery,
             discovery.seal_demand,
         )?;
-        let output = Arc::new(DiscoveredInstance::with_facts(
+        let output = DiscoveredInstance::with_facts(
             product,
             InstanceFacts {
                 source: Arc::new(
@@ -1154,6 +1165,7 @@ impl DemandInstances {
                         discharge: discovery.discharge,
                         adapters,
                         _owner: self.retained_owner.clone(),
+                        _window: None,
                     }
                     .packed(),
                 ),
@@ -1165,6 +1177,7 @@ impl DemandInstances {
                         templates: discovery.templates,
                         operation_freedom: discovery.operation_freedom,
                         _owner: self.retained_owner.clone(),
+                        _window: None,
                     }
                     .packed(),
                 ),
@@ -1174,11 +1187,27 @@ impl DemandInstances {
                     self.retained_owner.clone(),
                 )?,
                 _owner: self.retained_owner.clone(),
+                _window: None,
             },
             None,
-        ));
-        self.completed
-            .insert(key.instance.encoding().to_vec(), output.clone());
+        );
+        Ok(output)
+    }
+
+    fn discovered(
+        &mut self,
+        key: &InstanceAddress,
+        product: Arc<InstanceProduct>,
+        adapters: Vec<hirsel_lir::ir::Symbol>,
+    ) -> Result<Arc<DiscoveredInstance>, String> {
+        for request in self.descriptor(key, &product)?.requests {
+            self.admit(request)?;
+        }
+        let output = Arc::new(self.decode_completed(key, product, adapters)?);
+        self.completed.insert(
+            key.instance.encoding().to_vec(),
+            StoredInstance::capture(self.store.as_ref(), &output)?,
+        );
         Ok(output)
     }
 
@@ -1293,7 +1322,7 @@ impl DemandInstances {
             && let Some(output) = self.completed.get(key.instance.encoding())
             && output.product.product.action == action
         {
-            return Ok(output.clone());
+            return output.read(self, key);
         }
         let mut original_source = None;
         let mut operations = if request.recipe.domain == SOURCE_RECIPE {

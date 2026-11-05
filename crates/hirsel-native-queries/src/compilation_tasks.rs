@@ -272,21 +272,19 @@ impl CompilationTasks {
         }
         let completed = self.instances.completed_instances(discovery.clone())?;
         hirsel_intern::memory::checkpoint("global Value complete");
-        let guard_bytes = if completed
-            .iter()
-            .any(|(_, output)| output.facts.body.seal_demand.has_seal())
-        {
-            super::seal_demand::Plan::stored_admission_bytes(
-                completed
-                    .iter()
-                    .map(|(_, output)| &output.facts.body.seal_demand),
-            )
+        let mut locals = Vec::new();
+        let mut needs_execution = false;
+        for (key, stored) in &completed {
+            let output = self.instances.read_completed(key, stored)?;
+            needs_execution |= output.facts.body.templates.execution;
+            locals.push(output.facts.body.seal_demand.clone());
+        }
+        let guard_bytes = if locals.iter().any(|local| local.has_seal()) {
+            super::seal_demand::Plan::stored_admission_bytes(locals.iter())
         } else {
             0
         };
-        let needs_execution = completed
-            .iter()
-            .any(|(_, output)| output.facts.body.templates.execution);
+        drop(locals);
         let owners = completed
             .iter()
             .map(|(key, _)| key.clone())

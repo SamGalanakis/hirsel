@@ -304,10 +304,6 @@ mod component_tests {
 
     struct ChangedBytes(Vec<u8>);
     impl ResultStore for ChangedBytes {
-        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
-            hirsel_engine::store::ProviderCapability::ReadOnly
-        }
-
         fn get(&self, _: &EntryKey) -> Option<Bytes> {
             None
         }

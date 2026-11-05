@@ -154,7 +154,8 @@ fn native_demand_tasks_import_and_reuse_actual_settled_source_without_a_controll
             let completed = tasks.completed_instances((result[0]).clone()).unwrap();
             // The same compact flow archive survives cold publication and a
             // fresh hit with lowering disabled. This observes no Value body.
-            for (key, output) in &completed {
+            for (key, stored) in &completed {
+                let output = tasks.read_completed(key, stored).unwrap();
                 let equations = output.facts.body.seal_demand.open().unwrap();
                 equations.validate().unwrap();
                 assert_eq!(

@@ -1,519 +1,656 @@
-//! The existing callable fixed point over explicitly read, C-admitted Values.
+//! Callable work binds one definition and its direct interfaces at a time.
+//! The SCC walk and rewrite equations are shared with the ordinary RC pipeline.
 use super::*;
-use hirsel_lir::{ir::Callee, products::Binding, stage::Value};
+use hirsel_lir::{
+    ir::{Callee, Symbol, SymbolKind, UnitOrigin},
+    products::Binding,
+    stage::Value,
+};
+use hirsel_rc::closure_calls::{CallableEntry, CallableRecipe, TaskCaptureRecipe};
+use std::collections::HashMap;
 
-pub(crate) struct Scope {
-    pub outputs: Vec<(InstanceAddress, Arc<DiscoveredInstance>)>,
-    pub operations: hirsel_layout::operation::OperationRegistry,
-    requests: BTreeMap<Vec<u8>, Request>,
+const WINDOW_RECORD: Domain = Domain {
+    kind: super::super::instance_tasks::CALLABLE_GRAPH_KIND,
+    schema: 2,
+};
+
+/// Only an ordinary addressed manifest survives the callable producer. Reading
+/// a row reopens its facts; it does not transfer the producer's C acceptance.
+pub(crate) struct PublishedCallables {
+    records: BTreeMap<ContentHash, Reference>,
+    _index: Option<Arc<window::WindowRead>>,
+    target: ContentHash,
+    policy: ContentHash,
 }
-impl Scope {
-    pub(crate) fn trace_retention<'a>(
-        &mut self,
-        admitted: impl IntoIterator<Item = &'a Request>,
-        facts: impl IntoIterator<Item = &'a Arc<InstanceFacts>>,
-    ) {
-        let admitted_rows = admitted.into_iter().collect::<Vec<_>>();
-        let admitted = admitted_rows
-            .iter()
-            .map(|request| Arc::as_ptr(&request.0))
-            .collect::<std::collections::HashSet<_>>();
-        let facts = facts.into_iter().collect::<Vec<_>>();
-        let expected = self.retained_bytes(admitted_rows.iter().copied(), facts.iter().copied());
-        let mut sources = facts
-            .iter()
-            .map(|f| Arc::as_ptr(&f.source))
-            .collect::<std::collections::HashSet<_>>();
-        let mut bodies = facts
-            .iter()
-            .map(|f| Arc::as_ptr(&f.body))
-            .collect::<std::collections::HashSet<_>>();
-        let mut inline = facts
-            .iter()
-            .filter_map(|f| f.emission.inline.identity())
-            .collect::<std::collections::HashSet<_>>();
-        let mut facts = facts
-            .into_iter()
-            .map(Arc::as_ptr)
-            .collect::<std::collections::HashSet<_>>();
-        let total = std::cell::Cell::new(0u64);
-        let row = |owner: &str, kind: &str, bytes: u64, last: &str| {
-            total.set(total.get().saturating_add(bytes));
-            eprintln!("CALLABLE_RETAINER\t{owner}\t{kind}\t{bytes}\t{last}");
+#[derive(Serialize, Deserialize)]
+struct Row {
+    key: NamedKey,
+    request: Request,
+    output: window::StoredRecord,
+}
+impl PublishedCallables {
+    fn rows<'a>(
+        &'a self,
+        store: &'a dyn ResultStore,
+    ) -> impl Iterator<Item = Result<Row, String>> + 'a {
+        self.records
+            .values()
+            .map(|reference| read_json(store, *reference))
+    }
+    pub(crate) fn find(
+        &self,
+        store: &dyn ResultStore,
+        address: hirsel_engine::store::Address,
+    ) -> Result<Option<StoredInstance>, String> {
+        let Some(reference) = self.records.get(&address.0) else {
+            return Ok(None);
         };
-        for (key, output) in &self.outputs {
-            let owner = key.instance.definition().to_string();
-            let mut w = hirsel_engine::NativeMetadataWeight::default();
-            w.path(key.instance.definition());
-            w.add(key.instance.retained_encoding_bytes());
-            row(
-                &owner,
-                "key and product wrapper",
-                w.bytes() + output.wrapper_bytes(),
-                "callable C publication completed; alias/Ready/codegen pending",
-            );
-            if facts.insert(Arc::as_ptr(&output.facts)) {
-                let shared = output
-                    .facts
-                    .emission
-                    .inline
-                    .identity()
-                    .is_some_and(|id| !inline.insert(id));
-                row(
-                    &owner,
-                    "emission and fact wrapper",
-                    output
-                        .facts
-                        .local_metadata_bytes()
-                        .saturating_sub(if shared {
-                            output.facts.emission.inline.retained_bytes()
-                        } else {
-                            0
-                        }),
-                    "callable emission extracted; Ready/codegen pending",
-                );
-                if bodies.insert(Arc::as_ptr(&output.facts.body)) {
-                    row(
-                        &owner,
-                        "body facts",
-                        output.facts.body.retained_metadata_bytes(),
-                        "callable C publication completed; arena/Ready consumers pending",
-                    );
-                }
-                if sources.insert(Arc::as_ptr(&output.facts.source)) {
-                    row(
-                        &owner,
-                        "source facts",
-                        output.facts.source.retained_metadata_bytes(),
-                        "callable C publication completed; Ready/C/discharge pending",
-                    );
-                }
-            }
-        }
-        for (key, request) in &self.requests {
-            row(
-                &request.key.definition.to_string(),
-                "request map key and new recipe",
-                key.capacity() as u64
-                    + if admitted.contains(&Arc::as_ptr(&request.0)) {
-                        0
-                    } else {
-                        request.retained_metadata_bytes()
+        let row: Row = read_json(store, *reference)?;
+        StoredInstance::from_record(store, row.output).map(Some)
+    }
+    pub(crate) fn outputs(
+        &self,
+        store: &dyn ResultStore,
+    ) -> Result<Vec<(InstanceAddress, StoredInstance)>, String> {
+        self.rows(store)
+            .map(|row| {
+                let row = row?;
+                let key = row.key.bind()?;
+                let stored = StoredInstance::from_record(store, row.output)?;
+                Ok((
+                    InstanceAddress {
+                        target_abi: self.target,
+                        policy: self.policy,
+                        instance: key,
                     },
-                "callable dependency binding completed; later products() request binding pending",
-            );
+                    stored,
+                ))
+            })
+            .collect()
+    }
+    pub(crate) fn apply(&self, products: &mut DemandInstances) -> Result<(), String> {
+        products.queries = products.queries.callable();
+        let rows = self.records.values().copied().collect::<Vec<_>>();
+        for reference in rows {
+            let row: Row = read_json(products.store.as_ref(), reference)?;
+            let stored = StoredInstance::from_record(products.store.as_ref(), row.output)?;
+            let key = products.admit(row.request)?;
+            if key.instance != row.key.bind()? {
+                return Err("callable manifest request differs".into());
+            }
+            products.attach_stored(&key, stored)?;
         }
-        row(
-            "callable scope",
-            "operations",
-            super::super::ownership_compilation::metadata::operations(&mut self.operations),
-            "callable C publication completed; later independent C/Ready consumers pending",
-        );
-        let remainder = expected.saturating_sub(total.get());
-        row(
-            "callable scope",
-            "vector and request index nodes",
-            remainder,
-            "callable completion; later alias/snapshot consumers pending",
-        );
-        eprintln!("CALLABLE_TRACE_TOTAL\t{}\texpected={expected}", total.get());
+        Ok(())
     }
-    pub(crate) fn retained_bytes<'a>(
-        &mut self,
-        admitted: impl IntoIterator<Item = &'a Request>,
-        facts: impl IntoIterator<Item = &'a Arc<InstanceFacts>>,
-    ) -> u64 {
-        let admitted = admitted
-            .into_iter()
-            .map(|request| Arc::as_ptr(&request.0))
-            .collect::<std::collections::HashSet<_>>();
-        let facts = facts.into_iter().collect::<Vec<_>>();
-        let mut sources = facts
-            .iter()
-            .map(|facts| Arc::as_ptr(&facts.source))
-            .collect::<std::collections::HashSet<_>>();
-        let mut bodies = facts
-            .iter()
-            .map(|facts| Arc::as_ptr(&facts.body))
-            .collect::<std::collections::HashSet<_>>();
-        let mut inline = facts
-            .iter()
-            .filter_map(|facts| facts.emission.inline.identity())
-            .collect::<std::collections::HashSet<_>>();
-        let mut facts = facts
-            .into_iter()
-            .map(Arc::as_ptr)
-            .collect::<std::collections::HashSet<_>>();
-        let mut shared_inline = 0u64;
-        let mut weight = hirsel_engine::NativeMetadataWeight::default();
-        weight.vec(&self.outputs, |weight, (key, output)| {
-            weight.path(key.instance.definition());
-            weight.add(key.instance.retained_encoding_bytes());
-            weight.add(output.wrapper_bytes() as usize);
-            if facts.insert(Arc::as_ptr(&output.facts)) {
-                weight.add(output.facts.local_metadata_bytes() as usize);
-                if bodies.insert(Arc::as_ptr(&output.facts.body)) {
-                    weight.add(output.facts.body.retained_metadata_bytes() as usize);
-                }
-                if let Some(id) = output.facts.emission.inline.identity()
-                    && !inline.insert(id)
-                {
-                    // local_metadata_bytes includes the complete inline owner.
-                    shared_inline += output.facts.emission.inline.retained_bytes();
-                }
-                if sources.insert(Arc::as_ptr(&output.facts.source)) {
-                    weight.add(output.facts.source.retained_metadata_bytes() as usize);
-                }
-            }
-        });
-        weight.map(&self.requests, |weight, key, request| {
-            weight.add(key.capacity());
-            if !admitted.contains(&Arc::as_ptr(&request.0)) {
-                weight.add(request.retained_metadata_bytes() as usize);
-            }
-        });
-        weight.bytes().saturating_sub(shared_inline)
-            + super::super::ownership_compilation::metadata::operations(&mut self.operations)
+}
+// Target and policy are explicit manifest context, never inferred from an ABI id.
+
+fn read_json<T: for<'de> Deserialize<'de>>(
+    store: &dyn ResultStore,
+    reference: Reference,
+) -> Result<T, String> {
+    let bytes = store
+        .get_content(reference)
+        .ok_or("missing callable window record")?;
+    if reference.domain != WINDOW_RECORD || WINDOW_RECORD.reference(&bytes) != Some(reference) {
+        return Err("callable window record identity differs".into());
     }
+    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+}
+#[derive(Serialize, Deserialize)]
+struct Interface {
+    abi: ContentHash,
+    source: bool,
+    layouts: Reference,
+}
+#[derive(Serialize, Deserialize)]
+enum Seeds {
+    Parameters(CallableRecipe),
+    Capture(TaskCaptureRecipe),
+}
+#[derive(Serialize, Deserialize)]
+struct Selection {
+    origin: usize,
+    key: NamedKey,
+    seeds: Option<Seeds>,
+    layouts: Option<Reference>,
+}
+struct Pending {
+    key: InstanceAddress,
+    origin: usize,
+    selection: Reference,
+}
+struct Rewritten {
+    key: InstanceAddress,
+    origin: usize,
+    value: Reference,
+    inline: Vec<ContentHash>,
+}
+fn address_weight(w: &mut hirsel_engine::NativeMetadataWeight, key: &InstanceAddress) {
+    w.path(key.instance.definition());
+    w.add(key.instance.retained_encoding_bytes());
+}
+fn select_invocations(
+    instances: &DemandInstances,
+    key: &InstanceAddress,
+    records: &BTreeMap<hirsel_syntax::DefPath, Reference>,
+    required: bool,
+    operations: &mut hirsel_layout::operation::OperationRegistry,
+) -> Result<(), String> {
+    operations.invocations.clear();
+    if let Some(reference) = records.get(key.instance.definition()) {
+        operations.invocations.insert(
+            key.instance.definition().clone(),
+            instances.reopen(*reference)?,
+        );
+    } else if required {
+        // Preserve the registry's strict structural-reference requirement even
+        // for a library window. Its InstanceOperations admits no source calls.
+        operations
+            .invocations
+            .insert(key.instance.definition().clone(), Vec::new());
+    }
+    Ok(())
+}
+fn resize(lease: &mut Option<Arc<window::WindowRead>>, bytes: u64) -> Result<(), String> {
+    if let Some(lease) = lease {
+        Arc::get_mut(lease)
+            .ok_or("window charge unexpectedly shared")?
+            .resize(bytes)?;
+    }
+    Ok(())
 }
 impl DemandInstances {
-    fn cached_callable_scope(
-        &self,
-        originals: &[(InstanceAddress, Arc<DiscoveredInstance>)],
-        action: Action,
-        options: &hirsel_native::Options,
-        manifest: &hirsel_core_contract::Manifest,
-        operations: &mut hirsel_layout::operation::OperationRegistry,
-        source: &mut impl FnMut(
-            &InstanceAddress,
-            &mut hirsel_layout::operation::OperationRegistry,
-        ) -> Result<(), String>,
-    ) -> Option<Scope> {
-        let mut publisher = self.queries.callable();
-        let mut requests = self.requests.clone();
-        let mut pending = originals
-            .iter()
-            .map(|(key, _)| key.clone())
-            .collect::<Vec<_>>();
-        let mut candidates = BTreeMap::new();
-        let mut at = 0;
-        while at < pending.len() {
-            let key = pending[at].clone();
-            at += 1;
-            if candidates.contains_key(key.instance.encoding()) {
-                continue;
-            }
-            if candidates.len() >= originals.len() + hirsel_rc::closure_calls::MAX_SPECIALIZATIONS {
-                return None;
-            }
-            let product = publisher.candidate(&key)?;
-            if product.product.action != action {
-                return None;
-            }
-            let discovery = self.descriptor(&key, &product).ok()?;
-            for request in &discovery.requests {
-                let dependency = self.address(request.key.bind().ok()?);
-                if let Some(previous) =
-                    requests.insert(request.key.encoding.clone(), request.clone())
-                    && previous != *request
-                {
-                    return None;
-                }
-                pending.push(dependency);
-            }
-            candidates.insert(key.instance.encoding().to_vec(), (key, product, discovery));
-        }
-        for (key, _, _) in candidates.values() {
-            source(key, operations).ok()?;
-        }
-        let mut outputs = Vec::new();
-        let mut inline = super::super::emission::InlineInstances::default();
-        for (key, candidate, discovery) in candidates.into_values() {
-            let emission = discovery
-                .emission
-                .read(self.store.as_ref(), &inline, self.retained_owner.clone())
-                .ok()?;
-            inline = emission.inline.clone();
-            let request = requests.get(key.instance.encoding())?;
-            let (_, original) = originals.iter().find(|(original, _)| {
-                let input = &self.requests[original.instance.encoding()];
-                input.recipe == request.recipe
-                    && input.lexical == request.lexical
-                    && input.receipt_roots == request.receipt_roots
-                    && input.layouts == request.layouts
-                    && input.plan == request.plan
-                    && original.instance.definition() == key.instance.definition()
-                    && original.instance.body() == key.instance.body()
-            })?;
-            let selected_operations = super::super::instance_operations::InstanceOperations {
-                inventory: Some(&self.seal_inventory),
-                declarations: operations,
-                receipts: Some(&self.receipt_sources),
-                source: request
-                    .source_definition()
-                    .map(|_| (key.instance.definition(), key.instance.digest())),
-                all_sources: false,
-                pretransfer: Some(
-                    original
-                        .facts
-                        .source
-                        .adapters
-                        .iter()
-                        .map(|symbol| {
-                            let mut selected = operations
-                                .pretransfer_adapters
-                                .iter()
-                                .filter(|r| &r.adapter == symbol);
-                            let reference = selected.next()?;
-                            selected.next().is_none().then(|| reference.clone())
-                        })
-                        .collect::<Option<Vec<_>>>()?,
-                ),
-            };
-            let product = publisher.lookup(
-                &key,
-                action,
-                &NativeEnvironment {
-                    target: &self.target,
-                    manifest,
-                    operations: &selected_operations,
-                    discharge: Some(&options.discharge),
-                },
-            )?;
-            if product.product != candidate.product {
-                return None;
-            }
-            let dependencies = discovery
-                .requests
-                .iter()
-                .map(|r| Some(self.address(r.key.bind().ok()?)))
-                .collect::<Option<Vec<_>>>()?;
-            let seal_demand = StoredSealEquations::capture(
-                self.store.clone(),
-                product.discovery,
-                discovery.seal_demand,
-            )
-            .ok()?;
-            outputs.push((
-                key,
-                Arc::new(DiscoveredInstance::with_facts(
-                    product,
-                    InstanceFacts {
-                        source: Arc::new(
-                            InstanceSourceFacts {
-                                ready_source: ReadySourceFacts::decode(&discovery.ready_source)
-                                    .ok()?,
-                                selection_reads: discovery.selection_reads,
-                                constant_reads: discovery.constant_reads,
-                                discharge: discovery.discharge,
-                                adapters: original.facts.source.adapters.clone(),
-                                _owner: self.retained_owner.clone(),
-                            }
-                            .packed(),
-                        ),
-                        body: Arc::new(
-                            InstanceBodyFacts {
-                                seal_demand,
-                                callees: discovery.callees,
-                                dependencies,
-                                templates: discovery.templates,
-                                operation_freedom: discovery.operation_freedom,
-                                _owner: self.retained_owner.clone(),
-                            }
-                            .packed(),
-                        ),
-                        emission,
-                        _owner: self.retained_owner.clone(),
-                    },
-                    Some(original),
-                )),
-            ));
-        }
-        outputs.sort_by(|a, b| a.0.canonical_cmp(&b.0));
-        Some(Scope {
-            outputs,
-            operations: operations.clone(),
-            requests,
-        })
+    fn json<T: Serialize>(&self, value: &T) -> Result<Reference, String> {
+        self.put(
+            WINDOW_RECORD,
+            &serde_json::to_vec(value).map_err(|e| e.to_string())?,
+        )
     }
-    pub(crate) fn use_callable_scope(&mut self, scope: &Scope) {
-        self.queries = self.queries.callable();
-        self.requests = scope.requests.clone();
-        self.completed = scope
-            .outputs
-            .iter()
-            .map(|(key, output)| (key.instance.encoding().to_vec(), output.clone()))
-            .collect();
+    fn snapshot<T: hirsel_codec::Snapshot>(&self, value: &T) -> Result<Reference, String> {
+        self.put(WINDOW_RECORD, hirsel_codec::to_text(value).as_bytes())
+    }
+    fn reopen<T: hirsel_codec::Snapshot>(&self, reference: Reference) -> Result<T, String> {
+        let bytes = self
+            .store
+            .get_content(reference)
+            .ok_or("missing callable interface")?;
+        if reference.domain.reference(&bytes) != Some(reference) {
+            return Err("callable interface identity differs".into());
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
+        hirsel_codec::from_text(text).map_err(|e| format!("callable interface: {e:?}"))
     }
     pub(crate) fn specialize_callables(
         &mut self,
         options: &hirsel_native::Options,
         manifest: &hirsel_core_contract::Manifest,
         mut operations: hirsel_layout::operation::OperationRegistry,
-        reuse: bool,
         mut source: impl FnMut(
             &InstanceAddress,
             &mut hirsel_layout::operation::OperationRegistry,
         ) -> Result<(), String>,
-    ) -> Result<Scope, String> {
+    ) -> Result<PublishedCallables, String> {
+        let structural_reference = !operations.invocations.is_empty();
+        let invocation_records = std::mem::take(&mut operations.invocations)
+            .into_iter()
+            .map(|(key, rows)| Ok((key, self.snapshot(&rows)?)))
+            .collect::<Result<BTreeMap<_, _>, String>>()?;
+        let mut invocation_weight = hirsel_engine::NativeMetadataWeight::default();
+        invocation_weight.map(&invocation_records, |w, path, _| w.path(path));
+        let index_bytes = self.retained_index_bytes() + invocation_weight.bytes();
+        let mut graph_charge = self
+            .window
+            .as_ref()
+            .map(|w| w.read(index_bytes))
+            .transpose()?;
+        let mut operations_charge = self
+            .window
+            .as_ref()
+            .map(|w| {
+                w.read(super::super::ownership_compilation::metadata::operations(
+                    &mut operations,
+                ))
+            })
+            .transpose()?;
         let mut originals = self.completed_inputs()?;
         originals.sort_by(|a, b| a.0.canonical_cmp(&b.0));
-        let action_bytes = serde_json::to_vec(&(
-            hirsel_compiler_identity::COMPILER_IDENTITY.as_slice(),
-            originals
-                .iter()
-                .map(|(_, o)| {
-                    o.product
-                        .product
-                        .archive(hirsel_engine::runtime::ArchiveAdmission::Retained)
-                        .map(|archive| archive.reference())
-                        .map_err(|e| e.to_string())
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-            options.scoped_specialization,
-        ))
-        .map_err(|e| e.to_string())?;
-        let action = Action(ContentHash::of_parts(
-            "hirsel.native.callable-values-action.v1",
-            [action_bytes.as_slice()],
-        ));
-        if reuse
-            && self.verify_store != hirsel_engine::store::VerifyStore::Recompute
-            && options.validation != hirsel_native::Validation::EveryStage
-            && let Some(scope) = self.cached_callable_scope(
-                &originals,
-                action,
-                options,
-                manifest,
-                &mut operations,
-                &mut source,
-            )
-        {
-            return Ok(scope);
-        }
-        let environment = NativeEnvironment {
-            target: &self.target,
-            manifest,
-            operations: &operations,
-            discharge: Some(&options.discharge),
-        };
-        let captured = originals
+        let index = originals
             .iter()
-            .map(|(key, output)| {
-                let scoped = self.operations(key, &environment)?;
-                self.queries.read(
-                    key,
-                    &output.product,
-                    &NativeEnvironment {
-                        operations: &scoped,
-                        ..environment
-                    },
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let binding = Binding::new(
-            &self.target,
-            &captured
-                .iter()
-                .map(|(closure, _)| closure)
-                .collect::<Vec<_>>(),
-        )?;
-        let bound_pretransfer = super::super::instance_operations::bind_pretransfer(
-            &operations,
-            &binding.table,
-            &self.target,
-        )?;
-        let mut units = captured
-            .iter()
-            .map(|(_, body)| binding.materialize::<Value>(body))
-            .collect::<Result<Vec<_>, _>>()?;
-        let original_keys = originals
-            .iter()
-            .map(|(key, _)| key.instance.clone())
-            .collect::<Vec<_>>();
-        let specialized =
-            hirsel_rc::closure_calls::specialize_units(&mut units, &binding.table, &original_keys);
-        let keys = specialized
-            .keys
-            .iter()
-            .map(|instance| InstanceAddress {
-                instance: instance.clone(),
-                target_abi: self.target.digest(),
-                policy: self.policy,
-            })
-            .collect::<Vec<_>>();
-        for key in &keys {
-            source(key, &mut operations)?;
-        }
-        let mut requests = BTreeMap::new();
-        for (key, origin) in keys.iter().zip(&specialized.origins) {
-            let original = &originals[origin.index()].0;
-            let mut request = self.requests[original.instance.encoding()].clone();
-            if request.key.definition != *key.instance.definition()
-                || request.key.body != key.instance.body()
-                || request.key.encoding != key.instance.encoding()
-            {
-                Arc::make_mut(&mut request.0).key = Arc::new(NamedKey::of(&key.instance));
-            }
-            requests.insert(key.instance.encoding().to_vec(), request);
-        }
-        let index = keys
-            .iter()
-            .map(|key| {
+            .enumerate()
+            .map(|(i, (key, _))| {
                 (
                     (key.instance.definition().clone(), key.instance.digest()),
-                    key,
+                    i,
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let queries = self.queries.callable();
-        let mut publisher = queries;
-        let inline = super::super::emission::InlineInstances::new(
-            specialized.inline.iter().copied(),
-            self.retained_owner.clone(),
-        );
-        let inline_reference = inline.publish(self.store.as_ref())?;
-        let mut outputs = Vec::new();
-        for ((unit, key), origin) in units.into_iter().zip(&keys).zip(&specialized.origins) {
-            let original = &originals[origin.index()].1;
+        // The only graph-wide facts are identities and edges. Decoded equations
+        // are reopened one SCC at a time, then replaced by their boolean summary.
+        let mut edges = Vec::new();
+        for (key, stored) in &originals {
+            let output = stored.read(self, key)?;
+            edges.push(
+                output
+                    .facts
+                    .body
+                    .operation_freedom
+                    .dependencies()
+                    .iter()
+                    .filter_map(|name| index.get(name).copied())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let components = hirsel_graph::components(&edges);
+        let mut graph_weight = hirsel_engine::NativeMetadataWeight::default();
+        graph_weight.vec(&originals, |w, (key, _)| address_weight(w, key));
+        graph_weight.map(&index, |w, (path, _), _| w.path(path));
+        graph_weight.vec(&edges, |w, edges| w.flat_vec(edges));
+        graph_weight.vec(&components, |w, members| w.flat_vec(members));
+        let graph_bytes = index_bytes + graph_weight.bytes();
+        resize(&mut graph_charge, graph_bytes)?;
+        let mut freedom = BTreeMap::new();
+        for members in &components {
+            let mut equations = BTreeMap::new();
+            let mut reads = Vec::new();
+            for &i in members {
+                let (key, stored) = &originals[i];
+                let output = stored.read(self, key)?;
+                equations.insert(
+                    (key.instance.definition().clone(), key.instance.digest()),
+                    output.facts.body.operation_freedom.clone(),
+                );
+                reads.push(output);
+            }
+            let mut equation_weight = hirsel_engine::NativeMetadataWeight::default();
+            equation_weight.map(&equations, |w, (path, _), facts| {
+                w.path(path);
+                w.add(facts.retained_bytes() as usize)
+            });
+            let _equation_charge = self
+                .window
+                .as_ref()
+                .map(|w| w.read(equation_weight.bytes()))
+                .transpose()
+                .map_err(|error| {
+                    format!(
+                        "callable SCC {} members {:?}: {error}",
+                        members.len(),
+                        members
+                            .iter()
+                            .map(|&i| originals[i].0.instance.definition().to_string())
+                            .collect::<Vec<_>>()
+                    )
+                })?;
+            freedom.extend(hirsel_rc::closure_calls::settle_operation_freedom(
+                &equations, &freedom,
+            )?);
+        }
+        let mut freedom_weight = hirsel_engine::NativeMetadataWeight::default();
+        freedom_weight.map(&freedom, |w, (path, _), _| w.path(path));
+        let graph_bytes = graph_bytes + freedom_weight.bytes();
+        resize(&mut graph_charge, graph_bytes)?;
+        let mut interfaces = Vec::new();
+        for (key, stored) in &originals {
+            select_invocations(
+                self,
+                key,
+                &invocation_records,
+                structural_reference,
+                &mut operations,
+            )?;
+            resize(
+                &mut operations_charge,
+                super::super::ownership_compilation::metadata::operations(&mut operations),
+            )?;
+            let env = NativeEnvironment {
+                target: &self.target,
+                manifest,
+                operations: &operations,
+                discharge: Some(&options.discharge),
+            };
+            let (output, linkage) = self.admitted(key, &env)?;
+            interfaces.push(self.json(&Interface {
+                abi: linkage.abi(),
+                source: !output.facts.body.templates.library,
+                layouts: {
+                    let closure: LayoutClosure = self.reopen(stored.product.layout_closure)?;
+                    let binding = Binding::new(&self.target, &[&closure])?;
+                    let abi = binding
+                        .abi(linkage.abi())
+                        .ok_or("missing callable signature ABI")?;
+                    self.snapshot(&LayoutClosure::select(
+                        &binding.table,
+                        &self.target,
+                        &[],
+                        &[abi],
+                    )?)?
+                },
+            })?);
+        }
+        let mut pending = Vec::new();
+        for members in hirsel_graph::components(&edges) {
+            for origin in members {
+                let key = originals[origin].0.clone();
+                let selection = self.json(&Selection {
+                    origin,
+                    key: NamedKey::of(&key.instance),
+                    seeds: None,
+                    layouts: None,
+                })?;
+                pending.push(Pending {
+                    key,
+                    origin,
+                    selection,
+                });
+            }
+        }
+        let mut counts = vec![0usize; originals.len()];
+        let mut selected = BTreeSet::new();
+        let mut rewritten = Vec::new();
+        let mut at = 0;
+        while at < pending.len() {
+            let mut w = hirsel_engine::NativeMetadataWeight::default();
+            w.flat_vec(&interfaces);
+            w.flat_vec(&counts);
+            w.tree::<ContentHash, ()>(selected.len());
+            w.vec(&pending, |w, row| address_weight(w, &row.key));
+            w.vec(&rewritten, |w, row: &Rewritten| {
+                address_weight(w, &row.key);
+                w.flat_vec(&row.inline)
+            });
+            resize(&mut graph_charge, graph_bytes + w.bytes())?;
+            let item = &pending[at];
+            let key = item.key.clone();
+            let origin = item.origin;
+            let selection: Selection = read_json(self.store.as_ref(), item.selection)?;
+            let (original, stored) = &originals[origin];
+            let output = stored.read(self, original)?;
+            select_invocations(
+                self,
+                original,
+                &invocation_records,
+                structural_reference,
+                &mut operations,
+            )?;
+            resize(
+                &mut operations_charge,
+                super::super::ownership_compilation::metadata::operations(&mut operations),
+            )?;
+            let env = NativeEnvironment {
+                target: &self.target,
+                manifest,
+                operations: &operations,
+                discharge: Some(&options.discharge),
+            };
+            let scoped = self.operations(original, &env)?;
+            let (closure, body) = self.queries.read(
+                original,
+                &output.product,
+                &NativeEnvironment {
+                    operations: &scoped,
+                    ..env
+                },
+            )?;
+            let own = Binding::new(&self.target, &[&closure])?;
+            let original_unit = own.materialize::<Value>(&body)?;
+            if hirsel_rc::closure_calls::OperationFreedom::extract(&original_unit, &own.table)
+                != output.facts.body.operation_freedom
+            {
+                return Err(
+                    "callable operation-freedom equations differ from accepted Value".into(),
+                );
+            }
+            let neighbours = original_unit
+                .tables
+                .symbols
+                .iter()
+                .filter_map(|symbol| {
+                    symbol
+                        .instance
+                        .and_then(|id| index.get(&(symbol.definition.clone(), id)).copied())
+                })
+                .collect::<BTreeSet<_>>();
+            drop(original_unit);
+            drop(own);
+            let mut closures = vec![closure];
+            let mut declarations = Vec::new();
+            for &i in &neighbours {
+                let interface: Interface = read_json(self.store.as_ref(), interfaces[i])?;
+                closures.push(self.reopen::<LayoutClosure>(interface.layouts)?);
+                declarations.push((i, interface));
+            }
+            if let Some(layouts) = selection.layouts {
+                closures.push(self.reopen(layouts)?);
+            }
+            let binding = Binding::new(&self.target, &closures.iter().collect::<Vec<_>>())?;
+            let mut unit = binding.materialize::<Value>(&body)?;
+            unit.header.instance = key.instance.digest();
+            let mut entries = HashMap::new();
+            for (i, interface) in declarations {
+                let original = &originals[i].0;
+                entries.insert(
+                    Symbol {
+                        kind: SymbolKind::Function,
+                        definition: original.instance.definition().clone(),
+                        instance: Some(original.instance.digest()),
+                    },
+                    CallableEntry {
+                        key: original.instance.clone(),
+                        abi: binding
+                            .abi(interface.abi)
+                            .ok_or("missing window interface ABI")?,
+                        origin: if interface.source {
+                            UnitOrigin::Source
+                        } else {
+                            UnitOrigin::Library
+                        },
+                        op_free: freedom.get(&(
+                            original.instance.definition().clone(),
+                            original.instance.digest(),
+                        )) == Some(&true),
+                    },
+                );
+            }
+            let (seeds, flags) = match selection.seeds {
+                None => (Vec::new(), 0),
+                Some(Seeds::Parameters(recipe)) => {
+                    let request = recipe.bind(&key.instance, &binding)?;
+                    (
+                        request
+                            .seeds
+                            .into_iter()
+                            .map(|(p, target)| (unit.parameters[p], target))
+                            .collect(),
+                        request.spawn_flags,
+                    )
+                }
+                Some(Seeds::Capture(recipe)) => {
+                    let request = recipe.bind(&key.instance, &binding)?;
+                    (
+                        vec![(
+                            *unit
+                                .captures
+                                .first()
+                                .ok_or("task_main has no callable capture")?,
+                            request.target,
+                        )],
+                        0,
+                    )
+                }
+            };
+            // Requests carry portable seeds and their reached ABI closure. They
+            // never retain a cloned Value or the caller's numeric binding table.
+            let additions = std::cell::RefCell::new(Vec::new());
+            let mut enqueue = |entry: &CallableEntry,
+                               derived: InstanceKey,
+                               seeds: Result<Seeds, String>|
+             -> Result<bool, String> {
+                let owner = *index
+                    .get(&(entry.key.definition().clone(), entry.key.digest()))
+                    .ok_or("callable request has no original")?;
+                if selected.contains(&derived.digest()) {
+                    return Ok(true);
+                }
+                if counts[owner] >= hirsel_rc::closure_calls::MAX_PER_FUNCTION
+                    || selected.len() >= hirsel_rc::closure_calls::MAX_SPECIALIZATIONS
+                {
+                    return Ok(false);
+                }
+                let seeds = seeds?;
+                let selected_layouts = self.snapshot(&LayoutClosure::select(
+                    &binding.table,
+                    &self.target,
+                    &[],
+                    &(0..binding.table.fn_abis.len())
+                        .map(|i| hirsel_lir::FnAbiId(i as u32))
+                        .collect::<Vec<_>>(),
+                )?)?;
+                let derived = self.address(derived);
+                let record = self.json(&Selection {
+                    origin: owner,
+                    key: NamedKey::of(&derived.instance),
+                    seeds: Some(seeds),
+                    layouts: Some(selected_layouts),
+                })?;
+                selected.insert(derived.instance.digest());
+                counts[owner] += 1;
+                additions.borrow_mut().push(Pending {
+                    key: derived,
+                    origin: owner,
+                    selection: record,
+                });
+                Ok(true)
+            };
+            let enqueue = std::cell::RefCell::new(&mut enqueue);
+            let failure = std::cell::RefCell::new(None);
+            let inline = hirsel_rc::closure_calls::rewrite_window(
+                &mut unit,
+                &binding.table,
+                &entries,
+                &seeds,
+                flags,
+                |entry, request| match (enqueue.borrow_mut())(
+                    entry,
+                    request.key.clone(),
+                    TaskCaptureRecipe::capture(&entry.key, request, &binding.table)
+                        .map(Seeds::Capture),
+                ) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        *failure.borrow_mut() = Some(e);
+                        false
+                    }
+                },
+                |entry, request| match (enqueue.borrow_mut())(
+                    entry,
+                    request.key.clone(),
+                    CallableRecipe::capture(&entry.key, request, &binding.table)
+                        .map(Seeds::Parameters),
+                ) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        *failure.borrow_mut() = Some(e);
+                        false
+                    }
+                },
+            )?;
+            if let Some(error) = failure.into_inner() {
+                return Err(error);
+            }
+            pending.extend(additions.into_inner());
+            // Ordinary staging holds the transformed body until the dependency
+            // identities close. Only publication below grants C acceptance.
+            let value = self.snapshot(&(binding.table, unit))?;
+            rewritten.push(Rewritten {
+                key,
+                origin,
+                value,
+                inline: inline.into_iter().collect(),
+            });
+            at += 1;
+        }
+        drop(pending);
+        let mut requests = BTreeMap::new();
+        for row in &rewritten {
+            let mut request = self.requests[originals[row.origin].0.instance.encoding()].clone();
+            Arc::make_mut(&mut request.0).key = Arc::new(NamedKey::of(&row.key.instance));
+            requests.insert(row.key.instance.encoding().to_vec(), request);
+        }
+        let keys = rewritten
+            .iter()
+            .map(|row| {
+                (
+                    (
+                        row.key.instance.definition().clone(),
+                        row.key.instance.digest(),
+                    ),
+                    row.key.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut rows = BTreeMap::new();
+        let mut publisher = self.queries.callable();
+        for row in rewritten {
+            let key = row.key;
+            select_invocations(
+                self,
+                &originals[row.origin].0,
+                &invocation_records,
+                structural_reference,
+                &mut operations,
+            )?;
+            source(&key, &mut operations)?;
+            resize(
+                &mut operations_charge,
+                super::super::ownership_compilation::metadata::operations(&mut operations),
+            )?;
+            let original = originals[row.origin]
+                .1
+                .read(self, &originals[row.origin].0)?;
+            let (table, unit): (hirsel_lir::LayoutTable, hirsel_lir::LirUnit<Value>) =
+                self.reopen(row.value)?;
+            let inline = super::super::emission::InlineInstances::new(
+                row.inline,
+                self.retained_owner.clone(),
+            );
+            let inline_reference = inline.publish(self.store.as_ref())?;
             let callees = unit
                 .tables
                 .calls
                 .iter()
                 .filter_map(|call| match call.callee {
                     Callee::Direct(s) => {
-                        let symbol = &unit.tables.symbols[s.index()];
-                        symbol.instance.map(|id| (symbol.definition.clone(), id))
+                        let s = &unit.tables.symbols[s.index()];
+                        s.instance.map(|id| (s.definition.clone(), id))
                     }
                     _ => None,
                 })
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>();
-            let finalizers = original
-                .facts
-                .body
-                .dependencies
-                .iter()
-                .map(|k| (k.instance.definition().clone(), k.instance.digest()));
-            let templates = super::super::optimizer::TemplateFacts::of(&unit, finalizers);
+            let templates = super::super::optimizer::TemplateFacts::of(
+                &unit,
+                original
+                    .facts
+                    .body
+                    .dependencies
+                    .iter()
+                    .map(|k| (k.instance.definition().clone(), k.instance.digest())),
+            );
             let mut dependencies = templates
                 .references
                 .iter()
-                .filter_map(|name| index.get(name).map(|key| (*key).clone()))
+                .filter_map(|name| keys.get(name).cloned())
                 .collect::<Vec<_>>();
             dependencies.sort_by(InstanceAddress::canonical_cmp);
             dependencies.dedup();
-            let dependency_requests = dependencies
-                .iter()
-                .map(|k| requests[k.instance.encoding()].clone())
-                .collect::<Vec<_>>();
             let seal_demand =
                 hirsel_rc::seal_demand::equations::LocalDemandEquations::extract(&unit)?;
-            let freedom =
-                hirsel_rc::closure_calls::OperationFreedom::extract(&unit, &binding.table);
+            let operation_freedom =
+                hirsel_rc::closure_calls::OperationFreedom::extract(&unit, &table);
             let mut emission = super::super::emission::EmissionFacts::extract(&unit, []);
-            emission.inline = inline.clone();
+            emission.inline = inline;
             let discovery = self.put(
                 INSTANCE_DISCOVERY_DOMAIN,
                 &serde_json::to_vec(&Discovery {
@@ -522,11 +659,14 @@ impl DemandInstances {
                     ready_source: original.facts.source.ready_source.encode()?,
                     seal_demand: seal_demand.clone(),
                     callees: callees.clone(),
-                    requests: dependency_requests,
+                    requests: dependencies
+                        .iter()
+                        .map(|key| requests[key.instance.encoding()].clone())
+                        .collect(),
                     selection_reads: original.facts.source.selection_reads.clone(),
                     constant_reads: original.facts.source.constant_reads.clone(),
                     templates: templates.clone(),
-                    operation_freedom: freedom.clone(),
+                    operation_freedom: operation_freedom.clone(),
                     emission: super::super::emission::EmissionRecord::new(
                         &emission,
                         inline_reference,
@@ -545,11 +685,31 @@ impl DemandInstances {
                     .ok_or("missing callable static/finalizer input")?,
             )
             .map_err(|e| e.to_string())?;
+            let layout_keys = LayoutKeys::new(&table);
             let mut additional_abis = finalizers
                 .iter()
-                .map(|row| binding.abi(row.3).ok_or("missing callable finalizer ABI"))
+                .map(|row| {
+                    (0..table.fn_abis.len())
+                        .map(|i| hirsel_lir::FnAbiId(i as u32))
+                        .find(|id| layout_keys.fn_abi(&table.fn_abis[id.0 as usize]) == row.3)
+                        .ok_or("missing callable finalizer ABI")
+                })
                 .collect::<Result<Vec<_>, _>>()?;
-            additional_abis.extend(bound_pretransfer.iter().map(|a| a.abi));
+            let original_operations = self.operations(
+                &originals[row.origin].0,
+                &NativeEnvironment {
+                    target: &self.target,
+                    manifest,
+                    operations: &operations,
+                    discharge: Some(&options.discharge),
+                },
+            )?;
+            let pretransfer = super::super::instance_operations::bind_pretransfer(
+                &original_operations,
+                &table,
+                &self.target,
+            )?;
+            additional_abis.extend(pretransfer.iter().map(|row| row.abi));
             let selected_operations = super::super::instance_operations::InstanceOperations {
                 inventory: Some(&self.seal_inventory),
                 declarations: &operations,
@@ -565,32 +725,38 @@ impl DemandInstances {
                         .adapters
                         .iter()
                         .map(|symbol| {
-                            let mut selected = bound_pretransfer
-                                .iter()
-                                .filter(|reference| &reference.adapter == symbol);
-                            let reference = selected.next().ok_or(
+                            let mut rows = pretransfer.iter().filter(|row| &row.adapter == symbol);
+                            let selected = rows.next().ok_or(
                                 "callable publication lost an independently planned adapter",
                             )?;
-                            if selected.next().is_some() {
+                            if rows.next().is_some() {
                                 return Err(
                                     "callable publication repeats an independently planned adapter",
                                 );
                             }
-                            Ok(reference.clone())
+                            Ok(selected.clone())
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                 ),
             };
+            let action = Action(ContentHash::of_parts(
+                "hirsel.native.callable-window-action.v1",
+                [
+                    row.value.output.0.0.as_slice(),
+                    discovery.output.0.0.as_slice(),
+                    hirsel_compiler_identity::COMPILER_IDENTITY.as_slice(),
+                ],
+            ));
             let inputs = Inputs {
                 memo: Default::default(),
                 target: &self.target,
-                layouts: &binding.table,
+                layouts: &table,
                 operations: &selected_operations,
                 manifest,
                 discharge: Some(&options.discharge),
             };
             let (_, product) = publisher.publish(
-                key,
+                &key,
                 action,
                 unit,
                 &inputs,
@@ -598,41 +764,57 @@ impl DemandInstances {
                 discovery,
                 original.product.statics_finalizers,
             )?;
-            let seal_demand =
-                StoredSealEquations::capture(self.store.clone(), product.discovery, seal_demand)?;
-            outputs.push((
-                key.clone(),
-                Arc::new(DiscoveredInstance::with_facts(
-                    product,
-                    InstanceFacts {
-                        source: original.facts.source.clone(),
-                        body: Arc::new(
-                            InstanceBodyFacts {
+            let output = DiscoveredInstance::with_facts(
+                product,
+                InstanceFacts {
+                    source: original.facts.source.clone(),
+                    body: Arc::new(
+                        InstanceBodyFacts {
+                            seal_demand: StoredSealEquations::capture(
+                                self.store.clone(),
+                                discovery,
                                 seal_demand,
-                                callees,
-                                dependencies,
-                                templates,
-                                operation_freedom: freedom,
-                                _owner: self.retained_owner.clone(),
-                            }
-                            .packed(),
-                        ),
-                        emission,
-                        _owner: self.retained_owner.clone(),
-                    },
-                    Some(original),
-                )),
-            ));
+                            )?,
+                            callees,
+                            dependencies,
+                            templates,
+                            operation_freedom,
+                            _owner: self.retained_owner.clone(),
+                            _window: None,
+                        }
+                        .packed(),
+                    ),
+                    emission,
+                    _owner: self.retained_owner.clone(),
+                    _window: None,
+                },
+                Some(&original),
+            );
+            rows.insert(
+                key.address(hirsel_native::query_model::CALLABLE_VALUE_KIND)
+                    .0,
+                self.json(&Row {
+                    key: NamedKey::of(&key.instance),
+                    request: requests[key.instance.encoding()].clone(),
+                    output: StoredInstance::capture(self.store.as_ref(), &output)?.record()?,
+                })?,
+            );
         }
-        outputs.sort_by(|a, b| a.0.canonical_cmp(&b.0));
-        Ok(Scope {
-            outputs,
-            operations,
-            requests,
+        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        w.map(&rows, |_, _, _| ());
+        let index = self
+            .window
+            .as_ref()
+            .map(|window| window.read(w.bytes()))
+            .transpose()?;
+        Ok(PublishedCallables {
+            records: rows,
+            _index: index,
+            target: self.target.digest(),
+            policy: self.policy,
         })
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,6 +884,7 @@ mod tests {
         let source = Arc::new(
             InstanceSourceFacts {
                 _owner: Some(owner.clone()),
+                _window: None,
                 selection_reads: Vec::new(),
                 constant_reads: Vec::new(),
                 discharge: Default::default(),
@@ -724,6 +907,7 @@ mod tests {
         );
         let facts = InstanceFacts {
             _owner: Some(owner.clone()),
+            _window: None,
             source,
             body: Arc::new(
                 InstanceBodyFacts {
@@ -741,6 +925,7 @@ mod tests {
                     }))
                     .unwrap(),
                     _owner: Some(owner.clone()),
+                    _window: None,
                 }
                 .packed(),
             ),
@@ -768,35 +953,6 @@ mod tests {
         assert!(!Arc::ptr_eq(&original.facts, &emission_only.facts));
         assert!(Arc::ptr_eq(&original.facts.body, &emission_only.facts.body));
         drop(emission_only);
-        let mut scope = Scope {
-            outputs: vec![(
-                InstanceAddress {
-                    instance: key,
-                    target_abi: record.output.0,
-                    policy: record.output.0,
-                },
-                Arc::new(unchanged),
-            )],
-            operations: hirsel_layout::operation::OperationRegistry {
-                seal_sources: BTreeMap::new(),
-                receipt_sources: BTreeMap::new(),
-                pretransfer_adapters: Vec::new(),
-                pretransfer_actuals: Vec::new(),
-                invocation_bodies: Vec::new(),
-                invocations: BTreeMap::new(),
-                types,
-                signatures: BTreeMap::new(),
-                type_declarations: BTreeMap::new(),
-                owners: Default::default(),
-            },
-            requests: BTreeMap::new(),
-        };
-        let independent = scope.retained_bytes(std::iter::empty(), std::iter::empty());
-        let shared = scope.retained_bytes(std::iter::empty(), [&original.facts]);
-        assert_eq!(
-            independent - shared,
-            original.facts.retained_metadata_bytes()
-        );
         let facts_before_edit = original.facts.clone();
         let mut edited = facts;
         Arc::make_mut(&mut edited.body)
@@ -806,22 +962,14 @@ mod tests {
         let changed = DiscoveredInstance::with_facts(product, edited, Some(&original));
         assert!(!Arc::ptr_eq(&original.facts, &changed.facts));
         assert!(Arc::ptr_eq(&original.facts.source, &changed.facts.source));
-        scope.outputs[0].1 = Arc::new(changed);
-        let independent = scope.retained_bytes(std::iter::empty(), std::iter::empty());
-        let shared = scope.retained_bytes(std::iter::empty(), [&original.facts]);
-        assert_eq!(
-            independent - shared,
-            original.facts.source.retained_metadata_bytes()
-                + original.facts.emission.inline.retained_bytes()
-        );
-        let changed = scope.outputs[0].1.clone();
+        let changed = Arc::new(changed);
         drop(original);
         assert!(facts_before_edit.body.templates.references.is_empty());
         assert_eq!(changed.facts.body.templates.references.len(), 1);
         let retained_source = changed.facts.source.clone();
         let retained_body = changed.facts.body.clone();
         drop(changed);
-        drop(scope);
+        drop(unchanged);
         drop(facts_before_edit);
         assert_eq!(
             budget.reserved(),

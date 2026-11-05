@@ -181,11 +181,15 @@ impl OwnershipCompilation {
             .ok_or("ownership dispatch admission consumed twice")?;
         if snapshot.needs_guard {
             let inputs = snapshot.instances.completed_inputs()?;
-            let bytes = super::seal_demand::Plan::stored_admission_bytes(
-                inputs
-                    .iter()
-                    .map(|(_, output)| &output.facts.body.seal_demand),
-            );
+            let locals = inputs
+                .iter()
+                .map(|(key, stored)| {
+                    stored
+                        .read(&snapshot.instances, key)
+                        .map(|output| output.facts.body.seal_demand.clone())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let bytes = super::seal_demand::Plan::stored_admission_bytes(locals.iter());
             let guard_allowance = allowance
                 .split(bytes)
                 .ok_or("ownership seal-demand metadata exceeds dispatch admission")?;

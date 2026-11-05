@@ -124,14 +124,17 @@ impl ArenaTasks {
         let completed = self.instances.completed_instances(discovery.clone())?;
         let nodes = completed
             .iter()
-            .map(|(key, output)| ArenaNode {
-                equations: EquationProduct {
-                    owner: key.clone(),
-                    reference: output.product.local_equations,
-                },
-                callees: output.facts.body.callees.clone(),
+            .map(|(key, stored)| {
+                let output = self.instances.read_completed(key, stored)?;
+                Ok(ArenaNode {
+                    equations: EquationProduct {
+                        owner: key.clone(),
+                        reference: output.product.local_equations,
+                    },
+                    callees: output.facts.body.callees.clone(),
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, String>>()?;
         let mut queries = ArenaQueryPlan::new(&nodes, &[], self.facet)?;
         let ids = queries
             .component_keys

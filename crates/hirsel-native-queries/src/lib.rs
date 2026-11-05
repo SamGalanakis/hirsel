@@ -1,6 +1,5 @@
 //! Native source and instance producers over validated native pipeline inputs.
 use hirsel_native::query_model::*;
-use hirsel_native::*;
 pub mod arena_tasks;
 pub mod batch_sources;
 pub mod compilation_tasks;
@@ -16,7 +15,6 @@ pub mod local;
 mod ownership_closure;
 pub mod ownership_compilation;
 pub mod ownership_tasks;
-use hirsel_native_cache::preparation;
 pub mod products;
 mod receipt_requests;
 pub mod root_tasks;
@@ -54,10 +52,9 @@ fn fixture_product_bytes(
     fixture_product(&store, address, action, reference)
 }
 
-use hirsel_engine::runtime::ArchiveAdmission;
 use hirsel_engine::store::Reference;
 use hirsel_native_cache::{
-    arena, declarations, instance, optimizer, ready, ready_source, recipes, source, source_inputs,
+    arena, declarations, instance, optimizer, ready, ready_source, recipes, source_inputs,
 };
 use hirsel_syntax::ContentHash;
 use std::sync::Arc;

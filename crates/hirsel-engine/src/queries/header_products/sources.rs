@@ -117,6 +117,15 @@ impl SourceInputs {
         {
             return false;
         }
+        // Reconstruction installs this complete catalog with no materialized
+        // items. Its source generation and table owners prove the same bindings
+        // without visiting every declaration again.
+        if engine.items.is_empty()
+            && self.sources.placement_revision() == engine.sources.placement_revision()
+            && self.catalog.identity().matches(&engine.catalog)
+        {
+            return true;
+        }
         let mut observed = BTreeSet::new();
         let mut binding = |id, file, body, anchor, occurrence| {
             let matches = self.syntax.files.get(&file).is_some_and(|owner| {

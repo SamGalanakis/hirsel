@@ -400,7 +400,14 @@ impl DemandInstances {
             w.flat_vec(key);
             w.add(request.retained_metadata_bytes() as usize);
         });
-        w.packed_map(&mut self.completed, |w, key, _| w.flat_vec(key));
+        w.packed_map(&mut self.completed, |w, key, stored| {
+            w.flat_vec(key);
+            w.add(
+                stored
+                    .retained_bytes()
+                    .saturating_sub(size_of::<StoredInstance>() as u64) as usize,
+            );
+        });
         // products() creates this codec and admits descriptors without any
         // record decode. The instance validator itself remains producer-owned.
         w.add(hirsel_engine::NativeRecords::fresh_metadata_bytes() as usize);

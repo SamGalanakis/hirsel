@@ -241,7 +241,7 @@ impl StoredInstance {
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct StoredRecord {
+pub(crate) struct StoredRecord {
     address: ContentHash,
     action: ContentHash,
     archive: Reference,
@@ -254,7 +254,7 @@ pub(super) struct StoredRecord {
     bytes: u64,
 }
 impl StoredInstance {
-    pub(super) fn record(&self) -> Result<StoredRecord, String> {
+    pub(crate) fn record(&self) -> Result<StoredRecord, String> {
         Ok(StoredRecord {
             address: self.product.product.address.0,
             action: self.product.product.action.0,
@@ -273,7 +273,7 @@ impl StoredInstance {
             bytes: self.bytes,
         })
     }
-    pub(super) fn from_record(store: &dyn ResultStore, row: StoredRecord) -> Result<Self, String> {
+    pub(crate) fn from_record(store: &dyn ResultStore, row: StoredRecord) -> Result<Self, String> {
         let archive = store
             .copy_product_archive(row.archive)
             .ok_or("missing window product archive")?;

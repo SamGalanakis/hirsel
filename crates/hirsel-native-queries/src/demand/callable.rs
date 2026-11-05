@@ -7,7 +7,7 @@ use hirsel_lir::{
     stage::Value,
 };
 use hirsel_rc::closure_calls::{CallableEntry, CallableRecipe, TaskCaptureRecipe};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 const WINDOW_RECORD: Domain = Domain {
     kind: super::super::instance_tasks::CALLABLE_GRAPH_KIND,
@@ -125,6 +125,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(
 struct Interface {
     abi: ContentHash,
     source: bool,
+    op_free: bool,
     layouts: Reference,
 }
 #[derive(Serialize, Deserialize)]
@@ -139,14 +140,9 @@ struct Selection {
     seeds: Option<Seeds>,
     layouts: Option<Reference>,
 }
-struct Pending {
-    key: InstanceAddress,
-    origin: usize,
-    selection: Reference,
-}
+#[derive(Serialize, Deserialize)]
 struct Rewritten {
-    key: InstanceAddress,
-    origin: usize,
+    selection: Reference,
     value: Reference,
     inline: Vec<ContentHash>,
 }
@@ -288,8 +284,9 @@ impl DemandInstances {
                 operations_charge.as_ref().map_or(0, |c| c.bytes())
             );
         }
-        let mut freedom = BTreeMap::new();
+        let mut freedom = vec![None; originals.len()];
         let mut largest_scc = 0;
+        let mut largest_members = 0;
         for members in &components {
             let mut equations = BTreeMap::new();
             let mut scc_demand = 0;
@@ -338,8 +335,39 @@ impl DemandInstances {
                 })?;
             }
             scc_demand = scc_demand.max(equation_charge.as_ref().map_or(0, |c| c.bytes()));
-            if scc_demand > largest_scc {
-                largest_scc = scc_demand;
+            let outgoing = equations
+                .values()
+                .flat_map(|equation| equation.dependencies())
+                .filter(|name| !equations.contains_key(*name))
+                .filter_map(|name| {
+                    index
+                        .get(name)
+                        .and_then(|&i| freedom[i])
+                        .map(|safe| (name.clone(), safe))
+                })
+                .collect::<BTreeMap<_, _>>();
+            let mut w = hirsel_engine::NativeMetadataWeight::default();
+            w.map(&equations, |w, (path, _), facts| {
+                w.path(path);
+                w.add(facts.retained_bytes() as usize);
+            });
+            w.map(&outgoing, |w, (path, _), _| w.path(path));
+            resize(&mut equation_charge, w.bytes())?;
+            let solved = hirsel_rc::closure_calls::settle_operation_freedom(&equations, &outgoing)?;
+            let mut solved_weight = hirsel_engine::NativeMetadataWeight::default();
+            solved_weight.map(&solved, |w, (path, _), _| w.path(path));
+            let _solved_charge = self
+                .window
+                .as_ref()
+                .map(|window| window.read_for("scc", solved_weight.bytes()))
+                .transpose()?;
+            scc_demand = scc_demand.max(
+                equation_charge.as_ref().map_or(0, |c| c.bytes())
+                    + _solved_charge.as_ref().map_or(0, |c| c.bytes()),
+            );
+            if scc_demand > largest_scc || members.len() > largest_members {
+                largest_scc = largest_scc.max(scc_demand);
+                largest_members = largest_members.max(members.len());
                 if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some() {
                     eprintln!(
                         "NATIVE_SCC_DEMAND bytes={scc_demand} members={} names={:?}",
@@ -351,12 +379,12 @@ impl DemandInstances {
                     );
                 }
             }
-            freedom.extend(hirsel_rc::closure_calls::settle_operation_freedom(
-                &equations, &freedom,
-            )?);
+            for (name, safe) in solved {
+                freedom[*index.get(&name).ok_or("missing callable SCC member")?] = Some(safe);
+            }
         }
         let mut freedom_weight = hirsel_engine::NativeMetadataWeight::default();
-        freedom_weight.map(&freedom, |w, (path, _), _| w.path(path));
+        freedom_weight.flat_vec(&freedom);
         let graph_bytes = graph_bytes + freedom_weight.bytes();
         resize(&mut graph_charge, graph_bytes)?;
         if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some() {
@@ -366,7 +394,7 @@ impl DemandInstances {
             );
         }
         let mut interfaces = Vec::new();
-        for (key, stored) in &originals {
+        for (i, (key, stored)) in originals.iter().enumerate() {
             select_invocations(
                 self,
                 key,
@@ -390,6 +418,7 @@ impl DemandInstances {
             interfaces.push(self.json(&Interface {
                 abi: linkage.abi(),
                 source: !output.facts.body.templates.library,
+                op_free: freedom[i].ok_or("unsettled callable interface")?,
                 layouts: {
                     let closure: LayoutClosure = self.reopen(stored.product.layout_closure)?;
                     let binding = Binding::new(&self.target, &[&closure])?;
@@ -405,21 +434,16 @@ impl DemandInstances {
                 },
             })?);
         }
-        let mut pending = Vec::new();
+        drop(freedom);
+        let mut pending = VecDeque::new();
         for members in &components {
             for &origin in members {
-                let key = originals[origin].0.clone();
-                let selection = self.json(&Selection {
+                pending.push_back(self.json(&Selection {
                     origin,
-                    key: NamedKey::of(&key.instance),
+                    key: NamedKey::of(&originals[origin].0.instance),
                     seeds: None,
                     layouts: None,
-                })?;
-                pending.push(Pending {
-                    key,
-                    origin,
-                    selection,
-                });
+                })?);
             }
         }
         drop(components);
@@ -427,27 +451,21 @@ impl DemandInstances {
         let mut graph_weight = hirsel_engine::NativeMetadataWeight::default();
         graph_weight.vec(&originals, |w, (key, _)| address_weight(w, key));
         graph_weight.map(&index, |w, (path, _), _| w.path(path));
-        graph_weight.map(&freedom, |w, (path, _), _| w.path(path));
         let graph_bytes = index_bytes + graph_weight.bytes();
         let mut counts = vec![0usize; originals.len()];
         let mut selected = BTreeSet::new();
         let mut rewritten = Vec::new();
-        let mut at = 0;
-        while at < pending.len() {
+        while let Some(selection_record) = pending.pop_front() {
             let mut w = hirsel_engine::NativeMetadataWeight::default();
             w.flat_vec(&interfaces);
             w.flat_vec(&counts);
             w.tree::<ContentHash, ()>(selected.len());
-            w.vec(&pending, |w, row| address_weight(w, &row.key));
-            w.vec(&rewritten, |w, row: &Rewritten| {
-                address_weight(w, &row.key);
-                w.flat_vec(&row.inline)
-            });
+            w.add(pending.capacity() * size_of::<Reference>());
+            w.flat_vec(&rewritten);
             resize(&mut graph_charge, graph_bytes + w.bytes())?;
-            let item = &pending[at];
-            let key = item.key.clone();
-            let origin = item.origin;
-            let selection: Selection = read_json(self.store.as_ref(), item.selection)?;
+            let selection: Selection = read_json(self.store.as_ref(), selection_record)?;
+            let key = self.address(selection.key.bind()?);
+            let origin = selection.origin;
             let (original, stored) = &originals[origin];
             let output = stored
                 .read(self, original)
@@ -531,10 +549,7 @@ impl DemandInstances {
                         } else {
                             UnitOrigin::Library
                         },
-                        op_free: freedom.get(&(
-                            original.instance.definition().clone(),
-                            original.instance.digest(),
-                        )) == Some(&true),
+                        op_free: interface.op_free,
                     },
                 );
             }
@@ -601,11 +616,7 @@ impl DemandInstances {
                 })?;
                 selected.insert(derived.instance.digest());
                 counts[owner] += 1;
-                additions.borrow_mut().push(Pending {
-                    key: derived,
-                    origin: owner,
-                    selection: record,
-                });
+                additions.borrow_mut().push(record);
                 Ok(true)
             };
             let enqueue = std::cell::RefCell::new(&mut enqueue);
@@ -648,40 +659,51 @@ impl DemandInstances {
             // Ordinary staging holds the transformed body until the dependency
             // identities close. Only publication below grants C acceptance.
             let value = self.snapshot(&(binding.table, unit))?;
-            rewritten.push(Rewritten {
-                key,
-                origin,
+            rewritten.push(self.json(&Rewritten {
+                selection: selection_record,
                 value,
                 inline: inline.into_iter().collect(),
-            });
-            at += 1;
+            })?);
         }
         drop(pending);
-        let mut requests = BTreeMap::new();
-        for row in &rewritten {
-            let mut request = self.requests[originals[row.origin].0.instance.encoding()].clone();
-            Arc::make_mut(&mut request.0).key = Arc::new(NamedKey::of(&row.key.instance));
-            requests.insert(row.key.instance.encoding().to_vec(), request);
+        let mut keys = BTreeMap::new();
+        for reference in &rewritten {
+            let row: Rewritten = read_json(self.store.as_ref(), *reference)?;
+            let selection: Selection = read_json(self.store.as_ref(), row.selection)?;
+            let key = selection.key.bind()?;
+            if keys
+                .insert((key.definition().clone(), key.digest()), row.selection)
+                .is_some()
+            {
+                return Err("duplicate callable window selection".into());
+            }
         }
-        let keys = rewritten
-            .iter()
-            .map(|row| {
-                (
-                    (
-                        row.key.instance.definition().clone(),
-                        row.key.instance.digest(),
-                    ),
-                    row.key.clone(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
+        let request = |selection: &Selection| -> Result<Request, String> {
+            let original = originals
+                .get(selection.origin)
+                .ok_or("callable selection has no original")?;
+            let mut request = self.requests[original.0.instance.encoding()].clone();
+            Arc::make_mut(&mut request.0).key = Arc::new(selection.key.clone());
+            Ok(request)
+        };
+        let mut w = hirsel_engine::NativeMetadataWeight::default();
+        w.flat_vec(&rewritten);
+        w.map(&keys, |w, (path, _), _| w.path(path));
+        w.flat_vec(&interfaces);
+        w.flat_vec(&counts);
+        w.tree::<ContentHash, ()>(selected.len());
+        resize(&mut graph_charge, graph_bytes + w.bytes())?;
         let mut rows = BTreeMap::new();
         let mut publisher = self.queries.callable();
-        for row in rewritten {
-            let key = row.key;
+        for reference in rewritten {
+            let row: Rewritten = read_json(self.store.as_ref(), reference)?;
+            let selection: Selection = read_json(self.store.as_ref(), row.selection)?;
+            let key = self.address(selection.key.bind()?);
+            let selected_request = request(&selection)?;
+            let origin = selection.origin;
             select_invocations(
                 self,
-                &originals[row.origin].0,
+                &originals[origin].0,
                 &invocation_records,
                 structural_reference,
                 &mut operations,
@@ -691,9 +713,9 @@ impl DemandInstances {
                 &mut operations_charge,
                 super::super::ownership_compilation::metadata::operations(&mut operations),
             )?;
-            let original = originals[row.origin]
+            let original = originals[origin]
                 .1
-                .read(self, &originals[row.origin].0)
+                .read(self, &originals[origin].0)
                 .map_err(|e| format!("callable publication: {e}"))?;
             let (table, unit): (hirsel_lir::LayoutTable, hirsel_lir::LirUnit<Value>) =
                 self.reopen(row.value)?;
@@ -728,8 +750,12 @@ impl DemandInstances {
             let mut dependencies = templates
                 .references
                 .iter()
-                .filter_map(|name| keys.get(name).cloned())
-                .collect::<Vec<_>>();
+                .filter_map(|name| keys.get(name))
+                .map(|reference| {
+                    let selection: Selection = read_json(self.store.as_ref(), *reference)?;
+                    Ok(self.address(selection.key.bind()?))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
             dependencies.sort_by(InstanceAddress::canonical_cmp);
             dependencies.dedup();
             let seal_demand =
@@ -748,8 +774,12 @@ impl DemandInstances {
                     callees: callees.clone(),
                     requests: dependencies
                         .iter()
-                        .map(|key| requests[key.instance.encoding()].clone())
-                        .collect(),
+                        .map(|key| {
+                            let name = (key.instance.definition().clone(), key.instance.digest());
+                            let selection: Selection = read_json(self.store.as_ref(), keys[&name])?;
+                            request(&selection)
+                        })
+                        .collect::<Result<Vec<_>, String>>()?,
                     selection_reads: original.facts.source.selection_reads.clone(),
                     constant_reads: original.facts.source.constant_reads.clone(),
                     templates: templates.clone(),
@@ -783,7 +813,7 @@ impl DemandInstances {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let original_operations = self.operations(
-                &originals[row.origin].0,
+                &originals[origin].0,
                 &NativeEnvironment {
                     target: &self.target,
                     manifest,
@@ -801,7 +831,7 @@ impl DemandInstances {
                 inventory: Some(&self.seal_inventory),
                 declarations: &operations,
                 receipts: Some(&self.receipt_sources),
-                source: requests[key.instance.encoding()]
+                source: selected_request
                     .source_definition()
                     .map(|_| (key.instance.definition(), key.instance.digest())),
                 all_sources: false,
@@ -882,8 +912,8 @@ impl DemandInstances {
                     .0,
                 self.json(&Row {
                     key: NamedKey::of(&key.instance),
-                    origin: NamedKey::of(&originals[row.origin].0.instance),
-                    request: requests[key.instance.encoding()].clone(),
+                    origin: NamedKey::of(&originals[origin].0.instance),
+                    request: selected_request.clone(),
                     output: StoredInstance::capture(self.store.as_ref(), &output)?.record()?,
                 })?,
             );

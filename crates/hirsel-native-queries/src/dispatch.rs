@@ -30,3 +30,35 @@ pub(crate) fn read<T: for<'de> Deserialize<'de>>(
     }
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AddressRecord {
+    definition: hirsel_syntax::DefPath,
+    body: u32,
+    encoding: Vec<u8>,
+    target: ContentHash,
+    policy: ContentHash,
+}
+impl AddressRecord {
+    pub(crate) fn capture(key: &InstanceAddress) -> Self {
+        Self {
+            definition: key.instance.definition().clone(),
+            body: key.instance.body(),
+            encoding: key.instance.encoding().to_vec(),
+            target: key.target_abi,
+            policy: key.policy,
+        }
+    }
+    pub(crate) fn bind(self) -> Result<InstanceAddress, String> {
+        Ok(InstanceAddress {
+            instance: hirsel_layout::instance::InstanceKey::from_encoding(
+                &self.definition,
+                self.body,
+                self.encoding,
+            )
+            .map_err(|e| format!("dispatch owner encoding: {e:?}"))?,
+            target_abi: self.target,
+            policy: self.policy,
+        })
+    }
+}

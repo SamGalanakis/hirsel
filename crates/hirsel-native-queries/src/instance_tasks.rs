@@ -25,13 +25,34 @@ const FAILURE: Domain = Domain {
     schema: 1,
 };
 type Index = BTreeMap<ContentHash, Arc<Registered>>;
+type ProductIdentity = (Address, Action, Reference);
+fn product_identity(product: &ProductRef) -> Result<ProductIdentity, String> {
+    Ok((
+        product.address,
+        product.action,
+        product
+            .archive(ArchiveAdmission::Retained)
+            .map_err(|e| e.to_string())?
+            .reference(),
+    ))
+}
 struct Registered {
     ordinal: usize,
     address: ContentHash,
-    key: InstanceAddress,
+    key: Reference,
     request: StoredRequest,
-    input: OnceLock<ProductRef>,
+    input: OnceLock<ProductIdentity>,
     output: OriginalOutput,
+}
+impl Registered {
+    fn key(&self, store: &dyn ResultStore) -> Result<InstanceAddress, String> {
+        let record: super::dispatch::AddressRecord = super::dispatch::read(store, self.key)?;
+        let key = record.bind()?;
+        if key.address(INSTANCE_KIND).0 != self.address {
+            return Err("registered owner identity differs".into());
+        }
+        Ok(key)
+    }
 }
 const REQUEST_ARCHIVE: Domain = Domain {
     kind: INSTANCE_INPUT_KIND,
@@ -79,20 +100,39 @@ struct OriginalOutput {
     selected: OnceLock<OriginalSelection>,
 }
 struct OriginalSelection {
-    output: StoredInstance,
+    product: ProductIdentity,
+    record: Reference,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+struct OriginalRecord {
+    output: super::demand::window::StoredRecord,
     dependencies: Box<[ContentHash]>,
     callable: bool,
 }
 impl OriginalOutput {
-    fn get(&self) -> Option<StoredInstance> {
-        self.selected.get().map(|s| s.output.clone())
+    fn read(&self, store: &dyn ResultStore) -> Result<Option<OriginalRecord>, String> {
+        self.selected
+            .get()
+            .map(|s| super::dispatch::read(store, s.record))
+            .transpose()
     }
-    fn product(&self) -> Option<&ProductRef> {
-        self.selected.get().map(|s| &s.output.product.product)
+    fn get(&self, store: &dyn ResultStore) -> Result<Option<StoredInstance>, String> {
+        self.read(store)?
+            .map(|s| StoredInstance::from_record(store, s.output))
+            .transpose()
+    }
+    fn holds(&self, product: &ProductRef) -> bool {
+        self.selected.get().is_some_and(|selected| {
+            selected.product.0 == product.address
+                && selected.product.1 == product.action
+                && product
+                    .archive(ArchiveAdmission::Retained)
+                    .is_ok_and(|archive| archive.reference() == selected.product.2)
+        })
     }
     fn set(&self, output: &DiscoveredInstance, store: &dyn ResultStore) -> Result<(), String> {
-        let selected = OriginalSelection {
-            output: StoredInstance::capture(store, output)?,
+        let row = OriginalRecord {
+            output: StoredInstance::capture(store, output)?.record()?,
             dependencies: output
                 .facts
                 .body
@@ -102,11 +142,25 @@ impl OriginalOutput {
                 .collect(),
             callable: output.facts.body.templates.execution,
         };
+        let record = super::dispatch::put(store, &row)?;
+        let product = &output.product.product;
+        let selected = OriginalSelection {
+            product: (
+                product.address,
+                product.action,
+                product
+                    .archive(ArchiveAdmission::Retained)
+                    .map_err(|e| e.to_string())?
+                    .reference(),
+            ),
+            record,
+        };
         if let Err(other) = self.selected.set(selected) {
             let previous = self.selected.get().unwrap();
-            if previous.output.product.product != other.output.product.product
-                || previous.dependencies != other.dependencies
-                || previous.callable != other.callable
+            let old: OriginalRecord = super::dispatch::read(store, previous.record)?;
+            if previous.product != other.product
+                || old.dependencies != row.dependencies
+                || old.callable != row.callable
             {
                 return Err("native instance completion changed".into());
             }
@@ -349,8 +403,6 @@ impl InstanceTasks {
             .map(|(key, request)| {
                 let mut weight = hirsel_engine::NativeMetadataWeight::default();
                 weight.add(size_of::<Registered>() + 2 * size_of::<usize>());
-                weight.path(key.instance.definition());
-                weight.add(key.instance.retained_encoding_bytes());
                 let charge = weight.bytes();
                 let request = StoredRequest::capture(self.store.as_ref(), request)?;
                 Ok((
@@ -360,7 +412,10 @@ impl InstanceTasks {
                     Arc::new(Registered {
                         ordinal: 0,
                         address: key.address(INSTANCE_KIND).0,
-                        key,
+                        key: super::dispatch::put(
+                            self.store.as_ref(),
+                            &super::dispatch::AddressRecord::capture(&key),
+                        )?,
                         request,
                         input: OnceLock::new(),
                         output: OriginalOutput::default(),
@@ -378,10 +433,8 @@ impl InstanceTasks {
             if let Some(previous) = registry.entries.get(&id) {
                 if previous.key != entry.key || previous.request.record != entry.request.record {
                     return Err(format!(
-                        "inconsistent native request registration for {}: previous={:?}, requested={:?}",
-                        entry.key.instance.definition(),
-                        previous.request,
-                        entry.request,
+                        "inconsistent native request registration for {:?}: previous={:?}, requested={:?}",
+                        entry.address, previous.request, entry.request,
                     ));
                 }
                 continue;
@@ -486,23 +539,6 @@ impl InstanceTasks {
             original.definition.clone(),
             Arc::new(SourceBinding { selected, original }),
         );
-        Ok(())
-    }
-    fn charge_output(&self, entry: &Registered, output: &DiscoveredInstance) -> Result<(), String> {
-        if entry.output.product().is_some() {
-            return Ok(());
-        }
-        let stored = StoredInstance::capture(self.store.as_ref(), output)?;
-        let charge = stored.retained_bytes()
-            + (output.facts.body.dependencies.len() * size_of::<ContentHash>()) as u64;
-        let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
-        let total = registry
-            .charged
-            .checked_add(charge)
-            .filter(|total| *total <= self.allowance.bytes())
-            .ok_or("native completed identity allowance exhausted")?;
-        self.window.set_base(total)?;
-        registry.charged = total;
         Ok(())
     }
     fn put(&self, key: QueryId, bytes: Vec<u8>) -> Result<ProductRef, String> {
@@ -630,18 +666,19 @@ impl InstanceTasks {
         self.producer()
             .bind_planned_adapters(&source, requests.iter(), &mut registry)?;
         for entry in entries {
-            let Some(path) = (entry.request.source).then(|| entry.key.instance.definition()) else {
+            let key = entry.key(self.store.as_ref())?;
+            let Some(path) = (entry.request.source).then(|| key.instance.definition()) else {
                 continue;
             };
             let selected = hirsel_lir::ir::Symbol {
                 kind: hirsel_lir::ir::SymbolKind::Function,
-                definition: entry.key.instance.definition().clone(),
-                instance: Some(entry.key.instance.digest()),
+                definition: key.instance.definition().clone(),
+                instance: Some(key.instance.digest()),
             };
             let (evidence, _) = source.source_invocations(
                 path,
                 &selected,
-                hirsel_tir::BodyId(entry.key.instance.body()),
+                hirsel_tir::BodyId(key.instance.body()),
             )?;
             if let Some(previous) = registry.invocations.insert(
                 evidence.body.definition.clone(),
@@ -688,9 +725,9 @@ impl InstanceTasks {
         for entry in entries {
             let output = entry
                 .output
-                .get()
+                .get(self.store.as_ref())?
                 .ok_or("native discovery has an unfinished instance")?;
-            products.attach_stored(&entry.key, output)?;
+            products.attach_stored(&entry.key(self.store.as_ref())?, output)?;
         }
         products.recheck_receipts(&self.current_source()?)?;
         products.bind_original_roots(&self.roots)?;
@@ -712,10 +749,10 @@ impl InstanceTasks {
             .map(|entry| {
                 let output = entry
                     .output
-                    .get()
+                    .get(self.store.as_ref())?
                     .ok_or("native instance has not completed")?
                     .clone();
-                Ok((entry.key.clone(), output))
+                Ok((entry.key(self.store.as_ref())?, output))
             })
             .collect::<Result<Vec<_>, String>>()?;
         outputs.sort_by(|a, b| a.0.canonical_cmp(&b.0));
@@ -837,12 +874,19 @@ impl QueryTask for InstanceTask {
         if let Some(result) = self.terminal.clone() {
             return finish(result);
         }
+        let key = match self.entry.key(self.tasks.store.as_ref()) {
+            Ok(key) => key,
+            Err(error) => return finish(Err(self.tasks.failure(&error))),
+        };
+        let mut key_weight = hirsel_engine::NativeMetadataWeight::default();
+        key_weight.path(key.instance.definition());
+        key_weight.add(key.instance.retained_encoding_bytes());
+        let _key_read = match self.tasks.window.read_for("owner-key", key_weight.bytes()) {
+            Ok(lease) => lease,
+            Err(error) => return finish(Err(self.tasks.failure(&error))),
+        };
         let mut receipt_products = Vec::new();
-        let source_owner = self
-            .entry
-            .request
-            .source
-            .then(|| self.entry.key.instance.definition());
+        let source_owner = self.entry.request.source.then(|| key.instance.definition());
         if let Some(front) = &self.tasks.front
             && ((source_owner.is_some() && self.id.kind == INSTANCE_INPUT_KIND)
                 || self.entry.request.receipts)
@@ -912,13 +956,15 @@ impl QueryTask for InstanceTask {
             }
         }
         if self.id.kind == INSTANCE_KIND {
-            match cx.read(input_id(&self.entry.key)) {
-                Poll::Pending => return QueryPoll::Waiting(vec![input_id(&self.entry.key)]),
+            match cx.read(input_id(&key)) {
+                Poll::Pending => return QueryPoll::Waiting(vec![input_id(&key)]),
                 Poll::Ready(Err(error)) => {
                     self.terminal = Some(Err(error));
                     return finish(Err(error));
                 }
-                Poll::Ready(Ok(product)) if self.entry.input.get() == Some(&product) => {}
+                Poll::Ready(Ok(product))
+                    if product_identity(&product)
+                        .is_ok_and(|identity| self.entry.input.get() == Some(&identity)) => {}
                 _ => {
                     let error = self
                         .tasks
@@ -956,18 +1002,17 @@ impl QueryTask for InstanceTask {
                 self.tasks.source.provider()
             };
             if self.id.kind == INSTANCE_INPUT_KIND {
-                let bytes =
-                    producer.producer_inputs(&source, &self.entry.key, &self.tasks.options)?;
+                let bytes = producer.producer_inputs(&source, &key, &self.tasks.options)?;
                 let product = self.tasks.put(self.id, bytes)?;
-                if self.entry.input.set(product.clone()).is_err()
-                    && self.entry.input.get() != Some(&product)
+                let identity = product_identity(&product)?;
+                if self.entry.input.set(identity).is_err()
+                    && self.entry.input.get() != Some(&identity)
                 {
                     return Err("native selected input completion changed".into());
                 }
                 return Ok(product);
             }
-            let output =
-                producer.instance_from(&mut source, &self.entry.key, &self.tasks.options)?;
+            let output = producer.instance_from(&mut source, &key, &self.tasks.options)?;
             self.tasks
                 .imports
                 .fetch_add(producer.imports, Ordering::Relaxed);
@@ -978,7 +1023,6 @@ impl QueryTask for InstanceTask {
                 .source_body_demands
                 .fetch_add(source.body_demands, Ordering::Relaxed);
             self.tasks.register(producer.registered_requests()?)?;
-            self.tasks.charge_output(&self.entry, &output)?;
             let product = output.product.product.clone();
             if self
                 .entry
@@ -1072,11 +1116,15 @@ impl DiscoveryTask {
                 Poll::Pending => self.frontier.push(entry),
                 Poll::Ready(Err(error)) => return Err(error),
                 Poll::Ready(Ok(product)) => {
-                    let selected = entry.output.selected.get().ok_or_else(|| {
-                        self.tasks
-                            .failure("native task returned no completed descriptor")
-                    })?;
-                    if selected.output.product.product != product {
+                    let selected = entry
+                        .output
+                        .read(self.tasks.store.as_ref())
+                        .map_err(|e| self.tasks.failure(&e))?
+                        .ok_or_else(|| {
+                            self.tasks
+                                .failure("native task returned no completed descriptor")
+                        })?;
+                    if !entry.output.holds(&product) {
                         return Err(self.tasks.failure("native discovery read another output"));
                     }
                     mark(&mut self.seen, entry.ordinal);
@@ -1166,15 +1214,19 @@ impl InstanceTasks {
         let mut rows = Vec::new();
         let mut needs_callable = false;
         for entry in &entries {
-            let stored = entry.output.get().ok_or("discovery output is unfinished")?;
-            let output = self.read_completed(&entry.key, &stored)?;
+            let key = entry.key(self.store.as_ref())?;
+            let stored = entry
+                .output
+                .get(self.store.as_ref())?
+                .ok_or("discovery output is unfinished")?;
+            let output = self.read_completed(&key, &stored)?;
             facts.push((
-                entry.key.instance.definition().clone(),
+                key.instance.definition().clone(),
                 output.facts.source.discharge.clone(),
             ));
             needs_callable |= output.facts.body.templates.execution;
             rows.push((
-                entry.key.instance.encoding().to_vec(),
+                key.instance.encoding().to_vec(),
                 output.product.product.address.0,
                 output
                     .product
@@ -1305,7 +1357,7 @@ impl QueryTask for CallableTask {
                         self.terminal = Some(Err(error));
                         return finish(Err(error));
                     }
-                    Poll::Ready(Ok(product)) if entry.output.product() == Some(&product) => (),
+                    Poll::Ready(Ok(product)) if entry.output.holds(&product) => (),
                     _ => {
                         let error = self.tasks.failure("callable original output differs");
                         self.terminal = Some(Err(error));

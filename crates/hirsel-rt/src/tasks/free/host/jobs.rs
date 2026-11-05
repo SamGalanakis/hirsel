@@ -14,7 +14,7 @@
 //! a key) and single-winner delivery against terminal quarantine.
 use crate::io::{AdapterError, Completion};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 /// Physical job capacity of one run, as OTP's default dirty I/O scheduler count.
@@ -145,74 +145,85 @@ impl Drop for Reservation {
     }
 }
 
-const RUNNING: u8 = 0;
-const RETURNED: u8 = 1;
-const DELIVERED: u8 = 2;
-/// Abandoned while running: the job quarantines its own late result.
-const ABANDONED: u8 = 3;
-const QUARANTINED: u8 = 4;
+enum SlotState {
+    Running,
+    Returned(Output),
+    Delivered,
+    Abandoned,
+    Quarantined(Output),
+}
 
 /// A request-owned result. Exactly one of owner delivery or terminal
 /// quarantine wins; a quarantined result is retained until the last holder
 /// (job or request owner) reclaims it, and is never recorded or delivered.
 pub(crate) struct Slot {
-    word: AtomicU8,
-    result: Mutex<Option<Output>>,
+    state: Mutex<SlotState>,
     stats: Arc<Inner>,
 }
 
 impl Slot {
     pub(crate) fn returned(&self) -> bool {
-        self.word.load(Ordering::Acquire) == RETURNED
+        matches!(*self.state.lock().unwrap(), SlotState::Returned(_))
     }
 
     /// The owner takes the returned result: the single delivery winner.
     pub(crate) fn deliver(&self) -> Option<Output> {
-        self.word
-            .compare_exchange(RETURNED, DELIVERED, Ordering::AcqRel, Ordering::Acquire)
-            .ok()?;
-        self.stats.stats.delivered.fetch_add(1, Ordering::Relaxed);
-        self.result.lock().unwrap().take()
+        let mut state = self.state.lock().unwrap();
+        match std::mem::replace(&mut *state, SlotState::Delivered) {
+            SlotState::Returned(output) => {
+                self.stats.stats.delivered.fetch_add(1, Ordering::Relaxed);
+                Some(output)
+            }
+            previous => {
+                *state = previous;
+                None
+            }
+        }
     }
 
     /// The owner will never deliver (stop teardown or abandoned frame).
     /// Returns whether this call quarantined a result or the pending call.
     pub(crate) fn abandon(&self) -> bool {
-        let quarantined = self
-            .word
-            .compare_exchange(RETURNED, QUARANTINED, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok();
-        if quarantined {
-            self.stats.stats.quarantined.fetch_add(1, Ordering::Relaxed);
-            return true;
+        #[cfg(test)]
+        tests::before_abandon_transition();
+        let mut state = self.state.lock().unwrap();
+        match std::mem::replace(&mut *state, SlotState::Abandoned) {
+            SlotState::Running => true,
+            SlotState::Returned(output) => {
+                *state = SlotState::Quarantined(output);
+                self.stats.stats.quarantined.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            previous => {
+                *state = previous;
+                false
+            }
         }
-        self.word
-            .compare_exchange(RUNNING, ABANDONED, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
     }
 
     fn finish(&self, output: Output) {
-        *self.result.lock().unwrap() = Some(output);
-        if self
-            .word
-            .compare_exchange(RUNNING, RETURNED, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            assert!(
-                self.word
-                    .compare_exchange(ABANDONED, QUARANTINED, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok(),
-                "one job return"
-            );
-            self.stats.stats.quarantined.fetch_add(1, Ordering::Relaxed);
+        let mut state = self.state.lock().unwrap();
+        match std::mem::replace(&mut *state, SlotState::Running) {
+            SlotState::Running => *state = SlotState::Returned(output),
+            SlotState::Abandoned => {
+                *state = SlotState::Quarantined(output);
+                self.stats.stats.quarantined.fetch_add(1, Ordering::Relaxed);
+            }
+            previous => {
+                *state = previous;
+                drop(state);
+                panic!("host job returned more than once");
+            }
         }
     }
 }
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        if self.result.get_mut().unwrap().is_some() {
+        let state = std::mem::replace(self.state.get_mut().unwrap(), SlotState::Delivered);
+        if let SlotState::Returned(output) | SlotState::Quarantined(output) = state {
             self.stats.stats.reclaimed.fetch_add(1, Ordering::Relaxed);
+            drop(output);
         }
     }
 }
@@ -321,8 +332,7 @@ impl Jobs {
     ) -> Arc<Slot> {
         assert!(Arc::ptr_eq(&credit.inner, &self.inner));
         let slot = Arc::new(Slot {
-            word: AtomicU8::new(RUNNING),
-            result: Mutex::new(None),
+            state: Mutex::new(SlotState::Running),
             stats: self.inner.clone(),
         });
         let stats = &self.inner.stats;

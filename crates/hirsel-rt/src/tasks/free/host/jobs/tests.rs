@@ -2,6 +2,17 @@ use super::*;
 use std::sync::mpsc;
 use std::time::Duration;
 
+thread_local! {
+    static BEFORE_ABANDON: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
+}
+
+pub(super) fn before_abandon_transition() {
+    let checkpoint = BEFORE_ABANDON.with(|hook| hook.borrow_mut().take());
+    if let Some(checkpoint) = checkpoint {
+        checkpoint();
+    }
+}
+
 fn unit() -> Output {
     (Ok(Completion::Unit(Ok(()))), None)
 }
@@ -52,6 +63,26 @@ fn abandoned_job_retains_credit_until_return_then_grants_the_oldest_waiter() {
 }
 
 #[test]
+fn completion_during_owner_abandonment_is_quarantined() {
+    let jobs = Jobs::manual(1);
+    let reservation = jobs.reserve(1);
+    let slot = jobs.submit(reservation.take().unwrap(), 1, unit);
+    let returning = jobs.take().unwrap();
+    BEFORE_ABANDON.with(|hook| *hook.borrow_mut() = Some(Box::new(move || returning.run())));
+    // Complete after abandonment starts, before its custody transition.
+    // The departing owner never retries or delivers the returned output.
+    slot.abandon();
+    drop(slot);
+    let stats = jobs.stats();
+    assert_eq!(stats.returned.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.quarantined.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.delivered.load(Ordering::Relaxed), 0);
+    assert_eq!(stats.reclaimed.load(Ordering::Relaxed), 1);
+    assert_eq!(jobs.held(), 0);
+    assert_eq!(jobs.drain(), [1]);
+}
+
+#[test]
 fn delivery_and_quarantine_have_exactly_one_winner() {
     let jobs = Jobs::new(4);
     for round in 0..200u64 {
@@ -59,7 +90,7 @@ fn delivery_and_quarantine_have_exactly_one_winner() {
         let slot = jobs.submit(reservation.take().unwrap(), round, unit);
         let racer = slot.clone();
         let owner = std::thread::spawn(move || {
-            wait_for(|| racer.returned() || racer.word.load(Ordering::Acquire) > RETURNED);
+            wait_for(|| !matches!(*racer.state.lock().unwrap(), SlotState::Running));
             racer.deliver().is_some()
         });
         let abandoned = round % 2 == 0 && slot.abandon();

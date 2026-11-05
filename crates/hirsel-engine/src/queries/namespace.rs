@@ -7,11 +7,11 @@ mod reopen;
 
 const GENERATION: Domain = Domain {
     kind: 0x4601_0008,
-    schema: 1,
+    schema: 3,
 };
 const MANIFEST: Domain = Domain {
     kind: 0x4601_0009,
-    schema: 1,
+    schema: 3,
 };
 
 #[derive(PartialEq)]
@@ -56,7 +56,7 @@ pub struct NamespaceCapture {
     pub(crate) limits: crate::ComptimeLimits,
     environment: ContentHash,
     verify: Verify,
-    pub(crate) manifest: Reference,
+    pub(crate) manifest: ContentHash,
     manifest_inputs: Manifest,
     identity: ContentHash,
     installation: ContentHash,
@@ -275,12 +275,70 @@ struct NamespaceAdmission {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Manifest {
     base: ContentHash,
-    dependencies: Vec<(DefId, Reference)>,
+    dependencies: Vec<(DefId, ContentHash)>,
+    generations: Vec<Reference>,
     trace: Vec<DefId>,
     instances: Arc<hirsel_tir::InstanceBodies>,
     budget: u64,
     depth: usize,
     charging_version: u32,
+}
+
+impl Manifest {
+    fn identity(&self) -> ContentHash {
+        let mut identity = ContentHash::of_parts(
+            "hirsel.namespace.manifest.v3",
+            [
+                self.base.0.as_slice(),
+                self.budget.to_le_bytes().as_slice(),
+                (self.depth as u64).to_le_bytes().as_slice(),
+                self.charging_version.to_le_bytes().as_slice(),
+            ],
+        );
+        for (id, value) in &self.dependencies {
+            identity = ContentHash::of_parts(
+                "hirsel.namespace.dependency.v1",
+                [
+                    identity.0.as_slice(),
+                    id.path().fingerprint().0.as_slice(),
+                    value.0.as_slice(),
+                ],
+            );
+        }
+        for id in &self.trace {
+            identity = ContentHash::of_parts(
+                "hirsel.namespace.trace.v1",
+                [identity.0.as_slice(), id.path().fingerprint().0.as_slice()],
+            );
+        }
+        for id in &self.instances.declarations {
+            identity = ContentHash::of_parts(
+                "hirsel.namespace.instance-declaration.v1",
+                [identity.0.as_slice(), id.path().fingerprint().0.as_slice()],
+            );
+        }
+        for (id, rows) in &self.instances.instances {
+            let mut rows = rows.iter().collect::<Vec<_>>();
+            rows.sort_by_key(|(key, _)| **key);
+            for (key, row) in rows {
+                identity = ContentHash::of_parts(
+                    "hirsel.namespace.instance.v1",
+                    [
+                        identity.0.as_slice(),
+                        id.path().fingerprint().0.as_slice(),
+                        row.definition.path().fingerprint().0.as_slice(),
+                    ],
+                );
+                for spelling in key.spellings() {
+                    identity = ContentHash::of_parts(
+                        "hirsel.namespace.actual.v1",
+                        [identity.0.as_slice(), spelling.as_bytes()],
+                    );
+                }
+            }
+        }
+        identity
+    }
 }
 
 impl NamespaceCapture {
@@ -478,7 +536,7 @@ impl NamespaceCapture {
             _demand: None,
         }
     }
-    pub fn generation_manifest(&self) -> Reference {
+    pub fn generation_manifest(&self) -> ContentHash {
         self.manifest
     }
     pub(crate) fn installed_input(
@@ -619,31 +677,8 @@ impl NamespaceCapture {
             Err(refused("consumer captures differ"))
         }
     }
-    /// Byte equality includes the complete independent base and each accepted
-    /// generation. A missing manifest is a miss, never ambient source authority.
-    pub(crate) fn manifest_holds(&self, reference: Reference, limit: u64) -> bool {
-        if reference != self.manifest || reference.domain != MANIFEST || reference.len > limit {
-            return false;
-        }
-        let store = &self.store;
-        let Some(bytes) = store.get_content(reference) else {
-            return false;
-        };
-        if MANIFEST.reference(&bytes) != Some(reference) {
-            return false;
-        }
-        let Some(manifest): Option<Manifest> = self.records.decode(&**self.anchors(), &bytes)
-        else {
-            return false;
-        };
-        manifest.charging_version == hirsel_tir::CHARGING_VERSION
-            && manifest.dependencies.iter().all(|(_, reference)| {
-                reference.domain == GENERATION
-                    && reference.len <= limit
-                    && store
-                        .get_content(*reference)
-                        .is_some_and(|bytes| GENERATION.reference(&bytes) == Some(*reference))
-            })
+    pub(crate) fn manifest_holds(&self, identity: ContentHash, limit: u64) -> bool {
+        identity == self.manifest && self.retained <= limit
     }
 }
 
@@ -878,20 +913,26 @@ impl QueryEngine {
         let mut dependencies = BTreeMap::new();
         for registration in registrations {
             let id = DefId::intern(registration.definition());
-            let bytes = generation_bytes(&records, &anchors, registration)
-                .ok_or_else(|| refused("generation encoding"))?;
-            if bytes.len() as u64 > limit {
-                return Err(refused("generation exceeds admission"));
+            let mut identity = ContentHash::of_parts(
+                "hirsel.namespace.generation.v2",
+                [
+                    id.path().fingerprint().0.as_slice(),
+                    registration.text().as_bytes(),
+                    registration.syntax.text_hash.0.as_slice(),
+                    registration.reads().digest().0.as_slice(),
+                ],
+            );
+            for dependency in registration.checked_prefix() {
+                identity = ContentHash::of_parts(
+                    "hirsel.namespace.generation-prefix.v1",
+                    [
+                        identity.0.as_slice(),
+                        dependency.definition.path().fingerprint().0.as_slice(),
+                        dependency.fingerprint.0.as_slice(),
+                    ],
+                );
             }
-            let reference = GENERATION
-                .reference(&bytes)
-                .ok_or_else(|| refused("generation reference"))?;
-            if store.persistence().retains()
-                && store.put_content(GENERATION, &bytes) != Some(reference)
-            {
-                return Err(refused("generation publication"));
-            }
-            if dependencies.insert(id, reference).is_some() {
+            if dependencies.insert(id, identity).is_some() {
                 return Err(refused("duplicate accepted registration"));
             }
         }
@@ -911,18 +952,26 @@ impl QueryEngine {
                     .map(|id| (*id, self.candidates_value(id.path()))),
             )
             .collect::<BTreeMap<_, _>>();
-        let generation_base = records
-            .encode(&*anchors, &(self.environment_value(), generation_headers))
-            .ok_or_else(|| refused("generation header encoding"))?;
-        if generation_base.len() as u64 > limit {
-            return Err(refused("generation headers exceed admission"));
-        }
+        let generation_base =
+            generation_headers
+                .iter()
+                .fold(self.environment_value(), |identity, (id, value)| {
+                    ContentHash::of_parts(
+                        "hirsel.generation.header.v2",
+                        [
+                            identity.0.as_slice(),
+                            id.path().fingerprint().0.as_slice(),
+                            value.0.as_slice(),
+                        ],
+                    )
+                });
         let mut instance_weight = crate::NativeMetadataWeight::default();
         instance_weight.instance_bodies(&mut instances);
         let instances = Arc::new(instances);
         let manifest_inputs = Manifest {
-            base: ContentHash::of_parts("hirsel.generation.base.v1", [generation_base.as_slice()]),
+            base: generation_base,
             dependencies: dependencies.into_iter().collect(),
+            generations: vec![],
             trace: registrations
                 .iter()
                 .map(|r| DefId::intern(r.definition()))
@@ -932,18 +981,7 @@ impl QueryEngine {
             depth: self.comptime_limits.call_depth,
             charging_version: hirsel_tir::CHARGING_VERSION,
         };
-        let bytes = records
-            .encode(&*anchors, &manifest_inputs)
-            .ok_or_else(|| refused("manifest encoding"))?;
-        if bytes.len() as u64 > limit {
-            return Err(refused("manifest exceeds admission"));
-        }
-        let manifest = MANIFEST
-            .reference(&bytes)
-            .ok_or_else(|| refused("manifest reference"))?;
-        if store.persistence().retains() && store.put_content(MANIFEST, &bytes) != Some(manifest) {
-            return Err(refused("manifest publication"));
-        }
+        let manifest = manifest_inputs.identity();
         let mut body_index = self
             .operation
             .bodies
@@ -961,45 +999,53 @@ impl QueryEngine {
         })?;
         *body_index = Some(bodies.downgrade());
         drop(body_index);
-        let body_identities = bodies
+        let body_identity = bodies
             .iter()
-            .map(|(id, body)| {
-                (
-                    *id,
-                    body.implementation,
-                    body.queries.as_ref().map(|keys| {
-                        (
-                            keys.modes.0,
-                            keys.modes.1,
-                            keys.lower.0,
-                            keys.lower.1,
-                            keys.evaluate.0,
-                            keys.evaluate.1,
-                        )
-                    }),
+            .fold(ContentHash::default(), |identity, (id, body)| {
+                let mut identity = ContentHash::of_parts(
+                    "hirsel.namespace.body.v2",
+                    [
+                        identity.0.as_slice(),
+                        id.path().fingerprint().0.as_slice(),
+                        body.implementation.0.as_slice(),
+                    ],
+                );
+                if let Some(keys) = &body.queries {
+                    for key in [&keys.modes, &keys.lower, &keys.evaluate] {
+                        identity = ContentHash::of_parts(
+                            "hirsel.namespace.body-query.v1",
+                            [
+                                identity.0.as_slice(),
+                                key.0.0.as_slice(),
+                                key.1.0.as_slice(),
+                            ],
+                        );
+                    }
+                }
+                identity
+            });
+        let staged = self.staged_constants.iter().fold(
+            ContentHash::default(),
+            |identity, (path, constant)| {
+                ContentHash::of_parts(
+                    "hirsel.namespace.staged.v2",
+                    [
+                        identity.0.as_slice(),
+                        path.fingerprint().0.as_slice(),
+                        constant.signature.fingerprint.0.as_slice(),
+                    ],
                 )
-            })
-            .collect::<Vec<_>>();
-        let body_bytes = records
-            .encode(&*anchors, &body_identities)
-            .ok_or_else(|| refused("body identity encoding"))?;
-        let staged = self
-            .staged_constants
-            .iter()
-            .map(|(path, constant)| (DefId::intern(path), constant.signature.fingerprint))
-            .collect::<Vec<_>>();
-        let staged = records
-            .encode(&*anchors, &staged)
-            .ok_or_else(|| refused("staged header identity encoding"))?;
+            },
+        );
         let installation = self.catalog.installation_identity();
         let identity = ContentHash::of_parts(
-            "hirsel.namespace.capture.v1",
+            "hirsel.namespace.capture.v2",
             [
                 base.0.as_slice(),
                 installation.0.as_slice(),
-                manifest.output.0.0.as_slice(),
-                body_bytes.as_slice(),
-                staged.as_slice(),
+                manifest.0.as_slice(),
+                body_identity.0.as_slice(),
+                staged.0.as_slice(),
             ],
         );
         let registrations: BTreeMap<_, _> = registrations

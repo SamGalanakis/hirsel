@@ -2,7 +2,7 @@ use super::*;
 
 const SCOPED: Domain = Domain {
     kind: MANIFEST.kind,
-    schema: 2,
+    schema: 4,
 };
 pub(in crate::queries) struct ManifestDemand {
     pub declaration: DefPath,
@@ -35,7 +35,8 @@ impl NamespaceCapture {
             || manifest.depth != self.limits.call_depth
             || manifest.charging_version != hirsel_tir::CHARGING_VERSION
             || manifest.dependencies.len() != manifest.trace.len()
-            || manifest.dependencies.iter().any(|(_, reference)| {
+            || manifest.generations.len() != manifest.dependencies.len()
+            || manifest.generations.iter().any(|reference| {
                 reference.domain != GENERATION
                     || reference.len > limit
                     || !self
@@ -60,12 +61,19 @@ impl NamespaceCapture {
                 ),
             );
         }
-        let bytes = self
-            .records
-            .encode(&*self.anchors, &(self.environment, inputs))?;
-        Some(ContentHash::of_parts(
-            "hirsel.generation.scope-inputs.v1",
-            [bytes.as_slice()],
+        Some(inputs.iter().fold(
+            self.environment,
+            |identity, (id, (implementation, candidates))| {
+                ContentHash::of_parts(
+                    "hirsel.generation.scope-inputs.v2",
+                    [
+                        identity.0.as_slice(),
+                        id.path().fingerprint().0.as_slice(),
+                        implementation.0.as_slice(),
+                        candidates.0.as_slice(),
+                    ],
+                )
+            },
         ))
     }
     pub(in crate::queries) fn manifest_for_reads(
@@ -74,9 +82,6 @@ impl NamespaceCapture {
         reads: &Reads,
         limit: u64,
     ) -> Option<Reference> {
-        if self.manifest.len > limit {
-            return None;
-        }
         let mut manifest = self.manifest_inputs.clone();
         let mut needed = BTreeSet::new();
         let mut pending = std::iter::once(root)
@@ -103,15 +108,16 @@ impl NamespaceCapture {
         });
         instances.declarations = instances.instances.keys().copied().collect();
         manifest.base = self.scope_base(&manifest)?;
-        for (id, reference) in &manifest.dependencies {
+        manifest.generations.clear();
+        for (id, _) in &manifest.dependencies {
             let bytes =
                 generation_bytes(&self.records, &self.anchors, self.registrations.get(id)?)?;
-            if bytes.len() as u64 > limit
-                || GENERATION.reference(&bytes) != Some(*reference)
-                || self.store.put_content(GENERATION, &bytes) != Some(*reference)
-            {
+            if bytes.len() as u64 > limit {
                 return None;
             }
+            manifest
+                .generations
+                .push(self.store.put_content(GENERATION, &bytes)?);
         }
         let bytes = self.records.encode(&*self.anchors, &manifest)?;
         if bytes.len() as u64 > limit {
@@ -129,12 +135,7 @@ impl NamespaceCapture {
         let manifest = self.stored_manifest(reference, limit)?;
         Some(
             std::iter::once(reference)
-                .chain(
-                    manifest
-                        .dependencies
-                        .into_iter()
-                        .map(|(_, reference)| reference),
-                )
+                .chain(manifest.generations)
                 .collect(),
         )
     }

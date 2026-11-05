@@ -28,7 +28,7 @@ struct Input {
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Stored {
-    manifest: Reference,
+    manifest: ContentHash,
     output: Reference,
     decode_bytes: u64,
 }
@@ -52,7 +52,7 @@ pub struct FrontRegistrationOutput {
     data: Arc<Data>,
 }
 impl Data {
-    pub(in crate::queries) fn manifest(&self) -> Reference {
+    pub(in crate::queries) fn manifest(&self) -> ContentHash {
         self.namespace.manifest
     }
     pub(in crate::queries) fn definition(&self) -> &DefPath {
@@ -355,7 +355,7 @@ impl FrontRegistrationQueries {
             "hirsel.front.registration.action.v1",
             [
                 id.address.0.0.as_slice(),
-                namespace.manifest.output.0.0.as_slice(),
+                namespace.manifest.0.as_slice(),
                 data.reads.digest().0.as_slice(),
                 record.output.0.0.as_slice(),
             ],
@@ -508,7 +508,7 @@ impl FrontRegistrationQueries {
         output: Reference,
         data: &Data,
         decode_bytes: u64,
-        manifest: Reference,
+        manifest: ContentHash,
     ) {
         if !self.lower.store.persistence().retains() || data.acceptance.is_none() {
             return;

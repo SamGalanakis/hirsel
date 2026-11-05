@@ -246,7 +246,7 @@ impl AcceptedFrontRegistration {
             .text()
             .expect("accepted successful generator text")
     }
-    pub(crate) fn generation_manifest(&self) -> crate::store::Reference {
+    pub(crate) fn generation_manifest(&self) -> ContentHash {
         self.output.manifest()
     }
     pub(crate) fn depth(&self) -> &crate::memo::DepthEvidence<Span> {

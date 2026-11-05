@@ -26,6 +26,11 @@ struct Data {
     sites: Vec<Span>,
     _allowance: Option<hirsel_engine_admission::MemoryReservation>,
 }
+impl serde::Serialize for Data {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (&self.result, &*self.reads, &self.sites).serialize(serializer)
+    }
+}
 type Completed = (Result<ProductRef, Reference>, Arc<Data>);
 /// Clones retain the original source and declaration admission. A declaration
 /// is data until the source transaction accepts its owner and complete reads.
@@ -174,13 +179,6 @@ impl FrontStageQueries {
         Ok(registrations)
     }
     fn complete(&self, id: QueryId, mut data: Data) -> Result<ProductRef, Reference> {
-        let bytes = self
-            .records
-            .encode(&*self.anchors, &(&data.result, &*data.reads, &data.sites))
-            .ok_or(self.errors.resource)?;
-        if bytes.len() as u64 > self.weight.scratch {
-            return Err(self.errors.resource);
-        }
         let mut charge = crate::memo::retained_arc_bytes(&data)
             .checked_add((data.sites.capacity() * size_of::<Span>()) as u64)
             .ok_or(self.errors.resource)?;
@@ -220,29 +218,40 @@ impl FrontStageQueries {
             .ok_or(self.errors.resource)?;
         data._allowance = Some(self.output_pool.take(charge).ok_or(self.errors.resource)?);
         let failed = data.result.is_err();
-        let record = self
-            .store
-            .put_content(if failed { FAILURE } else { OUTPUT }, &bytes)
-            .ok_or(self.errors.resource)?;
+        let data = Arc::new(data);
         let action = hirsel_artifact_store::Action(ContentHash::of_parts(
-            "hirsel.front.stage.action.v1",
-            [id.address.0.0.as_slice(), record.output.0.0.as_slice()],
+            "hirsel.front.stage.action.v2",
+            [id.address.0.0.as_slice(), data.reads.digest().0.as_slice()],
         ));
         let result = if failed {
+            let bytes = self
+                .records
+                .encode(&*self.anchors, &*data)
+                .ok_or(self.errors.resource)?;
+            if bytes.len() as u64 > self.weight.scratch {
+                return Err(self.errors.resource);
+            }
+            let record = self
+                .store
+                .put_content(FAILURE, &bytes)
+                .ok_or(self.errors.resource)?;
             Err(record)
         } else {
-            Ok(ProductRef::import_archive(
+            Ok(ProductRef::live(
                 id.address,
                 action,
-                ProductArchive::from_encoded_in(record, bytes, &self.output_pool)
-                    .map_err(|_| self.errors.resource)?,
+                Arc::new(live_record::LiveRecord {
+                    value: data.clone(),
+                    domain: OUTPUT,
+                    records: self.records.clone(),
+                    source: (*self.anchors).clone(),
+                    serialization_working: self.weight.scratch,
+                    _admission: data.clone(),
+                }),
             ))
         };
-        outcomes.insert(id.address.0, (result.clone(), Arc::new(data)));
+        outcomes.insert(id.address.0, (result.clone(), data));
         drop(outcomes);
-        if !failed {
-            self.store.associate_product(id.address, action, record);
-        }
         result
     }
 }

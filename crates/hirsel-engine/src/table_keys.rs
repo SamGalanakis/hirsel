@@ -27,6 +27,15 @@ struct TableKeyCall {
     arguments: Vec<GenericArgument>,
 }
 impl TableKeyUse {
+    pub(crate) fn visit_types_mut(&mut self, mut visit: impl FnMut(&mut hirsel_types::TypeId)) {
+        for call in &mut self.calls {
+            for argument in &mut call.arguments {
+                if let GenericArgument::Type(ty) = argument {
+                    visit(ty);
+                }
+            }
+        }
+    }
     pub(crate) fn visit_spans_mut(&mut self, mut visit: impl FnMut(&mut Span)) {
         for call in &mut self.calls {
             visit(&mut call.site);

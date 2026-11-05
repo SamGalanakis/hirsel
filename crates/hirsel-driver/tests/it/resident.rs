@@ -651,7 +651,7 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
     #[derive(Default)]
     struct Off([std::sync::atomic::AtomicU64; 3]);
     impl Off {
-        fn ordinary_archives(&self, step: &str) -> u64 {
+        fn archive_counts(&self, step: &str) -> [u64; 3] {
             let counts = self
                 .0
                 .each_ref()
@@ -660,7 +660,10 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
                 "{step}: ordinary={} exports={} required_spills={}",
                 counts[0], counts[1], counts[2]
             );
-            counts[0]
+            counts
+        }
+        fn ordinary_archives(&self, step: &str) -> u64 {
+            self.archive_counts(step)[0]
         }
     }
     impl store::ResultStore for Off {
@@ -748,9 +751,11 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
                     panic!("expected ExportTir");
                 };
                 assert_eq!(tir, &scalar_tir);
-                off.ordinary_archives(&format!(
+                let exports = off.archive_counts(&format!(
                     "explicit ExportTir jobs={jobs} retention={retention:?}"
                 ));
+                assert_eq!(exports[0], 0, "explicit export encoded ordinary archives");
+                assert!(exports[1] > 0, "explicit archive export was not counted");
             }
         }
         // Producer-side accounting includes request-local archives even when

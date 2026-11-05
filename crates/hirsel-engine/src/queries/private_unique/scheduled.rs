@@ -53,32 +53,35 @@ impl Inference {
                 message: "private inference differs from its cached result".into(),
             }));
         }
-        let transport = || {
-            QueryError::Operational(hirsel_types::OperationalFailure {
-                operation: "private inference transport".into(),
-                message: "cannot encode module proof facts".into(),
-            })
-        };
-        let bytes = self
-            .records
-            .encode(&*self.citations.owners, &facts)
-            .ok_or_else(transport)?;
-        crate::store::product_domain(QueryKind::PrivateInference)
-            .reference(&bytes)
-            .ok_or_else(transport)?;
         if self.complete
             && let Some(store) = &self.store
-            && let Some(variant) =
-                VariantRef::publish(&**store, &self.key, facts.reads.clone(), &bytes)
+            && store.persistence().retains()
         {
-            let mut entry = StoredEntry::load(&**store, &self.key);
-            entry.insert(variant);
-            store.put_query(
-                self.key.2,
-                &self.key,
-                entry.action(&self.key),
-                &entry.encode_for(&self.key),
-            );
+            let transport = || {
+                QueryError::Operational(hirsel_types::OperationalFailure {
+                    operation: "private inference transport".into(),
+                    message: "cannot encode module proof facts".into(),
+                })
+            };
+            let bytes = self
+                .records
+                .encode(&*self.citations.owners, &facts)
+                .ok_or_else(transport)?;
+            crate::store::product_domain(QueryKind::PrivateInference)
+                .reference(&bytes)
+                .ok_or_else(transport)?;
+            if let Some(variant) =
+                VariantRef::publish(&**store, &self.key, facts.reads.clone(), &bytes)
+            {
+                let mut entry = StoredEntry::load(&**store, &self.key);
+                entry.insert(variant);
+                store.put_query(
+                    self.key.2,
+                    &self.key,
+                    entry.action(&self.key),
+                    &entry.encode_for(&self.key),
+                );
+            }
         }
         Ok(facts)
     }

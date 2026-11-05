@@ -13,6 +13,7 @@ struct Row {
     facts: Facts,
     bindings: BTreeMap<hirsel_span::Anchor, (DefId, u32)>,
     types: std::sync::Weak<hirsel_types::TypeInterner>,
+    type_rows: Option<Arc<hirsel_types::TypeInterner>>,
     decode_bytes: u64,
     charge: u64,
 }
@@ -78,13 +79,19 @@ impl FrontCarry {
         bindings: BTreeMap<hirsel_span::Anchor, (DefId, u32)>,
         types: std::sync::Weak<hirsel_types::TypeInterner>,
         decode_bytes: u64,
+        type_rows: Option<Arc<hirsel_types::TypeInterner>>,
     ) {
         let mut weight = crate::NativeMetadataWeight::default();
         weight.tree::<hirsel_span::Anchor, (DefId, u32)>(bindings.len());
         let charge = facts
             .view()
             .weight(false, Some(&reads), false)
-            .saturating_add(weight.bytes());
+            .saturating_add(weight.bytes())
+            .saturating_add(
+                type_rows
+                    .as_ref()
+                    .map_or(0, |types| types.retained_local_bytes()),
+            );
         let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
         let old = rows.entries.get(&key).map_or(0, |r| r.charge);
         let Some(used) = rows
@@ -139,6 +146,7 @@ impl FrontCarry {
                 facts,
                 bindings,
                 types,
+                type_rows,
                 decode_bytes,
                 charge,
             },
@@ -155,6 +163,50 @@ fn index_bytes(entries: usize, subscriptions: usize) -> u64 {
     weight.tree::<u32, Key>(entries);
     weight.tree::<(ReadKey, DefId, u32), ()>(subscriptions);
     weight.bytes()
+}
+
+fn import_types(
+    source: &hirsel_types::TypeInterner,
+    target: &hirsel_types::TypeInterner,
+    roots: &[hirsel_types::TypeId],
+) -> Option<std::collections::HashMap<hirsel_types::TypeId, hirsel_types::TypeId>> {
+    // hirsel-check-protocol/src/rows.rs:46: iterative postorder. A cyclic or
+    // missing graph declines optional carry and uses the normal query path.
+    let mut map = std::collections::HashMap::new();
+    let mut active = std::collections::HashSet::new();
+    let mut pending: Vec<_> = roots.iter().map(|id| (*id, false)).collect();
+    while let Some((id, expanded)) = pending.pop() {
+        if map.contains_key(&id) {
+            continue;
+        }
+        let row = source.get(id)?;
+        if expanded {
+            let mut row = row.clone();
+            let mut complete = true;
+            hirsel_check_protocol::rows::edges_mut(&mut row.kind, |edge| match map.get(edge) {
+                Some(mapped) => *edge = *mapped,
+                None => complete = false,
+            });
+            if !complete {
+                return None;
+            }
+            map.insert(id, target.intern(row));
+            active.remove(&id);
+        } else {
+            if !active.insert(id) {
+                return None;
+            }
+            pending.push((id, true));
+            pending.extend(
+                row.kind
+                    .graph_edges()
+                    .into_iter()
+                    .rev()
+                    .map(|edge| (edge.ty, false)),
+            );
+        }
+    }
+    Some(map)
 }
 
 pub(super) struct FactsRef<'a> {
@@ -187,6 +239,34 @@ impl Facts {
             diagnostic_phases: &self.diagnostic_phases,
             lowering: self.lowering.as_ref(),
             table_keys: self.table_keys.as_ref(),
+        }
+    }
+    fn visit_types_mut(&mut self, mut visit: impl FnMut(&mut hirsel_types::TypeId)) {
+        fn summary(
+            summary: &mut DefinitionSummary,
+            visit: &mut impl FnMut(&mut hirsel_types::TypeId),
+        ) {
+            for call in &mut summary.calls {
+                for argument in &mut call.arguments {
+                    if let hirsel_types::GenericArgument::Type(ty) = argument {
+                        visit(ty);
+                    }
+                }
+            }
+        }
+        if let Some((checked, _, _)) = &mut self.checked {
+            summary(&mut Arc::make_mut(checked).summary, &mut visit);
+        }
+        if let Some(published) = &mut self.summary {
+            let published = Arc::make_mut(published);
+            summary(&mut published.summary, &mut visit);
+            if let Some(checked) = &mut published.checked {
+                summary(&mut Arc::make_mut(checked).summary, &mut visit);
+            }
+            published.share_checked_storage();
+        }
+        if let Some(keys) = &mut self.table_keys {
+            Arc::make_mut(keys).visit_types_mut(visit);
         }
     }
     fn visit_spans_mut(&mut self, mut visit: impl FnMut(&mut Span)) {
@@ -675,6 +755,17 @@ impl BodyTask {
         if decode_bytes > self.weight.scratch {
             return;
         }
+        let mut roots = Vec::new();
+        facts.visit_types_mut(|ty| roots.push(*ty));
+        let type_rows = if roots.is_empty() {
+            None
+        } else {
+            let projection = queries.types.project_reachable(roots);
+            if projection.retained_bytes() > self.weight.scratch {
+                return;
+            }
+            Some(projection.into_interner())
+        };
         let input = &queries.inputs[&self.input];
         carry.remember(
             input.key.0,
@@ -686,6 +777,7 @@ impl BodyTask {
             bindings,
             Arc::downgrade(&queries.types),
             decode_bytes,
+            type_rows,
         );
     }
     pub(super) fn remember_cached_carry(
@@ -740,10 +832,22 @@ impl BodyTask {
         {
             return None;
         }
-        if !row.types.ptr_eq(&Arc::downgrade(&queries.types)) {
-            return None;
-        }
         let mut facts = row.facts.clone();
+        if !row.types.ptr_eq(&Arc::downgrade(&queries.types)) {
+            let mut roots = Vec::new();
+            facts.visit_types_mut(|ty| roots.push(*ty));
+            if !roots.is_empty() {
+                let map = import_types(row.type_rows.as_ref()?, &queries.types, &roots)?;
+                let mut valid = true;
+                facts.visit_types_mut(|ty| match map.get(ty) {
+                    Some(mapped) => *ty = *mapped,
+                    None => valid = false,
+                });
+                if !valid {
+                    return None;
+                }
+            }
+        }
         let mut valid = true;
         facts.visit_spans_mut(|span| {
             if span.anchor == hirsel_span::Anchor(0) {
@@ -937,6 +1041,7 @@ mod tests {
                         BTreeMap::new(),
                         std::sync::Weak::new(),
                         1024,
+                        None,
                     );
                 }
                 carry
@@ -980,6 +1085,7 @@ mod tests {
                     BTreeMap::new(),
                     std::sync::Weak::new(),
                     1024,
+                    None,
                 );
             }
             assert!(short.len() < width as usize);

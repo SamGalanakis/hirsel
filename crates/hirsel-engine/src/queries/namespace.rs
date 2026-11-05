@@ -1202,6 +1202,7 @@ mod tests {
     }
     #[test]
     fn demanded_syntax_keeps_its_charge_after_the_front_partition_ends() {
+        use hirsel_validate::SignatureLookup;
         struct Allowance(Arc<crate::runtime::MemoryReservationPool>);
         impl header_products::HeaderAllowance for Allowance {
             fn take_header(&self, bytes: u64) -> Option<crate::runtime::MemoryReservation> {

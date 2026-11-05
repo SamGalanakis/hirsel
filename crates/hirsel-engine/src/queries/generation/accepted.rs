@@ -283,7 +283,14 @@ impl AcceptedFrontRegistration {
                         })
                 })
             },
-            |engine, definition, key| engine.observe(definition, key),
+            |engine, definition, key| match key {
+                // General engine observation may prepare another private
+                // snapshot. This guard belongs to the exact owner V replayed.
+                ReadKey::ValidationUniverse(package) => {
+                    snapshot.validation_input_digest(&package.id()).ok()
+                }
+                _ => engine.observe(definition, key),
+            },
         )
     }
 }

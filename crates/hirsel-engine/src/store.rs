@@ -277,7 +277,7 @@ pub trait ResultStore: Send + Sync {
             return None;
         }
         let bytes = self.get(&content_key(reference))?;
-        bytes.checked(reference)
+        (reference.domain.reference(&bytes)? == reference).then_some(bytes)
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
         if !self.transports() {
@@ -857,7 +857,7 @@ impl ResultStore for MemStore {
             .entries
             .get(&key.0)
             .map(|(_, bytes)| bytes.clone())
-            .and_then(|bytes| bytes.checked(reference))
+            && reference.domain.reference(&bytes) == Some(reference)
         {
             return Some(bytes);
         }

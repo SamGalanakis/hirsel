@@ -1539,7 +1539,7 @@ impl ItemSyntax {
             match &mut e.kind {
                 ExprKind::Closure { signature, .. } => {
                     attributes(&mut signature.attributes, span);
-                    sharing(signature, span);
+                    sharing(&mut signature.generics, span);
                 }
                 ExprKind::With { bindings, .. } => {
                     for binding in bindings {
@@ -1553,7 +1553,7 @@ impl ItemSyntax {
             span(&mut s.origin.span);
             if let StmtKind::Function { signature, .. } = &mut s.kind {
                 attributes(&mut signature.attributes, span);
-                sharing(signature, span);
+                sharing(&mut signature.generics, span);
             }
         }
         for p in &mut tree.patterns {
@@ -1564,7 +1564,7 @@ impl ItemSyntax {
             match &mut t.kind {
                 TypeExprKind::Function(signature) => {
                     attributes(&mut signature.attributes, span);
-                    sharing(signature, span);
+                    sharing(&mut signature.generics, span);
                 }
                 TypeExprKind::Qualified {
                     relation: Some(relation),
@@ -1583,8 +1583,8 @@ impl ItemSyntax {
         span(&mut item.name_span);
         span(&mut item.origin.span);
         attributes(&mut item.attributes, span);
-        fn sharing(signature: &mut FunctionSyntax, span: &mut impl FnMut(&mut Span)) {
-            for generic in &mut signature.generics {
+        fn sharing(generics: &mut [GenericParam], span: &mut impl FnMut(&mut Span)) {
+            for generic in generics {
                 if let GenericKind::Implementation { sharing, .. } = &mut generic.kind {
                     for equation in sharing {
                         span(&mut equation.origin.span);
@@ -1595,7 +1595,7 @@ impl ItemSyntax {
         match &mut item.kind {
             ItemKind::Function { signature, .. } => {
                 attributes(&mut signature.attributes, span);
-                sharing(signature, span);
+                sharing(&mut signature.generics, span);
             }
             ItemKind::Signature { members } => {
                 for member in members {
@@ -1608,7 +1608,7 @@ impl ItemSyntax {
                         } => {
                             span(&mut origin.span);
                             attributes(&mut signature.attributes, span);
-                            sharing(signature, span);
+                            sharing(&mut signature.generics, span);
                         }
                     }
                 }
@@ -1622,15 +1622,18 @@ impl ItemSyntax {
                     }
                 }
             }
-            ItemKind::Type { body, .. } => match body {
-                TypeBody::Record(fields) => {
-                    for field in fields {
-                        span(&mut field.origin.span);
+            ItemKind::Type { generics, body, .. } => {
+                sharing(generics, span);
+                match body {
+                    TypeBody::Record(fields) => {
+                        for field in fields {
+                            span(&mut field.origin.span);
+                        }
                     }
+                    TypeBody::Distinct { field, .. } => span(&mut field.origin.span),
+                    _ => (),
                 }
-                TypeBody::Distinct { field, .. } => span(&mut field.origin.span),
-                _ => (),
-            },
+            }
             ItemKind::Const { .. } => (),
         }
         if let Some(Generated::Body(names)) = &mut item.generated {

@@ -10,6 +10,10 @@ struct CountedStore {
     reads: AtomicU64,
 }
 impl ResultStore for CountedStore {
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        self.inner.capability()
+    }
+
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         self.inner.get(key)

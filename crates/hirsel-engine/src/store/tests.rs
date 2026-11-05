@@ -576,6 +576,10 @@ fn action_index_admission_does_not_fetch_content_and_missing_outputs_miss() {
         content_reads: AtomicUsize,
     }
     impl ResultStore for Counted {
+        fn capability(&self) -> crate::store::ProviderCapability {
+            self.inner.capability()
+        }
+
         fn get(&self, key: &EntryKey) -> Option<Bytes> {
             self.inner.get(key)
         }
@@ -711,7 +715,10 @@ fn product_associations_share_content_without_conveying_authority() {
             store.lookup_product(address).is_none(),
             "absent content cannot publish"
         );
-        if store.transports() {
+        if matches!(
+            store.capability(),
+            ProviderCapability::RequestLocal(_) | ProviderCapability::Writable
+        ) {
             assert_eq!(store.put_content(domain, b"product"), Some(reference));
             store.associate_product(address, action, reference);
             let hit = store.lookup_product(address).unwrap();

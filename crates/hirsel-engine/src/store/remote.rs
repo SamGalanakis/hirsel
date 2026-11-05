@@ -138,6 +138,10 @@ impl RemoteStore {
 }
 
 impl ResultStore for RemoteStore {
+    fn capability(&self) -> ProviderCapability {
+        ProviderCapability::Writable
+    }
+
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
         let result = self
             .actions

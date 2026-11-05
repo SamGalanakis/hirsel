@@ -21,6 +21,10 @@ struct Store {
     fragment_puts: AtomicUsize,
 }
 impl ResultStore for Store {
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        self.inner.capability()
+    }
+
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
         self.inner.get(key)
     }

@@ -17,6 +17,10 @@ struct Observed {
     compact_fault: AtomicUsize,
 }
 impl ResultStore for Observed {
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        self.inner.capability()
+    }
+
     fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
         self.inner.get(key)
     }

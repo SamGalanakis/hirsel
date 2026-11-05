@@ -10,6 +10,10 @@ struct FreshBytes {
     verifier: Arc<hirsel_validate::VerifierCache>,
 }
 impl store::ResultStore for FreshBytes {
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        self.bytes.capability()
+    }
+
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         Some(self.verifier.clone())
     }
@@ -30,6 +34,12 @@ struct LiveStore {
     missing: std::sync::atomic::AtomicBool,
 }
 impl ResultStore for LiveStore {
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        hirsel_engine::store::ProviderCapability::RequestLocal(
+            hirsel_engine::store::Persistence::Disabled,
+        )
+    }
+
     fn get_content(&self, reference: store::Reference) -> Option<store::Bytes> {
         if self.missing.load(std::sync::atomic::Ordering::Relaxed) {
             return None;
@@ -47,12 +57,6 @@ impl ResultStore for LiveStore {
     }
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         self.bytes.verifier()
-    }
-    fn persistence(&self) -> store::Persistence {
-        store::Persistence::Disabled
-    }
-    fn transports(&self) -> bool {
-        true
     }
     fn name(&self) -> &'static str {
         "live-without-persistence"
@@ -249,6 +253,10 @@ fn persisted_entry_stops_at_first_observed_changed_read() {
         signature_gets: std::sync::atomic::AtomicUsize,
     }
     impl ResultStore for CountReads {
+        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+            self.inner.capability()
+        }
+
         fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
             if key == &self.signature_key {
                 self.signature_gets

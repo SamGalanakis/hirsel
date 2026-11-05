@@ -1,6 +1,6 @@
 //! Front query namespace in the shared artifact store. Hits retain mapped
 //! ranges; no second payload allocation is made before checking query reads.
-use super::{EntryKey, ResultStore};
+use super::{EntryKey, ProviderCapability, ResultStore};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -272,6 +272,13 @@ impl DirStore {
 }
 
 impl ResultStore for DirStore {
+    fn capability(&self) -> ProviderCapability {
+        match &self.physical {
+            Some(_) => ProviderCapability::Writable,
+            None => ProviderCapability::ReadOnly,
+        }
+    }
+
     fn installation_output(&self) -> Option<Arc<dyn ResultStore>> {
         self.installation
             .as_ref()
@@ -381,9 +388,6 @@ impl ResultStore for DirStore {
     }
     fn local_product_store(&self) -> Option<hirsel_artifact_store::Store> {
         self.physical.clone()
-    }
-    fn claims_content(&self) -> bool {
-        self.physical.is_some()
     }
     fn lookup_product(&self, address: super::Address) -> Option<super::Association> {
         // A front QueryId shares its logical address with its variant row.

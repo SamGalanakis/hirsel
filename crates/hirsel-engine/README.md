@@ -468,6 +468,12 @@ compiler, schema, target and policy, and output identities describe canonical re
 A hit validates its previous dependency outputs before reconstructing a demanded body.
 Published summaries restore reverse subscriptions without checked or mode bodies.
 
+`ResultStore::capability()` reports one `ProviderCapability`: absent ordinary
+storage, read-only installed content, admitted request-local content with its
+publication policy, or writable backing. `RequestLocal(Disabled)` still carries
+new content within the request. Cache and Complete publication remain scoped to
+the active operation; content capability grants no verifier authority.
+
 `DirStore::default_location` adds `$HIRSEL_PRODUCTS`, or the executable's sibling
 `hirsel-std.products`, as a read-only product root. Each compiler session retains
 its configured writable provider. Missing or stale records are ordinary misses;

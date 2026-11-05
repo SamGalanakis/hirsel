@@ -485,6 +485,10 @@ fn object_hit_never_reads_ready_body_payload() {
         body: Reference,
     }
     impl ResultStore for NoBody {
+        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+            self.inner.capability()
+        }
+
         fn get(
             &self,
             key: &hirsel_engine::store::EntryKey,

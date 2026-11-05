@@ -19,6 +19,10 @@ struct Faults {
     fragment_puts: AtomicUsize,
 }
 impl ResultStore for Faults {
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        self.disk.capability()
+    }
+
     fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
         self.disk.get(key)
     }

@@ -296,6 +296,16 @@ impl hirsel_validate::VerifierRows for RequestVerifierRows {
     }
 }
 impl ResultStore for RequestStore {
+    fn capability(&self) -> ProviderCapability {
+        ProviderCapability::RequestLocal(
+            self.active_policy
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .upgrade()
+                .map_or(self.baseline, |policy| policy.persistence()),
+        )
+    }
+
     fn installation_output(&self) -> Option<Arc<dyn ResultStore>> {
         self.backend.installation_output()
     }
@@ -362,17 +372,6 @@ impl ResultStore for RequestStore {
             return None;
         }
         self.backend.cache_query(key, reads, bytes)
-    }
-    fn persistence(&self) -> Persistence {
-        self.active_policy
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .upgrade()
-            .map_or(self.baseline, |policy| policy.persistence())
-    }
-    // Live transport is carried even when the selected backend persists nothing.
-    fn transports(&self) -> bool {
-        true
     }
     fn read_scope(&self) -> Option<Box<dyn Send + Sync>> {
         self.backend.read_scope()
@@ -602,6 +601,10 @@ mod tests {
     fn archive_views_admit_complete_backing_and_outlive_the_request_without_its_table() {
         struct Backend(Mutex<Bytes>);
         impl ResultStore for Backend {
+            fn capability(&self) -> ProviderCapability {
+                ProviderCapability::Writable
+            }
+
             fn get(&self, _: &EntryKey) -> Option<Bytes> {
                 None
             }
@@ -664,6 +667,10 @@ mod tests {
     fn encoded_archive_moves_producer_backing_without_reading_the_provider() {
         struct Backend;
         impl ResultStore for Backend {
+            fn capability(&self) -> ProviderCapability {
+                ProviderCapability::Writable
+            }
+
             fn get(&self, _: &EntryKey) -> Option<Bytes> {
                 panic!("producer transfer read the provider")
             }
@@ -693,6 +700,10 @@ mod tests {
     fn compact_archive_copy_admits_its_payload_and_survives_provider_eviction() {
         struct Backend(Mutex<Bytes>);
         impl ResultStore for Backend {
+            fn capability(&self) -> ProviderCapability {
+                ProviderCapability::Writable
+            }
+
             fn get(&self, _: &EntryKey) -> Option<Bytes> {
                 None
             }
@@ -872,6 +883,10 @@ mod tests {
         }
     }
     impl ResultStore for Refusing {
+        fn capability(&self) -> ProviderCapability {
+            self.disk.capability()
+        }
+
         fn get(&self, key: &EntryKey) -> Option<Bytes> {
             self.disk.get(key)
         }
@@ -1187,6 +1202,10 @@ mod tests {
 
         struct RefusedCache;
         impl ResultStore for RefusedCache {
+            fn capability(&self) -> ProviderCapability {
+                ProviderCapability::Writable
+            }
+
             fn get(&self, _: &EntryKey) -> Option<Bytes> {
                 None
             }

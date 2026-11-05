@@ -22,6 +22,10 @@ impl Drop for ReadScope {
     }
 }
 impl ResultStore for ReadScopes {
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        self.inner.capability()
+    }
+
     fn get(&self, key: &hirsel_engine::store::EntryKey) -> Option<hirsel_engine::store::Bytes> {
         self.inner.get(key)
     }

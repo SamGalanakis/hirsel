@@ -16,6 +16,10 @@ pub fn bind(remote: Arc<dyn ResultStore>) -> Arc<dyn ResultStore> {
 }
 
 impl ResultStore for InstalledRemote {
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        self.remote.capability()
+    }
+
     fn installed_package(
         &self,
         package: &PackageId,

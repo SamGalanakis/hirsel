@@ -1313,7 +1313,12 @@ impl QueryEngine {
     /// Select a persistent result store. Library engines default to no store;
     /// CLI engines use dir@1. Injected stores keep integration tests isolated.
     pub fn with_result_store(mut self, store: Arc<dyn crate::store::ResultStore>) -> Self {
-        let selected = store.transports().then_some(store);
+        let selected = match store.capability() {
+            crate::store::ProviderCapability::Absent => None,
+            crate::store::ProviderCapability::ReadOnly
+            | crate::store::ProviderCapability::RequestLocal(_)
+            | crate::store::ProviderCapability::Writable => Some(store),
+        };
         let previous_verifier = self
             .result_store
             .as_ref()

@@ -1027,13 +1027,15 @@ impl QueryEngine {
                 message: format!("standalone bootstrap runtime failure: {kind}"),
             })
         };
-        // Front's source archives need a provider that claims content. A
-        // disabled or installed-only provider never does.
+        // Front's source archives require a request-local or writable provider.
         let previous = self.result_store.clone();
-        if previous
-            .as_ref()
-            .is_none_or(|store| !store.claims_content())
-        {
+        if previous.as_ref().is_none_or(|store| {
+            matches!(
+                store.capability(),
+                crate::store::ProviderCapability::Absent
+                    | crate::store::ProviderCapability::ReadOnly
+            )
+        }) {
             self.result_store = Some(Arc::new(crate::store::MemStore::default()));
             // The temporary store supplies V's local authority too. A snapshot
             // captured before it existed cannot revalidate generator receipts.

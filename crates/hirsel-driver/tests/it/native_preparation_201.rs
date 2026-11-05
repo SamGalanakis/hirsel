@@ -13,6 +13,10 @@ struct FaultStore {
     damaged: Mutex<Option<(Reference, Option<Bytes>)>>,
 }
 impl ResultStore for FaultStore {
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        self.inner.capability()
+    }
+
     fn name(&self) -> &'static str {
         "native-preparation-faults"
     }

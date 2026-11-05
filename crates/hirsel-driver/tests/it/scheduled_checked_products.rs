@@ -64,6 +64,10 @@ fn products_case_with_decode_layout(
                 reads: AtomicUsize,
             }
             impl ResultStore for CountReads {
+                fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+                    self.inner.capability()
+                }
+
                 fn get(&self, key: &EntryKey) -> Option<Bytes> {
                     self.reads.fetch_add(1, Ordering::Relaxed);
                     self.inner.get(key)

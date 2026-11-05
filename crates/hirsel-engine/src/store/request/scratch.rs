@@ -139,6 +139,10 @@ impl ScratchStore {
     }
 }
 impl ResultStore for ScratchStore {
+    fn capability(&self) -> ProviderCapability {
+        ProviderCapability::RequestLocal(self.selected.persistence())
+    }
+
     fn installation_output(&self) -> Option<Arc<dyn ResultStore>> {
         self.selected.installation_output()
     }
@@ -155,12 +159,6 @@ impl ResultStore for ScratchStore {
     }
     fn cache_query(&self, key: &EntryKey, reads: Reads, bytes: &[u8]) -> Option<Reference> {
         self.selected.cache_query(key, reads, bytes)
-    }
-    fn persistence(&self) -> Persistence {
-        self.selected.persistence()
-    }
-    fn transports(&self) -> bool {
-        true
     }
     fn read_scope(&self) -> Option<Box<dyn Send + Sync>> {
         self.selected.read_scope()

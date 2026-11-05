@@ -292,6 +292,10 @@ fn check_settled_front_eviction(
         reads_after_eviction: AtomicUsize,
     }
     impl ResultStore for EvictModes {
+        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+            self.store.capability()
+        }
+
         fn get(&self, key: &EntryKey) -> Option<Bytes> {
             self.store.get(key)
         }

@@ -255,6 +255,10 @@ struct FaultStore {
     damaged: std::sync::Mutex<BTreeMap<hirsel_syntax::ContentHash, Vec<u8>>>,
 }
 impl ResultStore for FaultStore {
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        self.inner.capability()
+    }
+
     fn local_product_store(&self) -> Option<hirsel_artifact_store::Store> {
         self.inner.local_product_store()
     }

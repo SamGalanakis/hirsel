@@ -729,6 +729,10 @@ fn exact_counts_hardlinks_limits_and_live_lease_release() {
 fn explicit_toolchain_context_loads_sidecar_graph_without_host_discovery() {
     struct InstalledStd(Arc<crate::store::InstalledPackage>);
     impl crate::store::ResultStore for InstalledStd {
+        fn capability(&self) -> crate::store::ProviderCapability {
+            crate::store::ProviderCapability::ReadOnly
+        }
+
         fn installed_package(
             &self,
             package: &hirsel_syntax::PackageId,

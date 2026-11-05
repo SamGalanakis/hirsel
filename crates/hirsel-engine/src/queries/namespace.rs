@@ -1143,7 +1143,7 @@ impl QueryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{MemStore, Persistence, ResultStore};
+    use crate::store::{MemStore, ResultStore};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Default)]
@@ -1152,11 +1152,12 @@ mod tests {
         writes: AtomicUsize,
     }
     impl ResultStore for StoreOff {
+        fn capability(&self) -> crate::store::ProviderCapability {
+            crate::store::ProviderCapability::Absent
+        }
+
         fn name(&self) -> &'static str {
             "capture-store-off"
-        }
-        fn persistence(&self) -> Persistence {
-            Persistence::Disabled
         }
         fn get(&self, key: &EntryKey) -> Option<crate::store::Bytes> {
             self.installed.get(key)

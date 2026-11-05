@@ -38,14 +38,15 @@ use std::{
 // reporting the I/O error that its ordinary Option publication seam omits.
 pub(crate) struct DiagnosedStore(pub(crate) store::DirStore);
 impl ResultStore for DiagnosedStore {
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        self.0.capability()
+    }
+
     fn local_product_store(&self) -> Option<hirsel_artifact_store::Store> {
         self.0.local_product_store()
     }
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         self.0.verifier()
-    }
-    fn persistence(&self) -> store::Persistence {
-        self.0.persistence()
     }
     fn name(&self) -> &'static str {
         self.0.name()

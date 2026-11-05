@@ -66,6 +66,10 @@ mod tests {
         verifier: Arc<hirsel_validate::VerifierCache>,
     }
     impl ResultStore for SelectedStore {
+        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+            self.products.capability()
+        }
+
         fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
             self.products.get(key)
         }

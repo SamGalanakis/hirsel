@@ -142,6 +142,10 @@ fn ordinary_provider(backend: Backend) {
         drop(warm);
         struct Imported(DirStore);
         impl ResultStore for Imported {
+            fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+                hirsel_engine::store::ProviderCapability::ReadOnly
+            }
+
             fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
                 self.0.get(key)
             }

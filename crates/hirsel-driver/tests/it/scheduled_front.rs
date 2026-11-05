@@ -787,6 +787,10 @@ fn admitted_front_zero_hold_retains_only_archives_after_settlement() {
         std::fs::write(&path, "pub fn main()->u8{1u8}\n").unwrap();
         struct ContentOnly(MemStore);
         impl ResultStore for ContentOnly {
+            fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+                self.0.capability()
+            }
+
             fn get(
                 &self,
                 key: &hirsel_engine::store::EntryKey,
@@ -900,12 +904,12 @@ fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_ci
     with_compiler_stack(|| {
         struct Transport(MemStore);
         impl ResultStore for Transport {
-            fn persistence(&self) -> hirsel_engine::store::Persistence {
-                hirsel_engine::store::Persistence::Disabled
+            fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+                hirsel_engine::store::ProviderCapability::RequestLocal(
+                    hirsel_engine::store::Persistence::Disabled,
+                )
             }
-            fn transports(&self) -> bool {
-                true
-            }
+
             fn get(
                 &self,
                 key: &hirsel_engine::store::EntryKey,
@@ -1047,6 +1051,12 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         // recompute instead of being read back.
         struct Transport(Arc<MemStore>, bool);
         impl ResultStore for Transport {
+            fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+                hirsel_engine::store::ProviderCapability::RequestLocal(
+                    hirsel_engine::store::Persistence::Disabled,
+                )
+            }
+
             fn installed_package(
                 &self,
                 package: &hirsel_syntax::PackageId,
@@ -1056,12 +1066,6 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
             }
             fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
                 self.1.then(|| self.0.verifier()).flatten()
-            }
-            fn persistence(&self) -> hirsel_engine::store::Persistence {
-                hirsel_engine::store::Persistence::Disabled
-            }
-            fn transports(&self) -> bool {
-                true
             }
             fn get(
                 &self,

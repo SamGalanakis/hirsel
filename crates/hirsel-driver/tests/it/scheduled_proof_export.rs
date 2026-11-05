@@ -27,6 +27,10 @@ fn export_case_with_ownership(
                 reads: AtomicUsize,
             }
             impl ResultStore for CountReads {
+                fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+                    self.inner.capability()
+                }
+
                 fn get(&self, key: &EntryKey) -> Option<Bytes> {
                     self.reads.fetch_add(1, Ordering::Relaxed);
                     self.inner.get(key)

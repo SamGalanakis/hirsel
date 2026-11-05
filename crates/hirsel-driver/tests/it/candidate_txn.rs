@@ -505,6 +505,10 @@ fn store_fault_checks(candidate: bool) -> String {
         records: Mutex<Vec<(EntryKey, hirsel_engine::store::Bytes)>>,
     }
     impl ResultStore for FaultStore {
+        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+            self.backing.capability()
+        }
+
         fn get(&self, key: &EntryKey) -> Option<hirsel_engine::store::Bytes> {
             let bytes = self.backing.get(key)?;
             match self.mode.load(Ordering::Acquire) {

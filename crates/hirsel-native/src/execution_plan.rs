@@ -164,6 +164,10 @@ mod tests {
     use hirsel_engine::store::{self, Bytes, EntryKey};
     struct NoTransport;
     impl ResultStore for NoTransport {
+        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+            hirsel_engine::store::ProviderCapability::Writable
+        }
+
         fn get(&self, _: &EntryKey) -> Option<Bytes> {
             panic!("local plan read bytes")
         }
@@ -342,6 +346,10 @@ mod tests {
     fn plan_import_refuses_corruption_noncanonical_descriptors_and_wrong_schema() {
         struct Corrupt;
         impl ResultStore for Corrupt {
+            fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+                hirsel_engine::store::ProviderCapability::ReadOnly
+            }
+
             fn get(&self, _: &EntryKey) -> Option<Bytes> {
                 None
             }

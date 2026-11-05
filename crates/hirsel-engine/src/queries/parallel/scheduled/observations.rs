@@ -73,7 +73,9 @@ impl FrontBodyQueries {
             // Flat observations still borrow their producer's lease. Only
             // pooled readers carry the independent, last-reader refund needed
             // to release that producer while an inspection holds its reads.
-            if self.read_pool.get().is_none() || !self.store.transports() {
+            if self.read_pool.get().is_none()
+                || self.store.capability() == crate::store::ProviderCapability::Absent
+            {
                 return None;
             }
             // Reads' canonical codec preserves both the exact rows and their

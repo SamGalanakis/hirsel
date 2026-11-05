@@ -124,15 +124,16 @@ fn path_requests_reuse_one_session_per_thread_and_observe_edits() {
 fn session_representation_edit_matches_cold(opaque: bool, reads_field: bool) {
     struct InstalledNone(Arc<dyn store::ResultStore>);
     impl store::ResultStore for InstalledNone {
+        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+            hirsel_engine::store::ProviderCapability::Absent
+        }
+
         fn installed_package(
             &self,
             package: &hirsel_syntax::PackageId,
             compiler: hirsel_syntax::ContentHash,
         ) -> Result<Arc<store::InstalledPackage>, String> {
             self.0.installed_package(package, compiler)
-        }
-        fn persistence(&self) -> store::Persistence {
-            store::Persistence::Disabled
         }
         fn get(&self, _: &store::EntryKey) -> Option<store::Bytes> {
             None
@@ -649,9 +650,10 @@ fn restored_mode_phases_retire_with_the_edited_or_removed_memo() {
 fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
     struct Off;
     impl store::ResultStore for Off {
-        fn persistence(&self) -> store::Persistence {
-            store::Persistence::Disabled
+        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+            hirsel_engine::store::ProviderCapability::Absent
         }
+
         fn get(&self, _: &store::EntryKey) -> Option<hirsel_engine::store::Bytes> {
             panic!("off provider read")
         }
@@ -2054,6 +2056,10 @@ fn durable_front_workers_drain_payloads_before_accepting_another_task() {
         home: std::thread::ThreadId,
     }
     impl store::ResultStore for ObservedStore {
+        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+            hirsel_engine::store::ProviderCapability::Writable
+        }
+
         fn get(&self, _: &store::EntryKey) -> Option<hirsel_engine::store::Bytes> {
             None
         }

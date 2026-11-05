@@ -29,6 +29,10 @@ struct Missing<'a> {
     missing: Reference,
 }
 impl ResultStore for Missing<'_> {
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        self.inner.capability()
+    }
+
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
         self.inner.get(key)
     }

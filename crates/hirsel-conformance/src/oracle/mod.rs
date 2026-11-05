@@ -33,16 +33,16 @@ pub type Artifacts = BTreeMap<String, Vec<u8>>;
 struct ColdStore(Arc<dyn ResultStore>);
 
 impl ResultStore for ColdStore {
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        hirsel_engine::store::ProviderCapability::Absent
+    }
+
     fn installed_package(
         &self,
         package: &hirsel_syntax::PackageId,
         compiler: hirsel_syntax::ContentHash,
     ) -> Result<Arc<hirsel_engine::store::InstalledPackage>, String> {
         self.0.installed_package(package, compiler)
-    }
-
-    fn persistence(&self) -> hirsel_engine::store::Persistence {
-        hirsel_engine::store::Persistence::Disabled
     }
 
     fn get(&self, _: &hirsel_engine::store::EntryKey) -> Option<hirsel_engine::store::Bytes> {

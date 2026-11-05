@@ -212,6 +212,10 @@ struct GeneratorInputUnavailable {
     corrupted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 impl hirsel_engine::store::ResultStore for GeneratorInputUnavailable {
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        self.store.capability()
+    }
+
     fn get(&self, key: &hirsel_engine::store::EntryKey) -> Option<hirsel_engine::store::Bytes> {
         use hirsel_engine::store::{Entry, VariantRef};
         if self.corrupt_bound && key.2 == QueryKind::Generate {

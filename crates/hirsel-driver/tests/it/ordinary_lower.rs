@@ -121,6 +121,10 @@ fn readonly_comptime_products_reuse_only_the_consumers_local_verifier() {
             verifier: Arc<hirsel_validate::VerifierCache>,
         }
         impl store::ResultStore for ReadOnly {
+            fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+                hirsel_engine::store::ProviderCapability::ReadOnly
+            }
+
             fn read_scope(&self) -> Option<Box<dyn Send + Sync>> {
                 self.products.read_scope()
             }

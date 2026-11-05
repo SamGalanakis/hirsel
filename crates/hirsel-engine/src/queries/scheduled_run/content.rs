@@ -239,6 +239,10 @@ mod tests {
         gets: AtomicUsize,
     }
     impl ResultStore for Counting {
+        fn capability(&self) -> crate::store::ProviderCapability {
+            self.inner.capability()
+        }
+
         fn name(&self) -> &'static str {
             "run-content-bound-test"
         }

@@ -17,8 +17,8 @@ impl Default for Observed {
     }
 }
 impl ResultStore for Observed {
-    fn persistence(&self) -> Persistence {
-        self.inner.persistence()
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        self.inner.capability()
     }
 
     fn name(&self) -> &'static str {

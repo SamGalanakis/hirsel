@@ -108,6 +108,10 @@ mod tests {
 
     struct NoTransport;
     impl ResultStore for NoTransport {
+        fn capability(&self) -> crate::store::ProviderCapability {
+            crate::store::ProviderCapability::Absent
+        }
+
         fn get(&self, _: &EntryKey) -> Option<Bytes> {
             panic!("live completion read the store")
         }
@@ -116,9 +120,6 @@ mod tests {
         }
         fn name(&self) -> &'static str {
             "live-only-test"
-        }
-        fn persistence(&self) -> crate::store::Persistence {
-            crate::store::Persistence::Disabled
         }
     }
     fn value(store: &dyn ResultStore, reads: Vec<ProductRef>) -> LiveDependencyProduct {

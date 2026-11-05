@@ -1944,6 +1944,10 @@ mod tests {
     fn imported_archive_admits_complete_range_backing_and_refuses_substitution() {
         struct Store(Bytes);
         impl crate::store::ResultStore for Store {
+            fn capability(&self) -> crate::store::ProviderCapability {
+                crate::store::ProviderCapability::ReadOnly
+            }
+
             fn get(&self, _: &crate::store::EntryKey) -> Option<Bytes> {
                 None
             }

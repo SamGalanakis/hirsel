@@ -56,6 +56,10 @@ struct NativeStore {
     cache: Arc<dyn ResultStore>,
 }
 impl ResultStore for NativeStore {
+    fn capability(&self) -> ProviderCapability {
+        self.cache.capability()
+    }
+
     fn local_product_store(&self) -> Option<hirsel_artifact_store::Store> {
         self.cache.local_product_store()
     }
@@ -64,12 +68,6 @@ impl ResultStore for NativeStore {
     }
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         self.cache.verifier()
-    }
-    fn persistence(&self) -> hirsel_engine::store::Persistence {
-        self.cache.persistence()
-    }
-    fn transports(&self) -> bool {
-        self.cache.transports()
     }
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
         self.cache.get(key)

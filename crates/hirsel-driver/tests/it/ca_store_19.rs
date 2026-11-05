@@ -149,6 +149,10 @@ fn ordinary_catalog_native_roots_survive_fresh_warm_checks() {
     });
 }
 impl store::ResultStore for Observed {
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        self.inner.capability()
+    }
+
     fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         if key.2 == QueryKind::Parse {
@@ -904,6 +908,10 @@ fn lower_producer_records_cannot_mint_or_transfer_verifier_authority() {
     // provider interface supplies no verifier capability.
     struct ProducerOnly(Arc<store::MemStore>);
     impl store::ResultStore for ProducerOnly {
+        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+            self.0.capability()
+        }
+
         fn get(&self, key: &store::EntryKey) -> Option<store::Bytes> {
             store::ResultStore::get(&*self.0, key)
         }
@@ -1085,6 +1093,10 @@ struct Trusted {
     verifier: Arc<hirsel_validate::VerifierCache>,
 }
 impl store::ResultStore for Trusted {
+    fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+        self.remote.capability()
+    }
+
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         Some(self.verifier.clone())
     }

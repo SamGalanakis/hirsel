@@ -146,23 +146,13 @@ pub trait ResultStore: Send + Sync {
     fn verifier(&self) -> Option<Arc<hirsel_validate::VerifierCache>> {
         None
     }
-    /// What survives a request that publishes through this provider. Query
-    /// variants, `cache_product` and product associations publish only when
-    /// it retains; names are only labels.
+    /// The provider's content ownership and this request's publication policy.
+    /// Installed content and ordinary bytes confer no local verifier authority.
+    fn capability(&self) -> ProviderCapability;
+    /// What survives this request. Physical capability does not change when an
+    /// admitted request switches between Cache and Complete publication.
     fn persistence(&self) -> Persistence {
-        Persistence::Cache
-    }
-    /// Whether this provider carries a request's live bytes. A request
-    /// transport does so whatever its backend persists; any other provider
-    /// carries bytes only when it retains them. A provider that carries none
-    /// skips record capture, encoding and I/O, and engines treat it as absent.
-    fn transports(&self) -> bool {
-        self.persistence().retains()
-    }
-    /// Whether `put_content` can hold this request's new content. A provider
-    /// that only reads installed products, or never claims content, does not.
-    fn claims_content(&self) -> bool {
-        self.transports()
+        self.capability().persistence()
     }
     fn get(&self, key: &EntryKey) -> Option<Bytes>;
     fn put(&self, key: &EntryKey, value: &[u8]);
@@ -200,7 +190,7 @@ pub trait ResultStore: Send + Sync {
     /// Their registered domains are independent of front QueryKind tags. An
     /// association supplies integrity only, never verifier/native authority.
     fn lookup_product(&self, address: Address) -> Option<Association> {
-        if !self.transports() {
+        if self.capability() == ProviderCapability::Absent {
             return None;
         }
         let bytes = self.get(&product_association_key(address))?;
@@ -219,7 +209,11 @@ pub trait ResultStore: Send + Sync {
     /// Publish only after immutable output publication. Eviction or a failed
     /// write leaves a miss; read-only roots never receive an association.
     fn associate_product(&self, address: Address, action: Action, reference: Reference) {
-        if !self.transports() || self.get_content(reference).is_none() {
+        if matches!(
+            self.capability(),
+            ProviderCapability::Absent | ProviderCapability::ReadOnly
+        ) || self.get_content(reference).is_none()
+        {
             return;
         }
         self.associate_written_product(address, action, reference);
@@ -228,7 +222,10 @@ pub trait ResultStore: Send + Sync {
     /// or whose bytes this caller has already read and checked. This publishes
     /// only index metadata; it does not reread the completed payload.
     fn associate_written_product(&self, address: Address, action: Action, reference: Reference) {
-        if !self.transports() {
+        if matches!(
+            self.capability(),
+            ProviderCapability::Absent | ProviderCapability::ReadOnly
+        ) {
             return;
         }
         let bytes = serde_json::to_vec(&(address.0, action.0, reference))
@@ -286,14 +283,17 @@ pub trait ResultStore: Send + Sync {
     /// Immutable content and logical action indexes use distinct addresses.
     /// Byte providers share their map; directory providers map content directly.
     fn get_content(&self, reference: Reference) -> Option<Bytes> {
-        if !self.transports() {
+        if self.capability() == ProviderCapability::Absent {
             return None;
         }
         let bytes = self.get(&content_key(reference))?;
         (reference.domain.reference(&bytes)? == reference).then_some(bytes)
     }
     fn put_content(&self, domain: Domain, bytes: &[u8]) -> Option<Reference> {
-        if !self.transports() {
+        if matches!(
+            self.capability(),
+            ProviderCapability::Absent | ProviderCapability::ReadOnly
+        ) {
             return None;
         }
         let reference = domain.reference(bytes)?;
@@ -311,8 +311,34 @@ pub trait ResultStore: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
+/// One content capability per provider, independent of local V authority.
+/// Only admitted request content carries a request-specific publication policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderCapability {
+    /// No ordinary result content is read, captured, encoded or written.
+    Absent,
+    /// Installed or imported immutable content, without a writable backing.
+    ReadOnly,
+    /// New content owned by the request's admitted memory or bounded scratch.
+    /// Disabled persistence still permits this request's producers and readers
+    /// to exchange content; Complete publishes the closure atomically.
+    RequestLocal(Persistence),
+    /// A backing provider accepts new content beyond this request, best-effort.
+    Writable,
+}
+impl ProviderCapability {
+    pub fn persistence(self) -> Persistence {
+        match self {
+            Self::Absent => Persistence::Disabled,
+            Self::ReadOnly | Self::Writable => Persistence::Cache,
+            Self::RequestLocal(policy) => policy,
+        }
+    }
+}
+
 /// What a request leaves behind in its selected provider. Each provider
-/// reports one; a `StoreOperation` captures it once for the request it scopes.
+/// derives its policy from its capability; a `StoreOperation` captures it once
+/// for the request it scopes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Persistence {
     /// Nothing survives the request: no query variant, cached product or
@@ -715,9 +741,10 @@ impl Entry {
 #[derive(Debug, Default)]
 pub struct NoneStore;
 impl ResultStore for NoneStore {
-    fn persistence(&self) -> Persistence {
-        Persistence::Disabled
+    fn capability(&self) -> ProviderCapability {
+        ProviderCapability::Absent
     }
+
     fn get(&self, _: &EntryKey) -> Option<Bytes> {
         None
     }
@@ -805,6 +832,10 @@ impl MemStore {
     }
 }
 impl ResultStore for MemStore {
+    fn capability(&self) -> ProviderCapability {
+        ProviderCapability::Writable
+    }
+
     fn installed_package(
         &self,
         package: &hirsel_syntax::PackageId,
@@ -994,6 +1025,10 @@ impl SimStore {
     }
 }
 impl ResultStore for SimStore {
+    fn capability(&self) -> ProviderCapability {
+        ProviderCapability::Writable
+    }
+
     fn get(&self, key: &EntryKey) -> Option<Bytes> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let ordinal = state.gets;

@@ -71,6 +71,9 @@ impl WindowBudget {
     }
 }
 impl WindowRead {
+    pub(crate) fn bytes(&self) -> u64 {
+        self.bytes
+    }
     pub(crate) fn resize(&mut self, bytes: u64) -> Result<(), String> {
         let mut state = self.budget.state.lock().unwrap_or_else(|e| e.into_inner());
         let live = state
@@ -142,7 +145,8 @@ impl StoredInstance {
             .window
             .as_ref()
             .map(|window| window.read(self.bytes))
-            .transpose()?;
+            .transpose()
+            .map_err(|e| format!("native facts for {}: {e}", key.instance.definition()))?;
         let bytes = instances
             .store
             .get_content(self.adapters)

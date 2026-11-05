@@ -293,17 +293,15 @@ pub fn select(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-}
-
-#[cfg(test)]
 mod component_tests {
     use super::*;
     use hirsel_engine::store::{Bytes, EntryKey, MemStore, ResultStore};
 
     struct ChangedBytes(Vec<u8>);
     impl ResultStore for ChangedBytes {
+        fn capability(&self) -> hirsel_engine::store::ProviderCapability {
+            hirsel_engine::store::ProviderCapability::ReadOnly
+        }
         fn get(&self, _: &EntryKey) -> Option<Bytes> {
             None
         }

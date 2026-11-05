@@ -89,7 +89,6 @@ pub fn select(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hirsel_engine::DefinitionQueries;
 
     fn fixture() -> (ReadyProgram, DefPath, DefPath) {
         let dir = tempfile::tempdir().unwrap();

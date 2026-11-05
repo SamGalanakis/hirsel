@@ -52,7 +52,8 @@ impl PublishedCallables {
         &self,
         store: &dyn ResultStore,
     ) -> Result<Vec<(InstanceAddress, StoredInstance)>, String> {
-        self.rows(store)
+        let mut outputs = self
+            .rows(store)
             .map(|row| {
                 let row = row?;
                 let key = row.key.bind()?;
@@ -66,7 +67,9 @@ impl PublishedCallables {
                     stored,
                 ))
             })
-            .collect()
+            .collect::<Result<Vec<_>, String>>()?;
+        outputs.sort_by(|a, b| a.0.canonical_cmp(&b.0));
+        Ok(outputs)
     }
     pub(crate) fn apply(&self, products: &mut DemandInstances) -> Result<(), String> {
         products.queries = products.queries.callable();
@@ -213,6 +216,12 @@ impl DemandInstances {
                 ))
             })
             .transpose()?;
+        if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some() {
+            eprintln!(
+                "NATIVE_WINDOW_OWNERS input-index {index_bytes} operations {}",
+                operations_charge.as_ref().map_or(0, |c| c.bytes())
+            );
+        }
         let mut originals = self.completed_inputs()?;
         originals.sort_by(|a, b| a.0.canonical_cmp(&b.0));
         let index = originals
@@ -229,7 +238,9 @@ impl DemandInstances {
         // are reopened one SCC at a time, then replaced by their boolean summary.
         let mut edges = Vec::new();
         for (key, stored) in &originals {
-            let output = stored.read(self, key)?;
+            let output = stored
+                .read(self, key)
+                .map_err(|e| format!("callable graph edges: {e}"))?;
             edges.push(
                 output
                     .facts
@@ -249,30 +260,41 @@ impl DemandInstances {
         graph_weight.vec(&components, |w, members| w.flat_vec(members));
         let graph_bytes = index_bytes + graph_weight.bytes();
         resize(&mut graph_charge, graph_bytes)?;
+        if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some() {
+            eprintln!(
+                "NATIVE_WINDOW_OWNERS SCC-graph {graph_bytes} operations {}",
+                operations_charge.as_ref().map_or(0, |c| c.bytes())
+            );
+        }
         let mut freedom = BTreeMap::new();
         for members in &components {
             let mut equations = BTreeMap::new();
-            let mut reads = Vec::new();
+            let mut equation_charge = self.window.as_ref().map(|w| w.read(0)).transpose()?;
             for &i in members {
                 let (key, stored) = &originals[i];
-                let output = stored.read(self, key)?;
+                let output = stored.read(self, key).map_err(|e| {
+                    format!(
+                        "callable SCC {} members {:?}: {e}",
+                        members.len(),
+                        members
+                            .iter()
+                            .map(|&i| originals[i].0.instance.definition().to_string())
+                            .collect::<Vec<_>>()
+                    )
+                })?;
                 equations.insert(
                     (key.instance.definition().clone(), key.instance.digest()),
                     output.facts.body.operation_freedom.clone(),
                 );
-                reads.push(output);
-            }
-            let mut equation_weight = hirsel_engine::NativeMetadataWeight::default();
-            equation_weight.map(&equations, |w, (path, _), facts| {
-                w.path(path);
-                w.add(facts.retained_bytes() as usize)
-            });
-            let _equation_charge = self
-                .window
-                .as_ref()
-                .map(|w| w.read(equation_weight.bytes()))
-                .transpose()
-                .map_err(|error| {
+                // The equation is the last consumer of this decoded record.
+                // An SCC keeps equations, not every member's unrelated facts.
+                drop(output);
+                let mut equation_weight = hirsel_engine::NativeMetadataWeight::default();
+                equation_weight.map(&equations, |w, (path, _), facts| {
+                    w.path(path);
+                    w.add(facts.retained_bytes() as usize)
+                });
+                resize(&mut equation_charge, equation_weight.bytes()).map_err(|error| {
                     format!(
                         "callable SCC {} members {:?}: {error}",
                         members.len(),
@@ -282,6 +304,7 @@ impl DemandInstances {
                             .collect::<Vec<_>>()
                     )
                 })?;
+            }
             freedom.extend(hirsel_rc::closure_calls::settle_operation_freedom(
                 &equations, &freedom,
             )?);
@@ -290,6 +313,12 @@ impl DemandInstances {
         freedom_weight.map(&freedom, |w, (path, _), _| w.path(path));
         let graph_bytes = graph_bytes + freedom_weight.bytes();
         resize(&mut graph_charge, graph_bytes)?;
+        if std::env::var_os("HIRSEL_NATIVE_RETENTION").is_some() {
+            eprintln!(
+                "NATIVE_WINDOW_OWNERS signatures {graph_bytes} operations {}",
+                operations_charge.as_ref().map_or(0, |c| c.bytes())
+            );
+        }
         let mut interfaces = Vec::new();
         for (key, stored) in &originals {
             select_invocations(
@@ -309,7 +338,9 @@ impl DemandInstances {
                 operations: &operations,
                 discharge: Some(&options.discharge),
             };
-            let (output, linkage) = self.admitted(key, &env)?;
+            let (output, linkage) = self
+                .admitted(key, &env)
+                .map_err(|e| format!("callable signatures: {e}"))?;
             interfaces.push(self.json(&Interface {
                 abi: linkage.abi(),
                 source: !output.facts.body.templates.library,
@@ -329,8 +360,8 @@ impl DemandInstances {
             })?);
         }
         let mut pending = Vec::new();
-        for members in hirsel_graph::components(&edges) {
-            for origin in members {
+        for members in &components {
+            for &origin in members {
                 let key = originals[origin].0.clone();
                 let selection = self.json(&Selection {
                     origin,
@@ -345,6 +376,13 @@ impl DemandInstances {
                 });
             }
         }
+        drop(components);
+        drop(edges);
+        let mut graph_weight = hirsel_engine::NativeMetadataWeight::default();
+        graph_weight.vec(&originals, |w, (key, _)| address_weight(w, key));
+        graph_weight.map(&index, |w, (path, _), _| w.path(path));
+        graph_weight.map(&freedom, |w, (path, _), _| w.path(path));
+        let graph_bytes = index_bytes + graph_weight.bytes();
         let mut counts = vec![0usize; originals.len()];
         let mut selected = BTreeSet::new();
         let mut rewritten = Vec::new();
@@ -365,7 +403,9 @@ impl DemandInstances {
             let origin = item.origin;
             let selection: Selection = read_json(self.store.as_ref(), item.selection)?;
             let (original, stored) = &originals[origin];
-            let output = stored.read(self, original)?;
+            let output = stored
+                .read(self, original)
+                .map_err(|e| format!("callable rewrite: {e}"))?;
             select_invocations(
                 self,
                 original,
@@ -607,7 +647,8 @@ impl DemandInstances {
             )?;
             let original = originals[row.origin]
                 .1
-                .read(self, &originals[row.origin].0)?;
+                .read(self, &originals[row.origin].0)
+                .map_err(|e| format!("callable publication: {e}"))?;
             let (table, unit): (hirsel_lir::LayoutTable, hirsel_lir::LirUnit<Value>) =
                 self.reopen(row.value)?;
             let inline = super::super::emission::InlineInstances::new(

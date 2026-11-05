@@ -557,6 +557,9 @@ impl BodyTask {
         if facts.summary.as_ref().is_some_and(|s| s.storage.is_some()) {
             return;
         }
+        queries
+            .store
+            .archive_encoded(crate::store::ArchiveBoundary::Ordinary);
         let Some((bytes, outer)) = queries
             .records
             .encode_record_with_decode_bytes(&facts, |anchor| {

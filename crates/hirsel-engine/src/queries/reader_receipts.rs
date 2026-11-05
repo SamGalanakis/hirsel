@@ -24,75 +24,125 @@ fn decoding_bytes(rows: u32, max_key: u32) -> Option<u64> {
         .checked_add(256)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub(super) struct ReaderReceipt {
-    output: crate::store::Output,
-    len: u64,
-    rows: u32,
-    max_key: u32,
+    backing: Arc<ReaderBacking>,
     live: Option<(DefId, bool)>,
 }
+enum ReaderBacking {
+    Live {
+        reads: Arc<Reads>,
+        _admission: Arc<dyn Send + Sync>,
+    },
+    Spilled {
+        reference: Reference,
+        rows: u32,
+        max_key: u32,
+    },
+}
+impl std::fmt::Debug for ReaderReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReaderReceipt")
+            .field("rows", &self.len())
+            .finish()
+    }
+}
+impl PartialEq for ReaderReceipt {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.backing, &other.backing)
+            || match (&*self.backing, &*other.backing) {
+                (ReaderBacking::Live { reads: a, .. }, ReaderBacking::Live { reads: b, .. }) => {
+                    a == b && a.observed().eq(b.observed())
+                }
+                (
+                    ReaderBacking::Spilled { reference: a, .. },
+                    ReaderBacking::Spilled { reference: b, .. },
+                ) => a == b,
+                _ => false,
+            }
+    }
+}
+impl Eq for ReaderReceipt {}
 impl ReaderReceipt {
     pub(super) fn capture(store: &dyn ResultStore, reads: &Reads, scratch: u64) -> Option<Self> {
-        let framing = 8u64.checked_add((reads.len() as u64).checked_mul(4)?)?;
-        let (encoded, max_key) =
-            reads
-                .iter()
-                .try_fold((framing, 0usize), |(bytes, max_key), (key, value)| {
-                    let key_bytes = key.encoded_bytes()?;
-                    Some((
-                        bytes
-                            .checked_add(u64::try_from(key_bytes).ok()?)?
-                            .checked_add(value.0.len() as u64)?,
-                        max_key.max(key_bytes),
-                    ))
-                })?;
+        let charge = reads
+            .allocations()
+            .try_fold(
+                crate::memo::retained_arc_bytes(reads),
+                |bytes, (_, allocation)| bytes.checked_add(allocation as u64),
+            )?
+            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                ReaderBacking,
+            >::uninit()))?;
+        if let Some(admission) = store.try_admit_product_memory(charge) {
+            return Some(Self {
+                backing: Arc::new(ReaderBacking::Live {
+                    reads: Arc::new(reads.clone()),
+                    _admission: admission,
+                }),
+                live: None,
+            });
+        }
+        let encoded = reads.encoded_bytes()?;
         let native = (reads.len() as u64)
             .checked_mul((size_of::<(ReadKey, ContentHash)>() + 4) as u64)?
             .checked_add(crate::memo::retained_arc_bytes(reads))?;
-        // Exact capacity avoids the geometric encoding-buffer peak. Include
-        // the current flat rows and a provider copy within the same scratch.
         if encoded.checked_mul(2)?.checked_add(native)? > scratch {
             return None;
         }
+        let max_key = reads
+            .iter()
+            .try_fold(0usize, |max, (key, _)| Some(max.max(key.encoded_bytes()?)))?;
+        let rows = u32::try_from(reads.len()).ok()?;
+        let max_key = u32::try_from(max_key).ok()?;
+        store.archive_encoded(crate::store::ArchiveBoundary::RequiredSpill);
         let mut bytes = Vec::with_capacity(usize::try_from(encoded).ok()?);
         reads.encode(&mut bytes);
-        debug_assert_eq!(bytes.len() as u64, encoded);
-        if bytes.len() as u64 > scratch {
-            return None;
-        }
         let reference = store.put_content(READERS, &bytes)?;
-        if reference.domain != READERS {
-            return None;
-        }
-        Some(Self {
-            output: reference.output,
-            len: reference.len,
-            rows: u32::try_from(reads.len()).ok()?,
+        (reference.domain == READERS).then(|| Self {
+            backing: Arc::new(ReaderBacking::Spilled {
+                reference,
+                rows,
+                max_key,
+            }),
             live: None,
-            max_key: u32::try_from(max_key).ok()?,
         })
     }
     pub(super) fn len(&self) -> usize {
-        self.rows as usize
+        match &*self.backing {
+            ReaderBacking::Live { reads, .. } => reads.len(),
+            ReaderBacking::Spilled { rows, .. } => *rows as usize,
+        }
     }
     pub(super) fn decoding_bytes(&self) -> Option<u64> {
-        decoding_bytes(self.rows, self.max_key)
+        match &*self.backing {
+            ReaderBacking::Live { .. } => Some(0),
+            ReaderBacking::Spilled { rows, max_key, .. } => decoding_bytes(*rows, *max_key),
+        }
     }
     fn bytes(&self, store: &dyn ResultStore) -> Option<crate::store::Bytes> {
-        let reference = Reference {
-            output: self.output,
-            domain: READERS,
-            len: self.len,
+        let ReaderBacking::Spilled { reference, .. } = &*self.backing else {
+            return None;
         };
-        let bytes = store.get_content(reference)?;
-        (READERS.reference(&bytes)? == reference).then_some(bytes)
+        let bytes = store.get_content(*reference)?;
+        (READERS.reference(&bytes)? == *reference).then_some(bytes)
     }
     pub(super) fn load(&self, store: &dyn ResultStore) -> Option<Arc<Reads>> {
+        if let ReaderBacking::Live { reads, .. } = &*self.backing {
+            return Some(reads.clone());
+        }
         let bytes = self.bytes(store)?;
         let mut input = bytes.as_ref();
         let reads = Reads::decode(&mut input)?;
-        (input.is_empty() && reads.len() == self.rows as usize).then(|| Arc::new(reads))
+        (input.is_empty() && reads.len() == self.len()).then(|| Arc::new(reads))
+    }
+    fn merge(&self, union: &mut ReadUnion, store: &dyn ResultStore, scratch: u64) -> Option<()> {
+        match &*self.backing {
+            ReaderBacking::Live { reads, .. } => union.merge_rows(reads, scratch, 0),
+            ReaderBacking::Spilled { rows, max_key, .. } => {
+                union.merge_encoded(&self.bytes(store)?, *rows, *max_key, scratch)
+            }
+        }
     }
 }
 
@@ -163,10 +213,7 @@ impl ReadUnion {
 /// A read reference in Front's existing per-root metadata. The source keeps
 /// that original grant and the required request transport alive.
 pub(crate) struct ArchivedReader {
-    output: crate::store::Output,
-    len: u64,
-    rows: u32,
-    max_key: u32,
+    receipt: ReaderReceipt,
     source: Arc<crate::runtime::GrowthPublicationSource>,
     _owned: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
 }
@@ -186,10 +233,7 @@ impl ArchivedReader {
         receipt: ReaderReceipt,
     ) -> Arc<Self> {
         Arc::new(Self {
-            output: receipt.output,
-            len: receipt.len,
-            rows: receipt.rows,
-            max_key: receipt.max_key,
+            receipt,
             source,
             _owned: None,
         })
@@ -208,36 +252,45 @@ impl ArchivedReader {
         Arc::get_mut(&mut reader)?._owned = Some(allowance);
         Some(reader)
     }
-    fn bytes(&self) -> Option<crate::store::Bytes> {
-        let reference = Reference {
-            output: self.output,
-            domain: READERS,
-            len: self.len,
-        };
-        let bytes = self.source.store.get_content(reference)?;
-        (READERS.reference(&bytes)? == reference).then_some(bytes)
-    }
     pub(crate) fn load(&self) -> Option<Arc<Reads>> {
         if self.working_bytes()? > self.source.scratch {
             return None;
         }
-        let bytes = self.bytes()?;
-        let mut input = bytes.as_ref();
-        let reads = Reads::decode(&mut input)?;
-        (input.is_empty() && reads.len() == self.rows as usize).then(|| Arc::new(reads))
+        self.receipt.load(&*self.source.store)
     }
     pub(crate) fn working_bytes(&self) -> Option<u64> {
-        decoding_bytes(self.rows, self.max_key)
+        self.receipt.decoding_bytes()
     }
     pub(crate) fn encoding_working_bytes(&self) -> Option<u64> {
-        self.working_bytes()?.checked_add(self.len.checked_mul(4)?)
+        match &*self.receipt.backing {
+            ReaderBacking::Live { reads, .. } => reads.encoding_working_bytes(),
+            ReaderBacking::Spilled { reference, .. } => self
+                .working_bytes()?
+                .checked_add(reference.len.checked_mul(4)?),
+        }
     }
 }
 impl serde::Serialize for ArchivedReader {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let bytes = self
-            .bytes()
-            .ok_or_else(|| serde::ser::Error::custom("unavailable archived reader receipt"))?;
+        let bytes = match &*self.receipt.backing {
+            ReaderBacking::Live { reads, .. } => {
+                self.source
+                    .store
+                    .archive_encoded(crate::store::ArchiveBoundary::Export);
+                let mut bytes = Vec::with_capacity(
+                    reads
+                        .encoded_bytes()
+                        .ok_or_else(|| serde::ser::Error::custom("reader size overflow"))?
+                        as usize,
+                );
+                reads.encode(&mut bytes);
+                crate::store::Bytes::from(bytes)
+            }
+            ReaderBacking::Spilled { .. } => self
+                .receipt
+                .bytes(&*self.source.store)
+                .ok_or_else(|| serde::ser::Error::custom("unavailable archived reader receipt"))?,
+        };
         // Capture validated these exact HRD3 bytes. Authenticate the reference
         // and preserve the wire bytes without decoding and encoding them again.
         serializer.serialize_bytes(&bytes)
@@ -254,8 +307,9 @@ impl ReadUnion {
             if let Some(reads) = live(index) {
                 union.merge_live(&reads, scratch)?;
             } else {
-                let bytes = reader.bytes()?;
-                union.merge_encoded(&bytes, reader.rows, reader.max_key, scratch)?;
+                reader
+                    .receipt
+                    .merge(&mut union, &*reader.source.store, scratch)?;
             }
         }
         if !union.fits_scratch(scratch)? {
@@ -311,8 +365,7 @@ impl ReaderSequence {
             {
                 union.merge_live(&reads, scratch)?;
             } else {
-                let bytes = reader.bytes(store)?;
-                union.merge_encoded(&bytes, reader.rows, reader.max_key, scratch)?;
+                reader.merge(&mut union, store, scratch)?;
             }
         }
         if !union.fits_scratch(scratch)? {

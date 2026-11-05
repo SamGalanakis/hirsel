@@ -740,6 +740,7 @@ impl NativeRecordSource for NativeRecordContext {
 /// Encoded recipes are ordinary data, never source V or native C authority.
 #[derive(Clone)]
 pub struct NativeRecords {
+    store: Arc<dyn ResultStore>,
     records: Arc<TypeRecords>,
     types: Arc<hirsel_types::TypeInterner>,
 }
@@ -747,6 +748,7 @@ pub struct NativeRecords {
 pub(crate) struct NativeRecordEncoder<'a> {
     encoding: hirsel_product_codec::RecordEncoding<'a>,
     _admission: &'a hirsel_engine_admission::MemoryReservation,
+    store: &'a dyn ResultStore,
 }
 impl NativeRecordEncoder<'_> {
     pub(crate) fn capture<T>(
@@ -759,6 +761,8 @@ impl NativeRecordEncoder<'_> {
     }
 
     pub(crate) fn encode<T: Serialize>(self, value: &T) -> Option<Vec<u8>> {
+        self.store
+            .archive_encoded(crate::store::ArchiveBoundary::Export);
         self.encoding.encode(value)
     }
 }
@@ -782,6 +786,7 @@ impl NativeRecords {
                 serialization_working,
             )?,
             _admission: admission,
+            store: &*self.store,
         })
     }
 
@@ -809,7 +814,11 @@ impl NativeRecords {
     }
     pub fn new(types: Arc<hirsel_types::TypeInterner>, store: Arc<dyn ResultStore>) -> Self {
         Self {
-            records: TypeRecords::new(types.clone(), Arc::new(super::persistent::Contents(store))),
+            records: TypeRecords::new(
+                types.clone(),
+                Arc::new(super::persistent::Contents(store.clone())),
+            ),
+            store,
             types,
         }
     }
@@ -821,6 +830,18 @@ impl NativeRecords {
         if !Arc::ptr_eq(&self.types, source.record_types()) {
             return None;
         }
+        self.encode_at(source, value, crate::store::ArchiveBoundary::Ordinary)
+    }
+    pub(crate) fn encode_at<T: Serialize>(
+        &self,
+        source: &(impl NativeRecordSource + ?Sized),
+        value: &T,
+        boundary: crate::store::ArchiveBoundary,
+    ) -> Option<Vec<u8>> {
+        if !Arc::ptr_eq(&self.types, source.record_types()) {
+            return None;
+        }
+        self.store.archive_encoded(boundary);
         self.records
             .encode_record(value, |anchor| source.record_owner(anchor))
     }
@@ -834,6 +855,8 @@ impl NativeRecords {
         if !Arc::ptr_eq(&self.types, source.record_types()) {
             return None;
         }
+        self.store
+            .archive_encoded(crate::store::ArchiveBoundary::Ordinary);
         self.records
             .encode_tir(definition, |anchor| source.record_owner(anchor))
     }
@@ -845,6 +868,8 @@ impl NativeRecords {
         if !Arc::ptr_eq(&self.types, source.record_types()) {
             return None;
         }
+        self.store
+            .archive_encoded(crate::store::ArchiveBoundary::Ordinary);
         self.records
             .encode_tir_with_decode_bytes(definition, |anchor| source.record_owner(anchor))
     }
@@ -878,6 +903,8 @@ impl NativeRecords {
         if !Arc::ptr_eq(&self.types, source.record_types()) {
             return None;
         }
+        self.store
+            .archive_encoded(crate::store::ArchiveBoundary::Ordinary);
         self.records
             .encode_record_with_decode_bytes(value, |anchor| source.record_owner(anchor))
     }

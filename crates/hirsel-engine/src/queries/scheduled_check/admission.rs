@@ -203,32 +203,21 @@ impl QueryTask for Task {
         let result = match self.advance(cx) {
             Ok(Some(id)) => return QueryPoll::Waiting(vec![id]),
             Err(error) => Err(error),
-            Ok(None) => (|| {
-                let bytes = self.digest.0.to_vec();
-                let record = self
-                    .queries
-                    .store
-                    .put_content(
-                        Domain {
-                            kind: 0x4600_003a,
-                            schema: 1,
-                        },
-                        &bytes,
-                    )
-                    .ok_or(self.queries.errors.resource)?;
-                let archive = ProductArchive::from_retained_bytes(
-                    record,
-                    bytes.into(),
-                    self.queries._allowance.clone(),
-                    self.queries.retention.clone(),
-                )
-                .map_err(|_| self.queries.errors.resource)?;
-                Ok(ProductRef::import_archive(
-                    self.id().address,
-                    hirsel_artifact_store::Action(self.digest),
-                    archive,
-                ))
-            })(),
+            Ok(None) => Ok(ProductRef::live(
+                self.id().address,
+                hirsel_artifact_store::Action(self.digest),
+                Arc::new(super::super::live_record::LiveRecord {
+                    value: self.digest,
+                    domain: Domain {
+                        kind: 0x4600_003a,
+                        schema: 2,
+                    },
+                    records: self.queries.records.clone(),
+                    source: self.queries.anchors.clone(),
+                    serialization_working: 0,
+                    _admission: self.queries._allowance.clone(),
+                }),
+            )),
         };
         self.terminal = Some(result.clone());
         finish(result)

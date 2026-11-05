@@ -64,9 +64,20 @@ impl EntryKey {
     }
 }
 
+/// Why a producer encodes portable archive content. Required spills are
+/// admitted memory-pressure boundaries, independent of backend persistence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArchiveBoundary {
+    Ordinary,
+    Export,
+    RequiredSpill,
+}
 /// A content-keyed byte store. Implementations never fail a compile: a
 /// missing, unreadable or corrupt entry is a miss.
 pub trait ResultStore: Send + Sync {
+    /// Observe encoding at the producer, including request-local content.
+    fn archive_encoded(&self, _boundary: ArchiveBoundary) {}
+
     /// Attach an explicitly selected installed package, independently of cache hits.
     fn installed_package(
         &self,
@@ -88,6 +99,10 @@ pub trait ResultStore: Send + Sync {
     /// Its charge survives the producer and returns after the final reader.
     fn admit_product_memory(&self, _bytes: u64) -> Option<Arc<dyn Send + Sync>> {
         None
+    }
+    /// Attempt live retention before a required spill without exhausting the request.
+    fn try_admit_product_memory(&self, bytes: u64) -> Option<Arc<dyn Send + Sync>> {
+        self.admit_product_memory(bytes)
     }
     /// Independent operation handle for a provider with mutable physical
     /// epoch state. Nested producers use the returned provider directly.

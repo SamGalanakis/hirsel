@@ -69,6 +69,24 @@ impl FrontBodyQueries {
         scratch: u64,
     ) -> Option<Arc<FrontObservations>> {
         let () = Self::READER_METADATA;
+        let mut weight = crate::memo::retained::Weight::default();
+        for (_, reads) in &outcome.memos {
+            weight.reads(reads);
+        }
+        let charge = weight
+            .bytes
+            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                FrontObservations,
+            >::uninit()))?
+            .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+                LiveSourceBacking,
+            >::uninit()))?;
+        if let Some(backing) = outcome._backing.split(charge) {
+            return Some(Arc::new(FrontObservations {
+                rows: Rows::Retained(outcome.memos.clone()),
+                _backing: Some(backing),
+            }));
+        }
         let archived = (|| {
             // Flat observations still borrow their producer's lease. Only
             // pooled readers carry the independent, last-reader refund needed
@@ -92,6 +110,8 @@ impl FrontBodyQueries {
                 .iter()
                 .map(|(_, reads)| reads)
                 .collect::<Vec<_>>();
+            self.store
+                .archive_encoded(crate::store::ArchiveBoundary::RequiredSpill);
             let bytes = bincode::serialize(&reads).ok()?;
             let reference = self.store.put_content(OBSERVATIONS, &bytes)?;
             Some(Rows::Archived {
@@ -99,39 +119,17 @@ impl FrontBodyQueries {
                 reference,
             })
         })();
-        let (rows, backing) = if let Some(rows) = archived {
-            // The reference-only owner fits the per-root metadata admitted by
-            // input_bytes. It owns no read payload and needs no second lease.
-            const {
-                assert!(
-                    size_of::<FrontObservations>() + 2 * size_of::<usize>()
-                        <= 32 * size_of::<usize>()
-                )
-            };
-            (rows, None)
-        } else {
-            let mut weight = crate::memo::retained::Weight::default();
-            for (_, reads) in &outcome.memos {
-                weight.reads(reads);
-            }
-            let charge = weight
-                .bytes
-                .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                    FrontObservations,
-                >::uninit(
-                )))?
-                .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                    LiveSourceBacking,
-                >::uninit(
-                )))?;
-            (
-                Rows::Retained(outcome.memos.clone()),
-                Some(outcome._backing.split(charge)?),
+        let rows = archived?;
+        // The reference-only owner fits the per-root metadata admitted by
+        // input_bytes. It owns no read payload and needs no second lease.
+        const {
+            assert!(
+                size_of::<FrontObservations>() + 2 * size_of::<usize>() <= 32 * size_of::<usize>()
             )
         };
         Some(Arc::new(FrontObservations {
             rows,
-            _backing: backing,
+            _backing: None,
         }))
     }
 }

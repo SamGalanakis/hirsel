@@ -67,38 +67,40 @@ impl Weight<'_> {
         }
     }
     pub(crate) fn storage_definition(&mut self, definition: &StorageDefinition) {
-        self.vec(&definition.bodies, |w, body| {
-            w.vec(&body.paths, |w, path| w.path(path));
-            w.vec(&body.generics, Self::generic);
-            w.vec(&body.inputs, |w, input| {
-                w.storage_place(&input.place);
-                w.vec(&input.callables, |w, path| w.path(path));
-            });
-            w.vec(&body.nodes, |w, node| {
-                w.flat_vec(&node.successors);
-                match &node.operation {
-                    StorageOp::Nop => (),
-                    StorageOp::Assign(assignments) => w.vec(assignments, |w, (place, value)| {
+        self.vec(&definition.bodies, Self::storage_body);
+    }
+    pub(crate) fn storage_body(&mut self, body: &StorageBody) {
+        let w = self;
+        w.vec(&body.paths, |w, path| w.path(path));
+        w.vec(&body.generics, Self::generic);
+        w.vec(&body.inputs, |w, input| {
+            w.storage_place(&input.place);
+            w.vec(&input.callables, |w, path| w.path(path));
+        });
+        w.vec(&body.nodes, |w, node| {
+            w.flat_vec(&node.successors);
+            match &node.operation {
+                StorageOp::Nop => (),
+                StorageOp::Assign(assignments) => w.vec(assignments, |w, (place, value)| {
+                    w.storage_place(place);
+                    w.storage_value(value);
+                }),
+                StorageOp::Call {
+                    callee,
+                    arguments,
+                    mutations,
+                    destination,
+                } => {
+                    w.storage_callee(callee);
+                    w.vec(arguments, |w, (_, place)| w.storage_place(place));
+                    w.flat_vec(mutations);
+                    if let Some(place) = destination {
                         w.storage_place(place);
-                        w.storage_value(value);
-                    }),
-                    StorageOp::Call {
-                        callee,
-                        arguments,
-                        mutations,
-                        destination,
-                    } => {
-                        w.storage_callee(callee);
-                        w.vec(arguments, |w, (_, place)| w.storage_place(place));
-                        w.flat_vec(mutations);
-                        if let Some(place) = destination {
-                            w.storage_place(place);
-                        }
                     }
-                    StorageOp::Return(place) => w.storage_place(place),
-                    StorageOp::Kill(locals) => w.flat_vec(locals),
                 }
-            });
+                StorageOp::Return(place) => w.storage_place(place),
+                StorageOp::Kill(locals) => w.flat_vec(locals),
+            }
         });
     }
     pub(crate) fn storage_profiles(&mut self, profiles: &Vec<CallableStorageProfile>) {

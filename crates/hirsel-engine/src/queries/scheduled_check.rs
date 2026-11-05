@@ -16,7 +16,7 @@ pub const FRONT_CHECK_KIND: u32 = 0x4600_000a;
 const FRONT_WINDOW: usize = 1;
 const OUTPUT: Domain = Domain {
     kind: 0x4600_000b,
-    schema: 3,
+    schema: 4,
 };
 /// Engine-selected snapshots and source order. Clients submit operations and
 /// frozen input observations; the compiler host constructs this plan.
@@ -97,6 +97,46 @@ struct Data {
     failed_front: Vec<(DefPath, Reference)>,
     failed_lowered: Vec<(DefPath, Reference)>,
     reads: ReaderReceipt,
+    store: Arc<dyn ResultStore>,
+}
+struct FrontRows<'a>(&'a [(DefPath, FrontObservation)]);
+impl serde::Serialize for FrontRows<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(
+            self.0
+                .iter()
+                .map(|(path, p)| (path, p.address.0, p.action.0, p.domain())),
+        )
+    }
+}
+struct LowerRows<'a>(&'a [(DefPath, ProductRef)]);
+impl serde::Serialize for LowerRows<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(
+            self.0
+                .iter()
+                .map(|(path, p)| (path, p.address.0, p.action.0, p.domain())),
+        )
+    }
+}
+impl serde::Serialize for Data {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (
+            match self.checked.completion {
+                CheckCompletion::Complete => None,
+                CheckCompletion::Incomplete { phase } => Some(phase.phase_name()),
+            },
+            &self.checked.diagnostics,
+            FrontRows(&self.front),
+            LowerRows(&self.lowered),
+            &self.failed_front,
+            &self.failed_lowered,
+            self.reads
+                .load(&*self.store)
+                .ok_or_else(|| serde::ser::Error::custom("Check observations unavailable"))?,
+        )
+            .serialize(serializer)
+    }
 }
 /// Source and receipt owners remain admitted until the last inspection or
 /// execution consumer releases the completed check.
@@ -125,7 +165,6 @@ pub struct FrontCheckQueries {
     failures: Mutex<BTreeMap<ContentHash, (Reference, QueryError, Option<QueryKind>)>>,
     weight: MemoryWeight,
     errors: RuntimeErrors,
-    retention: Arc<Mutex<u64>>,
     _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 impl FrontCheckQueries {
@@ -156,7 +195,7 @@ impl FrontCheckQueries {
     }
 
     /// Ordered file/path cursors, product-reference rows and separate retained
-    /// data/archive bounds. Bodies keep their own producer admission.
+    /// live output bounds. Bodies keep their own producer admission.
     pub fn input_bytes(definitions: &[DefPath], files: usize, weight: MemoryWeight) -> Option<u64> {
         let path_slot = (std::mem::size_of::<(DefPath, bool)>()
             + std::mem::size_of::<(DefPath, ProductRef)>()
@@ -286,12 +325,7 @@ impl FrontCheckQueries {
     pub(crate) fn rejection(&self, reference: Reference) -> Option<QueryError> {
         let completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
         let (product, data) = completed.as_ref()?;
-        if product
-            .archive(ArchiveAdmission::Retained)
-            .ok()?
-            .reference()
-            != reference
-        {
+        if OUTPUT.reference(&product.action.0.0)? != reference {
             return None;
         }
         if has_errors(&data.checked.diagnostics) {
@@ -301,6 +335,12 @@ impl FrontCheckQueries {
         } else {
             None
         }
+    }
+    /// A failed dependency carries an identity token, not an archive demand.
+    pub(crate) fn rejection_reference(&self, product: &ProductRef) -> Option<Reference> {
+        (self.accepted(product.clone()) == Some(false))
+            .then(|| OUTPUT.reference(&product.action.0.0))
+            .flatten()
     }
     pub fn failure(&self, reference: Reference) -> Option<(QueryError, Option<QueryKind>)> {
         let failures = self.failures.lock().unwrap_or_else(|e| e.into_inner());
@@ -968,62 +1008,38 @@ impl Task {
             &queries.declarations,
             &mut diagnostics,
         );
-        let observed = scheduled_growth::publish_observations(
-            &queries.records,
-            &queries.anchors,
-            &*queries.store,
-            &reads,
-            queries.weight.scratch,
-        )
-        .ok_or(queries.errors.resource)?;
-        let bytes = queries
-            .records
-            .encode(
-                &queries.anchors,
-                &(
-                    incomplete.map(QueryKind::phase_name),
-                    &diagnostics,
-                    &self
-                        .front
-                        .iter()
-                        .map(|(path, p)| (path, p.address.0, p.action.0, p.domain()))
-                        .collect::<Vec<_>>(),
-                    &self
-                        .lowered
-                        .iter()
-                        .map(|(path, p)| (path, p.address.0, p.action.0, p.domain()))
-                        .collect::<Vec<_>>(),
-                    &self.failed_front,
-                    &self.failed_lowered,
-                    observed,
-                ),
-            )
-            .ok_or(queries.errors.resource)?;
-        if bytes.len() as u64 > queries.weight.scratch {
-            return Err(queries.errors.resource);
-        }
-        let record = queries
-            .store
-            .put_content(OUTPUT, &bytes)
-            .ok_or(queries.errors.resource)?;
         let action = hirsel_artifact_store::Action(ContentHash::of_parts(
-            "hirsel.front.check.action.v2",
-            [
-                queries.query.address.0.0.as_slice(),
-                record.output.0.0.as_slice(),
-            ],
+            "hirsel.front.check.action.v3",
+            std::iter::once(queries.query.address.0.0.as_slice())
+                .chain(std::iter::once(
+                    incomplete
+                        .map_or("complete", QueryKind::phase_name)
+                        .as_bytes(),
+                ))
+                .chain(
+                    queries
+                        .plan
+                        .files
+                        .iter()
+                        .filter_map(|(file, _, _)| queries.sources.file(*file))
+                        .map(|file| file.text().as_bytes()),
+                )
+                .chain(self.front.iter().map(|(_, p)| p.action.0.0.as_slice()))
+                .chain(self.lowered.iter().map(|(_, p)| p.action.0.0.as_slice()))
+                .chain(
+                    self.failed_front
+                        .iter()
+                        .map(|(_, p)| p.output.0.0.as_slice()),
+                )
+                .chain(
+                    self.failed_lowered
+                        .iter()
+                        .map(|(_, p)| p.output.0.0.as_slice()),
+                )
+                .chain(std::iter::once(
+                    crate::store::payload_reads_hash(&reads).0.as_slice(),
+                )),
         ));
-        let product = ProductRef::import_archive(
-            queries.query.address,
-            action,
-            ProductArchive::from_retained_bytes(
-                record,
-                bytes.into(),
-                queries._allowance.clone(),
-                queries.retention.clone(),
-            )
-            .map_err(|_| queries.errors.resource)?,
-        );
         let checked = CheckOutput {
             completion,
             sources: queries.sources.clone(),
@@ -1038,12 +1054,26 @@ impl Task {
             failed_lowered: std::mem::take(&mut self.failed_lowered),
             reads: ReaderReceipt::capture(&*queries.store, &reads, queries.weight.scratch)
                 .ok_or(queries.errors.resource)?,
+            store: queries.store.clone(),
         });
+        let product = ProductRef::live(
+            queries.query.address,
+            action,
+            Arc::new(super::live_record::LiveRecord {
+                value: data.clone(),
+                domain: OUTPUT,
+                records: queries.records.clone(),
+                source: queries.anchors.clone(),
+                serialization_working: data
+                    .reads
+                    .decoding_bytes()
+                    .and_then(|bytes| bytes.checked_add(reads.encoding_working_bytes()?))
+                    .ok_or(queries.errors.resource)?,
+                _admission: queries._allowance.clone(),
+            }),
+        );
         *queries.completed.lock().unwrap_or_else(|e| e.into_inner()) =
             Some((product.clone(), data));
-        queries
-            .store
-            .associate_product(product.address, product.action, record);
         Ok(product)
     }
 }
@@ -1265,7 +1295,6 @@ impl QueryEngine {
             failures: Mutex::new(BTreeMap::new()),
             weight,
             errors,
-            retention: Arc::new(Mutex::new(allowance.bytes() - required + weight.retained)),
             _allowance: Arc::new(allowance),
         }))
     }

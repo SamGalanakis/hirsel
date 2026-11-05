@@ -143,6 +143,8 @@ impl FrontBodyQueries {
         // Replace the live terminal's charge with its compact representation.
         // This consumes no second required-transport record. If compaction
         // cannot fit, leave the live terminal in place and refuse admission.
+        self.store
+            .archive_encoded(crate::store::ArchiveBoundary::RequiredSpill);
         let bytes = self.encode_terminal(key, outcome, scratch)?;
         let charge = (bytes.len() as u64)
             .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<

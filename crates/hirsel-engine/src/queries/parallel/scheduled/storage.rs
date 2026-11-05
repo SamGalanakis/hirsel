@@ -16,7 +16,7 @@ const FAILURE: Domain = Domain {
 struct Outcome {
     result: Result<(ProductRef, Arc<QueryOutput<StorageDefinition>>), (Reference, QueryError)>,
     reads: Arc<Reads>,
-    _reservation: hirsel_engine_admission::MemoryReservation,
+    _reservation: Arc<hirsel_engine_admission::MemoryReservation>,
     _source: Arc<FrontBodyQueries>,
 }
 #[derive(Default)]
@@ -289,16 +289,46 @@ impl StorageTask {
             }
         }
         let reads = Arc::new(reads.finish().map_err(|_| owner.errors.protocol)?);
-        let bytes = owner
-            .records
-            .encode(&*owner.anchors, &(path, &result, &*reads))
-            .ok_or(owner.errors.resource)?;
-        if bytes.len() as u64 > owner.weight.retained {
-            return Err(owner.errors.resource);
+        let mut weight = crate::memo::retained::Weight::default();
+        weight.add(
+            crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<Outcome>::uninit()) as usize,
+        );
+        weight.reads(&reads);
+        match &result {
+            Ok(output) => weight.arc(output, |w, output| {
+                w.storage_definition(&output.value);
+                w.vec(&output.diagnostics, |w, diagnostic| {
+                    w.diagnostic(diagnostic)
+                });
+                w.flat_vec(&output.dependencies);
+            }),
+            Err(error) => weight.error(error),
         }
-        let mut associated = None;
+        type Record = (
+            DefPath,
+            Result<Arc<QueryOutput<StorageDefinition>>, QueryError>,
+            Arc<Reads>,
+        );
+        weight.add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+            super::super::super::live_record::LiveRecord<Record>,
+        >::uninit()) as usize);
+        weight.def_path(path);
+        weight.add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+            hirsel_engine_admission::MemoryReservation,
+        >::uninit()) as usize);
+        let reservation = Arc::new(
+            owner
+                .outputs
+                .pool
+                .take(weight.bytes)
+                .ok_or(owner.errors.resource)?,
+        );
         let result = match result {
             Err(error) => {
+                let bytes = owner
+                    .records
+                    .encode(&*owner.anchors, &(path, Err::<(), _>(&error), &*reads))
+                    .ok_or(owner.errors.resource)?;
                 let record = owner
                     .front
                     .store
@@ -307,49 +337,34 @@ impl StorageTask {
                 Err((record, error))
             }
             Ok(output) => {
-                let record = owner
-                    .front
-                    .store
-                    .put_content(OUTPUT, &bytes)
-                    .ok_or(owner.errors.resource)?;
                 let action = hirsel_artifact_store::Action(ContentHash::of_parts(
-                    "hirsel.front.storage.action.v1",
+                    "hirsel.front.storage.action.v2",
                     [
                         product.action.0.0.as_slice(),
                         crate::store::payload_reads_hash(&reads).0.as_slice(),
-                        record.output.0.0.as_slice(),
                     ],
                 ));
-                let product = ProductRef::import_archive(
+                let product = ProductRef::live(
                     self.id.address,
                     action,
-                    ProductArchive::from_encoded_in(record, bytes, &owner.outputs.pool)
-                        .map_err(|_| owner.errors.resource)?,
+                    Arc::new(super::super::super::live_record::LiveRecord {
+                        value: (
+                            path.clone(),
+                            Ok::<_, QueryError>(output.clone()),
+                            reads.clone(),
+                        ),
+                        domain: OUTPUT,
+                        records: owner.records.clone(),
+                        source: (*owner.anchors).clone(),
+                        serialization_working: reads
+                            .encoding_working_bytes()
+                            .ok_or(owner.errors.resource)?,
+                        _admission: reservation.clone(),
+                    }),
                 );
-                associated = Some((product.address, product.action, record));
                 Ok((product, output))
             }
         };
-        let mut weight = crate::memo::retained::Weight::default();
-        weight.add(
-            crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<Outcome>::uninit()) as usize,
-        );
-        weight.reads(&reads);
-        match &result {
-            Ok((_, output)) => weight.arc(output, |w, output| {
-                w.storage_definition(&output.value);
-                w.vec(&output.diagnostics, |w, diagnostic| {
-                    w.diagnostic(diagnostic)
-                });
-                w.flat_vec(&output.dependencies);
-            }),
-            Err((_, error)) => weight.error(error),
-        }
-        let reservation = owner
-            .outputs
-            .pool
-            .take(weight.bytes)
-            .ok_or(owner.errors.resource)?;
         let terminal = match &result {
             Ok((product, _)) => Ok(product.clone()),
             Err((reference, _)) => Err(*reference),
@@ -369,9 +384,6 @@ impl StorageTask {
                 &owner.outputs,
             )
             .ok_or(owner.errors.resource)?;
-        if let Some((address, action, record)) = associated {
-            owner.front.store.associate_product(address, action, record);
-        }
         terminal
     }
 }

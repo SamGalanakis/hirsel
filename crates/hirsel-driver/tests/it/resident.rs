@@ -648,10 +648,32 @@ fn restored_mode_phases_retire_with_the_edited_or_removed_memo() {
 
 #[test]
 fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
-    struct Off;
+    #[derive(Default)]
+    struct Off([std::sync::atomic::AtomicU64; 3]);
+    impl Off {
+        fn ordinary_archives(&self, step: &str) -> u64 {
+            let counts = self
+                .0
+                .each_ref()
+                .map(|count| count.swap(0, std::sync::atomic::Ordering::Relaxed));
+            eprintln!(
+                "{step}: ordinary={} exports={} required_spills={}",
+                counts[0], counts[1], counts[2]
+            );
+            counts[0]
+        }
+    }
     impl store::ResultStore for Off {
         fn capability(&self) -> hirsel_engine::store::ProviderCapability {
             hirsel_engine::store::ProviderCapability::Absent
+        }
+        fn archive_encoded(&self, boundary: store::ArchiveBoundary) {
+            let index = match boundary {
+                store::ArchiveBoundary::Ordinary => 0,
+                store::ArchiveBoundary::Export => 1,
+                store::ArchiveBoundary::RequiredSpill => 2,
+            };
+            self.0[index].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         fn get(&self, _: &store::EntryKey) -> Option<hirsel_engine::store::Bytes> {
@@ -678,7 +700,7 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
             r#"{"schema":1,"package":{"name":"standalone","version":"0"},"sources":[{"path":"resident.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#,
         )
         .unwrap();
-        let mut scalar = engine(Arc::new(Off));
+        let mut scalar = engine(Arc::new(Off::default()));
         let file = scalar.sources.add(&source_path, source.into()).unwrap();
         scalar.parse_file(file, &default_context()).unwrap();
         assert!(
@@ -688,13 +710,15 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
                 .is_empty()
         );
         let scalar_tir = scalar.export_tir(&path("main")).unwrap();
+        let mut ordinary_archives = Vec::new();
         for jobs in [1, 2, 8] {
             for retention in [memo::Retention::Resident, memo::Retention::Batch] {
+                let off = Arc::new(Off::default());
                 let config = CompileConfig {
                     jobs: hirsel_intern::jobs::Jobs::new(jobs),
                     verify: Verify::On,
                     retention,
-                    store: Arc::new(Off),
+                    store: off.clone(),
                     ..CompileConfig::default()
                 };
                 let mut requests = CompilerRequests::for_host(
@@ -714,6 +738,9 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
                 };
                 assert!(checked.diagnostics.is_empty());
                 assert_eq!(checked.completion, CheckCompletion::Complete);
+                ordinary_archives.push(off.ordinary_archives(&format!(
+                    "frozen Check jobs={jobs} retention={retention:?}"
+                )));
                 let exported = requests
                     .execute(&manifest, CompileOperation::ExportTir)
                     .unwrap();
@@ -721,23 +748,32 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
                     panic!("expected ExportTir");
                 };
                 assert_eq!(tir, &scalar_tir);
+                off.ordinary_archives(&format!(
+                    "explicit ExportTir jobs={jobs} retention={retention:?}"
+                ));
             }
         }
-        // A session over the off provider encodes nothing into any byte store
-        // (Off panics on every read and write), yet a body edit still reuses
+        // Producer-side accounting includes request-local archives even when
+        // no backend I/O occurs. A body edit still reuses
         // the unedited definitions from the session's live owners: `view`
         // reads no other body, so its Resolve and Check never rerun.
         let fixture = crate::image_fixture::Fixture::new();
         let entry = fixture.0.join("main.hir");
         let initial = "fn view() -> u64 { 7 }\nfn a() -> u64 { 1 }\npub fn main() -> u64 { a() }\n";
         std::fs::write(&entry, initial).unwrap();
+        let session_manifest = fixture.0.join("hirsel.json");
+        crate::image_fixture::core_manifest(&entry, &session_manifest);
+        let off = Arc::new(Off::default());
         let config = CompileConfig {
             retention: memo::Retention::Resident,
-            store: Arc::new(Off),
+            store: off.clone(),
             ..CompileConfig::default()
         };
-        let mut session = session::Session::open_configured(&entry, config.clone());
+        let mut session = session::Session::open_configured(&session_manifest, config.clone());
         assert!(session.check_applied().unwrap().diagnostics.is_empty());
+        ordinary_archives.push(off.ordinary_archives("cold Check"));
+        assert!(session.check_applied().unwrap().diagnostics.is_empty());
+        ordinary_archives.push(off.ordinary_archives("no-op Check"));
         let mut view = session.logical_entry().unwrap().clone();
         view.0.name = "view".into();
         let queries = [QueryKind::Resolve, QueryKind::Check].map(|kind| (view.clone(), kind));
@@ -750,18 +786,23 @@ fn disabled_result_provider_skips_store_work_for_scalar_and_frozen_queries() {
             bytes: Some(edited.into_bytes()),
         }]);
         let actual = session.check_applied().unwrap();
+        ordinary_archives.push(off.ordinary_archives("body-edit Check"));
         assert_eq!(session.stats().loads, 1);
         assert_eq!(session.recompute_counts(queries.to_vec()).unwrap(), before);
         let expected = hirsel_front_phases::COMPILER
             .clone()
             .with_config(config)
             .with_owned_engines()
-            .load_program(&entry)
+            .load_program(&session_manifest)
             .unwrap()
             .check_configured()
             .unwrap();
         assert_eq!(diagnostics(&actual), diagnostics(&expected));
         assert_eq!(actual.completion, expected.completion);
+        assert!(
+            ordinary_archives.iter().all(|count| *count == 0),
+            "store-off Checks encoded ordinary request archives: {ordinary_archives:?}"
+        );
     });
 }
 

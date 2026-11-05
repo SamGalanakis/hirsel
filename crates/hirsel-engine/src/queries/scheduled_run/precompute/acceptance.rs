@@ -41,10 +41,9 @@ impl Task {
         };
         let checked = checked?;
         if check.accepted(checked.clone()) != Some(true) {
-            return Err(checked
-                .archive(ArchiveAdmission::Retained)
-                .map_err(|_| queries.errors.resource)?
-                .reference());
+            return Err(check
+                .rejection_reference(&checked)
+                .ok_or(queries.errors.protocol)?);
         }
         let Poll::Ready(prepared) = prepared else {
             unreachable!()

@@ -26,7 +26,7 @@ struct Data {
     profiles: Arc<Vec<CallableStorageProfile>>,
     diagnostics: Arc<Vec<Diagnostic>>,
     reads: Arc<Reads>,
-    _reservation: hirsel_engine_admission::MemoryReservation,
+    _reservation: Arc<hirsel_engine_admission::MemoryReservation>,
     _source: Arc<FrontBodyQueries>,
 }
 pub struct FrontStorageGraphOutput {
@@ -158,7 +158,7 @@ impl QueryFactory for Factory {
             recipe: None,
             reads: ReadsBuilder::new(),
             waiting: None,
-            input: None,
+            digest: ContentHash::of_bytes(b"source storage"),
             terminal,
         }))
     }
@@ -178,8 +178,8 @@ struct Task {
     recipe: Option<Box<dyn QueryTask>>,
     reads: ReadsBuilder,
     waiting: Option<QueryId>,
-    input: Option<ProductRef>,
     terminal: Option<Result<ProductRef, Reference>>,
+    digest: ContentHash,
 }
 impl QueryTask for Task {
     fn id(&self) -> QueryId {
@@ -219,6 +219,9 @@ impl Task {
             }
             Poll::Ready(result) => {
                 self.waiting = None;
+                if let Ok(product) = &result {
+                    self.fold(product);
+                }
                 Poll::Ready(result)
             }
         }
@@ -226,12 +229,11 @@ impl Task {
     fn advance(&mut self, cx: &mut dyn QueryContext) -> Poll<Result<ProductRef, Reference>> {
         let owner = self.owner.clone();
         if !self.initialized {
-            let product = match self.read(cx, owner.growth.query()) {
+            match self.read(cx, owner.growth.query()) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Ready(Ok(product)) => product,
+                Poll::Ready(Ok(_)) => (),
             };
-            self.input = Some(product);
             let mut checked = Vec::new();
             for definition in &owner.definitions {
                 let path = definition.path();
@@ -241,6 +243,14 @@ impl Task {
                     )))));
                 };
                 self.reads.merge(&output.reads);
+                self.digest = ContentHash::of_parts(
+                    "hirsel.front.storage-source.v1",
+                    [
+                        self.digest.0.as_slice(),
+                        path.fingerprint().0.as_slice(),
+                        owner.front.namespace().identity().0.as_slice(),
+                    ],
+                );
                 if output
                     .summary
                     .summary
@@ -319,6 +329,7 @@ impl Task {
                 };
                 self.recipe = None;
                 self.waiting = None;
+                self.fold(&product);
                 let Some(output) = owner.recipes.outcome(product) else {
                     return Poll::Ready(Err(owner.errors.protocol));
                 };
@@ -452,11 +463,25 @@ impl Task {
                 current.body += 1;
                 current.node = 0;
             }
-            let bytes = owner.records.encode(&*owner.anchors, &self.bodies);
-            if bytes.is_none_or(|bytes| bytes.len() as u64 > owner.weight.retained) {
+            let bytes = self.bodies.values().try_fold(0u64, |bytes, body| {
+                let mut weight = crate::memo::retained::Weight::default();
+                weight.storage_body(body);
+                bytes.checked_add(weight.bytes)
+            });
+            if bytes.is_none_or(|bytes| bytes > owner.weight.retained) {
                 return Poll::Ready(Err(owner.errors.resource));
             }
         }
+    }
+    fn fold(&mut self, product: &ProductRef) {
+        self.digest = ContentHash::of_parts(
+            "hirsel.front.storage-input.v1",
+            [
+                self.digest.0.as_slice(),
+                product.address.0.0.as_slice(),
+                product.action.0.0.as_slice(),
+            ],
+        );
     }
     fn reference(
         &mut self,
@@ -524,10 +549,6 @@ impl Task {
         let reads = std::mem::take(&mut self.reads)
             .finish()
             .map_err(|_| invalid("storage source reads disagree"))?;
-        let bytes = owner
-            .records
-            .encode(&*owner.anchors, &(&profiles, &diagnostics, &reads))
-            .ok_or(QueryError::NotImplemented)?;
         let profiles = Arc::new(profiles);
         let diagnostics = Arc::new(diagnostics);
         let reads = Arc::new(reads);
@@ -540,27 +561,44 @@ impl Task {
             w.vec(diagnostics, |w, diagnostic| w.diagnostic(diagnostic))
         });
         weight.reads(&reads);
-        let reservation = owner
-            .outputs
-            .pool
-            .take(weight.bytes)
-            .ok_or_else(|| invalid("storage graph output exceeds admission"))?;
-        let record = owner
-            .store
-            .put_content(OUTPUT, &bytes)
-            .ok_or(QueryError::NotImplemented)?;
-        let input = self.input.clone().ok_or(QueryError::NotImplemented)?;
+        type Record = (
+            Arc<Vec<CallableStorageProfile>>,
+            Arc<Vec<Diagnostic>>,
+            Arc<Reads>,
+        );
+        weight.add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+            super::live_record::LiveRecord<Record>,
+        >::uninit()) as usize);
+        weight.add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
+            hirsel_engine_admission::MemoryReservation,
+        >::uninit()) as usize);
+        let reservation = Arc::new(
+            owner
+                .outputs
+                .pool
+                .take(weight.bytes)
+                .ok_or_else(|| invalid("storage graph output exceeds admission"))?,
+        );
         let action = hirsel_artifact_store::Action(ContentHash::of_parts(
-            "hirsel.front.storage-graph.action.v1",
-            [input.action.0.0.as_slice(), record.output.0.0.as_slice()],
+            "hirsel.front.storage-graph.action.v2",
+            [
+                self.digest.0.as_slice(),
+                crate::store::payload_reads_hash(&reads).0.as_slice(),
+            ],
         ));
-        let product = ProductRef::import_archive(
+        let product = ProductRef::live(
             owner.query.address,
             action,
-            owner
-                .store
-                .open_product_archive(record)
-                .ok_or(QueryError::NotImplemented)?,
+            Arc::new(super::live_record::LiveRecord {
+                value: (profiles.clone(), diagnostics.clone(), reads.clone()),
+                domain: OUTPUT,
+                records: owner.records.clone(),
+                source: (*owner.anchors).clone(),
+                serialization_working: reads
+                    .encoding_working_bytes()
+                    .ok_or_else(|| invalid("storage read encoding size overflow"))?,
+                _admission: reservation.clone(),
+            }),
         );
         *owner.completed.lock().unwrap_or_else(|e| e.into_inner()) = Some((
             product.clone(),
@@ -572,9 +610,6 @@ impl Task {
                 _source: owner.front.clone(),
             }),
         ));
-        owner
-            .store
-            .associate_product(product.address, product.action, record);
         Ok(product)
     }
 }

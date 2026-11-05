@@ -34,7 +34,7 @@ struct Admission {
     verifier: OnceLock<Weak<hirsel_validate::VerifierCache>>,
 }
 impl Admission {
-    fn charge(&self, bytes: u64) -> bool {
+    fn try_charge(&self, bytes: u64) -> bool {
         let reserve = || {
             self.used
                 .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
@@ -52,8 +52,14 @@ impl Admission {
                 return true;
             }
         }
-        self.exhausted.store(true, Ordering::Release);
         false
+    }
+    fn charge(&self, bytes: u64) -> bool {
+        let admitted = self.try_charge(bytes);
+        if !admitted {
+            self.exhausted.store(true, Ordering::Release);
+        }
+        admitted
     }
     fn release(&self, bytes: u64) {
         let previous = self.used.fetch_sub(bytes, Ordering::AcqRel);
@@ -305,6 +311,9 @@ impl ResultStore for RequestStore {
                 .map_or(self.baseline, |policy| policy.persistence()),
         )
     }
+    fn archive_encoded(&self, boundary: ArchiveBoundary) {
+        self.backend.archive_encoded(boundary);
+    }
 
     fn installation_output(&self) -> Option<Arc<dyn ResultStore>> {
         self.backend.installation_output()
@@ -352,11 +361,18 @@ impl ResultStore for RequestStore {
         operation
     }
     fn admit_product_memory(&self, bytes: u64) -> Option<Arc<dyn Send + Sync>> {
+        let admitted = self.try_admit_product_memory(bytes);
+        if admitted.is_none() {
+            self.memory.exhausted.store(true, Ordering::Release);
+        }
+        admitted
+    }
+    fn try_admit_product_memory(&self, bytes: u64) -> Option<Arc<dyn Send + Sync>> {
         let bytes =
             bytes.checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
                 ArchiveLease,
             >::uninit()))?;
-        if !self.memory.charge(bytes) {
+        if !self.memory.try_charge(bytes) {
             return None;
         }
         Some(Arc::new(ArchiveLease {
@@ -1077,6 +1093,25 @@ mod tests {
             assert!(request.exhausted());
             assert!(request.retained_bytes() <= limit);
             assert!(budget.reserve(1).is_err());
+        }
+        // Refusing a live lease still permits the required-spill boundary.
+        {
+            let allowance = ENTRY_CHARGE * 4;
+            let budget = hirsel_engine_admission::ProcessBudget::new(allowance);
+            let parent = tempfile::tempdir().unwrap();
+            let request = RequestStore::with_scratch(
+                Arc::new(NoneStore),
+                budget.reserve(allowance).unwrap(),
+                parent.path(),
+                allowance,
+            )
+            .unwrap();
+            assert!(request.try_admit_product_memory(allowance + 1).is_none());
+            assert!(!request.exhausted());
+            let spilled = request.put_content(domain(), b"required spill").unwrap();
+            assert_eq!(&*request.get_content(spilled).unwrap(), b"required spill");
+            assert!(!request.exhausted());
+            assert!(request.retained_bytes() <= allowance);
         }
         let allowance = ENTRY_CHARGE * 4;
         let budget = hirsel_engine_admission::ProcessBudget::new(allowance);

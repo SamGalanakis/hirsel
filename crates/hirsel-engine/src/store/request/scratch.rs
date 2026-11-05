@@ -142,6 +142,9 @@ impl ResultStore for ScratchStore {
     fn capability(&self) -> ProviderCapability {
         ProviderCapability::RequestLocal(self.selected.persistence())
     }
+    fn archive_encoded(&self, boundary: ArchiveBoundary) {
+        self.selected.archive_encoded(boundary);
+    }
 
     fn installation_output(&self) -> Option<Arc<dyn ResultStore>> {
         self.selected.installation_output()

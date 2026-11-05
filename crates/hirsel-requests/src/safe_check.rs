@@ -203,10 +203,7 @@ impl QueryTask for Task {
             },
             None => None,
         };
-        let Ok(check_archive) = check.archive(ArchiveAdmission::Retained) else {
-            return QueryPoll::Failed(owner.errors.resource);
-        };
-        let mut bytes = check_archive.reference().output.0.0.to_vec();
+        let mut bytes = check.action.0.0.to_vec();
         bytes.push(u8::from(run.is_some()));
         if let Some(run) = &run {
             let Ok(archive) = run.archive(ArchiveAdmission::Retained) else {

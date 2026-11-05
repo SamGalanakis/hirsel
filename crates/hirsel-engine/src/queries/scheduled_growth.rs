@@ -14,10 +14,6 @@ use std::{
     task::Poll,
 };
 pub const FRONT_GROWTH_KIND: u32 = 0x4600_0008;
-const OBSERVATIONS: Domain = Domain {
-    kind: 0x4600_0023,
-    schema: 1,
-};
 const FAILURE: Domain = Domain {
     kind: 0x4600_000c,
     schema: 1,
@@ -951,60 +947,5 @@ impl QueryEngine {
             output_pool,
             _allowance: allowance,
         }))
-    }
-}
-
-pub(super) fn publish_observations(
-    records: &crate::NativeRecords,
-    source: &crate::NativeRecordContext,
-    store: &dyn ResultStore,
-    reads: &Reads,
-    scratch: u64,
-) -> Option<Reference> {
-    let bytes = records.encode(source, reads)?;
-    (bytes.len() as u64 <= scratch)
-        .then(|| store.put_content(OBSERVATIONS, &bytes))
-        .flatten()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn observation_record_preserves_every_row_and_refuses_short_working_space() {
-        let engine = QueryEngine::new(crate::default_environment(), Default::default());
-        let source = crate::NativeRecordContext::capture(&engine);
-        let store = Arc::new(crate::store::MemStore::default());
-        let records = crate::NativeRecords::new(engine.types().clone(), store.clone());
-        let reads = Reads::from_vec(
-            (0u32..1024)
-                .map(|i| {
-                    (
-                        ReadKey::ExecutedBody(DefId::intern(&DefPath::core(&format!(
-                            "observed_{i}"
-                        )))),
-                        ContentHash::of_bytes(&i.to_le_bytes()),
-                    )
-                })
-                .collect(),
-        )
-        .unwrap();
-        let bytes = records.encode(&source, &reads).unwrap();
-        let reference = OBSERVATIONS.reference(&bytes).unwrap();
-        assert!(
-            publish_observations(&records, &source, &*store, &reads, bytes.len() as u64 - 1)
-                .is_none()
-        );
-        assert!(store.get_content(reference).is_none());
-        assert_eq!(
-            publish_observations(&records, &source, &*store, &reads, bytes.len() as u64),
-            Some(reference)
-        );
-        let restored: Reads = records
-            .decode(&source, &store.get_content(reference).unwrap())
-            .unwrap();
-        assert_eq!(restored, reads);
-        assert_eq!(restored.len(), 1024);
     }
 }

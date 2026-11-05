@@ -12,6 +12,7 @@ type HeaderProjection = (
 /// Shared across every metadata assembler belonging to this operation.
 #[derive(Default)]
 pub(crate) struct OperationOwner {
+    pub(crate) structural: parallel::structural::Checks,
     pub(crate) fact_graph: Arc<hirsel_validate::FactGraph>,
     pub(crate) inference: Mutex<Vec<Arc<header_products::PrivateInferenceScope>>>,
     pub(crate) captures: Mutex<Vec<Weak<NamespaceCapture>>>,

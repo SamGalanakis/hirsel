@@ -342,6 +342,10 @@ pub trait ResolverPhase: Send + Sync {
     ) -> Result<QueryOutput<Resolution>, QueryError>;
 }
 /// Type checking produces body tables; modes then enrich/check them before lowering (LANG-6, MODE-7).
+/// Structural checking consumes declaration signatures. Frozen body workers
+/// remove inferred ownership before invoking it; Modes consumes that proof
+/// separately. Dependency fingerprints are rebound to the consumer's complete
+/// current signatures before publication.
 pub trait CheckerPhase: Send + Sync {
     fn check(
         &self,

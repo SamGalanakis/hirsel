@@ -1,5 +1,5 @@
 //! Typed operation-local single flight. The wait graph follows salsa's
-//! runtime/dependency_graph.rs add_edge-before-block protocol. Unlike S1
+//! src/runtime/dependency_graph.rs:49-110 add_edge-before-block protocol. Unlike S1
 //! evaluation, an illegal fact cycle returns its key and never duplicates work.
 use crate::ViewRefusal;
 use std::collections::HashMap;

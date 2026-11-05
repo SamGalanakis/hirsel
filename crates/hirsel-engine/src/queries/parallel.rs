@@ -10,6 +10,7 @@ use hirsel_types::SignatureRef;
 pub(crate) use signature_reads::OrderedSignatureReads;
 mod compact;
 mod scheduled;
+pub(in crate::queries) mod structural;
 pub(crate) use compact::CompactCompleted;
 
 pub use scheduled::{
@@ -373,17 +374,12 @@ impl Worker<'_> {
             };
             let initial_signatures = stage.detail.signatures.len();
             let mut provider = WorkerRecorder::new(self, owner, &mut stage);
-            let mut result = match self.checker {
-                Some(adapter) => adapter.check(
-                    self.types,
-                    self.memo,
-                    task.syntax,
-                    resolution.value.clone(),
-                    &signature.value,
-                    &mut provider,
-                ),
-                None => Err(QueryError::NotImplemented),
-            };
+            let mut result = self.structural_check(
+                task.syntax,
+                resolution.value.clone(),
+                &signature.value,
+                &mut provider,
+            );
             if let Ok(output) = &mut result {
                 arm_fixes::place_with(
                     output,
@@ -908,6 +904,167 @@ mod frozen_task_tests {
             )]))
         }
     }
+    struct CountStructural(std::sync::atomic::AtomicUsize, DefId);
+    impl CheckerPhase for CountStructural {
+        fn check(
+            &self,
+            types: &hirsel_types::TypeInterner,
+            _: &hirsel_types::TypeMemo,
+            syntax: Arc<ItemSyntax>,
+            resolution: Resolution,
+            signature: &Signature,
+            provider: &mut dyn SignatureProvider,
+        ) -> Result<QueryOutput<TypedBody>, QueryError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let dependency = provider.signature(self.1)?;
+            let hirsel_types::SignatureKind::Function(function) = &dependency.kind else {
+                return Err(QueryError::NotImplemented);
+            };
+            Ok(QueryOutput {
+                value: TypedBody {
+                    checked: hirsel_types::CheckedBody {
+                        lexical: syntax.owner(),
+                        resolution,
+                        places: vec![],
+                        calls: vec![],
+                        tails: vec![],
+                        bindings: vec![],
+                        patterns: vec![],
+                        expressions: vec![],
+                        instantiations: vec![],
+                        closures: vec![],
+                    },
+                    syntax,
+                    plans: Default::default(),
+                    unit: function.result,
+                    boolean: types.intern(hirsel_types::Type::boolean()),
+                },
+                dependencies: vec![
+                    SignatureDependency {
+                        definition: signature.definition,
+                        fingerprint: signature.fingerprint,
+                    },
+                    SignatureDependency {
+                        definition: dependency.definition,
+                        fingerprint: dependency.fingerprint,
+                    },
+                ],
+                diagnostics: vec![],
+            })
+        }
+    }
+    #[test]
+    fn structural_check_reuses_declarations_and_rebinds_receipts_after_inference() {
+        crate::with_compiler_stack(|| {
+            let (mut engine, path) = fixture();
+            let id = DefId::intern(&path);
+            let first = engine.signatures[&id].result().unwrap().value.clone();
+            let file = engine
+                .sources
+                .add("dependency.hir", "fn dependency()->(){()}\n".into())
+                .unwrap();
+            let parsed = engine.parse_file(file, &default_context()).unwrap();
+            let dependency_path = parsed.value.items[0].item.definition.clone();
+            let dependency_id = DefId::intern(&dependency_path);
+            let checker = Arc::new(CountStructural(
+                std::sync::atomic::AtomicUsize::new(0),
+                dependency_id,
+            ));
+            engine.adapters.checker = Some(checker.clone());
+            let mut inferred = first.clone();
+            Arc::make_mut(&mut inferred)
+                .metadata
+                .inferred_unique
+                .preserves_unique
+                .push(hirsel_types::ParamId(0));
+            Arc::make_mut(&mut inferred).fingerprint = ContentHash::of_bytes(b"inferred receipt");
+            let mut dependency = first.clone();
+            Arc::make_mut(&mut dependency).definition = dependency_id;
+            let mut dependency_proof = dependency.clone();
+            Arc::make_mut(&mut dependency_proof)
+                .metadata
+                .inferred_unique = inferred.metadata.inferred_unique.clone();
+            Arc::make_mut(&mut dependency_proof).fingerprint =
+                ContentHash::of_bytes(b"provider inferred receipt");
+            let mut changed = dependency_proof.clone();
+            if let hirsel_types::SignatureKind::Function(function) =
+                &mut Arc::make_mut(&mut changed).kind
+            {
+                function.result = engine.types.intern(hirsel_types::Type::boolean());
+            }
+            Arc::make_mut(&mut changed).fingerprint =
+                ContentHash::of_bytes(b"changed provider declaration");
+            for (signature, dependency, expected_type, computations) in [
+                (
+                    first,
+                    dependency,
+                    engine.types.intern(hirsel_types::Type::unit()),
+                    1,
+                ),
+                (
+                    inferred.clone(),
+                    dependency_proof,
+                    engine.types.intern(hirsel_types::Type::unit()),
+                    1,
+                ),
+                (
+                    inferred,
+                    changed,
+                    engine.types.intern(hirsel_types::Type::boolean()),
+                    2,
+                ),
+            ] {
+                let text = engine
+                    .key_text(&dependency_path, QueryKind::Signature)
+                    .unwrap();
+                let entry = engine.finish(
+                    MemoKey::new(QueryKind::Signature, dependency_id),
+                    text,
+                    DependencyReads::default(),
+                    Ok(output(dependency.clone())),
+                    Observed::default(),
+                );
+                engine.signatures.insert(dependency_id, Arc::new(entry));
+                engine.snapshot = None;
+                engine.header_products = None;
+                let snapshot = engine.signature_inputs();
+                let declarations = engine.frozen_declarations();
+                let citations = engine.citation_source();
+                let worker = Worker {
+                    owners: engine.source_records(),
+                    types: &engine.types,
+                    memo: &engine.memo,
+                    snapshot: &snapshot,
+                    declarations: &declarations,
+                    citations: &citations,
+                    sources: &engine.sources,
+                    items: &engine.items,
+                    resolver: None,
+                    checker: engine.adapters.checker.as_deref(),
+                    modes: None,
+                };
+                let mut reads = ReadsBuilder::new();
+                let mut provider =
+                    FrozenProvider::for_definition(&snapshot, id, &citations, &mut reads);
+                let output = worker
+                    .structural_check(
+                        engine.items[&path][0].clone(),
+                        Resolution::default(),
+                        &signature,
+                        &mut provider,
+                    )
+                    .unwrap();
+                assert_eq!(output.value.unit, expected_type);
+                assert_eq!(output.dependencies[0].fingerprint, signature.fingerprint);
+                assert_eq!(output.dependencies[1].fingerprint, dependency.fingerprint);
+                assert_eq!(
+                    checker.0.load(std::sync::atomic::Ordering::SeqCst),
+                    computations
+                );
+            }
+        });
+    }
+
     fn fixture() -> (QueryEngine, DefPath) {
         let mut adapters = crate::phases::engine_only_adapters();
         adapters.checker = Some(Arc::new(RejectAfterReads));

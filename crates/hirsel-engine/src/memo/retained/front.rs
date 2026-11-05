@@ -284,3 +284,55 @@ impl Weight<'_> {
         self.flat_vec(call_allocations);
     }
 }
+
+pub(crate) fn retained_structural_bytes(
+    syntax: &Arc<hirsel_syntax::ItemSyntax>,
+    resolution: &Resolution,
+    result: &Result<QueryOutput<crate::TypedBody>, QueryError>,
+) -> u64 {
+    let mut weight = Weight {
+        count_shared_repeats: true,
+        ..Default::default()
+    };
+    weight.arc(syntax, |w, syntax| w.syntax(syntax));
+    weight.resolution(resolution);
+    match result {
+        Ok(output) => {
+            weight.vec(&output.diagnostics, Weight::diagnostic);
+            weight.flat_vec(&output.dependencies);
+            weight.arc(&output.value.syntax, |w, syntax| w.syntax(syntax));
+            weight.checked_body(&output.value.checked);
+            weight.plans(&output.value.plans);
+        }
+        Err(error) => weight.error(error),
+    }
+    weight.bytes
+}
+pub(crate) fn retained_structural_lookup_bytes(
+    context: &hirsel_syntax::FileContext,
+    path: &hirsel_syntax::Path,
+    output: &LookupOutput,
+) -> u64 {
+    let mut weight = Weight {
+        count_shared_repeats: true,
+        ..Default::default()
+    };
+    weight.add(context.package.name.capacity());
+    weight.add(context.package.version.capacity());
+    weight.vec(&context.modules, |w, module| w.add(module.capacity()));
+    if let Some(package) = &path.package {
+        weight.add(package.name.capacity());
+        weight.add(package.version.capacity());
+    }
+    weight.flat_vec(&path.segments);
+    match &output.result {
+        Ok(path) => weight.def_path(path),
+        Err(error) => weight.error(error),
+    }
+    weight.bytes
+}
+pub(crate) fn retained_structural_path_bytes(path: &hirsel_syntax::DefPath) -> u64 {
+    let mut weight = Weight::default();
+    weight.def_path(path);
+    weight.bytes
+}

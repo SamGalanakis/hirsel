@@ -234,6 +234,14 @@ pub(crate) struct HeaderProducts {
     failures: BTreeMap<DefId, Vec<hirsel_types::UniqueFailure>>,
 }
 impl HeaderProducts {
+    pub(in crate::queries) fn structural_checks(
+        &self,
+        checker: &dyn CheckerPhase,
+    ) -> Option<(&parallel::structural::Checks, Arc<dyn CheckerPhase>)> {
+        let owned = self.adapters.checker.as_ref()?;
+        std::ptr::eq(checker, &**owned).then(|| (&self.operation.structural, owned.clone()))
+    }
+
     pub(crate) fn fact_graph(&self) -> Arc<hirsel_validate::FactGraph> {
         self.store
             .as_ref()
@@ -1227,7 +1235,8 @@ impl HeaderProducts {
     }
     /// Evict one unpinned settled entry: a header row, else a module proof.
     pub(crate) fn evict(&self) -> bool {
-        if self.reclaim_header_rows()
+        if self.operation.structural.evict()
+            || self.reclaim_header_rows()
             || self.evict_validation_cache()
             || self.evict_row()
             || self.evict_proof()

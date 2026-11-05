@@ -6,13 +6,14 @@ pub(crate) fn supplier(
     path: &Path,
     entry: &hirsel_engine::DefPath,
     toolchain: &hirsel_native::Toolchain,
-) -> impl FnMut(&hirsel_native::Options) -> Result<Arc<requests::NativeReady>, hirsel_native::NativeError>
-{
+) -> impl FnMut(
+    &hirsel_native::Options,
+) -> Result<Arc<hirsel_requests::NativeReady>, hirsel_native::NativeError> {
     let path = path.to_path_buf();
     let entry = entry.clone();
     let compiler = hirsel_front_phases::COMPILER;
     let mut compiler_requests =
-        requests::CompilerRequests::for_host(compiler.clone(), compiler.configuration())
+        hirsel_requests::CompilerRequests::for_host(compiler.clone(), compiler.configuration())
             .with_toolchain(Arc::new(toolchain.clone()));
     move |options| {
         let failed = |message| hirsel_native::NativeError {
@@ -24,11 +25,11 @@ pub(crate) fn supplier(
         let output = compiler_requests
             .execute(
                 &path,
-                requests::CompileOperation::NativeBuild(requests::NativeRequest {
+                hirsel_requests::CompileOperation::NativeBuild(hirsel_requests::NativeRequest {
                     definition: Some(entry.clone()),
                     test_entries: vec![],
                     supplemental_sources: vec![],
-                    output: requests::NativeOutput::Ready,
+                    output: hirsel_requests::NativeOutput::Ready,
                     options: hirsel_native::BuildOptions::new(
                         options.clone(),
                         hirsel_native::Backend::Llvm,
@@ -41,14 +42,16 @@ pub(crate) fn supplier(
             )
             .map_err(|error| failed(error.to_string()))?;
         match &output.result {
-            requests::CompileResult::NativeReady(view) => Ok(view.clone()),
-            requests::CompileResult::NativeError(error) => Err(error.clone()),
-            requests::CompileResult::Check(checked)
-            | requests::CompileResult::SafeCheck { checked, .. }
-            | requests::CompileResult::CheckedProducts { checked, .. } => Err(failed(format!(
-                "native request returned check result: completion={:?}, diagnostics={:?}",
-                checked.completion, checked.diagnostics
-            ))),
+            hirsel_requests::CompileResult::NativeReady(view) => Ok(view.clone()),
+            hirsel_requests::CompileResult::NativeError(error) => Err(error.clone()),
+            hirsel_requests::CompileResult::Check(checked)
+            | hirsel_requests::CompileResult::SafeCheck { checked, .. }
+            | hirsel_requests::CompileResult::CheckedProducts { checked, .. } => {
+                Err(failed(format!(
+                    "native request returned check result: completion={:?}, diagnostics={:?}",
+                    checked.completion, checked.diagnostics
+                )))
+            }
             _ => Err(failed(
                 "native request returned an unexpected result".into(),
             )),

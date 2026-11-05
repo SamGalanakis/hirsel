@@ -181,7 +181,7 @@ fn recipe(row: &Row) -> Fixture {
     }
 }
 fn simulations(
-    prepared: &requests::TirExecution,
+    prepared: &hirsel_requests::TirExecution,
     id: &str,
     world: hirsel_engine::SimulationConfig,
     expected: &[u8],
@@ -437,7 +437,7 @@ fn four_engine_lines_cursor_and_offline_replay() {
 }
 
 fn refusal_controls(
-    prepared: &requests::TirExecution,
+    prepared: &hirsel_requests::TirExecution,
     tape: &Path,
     record: &hirsel_rt::launch::Recording,
     runnables: &[(Runnable, PathBuf)],

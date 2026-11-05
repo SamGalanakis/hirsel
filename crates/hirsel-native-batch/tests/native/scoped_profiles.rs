@@ -1,6 +1,5 @@
 use hirsel_engine::DefinitionQueries;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 #[test]
 fn profile_switch_keeps_debug_heap_and_release_zero_environment() {

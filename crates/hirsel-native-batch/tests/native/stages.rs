@@ -1,7 +1,6 @@
 use crate::build;
 use hirsel_native::stages::*;
 use hirsel_native::*;
-use hirsel_native_batch::*;
 use hirsel_native_testing::*;
 
 /// Operational budgets stop below LANG-10 and do not start user cleanup.

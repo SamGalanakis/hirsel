@@ -45,6 +45,7 @@ STARTUP_PREFIXES = (
     'crates/hirsel-requests/src/',
     'crates/hirsel-native/src/',
     'crates/hirsel-native-queries/src/',
+    'crates/hirsel-native-cache/src/',
     'crates/hirsel-native-batch/src/',
     'crates/hirsel-native-testing/src/',
     'crates/hirsel-host-io/src/',

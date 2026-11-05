@@ -87,12 +87,12 @@ fn dfa_forced_quits() -> bool uses {} {
   let mut work = 1000000u64
   let Ok(subject) = make_subject("aaa", mut work) else { return false }
   let mut cache = dfa_cache(re, true, 65024)
-  let mut state = dfa_intern(mut cache, 0, 0)
+  let mut state = dfa_intern(vm_program(re), mut cache, 0, 0)
   let mut at = 0u64
   while at <= 3 {
     let transition = dfa_transition(vm_program(re), state, dfa_byte(subject, at), mut cache)
     if transition == 0 { return false }
-    state = transition / 4
+    state = transition / 8
     at += 1
   }
   cache.limit = core@1/list.len(cache.data)
@@ -108,9 +108,9 @@ fn dfa_forced_quits() -> bool uses {} {
   // A pending lower-priority match is inconclusive if a later miss fills cache.
   let Ok(alternate) = compile("a.*z|a", 100) else { return false }
   let mut pending = dfa_cache(alternate, true, 65024)
-  state = dfa_intern(mut pending, 0, 0)
+  state = dfa_intern(vm_program(alternate), mut pending, 0, 0)
   let first = dfa_transition(vm_program(alternate), state, 97, mut pending)
-  let second = dfa_transition(vm_program(alternate), first / 4, 120, mut pending)
+  let second = dfa_transition(vm_program(alternate), first / 8, 120, mut pending)
   if second % 2 != 1 { return false }
   pending.limit = core@1/list.len(pending.data)
   let Ok(other) = make_subject("axq", mut work) else { return false }

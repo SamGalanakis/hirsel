@@ -2875,24 +2875,24 @@ impl QueryEngine {
     /// their roots. Only resolution runs here; a body that fails to resolve or names an
     /// unavailable specialization reports it from its own worker outcome.
     pub fn register_specializations(&mut self, definitions: &[DefPath]) {
-        let mut pending = definitions.to_vec();
-        let mut seen = std::collections::BTreeSet::new();
-        while let Some(definition) = pending.pop() {
-            if !seen.insert(definition.clone()) {
+        let mut pending: Vec<_> = definitions.iter().map(DefId::intern).collect();
+        let mut seen = hirsel_syntax::DefMap::default();
+        while let Some(id) = pending.pop() {
+            if seen.insert(id, ()).is_some() {
                 continue;
             }
-            let id = DefId::intern(&definition);
-            let facts = self.source_facts(&definition);
+            let definition = id.path();
+            let facts = self.source_facts(definition);
             if facts.as_ref().is_some_and(|facts| !facts.specializes)
                 && !self.specialization_dependencies.contains_key(&id)
             {
                 continue;
             }
-            let dependencies = if self.installed_definition(&definition) {
+            let dependencies = if self.installed_definition(definition) {
                 // The immutable package already published exact registrations.
                 // Reading them does not resolve or reconstruct its With body.
                 let Ok(Some(record)) =
-                    self.installed_semantic_input(&definition, crate::store::MAX_RECORD as u64)
+                    self.installed_semantic_input(definition, crate::store::MAX_RECORD as u64)
                 else {
                     continue;
                 };
@@ -2903,22 +2903,22 @@ impl QueryEngine {
             } else {
                 if facts.is_none()
                     && !self
-                        .snapshot(&definition)
+                        .snapshot(definition)
                         .is_ok_and(|syntax| crate::families::closes(&syntax))
                 {
                     continue;
                 }
-                if self.materialize(&definition).is_err() {
+                if self.materialize(definition).is_err() {
                     continue;
                 }
-                let Some(dependencies) = self.specialization_dependencies(&definition) else {
+                let Some(dependencies) = self.specialization_dependencies(definition) else {
                     continue;
                 };
                 dependencies
             };
             for dependency in dependencies {
                 if self.materialize(&dependency).is_ok() {
-                    pending.push(dependency);
+                    pending.push(DefId::intern(&dependency));
                 }
             }
         }

@@ -1330,9 +1330,14 @@ pub(super) fn install(
     let mut run_inputs = installed.run_inputs.take();
     let run_error = installed.run_error.take();
     let available_run = needs_run && run_inputs.is_some();
-    let available_export =
+    // Optional export buffers cannot spend Run's already planned input rows.
+    let run_inventory = run_inputs
+        .as_ref()
+        .map(|inputs| run.split(inputs.input_bytes()).ok_or_else(|| uninstalled()))
+        .transpose()?;
+    let mut available_export =
         artifacts && available_run && (!shared_source || definitions.contains(&program.entry));
-    let export_error = (shared_source && run_error.is_none() && !available_export)
+    let mut export_error = (shared_source && run_error.is_none() && !available_export)
         .then_some(QueryError::NotImplemented);
     let mut native_catalogue = installed.catalogue.take();
     let query_error = |error| ToolError::Query {
@@ -1469,6 +1474,27 @@ pub(super) fn install(
     };
     let check = installed.check(&mut program.engine, &selection)?;
     let plan = &installed.plan;
+    let export_headers = if available_export {
+        let headers = program
+            .engine
+            .front_checked_signatures_bytes(&front)
+            .map_err(&query_error)?;
+        let minimum = headers
+            .checked_add(super::safe_check::BYTES)
+            .and_then(|bytes| bytes.checked_add(super::proof_export::BYTES));
+        if shared_source && minimum.is_none_or(|bytes| bytes > run.bytes()) {
+            available_export = false;
+            export_error = Some(QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "proof export inputs".into(),
+                message: "proof export inputs exceed admission".into(),
+            }));
+            None
+        } else {
+            Some(headers)
+        }
+    } else {
+        None
+    };
     let needs_safe = if shared_source {
         available_export
     } else {
@@ -1498,15 +1524,13 @@ pub(super) fn install(
         })
         .transpose()?;
     let export_allowance = if available_export {
-        let headers = program
-            .engine
-            .front_checked_signatures_bytes(&front)
-            .map_err(&query_error)?;
-        let headers = run.split(headers).ok_or_else(|| uninstalled())?;
-        let export = run.split(run.bytes() / 4).ok_or_else(|| uninstalled())?;
+        let headers = run
+            .split(export_headers.ok_or_else(|| uninstalled())?)
+            .ok_or_else(|| uninstalled())?;
         let output = run
             .split(super::proof_export::BYTES)
             .ok_or_else(|| uninstalled())?;
+        let export = run.split(run.bytes() / 4).ok_or_else(|| uninstalled())?;
         Some((headers, export, output))
     } else {
         None
@@ -1520,6 +1544,8 @@ pub(super) fn install(
         .transpose()?;
     let mut run = if available_run {
         let inputs = run_inputs.take().ok_or_else(|| uninstalled())?;
+        run.join(run_inventory.ok_or_else(|| uninstalled())?)
+            .map_err(|_| uninstalled())?;
         let selected = if matches!(request.operation, CompileOperation::Precompute) {
             program
                 .engine

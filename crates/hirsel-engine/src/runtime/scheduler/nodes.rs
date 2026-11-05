@@ -266,8 +266,9 @@ impl Nodes {
             let node = &self.rows[cursor.slot as usize];
             let Some(next) = node.dependencies.iter().find_map(|edge| {
                 let slot = edge.target();
-                (!matches!(self.rows[slot as usize].status, Status::Settled(_))
-                    || (!edge.body_consumed() && matches!(self.rows[slot as usize].status, Status::Settled(ref result) if result.is_err())))
+                (!edge.body_consumed()
+                    && (!matches!(self.rows[slot as usize].status, Status::Settled(_))
+                        || matches!(self.rows[slot as usize].status, Status::Settled(ref result) if result.is_err())))
                     .then_some(NodeId { slot, generation: self.rows[slot as usize].generation })
             }) else { return false; };
             cursor = next;

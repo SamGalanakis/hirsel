@@ -2616,3 +2616,20 @@ fn ordered_publication_advances_past_a_consumed_dependency_failure() {
         assert_eq!(rt.wait(request), Ok(vec![product(local_query(0))]));
     }
 }
+
+#[test]
+fn ordered_publication_advances_past_a_released_dormant_body() {
+    for result in [Ok(product(query(1))), Err(errors().protocol)] {
+        let mut nodes = Nodes::default();
+        let root = nodes.insert(key(query(0)), bare_node());
+        let first = nodes.insert(key(query(1)), bare_node());
+        let next = nodes.insert(key(query(2)), bare_node());
+        nodes.insert_edge(root, first).unwrap();
+        nodes.insert_edge(root, next).unwrap();
+        assert!(!nodes.publication_frontier(key(query(0)), next));
+        nodes.get_id_mut(first).unwrap().status = Status::Settled(Box::new(result));
+        nodes.release_body(root, key(query(1)));
+        nodes.remove(&key(query(1)));
+        assert!(nodes.publication_frontier(key(query(0)), next));
+    }
+}

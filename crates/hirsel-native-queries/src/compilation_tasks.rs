@@ -276,7 +276,7 @@ impl CompilationTasks {
             .iter()
             .any(|(_, output)| output.facts.body.seal_demand.has_seal())
         {
-            super::seal_demand::Plan::admission_bytes(
+            super::seal_demand::Plan::stored_admission_bytes(
                 completed
                     .iter()
                     .map(|(_, output)| &output.facts.body.seal_demand),

@@ -86,12 +86,14 @@ impl NativeTasks {
             } else {
                 let mut locals = inputs
                     .iter()
-                    .map(|(key, output)| super::seal_demand::Input {
-                        query: instance_query(key, output.product.product.clone()),
-                        product: output.product.product.clone(),
-                        equations: output.facts.body.seal_demand.clone(),
+                    .map(|(key, output)| {
+                        Ok(super::seal_demand::Input {
+                            query: instance_query(key, output.product.product.clone()),
+                            product: output.product.product.clone(),
+                            equations: output.facts.body.seal_demand.open()?,
+                        })
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<Result<Vec<_>, String>>()?;
                 locals.sort_by(|a, b| a.equations.owner().cmp(b.equations.owner()));
                 let mut roots = snapshot
                     .instances

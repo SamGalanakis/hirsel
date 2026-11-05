@@ -49,12 +49,28 @@ impl Plan {
     /// Plan plus the largest retained per-value selection. Count owned vector
     /// and path allocations; serialized output size is not a memory allowance.
     pub fn admission_bytes<'a>(locals: impl IntoIterator<Item = &'a LocalDemandEquations>) -> u64 {
+        Self::admission_rows(
+            locals
+                .into_iter()
+                .map(|local| (local.retained_bytes(), local.value_count(), local.owner())),
+        )
+    }
+    pub fn stored_admission_bytes<'a>(
+        locals: impl IntoIterator<Item = &'a super::demand::StoredSealEquations>,
+    ) -> u64 {
+        Self::admission_rows(
+            locals
+                .into_iter()
+                .map(|local| (local.retained_bytes(), local.value_count(), local.owner())),
+        )
+    }
+    fn admission_rows<'a>(locals: impl IntoIterator<Item = (u64, u32, &'a Function)>) -> u64 {
         let mut weight = hirsel_engine::NativeMetadataWeight::default();
         weight.add(size_of::<GuardTasks>() + size_of::<Plan>() + 4096);
-        for local in locals {
-            weight.add(size_of::<Input>() + local.retained_bytes() as usize);
-            weight.add(size_of::<UnitDemand>() + local.value_count() as usize * size_of::<u32>());
-            weight.path(&local.owner().0);
+        for (bytes, values, owner) in locals {
+            weight.add(size_of::<Input>() + bytes as usize);
+            weight.add(size_of::<UnitDemand>() + values as usize * size_of::<u32>());
+            weight.path(&owner.0);
             weight.add(size_of::<usize>() + size_of::<QueryId>());
         }
         weight.bytes()

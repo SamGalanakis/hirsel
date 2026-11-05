@@ -15,6 +15,8 @@ use hirsel_lir::{
 use hirsel_rc::instance::{InstanceId, Instances, SelectionRead};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+mod seal_equations;
+pub use seal_equations::StoredSealEquations;
 
 const SOURCE_RECIPE: Domain = Domain {
     kind: 0x4e00_0016,
@@ -150,7 +152,7 @@ pub struct InstanceFacts {
 /// Neither these equations nor their immutable owner convey native C authority.
 #[derive(Clone)]
 pub struct InstanceBodyFacts {
-    pub seal_demand: hirsel_rc::seal_demand::equations::LocalDemandEquations,
+    pub seal_demand: StoredSealEquations,
     pub callees: Vec<hirsel_rc::arena_credit::equations::Function>,
     pub dependencies: Vec<InstanceAddress>,
     pub templates: super::optimizer::TemplateFacts,
@@ -159,7 +161,6 @@ pub struct InstanceBodyFacts {
 }
 impl InstanceBodyFacts {
     fn packed(mut self) -> Self {
-        self.seal_demand.compact();
         self.callees.shrink_to_fit();
         self.dependencies.shrink_to_fit();
         self.templates.references.shrink_to_fit();
@@ -176,7 +177,7 @@ impl InstanceBodyFacts {
         weight.vec(&self.templates.references, |w, (path, _)| w.path(path));
         weight
             .bytes()
-            .saturating_add(self.seal_demand.retained_bytes())
+            .saturating_add(self.seal_demand.retained_metadata_bytes())
             .saturating_add(self.operation_freedom.retained_bytes())
     }
 }
@@ -1113,6 +1114,11 @@ impl DemandInstances {
             .into_iter()
             .map(|r| self.admit(r))
             .collect::<Result<Vec<_>, _>>()?;
+        let seal_demand = StoredSealEquations::capture(
+            self.store.clone(),
+            product.discovery,
+            discovery.seal_demand,
+        )?;
         let output = Arc::new(DiscoveredInstance::with_facts(
             product,
             InstanceFacts {
@@ -1129,7 +1135,7 @@ impl DemandInstances {
                 ),
                 body: Arc::new(
                     InstanceBodyFacts {
-                        seal_demand: discovery.seal_demand,
+                        seal_demand,
                         callees: discovery.callees,
                         dependencies,
                         templates: discovery.templates,

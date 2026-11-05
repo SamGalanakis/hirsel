@@ -181,7 +181,7 @@ impl OwnershipCompilation {
             .ok_or("ownership dispatch admission consumed twice")?;
         if snapshot.needs_guard {
             let inputs = snapshot.instances.completed_inputs()?;
-            let bytes = super::seal_demand::Plan::admission_bytes(
+            let bytes = super::seal_demand::Plan::stored_admission_bytes(
                 inputs
                     .iter()
                     .map(|(_, output)| &output.facts.body.seal_demand),

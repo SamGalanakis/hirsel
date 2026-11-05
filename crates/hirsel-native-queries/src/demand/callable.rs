@@ -178,6 +178,12 @@ impl DemandInstances {
                 .iter()
                 .map(|r| Some(self.address(r.key.bind().ok()?)))
                 .collect::<Option<Vec<_>>>()?;
+            let seal_demand = StoredSealEquations::capture(
+                self.store.clone(),
+                product.discovery,
+                discovery.seal_demand,
+            )
+            .ok()?;
             outputs.push((
                 key,
                 Arc::new(DiscoveredInstance::with_facts(
@@ -197,7 +203,7 @@ impl DemandInstances {
                         ),
                         body: Arc::new(
                             InstanceBodyFacts {
-                                seal_demand: discovery.seal_demand,
+                                seal_demand,
                                 callees: discovery.callees,
                                 dependencies,
                                 templates: discovery.templates,
@@ -482,6 +488,8 @@ impl DemandInstances {
                 discovery,
                 original.product.statics_finalizers,
             )?;
+            let seal_demand =
+                StoredSealEquations::capture(self.store.clone(), product.discovery, seal_demand)?;
             outputs.push((
                 key.clone(),
                 Arc::new(DiscoveredInstance::with_facts(
@@ -524,13 +532,54 @@ mod tests {
         let types = hirsel_types::TypeInterner::new(None);
         let path = hirsel_syntax::DefPath::core("facts");
         let key = InstanceKey::new(&path, 0, &[], &types, None, None).unwrap();
-        let record = INSTANCE_DISCOVERY_DOMAIN.reference(b"descriptor").unwrap();
+        let equations: hirsel_rc::seal_demand::equations::LocalDemandEquations =
+            serde_json::from_value(serde_json::json!({
+                "schema": 1, "owner": (&path, key.digest()), "values": 1025,
+                "parameters": [0], "captures": [],
+                "flow": (0..1024).map(|i| (i + 1, i)).collect::<Vec<_>>(),
+                "closures": [], "calls": [], "returns": [1024], "seals": [1024]
+            }))
+            .unwrap();
+        let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine::store::MemStore::default());
+        let bytes = serde_json::to_vec(&serde_json::json!({"seal_demand": &equations})).unwrap();
+        let record = store
+            .put_content(INSTANCE_DISCOVERY_DOMAIN, &bytes)
+            .unwrap();
+        let stored =
+            StoredSealEquations::capture(store.clone(), record, equations.clone()).unwrap();
+        assert_eq!(stored.open().unwrap(), equations);
+        let emission_record = store
+            .put_content(
+                INSTANCE_DISCOVERY_DOMAIN,
+                &serde_json::to_vec(
+                    &serde_json::json!({"seal_demand": &equations, "emission": true}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            StoredSealEquations::capture(store.clone(), emission_record, equations.clone())
+                .unwrap()
+        );
+        let changed = serde_json::from_value(serde_json::json!({
+            "schema": 1, "owner": (&path, key.digest()), "values": 1025,
+            "parameters": [0], "captures": [], "flow": [], "closures": [],
+            "calls": [], "returns": [1024], "seals": []
+        }))
+        .unwrap();
+        assert!(
+            StoredSealEquations::capture(store, record, changed)
+                .unwrap()
+                .open()
+                .is_err()
+        );
         let product = Arc::new(InstanceProduct {
             product: crate::fixture_product_bytes(
                 hirsel_engine::store::Address(record.output.0),
                 Action(record.output.0),
                 record.domain,
-                b"descriptor",
+                &bytes,
             ),
             value: record,
             layout_closure: record,
@@ -568,12 +617,7 @@ mod tests {
             source,
             body: Arc::new(
                 InstanceBodyFacts {
-                    seal_demand: serde_json::from_value(serde_json::json!({
-                        "schema": 1, "owner": (&path, record.output.0), "values": 0,
-                        "parameters": [], "captures": [], "flow": [], "closures": [],
-                        "calls": [], "returns": [], "seals": []
-                    }))
-                    .unwrap(),
+                    seal_demand: stored,
                     callees: Vec::new(),
                     dependencies: Vec::new(),
                     templates: hirsel_native_cache::optimizer::TemplateFacts {
@@ -598,6 +642,10 @@ mod tests {
                 ..Default::default()
             },
         };
+        assert!(
+            facts.body.retained_metadata_bytes() < equations.retained_bytes(),
+            "completed facts release decoded seal graph allocations"
+        );
         drop(owner);
         let original = DiscoveredInstance::with_facts(product.clone(), facts.clone(), None);
         let unchanged =

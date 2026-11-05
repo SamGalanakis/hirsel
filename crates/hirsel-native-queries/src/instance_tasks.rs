@@ -316,6 +316,52 @@ impl InstanceTasks {
             .cloned()
             .collect()
     }
+    fn binding_refusal(
+        &self,
+        registry: &Registry,
+        requested: u64,
+        owner: &hirsel_syntax::DefPath,
+    ) -> String {
+        let mut requests = 0;
+        let mut bindings = 0;
+        let mut descriptors = 0;
+        let mut ready = 0;
+        let mut seal = 0;
+        let mut freedom = 0;
+        let mut discharge = 0;
+        let mut largest = (0, String::new());
+        for entry in registry.entries.values() {
+            requests += entry.request.retained_metadata_bytes();
+            if let Some((_, original)) = entry.source.get() {
+                let mut weight = hirsel_engine::NativeMetadataWeight::default();
+                weight.path(&original.definition);
+                bindings +=
+                    weight.bytes() + original.body.retained_metadata_bytes().unwrap_or(u64::MAX);
+            }
+            if let Some(output) = entry.output.get() {
+                let bytes = output.retained_metadata_bytes();
+                descriptors += bytes;
+                ready += output.facts.source.ready_source.retained_metadata_bytes();
+                seal += output.facts.body.seal_demand.retained_metadata_bytes();
+                freedom += output.facts.body.operation_freedom.retained_bytes();
+                discharge += output.facts.source.discharge.retained_metadata_bytes();
+                if bytes > largest.0 {
+                    largest = (bytes, entry.key.instance.definition().to_string());
+                }
+            }
+        }
+        format!(
+            "native source binding exceeds retained allowance: owner {owner}, requested {requested}, retained {}, allowance {}, entries {}, requests {requests}, source bindings {bindings}, descriptors {descriptors} [ready {ready}, seal {seal}, freedom {freedom}, discharge {discharge}], registry/frame {}, largest descriptor {} {}",
+            registry.charged,
+            self.allowance.bytes(),
+            registry.entries.len(),
+            registry
+                .charged
+                .saturating_sub(requests + bindings + descriptors),
+            largest.0,
+            largest.1
+        )
+    }
     fn charge_output(&self, output: &DiscoveredInstance) -> Result<(), String> {
         let charge = output.retained_metadata_bytes();
         let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
@@ -742,7 +788,9 @@ impl QueryTask for InstanceTask {
                                     .charged
                                     .checked_add(weight.bytes())
                                     .filter(|total| *total <= self.tasks.allowance.bytes())
-                                    .ok_or("native source binding exceeds retained allowance")?;
+                                    .ok_or_else(|| {
+                                        self.tasks.binding_refusal(&registry, weight.bytes(), path)
+                                    })?;
                                 drop(registry);
                                 self.entry
                                     .source

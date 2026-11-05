@@ -600,6 +600,11 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
             runtime.shutdown();
             drop(runtime);
             drop(program);
+            assert!(
+                budget.reserved() > 0,
+                "the source codec context owns its bindings"
+            );
+            drop(anchors);
             assert_eq!(budget.reserved(), 0);
         }
     });

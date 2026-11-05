@@ -10,7 +10,7 @@ use super::{
 use hirsel_engine::store::{Action, Address, Domain};
 use hirsel_engine::{runtime::*, store::ResultStore};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     sync::{
         Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -26,6 +26,8 @@ const FAILURE: Domain = Domain {
 };
 type Index = BTreeMap<ContentHash, Arc<Registered>>;
 struct Registered {
+    ordinal: usize,
+    address: ContentHash,
     key: InstanceAddress,
     request: Request,
     input: OnceLock<ProductRef>,
@@ -123,7 +125,7 @@ impl InstanceTasks {
                 b"native instance task resource or protocol refusal",
             )
             .ok_or("native task failure publication failed")?;
-        let root_bytes = roots.len().saturating_mul(size_of::<ContentHash>());
+        let root_bytes = roots.len().saturating_mul(size_of::<Arc<Registered>>());
         if weight.retained < root_bytes as u64 + std::mem::size_of::<DiscoveryTask>() as u64
             || weight.retained < std::mem::size_of::<InstanceTask>() as u64
             || weight.retained < std::mem::size_of::<DiscoveryTask>() as u64
@@ -246,6 +248,8 @@ impl InstanceTasks {
                     key.address(INSTANCE_INPUT_KIND).0,
                     charge,
                     Arc::new(Registered {
+                        ordinal: 0,
+                        address: key.address(INSTANCE_KIND).0,
                         key,
                         request,
                         input: OnceLock::new(),
@@ -261,7 +265,7 @@ impl InstanceTasks {
             weight.tree::<ContentHash, Arc<Registered>>(len);
             weight.bytes().saturating_mul(2)
         };
-        for (id, input, mut charge, entry) in entries {
+        for (id, input, mut charge, mut entry) in entries {
             if let Some(previous) = registry.entries.get(&id) {
                 if previous.key != entry.key || previous.request != entry.request {
                     return Err(format!(
@@ -285,6 +289,9 @@ impl InstanceTasks {
             {
                 return Err("native discovery metadata allowance exhausted".into());
             }
+            Arc::get_mut(&mut entry)
+                .expect("unpublished native registration")
+                .ordinal = registry.entries.len();
             registry.charged += charge;
             registry.inputs.insert(input, entry.clone());
             registry.entries.insert(id, entry);
@@ -593,9 +600,13 @@ impl QueryFactory for InstanceTaskFactory {
                     .tasks
                     .roots
                     .iter()
-                    .map(|key| key.address(INSTANCE_KIND).0)
-                    .collect(),
-                seen: BTreeSet::new(),
+                    .map(|key| {
+                        self.tasks
+                            .registered(key)
+                            .map_err(|e| self.tasks.failure(&e))
+                    })
+                    .collect::<Result<_, _>>()?,
+                seen: Vec::new(),
                 terminal: None,
             }));
         }
@@ -832,8 +843,8 @@ impl QueryTask for InstanceTask {
 }
 struct DiscoveryTask {
     tasks: Arc<InstanceTasks>,
-    frontier: Vec<ContentHash>,
-    seen: BTreeSet<ContentHash>,
+    frontier: Vec<Arc<Registered>>,
+    seen: Vec<u64>,
     terminal: Option<Result<ProductRef, Reference>>,
 }
 impl QueryTask for DiscoveryTask {
@@ -863,9 +874,9 @@ impl QueryTask for DiscoveryTask {
             } else {
                 self.frontier
                     .iter()
-                    .map(|address| QueryId {
+                    .map(|entry| QueryId {
                         kind: INSTANCE_KIND,
-                        address: Address(*address),
+                        address: Address(entry.address),
                     })
                     .collect()
             }),
@@ -876,32 +887,37 @@ impl QueryTask for DiscoveryTask {
         }
     }
 }
+// Ordinals are stable, dense slots in this immutable operation's registry.
+// These bits record traversal only; reads still compare the exact ProductRef.
+fn marked(bits: &[u64], ordinal: usize) -> bool {
+    bits.get(ordinal / 64)
+        .is_some_and(|word| word & (1 << (ordinal % 64)) != 0)
+}
+fn mark(bits: &mut Vec<u64>, ordinal: usize) -> bool {
+    let word = ordinal / 64;
+    if word >= bits.len() {
+        bits.resize(word + 1, 0);
+    }
+    let mask = 1 << (ordinal % 64);
+    let previous = bits[word] & mask != 0;
+    bits[word] |= mask;
+    previous
+}
 impl DiscoveryTask {
     fn advance(&mut self, cx: &mut dyn QueryContext) -> Result<Option<ProductRef>, Reference> {
         let mut frontier = std::mem::take(&mut self.frontier);
-        let mut read = BTreeSet::new();
-        while let Some(address) = frontier.pop() {
-            if self.seen.contains(&address) || !read.insert(address) {
+        let mut read = Vec::new();
+        while let Some(entry) = frontier.pop() {
+            if marked(&self.seen, entry.ordinal) || mark(&mut read, entry.ordinal) {
                 continue;
             }
             match cx.read(QueryId {
                 kind: INSTANCE_KIND,
-                address: Address(address),
+                address: Address(entry.address),
             }) {
-                Poll::Pending => self.frontier.push(address),
+                Poll::Pending => self.frontier.push(entry),
                 Poll::Ready(Err(error)) => return Err(error),
                 Poll::Ready(Ok(product)) => {
-                    let entry = self
-                        .tasks
-                        .registry
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .entries
-                        .get(&address)
-                        .cloned()
-                        .ok_or_else(|| {
-                            self.tasks.failure("unregistered native discovery address")
-                        })?;
                     let output = entry.output.get().ok_or_else(|| {
                         self.tasks
                             .failure("native task returned no completed descriptor")
@@ -909,31 +925,37 @@ impl DiscoveryTask {
                     if output.product.product != product {
                         return Err(self.tasks.failure("native discovery read another output"));
                     }
-                    self.seen.insert(address);
-                    frontier.extend(
-                        output
-                            .facts
-                            .body
-                            .dependencies
-                            .iter()
-                            .map(|key| key.address(INSTANCE_KIND).0),
-                    );
+                    mark(&mut self.seen, entry.ordinal);
+                    let registry = self
+                        .tasks
+                        .registry
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    for key in &output.facts.body.dependencies {
+                        let dependency = registry
+                            .entries
+                            .get(&key.address(INSTANCE_KIND).0)
+                            .ok_or_else(|| {
+                                self.tasks.failure("unregistered native discovery address")
+                            })?;
+                        frontier.push(dependency.clone());
+                    }
                 }
             }
             let mut weight = hirsel_engine::NativeMetadataWeight::default();
             weight.add(size_of::<Self>());
             weight.flat_vec(&frontier);
             weight.flat_vec(&self.frontier);
-            weight.tree::<ContentHash, ()>(self.seen.len());
-            weight.tree::<ContentHash, ()>(read.len());
+            weight.flat_vec(&self.seen);
+            weight.flat_vec(&read);
             if weight.bytes() > self.tasks.weight.retained {
                 return Err(self
                     .tasks
                     .failure("native discovery frame exceeds retained allowance"));
             }
         }
-        self.frontier.sort_unstable();
-        self.frontier.dedup();
+        self.frontier.sort_unstable_by_key(|entry| entry.address);
+        self.frontier.dedup_by_key(|entry| entry.address);
         if !self.frontier.is_empty() {
             return Ok(None);
         }
@@ -1138,7 +1160,10 @@ impl QueryTask for CallableTask {
         let mut waiting = Vec::new();
         if self.id == self.tasks.callable_id() {
             for entry in self.tasks.entries() {
-                let query = instance_id(&entry.key);
+                let query = QueryId {
+                    kind: INSTANCE_KIND,
+                    address: Address(entry.address),
+                };
                 match cx.read(query) {
                     Poll::Pending => waiting.push(query),
                     Poll::Ready(Err(error)) => {
@@ -1217,92 +1242,96 @@ mod retained_tests {
     #[test]
     fn discovery_frontier_keeps_addresses_within_a_small_frame() {
         hirsel_engine::with_compiler_stack(|| {
-            let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
-            let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine::store::RequestStore::new(
-                Arc::new(hirsel_engine::store::MemStore::default()),
-                transport.reserve(64 << 20).unwrap(),
-            ));
-            let mut engine = hirsel_engine::QueryEngine::new(
-                hirsel_engine::default_environment(),
-                hirsel_front_phases::compiler_adapters(),
-            )
-            .with_result_store(store.clone());
-            let text = (0..48)
-                .map(|n| format!("pub fn function_{n}()->u64{{1u64}}\n"))
-                .collect();
-            let file = engine.sources.add("frontier-bounds.hir", text).unwrap();
-            engine
-                .parse_file(file, &hirsel_engine::default_context())
-                .unwrap();
-            let mut discovery =
-                hirsel_engine::NativeDiscoveryCache::new(engine.types().clone(), store.clone());
-            let declarations = hirsel_native_cache::declarations::NativeDeclarations::collect(
-                &mut engine,
-                &mut discovery,
-                &[],
-            )
-            .unwrap();
-            let paths = declarations
-                .context
-                .sources
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>();
-            let context = engine.native_original_context(&paths).unwrap();
-            let source =
-                NativeInstanceInputs::from_products(declarations, context.reader([]).unwrap())
+            for count in [48, 256] {
+                let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
+                let store: Arc<dyn ResultStore> =
+                    Arc::new(hirsel_engine::store::RequestStore::new(
+                        Arc::new(hirsel_engine::store::MemStore::default()),
+                        transport.reserve(64 << 20).unwrap(),
+                    ));
+                let mut engine = hirsel_engine::QueryEngine::new(
+                    hirsel_engine::default_environment(),
+                    hirsel_front_phases::compiler_adapters(),
+                )
+                .with_result_store(store.clone());
+                let text = (0..count)
+                    .map(|n| format!("pub fn function_{n}()->u64{{1u64}}\n"))
+                    .collect();
+                let file = engine.sources.add("frontier-bounds.hir", text).unwrap();
+                engine
+                    .parse_file(file, &hirsel_engine::default_context())
                     .unwrap();
-            let budget = hirsel_engine_admission::ProcessBudget::new(16 << 20);
-            let tasks = InstanceTasks::new(
-                source,
-                store,
-                hirsel_native::Options::new(hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu()),
-                ContentHash::of_bytes(b"frontier bounds"),
-                MemoryWeight {
-                    scratch: 16 << 20,
-                    retained: 16 << 10,
-                    stack: 0,
-                },
-                budget.reserve(16 << 20).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(
-                tasks
-                    .roots
-                    .iter()
-                    .filter(|key| key.instance.definition().0.name.starts_with("function_"))
-                    .count(),
-                48
-            );
-            struct Pending(Vec<QueryId>);
-            impl QueryContext for Pending {
-                fn read(&mut self, query: QueryId) -> Poll<Result<ProductRef, Reference>> {
-                    self.0.push(query);
-                    Poll::Pending
-                }
-            }
-            let mut task = InstanceTaskFactory::new(tasks.clone())
-                .create(tasks.discovery)
+                let mut discovery =
+                    hirsel_engine::NativeDiscoveryCache::new(engine.types().clone(), store.clone());
+                let declarations = hirsel_native_cache::declarations::NativeDeclarations::collect(
+                    &mut engine,
+                    &mut discovery,
+                    &[],
+                )
                 .unwrap();
-            let mut pending = Pending(vec![]);
-            let QueryPoll::Waiting(waiting) = task.poll(&mut pending) else {
-                panic!("discovery must subscribe to all roots");
-            };
-            assert_eq!(waiting.len(), tasks.roots.len());
-            pending.0.sort_by_key(|query| query.address.0);
-            let mut waiting = waiting;
-            waiting.sort_by_key(|query| query.address.0);
-            assert_eq!(waiting, pending.0);
-            let alias_id = QueryId {
-                kind: hirsel_native::query_model::CALLABLE_VALUE_KIND,
-                address: tasks.roots[0].address(hirsel_native::query_model::CALLABLE_VALUE_KIND),
-            };
-            for id in [tasks.callable_id(), alias_id] {
-                let task = InstanceTaskFactory::new(tasks.clone()).create(id).unwrap();
-                assert_eq!(task.weight().retained, size_of::<CallableTask>() as u64);
-                assert_eq!(task.continuation_bytes(), size_of::<CallableTask>() as u64);
-                assert_eq!(task.weight().scratch, tasks.weight.scratch);
-                assert_eq!(task.weight().stack, tasks.weight.stack);
+                let paths = declarations
+                    .context
+                    .sources
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let context = engine.native_original_context(&paths).unwrap();
+                let source =
+                    NativeInstanceInputs::from_products(declarations, context.reader([]).unwrap())
+                        .unwrap();
+                let budget = hirsel_engine_admission::ProcessBudget::new(16 << 20);
+                let tasks = InstanceTasks::new(
+                    source,
+                    store,
+                    hirsel_native::Options::new(hirsel_lir::TargetSpec::x86_64_unknown_linux_gnu()),
+                    ContentHash::of_bytes(b"frontier bounds"),
+                    MemoryWeight {
+                        scratch: 16 << 20,
+                        retained: 16 << 10,
+                        stack: 0,
+                    },
+                    budget.reserve(16 << 20).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    tasks
+                        .roots
+                        .iter()
+                        .filter(|key| key.instance.definition().0.name.starts_with("function_"))
+                        .count(),
+                    count
+                );
+                struct Pending(Vec<QueryId>);
+                impl QueryContext for Pending {
+                    fn read(&mut self, query: QueryId) -> Poll<Result<ProductRef, Reference>> {
+                        self.0.push(query);
+                        Poll::Pending
+                    }
+                }
+                let mut task = InstanceTaskFactory::new(tasks.clone())
+                    .create(tasks.discovery)
+                    .unwrap();
+                let mut pending = Pending(vec![]);
+                let QueryPoll::Waiting(waiting) = task.poll(&mut pending) else {
+                    panic!("discovery must subscribe to all roots");
+                };
+                assert_eq!(waiting.len(), tasks.roots.len());
+                pending.0.sort_by_key(|query| query.address.0);
+                let mut waiting = waiting;
+                waiting.sort_by_key(|query| query.address.0);
+                assert_eq!(waiting, pending.0);
+                let alias_id = QueryId {
+                    kind: hirsel_native::query_model::CALLABLE_VALUE_KIND,
+                    address: tasks.roots[0]
+                        .address(hirsel_native::query_model::CALLABLE_VALUE_KIND),
+                };
+                for id in [tasks.callable_id(), alias_id] {
+                    let task = InstanceTaskFactory::new(tasks.clone()).create(id).unwrap();
+                    assert_eq!(task.weight().retained, size_of::<CallableTask>() as u64);
+                    assert_eq!(task.continuation_bytes(), size_of::<CallableTask>() as u64);
+                    assert_eq!(task.weight().scratch, tasks.weight.scratch);
+                    assert_eq!(task.weight().stack, tasks.weight.stack);
+                }
             }
         });
     }

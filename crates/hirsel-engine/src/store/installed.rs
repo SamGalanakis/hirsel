@@ -218,8 +218,16 @@ mod tests {
     fn operation_pins_the_manifest_and_rows_across_atomic_publication() {
         let directory = tempfile::tempdir().unwrap();
         let (writer, compiler, package, first) = fixture(directory.path());
-        let reader = writer.for_operation();
-        let previous = InstalledPackage::open(&reader, &package, compiler).unwrap();
+        let reader = DirStore::new(directory.path().join("cache"))
+            .with_read_only_root(directory.path().to_owned());
+        let package_owner = reader.installed_package(&package, compiler).unwrap();
+        let previous = OpenedInstallation {
+            records: package_owner
+                .records
+                .upgrade()
+                .expect("the provider pins direct library reads too"),
+            package: package_owner,
+        };
         let row = Address(ContentHash::of_bytes(b"row"));
         let second = writer.put(first.domain, b"replacement").unwrap();
         let action = Action(ContentHash::of_bytes(b"new action"));

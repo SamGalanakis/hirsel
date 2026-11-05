@@ -113,7 +113,7 @@ impl DirStore {
     pub fn with_read_only_root(mut self, root: PathBuf) -> Self {
         if root != self.root && !self.read_only.iter().any(|store| store.root() == root) {
             self.read_only.push(hirsel_artifact_store::Store::new(root));
-            self.installed_capture = None;
+            self.installed_capture = Some(Default::default());
         }
         self
     }
@@ -202,7 +202,7 @@ impl DirStore {
             verifier_identity: None,
             verifier,
             operation: false,
-            installed_capture: None,
+            installed_capture: Some(Default::default()),
             installation: None,
         })
     }

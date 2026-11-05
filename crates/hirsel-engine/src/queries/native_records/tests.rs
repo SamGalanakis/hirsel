@@ -374,6 +374,9 @@ fn ownership_product_tracks_removal_reordering_relocation_and_parse_eviction() {
         .next()
         .map(|(path, items)| (path.clone(), items[0].clone()))
         .unwrap();
+    let encoded = NativeRecords::new(producer.types().clone(), store.clone())
+        .encode(&producer.source_records(), &syntax)
+        .unwrap();
     let mut consumer = create();
     consumer.sources = producer.sources.clone();
     consumer.index_source(file, &context).unwrap();
@@ -382,6 +385,10 @@ fn ownership_product_tracks_removal_reordering_relocation_and_parse_eviction() {
         "fixture restores declaration heads without bodies"
     );
     let before = consumer.source_records();
+    let syntax: Arc<hirsel_syntax::ItemSyntax> =
+        NativeRecords::new(consumer.types().clone(), store.clone())
+            .decode(&before, &encoded)
+            .unwrap();
     let bytes = before.input_bytes().unwrap();
     let budget = hirsel_engine_admission::ProcessBudget::new(bytes);
     let mut allowance = budget.reserve(bytes).unwrap();

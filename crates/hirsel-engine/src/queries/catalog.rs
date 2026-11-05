@@ -1138,8 +1138,10 @@ impl QueryEngine {
         self.retire_snapshot();
     }
     pub(crate) fn materialize(&mut self, path: &DefPath) -> Result<(), QueryError> {
-        if !self.items.contains_key(path) && self.declared(path) && self.installed_definition(path)
-        {
+        if self.items.contains_key(path) {
+            return Ok(());
+        }
+        if self.declared(path) && self.installed_definition(path) {
             let record = self
                 .installed_semantic_input(path, crate::store::MAX_RECORD as u64)?
                 .ok_or(QueryError::NotImplemented)?;
@@ -1303,8 +1305,13 @@ impl QueryEngine {
         for syntax in &output.value.items {
             let mut add = |item: Arc<ItemSyntax>| {
                 let candidates = self.items.entry(item.item.definition.clone()).or_default();
-                candidates.push(item.clone());
-                candidates.sort_by_key(|c| c.occurrence);
+                if !candidates
+                    .iter()
+                    .any(|old| old.anchor == item.anchor && old.occurrence == item.occurrence)
+                {
+                    candidates.push(item.clone());
+                    candidates.sort_by_key(|c| c.occurrence);
+                }
                 listed.push(item);
             };
             if let Some(helper) = crate::facts::snapshot(syntax) {

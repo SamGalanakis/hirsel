@@ -459,7 +459,20 @@ mod tests {
             let placed = warm.catalog.candidates[&path][0].head.name.anchor;
             assert_ne!(original, placed);
             warm.adapters.parser = None;
+            // A demanded installed body may precede its sibling's whole-file load.
+            let mut demanded = warm.load_parse_syntax(moved, &context).unwrap();
+            let syntax = demanded.value.items.first_mut().unwrap();
+            Arc::make_mut(syntax).occurrence = 1;
+            warm.items.get_mut(&path).unwrap().push(syntax.clone());
+            let cited = warm.cited_value(&path);
+            warm.materialize(&path).unwrap();
+            assert!(
+                warm.catalog.files.contains_key(&moved),
+                "an already demanded body must not materialize its whole file"
+            );
             warm.materialize_source(moved).unwrap();
+            assert_eq!(warm.items[&path].len(), 2, "one candidate per occurrence");
+            assert_eq!(warm.cited_value(&path), cited);
             let restored = warm.items[&path]
                 .iter()
                 .find(|s| s.anchor == placed)

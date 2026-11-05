@@ -24,6 +24,7 @@ pub use carry::LowerCarry;
 use constants::Constants;
 use dependencies::{Dependencies, PackedDependencies};
 use evidence::Evidence;
+use hirsel_syntax::PackageId;
 use hirsel_tir::{DefinitionRef, Materialized, MaterializedRef};
 use inputs::Inputs;
 pub use inspection::FrontLowerDependencies;
@@ -1389,14 +1390,9 @@ impl FrontLowerQueries {
         );
         let computed = if source.framed && source.depth.borrow().limit() == 0 {
             if self.verify == Verify::On {
-                let mut observed = ReadsBuilder::new();
-                FrozenProvider::new(
-                    &self.namespace.snapshot,
-                    path.0.package.clone(),
-                    &mut observed,
-                )
-                .validation_universe()
-                .map_err(|_| self.errors.resource)?;
+                let observed = self
+                    .validation_reads(&path.0.package, &source.reads)
+                    .await?;
                 source.merge(&observed.finish().map_err(|_| self.errors.protocol)?);
             }
             Err(source.overflow(self.inputs[&path].captured.site))
@@ -1921,6 +1917,28 @@ impl FrontLowerQueries {
             archive.ok_or(self.errors.protocol)?,
         ))
     }
+    async fn validation_reads(
+        &self,
+        package: &PackageId,
+        query_reads: &QueryReads,
+    ) -> Result<ReadsBuilder, Reference> {
+        // V shares Front's partition. Release optional body retention before
+        // retrying the exact universe read, as for ordinary Lower admission.
+        loop {
+            {
+                let mut observed = ReadsBuilder::new();
+                if FrozenProvider::new(&self.namespace.snapshot, package.clone(), &mut observed)
+                    .validation_universe()
+                    .is_ok()
+                {
+                    return Ok(observed);
+                }
+            }
+            if !self.front.evict_idle(self.weight.scratch) && !query_reads.evict_body().await {
+                return Err(self.errors.resource);
+            }
+        }
+    }
     async fn compute(
         &self,
         kind: u32,
@@ -1969,14 +1987,10 @@ impl FrontLowerQueries {
         }
         source.merge(&body.outcome.reads);
         if self.verify == Verify::On {
-            let mut observed = ReadsBuilder::new();
-            FrozenProvider::new(
-                &self.namespace.snapshot,
-                path.0.package.clone(),
-                &mut observed,
-            )
-            .validation_universe()
-            .map_err(|_| source.refused(self.errors.resource))?;
+            let observed = self
+                .validation_reads(&path.0.package, &source.reads)
+                .await
+                .map_err(|error| source.refused(error))?;
             source.merge(
                 &observed
                     .finish()
@@ -2168,15 +2182,10 @@ impl FrontLowerQueries {
         let mut verification = None;
         let mut acceptance = None;
         if self.verify == Verify::On {
-            let mut observed = ReadsBuilder::new();
-            // A refused V read refuses this producer: nothing it computed is kept.
-            FrozenProvider::new(
-                &completed.namespace.snapshot,
-                path.0.package.clone(),
-                &mut observed,
-            )
-            .validation_universe()
-            .map_err(|_| source.refused(self.errors.resource))?;
+            let observed = completed
+                .validation_reads(&path.0.package, &source.reads)
+                .await
+                .map_err(|error| source.refused(error))?;
             source.merge(&observed.finish().map_err(|_| QueryError::NotImplemented)?);
             let (report, ran, accepted, evidence) = completed
                 .namespace

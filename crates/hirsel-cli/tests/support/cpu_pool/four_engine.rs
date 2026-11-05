@@ -42,6 +42,7 @@ fn cpu_fixture_four_engine_source_grant(
     policies: &[bool],
     runtimes: &[hirsel_native_testing::Runtime],
 ) {
+    let _compiler = QUAL_COMPILER.lock().unwrap_or_else(|e| e.into_inner());
     use hirsel_front_phases::compiler_adapters;
     use hirsel_driver::native;
     use hirsel_engine::{

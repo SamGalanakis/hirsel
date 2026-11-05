@@ -854,7 +854,7 @@ impl FrontBodyQueries {
         }
         Some(())
     }
-    fn evict_idle(&self, scratch: u64) -> bool {
+    pub(in crate::queries) fn evict_idle(&self, scratch: u64) -> bool {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let selected = slots.iter().find_map(|(key, slot)| match slot {
             FrontSlot::Archived(_) => None,

@@ -139,7 +139,12 @@ fn dfa_intern(re: VmProgram, mut cache: DfaCache, count: u64, flags: u64) -> u64
       byte += 1
     }
     for inst in re.code {
-      if dfa_consumes(inst.kind) {
+      if inst.kind == 1 {
+        for (lo, hi) in inst.ranges {
+          if lo > 0 && lo < 128 { cache.data[cache.classes + core@1/int.widen(lo)] = 1 }
+          if hi < 127 { cache.data[cache.classes + core@1/int.widen(hi) + 1] = 1 }
+        }
+      } else if inst.kind == 13 {
         let mut previous = false
         byte = 0
         while byte < 128 {

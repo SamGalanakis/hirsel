@@ -993,8 +993,8 @@ fn frozen_frontier_evaluation_tasks_overlap() {
             &self,
             t: &hirsel_types::TypeInterner,
             m: &hirsel_types::TypeMemo,
-            body: &AnalyzedBody,
-            comptime: &Comptime,
+            body: &hirsel_query_products::AnalyzedBody,
+            comptime: &hirsel_query_products::Comptime,
             signature: &hirsel_types::Signature,
         ) -> Result<QueryOutput<hirsel_tir::Definition>, QueryError> {
             self.inner.lower(t, m, body, comptime, signature)
@@ -1003,7 +1003,7 @@ fn frozen_frontier_evaluation_tasks_overlap() {
             &self,
             t: &hirsel_types::TypeInterner,
             m: &hirsel_types::TypeMemo,
-            body: &AnalyzedBody,
+            body: &hirsel_query_products::AnalyzedBody,
             staged: &[(hirsel_syntax::ExprId, hirsel_types::TypeId)],
             signature: &hirsel_types::Signature,
             expression: hirsel_syntax::ExprId,
@@ -1104,8 +1104,8 @@ fn frozen_frontier_staged_rounds_evaluate_on_workers() {
             &self,
             t: &hirsel_types::TypeInterner,
             m: &hirsel_types::TypeMemo,
-            body: &AnalyzedBody,
-            comptime: &Comptime,
+            body: &hirsel_query_products::AnalyzedBody,
+            comptime: &hirsel_query_products::Comptime,
             signature: &hirsel_types::Signature,
         ) -> Result<QueryOutput<hirsel_tir::Definition>, QueryError> {
             self.0.lower(t, m, body, comptime, signature)
@@ -1114,7 +1114,7 @@ fn frozen_frontier_staged_rounds_evaluate_on_workers() {
             &self,
             t: &hirsel_types::TypeInterner,
             m: &hirsel_types::TypeMemo,
-            body: &AnalyzedBody,
+            body: &hirsel_query_products::AnalyzedBody,
             staged: &[(hirsel_syntax::ExprId, hirsel_types::TypeId)],
             signature: &hirsel_types::Signature,
             expression: hirsel_syntax::ExprId,
@@ -1399,7 +1399,7 @@ fn frozen_frontier_releases_completed_typed_bodies_before_next_root() {
     };
     struct ObservedModes {
         inner: Arc<dyn ModesPhase>,
-        bodies: Mutex<Vec<Weak<TypedBody>>>,
+        bodies: Mutex<Vec<Weak<hirsel_query_products::TypedBody>>>,
         peak: AtomicUsize,
     }
     impl ModesPhase for ObservedModes {
@@ -1407,11 +1407,11 @@ fn frozen_frontier_releases_completed_typed_bodies_before_next_root() {
             &self,
             t: &hirsel_types::TypeInterner,
             m: &hirsel_types::TypeMemo,
-            body: Arc<TypedBody>,
+            body: Arc<hirsel_query_products::TypedBody>,
             signature: &hirsel_types::Signature,
             products: &mut PhaseProducts,
             provider: &mut dyn hirsel_types::SignatureProvider,
-        ) -> Result<QueryOutput<AnalyzedBody>, QueryError> {
+        ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
             let output = self
                 .inner
                 .check_modes(t, m, body, signature, products, provider)?;
@@ -1564,8 +1564,8 @@ fn frozen_lowering_frontier_keeps_lower_warnings_and_current_hit_metadata() {
             &self,
             t: &hirsel_types::TypeInterner,
             m: &hirsel_types::TypeMemo,
-            body: &AnalyzedBody,
-            comptime: &Comptime,
+            body: &hirsel_query_products::AnalyzedBody,
+            comptime: &hirsel_query_products::Comptime,
             signature: &hirsel_types::Signature,
         ) -> Result<QueryOutput<hirsel_tir::Definition>, QueryError> {
             if self.guard.load(Ordering::Relaxed) {
@@ -1589,7 +1589,7 @@ fn frozen_lowering_frontier_keeps_lower_warnings_and_current_hit_metadata() {
             &self,
             t: &hirsel_types::TypeInterner,
             m: &hirsel_types::TypeMemo,
-            body: &AnalyzedBody,
+            body: &hirsel_query_products::AnalyzedBody,
             staged: &[(hirsel_syntax::ExprId, hirsel_types::TypeId)],
             signature: &hirsel_types::Signature,
             expression: hirsel_syntax::ExprId,
@@ -2459,8 +2459,8 @@ fn frozen_frontier_generator_demand_skips_a_dead_compile_time_branch() {
             &self,
             types: &hirsel_types::TypeInterner,
             memo: &hirsel_types::TypeMemo,
-            body: &AnalyzedBody,
-            comptime: &Comptime,
+            body: &hirsel_query_products::AnalyzedBody,
+            comptime: &hirsel_query_products::Comptime,
             signature: &hirsel_types::Signature,
         ) -> Result<QueryOutput<hirsel_tir::Definition>, QueryError> {
             self.0.lower(types, memo, body, comptime, signature)
@@ -2469,7 +2469,7 @@ fn frozen_frontier_generator_demand_skips_a_dead_compile_time_branch() {
             &self,
             types: &hirsel_types::TypeInterner,
             memo: &hirsel_types::TypeMemo,
-            body: &AnalyzedBody,
+            body: &hirsel_query_products::AnalyzedBody,
             staged: &[(hirsel_syntax::ExprId, hirsel_types::TypeId)],
             signature: &hirsel_types::Signature,
             expression: hirsel_syntax::ExprId,

@@ -314,8 +314,8 @@ impl LoweringPhase for ForgedLowering {
         &self,
         t: &hirsel_types::TypeInterner,
         m: &hirsel_types::TypeMemo,
-        body: &AnalyzedBody,
-        comptime: &Comptime,
+        body: &hirsel_query_products::AnalyzedBody,
+        comptime: &hirsel_query_products::Comptime,
         signature: &Signature,
     ) -> Result<QueryOutput<hirsel_tir::Definition>, QueryError> {
         let mut output = LowerAdapter.lower(t, m, body, comptime, signature)?;
@@ -326,7 +326,7 @@ impl LoweringPhase for ForgedLowering {
         &self,
         t: &hirsel_types::TypeInterner,
         m: &hirsel_types::TypeMemo,
-        body: &AnalyzedBody,
+        body: &hirsel_query_products::AnalyzedBody,
         staged: &[(hirsel_syntax::ExprId, hirsel_types::TypeId)],
         signature: &Signature,
         expression: hirsel_syntax::ExprId,
@@ -1263,8 +1263,8 @@ fn program_constant_frontiers_evaluate_on_workers_and_reuse_published_values() {
                 &self,
                 t: &hirsel_types::TypeInterner,
                 m: &hirsel_types::TypeMemo,
-                body: &AnalyzedBody,
-                comptime: &Comptime,
+                body: &hirsel_query_products::AnalyzedBody,
+                comptime: &hirsel_query_products::Comptime,
                 signature: &Signature,
             ) -> Result<QueryOutput<hirsel_tir::Definition>, QueryError> {
                 self.inner.lower(t, m, body, comptime, signature)
@@ -1273,7 +1273,7 @@ fn program_constant_frontiers_evaluate_on_workers_and_reuse_published_values() {
                 &self,
                 t: &hirsel_types::TypeInterner,
                 m: &hirsel_types::TypeMemo,
-                body: &AnalyzedBody,
+                body: &hirsel_query_products::AnalyzedBody,
                 staged: &[(hirsel_syntax::ExprId, hirsel_types::TypeId)],
                 signature: &Signature,
                 expression: hirsel_syntax::ExprId,
@@ -1365,8 +1365,8 @@ fn constant_frontier_keeps_earlier_lower_warnings_when_a_later_root_stops() {
             &self,
             t: &hirsel_types::TypeInterner,
             m: &hirsel_types::TypeMemo,
-            body: &AnalyzedBody,
-            comptime: &Comptime,
+            body: &hirsel_query_products::AnalyzedBody,
+            comptime: &hirsel_query_products::Comptime,
             signature: &Signature,
         ) -> Result<QueryOutput<hirsel_tir::Definition>, QueryError> {
             if signature.definition.path().0.name == "B" {
@@ -1391,7 +1391,7 @@ fn constant_frontier_keeps_earlier_lower_warnings_when_a_later_root_stops() {
             &self,
             t: &hirsel_types::TypeInterner,
             m: &hirsel_types::TypeMemo,
-            body: &AnalyzedBody,
+            body: &hirsel_query_products::AnalyzedBody,
             staged: &[(hirsel_syntax::ExprId, hirsel_types::TypeId)],
             signature: &Signature,
             expression: hirsel_syntax::ExprId,
@@ -1471,7 +1471,7 @@ fn batch_publication_releases_completed_worker_bodies_before_the_next_task() {
     };
     struct ObservedModes {
         inner: Arc<dyn ModesPhase>,
-        bodies: Mutex<Vec<Weak<TypedBody>>>,
+        bodies: Mutex<Vec<Weak<hirsel_query_products::TypedBody>>>,
         peak: AtomicUsize,
     }
     impl ModesPhase for ObservedModes {
@@ -1479,11 +1479,11 @@ fn batch_publication_releases_completed_worker_bodies_before_the_next_task() {
             &self,
             t: &hirsel_types::TypeInterner,
             m: &hirsel_types::TypeMemo,
-            body: Arc<TypedBody>,
+            body: Arc<hirsel_query_products::TypedBody>,
             signature: &Signature,
             products: &mut PhaseProducts,
             provider: &mut dyn SignatureProvider,
-        ) -> Result<QueryOutput<AnalyzedBody>, QueryError> {
+        ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
             let output = self
                 .inner
                 .check_modes(t, m, body, signature, products, provider)?;
@@ -1796,11 +1796,11 @@ fn batch_warning_phase_lives_with_the_summary_and_retires_with_its_owner() {
             &self,
             t: &hirsel_types::TypeInterner,
             m: &hirsel_types::TypeMemo,
-            body: Arc<TypedBody>,
+            body: Arc<hirsel_query_products::TypedBody>,
             signature: &Signature,
             products: &mut PhaseProducts,
             provider: &mut dyn SignatureProvider,
-        ) -> Result<QueryOutput<AnalyzedBody>, QueryError> {
+        ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
             let syntax = body.syntax.clone();
             let mut output = self
                 .0
@@ -1933,18 +1933,18 @@ fn batch_serial_compile_time_demands_release_bodies_after_each_root() {
     use std::sync::{Mutex, Weak};
     struct ObservedModes {
         inner: Arc<dyn ModesPhase>,
-        bodies: Mutex<Vec<Weak<TypedBody>>>,
+        bodies: Mutex<Vec<Weak<hirsel_query_products::TypedBody>>>,
     }
     impl ModesPhase for ObservedModes {
         fn check_modes(
             &self,
             types: &hirsel_types::TypeInterner,
             memo: &hirsel_types::TypeMemo,
-            body: Arc<TypedBody>,
+            body: Arc<hirsel_query_products::TypedBody>,
             signature: &Signature,
             products: &mut PhaseProducts,
             provider: &mut dyn SignatureProvider,
-        ) -> Result<QueryOutput<AnalyzedBody>, QueryError> {
+        ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
             let output = self
                 .inner
                 .check_modes(types, memo, body, signature, products, provider)?;
@@ -2109,11 +2109,11 @@ fn durable_front_workers_drain_payloads_before_accepting_another_task() {
             &self,
             types: &hirsel_types::TypeInterner,
             memo: &hirsel_types::TypeMemo,
-            body: Arc<TypedBody>,
+            body: Arc<hirsel_query_products::TypedBody>,
             signature: &Signature,
             products: &mut PhaseProducts,
             provider: &mut dyn SignatureProvider,
-        ) -> Result<QueryOutput<AnalyzedBody>, QueryError> {
+        ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
             let output = self
                 .0
                 .check_modes(types, memo, body, signature, products, provider)?;
@@ -2461,8 +2461,8 @@ fn program_dynamic_lower_frontiers_use_workers_and_retain_compact_results() {
             &self,
             t: &hirsel_types::TypeInterner,
             m: &hirsel_types::TypeMemo,
-            body: &AnalyzedBody,
-            comptime: &Comptime,
+            body: &hirsel_query_products::AnalyzedBody,
+            comptime: &hirsel_query_products::Comptime,
             signature: &Signature,
         ) -> Result<QueryOutput<hirsel_tir::Definition>, QueryError> {
             if body.typed.syntax.item.definition.0.name == "VALUE" {
@@ -2474,7 +2474,7 @@ fn program_dynamic_lower_frontiers_use_workers_and_retain_compact_results() {
             &self,
             t: &hirsel_types::TypeInterner,
             m: &hirsel_types::TypeMemo,
-            body: &AnalyzedBody,
+            body: &hirsel_query_products::AnalyzedBody,
             staged: &[(hirsel_syntax::ExprId, hirsel_types::TypeId)],
             signature: &Signature,
             expression: hirsel_syntax::ExprId,

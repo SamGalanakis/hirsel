@@ -3,33 +3,33 @@ use hirsel_span::Span;
 use hirsel_syntax::{DefId, DefPath, LexicalOwner};
 use hirsel_types::{GenericArgument, NameSite, Primitive, Type, TypeId, TypeInterner, TypeKind};
 
-fn summary(ty: TypeId) -> CheckedSummary {
+fn summary(ty: TypeId) -> hirsel_query_products::CheckedSummary {
     let owner = DefId::intern(&DefPath::core("facet-owner"));
     let binder = LexicalOwner::first(owner.path()).site(NameSite::Item);
-    CheckedSummary {
-        summary: DefinitionSummary {
+    hirsel_query_products::CheckedSummary {
+        summary: hirsel_query_products::DefinitionSummary {
             owner,
-            frames: vec![Frame {
+            frames: vec![hirsel_query_products::Frame {
                 site: NameSite::Item,
                 parent: None,
-                kind: FrameKind::Item,
+                kind: hirsel_query_products::FrameKind::Item,
                 generic: false,
                 size_bindings: Box::new([]),
             }]
             .into(),
-            calls: vec![SummaryCall {
+            calls: vec![hirsel_query_products::SummaryCall {
                 callee: owner,
                 binder,
                 arguments: vec![GenericArgument::Type(ty)].into(),
                 owning_frame: 0,
                 target_frame: None,
-                class: CallClass::Runtime,
+                class: hirsel_query_products::CallClass::Runtime,
                 site: Span::default(),
             }]
             .into(),
             staged: [].into(),
         },
-        growth: ParameterGrowth::default(),
+        growth: hirsel_query_products::ParameterGrowth::default(),
     }
 }
 
@@ -53,7 +53,7 @@ fn independently_allocated_summary_projection_excludes_only_diagnostic_positions
             1 => b.summary.frames[0].generic = true,
             2 => b.summary.frames[0].parent = Some(0),
             3 => b.summary.calls[0].callee = DefId::intern(&DefPath::core("different")),
-            4 => b.summary.calls[0].class = CallClass::StaticSelection,
+            4 => b.summary.calls[0].class = hirsel_query_products::CallClass::StaticSelection,
             5 => b.summary.calls[0].target_frame = Some(0),
             6 => b.summary.calls[0].owning_frame = 1,
             7 => b.summary.calls[0].arguments = Box::new([]),

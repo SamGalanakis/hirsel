@@ -48,15 +48,15 @@ pub use diagnostics::*;
 pub use generic_graph::{InstanceEdge, InstanceGraph, InstanceKind};
 mod source_components;
 mod summary;
+use hirsel_query_products::{
+    AnalyzedBody, CallClass, CheckedSummary, Comptime, DefinitionSummary, FrameKind,
+    GenericParameterRef, ParameterGrowth, SummaryCall, TypedBody, growing_sites, summarize,
+};
 pub use source_components::{
     SourceGrowthComponent, SourceGrowthComponents, SourceGrowthFacets, SourceGrowthFact,
     SourceGrowthIdentity, SourceGrowthIter, SourceGrowthProducer,
 };
-pub use summary::{
-    CallClass, CheckedSummary, DefinitionSummary, Frame, FrameKind, GenericParameterRef,
-    GrowthEdge, ParameterGrowth, PublishedSummary, SummaryCall, SummaryView, growing_sites,
-    summarize,
-};
+pub use summary::{PublishedSummary, SummaryView};
 mod semantic;
 mod snapshot;
 pub use semantic::*;

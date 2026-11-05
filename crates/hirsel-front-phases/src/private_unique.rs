@@ -36,7 +36,7 @@ pub(super) fn infer(
     modes: &dyn ModesPhase,
     t: &hirsel_types::TypeInterner,
     m: &hirsel_types::TypeMemo,
-    bodies: &[(Arc<TypedBody>, SignatureRef)],
+    bodies: &[(Arc<hirsel_query_products::TypedBody>, SignatureRef)],
     provider: &mut dyn SignatureProvider,
 ) -> Result<Vec<(DefId, UniqueInference)>, QueryError> {
     let positions: BTreeMap<_, _> = bodies
@@ -234,11 +234,11 @@ mod tests {
             &self,
             _: &hirsel_types::TypeInterner,
             _: &hirsel_types::TypeMemo,
-            body: Arc<TypedBody>,
+            body: Arc<hirsel_query_products::TypedBody>,
             signature: &Signature,
             _: &mut PhaseProducts,
             provider: &mut dyn SignatureProvider,
-        ) -> Result<QueryOutput<AnalyzedBody>, QueryError> {
+        ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
             *self
                 .calls
                 .lock()
@@ -264,7 +264,7 @@ mod tests {
                     .push(hirsel_types::ParamId(0));
             }
             Ok(QueryOutput {
-                value: AnalyzedBody {
+                value: hirsel_query_products::AnalyzedBody {
                     typed: body,
                     ownership,
                     results: vec![],

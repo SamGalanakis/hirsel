@@ -8,10 +8,10 @@ use hirsel_syntax::{DefId, DefPath, LexicalOwner, StmtId};
 use hirsel_types::{NameSite, SizeParamId, SizeParameterRef, TypeParamId, TypeParameterRef};
 use std::collections::{BTreeMap, BTreeSet};
 
-type Vertex = (DefId, GenericParameterRef);
+type Vertex = (DefId, hirsel_query_products::GenericParameterRef);
 
 // The former production predicate, deliberately independent of SCC membership.
-fn old_sites(edges: &[GrowthEdge]) -> Vec<Span> {
+fn old_sites(edges: &[hirsel_query_products::GrowthEdge]) -> Vec<Span> {
     let mut graph: BTreeMap<_, Vec<_>> = BTreeMap::new();
     for (from, to, _, _) in edges {
         graph.entry(from).or_default().push(to);
@@ -41,20 +41,30 @@ fn vertex(index: usize) -> Vertex {
         NameSite::Statement(StmtId(0))
     });
     let parameter = if index.is_multiple_of(2) {
-        GenericParameterRef::Type(TypeParameterRef::body(scope, TypeParamId(0)))
+        hirsel_query_products::GenericParameterRef::Type(TypeParameterRef::body(
+            scope,
+            TypeParamId(0),
+        ))
     } else {
-        GenericParameterRef::Size(SizeParameterRef::body(scope, SizeParamId(0)))
+        hirsel_query_products::GenericParameterRef::Size(SizeParameterRef::body(
+            scope,
+            SizeParamId(0),
+        ))
     };
     (DefId::intern(&path), parameter)
 }
 fn site(anchor: u32, start: u32, end: u32) -> Span {
     Span::new(Anchor(anchor), start, end).unwrap()
 }
-fn edge(from: usize, to: usize, grows: bool, span: Span) -> GrowthEdge {
+fn edge(from: usize, to: usize, grows: bool, span: Span) -> hirsel_query_products::GrowthEdge {
     (vertex(from), vertex(to), grows, span)
 }
-fn compare(edges: &[GrowthEdge]) {
-    assert_eq!(growing_sites(edges), old_sites(edges), "{edges:?}");
+fn compare(edges: &[hirsel_query_products::GrowthEdge]) {
+    assert_eq!(
+        hirsel_query_products::growing_sites(edges),
+        old_sites(edges),
+        "{edges:?}"
+    );
 }
 fn random(state: &mut u64) -> u64 {
     *state = state
@@ -62,7 +72,7 @@ fn random(state: &mut u64) -> u64 {
         .wrapping_add(1442695040888963407);
     *state >> 32
 }
-fn shuffle(edges: &mut [GrowthEdge], state: &mut u64) {
+fn shuffle(edges: &mut [hirsel_query_products::GrowthEdge], state: &mut u64) {
     for i in (1..edges.len()).rev() {
         edges.swap(i, random(state) as usize % (i + 1));
     }
@@ -86,18 +96,18 @@ fn ordered_sites_keep_anchors_duplicates_and_parameter_binders() {
         edge(3, 3, false, b), // Isolated, non-growing self-loop.
     ];
     let expected = vec![c, b, a];
-    assert_eq!(growing_sites(&edges), expected);
+    assert_eq!(hirsel_query_products::growing_sites(&edges), expected);
     let mut state = 0x5eed;
     for _ in 0..32 {
         shuffle(&mut edges, &mut state);
         compare(&edges);
-        assert_eq!(growing_sites(&edges), expected);
+        assert_eq!(hirsel_query_products::growing_sites(&edges), expected);
     }
     // Neither equal ordinals nor equal owners merge distinct type/size/local binders.
     for (from, to) in [(0, 1), (0, 2), (0, 4)] {
         let edges = [edge(from, to, true, a), edge(to, to, false, b)];
         compare(&edges);
-        assert!(growing_sites(&edges).is_empty());
+        assert!(hirsel_query_products::growing_sites(&edges).is_empty());
     }
 }
 
@@ -153,10 +163,10 @@ pub(super) fn source_compare(engine: &mut QueryEngine) -> Vec<Span> {
     let edges = graph.edges.to_vec();
     compare(&edges);
     let expected = old_sites(&edges);
-    assert_eq!(growing_sites(&edges), expected);
+    assert_eq!(hirsel_query_products::growing_sites(&edges), expected);
     let mut shuffled = edges;
     shuffle(&mut shuffled, &mut 0x5eed);
-    assert_eq!(growing_sites(&shuffled), expected);
+    assert_eq!(hirsel_query_products::growing_sites(&shuffled), expected);
     expected
 }
 

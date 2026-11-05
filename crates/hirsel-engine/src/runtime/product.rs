@@ -1759,7 +1759,7 @@ mod tests {
                 let tuple = types.intern(hirsel_types::Type::with_kind(
                     hirsel_types::TypeKind::Tuple(vec![unit; type_edges].into()),
                 ));
-                changed.summary.frames = [crate::Frame {
+                changed.summary.frames = [hirsel_query_products::Frame {
                     site: hirsel_types::NameSite::Item,
                     parent: None,
                     kind: crate::FrameKind::Item,

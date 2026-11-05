@@ -1,0 +1,19 @@
+[package]
+name = "hirsel-query-products"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hirsel-check-protocol = { path = "../hirsel-check-protocol" }
+hirsel-graph = { path = "../hirsel-graph" }
+hirsel-intern = { path = "../hirsel-intern" }
+hirsel-span = { path = "../hirsel-span" }
+hirsel-syntax = { path = "../hirsel-syntax" }
+hirsel-tir = { path = "../hirsel-tir" }
+hirsel-types = { path = "../hirsel-types" }
+serde = { version = "1", features = ["derive", "rc"] }
+
+[dev-dependencies]
+hirsel-guard = { path = "../hirsel-guard" }

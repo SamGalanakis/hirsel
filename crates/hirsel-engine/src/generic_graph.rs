@@ -12,8 +12,8 @@
 //! closure environments and generic arguments, and the nominals of
 //! materialized values. Whether those implicit instances belong to the source
 //! rule is spec #87; until it rules, only native import rejects their growth.
-use crate::summary::parameters;
 use crate::*;
+use hirsel_query_products::parameters;
 use hirsel_span::Span;
 use hirsel_syntax::{DefId, ExprId};
 use hirsel_tir::{Callee, CleanupAction, InstructionKind, Materialized, Rvalue, Terminator};
@@ -129,7 +129,7 @@ impl InstanceGraph {
                 )
             })
             .collect();
-        crate::summary::growing_sites(&edges)
+        hirsel_query_products::growing_sites(&edges)
     }
     /// Same edges in the same order.
     pub fn same(&self, other: &Self, t: &TypeInterner) -> bool {

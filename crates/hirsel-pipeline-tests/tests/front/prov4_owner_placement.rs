@@ -254,7 +254,7 @@ fn omitted_destination_receipt_never_invents_an_explicit_arena() {
             engine.types(),
             &hirsel_types::TypeMemo::new(),
             &analyzed,
-            &hirsel_engine::Comptime::default(),
+            &hirsel_query_products::Comptime::default(),
             &signature,
         );
         if ambiguous {

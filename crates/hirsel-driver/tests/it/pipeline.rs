@@ -29,7 +29,7 @@ fn check_all(engine: &mut QueryEngine) {
 }
 // Syntax IDs are snapshot-local; compare sites relative to the retained owner.
 // TypeId's Debug omits ephemeral provenance, while complete row content is compared.
-fn normalize_sites(typed: &TypedBody, mut view: String) -> String {
+fn normalize_sites(typed: &hirsel_query_products::TypedBody, mut view: String) -> String {
     let tree = &typed.syntax.tree;
     let base = typed.syntax.item.origin.span.start;
     for (prefix, sites) in [
@@ -76,7 +76,7 @@ fn normalize_sites(typed: &TypedBody, mut view: String) -> String {
     }
     view
 }
-fn artifact_view(typed: &TypedBody) -> String {
+fn artifact_view(typed: &hirsel_query_products::TypedBody) -> String {
     normalize_sites(
         typed,
         format!(
@@ -104,7 +104,7 @@ fn equal_artifacts(engine: &mut QueryEngine, fresh: &mut QueryEngine, p: &DefPat
     let b = fresh.mode_definition(p).unwrap().value;
     assert_eq!(artifact_view(&a.typed), artifact_view(&b.typed));
     // The fact sets are hashed: compare them in a stable order.
-    let facts = |v: &AnalyzedBody| {
+    let facts = |v: &hirsel_query_products::AnalyzedBody| {
         let sorted = |set: &std::collections::HashSet<hirsel_types::TypeId>| {
             let mut ids: Vec<_> = set.iter().map(|id| format!("{id:?}")).collect();
             ids.sort();

@@ -60,8 +60,8 @@ impl LoweringPhase for PrivateTypeMutation {
         &self,
         t: &hirsel_types::TypeInterner,
         m: &hirsel_types::TypeMemo,
-        body: &AnalyzedBody,
-        comptime: &Comptime,
+        body: &hirsel_query_products::AnalyzedBody,
+        comptime: &hirsel_query_products::Comptime,
         signature: &Signature,
     ) -> Result<QueryOutput<hirsel_tir::Definition>, QueryError> {
         LowerAdapter.lower(t, m, body, comptime, signature)
@@ -70,7 +70,7 @@ impl LoweringPhase for PrivateTypeMutation {
         &self,
         t: &hirsel_types::TypeInterner,
         m: &hirsel_types::TypeMemo,
-        body: &AnalyzedBody,
+        body: &hirsel_query_products::AnalyzedBody,
         staged: &[(hirsel_syntax::ExprId, hirsel_types::TypeId)],
         signature: &Signature,
         expression: hirsel_syntax::ExprId,

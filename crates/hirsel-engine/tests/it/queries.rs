@@ -239,7 +239,7 @@ impl CheckerPhase for Fake {
         resolution: Resolution,
         _signature: &Signature,
         _provider: &mut dyn SignatureProvider,
-    ) -> Result<QueryOutput<TypedBody>, QueryError> {
+    ) -> Result<QueryOutput<hirsel_query_products::TypedBody>, QueryError> {
         self.fail("check", syntax.item.origin.span)?;
         let unit = match _signature.kind {
             SignatureKind::Const { ty: unit, .. } => unit,
@@ -250,7 +250,7 @@ impl CheckerPhase for Fake {
             kind: TypeKind::Primitive(hirsel_types::Primitive::Bool),
             ..t.row(unit).clone()
         });
-        Ok(out(TypedBody {
+        Ok(out(hirsel_query_products::TypedBody {
             checked: CheckedBody {
                 lexical: syntax.owner(),
                 tails: vec![],
@@ -275,13 +275,13 @@ impl ModesPhase for Fake {
         &self,
         _t: &hirsel_types::TypeInterner,
         _m: &hirsel_types::TypeMemo,
-        body: Arc<TypedBody>,
+        body: Arc<hirsel_query_products::TypedBody>,
         _signature: &Signature,
         _: &mut PhaseProducts,
         _provider: &mut dyn SignatureProvider,
-    ) -> Result<QueryOutput<AnalyzedBody>, QueryError> {
+    ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
         self.fail("modes", body.syntax.item.origin.span)?;
-        Ok(out(AnalyzedBody {
+        Ok(out(hirsel_query_products::AnalyzedBody {
             typed: body,
             ownership: Default::default(),
             results: vec![],
@@ -294,8 +294,8 @@ impl LoweringPhase for Fake {
         &self,
         t: &hirsel_types::TypeInterner,
         _m: &hirsel_types::TypeMemo,
-        body: &AnalyzedBody,
-        _comptime: &Comptime,
+        body: &hirsel_query_products::AnalyzedBody,
+        _comptime: &hirsel_query_products::Comptime,
         signature: &Signature,
     ) -> Result<QueryOutput<hirsel_tir::Definition>, QueryError> {
         let syntax = &body.typed.syntax;
@@ -322,7 +322,7 @@ impl LoweringPhase for Fake {
         &self,
         _t: &hirsel_types::TypeInterner,
         _m: &hirsel_types::TypeMemo,
-        _: &AnalyzedBody,
+        _: &hirsel_query_products::AnalyzedBody,
         _staged: &[(hirsel_syntax::ExprId, hirsel_types::TypeId)],
         _: &Signature,
         _: ExprId,
@@ -1401,7 +1401,7 @@ fn frozen_frontier_runs_independent_checkers_concurrently() {
             resolution: Resolution,
             signature: &Signature,
             provider: &mut dyn SignatureProvider,
-        ) -> Result<QueryOutput<TypedBody>, QueryError> {
+        ) -> Result<QueryOutput<hirsel_query_products::TypedBody>, QueryError> {
             // Exactly two tasks/workers: a serialized implementation cannot
             // satisfy this rendezvous. No wall-clock threshold is involved.
             self.barrier.wait();
@@ -1619,7 +1619,7 @@ impl CheckerPhase for SccChecker {
         resolution: Resolution,
         signature: &Signature,
         provider: &mut dyn SignatureProvider,
-    ) -> Result<QueryOutput<TypedBody>, QueryError> {
+    ) -> Result<QueryOutput<hirsel_query_products::TypedBody>, QueryError> {
         let mut output = self
             .base
             .check(types, memo, syntax, resolution, signature, provider)?;

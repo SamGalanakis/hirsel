@@ -61,4 +61,5 @@ tempfile = "3"
 rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 
 [dependencies]
+hirsel-query-products = { path = "../hirsel-query-products" }
 hirsel-engine-admission = { path = "../hirsel-engine-admission" }

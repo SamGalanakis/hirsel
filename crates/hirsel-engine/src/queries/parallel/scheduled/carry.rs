@@ -993,7 +993,7 @@ mod tests {
                     summary: DefinitionSummary {
                         owner: definition,
                         frames: (0..width)
-                            .map(|_| Frame {
+                            .map(|_| hirsel_query_products::Frame {
                                 site: hirsel_types::NameSite::Item,
                                 parent: None,
                                 kind: FrameKind::Item,

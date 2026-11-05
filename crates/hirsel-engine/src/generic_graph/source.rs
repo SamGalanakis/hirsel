@@ -1,8 +1,10 @@
 //! Source growth products are invalidated by the existing query graph. Only
 //! pending source roots demand checked summaries. Components name canonical
 //! parameter nodes and edges; their verdict references current position rows.
-use crate::summary::{CheckedSummary, GenericParameterRef, GrowthEdge};
 use hirsel_diag::Diagnostic;
+use hirsel_query_products::CheckedSummary;
+use hirsel_query_products::GenericParameterRef;
+use hirsel_query_products::GrowthEdge;
 use hirsel_span::Span;
 use hirsel_syntax::{ContentHash, DefId, DefPath};
 use hirsel_types::SharedSlice;

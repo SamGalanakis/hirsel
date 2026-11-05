@@ -58,7 +58,7 @@ fn context_with(text: &str) -> (QueryEngine, NativeRecordContext, Vec<DefId>, Ve
     (engine, source, ids, sites)
 }
 
-fn summary(owner: DefId, edges: Vec<crate::GrowthEdge>) -> Arc<CheckedSummary> {
+fn summary(owner: DefId, edges: Vec<hirsel_query_products::GrowthEdge>) -> Arc<CheckedSummary> {
     Arc::new(CheckedSummary {
         summary: DefinitionSummary {
             owner,

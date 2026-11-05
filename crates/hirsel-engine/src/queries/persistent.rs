@@ -4354,7 +4354,8 @@ mod malformed_tests {
                 hirsel_artifact_store::Address(ContentHash::default()),
                 hirsel_artifact_store::Action(ContentHash::default()),
             );
-            let (summary, growth) = crate::summary::summarize(&engine.types, &output.value.typed);
+            let (summary, growth) =
+                hirsel_query_products::summarize(&engine.types, &output.value.typed);
             let value = Arc::new(crate::PublishedSummary {
                 definition: DefId::intern(&outcome.definition),
                 text: syntax.text_hash,
@@ -4771,10 +4772,10 @@ mod malformed_tests {
                 let path = &syntax.item.definition;
                 let summary = DefinitionSummary {
                     owner: syntax.owner().def,
-                    frames: vec![crate::summary::Frame {
+                    frames: vec![hirsel_query_products::Frame {
                         site: hirsel_types::NameSite::Item,
                         parent: None,
-                        kind: crate::summary::FrameKind::Item,
+                        kind: hirsel_query_products::FrameKind::Item,
                         generic: false,
                         size_bindings: Box::new([]),
                     }]

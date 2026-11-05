@@ -15,7 +15,15 @@ fn check(source: &str) -> (QueryEngine, CheckOutput) {
     let output = source_check_request(&mut engine, file, &default_context()).unwrap();
     (engine, output)
 }
-fn summaries(engine: &mut QueryEngine) -> BTreeMap<String, (DefinitionSummary, ParameterGrowth)> {
+fn summaries(
+    engine: &mut QueryEngine,
+) -> BTreeMap<
+    String,
+    (
+        hirsel_query_products::DefinitionSummary,
+        hirsel_query_products::ParameterGrowth,
+    ),
+> {
     engine
         .definition_summaries()
         .unwrap()
@@ -28,7 +36,7 @@ fn path(name: &str) -> DefPath {
     p.0.name = name.into();
     p
 }
-fn typed(engine: &mut QueryEngine, name: &str) -> std::sync::Arc<TypedBody> {
+fn typed(engine: &mut QueryEngine, name: &str) -> std::sync::Arc<hirsel_query_products::TypedBody> {
     engine.mode_definition(&path(name)).unwrap().value.typed
 }
 
@@ -65,7 +73,13 @@ fn width[T](v: T) -> u64 uses {} = comptime width_body(shape(T))
 /// selected at.
 fn generated_selections(
     engine: &mut QueryEngine,
-    summaries: &BTreeMap<String, (DefinitionSummary, ParameterGrowth)>,
+    summaries: &BTreeMap<
+        String,
+        (
+            hirsel_query_products::DefinitionSummary,
+            hirsel_query_products::ParameterGrowth,
+        ),
+    >,
     roots: &[&str],
     generated: &str,
 ) -> BTreeSet<Vec<String>> {
@@ -141,12 +155,15 @@ pub fn main() -> Result[(), ()] {{
     let summaries = summaries(&mut engine);
     let (forward, growth) = &summaries["forward"];
     assert_eq!(forward.frames.len(), 1);
-    assert_eq!(forward.frames[0].kind, FrameKind::Item);
+    assert_eq!(
+        forward.frames[0].kind,
+        hirsel_query_products::FrameKind::Item
+    );
     let [call] = &forward.calls[..] else {
         panic!("{:?}", forward.calls)
     };
     assert_eq!(call.callee.path().0.name, "width");
-    assert_eq!(call.class, CallClass::Runtime);
+    assert_eq!(call.class, hirsel_query_products::CallClass::Runtime);
     assert_eq!((call.owning_frame, call.target_frame), (0, None));
     // The argument stays open: forward's own parameter, not an actual.
     let types = engine.types().clone();
@@ -222,9 +239,9 @@ pub fn main() -> Result[(), ()] {
     assert_eq!(
         kinds,
         [
-            (FrameKind::Item, None),
-            (FrameKind::LocalFunction, Some(0)),
-            (FrameKind::ComptimeRegion, Some(1)),
+            (hirsel_query_products::FrameKind::Item, None),
+            (hirsel_query_products::FrameKind::LocalFunction, Some(0)),
+            (hirsel_query_products::FrameKind::ComptimeRegion, Some(1)),
         ]
     );
     let n = SizeParameterRef::body(outer.item_binder(), hirsel_types::SizeParamId(0));
@@ -261,7 +278,7 @@ pub fn main() -> Result[(), ()] {
         &*call.arguments,
         &[GenericArgument::Size(Size::Parameter(n))]
     );
-    assert_eq!(call.class, CallClass::Runtime);
+    assert_eq!(call.class, hirsel_query_products::CallClass::Runtime);
 
     // Staged selection over summaries: each size outer is called at selects
     // the region's constant at (n, n), through inner's call by name.
@@ -285,7 +302,13 @@ pub fn main() -> Result[(), ()] {
 /// it encloses; calls outside comptime enter their callee's frame with the
 /// call's size actuals.
 fn staged_selections(
-    summaries: &BTreeMap<String, (DefinitionSummary, ParameterGrowth)>,
+    summaries: &BTreeMap<
+        String,
+        (
+            hirsel_query_products::DefinitionSummary,
+            hirsel_query_products::ParameterGrowth,
+        ),
+    >,
     root: &str,
 ) -> BTreeSet<(hirsel_syntax::DefId, NameSite, Vec<u64>)> {
     let mut selected = BTreeSet::new();
@@ -303,7 +326,9 @@ fn staged_selections(
             continue;
         };
         let function_frame = |mut f: u32| {
-            while summary.frames[f as usize].kind == FrameKind::ComptimeRegion {
+            while summary.frames[f as usize].kind
+                == hirsel_query_products::FrameKind::ComptimeRegion
+            {
                 f = summary.frames[f as usize].parent.unwrap();
             }
             f
@@ -316,7 +341,9 @@ fn staged_selections(
             }
         }
         for call in summary.calls.iter() {
-            if call.owning_frame != frame || call.class == CallClass::ComptimeExecuted {
+            if call.owning_frame != frame
+                || call.class == hirsel_query_products::CallClass::ComptimeExecuted
+            {
                 continue;
             }
             let (callee, target) = match call.target_frame {
@@ -379,7 +406,7 @@ pub fn main() -> Result[(), ()] {{
         .frames
         .iter()
         .enumerate()
-        .filter(|(_, f)| f.kind == FrameKind::ComptimeRegion)
+        .filter(|(_, f)| f.kind == hirsel_query_products::FrameKind::ComptimeRegion)
         .map(|(i, _)| i as u32)
         .collect();
     assert_eq!(regions.len(), 1, "{:?}", pick.frames);
@@ -390,7 +417,10 @@ pub fn main() -> Result[(), ()] {{
         .collect();
     assert!(!width.is_empty());
     for call in width {
-        assert_eq!(call.class, CallClass::ComptimeExecuted);
+        assert_eq!(
+            call.class,
+            hirsel_query_products::CallClass::ComptimeExecuted
+        );
         assert_eq!(call.owning_frame, regions[0]);
     }
     // CT-5 still selects the instance statically, as the checked body did.
@@ -420,7 +450,11 @@ fn growth_edges_give_the_checked_bodies_gen5_verdict_on_compiler_thread() {
             .flat_map(|(_, growth)| growth.edges.into_iter())
             .collect();
         let graph = engine.gen5_source_graph().unwrap();
-        assert_eq!(growing_sites(&edges), graph.growing_sites(), "{source}");
+        assert_eq!(
+            hirsel_query_products::growing_sites(&edges),
+            graph.growing_sites(),
+            "{source}"
+        );
     }
 }
 
@@ -436,7 +470,7 @@ fn published_summary_survives_body_release_and_rejects_stale_seeds() {
         let main = hirsel_syntax::DefId::intern(&path("main"));
         let early = engine.checked_definition_summary(main).unwrap();
         let analyzed = engine.mode_definition(main.path()).unwrap();
-        let mode_summary = summarize(engine.types(), &analyzed.value.typed);
+        let mode_summary = hirsel_query_products::summarize(engine.types(), &analyzed.value.typed);
         let summary = engine
             .publish_definition(main, hirsel_engine::memo::Retention::Batch)
             .unwrap();
@@ -531,10 +565,10 @@ fn published_summaries_match_mode_refined_selection_inputs() {
                     "generated instances retain source lexical owners but distinct query identities");
             }
             for (definition, checked) in checked {
-                let CheckedSummary { summary: checked, growth } = checked;
+                let hirsel_query_products::CheckedSummary { summary: checked, growth } = checked;
                 let path = definition.path();
                 let analyzed = engine.mode_definition(path).unwrap();
-                let mode = summarize(engine.types(), &analyzed.value.typed);
+                let mode = hirsel_query_products::summarize(engine.types(), &analyzed.value.typed);
                 // Exact equality is stronger than CT-3 selection equivalence:
                 // every frame, call, generic argument, site and growth edge.
                 let published = engine.definition_summary(definition).unwrap();

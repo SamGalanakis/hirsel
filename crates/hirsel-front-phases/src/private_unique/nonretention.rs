@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 pub(super) fn infer(
     types: &hirsel_types::TypeInterner,
-    bodies: &[(Arc<TypedBody>, SignatureRef)],
+    bodies: &[(Arc<hirsel_query_products::TypedBody>, SignatureRef)],
     headers: &mut BTreeMap<DefId, SignatureRef>,
     provider: &mut dyn SignatureProvider,
 ) -> Result<(), QueryError> {
@@ -137,7 +137,7 @@ fn concrete_data_parameter(types: &hirsel_types::TypeInterner, ty: TypeId) -> bo
 
 struct Proof<'a> {
     types: &'a hirsel_types::TypeInterner,
-    body: &'a TypedBody,
+    body: &'a hirsel_query_products::TypedBody,
     headers: &'a BTreeMap<DefId, SignatureRef>,
     provider: &'a mut dyn SignatureProvider,
     parameter: ParamId,

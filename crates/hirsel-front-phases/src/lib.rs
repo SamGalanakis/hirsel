@@ -94,7 +94,7 @@ impl CheckerPhase for BodyAdapter {
         resolution: Resolution,
         signature: &Signature,
         provider: &mut dyn SignatureProvider,
-    ) -> Result<QueryOutput<TypedBody>, QueryError> {
+    ) -> Result<QueryOutput<hirsel_query_products::TypedBody>, QueryError> {
         let definition = signature.definition.path();
         let context = FileContext {
             package: definition.0.package.clone(),
@@ -119,7 +119,7 @@ impl CheckerPhase for BodyAdapter {
         let unit = t.intern(hirsel_types::Type::unit());
         let boolean = t.intern(hirsel_types::Type::boolean());
         Ok(QueryOutput {
-            value: TypedBody {
+            value: hirsel_query_products::TypedBody {
                 syntax,
                 checked: output.checked.value,
                 plans: output.plans,
@@ -142,7 +142,10 @@ impl ModesPhase for ModeAdapter {
         &self,
         t: &hirsel_types::TypeInterner,
         m: &hirsel_types::TypeMemo,
-        bodies: &[(Arc<TypedBody>, hirsel_types::SignatureRef)],
+        bodies: &[(
+            Arc<hirsel_query_products::TypedBody>,
+            hirsel_types::SignatureRef,
+        )],
         provider: &mut dyn SignatureProvider,
     ) -> Result<Vec<(DefId, hirsel_types::UniqueInference)>, QueryError> {
         private_unique::infer(self, t, m, bodies, provider)
@@ -152,7 +155,7 @@ impl ModesPhase for ModeAdapter {
         &self,
         t: &hirsel_types::TypeInterner,
         m: &hirsel_types::TypeMemo,
-        body: &AnalyzedBody,
+        body: &hirsel_query_products::AnalyzedBody,
         signature: &Signature,
         signatures: &mut dyn SignatureProvider,
     ) -> Result<QueryOutput<hirsel_types::storage::graph::StorageDefinition>, QueryError> {
@@ -179,11 +182,11 @@ impl ModesPhase for ModeAdapter {
         &self,
         t: &hirsel_types::TypeInterner,
         m: &hirsel_types::TypeMemo,
-        typed: Arc<TypedBody>,
+        typed: Arc<hirsel_query_products::TypedBody>,
         signature: &Signature,
         products: &mut PhaseProducts,
         provider: &mut dyn SignatureProvider,
-    ) -> Result<QueryOutput<AnalyzedBody>, QueryError> {
+    ) -> Result<QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
         let mut typed = Arc::unwrap_or_clone(typed);
         let syntax = typed.syntax.clone();
         let intrinsics = hirsel_types::core_roles::intrinsic_roles()
@@ -341,7 +344,7 @@ impl ModesPhase for ModeAdapter {
         output.dependencies.extend(audited.dependencies);
         typed.checked = output.body;
         Ok(QueryOutput {
-            value: AnalyzedBody {
+            value: hirsel_query_products::AnalyzedBody {
                 typed: Arc::new(typed),
                 ownership: owned.value,
                 results: output.result_types,
@@ -358,8 +361,8 @@ impl LoweringPhase for LowerAdapter {
         &self,
         t: &hirsel_types::TypeInterner,
         _: &hirsel_types::TypeMemo,
-        analyzed: &AnalyzedBody,
-        comptime: &Comptime,
+        analyzed: &hirsel_query_products::AnalyzedBody,
+        comptime: &hirsel_query_products::Comptime,
         signature: &Signature,
     ) -> Result<QueryOutput<hirsel_tir::Definition>, QueryError> {
         let source = &analyzed.typed.syntax.item;
@@ -410,7 +413,7 @@ impl LoweringPhase for LowerAdapter {
         &self,
         t: &hirsel_types::TypeInterner,
         _: &hirsel_types::TypeMemo,
-        analyzed: &AnalyzedBody,
+        analyzed: &hirsel_query_products::AnalyzedBody,
         staged: &[(hirsel_syntax::ExprId, TypeId)],
         signature: &Signature,
         expression: hirsel_syntax::ExprId,
@@ -434,7 +437,7 @@ impl LoweringPhase for LowerAdapter {
 
 fn lower_expression(
     t: &hirsel_types::TypeInterner,
-    analyzed: &AnalyzedBody,
+    analyzed: &hirsel_query_products::AnalyzedBody,
     staged: &[(hirsel_syntax::ExprId, TypeId)],
     signature: &Signature,
     expression: hirsel_syntax::ExprId,

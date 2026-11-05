@@ -552,7 +552,10 @@ fn failed_private_inference_cannot_reuse_a_successful_signature_snapshot() {
             &self,
             _: &hirsel_types::TypeInterner,
             _: &hirsel_types::TypeMemo,
-            _: &[(Arc<TypedBody>, hirsel_types::SignatureRef)],
+            _: &[(
+                Arc<hirsel_query_products::TypedBody>,
+                hirsel_types::SignatureRef,
+            )],
             _: &mut dyn hirsel_types::SignatureProvider,
         ) -> Result<
             Vec<(hirsel_syntax::DefId, hirsel_types::UniqueInference)>,
@@ -564,11 +567,14 @@ fn failed_private_inference_cannot_reuse_a_successful_signature_snapshot() {
             &self,
             types: &hirsel_types::TypeInterner,
             memo: &hirsel_types::TypeMemo,
-            body: Arc<TypedBody>,
+            body: Arc<hirsel_query_products::TypedBody>,
             signature: &hirsel_types::Signature,
             products: &mut PhaseProducts,
             signatures: &mut dyn hirsel_types::SignatureProvider,
-        ) -> Result<hirsel_types::QueryOutput<AnalyzedBody>, hirsel_types::QueryError> {
+        ) -> Result<
+            hirsel_types::QueryOutput<hirsel_query_products::AnalyzedBody>,
+            hirsel_types::QueryError,
+        > {
             self.0
                 .check_modes(types, memo, body, signature, products, signatures)
         }

@@ -49,7 +49,7 @@ fn summary_membership_and_sibling_frames_have_bounded_scaling() {
         engine.parse_file(file, &default_context()).unwrap();
         let output = engine.mode_definition(&probe_path).unwrap();
         assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
-        let (summary, _) = summarize(engine.types(), &output.value.typed);
+        let (summary, _) = hirsel_query_products::summarize(engine.types(), &output.value.typed);
         assert_eq!(
             summary
                 .frames
@@ -57,9 +57,9 @@ fn summary_membership_and_sibling_frames_have_bounded_scaling() {
                 .map(|f| (f.kind, f.parent))
                 .collect::<Vec<_>>(),
             [
-                (FrameKind::Item, None),
-                (FrameKind::Closure, Some(0)),
-                (FrameKind::ComptimeRegion, Some(0)),
+                (hirsel_query_products::FrameKind::Item, None),
+                (hirsel_query_products::FrameKind::Closure, Some(0)),
+                (hirsel_query_products::FrameKind::ComptimeRegion, Some(0)),
             ]
         );
         assert_eq!(
@@ -69,9 +69,9 @@ fn summary_membership_and_sibling_frames_have_bounded_scaling() {
                 .map(|c| (c.owning_frame, c.target_frame, c.class))
                 .collect::<Vec<_>>(),
             [
-                (1, None, CallClass::Runtime),
-                (0, Some(1), CallClass::Runtime),
-                (2, None, CallClass::ComptimeExecuted),
+                (1, None, hirsel_query_products::CallClass::Runtime),
+                (0, Some(1), hirsel_query_products::CallClass::Runtime),
+                (2, None, hirsel_query_products::CallClass::ComptimeExecuted),
             ]
         );
         let mut measurements = Vec::new();
@@ -101,25 +101,19 @@ fn summary_membership_and_sibling_frames_have_bounded_scaling() {
                 let output = engine.mode_definition(&probe_path).unwrap();
                 assert!(output.diagnostics.is_empty(), "{:?}", output.diagnostics);
                 let before = work::read(Counter::SummaryComparisons);
-                let (summary, growth) = summarize(engine.types(), &output.value.typed);
+                let (summary, growth) =
+                    hirsel_query_products::summarize(engine.types(), &output.value.typed);
                 units.push(work::read(Counter::SummaryComparisons) - before);
                 // The source has exactly n independent written sites. Planned
                 // duplicates retain the first written call and its runtime class.
                 if family == "frames" {
                     assert_eq!(summary.frames.len(), n + 1);
-                    assert!(
-                        summary.frames[1..]
-                            .iter()
-                            .all(|f| f.parent == Some(0) && f.kind == FrameKind::Closure)
-                    );
+                    assert!(summary.frames[1..].iter().all(|f| f.parent == Some(0)
+                        && f.kind == hirsel_query_products::FrameKind::Closure));
                 } else {
                     assert_eq!(summary.calls.len(), n);
-                    assert!(
-                        summary
-                            .calls
-                            .iter()
-                            .all(|c| c.owning_frame == 0 && c.class == CallClass::Runtime)
-                    );
+                    assert!(summary.calls.iter().all(|c| c.owning_frame == 0
+                        && c.class == hirsel_query_products::CallClass::Runtime));
                     assert!(
                         summary
                             .calls

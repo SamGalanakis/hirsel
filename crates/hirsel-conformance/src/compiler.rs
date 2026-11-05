@@ -252,7 +252,8 @@ fn evaluate_on_compiler_thread(
     let mut diagnostic_phase = None;
     let mut rejected = None;
     let checked = (|| {
-        use hirsel_engine::LoweringPolicy::{Comptime, Reachable};
+        use hirsel_engine::LoweringPolicy::Reachable;
+        use hirsel_query_products::Comptime;
         {
             let (comptime, phase) = match requested.check(Comptime) {
                 Ok(checked) => checked,

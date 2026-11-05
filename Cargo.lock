@@ -668,6 +668,7 @@ dependencies = [
  "hirsel-native-queries",
  "hirsel-native-testing",
  "hirsel-proof-export",
+ "hirsel-query-products",
  "hirsel-requests",
  "hirsel-run-config",
  "hirsel-run-schema",
@@ -752,6 +753,7 @@ dependencies = [
  "hirsel-parser",
  "hirsel-project-info",
  "hirsel-proof-export",
+ "hirsel-query-products",
  "hirsel-rc",
  "hirsel-registry",
  "hirsel-remote",
@@ -795,6 +797,7 @@ dependencies = [
  "hirsel-parser",
  "hirsel-product-codec",
  "hirsel-proof-export",
+ "hirsel-query-products",
  "hirsel-registry",
  "hirsel-resolve",
  "hirsel-run-config",
@@ -864,6 +867,7 @@ dependencies = [
  "hirsel-guard",
  "hirsel-lower",
  "hirsel-ownership",
+ "hirsel-query-products",
  "hirsel-signature",
  "hirsel-span",
  "hirsel-syntax",
@@ -1358,6 +1362,7 @@ dependencies = [
  "hirsel-native-testing",
  "hirsel-object-storage",
  "hirsel-proof-export",
+ "hirsel-query-products",
  "hirsel-rc",
  "hirsel-registry",
  "hirsel-requests",
@@ -1427,6 +1432,21 @@ dependencies = [
  "hirsel-types",
  "hirsel-validate",
  "serde_json",
+]
+
+[[package]]
+name = "hirsel-query-products"
+version = "0.1.0"
+dependencies = [
+ "hirsel-check-protocol",
+ "hirsel-graph",
+ "hirsel-guard",
+ "hirsel-intern",
+ "hirsel-span",
+ "hirsel-syntax",
+ "hirsel-tir",
+ "hirsel-types",
+ "serde",
 ]
 
 [[package]]

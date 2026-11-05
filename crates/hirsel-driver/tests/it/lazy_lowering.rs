@@ -512,7 +512,8 @@ fn a_later_generator_respects_its_files_operational_stop() {
             resolution: hirsel_types::Resolution,
             signature: &hirsel_types::Signature,
             provider: &mut dyn hirsel_types::SignatureProvider,
-        ) -> Result<QueryOutput<TypedBody>, hirsel_types::QueryError> {
+        ) -> Result<QueryOutput<hirsel_query_products::TypedBody>, hirsel_types::QueryError>
+        {
             if self.unavailable && syntax.item.definition.0.name == "first" {
                 return Err(hirsel_types::QueryError::NotImplemented);
             }

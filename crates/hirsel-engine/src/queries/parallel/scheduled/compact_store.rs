@@ -389,10 +389,10 @@ mod tests {
                 let checked_summary = Arc::new(CheckedSummary {
                     summary: DefinitionSummary {
                         owner: syntax.owner().def,
-                        frames: vec![crate::summary::Frame {
+                        frames: vec![hirsel_query_products::Frame {
                             site: hirsel_types::NameSite::Item,
                             parent: None,
-                            kind: crate::summary::FrameKind::Item,
+                            kind: hirsel_query_products::FrameKind::Item,
                             generic: false,
                             size_bindings: Box::new([]),
                         }]

@@ -5,34 +5,7 @@
 use crate::*;
 use hirsel_check_protocol::header::{Input, NormalizedDeclaration};
 use hirsel_span::Span;
-use hirsel_types::{NameSite, TypeId};
 use std::sync::Arc;
-
-/// H's complete definition-local result. Every TypeId is a session interner row.
-#[derive(Clone, Debug)]
-pub struct TypedBody {
-    pub syntax: Arc<ItemSyntax>,
-    pub checked: CheckedBody,
-    pub plans: hirsel_check_protocol::body::Plans,
-    pub unit: TypeId,
-    pub boolean: TypeId,
-}
-/// J/I's complete result, refined together and cached as one artifact.
-#[derive(Clone, Debug)]
-pub struct AnalyzedBody {
-    pub typed: Arc<TypedBody>,
-    pub ownership: hirsel_types::OwnershipFacts,
-    pub results: Vec<(NameSite, TypeId)>,
-    pub call_allocations: Vec<(hirsel_syntax::ExprId, hirsel_types::Allocation)>,
-}
-/// The compile-time products lowering reads beside a borrowed analyzed body.
-#[derive(Clone, Debug, Default)]
-pub struct Comptime {
-    /// Evaluated subexpressions, which lowering emits as values.
-    pub materialized: Vec<(hirsel_syntax::ExprId, hirsel_tir::Materialized)>,
-    /// Shared reception types of hidden size-generic constants.
-    pub staged: Vec<(hirsel_syntax::ExprId, TypeId)>,
-}
 
 /// The compiler's front phases. [`PhaseAdapters::compiler`] installs them beside
 /// the engine's own lexer, parser, resolver, formatter and interpreter adapters.

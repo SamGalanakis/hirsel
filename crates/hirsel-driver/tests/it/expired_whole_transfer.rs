@@ -78,18 +78,18 @@ const NEGATIVES: &[(&str, &str)] = &[
 // removed: V receives the actual rejected program, not an accepted substitute.
 struct CaptureModes {
     inner: Arc<dyn ModesPhase>,
-    body: Mutex<Option<AnalyzedBody>>,
+    body: Mutex<Option<hirsel_query_products::AnalyzedBody>>,
 }
 impl ModesPhase for CaptureModes {
     fn check_modes(
         &self,
         t: &TypeInterner,
         m: &TypeMemo,
-        body: Arc<TypedBody>,
+        body: Arc<hirsel_query_products::TypedBody>,
         signature: &Signature,
         products: &mut PhaseProducts,
         provider: &mut dyn SignatureProvider,
-    ) -> Result<hirsel_types::QueryOutput<AnalyzedBody>, QueryError> {
+    ) -> Result<hirsel_types::QueryOutput<hirsel_query_products::AnalyzedBody>, QueryError> {
         let output = self
             .inner
             .check_modes(t, m, body, signature, products, provider)?;

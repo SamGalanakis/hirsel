@@ -221,8 +221,16 @@ impl FrontLowerQueries {
                     constant_selection_bytes: lower.constant_selection_bytes,
                 }),
                 [
-                    Some((crate::NATIVE_ORIGINAL_BODY, lower.body)),
-                    Some((LOWER_MATERIALIZED, lower.materialized)),
+                    lower
+                        .body
+                        .get()
+                        .copied()
+                        .map(|body| (crate::NATIVE_ORIGINAL_BODY, body)),
+                    lower
+                        .materialized
+                        .get()
+                        .copied()
+                        .map(|body| (LOWER_MATERIALIZED, body)),
                     lower
                         .verified
                         .as_ref()
@@ -427,14 +435,15 @@ impl FrontLowerQueries {
             }
             let lower = LowerProduct {
                 live: None,
+                local_verified: None,
                 definition,
-                body,
+                body: Arc::new(std::sync::OnceLock::from(body)),
                 diagnostics,
                 dependencies: dependencies.into_inner(),
                 archived_metadata: None,
                 verified: retained.verified,
                 acceptance: retained.acceptance,
-                materialized,
+                materialized: Arc::new(std::sync::OnceLock::from(materialized)),
                 definition_decode_layout: retained.definition_decode_layout,
                 constant_selection_bytes: retained.constant_selection_bytes,
             };
@@ -506,6 +515,11 @@ impl FrontLowerQueries {
                     executed,
                     execution,
                     execution_subject: persistent::evaluation_subject(key, &descriptor),
+                    action: hirsel_artifact_store::Action(persistent::evaluation_subject(
+                        key,
+                        &descriptor,
+                    )),
+                    observations: None,
                 },
                 Publication {
                     domain,

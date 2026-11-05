@@ -1114,7 +1114,9 @@ impl State {
             let body = product
                 .analyzed_value()
                 .is_some_and(|body| body.cache_only())
-                || product.lower_value().is_some_and(|body| body.cache_only());
+                || product
+                    .lower_value()
+                    .is_some_and(|body| body.cache_only() && body.prepare_eviction(scratch));
             let archived = match self.factories.get(&query.0) {
                 Some(Factory::Send(factory)) if !body => factory.evict(id(query), product, scratch),
                 _ => false,
@@ -1363,7 +1365,9 @@ impl QueryContext for Context<'_> {
                     let body = product
                         .analyzed_value()
                         .is_some_and(|body| body.cache_only())
-                        || product.lower_value().is_some_and(|body| body.cache_only());
+                        || product.lower_value().is_some_and(|body| {
+                            body.cache_only() && body.prepare_eviction(scratch)
+                        });
                     let summary = product.summary_value().is_some();
                     (body || summary).then_some((order, body))
                 })

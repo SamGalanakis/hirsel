@@ -116,14 +116,15 @@ struct Publication {
 #[derive(Clone)]
 struct LowerProduct {
     live: Option<WeakLowerProduct>,
+    local_verified: Option<hirsel_validate::VerifiedDefinitionOutput>,
     definition: DefId,
-    body: Reference,
+    body: Arc<std::sync::OnceLock<Reference>>,
     diagnostics: Vec<Diagnostic>,
     dependencies: Dependencies,
     archived_metadata: Option<Box<reads::Archive>>,
     verified: Option<StoredVerification>,
     acceptance: Option<hirsel_validate::AcceptedArtifact>,
-    materialized: Reference,
+    materialized: Arc<std::sync::OnceLock<Reference>>,
     definition_decode_layout: DefinitionDecodeLayout,
     constant_selection_bytes: u64,
 }
@@ -134,6 +135,9 @@ impl LowerProduct {
     ) -> Option<Option<hirsel_validate::VerifiedDefinitionOutput>> {
         if let Some(live) = self.live.as_ref().and_then(WeakLowerProduct::upgrade) {
             return Some(live.observations().verified.clone());
+        }
+        if self.local_verified.is_some() {
+            return Some(self.local_verified.clone());
         }
         let Some(stored) = &self.verified else {
             return Some(None);
@@ -176,7 +180,7 @@ impl LowerProduct {
         if let Some(live) = self.live.as_ref().and_then(WeakLowerProduct::upgrade) {
             return Some(live.output().clone());
         }
-        let definition = decode_definition(owner, self.body)?;
+        let definition = decode_definition(owner, *self.body.get()?)?;
         if definition.path != self.definition {
             return None;
         }
@@ -207,6 +211,8 @@ struct Outcome {
     executed: bool,
     execution: Option<hirsel_validate::ExecutionReceipt>,
     execution_subject: ContentHash,
+    action: hirsel_artifact_store::Action,
+    observations: Option<ProductRef>,
 }
 impl Outcome {
     fn archive(&self) -> Option<&reads::Archive> {
@@ -300,6 +306,12 @@ impl Outcome {
                 if lower.archived_metadata.is_some() {
                     weight.add(size_of::<reads::Archive>() + 2 * size_of::<usize>());
                 }
+                weight.add(
+                    2 * (size_of::<std::sync::OnceLock<Reference>>() + 2 * size_of::<usize>()),
+                );
+                if let Some(verified) = &lower.local_verified {
+                    weight.add(verified.retained_bytes()?.try_into().ok()?);
+                }
                 // AcceptedArtifact and every other inline product field are
                 // included in the LowerProduct allocation above.
             }
@@ -357,7 +369,7 @@ fn outcome_table_bytes(rows: usize) -> u64 {
         return 0;
     }
     let mut weight = crate::NativeMetadataWeight::default();
-    weight.tree::<(u32, ContentHash), (Reference, Box<Outcome>, u64)>(rows);
+    weight.tree::<(u32, ContentHash), (Option<Reference>, Box<Outcome>, u64)>(rows);
     weight.bytes()
 }
 
@@ -377,7 +389,9 @@ pub struct FrontLowerOutput {
     pub signature: ContentHash,
     pub verified: Option<hirsel_validate::VerifiedDefinitionOutput>,
     pub materialized: Vec<(hirsel_syntax::ExprId, Materialized)>,
-    query_observations: Option<ProductArchive>,
+    query_observations: Option<ProductRef>,
+    body_archive: Arc<std::sync::OnceLock<Reference>>,
+    constants_archive: Arc<std::sync::OnceLock<Reference>>,
     owner: Arc<LowerSource>,
 }
 pub(crate) struct LowerPartition {
@@ -463,7 +477,7 @@ pub struct FrontLowerQueries {
     verify_store: crate::store::VerifyStore,
     records: crate::NativeRecords,
     store: Arc<dyn ResultStore>,
-    outcomes: Mutex<BTreeMap<(u32, ContentHash), (Reference, Box<Outcome>, u64)>>,
+    outcomes: Mutex<BTreeMap<(u32, ContentHash), (Option<Reference>, Box<Outcome>, u64)>>,
     carry: Mutex<Option<Arc<LowerCarry>>>,
     carry_changes: Mutex<Option<Arc<carry::CarryChanges>>>,
     clean_memos: Mutex<BTreeSet<crate::memo::MemoKey>>,
@@ -1116,10 +1130,12 @@ impl FrontLowerQueries {
         let outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
         let (reference, outcome, _) = outcomes.get(&(FRONT_LOWER_KIND, product.address.0))?;
         if *reference
-            != product
-                .archive(ArchiveAdmission::Retained)
-                .ok()?
-                .reference()
+            != Some(
+                product
+                    .archive(ArchiveAdmission::Retained)
+                    .ok()?
+                    .reference(),
+            )
         {
             return None;
         }
@@ -1137,7 +1153,7 @@ impl FrontLowerQueries {
         let output = lower.decode(self)?;
         let materialized = self.records.decode(
             &*self.namespace.anchors,
-            &self.store.get_content(lower.materialized)?,
+            &self.store.get_content(*lower.materialized.get()?)?,
         )?;
         let input = self.inputs.get(lower.definition.path())?;
         let signature = self
@@ -1160,7 +1176,9 @@ impl FrontLowerQueries {
             signature,
             verified: lower.verified(self)?,
             materialized,
-            query_observations: Some(product.archive(ArchiveAdmission::Retained).ok()?),
+            query_observations: Some(product.clone()),
+            body_archive: lower.body.clone(),
+            constants_archive: lower.materialized.clone(),
             owner: self.source.clone(),
         })
     }
@@ -1192,14 +1210,14 @@ impl FrontLowerQueries {
         };
         let body = crate::NativeOriginalHandle::bound(
             &live,
-            lower.body,
+            lower.body.clone(),
             self.namespace.anchors.clone(),
             self.records.clone(),
             self.source.clone(),
             lower
                 .definition_decode_layout
                 .total()?
-                .checked_add(lower.body.len)?,
+                .checked_add(lower.body.get().map_or(0, |body| body.len))?,
         );
         let observations = live.observations();
         Some(crate::NativeOriginalProduct {
@@ -1228,16 +1246,7 @@ impl FrontLowerQueries {
             address: product.address,
         };
         self.selected(id, Ok(product.clone()))?;
-        let archive = product
-            .lower_value()?
-            .observations()
-            .query_observations
-            .clone()?;
-        Some(ProductRef::import_archive(
-            product.address,
-            product.action,
-            archive,
-        ))
+        self.selected(id, Ok(product))?.observations
     }
     pub fn failure(&self, reference: Reference) -> Option<QueryError> {
         let local = self
@@ -1245,7 +1254,7 @@ impl FrontLowerQueries {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .values()
-            .find(|(r, _, _)| *r == reference)
+            .find(|(r, _, _)| *r == Some(reference))
             .and_then(|(_, outcome, _)| outcome.result.as_ref().err().cloned());
         if local.is_some() {
             return local;
@@ -1268,7 +1277,7 @@ impl FrontLowerQueries {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .values()
-            .find(|(r, _, _)| *r == reference)
+            .find(|(r, _, _)| *r == Some(reference))
             .map(|(_, outcome, _)| {
                 outcome.diagnostic_sources.as_ref().map_or_else(
                     || self.namespace.sources.clone(),
@@ -1302,11 +1311,13 @@ impl FrontLowerQueries {
                     if let Some(live) = product.lower_value() {
                         product.address == live.address() && product.action == live.action()
                             && matches!(&outcome.result, Ok(Value::Lower(lower)) if lower.live.as_ref().and_then(WeakLowerProduct::upgrade).is_some_and(|stored| stored.same_owner(live)))
+                    } else if product.action == outcome.action && reference.is_none() {
+                        true
                     } else {
-                        product.archive(ArchiveAdmission::Retained).is_ok_and(|archive| archive.reference() == *reference)
+                        product.archive(ArchiveAdmission::Retained).is_ok_and(|archive| Some(archive.reference()) == *reference)
                     }
                 }
-                Err(failure) => failure == reference,
+                Err(failure) => Some(*failure) == *reference,
             })
             .map(|(_, outcome, _)| outcome.as_ref().clone())
     }
@@ -1519,6 +1530,57 @@ impl FrontLowerQueries {
             .as_ref()
             .ok()
             .and_then(|_| source.evidence.borrow().finish(&observed));
+        if result.is_ok() {
+            let selections = std::mem::take(&mut *source.selections.borrow_mut());
+            let action = hirsel_artifact_store::Action(ContentHash::of_parts(
+                "hirsel.front.live-action.v1",
+                [
+                    key.0.0.as_slice(),
+                    key.1.0.as_slice(),
+                    self.namespace.manifest.0.as_slice(),
+                    crate::store::payload_reads_hash(&observed).0.as_slice(),
+                    id.kind.to_le_bytes().as_slice(),
+                ],
+            ));
+            let execution_subject = action.0;
+            if let Some((definition, evidence)) = verification
+                && let Ok(Value::Lower(lower)) = &mut result
+                && let Some(cache) = self.store.verifier()
+            {
+                lower.local_verified = self
+                    .namespace
+                    .snapshot
+                    .validation(&path.0.package)
+                    .ok()
+                    .and_then(|views| {
+                        cache.publish_definition(
+                            execution_subject,
+                            &definition,
+                            self.namespace.snapshot.types().clone(),
+                            self.namespace.snapshot.source_verification_policy(),
+                            views,
+                            &evidence,
+                            &[],
+                        )
+                    });
+            }
+            let outcome = Outcome {
+                diagnostic_sources: source.diagnostic_sources.borrow().clone(),
+                result,
+                reads: observed,
+                reads_decode_bytes: 0,
+                selections,
+                depth: depth.into(),
+                executed,
+                execution,
+                execution_subject,
+                action,
+                observations: None,
+            };
+            return self
+                .publish_live(id, &key, outcome, raw, &source.reads)
+                .await;
+        }
         let descriptor_reads =
             evidence::archived_reads(&observed, execution.as_ref()).ok_or(self.errors.protocol)?;
         let selections = std::mem::take(&mut *source.selections.borrow_mut());
@@ -1559,10 +1621,14 @@ impl FrontLowerQueries {
                         &*self.namespace.anchors,
                         &(
                             lower.definition,
-                            lower.body,
+                            lower.body.get().copied().ok_or(self.errors.protocol)?,
                             &lower.diagnostics,
                             lower.dependencies.packed(),
-                            &lower.materialized,
+                            lower
+                                .materialized
+                                .get()
+                                .copied()
+                                .ok_or(self.errors.protocol)?,
                             &descriptor_reads,
                             &depth,
                             executed,
@@ -1674,6 +1740,8 @@ impl FrontLowerQueries {
             executed,
             execution,
             execution_subject,
+            action: hirsel_artifact_store::Action(execution_subject),
+            observations: None,
         };
         self.remember_carry(id, &key, &bytes, &outcome);
         self.publish(
@@ -1749,7 +1817,7 @@ impl FrontLowerQueries {
                         &*self.namespace.anchors,
                         &self
                             .store
-                            .get_content(lower.materialized)
+                            .get_content(*lower.materialized.get().ok_or(self.errors.protocol)?)
                             .ok_or(self.errors.protocol)?,
                     )
                     .ok_or(self.errors.protocol)?,
@@ -1789,6 +1857,8 @@ impl FrontLowerQueries {
                         .fingerprint,
                     verified: lower.verified(self).unwrap_or(None),
                     query_observations: None,
+                    body_archive: lower.body.clone(),
+                    constants_archive: lower.materialized.clone(),
                     owner: self.source.clone(),
                 }
             })
@@ -1844,7 +1914,9 @@ impl FrontLowerQueries {
                 }
             };
             if let Some(original) = &mut original {
-                original.query_observations = archive.clone();
+                original.query_observations = archive
+                    .clone()
+                    .map(|archive| ProductRef::import_archive(id.address, action, archive));
             }
             let live = match original.take() {
                 Some(output) => match LiveLowerProduct::from_retained(
@@ -1892,9 +1964,9 @@ impl FrontLowerQueries {
                     .map(|remaining| {
                         let admitted = outcome.take().expect("unadmitted outcome");
                         let replaced =
-                            outcomes.insert(selected, (record, Box::new(admitted), charge));
+                            outcomes.insert(selected, (Some(record), Box::new(admitted), charge));
                         *retention = remaining;
-                        drop(replaced);
+                        replaced
                     })
             };
             if admitted.is_none() {
@@ -1903,6 +1975,7 @@ impl FrontLowerQueries {
                 }
                 continue;
             }
+            drop(admitted);
             break (archive, live);
         };
         if failed {
@@ -2216,39 +2289,13 @@ impl FrontLowerQueries {
         if has_errors(&output.diagnostics) {
             return Err(QueryError::Diagnostics(output.diagnostics));
         }
-        let (bytes, record_decode_bytes) = completed
-            .records
-            .encode_tir_with_decode_bytes(&*completed.namespace.anchors, &definition)
-            .ok_or(QueryError::NotImplemented)?;
-        // Arc/slice decoding can temporarily overlap its construction buffers.
-        // Count serialized shared rows independently; source sharing is not a
-        // promise made by the ordinary decoder.
         let retained = crate::memo::retained::decoded_tir_bytes(&definition);
         let definition_decode_layout = DefinitionDecodeLayout {
             retained,
-            transient: retained
-                .checked_add(record_decode_bytes)
-                .ok_or(QueryError::NotImplemented)?,
+            transient: retained,
         };
-        definition_decode_layout
-            .total()
-            .ok_or(QueryError::NotImplemented)?;
-        // Ordinary body bytes belong to the selected provider. Encoding uses
-        // the active scratch reservation, rather than the saved future frame.
-        if bytes.len() as u64 > self.weight.scratch {
-            return Err(QueryError::NotImplemented);
-        }
-        let body = self
-            .store
-            .put_content(crate::NATIVE_ORIGINAL_BODY, &bytes)
-            .ok_or(QueryError::NotImplemented)?;
-        drop(bytes);
-        let materialized = completed
-            .records
-            .encode(&*completed.namespace.anchors, &constants)
-            .filter(|bytes| bytes.len() as u64 <= self.weight.scratch)
-            .and_then(|bytes| self.store.put_content(LOWER_MATERIALIZED, &bytes))
-            .ok_or(QueryError::NotImplemented)?;
+        let body = Arc::new(std::sync::OnceLock::new());
+        let materialized = Arc::new(std::sync::OnceLock::new());
         // Scalar Lower inherits the Modes detail and then appends its
         // analyzed input again before the lowering adapter's dependencies.
         let mut dependencies = analyzed.dependencies.clone();
@@ -2267,6 +2314,7 @@ impl FrontLowerQueries {
             raw,
             value: Value::Lower(Box::new(LowerProduct {
                 live: None,
+                local_verified: None,
                 constant_selection_bytes,
                 definition: definition.path,
                 body,
@@ -2282,6 +2330,262 @@ impl FrontLowerQueries {
         })
     }
 }
+struct LowerCharge {
+    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
+    remaining: Arc<Mutex<u64>>,
+    bytes: u64,
+}
+impl Drop for LowerCharge {
+    fn drop(&mut self) {
+        *self.remaining.lock().unwrap_or_else(|e| e.into_inner()) += self.bytes;
+    }
+}
+impl FrontLowerQueries {
+    async fn publish_live(
+        &self,
+        id: QueryId,
+        _key: &EntryKey,
+        mut outcome: Outcome,
+        raw: Option<RawLowerOutput>,
+        query_reads: &QueryReads,
+    ) -> Result<ProductRef, Reference> {
+        let action = outcome.action;
+        let metadata = (
+            outcome.reads.clone(),
+            outcome.depth.evidence(),
+            outcome.executed,
+            outcome.selections.clone(),
+            self.namespace.manifest,
+        );
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(size_of_val(&metadata) + size_of::<LowerCharge>() + 8 * size_of::<usize>());
+        for (_, bytes) in outcome.reads.allocations() {
+            weight.add(bytes);
+        }
+        weight.add(size_of_val(&*metadata.1.first));
+        weight.add(
+            staged::selection_bytes(&metadata.3)
+                .try_into()
+                .map_err(|_| self.errors.resource)?,
+        );
+        let metadata_bytes = weight.bytes();
+        let required = outcome
+            .retained_bytes()
+            .and_then(|bytes| bytes.checked_add(metadata_bytes))
+            .and_then(|bytes| bytes.checked_add(outcome_table_bytes(1)))
+            .ok_or(self.errors.resource)?;
+        while *self.retention.lock().unwrap_or_else(|e| e.into_inner()) < required {
+            if !query_reads.evict_body().await {
+                return Err(self.errors.resource);
+            }
+        }
+        let charge = loop {
+            let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(next) = remaining.checked_sub(metadata_bytes) {
+                *remaining = next;
+                break Arc::new(LowerCharge {
+                    _allowance: self._allowance.clone(),
+                    remaining: self.retention.clone(),
+                    bytes: metadata_bytes,
+                });
+            }
+            drop(remaining);
+            if !query_reads.evict_body().await {
+                return Err(self.errors.resource);
+            }
+        };
+        let observations = ProductRef::live(
+            id.address,
+            action,
+            Arc::new(live_record::LiveRecord {
+                value: metadata,
+                domain: Domain {
+                    kind: 0x4600_0040,
+                    schema: 1,
+                },
+                records: self.records.clone(),
+                source: (*self.namespace.anchors).clone(),
+                serialization_working: self.weight.scratch,
+                _admission: charge,
+            }),
+        );
+        outcome.observations = Some(observations.clone());
+        let product = match (&mut outcome.result, raw) {
+            (Ok(Value::Lower(lower)), Some((output, materialized))) => {
+                let path = output.value.path;
+                let mut output = Some(FrontLowerOutput {
+                    output,
+                    materialized,
+                    reads: outcome.reads.clone(),
+                    depth: outcome.depth.evidence(),
+                    execution: outcome.execution.clone(),
+                    execution_subject: outcome.execution_subject,
+                    executed: outcome.executed,
+                    selections: outcome.selections.clone(),
+                    acceptance: lower.acceptance.clone(),
+                    implementation_revision: self
+                        .inputs
+                        .get(path.path())
+                        .ok_or(self.errors.protocol)?
+                        .captured
+                        .implementation,
+                    signature: self
+                        .namespace
+                        .snapshot
+                        .signature(path)
+                        .ok_or(self.errors.protocol)?
+                        .as_ref()
+                        .map_err(|_| self.errors.protocol)?
+                        .fingerprint,
+                    verified: lower.local_verified.clone(),
+                    query_observations: Some(observations),
+                    body_archive: lower.body.clone(),
+                    constants_archive: lower.materialized.clone(),
+                    owner: self.source.clone(),
+                });
+                let live = loop {
+                    match LiveLowerProduct::from_retained(
+                        (id.address, action),
+                        output.take().expect("unpublished Lower"),
+                        (*self.namespace.anchors).clone(),
+                        self.records.clone(),
+                        self.source.clone(),
+                        self._allowance.clone(),
+                        self.retention.clone(),
+                    ) {
+                        LiveAdmission::Admitted(live) => break live,
+                        LiveAdmission::Blocked(value) => {
+                            output = Some(*value);
+                            if !query_reads.evict_body().await {
+                                return Err(self.errors.resource);
+                            }
+                        }
+                        LiveAdmission::Refused => return Err(self.errors.resource),
+                    }
+                };
+                lower.live = Some(live.downgrade());
+                ProductRef::lower(live)
+            }
+            (Ok(Value::Constant(value)), _) => {
+                let (root, substitutions) = value
+                    .decoded(
+                        &self.records,
+                        &self.namespace.anchors,
+                        &*self.store,
+                        self.weight.scratch,
+                    )
+                    .ok_or(self.errors.resource)?;
+                let bytes = value
+                    .retained_bytes()
+                    .checked_add(metadata_bytes)
+                    .ok_or(self.errors.resource)?
+                    .checked_add(size_of_val(&root) as u64)
+                    .and_then(|bytes| bytes.checked_add(size_of::<LowerCharge>() as u64 + 128))
+                    .ok_or(self.errors.resource)?;
+                let charge = loop {
+                    let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(next) = remaining.checked_sub(bytes) {
+                        *remaining = next;
+                        break Arc::new(LowerCharge {
+                            _allowance: self._allowance.clone(),
+                            remaining: self.retention.clone(),
+                            bytes,
+                        });
+                    }
+                    drop(remaining);
+                    if !query_reads.evict_body().await {
+                        return Err(self.errors.resource);
+                    }
+                };
+                ProductRef::live(
+                    id.address,
+                    action,
+                    Arc::new(live_record::LiveRecord {
+                        value: (
+                            root,
+                            substitutions,
+                            outcome.reads.clone(),
+                            outcome.depth.evidence(),
+                            outcome.executed,
+                            outcome.selections.clone(),
+                            self.namespace.manifest,
+                        ),
+                        domain: Domain {
+                            kind: 0x4600_0041,
+                            schema: 1,
+                        },
+                        records: self.records.clone(),
+                        source: (*self.namespace.anchors).clone(),
+                        serialization_working: self.weight.scratch,
+                        _admission: charge,
+                    }),
+                )
+            }
+            _ => return Err(self.errors.protocol),
+        };
+        loop {
+            let charge = outcome.retained_bytes().ok_or(self.errors.resource)?;
+            let inserted = {
+                let mut remaining = self.retention.lock().unwrap_or_else(|e| e.into_inner());
+                let mut outcomes = self.outcomes.lock().unwrap_or_else(|e| e.into_inner());
+                let selected = (id.kind, id.address.0);
+                let old = outcomes.get(&selected).map_or(0, |(_, _, bytes)| *bytes);
+                let growth = outcome_table_bytes(
+                    outcomes.len() + usize::from(!outcomes.contains_key(&selected)),
+                )
+                .checked_sub(outcome_table_bytes(outcomes.len()))
+                .ok_or(self.errors.resource)?;
+                if let Some(next) = remaining
+                    .checked_add(old)
+                    .and_then(|n| n.checked_sub(charge))
+                    .and_then(|n| n.checked_sub(growth))
+                {
+                    *remaining = next;
+                    Some(outcomes.insert(selected, (None, Box::new(outcome.clone()), charge)))
+                } else {
+                    None
+                }
+            };
+            if let Some(replaced) = inserted {
+                drop(replaced);
+                break;
+            }
+            if !query_reads.evict_body().await {
+                return Err(self.errors.resource);
+            }
+        }
+        Ok(product)
+    }
+}
+impl FrontLowerOutput {
+    pub(crate) fn spill(&self, scratch: u64) -> Option<()> {
+        if self.body_archive.get().is_some() && self.constants_archive.get().is_some() {
+            return Some(());
+        }
+        let records = self
+            .owner
+            .records
+            .for_boundary(crate::store::ArchiveBoundary::RequiredSpill);
+        let bytes = records.encode_tir(&self.owner.anchors, &self.output.value)?;
+        if bytes.len() as u64 > scratch {
+            return None;
+        }
+        let body = self
+            .owner
+            .store
+            .put_content(crate::NATIVE_ORIGINAL_BODY, &bytes)?;
+        drop(bytes);
+        let bytes = records.encode(&self.owner.anchors, &self.materialized)?;
+        if bytes.len() as u64 > scratch {
+            return None;
+        }
+        let constants = self.owner.store.put_content(LOWER_MATERIALIZED, &bytes)?;
+        let _ = self.body_archive.set(body);
+        let _ = self.constants_archive.set(constants);
+        Some(())
+    }
+}
+
 struct Factory {
     owner: Arc<FrontLowerQueries>,
     _demand: Option<Arc<generation::demand::DemandProducer>>,
@@ -3371,6 +3675,8 @@ mod retention_tests {
             executed: false,
             execution: None,
             execution_subject: ContentHash::default(),
+            action: hirsel_artifact_store::Action(ContentHash::default()),
+            observations: None,
         };
         let expected = size_of::<Outcome>()
             + 2 * size_of::<usize>()

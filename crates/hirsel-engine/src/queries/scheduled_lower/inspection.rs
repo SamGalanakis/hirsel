@@ -65,7 +65,7 @@ impl FrontLowerQueries {
         if let Some(live) = lower.live.as_ref().and_then(WeakLowerProduct::upgrade) {
             return Ok(crate::NativeOriginalValue::Live(live.clone()));
         }
-        let reference = lower.body;
+        let reference = *lower.body.get().ok_or(QueryError::NotImplemented)?;
         drop(outcomes);
         let archive = self
             .records

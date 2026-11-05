@@ -971,6 +971,9 @@ struct LowerValue {
     output: crate::FrontLowerOutput,
 }
 impl LiveLowerProduct {
+    pub(super) fn prepare_eviction(&self, scratch: u64) -> bool {
+        self.observations().spill(scratch).is_some()
+    }
     pub(crate) fn downgrade(&self) -> WeakLowerProduct {
         WeakLowerProduct(Arc::downgrade(&self.0))
     }

@@ -197,14 +197,15 @@ mod tests {
             diagnostic_sources: None,
             result: Ok(Value::Lower(Box::new(LowerProduct {
                 live: None,
+                local_verified: None,
                 definition,
-                body,
+                body: Arc::new(std::sync::OnceLock::from(body)),
                 diagnostics: Vec::new(),
                 dependencies: descriptor.3.clone().into_inner(),
                 archived_metadata: None,
                 verified: None,
                 acceptance: None,
-                materialized,
+                materialized: Arc::new(std::sync::OnceLock::from(materialized)),
                 definition_decode_layout: DefinitionDecodeLayout {
                     retained: 0,
                     transient: 0,
@@ -218,6 +219,8 @@ mod tests {
             executed: false,
             execution: None,
             execution_subject: ContentHash::default(),
+            action: hirsel_artifact_store::Action(ContentHash::default()),
+            observations: None,
         };
         let before = outcome.retained_bytes().unwrap();
         outcome.archive_reads(reference);
@@ -321,6 +324,8 @@ mod tests {
             executed: false,
             execution: None,
             execution_subject: ContentHash::default(),
+            action: hirsel_artifact_store::Action(ContentHash::default()),
+            observations: None,
         };
         let before = outcome.retained_bytes().unwrap();
         outcome.archive_reads(reference);

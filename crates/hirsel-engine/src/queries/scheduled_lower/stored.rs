@@ -323,14 +323,15 @@ impl FrontLowerQueries {
             (
                 Value::Lower(Box::new(LowerProduct {
                     live: None,
+                    local_verified: None,
                     definition,
-                    body,
+                    body: Arc::new(std::sync::OnceLock::from(body)),
                     diagnostics,
                     dependencies: dependencies.into_inner(),
                     archived_metadata: None,
                     verified,
                     acceptance,
-                    materialized,
+                    materialized: Arc::new(std::sync::OnceLock::from(materialized)),
                     definition_decode_layout: layout,
                     constant_selection_bytes,
                 })),
@@ -403,6 +404,8 @@ impl FrontLowerQueries {
                         executed,
                         execution: None,
                         execution_subject,
+                        action: hirsel_artifact_store::Action(execution_subject),
+                        observations: None,
                     };
                     return Some(
                         self.publish(
@@ -438,6 +441,8 @@ impl FrontLowerQueries {
             executed,
             execution,
             execution_subject,
+            action: hirsel_artifact_store::Action(execution_subject),
+            observations: None,
         };
         if let Err(error) = self
             .restore_selections(&outcome.selections, query_reads)

@@ -31,7 +31,7 @@ impl NativeOriginalProduct {
             && self.verified == other.verified
             && match (&self.body.input, &other.body.input) {
                 (OriginalInput::Bound(a), OriginalInput::Bound(b)) => {
-                    a.reference == b.reference && a.context.bindings_hold(&b.context)
+                    a.action == b.action && a.context.bindings_hold(&b.context)
                 }
                 (OriginalInput::Archive(a), OriginalInput::Archive(b)) => {
                     a.reference() == b.reference()
@@ -57,7 +57,8 @@ enum OriginalInput {
 struct BoundOriginal {
     definition: hirsel_syntax::DefId,
     live: crate::runtime::WeakLowerProduct,
-    reference: hirsel_artifact_store::Reference,
+    reference: Arc<std::sync::OnceLock<hirsel_artifact_store::Reference>>,
+    action: hirsel_artifact_store::Action,
     context: Arc<NativeRecordContext>,
     source: Arc<dyn Send + Sync>,
     records: crate::NativeRecords,
@@ -106,7 +107,7 @@ impl From<hirsel_product_codec::CheckedTir> for NativeOriginalHandle {
 impl NativeOriginalHandle {
     pub(crate) fn bound(
         live: &crate::runtime::LiveLowerProduct,
-        reference: hirsel_artifact_store::Reference,
+        reference: Arc<std::sync::OnceLock<hirsel_artifact_store::Reference>>,
         context: Arc<NativeRecordContext>,
         records: crate::NativeRecords,
         source: Arc<dyn Send + Sync>,
@@ -118,6 +119,7 @@ impl NativeOriginalHandle {
                 definition: live.output().value.path,
                 live: live.downgrade(),
                 reference,
+                action: live.action(),
                 context,
                 records,
                 source,
@@ -159,7 +161,7 @@ impl NativeOriginalHandle {
     }
     fn reference(&self) -> Option<hirsel_artifact_store::Reference> {
         match &self.input {
-            OriginalInput::Bound(input) => Some(input.reference),
+            OriginalInput::Bound(input) => input.reference.get().copied(),
             OriginalInput::Archive(value) => Some(value.reference()),
             OriginalInput::Scalar(_) => None,
         }
@@ -178,11 +180,11 @@ impl NativeOriginalHandle {
                 let lease =
                     admission?.reserve(input.working_bytes.checked_add(owner_bytes as u64)?)?;
                 // Reserve before provider access, opening, or materialization.
-                let bytes = input.store.get_content(input.reference)?;
+                let bytes = input.store.get_content(*input.reference.get()?)?;
                 let archive = input.records.open_tir(
                     input.context.clone(),
                     bytes,
-                    input.reference,
+                    *input.reference.get()?,
                     Arc::new((lease, input.source.clone())),
                 )?;
                 Some(NativeOriginalValue::Archive(archive))
@@ -193,7 +195,10 @@ impl NativeOriginalHandle {
         match &self.input {
             OriginalInput::Bound(input) => {
                 input.definition.path() == &product.definition
-                    && input.reference.domain == NATIVE_ORIGINAL_BODY
+                    && input
+                        .reference
+                        .get()
+                        .is_none_or(|reference| reference.domain == NATIVE_ORIGINAL_BODY)
                     && input.context.bindings_hold(context)
                     && input.implementation_revision == product.implementation_revision
                     && input.signature == product.signature

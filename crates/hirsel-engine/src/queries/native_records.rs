@@ -740,6 +740,7 @@ impl NativeRecordSource for NativeRecordContext {
 /// Encoded recipes are ordinary data, never source V or native C authority.
 #[derive(Clone)]
 pub struct NativeRecords {
+    boundary: crate::store::ArchiveBoundary,
     store: Arc<dyn ResultStore>,
     records: Arc<TypeRecords>,
     types: Arc<hirsel_types::TypeInterner>,
@@ -768,6 +769,12 @@ impl NativeRecordEncoder<'_> {
 }
 
 impl NativeRecords {
+    pub(crate) fn for_boundary(&self, boundary: crate::store::ArchiveBoundary) -> Self {
+        Self {
+            boundary,
+            ..self.clone()
+        }
+    }
     pub(crate) fn prepare_encoding<'a, T: Serialize>(
         &'a self,
         source: &NativeRecordContext,
@@ -814,6 +821,7 @@ impl NativeRecords {
     }
     pub fn new(types: Arc<hirsel_types::TypeInterner>, store: Arc<dyn ResultStore>) -> Self {
         Self {
+            boundary: crate::store::ArchiveBoundary::Ordinary,
             records: TypeRecords::new(
                 types.clone(),
                 Arc::new(super::persistent::Contents(store.clone())),
@@ -830,7 +838,7 @@ impl NativeRecords {
         if !Arc::ptr_eq(&self.types, source.record_types()) {
             return None;
         }
-        self.encode_at(source, value, crate::store::ArchiveBoundary::Ordinary)
+        self.encode_at(source, value, self.boundary)
     }
     pub(crate) fn encode_at<T: Serialize>(
         &self,
@@ -855,8 +863,7 @@ impl NativeRecords {
         if !Arc::ptr_eq(&self.types, source.record_types()) {
             return None;
         }
-        self.store
-            .archive_encoded(crate::store::ArchiveBoundary::Ordinary);
+        self.store.archive_encoded(self.boundary);
         self.records
             .encode_tir(definition, |anchor| source.record_owner(anchor))
     }
@@ -868,8 +875,7 @@ impl NativeRecords {
         if !Arc::ptr_eq(&self.types, source.record_types()) {
             return None;
         }
-        self.store
-            .archive_encoded(crate::store::ArchiveBoundary::Ordinary);
+        self.store.archive_encoded(self.boundary);
         self.records
             .encode_tir_with_decode_bytes(definition, |anchor| source.record_owner(anchor))
     }
@@ -903,8 +909,7 @@ impl NativeRecords {
         if !Arc::ptr_eq(&self.types, source.record_types()) {
             return None;
         }
-        self.store
-            .archive_encoded(crate::store::ArchiveBoundary::Ordinary);
+        self.store.archive_encoded(self.boundary);
         self.records
             .encode_record_with_decode_bytes(value, |anchor| source.record_owner(anchor))
     }

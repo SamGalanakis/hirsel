@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 const WINDOW_RECORD: Domain = Domain {
     kind: super::super::instance_tasks::CALLABLE_GRAPH_KIND,
-    schema: 2,
+    schema: 3,
 };
 
 /// Only an ordinary addressed manifest survives the callable producer. Reading
@@ -25,6 +25,7 @@ pub(crate) struct PublishedCallables {
 #[derive(Serialize, Deserialize)]
 struct Row {
     key: NamedKey,
+    origin: NamedKey,
     request: Request,
     output: window::StoredRecord,
 }
@@ -77,9 +78,29 @@ impl PublishedCallables {
         for reference in rows {
             let row: Row = read_json(products.store.as_ref(), reference)?;
             let stored = StoredInstance::from_record(products.store.as_ref(), row.output)?;
-            let key = products.admit(row.request)?;
-            if key.instance != row.key.bind()? {
-                return Err("callable manifest request differs".into());
+            let selected = row.key.bind()?;
+            let origin = row.origin.bind()?;
+            if !selected.is_same_or_derived_from(&origin) || row.request.key.bind()? != selected {
+                return Err("callable manifest request has another origin".into());
+            }
+            // Receipt-aware originals keep the ordinary request checks. A
+            // callable selection is a separately C-published transformation,
+            // not another original import requiring new receipt roots.
+            let mut original = row.request.clone();
+            Arc::make_mut(&mut original.0).key = Arc::new(row.origin);
+            products.admit(original)?;
+            let key = products.address(selected);
+            if let Some(previous) = products.requests.get(key.instance.encoding()) {
+                if previous != &row.request {
+                    return Err("callable manifest request differs".into());
+                }
+            } else {
+                if products.requests.len() >= hirsel_rc::instance::MAX_INSTANCES {
+                    return Err("native instance limit".into());
+                }
+                products
+                    .requests
+                    .insert(key.instance.encoding().to_vec(), row.request);
             }
             products.attach_stored(&key, stored)?;
         }
@@ -836,6 +857,7 @@ impl DemandInstances {
                     .0,
                 self.json(&Row {
                     key: NamedKey::of(&key.instance),
+                    origin: NamedKey::of(&originals[row.origin].0.instance),
                     request: requests[key.instance.encoding()].clone(),
                     output: StoredInstance::capture(self.store.as_ref(), &output)?.record()?,
                 })?,

@@ -236,12 +236,12 @@ fn audit_resources(
     Some(trap)
 }
 
-/// One run's view of its provider: a program's definitions are immutable for the
-/// run, so each is looked up once rather than at every call. An error is never
-/// retained; it is asked again.
+/// Reuse immutable definitions while a producer or executing frame owns them.
+/// Completed reads leave only weak cache entries, so producer eviction can
+/// reclaim their backing before the run ends. Errors are never retained.
 struct Resolved<'p, P: ?Sized> {
     provider: &'p mut P,
-    definitions: std::collections::BTreeMap<hirsel_syntax::DefPath, DefinitionRef>,
+    definitions: std::collections::BTreeMap<hirsel_syntax::DefPath, std::sync::Weak<Definition>>,
     /// Declarations with their own body: CT-5 instances never replace them.
     own_bodies: std::collections::BTreeSet<hirsel_syntax::DefPath>,
 }
@@ -259,11 +259,16 @@ impl<P: AsyncTirProvider + ?Sized> AsyncTirProvider for Resolved<'_, P> {
         &mut self,
         path: &hirsel_syntax::DefPath,
     ) -> Result<DefinitionRef, hirsel_types::QueryError> {
-        if let Some(definition) = self.definitions.get(path) {
-            return Ok(definition.clone());
+        if let Some(definition) = self
+            .definitions
+            .get(path)
+            .and_then(std::sync::Weak::upgrade)
+        {
+            return Ok(definition);
         }
         let definition = self.provider.definition(path).await?;
-        self.definitions.insert(path.clone(), definition.clone());
+        self.definitions
+            .insert(path.clone(), std::sync::Arc::downgrade(&definition));
         Ok(definition)
     }
     async fn constant(
@@ -3194,11 +3199,16 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                         // Generic TIR executes parametrically: scalar values retain
                         // their widths and aggregates retain their runtime shape.
                         // Static bounds and call types were checked at publication.
-                        let entry = match target.entry.get() {
-                            Some(entry) => entry,
-                            None => {
-                                let definition =
-                                    provider.definition(path).await.map_err(Error::Query)?;
+                        let definition = match target
+                            .entry
+                            .get()
+                            .and_then(|entry| entry.definition.borrow().upgrade())
+                        {
+                            Some(definition) => definition,
+                            None => provider.definition(path).await.map_err(Error::Query)?,
+                        };
+                        let entry =
+                            target.entry.get_or_init(|| {
                                 let body = definition.entry;
                                 let scope = definition.bodies[body.0 as usize].parameter_scope;
                                 let mut sizes = Default::default();
@@ -3221,23 +3231,18 @@ pub(crate) async fn execute_frames<O: crate::ownership_trace::Observer>(
                                     target.actuals.clone(),
                                 );
                                 let code = codes.id(&runtime.types, &definition, body);
-                                target.entry.get_or_init(|| crate::code::Entry {
-                                    definition,
+                                crate::code::Entry {
+                                    definition: Default::default(),
                                     body,
                                     sizes,
                                     type_arguments,
                                     code,
-                                })
-                            }
-                        };
+                                }
+                            });
+                        *entry.definition.borrow_mut() = std::sync::Arc::downgrade(&definition);
                         invocation_types = entry.type_arguments.clone();
                         callee_code = Some(entry.code);
-                        (
-                            entry.definition.clone(),
-                            entry.body,
-                            vec![],
-                            entry.sizes.clone(),
-                        )
+                        (definition, entry.body, vec![], entry.sizes.clone())
                     }
                 };
                 let path =

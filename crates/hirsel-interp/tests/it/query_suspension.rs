@@ -245,3 +245,146 @@ fn dropping_suspended_execution_releases_its_saved_non_send_read_without_restart
     std::mem::drop(execution);
     assert_eq!(&*events.borrow(), &["definition main", "read released"]);
 }
+
+#[test]
+fn completed_calls_release_definition_backing_before_the_next_demand() {
+    struct Consumer {
+        main: DefinitionRef,
+        helper: Definition,
+        last: std::sync::Weak<Definition>,
+        demands: usize,
+        constant: MaterializedRef,
+    }
+    impl AsyncTirProvider for Consumer {
+        async fn definition(&mut self, name: &DefPath) -> Result<DefinitionRef, QueryError> {
+            if name == self.main.path.path() {
+                return Ok(self.main.clone());
+            }
+            assert_eq!(name, self.helper.path.path());
+            let definition = Arc::new(self.helper.clone());
+            self.last = Arc::downgrade(&definition);
+            self.demands += 1;
+            Ok(definition)
+        }
+        async fn constant(&mut self, _: &DefPath) -> Result<MaterializedRef, QueryError> {
+            assert_eq!(self.demands, 1);
+            assert!(
+                self.last.upgrade().is_none(),
+                "completed callee pinned by an optional execution cache"
+            );
+            Ok(self.constant.clone())
+        }
+        async fn constant_instance(
+            &mut self,
+            _: &DefPath,
+            _: &[u64],
+        ) -> Result<MaterializedRef, QueryError> {
+            Err(QueryError::NotImplemented)
+        }
+        async fn constant_definitions(&mut self) -> Result<Vec<DefPath>, QueryError> {
+            Ok(vec![])
+        }
+        async fn instance_body(
+            &mut self,
+            _: &DefPath,
+            _: &[GenericArgument],
+        ) -> Result<Option<DefPath>, QueryError> {
+            Ok(None)
+        }
+    }
+    let fixture = provider(false);
+    let mut b = Builder::new();
+    let before = b.int(Primitive::U32, 5);
+    let first = b.local(TypeKind::Primitive(Primitive::U32), Storage::Temporary);
+    b.block(
+        Terminator::Call {
+            callee: Callee::Definition {
+                path: path("helper"),
+                arguments: vec![],
+            },
+            arguments: vec![CallArgument {
+                parameter: ParamId(0),
+                value: take(before),
+            }],
+            returns: Some(CallReturn {
+                destination: first,
+                next: BlockId(1),
+            }),
+            on_failure: CleanupId(0),
+        },
+        3,
+    );
+    let data = b.local(TypeKind::Primitive(Primitive::U32), Storage::Temporary);
+    b.assign(
+        data,
+        Rvalue::ReadConstant {
+            definition: path("DATA"),
+            arguments: vec![],
+        },
+        4,
+        CleanupId(0),
+    );
+    let sum = b.binary(
+        BinaryOp::Add,
+        first,
+        data,
+        TypeKind::Primitive(Primitive::U32),
+        5,
+        CleanupId(0),
+    );
+    let result = b.local(TypeKind::Primitive(Primitive::U32), Storage::Temporary);
+    b.block(
+        Terminator::Call {
+            callee: Callee::Definition {
+                path: path("helper"),
+                arguments: vec![],
+            },
+            arguments: vec![CallArgument {
+                parameter: ParamId(0),
+                value: take(sum),
+            }],
+            returns: Some(CallReturn {
+                destination: result,
+                next: BlockId(2),
+            }),
+            on_failure: CleanupId(0),
+        },
+        6,
+    );
+    let mut consumer = Consumer {
+        main: Arc::new(b.finish("main", result)),
+        helper: (*fixture.definitions[1]).clone(),
+        last: Default::default(),
+        demands: 0,
+        constant: fixture.constant,
+    };
+    let mut operations = NoOperations;
+    let runtime = runtime();
+    let sources = sources();
+    let configuration = configuration();
+    let result = {
+        let mut execution = Box::pin(run_with_runtime_async(
+            &mut consumer,
+            &sources,
+            &configuration,
+            vec![],
+            Default::default(),
+            &mut operations,
+            &runtime,
+        ));
+        match execution
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(result) => result.unwrap(),
+            Poll::Pending => panic!("immediate provider suspended"),
+        }
+    };
+    assert_eq!(
+        consumer.demands, 2,
+        "expired completed read must be demanded again"
+    );
+    assert!(
+        matches!(result.outcome, Outcome::Returned { value: Value::Integer(n), .. } if n.bits() == 12)
+    );
+}

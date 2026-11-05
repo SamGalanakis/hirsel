@@ -162,7 +162,7 @@ impl ArenaCall {
     }
 }
 pub(crate) struct Entry {
-    pub definition: DefinitionRef,
+    pub definition: std::cell::RefCell<std::sync::Weak<Definition>>,
     pub body: BodyId,
     pub sizes: crate::value::SizeBindings,
     pub type_arguments: crate::type_arguments::Bindings,

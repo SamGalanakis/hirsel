@@ -27,7 +27,7 @@ impl NamespaceCapture {
             return None;
         }
         let bytes = self.store.get_content(reference)?;
-        if !bytes.matches_reference(reference) {
+        if reference.domain.reference(&bytes) != Some(reference) {
             return None;
         }
         let manifest: Manifest = self.records.decode(&**self.anchors(), &bytes)?;
@@ -41,7 +41,7 @@ impl NamespaceCapture {
                     || !self
                         .store
                         .get_content(*reference)
-                        .is_some_and(|bytes| bytes.matches_reference(*reference))
+                        .is_some_and(|bytes| GENERATION.reference(&bytes) == Some(*reference))
             })
         {
             return None;

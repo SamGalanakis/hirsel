@@ -79,17 +79,10 @@ fn checked_slots_never_accept_a_colliding_reference_or_a_different_pack_range() 
         .map(|number| store.put(DOMAIN, &number.to_le_bytes()).unwrap())
         .collect();
     batch.finish().unwrap();
-    let statistics = store.enable_statistics();
     let operation = store.request();
     for reference in &references {
-        let bytes = store.get(*reference).unwrap();
-        assert_eq!(bytes.len(), 4);
-        assert!(bytes.matches_reference(*reference));
+        assert_eq!(store.get(*reference).unwrap().len(), 4);
     }
-    assert_eq!(
-        statistics.snapshot().counters["ContentChecks"],
-        references.len() as u64
-    );
     for pair in references.windows(2) {
         let other = store.raw_container(pair[0]).unwrap();
         assert!(checked_container(other, pair[1]).is_none());

@@ -30,7 +30,9 @@ impl Rows {
             Self::Retained(rows) => Some(rows.to_vec()),
             Self::Archived { keys, reference } => {
                 let bytes = store.get_content(*reference)?;
-                if reference.domain != OBSERVATIONS || !bytes.matches_reference(*reference) {
+                if reference.domain != OBSERVATIONS
+                    || reference.domain.reference(&bytes)? != *reference
+                {
                     return None;
                 }
                 let reads: Vec<Arc<Reads>> = bincode::DefaultOptions::new()

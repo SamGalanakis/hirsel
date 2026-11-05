@@ -117,12 +117,27 @@ impl SourceInputs {
         {
             return false;
         }
-        // Reconstruction installs this complete catalog with no materialized
-        // items. Its source generation and table owners prove the same bindings
-        // without visiting every declaration again.
-        if engine.items.is_empty()
-            && self.sources.placement_revision() == engine.sources.placement_revision()
+        // Reconstruction installs this complete catalog. Materializing one of
+        // its items adds an alias, not a new binding. Check those aliases while
+        // the source generation and table owners prove the unchanged catalog.
+        if self.sources.placement_revision() == engine.sources.placement_revision()
             && self.catalog.identity().matches(&engine.catalog)
+            && engine.items.values().flatten().all(|syntax| {
+                self.syntax
+                    .files
+                    .get(&engine.item_file(syntax))
+                    .is_some_and(|owner| {
+                        owner
+                            .bindings
+                            .binary_search(&(
+                                DefId::intern(&syntax.item.definition),
+                                syntax.text_hash,
+                                syntax.anchor,
+                                syntax.occurrence,
+                            ))
+                            .is_ok()
+                    })
+            })
         {
             return true;
         }

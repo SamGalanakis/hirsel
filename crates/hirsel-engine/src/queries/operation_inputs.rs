@@ -8,9 +8,9 @@ use std::sync::{Mutex, OnceLock, Weak};
 #[derive(Default)]
 pub(crate) struct OperationOwner {
     pub(crate) captures: Mutex<Vec<Weak<NamespaceCapture>>>,
-    pub(crate) inputs: Mutex<Option<Arc<header_products::SourceInputs>>>,
+    pub(crate) inputs: Mutex<Option<Weak<header_products::SourceInputs>>>,
     pub(crate) payloads: Mutex<Vec<Weak<header_products::HeaderPayload>>>,
-    pub(crate) bodies: Mutex<Option<InputIndex<DefId, Arc<namespace::BodyInput>>>>,
+    pub(crate) bodies: Mutex<Option<WeakInputIndex<DefId, Arc<namespace::BodyInput>>>>,
     pub(crate) delta: Mutex<Option<Weak<namespace::CaptureDelta>>>,
     pub(crate) front: Mutex<Option<Weak<parallel::OperationFrontInputs>>>,
     pub(crate) headers: Mutex<BTreeMap<DefId, Vec<Weak<header_products::HeaderProduct>>>>,
@@ -18,6 +18,12 @@ pub(crate) struct OperationOwner {
 }
 
 pub(crate) struct InputIndex<K, V>(Arc<Rows<K, V>>);
+pub(crate) struct WeakInputIndex<K, V>(Weak<Rows<K, V>>);
+impl<K, V> WeakInputIndex<K, V> {
+    pub(crate) fn upgrade(&self) -> Option<InputIndex<K, V>> {
+        self.0.upgrade().map(InputIndex)
+    }
+}
 struct Rows<K, V> {
     parent: Option<InputIndex<K, V>>,
     delta: Box<[(K, V)]>,
@@ -84,6 +90,9 @@ impl<K: Ord + Clone, V> InputIndex<K, V> {
     }
 }
 impl<K: Ord, V> InputIndex<K, V> {
+    pub(crate) fn downgrade(&self) -> WeakInputIndex<K, V> {
+        WeakInputIndex(Arc::downgrade(&self.0))
+    }
     pub(crate) fn get(&self, key: &K) -> Option<&V> {
         if self.0.removed.binary_search(key).is_ok() {
             return None;

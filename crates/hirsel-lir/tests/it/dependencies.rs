@@ -1,5 +1,5 @@
 //! Dependency allowlist: implementation crates
-//! never depend on one another; only the driver wires them.
+//! never depend on one another; the driver wiring crates compose them.
 //!
 //! Reads `cargo metadata`, classifies every workspace crate, and checks each
 //! declared workspace edge by kind. Production and build edges must respect the
@@ -19,8 +19,7 @@ enum Class {
     LeafKernel,
     /// Shared persistent bytes, independent of compiler phase implementations.
     Storage,
-    /// The driver layer: the engine and the driver, which wires implementation
-    /// crates through adapters and alone depends on the engine.
+    /// The engine and driver wiring crates compose implementation adapters.
     Wiring,
     /// The CLI and the conformance runner: never a compiler dependency.
     Tool,
@@ -174,7 +173,10 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
         (Class::Tool, Class::Wiring | Class::Implementation) => true,
         (Class::Data | Class::Storage, _) => false,
         (Class::Implementation, _) => false,
-        (Class::Tool, Class::Tool) => to == "hirsel-cli-args",
+        (Class::Tool, Class::Tool) => {
+            to == "hirsel-cli-args"
+                || to == "hirsel-candidate" && matches!(from, "hirsel-cli" | "hirsel-conformance")
+        }
         (_, Class::Tool) => false,
         (Class::Wiring, Class::Wiring) => match from {
             "hirsel-front-phases" | "hirsel-host-io" | "hirsel-native" => to == "hirsel-engine",

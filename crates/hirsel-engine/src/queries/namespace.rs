@@ -882,11 +882,14 @@ impl QueryEngine {
         if store.persistence().retains() && store.put_content(MANIFEST, &bytes) != Some(manifest) {
             return Err(refused("manifest publication"));
         }
-        let mut previous = self
+        let mut body_index = self
             .operation
             .bodies
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let previous = body_index
+            .as_ref()
+            .and_then(operation_inputs::WeakInputIndex::upgrade);
         let bodies = operation_inputs::InputIndex::capture(bodies, previous.as_ref(), |len| {
             let mut weight = crate::NativeMetadataWeight::default();
             weight.add(len.checked_mul(
@@ -894,8 +897,8 @@ impl QueryEngine {
             )?);
             Some(weight.bytes())
         })?;
-        *previous = Some(bodies.clone());
-        drop(previous);
+        *body_index = Some(bodies.downgrade());
+        drop(body_index);
         let body_identities = bodies
             .iter()
             .map(|(id, body)| {

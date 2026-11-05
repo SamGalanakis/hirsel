@@ -91,7 +91,9 @@ impl SourceInputs {
             .operation
             .inputs
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(Weak::upgrade);
         operation_inputs
             .iter()
             .chain(engine.source_inputs.iter())
@@ -203,7 +205,7 @@ impl SourceInputs {
             .operation
             .inputs
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(inputs.clone());
+            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(&inputs));
         inputs
     }
     pub(crate) fn metadata_bytes(engine: &QueryEngine) -> Option<u64> {

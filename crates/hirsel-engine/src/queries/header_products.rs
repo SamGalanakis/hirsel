@@ -167,6 +167,12 @@ pub(crate) struct HeaderProducts {
     /// adopts the completed rows once per revision, not once per read.
     revision: AtomicU64,
     admission: std::sync::Mutex<Option<HeaderAdmission>>,
+    validation_caches: std::sync::Mutex<
+        Vec<(
+            std::sync::Weak<crate::snapshot::ValidationState>,
+            Arc<dyn Send + Sync>,
+        )>,
+    >,
     environment: QueryEnvironment,
     adapters: HeaderPhases,
     sources: SourceMap,
@@ -257,6 +263,7 @@ impl HeaderProducts {
             generation: AtomicU64::new(0),
             revision: AtomicU64::new(0),
             admission: std::sync::Mutex::new(None),
+            validation_caches: Default::default(),
             environment: engine.environment.clone(),
             adapters: HeaderPhases::capture(&engine.adapters),
             sources: engine.sources.clone(),
@@ -868,9 +875,50 @@ impl HeaderProducts {
         drop(admission);
         self.inherit_private_scope(previous, registrations);
     }
+    pub(crate) fn retain_validation_cache(
+        &self,
+        state: &Arc<crate::snapshot::ValidationState>,
+    ) -> Result<(), hirsel_validate::ViewRefusal> {
+        // Four vector slots per live owner bound minimum/spare allocation.
+        // Retain the charge until a dead weak owner is pruned.
+        let bytes = 4 * size_of::<(
+            std::sync::Weak<crate::snapshot::ValidationState>,
+            Arc<dyn Send + Sync>,
+        )>() + 128;
+        let lease = self.validation_lease(bytes as u64).map_err(|cause| {
+            hirsel_validate::ViewRefusal::Unreadable {
+                definition: self
+                    .rows
+                    .keys()
+                    .next()
+                    .copied()
+                    .unwrap_or_else(|| DefId::intern(&DefPath::core("validation-cache"))),
+                cause,
+            }
+        })?;
+        let mut caches = self.validation_caches.lock().unwrap();
+        caches.retain(|(state, _)| state.strong_count() != 0);
+        if caches.capacity() > 4 * caches.len().max(1) {
+            caches.shrink_to_fit();
+        }
+        caches.push((Arc::downgrade(state), lease));
+        Ok(())
+    }
+    fn evict_validation_cache(&self) -> bool {
+        let mut caches = self.validation_caches.lock().unwrap();
+        caches.retain(|(state, _)| state.strong_count() != 0);
+        for (state, _) in caches.iter() {
+            if let Some(state) = state.upgrade()
+                && state.evict_cached()
+            {
+                return true;
+            }
+        }
+        false
+    }
     /// Evict one unpinned settled entry: a header row, else a module proof.
     pub(crate) fn evict(&self) -> bool {
-        self.evict_row() || self.evict_proof()
+        self.evict_validation_cache() || self.evict_row() || self.evict_proof()
     }
     fn evict_row(&self) -> bool {
         for cell in self.rows.values() {

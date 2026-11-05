@@ -153,7 +153,7 @@ fn view_products<'a>(
 struct ValidationCandidates {
     previous: Option<Arc<ValidationState>>,
 }
-struct ValidationState {
+pub(crate) struct ValidationState {
     views: Arc<ViewTable>,
     bases: BTreeMap<PackageId, Arc<ViewTable>>,
     packages: BTreeMap<PackageId, PackageViews>,
@@ -279,6 +279,26 @@ const _: () = {
     shared::<SignatureSnapshot>();
 };
 impl ValidationState {
+    pub(crate) fn evict_cached(&self) -> bool {
+        let mut overlays = self.overlays.lock().unwrap();
+        let before = overlays.len();
+        overlays.retain(|_, views| Arc::strong_count(views) > 1);
+        let mut removed = before - overlays.len();
+        drop(overlays);
+        let mut bases = self.overlay_bases.lock().unwrap();
+        let before = bases.len();
+        bases.retain(|_, table| Arc::strong_count(table) > 1);
+        removed += before - bases.len();
+        hirsel_intern::work::count_by(
+            hirsel_intern::work::Counter::VerifierFactEvictions,
+            removed as u64,
+        );
+        hirsel_intern::timings::count_by(
+            hirsel_intern::timings::Count::VerifierFactEvictions,
+            removed as u64,
+        );
+        removed != 0
+    }
     /// The table `package`'s bodies are validated against, without private views.
     fn base(&self, package: &PackageId) -> &Arc<ViewTable> {
         self.installed
@@ -712,7 +732,7 @@ impl SignatureSnapshot {
                     ))
                 })
                 .collect::<Result<_, hirsel_validate::ViewRefusal>>()?;
-            Ok(Arc::new(ValidationState {
+            let state = Arc::new(ValidationState {
                 views,
                 bases,
                 packages,
@@ -721,7 +741,11 @@ impl SignatureSnapshot {
                 producers: crate::memo::S1Coordinator::new(),
                 installed: installed_universes,
                 validated,
-            }))
+            });
+            if let Some(headers) = &self.headers {
+                headers.retain_validation_cache(&state)?;
+            }
+            Ok(state)
         }
     }
     pub(crate) fn with_lookup(mut self, lookup: LookupInput) -> Self {
@@ -1870,6 +1894,24 @@ mod tests {
         let views = changed.validation_with(&package, rows[0].clone()).unwrap();
         assert!(!views.universe_errors().1.is_empty());
         assert_eq!(work::read(Counter::RegistrationValidationViews) - before, 2);
+
+        let pinned = snapshot.validation_with(&package, rows[0].clone()).unwrap();
+        let state = snapshot.validation_state().unwrap();
+        assert!(state.evict_cached());
+        let before = work::read(Counter::ValidationOverlayConstructions);
+        let reused = snapshot.validation_with(&package, rows[0].clone()).unwrap();
+        assert!(Arc::ptr_eq(&pinned, &reused));
+        assert_eq!(work::read(Counter::ValidationOverlayConstructions), before);
+        drop(reused);
+        drop(pinned);
+        assert!(state.evict_cached());
+        assert!(state.overlay_bases.lock().unwrap().is_empty());
+        let fresh = snapshot.validation_with(&package, rows[0].clone()).unwrap();
+        assert!(fresh.universe_errors().1.is_empty());
+        assert_eq!(
+            work::read(Counter::ValidationOverlayConstructions) - before,
+            1
+        );
     }
 
     #[test]

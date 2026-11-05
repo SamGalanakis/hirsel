@@ -303,10 +303,10 @@ impl Catalog {
     }
     pub(super) fn bindings(
         &self,
-    ) -> impl Iterator<Item = (hirsel_span::Anchor, (DefPath, u32))> + '_ {
+    ) -> impl Iterator<Item = (hirsel_span::Anchor, (&DefPath, u32))> + '_ {
         self.candidates.iter().flat_map(|(path, rows)| {
             rows.iter()
-                .map(move |row| (row.head.name.anchor, (path.clone(), row.occurrence)))
+                .map(move |row| (row.head.name.anchor, (path, row.occurrence)))
         })
     }
 

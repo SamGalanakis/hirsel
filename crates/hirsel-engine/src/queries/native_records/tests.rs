@@ -245,7 +245,7 @@ fn scalar_owner(engine: &QueryEngine, anchor: Anchor) -> Option<(DefPath, u32)> 
         engine
             .catalog
             .bindings()
-            .find_map(|(site, owner)| (site == anchor).then_some(owner))
+            .find_map(|(site, owner)| (site == anchor).then(|| (owner.0.clone(), owner.1)))
     })
 }
 

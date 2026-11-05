@@ -534,7 +534,7 @@ impl NativeRecordContext {
                 if engine.sources.anchor(item.anchor).is_some() {
                     owners
                         .entry(item.anchor)
-                        .or_insert_with(|| (path.clone(), item.occurrence));
+                        .or_insert_with(|| (RecordOwner::capture(path), item.occurrence));
                 }
             }
         }
@@ -543,7 +543,9 @@ impl NativeRecordContext {
                 .catalog
                 .bindings()
                 .fold(BTreeMap::new(), |mut owners, (anchor, owner)| {
-                    owners.entry(anchor).or_insert(owner);
+                    owners
+                        .entry(anchor)
+                        .or_insert_with(|| (RecordOwner::capture(owner.0), owner.1));
                     owners
                 });
         let mut ordinary_anchors = BTreeMap::new();
@@ -551,21 +553,26 @@ impl NativeRecordContext {
             for item in items {
                 if engine.sources.anchor(item.anchor).is_some() {
                     ordinary_anchors
-                        .entry((path.clone(), item.occurrence))
+                        .entry((RecordOwner::capture(path), item.occurrence))
                         .or_insert(item.anchor);
                 }
             }
         }
         for (anchor, owner) in engine.catalog.bindings() {
             if engine.sources.anchor(anchor).is_some() {
-                ordinary_anchors.entry(owner).or_insert(anchor);
+                ordinary_anchors
+                    .entry((RecordOwner::capture(owner.0), owner.1))
+                    .or_insert(anchor);
             }
         }
         let mut generated = BTreeMap::new();
         for (path, source) in &engine.generated {
             generated.entry(source.file).or_insert_with(|| {
                 (
-                    super::persistent::generated_codec_owner(path, &source.text),
+                    RecordOwner::capture(&super::persistent::generated_codec_owner(
+                        path,
+                        &source.text,
+                    )),
                     DefId::intern(path),
                 )
             });
@@ -619,7 +626,7 @@ impl NativeRecordContext {
                 let declaration = generated
                     .get(&file)
                     .map(|(_, declaration)| *declaration)
-                    .unwrap_or_else(|| DefId::intern(&owner.0));
+                    .unwrap_or_else(|| DefId::intern(owner.0.path()));
                 source_definitions.insert(anchor, declaration);
                 owners.insert(anchor, owner);
             }
@@ -630,18 +637,8 @@ impl NativeRecordContext {
                 parent: None,
                 admission: Default::default(),
                 cache: Arc::downgrade(&engine.source_ownership),
-                owners: owners
-                    .into_iter()
-                    .map(|(anchor, (owner, occurrence))| {
-                        (anchor, (RecordOwner::capture(&owner), occurrence))
-                    })
-                    .collect(),
-                anchors: anchors
-                    .into_iter()
-                    .map(|((owner, occurrence), anchor)| {
-                        ((RecordOwner::capture(&owner), occurrence), anchor)
-                    })
-                    .collect(),
+                owners: owners.into_iter().collect(),
+                anchors: anchors.into_iter().collect(),
                 source_definitions: source_definitions.into_iter().collect(),
             }),
         }

@@ -9,12 +9,21 @@ use super::native_bootstrap::NativeProofs;
 use super::native_link::FrozenPlatform;
 use super::native_products::NativeBuildReadiness;
 use super::native_routing::NativeRouting;
-use hirsel_engine::{
-    FrontBodyQueries, FrontLowerQueries, FrontNativeDefinitionInputs, FrontNativePlan,
-    FrontNativeQueries, FrontRunQueries, LoadedProgram, ToolError,
-    runtime::{MemoryReservation, MemoryWeight, QueryFactory, QueryId, RuntimeErrors},
-    store::{Reference, ResultStore},
-};
+use hirsel_engine::FrontBodyQueries;
+use hirsel_engine::FrontLowerQueries;
+use hirsel_engine::FrontNativeDefinitionInputs;
+use hirsel_engine::FrontNativePlan;
+use hirsel_engine::FrontNativeQueries;
+use hirsel_engine::FrontRunQueries;
+use hirsel_engine::LoadedProgram;
+use hirsel_engine::ToolError;
+use hirsel_engine::runtime::MemoryWeight;
+use hirsel_engine::runtime::QueryFactory;
+use hirsel_engine::runtime::QueryId;
+use hirsel_engine::runtime::RuntimeErrors;
+use hirsel_engine::store::Reference;
+use hirsel_engine::store::ResultStore;
+
 use hirsel_native::object_queries;
 use hirsel_native::query_model::{
     ARENA_CANDIDATES_KIND, ARENA_CHOSEN_KIND, INSTANCE_KIND, READY_KIND, ROOT_KIND,
@@ -37,8 +46,8 @@ pub(super) struct NativeSourceInputs {
 /// Selected evidence and its partitions of the native snapshot allowance.
 pub(super) struct NativeProofPlan {
     pub evidence: Arc<hirsel_native::Evidence>,
-    pub headers: MemoryReservation,
-    pub export: MemoryReservation,
+    pub headers: hirsel_engine_admission::MemoryReservation,
+    pub export: hirsel_engine_admission::MemoryReservation,
 }
 /// These partitions transfer the caller's existing snapshot reservation.
 /// This module cannot reserve another process cap or enlarge a task frame.
@@ -47,10 +56,10 @@ pub(super) struct NativeAssemblyPlan {
     pub output: super::NativeOutput,
     pub proofs: Option<NativeProofPlan>,
     pub tasks: NativeAdmission,
-    pub catalogue: MemoryReservation,
-    pub source: MemoryReservation,
-    pub routing: MemoryReservation,
-    pub bootstrap: MemoryReservation,
+    pub catalogue: hirsel_engine_admission::MemoryReservation,
+    pub source: hirsel_engine_admission::MemoryReservation,
+    pub routing: hirsel_engine_admission::MemoryReservation,
+    pub bootstrap: hirsel_engine_admission::MemoryReservation,
     pub weight: MemoryWeight,
     pub source_weight: MemoryWeight,
     /// The native source root suspends beside Growth/Check/Run as a planned

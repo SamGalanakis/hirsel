@@ -538,7 +538,7 @@ mod tests {
             discovery: record,
             statics_finalizers: record,
         });
-        let budget = hirsel_engine::runtime::ProcessBudget::new(1 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
         let owner = Arc::new(budget.reserve(1 << 20).unwrap());
         let source = Arc::new(
             InstanceSourceFacts {

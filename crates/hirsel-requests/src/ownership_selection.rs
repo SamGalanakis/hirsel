@@ -288,7 +288,7 @@ impl OwnershipSelection {
         request: &OwnershipRequest,
         verify_store: VerifyStore,
         footprint: &Footprint,
-        allowance: &mut MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
         weight: MemoryWeight,
         errors: RuntimeErrors,
     ) -> Result<Arc<Self>, ToolError> {

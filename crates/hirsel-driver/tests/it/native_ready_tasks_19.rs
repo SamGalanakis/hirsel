@@ -226,7 +226,7 @@ fn ready_case_inner_mutation(
 ) {
     with_compiler_stack(|| {
         let dir = tempfile::tempdir().unwrap();
-        let transport = ProcessBudget::new(64 << 20);
+        let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
         let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
             Arc::new(store::DirStore::new(dir.path().join("products"))),
             transport.reserve(64 << 20).unwrap(),
@@ -273,7 +273,7 @@ fn ready_case_inner_mutation(
             // every later stage reopens its original body under admission.
             assert!(originals.0.iter().all(|body| body.upgrade().is_none()));
             let runtime_bytes = hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + (64 << 20);
-            let budget = ProcessBudget::new(runtime_bytes + (32 << 20));
+            let budget = hirsel_engine_admission::ProcessBudget::new(runtime_bytes + (32 << 20));
             let trace = hirsel_lir::construction::ValueTrace::default();
             let _observe = trace.enter();
             let mut instance_allowance = budget.reserve(16 << 20).unwrap();

@@ -107,7 +107,7 @@ pub struct NativeSnapshot {
     // Compilation dispatch and copied instance/arena metadata remain charged
     // through the last snapshot, product scope or linker view. Direct snapshot
     // clients still own admission of their supplied inputs themselves.
-    pub retained_allowances: Vec<Arc<hirsel_engine::runtime::MemoryReservation>>,
+    pub retained_allowances: Vec<Arc<hirsel_engine_admission::MemoryReservation>>,
 }
 impl NativeSnapshot {
     pub fn retained_dispatch_bytes(&mut self) -> u64 {

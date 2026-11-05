@@ -52,7 +52,7 @@ pub struct NativeLinkSource {
     call_launch: Option<(DefPath, super::link::LaunchKind)>,
     requested_run: Option<(DefPath, Arc<hirsel_run_config::ValidatedRun>)>,
     test_entries: Vec<(DefPath, u64)>,
-    metadata_owner: Mutex<Option<Arc<hirsel_engine::runtime::MemoryReservation>>>,
+    metadata_owner: Mutex<Option<Arc<hirsel_engine_admission::MemoryReservation>>>,
 }
 
 // Bulk collection fills the immutable B-tree nodes. These private maps have
@@ -76,9 +76,9 @@ fn failed(message: impl Into<String>) -> NativeError {
 }
 
 fn retain_source_metadata(
-    owner: &Mutex<Option<Arc<hirsel_engine::runtime::MemoryReservation>>>,
+    owner: &Mutex<Option<Arc<hirsel_engine_admission::MemoryReservation>>>,
     bytes: u64,
-    allowance: &mut hirsel_engine::runtime::MemoryReservation,
+    allowance: &mut hirsel_engine_admission::MemoryReservation,
 ) -> Result<(), String> {
     let mut retained = owner.lock().unwrap_or_else(|e| e.into_inner());
     if retained.is_none() {
@@ -289,7 +289,7 @@ impl NativeLinkSource {
             metadata_owner: _,
         } = self;
         w.add(size_of::<Self>() + 2 * size_of::<usize>());
-        w.add(size_of::<hirsel_engine::runtime::MemoryReservation>() + 2 * size_of::<usize>());
+        w.add(size_of::<hirsel_engine_admission::MemoryReservation>() + 2 * size_of::<usize>());
         bulk_map(&mut w, functions, |w, path, _| w.path(path));
         bulk_map(&mut w, signatures, |w, path, _| w.path(path));
         bulk_map(&mut w, representations, |w, path, value| {
@@ -343,7 +343,7 @@ impl NativeLinkSource {
     }
     pub fn retain_metadata(
         &self,
-        allowance: &mut hirsel_engine::runtime::MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
     ) -> Result<(), String> {
         retain_source_metadata(
             &self.metadata_owner,
@@ -351,7 +351,7 @@ impl NativeLinkSource {
             allowance,
         )
     }
-    pub fn metadata_allowance(&self) -> Option<Arc<hirsel_engine::runtime::MemoryReservation>> {
+    pub fn metadata_allowance(&self) -> Option<Arc<hirsel_engine_admission::MemoryReservation>> {
         self.metadata_owner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -421,9 +421,12 @@ impl NativeLinkSource {
             .signatures
             .get(entry)
             .ok_or_else(|| failed("native call has no checked signature"))?;
-        let roots =
-            hirsel_engine::entry_roots(&self.types, signature, hirsel_run_schema::LaunchKind::Call)
-                .map_err(|e| failed(e.to_string()))?;
+        let roots = hirsel_engine_admission::entry_roots(
+            &self.types,
+            signature,
+            hirsel_run_schema::LaunchKind::Call,
+        )
+        .map_err(|e| failed(e.to_string()))?;
         let request = hirsel_rc::library::runners::replay_main(program, entry)
             .map_err(|e| failed(format!("callee decoder: {e}")))?;
         let owners =
@@ -683,7 +686,7 @@ mod metadata_tests {
     use super::*;
     #[test]
     fn copied_source_metadata_rejects_excess_and_keeps_one_lifetime_charge() {
-        let budget = hirsel_engine::runtime::ProcessBudget::new(100);
+        let budget = hirsel_engine_admission::ProcessBudget::new(100);
         let mut allowance = budget.reserve(100).unwrap();
         let owner = Mutex::new(None);
         assert!(retain_source_metadata(&owner, 101, &mut allowance).is_err());

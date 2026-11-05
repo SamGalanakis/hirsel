@@ -263,10 +263,9 @@ fn packaged_capture_replays_changed_inputs_without_originals() {
 #[test]
 #[ignore = "requires scratch-linker-proof selected linker inputs"]
 fn large_tool_snapshots_and_replays_under_none_and_unwritable_with_original_ram_cap() {
-    use hirsel_engine::{
-        runtime::ProcessBudget,
-        store::{NoneStore, RequestStore},
-    };
+    use hirsel_engine::store::NoneStore;
+    use hirsel_engine::store::RequestStore;
+
     let package = PathBuf::from(std::env::var_os("HIRSEL_CAPTURE_LINKER").unwrap());
     let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
     for unwritable in [false, true] {
@@ -281,7 +280,7 @@ fn large_tool_snapshots_and_replays_under_none_and_unwritable_with_original_ram_
         let local = selected.local_product_store().is_some();
         let verifier = selected.verifier().is_some();
         let ram = 16 << 20;
-        let budget = ProcessBudget::new(ram);
+        let budget = hirsel_engine_admission::ProcessBudget::new(ram);
         let store = RequestStore::with_scratch(
             selected,
             budget.reserve(ram).unwrap(),

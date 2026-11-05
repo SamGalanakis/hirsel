@@ -1,7 +1,9 @@
-use hirsel_engine::{
-    CompileConfig, LoweringPolicy, QueryKind, runtime::ProcessBudget, store::DirStore,
-    with_compiler_stack,
-};
+use hirsel_engine::CompileConfig;
+use hirsel_engine::LoweringPolicy;
+use hirsel_engine::QueryKind;
+use hirsel_engine::store::DirStore;
+use hirsel_engine::with_compiler_stack;
+
 use hirsel_front_phases::COMPILER;
 use hirsel_requests::*;
 use std::sync::Arc;
@@ -65,7 +67,7 @@ fn settled_precompute_graph_preserves_scalar_revisions_and_detached_ownership() 
             let before = requests.recompute_counts(&queries).unwrap();
             let bound = sources.semantic_graph_decode_bytes().unwrap();
             assert!(bound > 0);
-            let budget = ProcessBudget::new(bound);
+            let budget = hirsel_engine_admission::ProcessBudget::new(bound);
             assert!(
                 sources
                     .semantic_graph(budget.reserve(bound - 1).unwrap())

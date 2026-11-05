@@ -64,7 +64,7 @@ fn aware_source_request_publishes_a_taken_parameter_as_its_paired_return() {
 fn request_result(forward: bool, take: bool, mutable: bool, result: bool) {
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
-        let transport_budget = hirsel_engine::runtime::ProcessBudget::new(64 << 20);
+        let transport_budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
         let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
             Arc::new(store::DirStore::new(directory.path().join("products"))),
             transport_budget.reserve(64 << 20).unwrap(),
@@ -205,7 +205,10 @@ pub fn inspect(root: List[u64]) -> u64 { forward(root)+forward_again(root) }
             use hirsel_native_queries::instance_tasks::INSTANCE_INPUT_KIND;
             use hirsel_native_queries::instance_tasks::InstanceTaskFactory;
             use hirsel_native_queries::instance_tasks::InstanceTasks;
-            use runtime::{MemoryWeight, ProcessBudget, QueryFactory, QueryId, QueryPoll};
+            use runtime::MemoryWeight;
+            use runtime::QueryFactory;
+            use runtime::QueryId;
+            use runtime::QueryPoll;
             let bindings = products
                 .iter()
                 .map(|(path, product)| {
@@ -228,7 +231,7 @@ pub fn inspect(root: List[u64]) -> u64 { forward(root)+forward_again(root) }
                 rows,
                 waiting: Some(bindings[&delayed]),
             };
-            let budget = ProcessBudget::new(64 << 20);
+            let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
             let tasks = InstanceTasks::new(
                 inputs.clone(),
                 store.clone(),

@@ -1125,12 +1125,15 @@ mod frozen_task_tests {
     }
     #[test]
     fn admitted_front_body_failure_matches_scalar_reads_and_retains_snapshot_admission() {
-        use crate::runtime::{AdmittedRuntime, MemoryWeight, ProcessBudget, QueryRuntime};
+        use crate::runtime::AdmittedRuntime;
+        use crate::runtime::MemoryWeight;
+        use crate::runtime::QueryRuntime;
+
         crate::with_compiler_stack(|| {
             let (mut engine, path) = fixture();
             let store = Arc::new(crate::store::MemStore::default());
             engine = engine.with_result_store(store.clone());
-            let budget = ProcessBudget::new(512 << 20);
+            let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
             let mut runtime = AdmittedRuntime::new(
                 Jobs::new(1),
                 budget.reserve(256 << 20).unwrap(),

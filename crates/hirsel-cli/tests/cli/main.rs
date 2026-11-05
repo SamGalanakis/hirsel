@@ -2809,7 +2809,7 @@ fn launch_admission_conditions_and_historical_replay() {
                     serde_json::from_slice(&decode(canonical)).unwrap();
                 historical["admission"]["expires"] = 20.into();
                 std::fs::write(&grants, historical.to_string()).unwrap();
-                let run = hirsel_engine::read_run_record(&grants).unwrap();
+                let run = hirsel_engine_admission::read_run_record(&grants).unwrap();
                 std::fs::remove_file(&grants).unwrap();
                 let historical = recorded
                     .replace(

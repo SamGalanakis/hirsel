@@ -30,7 +30,7 @@ pub(crate) struct SourceInputs {
     declarations: crate::DeclarationIndex,
     installed: BTreeSet<FileId>,
     retained: u64,
-    admission: OnceLock<crate::runtime::MemoryReservation>,
+    admission: OnceLock<hirsel_engine_admission::MemoryReservation>,
 }
 type SyntaxBinding = (DefId, ContentHash, hirsel_span::Anchor, u32);
 fn compare_binding(left: &SyntaxBinding, right: &SyntaxBinding) -> std::cmp::Ordering {
@@ -292,7 +292,7 @@ impl SourceInputs {
     }
     pub(crate) fn admit(
         &self,
-        allowance: &mut crate::runtime::MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
     ) -> Result<(), QueryError> {
         if self.admission.get().is_none() {
             let reservation = allowance

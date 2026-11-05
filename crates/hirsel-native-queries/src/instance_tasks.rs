@@ -54,7 +54,7 @@ pub struct InstanceTasks {
     completed: OnceLock<ProductRef>,
     callables: OnceLock<(ProductRef, super::demand::callable::Scope)>,
     weight: MemoryWeight,
-    allowance: Arc<MemoryReservation>,
+    allowance: Arc<hirsel_engine_admission::MemoryReservation>,
     fallback: Reference,
     pub imports: AtomicU64,
     pub recipe_decodes: AtomicU64,
@@ -79,7 +79,7 @@ impl InstanceTasks {
         options: hirsel_native::Options,
         policy: ContentHash,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Arc<Self>, String> {
         Self::with_library_roots(source, store, options, policy, weight, allowance, &[])
     }
@@ -89,7 +89,7 @@ impl InstanceTasks {
         options: hirsel_native::Options,
         policy: ContentHash,
         weight: MemoryWeight,
-        mut allowance: MemoryReservation,
+        mut allowance: hirsel_engine_admission::MemoryReservation,
         library: &[hirsel_rc::library::Request],
     ) -> Result<Arc<Self>, String> {
         source.retain_metadata(&mut allowance)?;
@@ -132,7 +132,8 @@ impl InstanceTasks {
         }
         let mut metadata = hirsel_engine::NativeMetadataWeight::default();
         metadata.add(size_of::<Self>() + 2 * size_of::<usize>());
-        metadata.add(size_of::<MemoryReservation>() + 2 * size_of::<usize>());
+        metadata
+            .add(size_of::<hirsel_engine_admission::MemoryReservation>() + 2 * size_of::<usize>());
         metadata.vec(&roots, |w, key| {
             w.path(key.instance.definition());
             w.add(key.instance.retained_encoding_bytes());
@@ -206,12 +207,12 @@ impl InstanceTasks {
         tasks.front = Some(front);
         Ok(self)
     }
-    pub fn retained_allowance(&self) -> Arc<MemoryReservation> {
+    pub fn retained_allowance(&self) -> Arc<hirsel_engine_admission::MemoryReservation> {
         self.allowance.clone()
     }
     /// Keep copied source declarations charged when a settled native snapshot
     /// outlives this task registry. The registry allowance is a separate slice.
-    pub fn retained_source_allowance(&self) -> Arc<MemoryReservation> {
+    pub fn retained_source_allowance(&self) -> Arc<hirsel_engine_admission::MemoryReservation> {
         self.source
             .metadata_allowance()
             .expect("instance source metadata admitted at construction")
@@ -1216,7 +1217,7 @@ mod retained_tests {
     #[test]
     fn discovery_frontier_keeps_addresses_within_a_small_frame() {
         hirsel_engine::with_compiler_stack(|| {
-            let transport = ProcessBudget::new(64 << 20);
+            let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
             let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine::store::RequestStore::new(
                 Arc::new(hirsel_engine::store::MemStore::default()),
                 transport.reserve(64 << 20).unwrap(),
@@ -1251,7 +1252,7 @@ mod retained_tests {
             let source =
                 NativeInstanceInputs::from_products(declarations, context.reader([]).unwrap())
                     .unwrap();
-            let budget = ProcessBudget::new(16 << 20);
+            let budget = hirsel_engine_admission::ProcessBudget::new(16 << 20);
             let tasks = InstanceTasks::new(
                 source,
                 store,
@@ -1309,7 +1310,7 @@ mod retained_tests {
     #[test]
     fn registry_metadata_refuses_one_less_and_releases_its_exact_partition() {
         hirsel_engine::with_compiler_stack(|| {
-            let transport = ProcessBudget::new(64 << 20);
+            let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
             let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine::store::RequestStore::new(
                 Arc::new(hirsel_engine::store::MemStore::default()),
                 transport.reserve(64 << 20).unwrap(),
@@ -1344,7 +1345,7 @@ mod retained_tests {
             let source =
                 NativeInstanceInputs::from_products(declarations, context.reader([]).unwrap())
                     .unwrap();
-            let budget = ProcessBudget::new(16 << 20);
+            let budget = hirsel_engine_admission::ProcessBudget::new(16 << 20);
             let make = |bytes| {
                 InstanceTasks::new(
                     source.clone(),

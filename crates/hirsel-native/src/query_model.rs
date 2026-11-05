@@ -293,7 +293,7 @@ pub fn solve_arena_component(
 pub struct ArenaSummary {
     pub product: ProductRef,
     pub candidates: Vec<(InstanceAddress, Vec<u32>)>,
-    retained_owner: Option<Arc<hirsel_engine::runtime::MemoryReservation>>,
+    retained_owner: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
 }
 impl std::fmt::Debug for ArenaSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -316,12 +316,12 @@ impl ArenaSummary {
     }
     pub fn with_retained_owner(
         mut self,
-        owner: Arc<hirsel_engine::runtime::MemoryReservation>,
+        owner: Arc<hirsel_engine_admission::MemoryReservation>,
     ) -> Self {
         self.retain_owner(owner);
         self
     }
-    pub fn retain_owner(&mut self, owner: Arc<hirsel_engine::runtime::MemoryReservation>) {
+    pub fn retain_owner(&mut self, owner: Arc<hirsel_engine_admission::MemoryReservation>) {
         self.retained_owner = Some(owner);
     }
 
@@ -393,7 +393,7 @@ pub trait NativeProducts {
 /// backend exactly. The admitted allowance outlives every external byte view.
 pub fn request_store(
     engine: &hirsel_engine::QueryEngine,
-    allowance: hirsel_engine::runtime::MemoryReservation,
+    allowance: hirsel_engine_admission::MemoryReservation,
 ) -> Arc<hirsel_engine::store::RequestStore> {
     let backend = engine
         .product_store()

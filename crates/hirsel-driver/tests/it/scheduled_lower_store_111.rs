@@ -79,7 +79,7 @@ fn check_lower_reuse(carry_across_stores: bool) {
         for verify in [Verify::On, Verify::Off] {
             for jobs in [1, 2] {
                 let store: Arc<dyn store::ResultStore> = Arc::new(MemStore::default());
-                let carry_budget = ProcessBudget::new(32 << 20);
+                let carry_budget = hirsel_engine_admission::ProcessBudget::new(32 << 20);
                 let carry = LowerCarry::new(carry_budget.reserve(32 << 20).unwrap())
                     .ok()
                     .unwrap();
@@ -114,7 +114,7 @@ fn check_lower_reuse(carry_across_stores: bool) {
                         })
                         .collect();
                     let errors = crate::scheduled_front::errors();
-                    let budget = ProcessBudget::new(1 << 30);
+                    let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
                     let mut runtime = AdmittedRuntime::new(
                         hirsel_intern::jobs::Jobs::new(jobs),
                         budget.reserve(512 << 20).unwrap(),
@@ -374,7 +374,7 @@ fn check_live_lower_observations(live_only: bool) {
                 .with_owned_engines()
                 .load_program(&input)
                 .unwrap();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let mut runtime = AdmittedRuntime::new(
                 hirsel_intern::jobs::Jobs::ONE,

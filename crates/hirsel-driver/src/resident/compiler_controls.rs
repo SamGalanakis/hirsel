@@ -3,10 +3,11 @@ use super::*;
 use crate::requests::{
     CompileOperation, CompileRequest, CompileResult, CompilerRequests, RequestLimits,
 };
-use hirsel_engine::{
-    CompileConfig, LoweringPolicy, loader_inputs::InputLimits, requests::observe_inputs,
-    runtime::ProcessBudget,
-};
+use hirsel_engine::CompileConfig;
+use hirsel_engine::LoweringPolicy;
+use hirsel_engine::loader_inputs::InputLimits;
+use hirsel_engine::requests::observe_inputs;
+
 use hirsel_intern::jobs::Jobs;
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -26,7 +27,7 @@ fn config() -> CompileConfig {
         ..Default::default()
     }
 }
-fn selector(budget: Arc<ProcessBudget>) -> CompilerRequests {
+fn selector(budget: Arc<hirsel_engine_admission::ProcessBudget>) -> CompilerRequests {
     CompilerRequests::new(
         crate::COMPILER,
         config(),
@@ -145,7 +146,9 @@ fn real_compiler_requests_coalesce_cancel_independently_and_keep_frozen_revision
     hirsel_engine::with_compiler_stack(|| {
         let (_directory, entry, source) = fixture();
         let initial = request(&entry);
-        let mut host = Host::new(selector(ProcessBudget::new(768 << 20)));
+        let mut host = Host::new(selector(hirsel_engine_admission::ProcessBudget::new(
+            768 << 20,
+        )));
         let old = host.request(&initial).unwrap();
         let cancelled = host.request(&initial).unwrap();
         let also_old = host.request(&initial).unwrap();
@@ -198,7 +201,7 @@ fn real_compiler_host_shutdown_cancels_its_subscription_and_releases_the_allowan
     hirsel_engine::with_compiler_stack(|| {
         let (_directory, entry, _source) = fixture();
         let request = request(&entry);
-        let budget = ProcessBudget::new(768 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(768 << 20);
         let mut host = Host::new(selector(budget.clone()));
         let lease = host.request(&request).unwrap();
         drop(host);
@@ -216,7 +219,7 @@ fn real_compiler_requests_refuse_a_zero_process_allowance() {
     hirsel_engine::with_compiler_stack(|| {
         let (_directory, entry, _source) = fixture();
         let request = request(&entry);
-        let mut host = Host::new(selector(ProcessBudget::new(0)));
+        let mut host = Host::new(selector(hirsel_engine_admission::ProcessBudget::new(0)));
         assert!(host.request(&request).is_err());
     });
 }
@@ -226,7 +229,7 @@ fn physical_inspection_counts_survive_revisions_eviction_and_detached_snapshot_o
     hirsel_engine::with_compiler_stack(|| {
         let (_directory, entry, source) = fixture();
         let original = request(&entry);
-        let budget = ProcessBudget::new(600 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(600 << 20);
         let mut host = Host::new(selector(budget.clone()));
         let mut held = None;
         let mut previous = 0;
@@ -319,7 +322,7 @@ fn production_host_policy_admits_a_small_real_check_with_its_existing_cap() {
     });
 }
 
-fn run_selector(budget: Arc<ProcessBudget>) -> CompilerRequests {
+fn run_selector(budget: Arc<hirsel_engine_admission::ProcessBudget>) -> CompilerRequests {
     CompilerRequests::new(
         crate::COMPILER,
         config(),
@@ -339,7 +342,7 @@ fn selected_run_executes_tir_and_checked_after_host_drop() {
         std::fs::write(&source, "pub fn main()->Result[(),()]{Ok(())}\n").unwrap();
         let mut selected = request(&entry);
         selected.operation = CompileOperation::Tir { definition: None };
-        let budget = ProcessBudget::new(768 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(768 << 20);
         let mut host = Host::new(run_selector(budget.clone()));
         let output = host.request(&selected).unwrap().wait().unwrap();
         let CompileResult::Tir(input) = &output.result else {
@@ -400,7 +403,9 @@ fn selected_run_callee_identity_and_cancellation_keep_the_shared_check_live() {
         let mut callee = metadata.entry.clone();
         callee.0.name = "callee".into();
         drop(metadata);
-        let mut host = Host::new(run_selector(ProcessBudget::new(768 << 20)));
+        let mut host = Host::new(run_selector(hirsel_engine_admission::ProcessBudget::new(
+            768 << 20,
+        )));
         let pending_main = host.request(&selected).unwrap();
         selected.operation = CompileOperation::Tir {
             definition: Some(callee.clone()),
@@ -433,7 +438,7 @@ fn selected_safe_check_preserves_rejection_and_library_checks_without_run() {
             }
             let mut selected = request(&entry);
             selected.operation = CompileOperation::SafeCheck;
-            let budget = ProcessBudget::new(768 << 20);
+            let budget = hirsel_engine_admission::ProcessBudget::new(768 << 20);
             let mut host = Host::new(run_selector(budget.clone()));
             let output = host.request(&selected).unwrap().wait().unwrap();
             let CompileResult::SafeCheck { checked, reach } = &output.result else {
@@ -467,7 +472,9 @@ fn selected_safe_check_reports_the_settled_entry_escape() {
         let (_directory, entry, _source) = fixture();
         let mut selected = request(&entry);
         selected.operation = CompileOperation::SafeCheck;
-        let mut host = Host::new(run_selector(ProcessBudget::new(768 << 20)));
+        let mut host = Host::new(run_selector(hirsel_engine_admission::ProcessBudget::new(
+            768 << 20,
+        )));
         let output = host.request(&selected).unwrap().wait().unwrap();
         let CompileResult::SafeCheck { checked, reach } = &output.result else {
             panic!("safe check returned another operation");
@@ -495,7 +502,7 @@ fn selected_private_layout_cache_matches_cold_and_preserves_unread_reader_work()
             );
             std::fs::write(&source, &initial).unwrap();
             let selected = request(&entry);
-            let budget = ProcessBudget::new(768 << 20);
+            let budget = hirsel_engine_admission::ProcessBudget::new(768 << 20);
             let mut configured = config();
             configured.store = Arc::new(hirsel_engine::store::MemStore::default());
             let make = |configured: CompileConfig| {
@@ -670,7 +677,7 @@ fn selected_footprint_planner_admits_many_small_definitions_under_the_same_snaps
         text.push_str("pub fn main()->u8{1u8}\n");
         std::fs::write(&source, text).unwrap();
         let selected = request(&entry);
-        let budget = ProcessBudget::new(512 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
         let mut host = Host::new(CompilerRequests::new(
             crate::COMPILER,
             config(),
@@ -704,7 +711,7 @@ fn source_transport_scratch_keeps_the_selected_provider_and_lives_through_detach
         let (_directory, entry, source) = fixture();
         let selected = request(&entry);
         let parent = tempfile::tempdir().unwrap();
-        let budget = ProcessBudget::new(512 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
         let mut host =
             Host::new(selector(budget.clone()).with_scratch_parent(parent.path().to_owned()));
         assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
@@ -750,7 +757,7 @@ fn immutable_query_capacity_preserves_sixteen_real_coalesced_subscribers() {
     hirsel_engine::with_compiler_stack(|| {
         let (_directory, entry, _source) = fixture();
         let mut selected = request(&entry);
-        let budget = ProcessBudget::new(512 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
         let mut host = Host::new(selector(budget.clone()));
         let leases = (0..16)
             .map(|_| host.request(&selected).unwrap())

@@ -7,7 +7,7 @@ pub struct FrontCheckScope {
     lowered: BTreeSet<DefPath>,
     failed_lowered: BTreeSet<DefPath>,
     _owner: Arc<FrontCheckQueries>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontCheckScope {
     pub(super) fn owner(&self) -> &Arc<FrontCheckQueries> {
@@ -117,7 +117,7 @@ impl FrontCheckQueries {
     pub fn completed_scope(
         self: &Arc<Self>,
         product: ProductRef,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<FrontCheckScope, QueryError> {
         let completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
         let (selected, data) = completed.as_ref().ok_or(QueryError::NotImplemented)?;

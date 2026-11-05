@@ -135,7 +135,7 @@ pub struct FrontRunQueries {
 struct Ownership {
     _front: Arc<FrontBodyQueries>,
     _lower: Arc<FrontLowerQueries>,
-    _allowance: Arc<MemoryReservation>,
+    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 impl FrontRunQueries {
     fn admit_archive(
@@ -270,7 +270,7 @@ impl FrontRunQueries {
                 >::uninit(
                 )))?
                 .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                    MemoryReservation,
+                    hirsel_engine_admission::MemoryReservation,
                 >::uninit(
                 )))?,
             |n, path| {
@@ -535,7 +535,7 @@ impl Task {
                     Ok(input) => input,
                     Err(error) => return Poll::Ready(Err(self.queries.failure_record(error))),
                 };
-                if crate::admission::entry_roots(
+                if hirsel_engine_admission::entry_roots(
                     self.queries.lower.signatures().types(),
                     &input.signature,
                     hirsel_run_schema::LaunchKind::Call,
@@ -1143,7 +1143,7 @@ impl Task {
         let facts = |path: &DefPath| -> Result<Option<(CalleeFacts, CallForm)>, QueryError> {
             let input = queries.input(path)?;
             let signature = &input.signature;
-            let Ok(roots) = crate::admission::entry_roots(
+            let Ok(roots) = hirsel_engine_admission::entry_roots(
                 snapshot.types(),
                 signature,
                 hirsel_run_schema::LaunchKind::Call,
@@ -1389,7 +1389,7 @@ impl QueryEngine {
         front: Arc<FrontBodyQueries>,
         lower: Arc<FrontLowerQueries>,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontRunQueries>, QueryError> {
         front.namespace().require_consistent(lower.namespace())?;
@@ -1473,7 +1473,7 @@ impl QueryEngine {
         lower: Arc<FrontLowerQueries>,
         inputs: FrontRunInputs,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontRunQueries>, QueryError> {
         self.front_source_queries_with_inputs(
@@ -1494,7 +1494,7 @@ impl QueryEngine {
         front: Arc<FrontBodyQueries>,
         lower: Arc<FrontLowerQueries>,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontRunQueries>, QueryError> {
         let inputs = self.front_run_inputs_in(front.namespace().clone(), allowance.bytes())?;
@@ -1506,7 +1506,7 @@ impl QueryEngine {
         lower: Arc<FrontLowerQueries>,
         inputs: FrontRunInputs,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontRunQueries>, QueryError> {
         self.front_source_queries_with_inputs(None, front, lower, inputs, weight, allowance, errors)
@@ -1519,7 +1519,7 @@ impl QueryEngine {
         lower: Arc<FrontLowerQueries>,
         inputs: FrontRunInputs,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontRunQueries>, QueryError> {
         inputs.namespace.require_consistent(front.namespace())?;

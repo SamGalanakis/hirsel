@@ -31,7 +31,7 @@ pub(super) fn imported_fixture(
     action: hirsel_engine::store::Action,
     reference: hirsel_engine::store::Reference,
 ) -> ProductRef {
-    let budget = ProcessBudget::new(64 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let mut allowance = budget.reserve(64 << 20).unwrap();
     let archive = ProductArchive::open(store, reference, &mut allowance).unwrap();
     ProductRef::import_archive(address, action, archive)
@@ -102,7 +102,7 @@ fn admitted_real_front_tasks_match_scalar_modes_and_complete_reads() {
                 path.0.name = name.into();
                 definitions.push(path);
             }
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let mut runtime = AdmittedRuntime::new(
                 hirsel_intern::jobs::Jobs::new(jobs),
                 budget.reserve(512 << 20).unwrap(),
@@ -233,7 +233,7 @@ fn admitted_lower_saved_work_and_native_metadata_survive_dependency_suspension()
                     path
                 })
                 .collect();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let mut runtime = AdmittedRuntime::new(
                 hirsel_intern::jobs::Jobs::new(jobs),
                 budget.reserve(512 << 20).unwrap(),
@@ -492,7 +492,7 @@ fn admitted_lower_depth_matches_scalar_after_warm_constant_dependencies() {
                             path
                         })
                         .collect();
-                    let budget = ProcessBudget::new(1 << 30);
+                    let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
                     let mut runtime = AdmittedRuntime::new(
                         hirsel_intern::jobs::Jobs::new(jobs),
                         budget.reserve(512 << 20).unwrap(),
@@ -571,7 +571,7 @@ fn admitted_lower_reserves_outputs_only_for_demanded_definitions() {
         let mut spare = program.entry.clone();
         spare.0.name = "spare".into();
         let definitions = vec![program.entry.clone(), spare.clone()];
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let weight = MemoryWeight {
             retained: 64 << 10,
             scratch: 8 << 20,
@@ -707,7 +707,7 @@ fn admitted_front_store_hits_validate_signature_reads_before_materializing_bodie
             let mut spare = program.entry.clone();
             spare.0.name = "spare".into();
             let definitions = vec![program.entry.clone(), spare.clone()];
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let mut runtime = AdmittedRuntime::new(
                 hirsel_intern::jobs::Jobs::new(1),
                 budget.reserve(512 << 20).unwrap(),
@@ -814,7 +814,7 @@ fn admitted_front_zero_hold_retains_only_archives_after_settlement() {
             .with_owned_engines()
             .load_program(&path)
             .unwrap();
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let mut runtime = AdmittedRuntime::new(
             hirsel_intern::jobs::Jobs::ONE,
             budget.reserve(512 << 20).unwrap(),
@@ -928,7 +928,7 @@ fn admitted_front_pressure_refused_citation_caches_nothing_and_recomputes_the_ci
             "const NAME:String=\"shared\"\nfn code()->String{NAME}\nfn need(take value:unique String){}\npub fn main(){need(code())}\n",
         )
         .unwrap();
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let weight = MemoryWeight {
             retained: 1 << 20,
             scratch: 8 << 20,
@@ -1085,7 +1085,7 @@ fn admitted_front_pressure_evicts_only_unpinned_settled_bodies_and_recomputes_eq
         .unwrap();
         let warm = tempfile::tempdir().unwrap();
         std::fs::write(warm.path().join("main.hir"), "pub fn main()->u8{0u8}\n").unwrap();
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let weight = MemoryWeight {
             retained: 1 << 20,
             scratch: 8 << 20,
@@ -1675,7 +1675,7 @@ fn admitted_storage_recipe_waits_for_checked_body_and_matches_scalar_adapter() {
                 .with_owned_engines()
                 .load_program(&path)
                 .unwrap();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let mut runtime = AdmittedRuntime::new(
                 hirsel_intern::jobs::Jobs::new(jobs),
                 budget.reserve(512 << 20).unwrap(),
@@ -1795,7 +1795,7 @@ fn admitted_front_actual_output_debit_refuses_insufficient_producer_allowance() 
             let definitions = vec![program.entry.clone()];
             let footprint = program.engine.front_input_footprint(&definitions).unwrap();
             assert!(footprint.source_headers > 0);
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let weight = MemoryWeight {
                 retained: 64 << 10,
                 scratch: 8 << 20,
@@ -1855,7 +1855,7 @@ fn archived_front_releases_observation_arrays_when_their_readers_finish() {
                 .with_owned_engines()
                 .load_program(&path)
                 .unwrap();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let weight = MemoryWeight {
                 retained: 1 << 20,
                 scratch: 8 << 20,

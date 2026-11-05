@@ -14,7 +14,7 @@ use std::sync::Arc;
 fn aware_inventory_import_preserves_dead_original_payload_and_rechecks_c_on_replay() {
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
-        let budget = runtime::ProcessBudget::new(64 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
         let store: Arc<dyn store::ResultStore> = Arc::new(store::RequestStore::new(
             Arc::new(store::DirStore::new(directory.path().join("products"))),
             budget.reserve(64 << 20).unwrap(),

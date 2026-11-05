@@ -88,7 +88,7 @@ fn compile_source(
     // contention, which is not the no-fault warm-cache vector being tested.
     let physical = store.inner.local_product_store().unwrap();
     let request = physical.request();
-    let transport_budget = runtime::ProcessBudget::new(24 << 20);
+    let transport_budget = hirsel_engine_admission::ProcessBudget::new(24 << 20);
     let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
         store,
         transport_budget.reserve(24 << 20).unwrap(),

@@ -49,7 +49,7 @@ fn actual_native_selector_coalesces_build_and_bound_run_without_a_retained_contr
             let compiler = crate::COMPILER
                 .with_config(config.clone())
                 .with_owned_engines();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let mut selector = CompilerRequests::new(
                 compiler.clone(),
                 config,

@@ -49,7 +49,7 @@ fn admitted_source_growth_demands_unexecuted_required_roots() {
                         "unexecuted declaration remains required"
                     );
                 }
-                let budget = ProcessBudget::new(1 << 30);
+                let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
                 let weight = MemoryWeight {
                     retained: 64 << 10,
                     scratch: 8 << 20,
@@ -143,7 +143,7 @@ fn growth_output_admission_does_not_spend_its_grant_on_the_runtime_frame() {
                 // its independent admission here, so this law reaches growth.
                 (
                     many.as_str(),
-                    106_172 - MemoryReservationPool::metadata_bytes(),
+                    106_172 - hirsel_engine_admission::MemoryReservationPool::metadata_bytes(),
                     "f255",
                 ),
             ] {
@@ -157,7 +157,7 @@ fn growth_output_admission_does_not_spend_its_grant_on_the_runtime_frame() {
                     .load_program(&manifest)
                     .unwrap();
                 let definitions = program.engine.front_source_roots();
-                let budget = ProcessBudget::new(1 << 30);
+                let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
                 let errors = crate::scheduled_front::errors();
                 let weight = MemoryWeight {
                     retained: 16 << 10,
@@ -253,7 +253,7 @@ fn changed_source_member_stops_at_equal_settled_component() {
                 .load_program(&manifest)
                 .unwrap();
             let definitions = program.engine.front_source_roots();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let weight = MemoryWeight {
                 retained: 64 << 10,
                 scratch: 8 << 20,

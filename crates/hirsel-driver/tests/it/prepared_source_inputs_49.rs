@@ -29,7 +29,7 @@ fn prepared_source_inputs_enforce_exact_caps_and_snapshot_identity_49() {
         let mut program = load();
         let mut another = load();
         let paths = program.engine.front_source_roots();
-        let budget = ProcessBudget::new(128 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(128 << 20);
         let errors = crate::scheduled_front::errors();
         let weight = MemoryWeight {
             retained: 64 << 10,
@@ -228,7 +228,7 @@ fn semantic_source_products_do_not_require_a_launch_or_program_check() {
             .load_check_package(&manifest)
             .unwrap();
         let paths = program.engine.front_source_roots();
-        let budget = ProcessBudget::new(256 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(256 << 20);
         let errors = crate::scheduled_front::errors();
         let weight = MemoryWeight {
             retained: 64 << 10,

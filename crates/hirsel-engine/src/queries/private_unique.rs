@@ -86,7 +86,10 @@ impl QueryEngine {
     }
     /// Lend the host's existing partition to demand inference. Installing the
     /// allowance does not normalize a header or compute private facts.
-    pub fn admit_private_inference(&mut self, allowance: crate::runtime::MemoryReservation) {
+    pub fn admit_private_inference(
+        &mut self,
+        allowance: hirsel_engine_admission::MemoryReservation,
+    ) {
         assert!(self.private_inference_allowance.is_none());
         self.private_inference_hosted = true;
         self.private_inference_allowance = Some(Ok(allowance));
@@ -95,7 +98,7 @@ impl QueryEngine {
     /// Return the partition before the host admits its query executor.
     pub fn release_private_inference_admission(
         &mut self,
-    ) -> Result<crate::runtime::MemoryReservation, QueryError> {
+    ) -> Result<hirsel_engine_admission::MemoryReservation, QueryError> {
         self.private_inference_allowance.take().unwrap_or_else(|| {
             Err(self
                 .current_private_summary_failure()

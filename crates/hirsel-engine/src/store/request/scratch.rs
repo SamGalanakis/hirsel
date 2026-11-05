@@ -338,7 +338,7 @@ fn read_at(file: &fs::File, bytes: &mut [u8], offset: u64) -> std::io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::ProcessBudget;
+
     fn domain() -> Domain {
         Domain {
             kind: 0x4e00001f,
@@ -349,7 +349,7 @@ mod tests {
     fn one_payload_backing_fits_its_original_read_grant_and_refuses_a_second_live_read() {
         let parent = tempfile::tempdir().unwrap();
         let ram = 48 << 10;
-        let budget = ProcessBudget::new(ram);
+        let budget = hirsel_engine_admission::ProcessBudget::new(ram);
         let request = RequestStore::with_scratch(
             Arc::new(NoneStore),
             budget.reserve(ram).unwrap(),
@@ -384,7 +384,7 @@ mod tests {
         for count in [32u32, 64, 128] {
             let parent = tempfile::tempdir().unwrap();
             let ram = 256 << 10;
-            let budget = ProcessBudget::new(ram);
+            let budget = hirsel_engine_admission::ProcessBudget::new(ram);
             let request = RequestStore::with_scratch(
                 Arc::new(NoneStore),
                 budget.reserve(ram).unwrap(),
@@ -436,7 +436,7 @@ mod tests {
     fn scratch_transports_more_than_ram_and_last_child_owns_cleanup() {
         let parent = tempfile::tempdir().unwrap();
         let ram = 256 << 10;
-        let budget = ProcessBudget::new(ram);
+        let budget = hirsel_engine_admission::ProcessBudget::new(ram);
         let request = RequestStore::with_scratch(
             Arc::new(NoneStore),
             budget.reserve(ram).unwrap(),
@@ -476,7 +476,7 @@ mod tests {
     fn scratch_many_small_records_use_their_index_layout_bound() {
         let parent = tempfile::tempdir().unwrap();
         let ram = 256 << 10;
-        let budget = ProcessBudget::new(ram);
+        let budget = hirsel_engine_admission::ProcessBudget::new(ram);
         let request = RequestStore::with_scratch(
             Arc::new(NoneStore),
             budget.reserve(ram).unwrap(),
@@ -507,7 +507,7 @@ mod tests {
     fn scratch_live_reads_disk_and_corruption_never_expand_admission() {
         let parent = tempfile::tempdir().unwrap();
         let ram = 128 << 10;
-        let budget = ProcessBudget::new(ram);
+        let budget = hirsel_engine_admission::ProcessBudget::new(ram);
         let request = RequestStore::with_scratch(
             Arc::new(NoneStore),
             budget.reserve(ram).unwrap(),
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn scratch_preserves_selected_backend_capabilities_and_zero_refuses() {
         let parent = tempfile::tempdir().unwrap();
-        let empty = ProcessBudget::new(0);
+        let empty = hirsel_engine_admission::ProcessBudget::new(0);
         assert!(
             RequestStore::with_scratch(
                 Arc::new(NoneStore),
@@ -570,7 +570,7 @@ mod tests {
         assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
         let selected = Arc::new(MemStore::default());
         let verifier = selected.verifier().unwrap();
-        let budget = ProcessBudget::new(8 << 10);
+        let budget = hirsel_engine_admission::ProcessBudget::new(8 << 10);
         let request = RequestStore::with_scratch(
             selected.clone(),
             budget.reserve(8 << 10).unwrap(),

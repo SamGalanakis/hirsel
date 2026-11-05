@@ -1,10 +1,12 @@
 use hirsel_diag::{Diagnostic, RuleId};
+use hirsel_engine::memo::MemoKey;
+use hirsel_engine::runtime::AdmittedRuntime;
+use hirsel_engine::runtime::MemoryWeight;
+use hirsel_engine::runtime::QueryRuntime;
+use hirsel_engine::runtime::RuntimeErrors;
+use hirsel_engine::store::MemStore;
 use hirsel_engine::*;
-use hirsel_engine::{
-    memo::MemoKey,
-    runtime::{AdmittedRuntime, MemoryWeight, ProcessBudget, QueryRuntime, RuntimeErrors},
-    store::MemStore,
-};
+
 use hirsel_intern::Symbol;
 use hirsel_span::{FileId, SourceMap, Span};
 use hirsel_syntax::Origin;
@@ -431,7 +433,7 @@ fn parse(engine: &mut QueryEngine, text: &str) -> FileId {
 struct AdmittedFront {
     queries: Arc<FrontBodyQueries>,
     runtime: AdmittedRuntime,
-    _budget: Arc<ProcessBudget>,
+    _budget: Arc<hirsel_engine_admission::ProcessBudget>,
 }
 impl AdmittedFront {
     fn request(&mut self, definitions: &[DefPath]) -> Vec<FrontBodyOutput> {
@@ -504,7 +506,7 @@ impl AdmittedFront {
     }
 }
 fn admitted_front(engine: &mut QueryEngine, definitions: &[DefPath], jobs: usize) -> AdmittedFront {
-    let budget = ProcessBudget::new(1 << 30);
+    let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
     let errors = runtime_errors();
     let queries = engine
         .front_body_queries(
@@ -672,7 +674,7 @@ fn phases_run_in_order_and_stop_at_every_error_boundary_on_compiler_thread() {
 fn front_body_handoff_reuses_only_the_latest_admitted_body() {
     with_compiler_stack(|| {
         let (mut engine, _) = make_engine(None, false);
-        let transport = ProcessBudget::new(8 << 20);
+        let transport = hirsel_engine_admission::ProcessBudget::new(8 << 20);
         engine = engine.with_result_store(Arc::new(hirsel_engine::store::RequestStore::new(
             Arc::new(hirsel_engine::store::NoneStore),
             transport.reserve(8 << 20).unwrap(),
@@ -1677,7 +1679,7 @@ fn scheduled_scc_run_with_capacity(
     let mut engine = QueryEngine::new(default_environment(), adapters).with_result_store(store);
     parse(&mut engine, text);
     let definitions = engine.front_source_roots();
-    let budget = ProcessBudget::new(1 << 30);
+    let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
     let weight = MemoryWeight {
         retained: 64 << 10,
         scratch: 8 << 20,
@@ -1921,7 +1923,7 @@ fn scheduled_scc_products_fit_the_existing_complete_growth_output_grant() {
         &[],
         Arc::new(MemStore::default()),
         1,
-        106_172 - hirsel_engine::runtime::MemoryReservationPool::metadata_bytes(),
+        106_172 - hirsel_engine_admission::MemoryReservationPool::metadata_bytes(),
     );
     assert_eq!(output.facets.components.len(), 257);
     assert_eq!((solves, memberships), (257, 1));
@@ -1934,7 +1936,7 @@ fn scheduled_scc_stream_exceeds_8192_with_store_off_and_unchanged_inventory() {
         text.push_str(&format!("fn f{i} {{}}\n"));
     }
     text.push_str("fn main {}\n");
-    let transport = ProcessBudget::new(64 << 20);
+    let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let store = Arc::new(hirsel_engine::store::RequestStore::new(
         Arc::new(hirsel_engine::store::NoneStore),
         transport.reserve(64 << 20).unwrap(),
@@ -1951,7 +1953,7 @@ fn scheduled_scc_stream_exceeds_8192_with_store_off_and_unchanged_inventory() {
 
 #[test]
 fn scheduled_scc_store_off_edit_split_merge_and_reopen_agree_with_cold_solve() {
-    let transport = ProcessBudget::new(8 << 20);
+    let transport = hirsel_engine_admission::ProcessBudget::new(8 << 20);
     let store = Arc::new(hirsel_engine::store::RequestStore::new(
         Arc::new(hirsel_engine::store::NoneStore),
         transport.reserve(8 << 20).unwrap(),
@@ -2061,7 +2063,7 @@ fn scheduled_scc_cancelled_prefix_reopens_and_records_its_consumed_reads() {
     let (mut engine, _) = make_engine_with_store(None, false);
     parse(&mut engine, text);
     let definitions = engine.front_source_roots();
-    let budget = ProcessBudget::new(1 << 30);
+    let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
     let weight = MemoryWeight {
         retained: 64 << 10,
         scratch: 8 << 20,

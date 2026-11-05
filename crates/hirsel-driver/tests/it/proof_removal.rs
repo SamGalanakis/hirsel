@@ -896,7 +896,7 @@ fn native_discovery_reports_actual_removals_on_cold_and_body_free_fresh_hits() {
             trusted: vec![Checker::parse("prover@1").unwrap()],
         };
         let dir = tempfile::tempdir().unwrap();
-        let transport = ProcessBudget::new(64 << 20);
+        let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
         let store: Arc<dyn store::ResultStore> = Arc::new(store::RequestStore::new(
             Arc::new(store::DirStore::new(dir.path().to_path_buf())),
             transport.reserve(64 << 20).unwrap(),
@@ -948,7 +948,7 @@ fn native_discovery_reports_actual_removals_on_cold_and_body_free_fresh_hits() {
             drop(cache);
             drop(producer);
             let runtime_bytes = hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + (64 << 20);
-            let budget = ProcessBudget::new(runtime_bytes + (32 << 20));
+            let budget = hirsel_engine_admission::ProcessBudget::new(runtime_bytes + (32 << 20));
             let tasks = InstanceTasks::new(
                 inputs,
                 store.clone(),

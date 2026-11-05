@@ -74,7 +74,7 @@ impl Packed {
 pub struct FrontSourceProducts {
     body: Body,
     _owner: Arc<FrontRunQueries>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontSourceProducts {
     pub fn audit(&self) -> &crate::SourceAudit {
@@ -114,7 +114,7 @@ impl FrontRunQueries {
     pub fn source_products_with_allowance(
         self: &Arc<Self>,
         product: ProductRef,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Option<FrontSourceProducts>, QueryError> {
         let entry = self
             .semantic_entry(product)

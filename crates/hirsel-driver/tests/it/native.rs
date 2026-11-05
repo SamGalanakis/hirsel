@@ -28,7 +28,7 @@ use std::path::PathBuf;
 pub(super) fn admitted_native_store(
     backend: std::sync::Arc<dyn hirsel_engine::store::ResultStore>,
 ) -> std::sync::Arc<dyn hirsel_engine::store::ResultStore> {
-    let budget = hirsel_engine::runtime::ProcessBudget::new(64 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     std::sync::Arc::new(hirsel_engine::store::RequestStore::new(
         backend,
         budget.reserve(64 << 20).unwrap(),

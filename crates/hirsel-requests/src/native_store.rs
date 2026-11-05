@@ -1,11 +1,13 @@
 //! Native products retain their host-selected cache independently of front results.
-use hirsel_engine::{ToolError, runtime::MemoryReservation, store::*};
+use hirsel_engine::ToolError;
+use hirsel_engine::store::*;
+
 use std::{path::Path, sync::Arc};
 
 pub(super) fn capture(
     source: Arc<dyn ResultStore>,
     request: &super::NativeRequest,
-    allowance: MemoryReservation,
+    allowance: hirsel_engine_admission::MemoryReservation,
     scratch: &Path,
     disk: u64,
 ) -> Result<Arc<dyn ResultStore>, ToolError> {

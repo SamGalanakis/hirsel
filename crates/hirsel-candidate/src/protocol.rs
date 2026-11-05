@@ -720,7 +720,7 @@ mod matrix {
                 let engine = super::requests::CompilerRequests::new(
                     compiler.clone(),
                     config.clone(),
-                    hirsel_engine::runtime::ProcessBudget::new(2 << 30),
+                    hirsel_engine_admission::ProcessBudget::new(2 << 30),
                     super::requests::RequestLimits {
                         runtime_bytes: 512 << 20,
                         snapshot_bytes: 64 << 20,

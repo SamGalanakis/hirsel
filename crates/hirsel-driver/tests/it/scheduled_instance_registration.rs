@@ -14,7 +14,11 @@ fn make[T](s: TypeShape[T]) -> Result[Body[fn(T)->u64 uses {}], String] uses {} 
 fn generated[T](v: T)->u64 uses {} = comptime make(shape(T))
 pub fn main()->u64 uses {} { generated(Point(x:1u8)) + generated(Box3(x:2u16)) + generated(Point(x:3u8)) }
 "#;
-fn fixture(source: &str, jobs: usize, run: impl FnOnce(&mut LoadedProgram, &Arc<ProcessBudget>)) {
+fn fixture(
+    source: &str,
+    jobs: usize,
+    run: impl FnOnce(&mut LoadedProgram, &Arc<hirsel_engine_admission::ProcessBudget>),
+) {
     let directory = tempfile::tempdir().unwrap();
     let manifest = directory.path().join("hirsel.json");
     std::fs::write(directory.path().join("main.hir"), source).unwrap();
@@ -28,7 +32,7 @@ fn fixture(source: &str, jobs: usize, run: impl FnOnce(&mut LoadedProgram, &Arc<
         })
         .with_owned_engines();
     let mut program = compiler.load_program(&manifest).unwrap();
-    let budget = ProcessBudget::new(1 << 30);
+    let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
     run(&mut program, &budget);
 }
 fn weight() -> MemoryWeight {
@@ -50,7 +54,7 @@ fn ordinary(program: &mut LoadedProgram) -> Vec<DefPath> {
 }
 fn front(
     program: &mut LoadedProgram,
-    budget: &Arc<ProcessBudget>,
+    budget: &Arc<hirsel_engine_admission::ProcessBudget>,
     jobs: usize,
     accepted: &[Arc<AcceptedFrontRegistration>],
 ) -> Arc<FrontBodyQueries> {
@@ -91,7 +95,7 @@ fn front(
 }
 fn execute(
     program: &mut LoadedProgram,
-    budget: &Arc<ProcessBudget>,
+    budget: &Arc<hirsel_engine_admission::ProcessBudget>,
     jobs: usize,
     front: Arc<FrontBodyQueries>,
     paths: &[DefPath],
@@ -162,7 +166,7 @@ fn execute(
 }
 fn discovery(
     program: &mut LoadedProgram,
-    budget: &Arc<ProcessBudget>,
+    budget: &Arc<hirsel_engine_admission::ProcessBudget>,
     fronts: &[Arc<FrontBodyQueries>],
 ) -> FrontInstanceDiscovery {
     let roots = [program.entry.clone()];
@@ -173,7 +177,7 @@ fn discovery(
 }
 fn register(
     program: &mut LoadedProgram,
-    budget: &Arc<ProcessBudget>,
+    budget: &Arc<hirsel_engine_admission::ProcessBudget>,
     round: &FrontInstanceDiscovery,
 ) -> Vec<DefPath> {
     round
@@ -846,7 +850,7 @@ fn instance_bootstrap_failure(zero_depth: bool) {
             let mut program = compiler.load_program(&manifest).unwrap();
             let definitions = program.engine.front_source_roots();
             let generators = program.engine.front_generator_roots(&definitions).unwrap();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let error = program
                 .engine
                 .demand_front_scope(
@@ -1057,7 +1061,7 @@ fn source_requests_install_nested_instance_views_for_check_run_and_native_owners
                 ..Default::default()
             };
             let compiler = COMPILER.with_config(config.clone()).with_owned_engines();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let selector = CompilerRequests::new(
                 compiler.clone(),
                 config.clone(),

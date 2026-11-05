@@ -44,7 +44,7 @@ fn import_engine_with_validation(
     store: Arc<dyn ResultStore>,
     validation: hirsel_native::Validation,
 ) -> (Bodies, u64, u64) {
-    let budget = runtime::ProcessBudget::new(64 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
         store,
         budget.reserve(64 << 20).unwrap(),

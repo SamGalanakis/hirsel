@@ -654,12 +654,13 @@ impl HeaderProducts {
     pub(super) fn reserve_standalone(
         &self,
         bytes: u64,
-    ) -> Result<crate::runtime::MemoryReservation, QueryError> {
+    ) -> Result<hirsel_engine_admission::MemoryReservation, QueryError> {
         // Legacy scalar inputs already use this shared source-inference partition.
         // The admitted front grant covers its task/output rows, not those inputs.
         let bytes = bytes
             .checked_add(
-                (size_of::<crate::runtime::MemoryReservation>() + 2 * size_of::<usize>()) as u64,
+                (size_of::<hirsel_engine_admission::MemoryReservation>() + 2 * size_of::<usize>())
+                    as u64,
             )
             .ok_or_else(private_refusal)?;
         crate::queries::private_unique::scheduled::standalone_budget()

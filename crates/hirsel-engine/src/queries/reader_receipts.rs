@@ -168,7 +168,7 @@ pub(crate) struct ArchivedReader {
     rows: u32,
     max_key: u32,
     source: Arc<crate::runtime::GrowthPublicationSource>,
-    _owned: Option<Arc<crate::runtime::MemoryReservation>>,
+    _owned: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
 }
 impl ArchivedReader {
     pub(crate) fn source(&self) -> &Arc<crate::runtime::GrowthPublicationSource> {
@@ -197,11 +197,11 @@ impl ArchivedReader {
     pub(crate) fn capture_owned(
         source: Arc<crate::runtime::GrowthPublicationSource>,
         reads: &Reads,
-        pool: &crate::runtime::MemoryReservationPool,
+        pool: &hirsel_engine_admission::MemoryReservationPool,
     ) -> Option<Arc<Self>> {
         let bytes = crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<Self>::uninit())
             .checked_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
-                crate::runtime::MemoryReservation,
+                hirsel_engine_admission::MemoryReservation,
             >::uninit()))?;
         let allowance = Arc::new(pool.take(bytes)?);
         let mut reader = Self::capture(source, reads)?;

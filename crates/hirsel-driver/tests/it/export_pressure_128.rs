@@ -1,10 +1,12 @@
-use hirsel_engine::{
-    CompileConfig, LoweringPolicy,
-    requests::{OutputReadiness, RequestEngine, observe_inputs},
-    runtime::{ProcessBudget, QueryRuntime},
-    store::MemStore,
-    with_compiler_stack,
-};
+use hirsel_engine::CompileConfig;
+use hirsel_engine::LoweringPolicy;
+use hirsel_engine::requests::OutputReadiness;
+use hirsel_engine::requests::RequestEngine;
+use hirsel_engine::requests::observe_inputs;
+use hirsel_engine::runtime::QueryRuntime;
+use hirsel_engine::store::MemStore;
+use hirsel_engine::with_compiler_stack;
+
 use hirsel_front_phases::COMPILER;
 use hirsel_requests::CompileOperation;
 use hirsel_requests::CompileRequest;
@@ -31,7 +33,7 @@ fn pressure(reclaim_idle: bool) {
         )
         .unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"export_pressure","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
-        let budget = ProcessBudget::new(768 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(768 << 20);
         let config = CompileConfig {
             store: Arc::new(MemStore::default()),
             jobs: hirsel_intern::jobs::Jobs::new(1),
@@ -148,7 +150,7 @@ fn retained_checked_products_results_release_their_graph_admission() {
         };
         // What one retained Check result of this program keeps charged.
         let check_held = {
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let mut selector =
                 CompilerRequests::new(COMPILER, config.clone(), budget.clone(), limits);
             write(0);
@@ -176,7 +178,7 @@ fn retained_checked_products_results_release_their_graph_admission() {
         const RECEIPT_ROOM: u64 = 1 << 20;
         let graph = limits.runtime_bytes + limits.snapshot_bytes + limits.transport_bytes;
         // The selector's carry takes half the transport allowance up front.
-        let budget = ProcessBudget::new(
+        let budget = hirsel_engine_admission::ProcessBudget::new(
             limits.transport_bytes / 2 + graph + RESULTS * (check_held + RECEIPT_ROOM),
         );
         let mut selector = CompilerRequests::new(COMPILER, config, budget.clone(), limits);

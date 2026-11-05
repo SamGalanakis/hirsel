@@ -676,7 +676,7 @@ struct RequestFrontier {
     text: FrontierText,
     sources: Option<std::sync::Arc<hirsel_requests::PrecomputedSources>>,
     inspection: Option<std::sync::Arc<hirsel_requests::CompileInspection>>,
-    budget: std::sync::Arc<hirsel_engine::runtime::ProcessBudget>,
+    budget: std::sync::Arc<hirsel_engine_admission::ProcessBudget>,
 }
 fn diagnostic_text(
     sources: &hirsel_span::SourceMap,
@@ -935,7 +935,7 @@ fn frozen_frontier_values_refresh_and_preserve_input_order() {
                         .iter()
                         .map(|path| {
                             let bound = sources.source_product_bytes(path).unwrap().unwrap();
-                            let budget = hirsel_engine::runtime::ProcessBudget::new(bound);
+                            let budget = hirsel_engine_admission::ProcessBudget::new(bound);
                             let products = sources
                                 .source_products(path, budget.reserve(bound).unwrap())
                                 .unwrap()
@@ -1196,7 +1196,7 @@ fn frozen_frontier_staged_rounds_evaluate_on_workers() {
                         .iter()
                         .map(|path| {
                             let bound = sources.source_product_bytes(path).unwrap().unwrap();
-                            let budget = hirsel_engine::runtime::ProcessBudget::new(bound);
+                            let budget = hirsel_engine_admission::ProcessBudget::new(bound);
                             let products = sources
                                 .source_products(path, budget.reserve(bound).unwrap())
                                 .unwrap()
@@ -1214,7 +1214,7 @@ fn frozen_frontier_staged_rounds_evaluate_on_workers() {
                         let bound = sources
                             .checked_dependency_decode_bytes(&path("chosen"))
                             .unwrap();
-                        let budget = hirsel_engine::runtime::ProcessBudget::new(bound);
+                        let budget = hirsel_engine_admission::ProcessBudget::new(bound);
                         let worker = sources
                             .checked_dependencies(&path("chosen"), budget.reserve(bound).unwrap())
                             .unwrap();
@@ -2515,7 +2515,7 @@ fn frozen_frontier_generator_demand_skips_a_dead_compile_time_branch() {
                     protocol: domain.reference(b"protocol").unwrap(),
                     panicked: domain.reference(b"panicked").unwrap(),
                 };
-                let budget = ProcessBudget::new(512 << 20);
+                let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
                 let weight = MemoryWeight {
                     retained: 128 << 10,
                     scratch: 8 << 20,
@@ -2587,7 +2587,8 @@ fn frozen_frontier_generator_demand_skips_a_dead_compile_time_branch() {
 }
 #[test]
 fn frozen_generator_instance_allowance_counts_current_selections_including_hits() {
-    use hirsel_engine::{FrontInstanceRequest, runtime::ProcessBudget};
+    use hirsel_engine::FrontInstanceRequest;
+
     use hirsel_types::{Actuals, GenericArgument, Size};
     with_compiler_stack(|| {
         let source = "fn make[n:size]()->u64 uses {}=comptime Ok(codegen.body(\"fn()->u64 uses {}{7u64}\"))\n";
@@ -2597,7 +2598,7 @@ fn frozen_generator_instance_allowance_counts_current_selections_including_hits(
             .add("revision.hir", "const UNUSED:u64=1\n".into())
             .unwrap();
         engine.parse_file(revision, &default_context()).unwrap();
-        let budget = ProcessBudget::new(64 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
         let select = |engine: &mut QueryEngine, n| {
             engine.register_front_instance(
                 &FrontInstanceRequest {
@@ -2702,7 +2703,7 @@ fn frozen_generator_acceptance_cancellation_publishes_no_registration() {
             protocol: domain.reference(b"protocol").unwrap(),
             panicked: domain.reference(b"panicked").unwrap(),
         };
-        let budget = ProcessBudget::new(512 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
         let weight = MemoryWeight {
             retained: 128 << 10,
             scratch: 8 << 20,

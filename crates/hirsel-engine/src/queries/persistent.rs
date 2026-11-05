@@ -798,7 +798,7 @@ pub(crate) fn encode_live_analyzed(
     reads: &Reads,
     phase: Option<QueryKind>,
     diagnostic_phases: &[(Diagnostic, String)],
-    admission: &crate::runtime::MemoryReservation,
+    admission: &hirsel_engine_admission::MemoryReservation,
 ) -> Option<Vec<u8>> {
     let value = &output.value;
     let syntax = (&value.typed.syntax, value.typed.syntax.occurrence);
@@ -4282,9 +4282,11 @@ mod malformed_tests {
     }
     #[test]
     fn live_analyzed_archive_keeps_source_and_complete_body_fields_under_exact_admission() {
-        use crate::runtime::{
-            LIVE_ANALYZED, LiveAnalyzedProduct, LiveSummaryProduct, ProcessBudget, ProductSource,
-        };
+        use crate::runtime::LIVE_ANALYZED;
+        use crate::runtime::LiveAnalyzedProduct;
+        use crate::runtime::LiveSummaryProduct;
+        use crate::runtime::ProductSource;
+
         let mut identities = Vec::new();
         for (text, capture_case) in [
             ("fn main() { true }", false),
@@ -4338,7 +4340,7 @@ mod malformed_tests {
                 diagnostic_phases: phases.clone(),
             };
             let required = LiveAnalyzedProduct::required_bytes(&outcome).unwrap();
-            let budget = ProcessBudget::new(4 << 20);
+            let budget = hirsel_engine_admission::ProcessBudget::new(4 << 20);
             let backing = Arc::new(budget.reserve(17).unwrap());
             let retained_source = Arc::downgrade(&backing);
             let source = engine.source_records();

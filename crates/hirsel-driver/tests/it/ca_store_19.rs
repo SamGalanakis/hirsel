@@ -1278,7 +1278,7 @@ fn private_evaluation_uses_independent_receipts_in_scalar_and_worker_sessions() 
                     .iter()
                     .map(|path| {
                         let bound = sources.source_product_bytes(path).unwrap().unwrap();
-                        let budget = hirsel_engine::runtime::ProcessBudget::new(bound);
+                        let budget = hirsel_engine_admission::ProcessBudget::new(bound);
                         sources
                             .source_products(path, budget.reserve(bound).unwrap())
                             .unwrap()

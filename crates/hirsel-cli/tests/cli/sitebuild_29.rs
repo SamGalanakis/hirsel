@@ -459,10 +459,11 @@ fn recording_controls(root: &Path) {
     canonical["args"] = json!(["plan", "changed.toml"]);
     let run_file = root.join("changed-run.json");
     fs::write(&run_file, canonical.to_string()).unwrap();
-    config.binding.as_mut().unwrap().canonical = hirsel_engine::read_run_record(&run_file)
-        .unwrap()
-        .canonical()
-        .to_vec();
+    config.binding.as_mut().unwrap().canonical =
+        hirsel_engine_admission::read_run_record(&run_file)
+            .unwrap()
+            .canonical()
+            .to_vec();
     let mut changed_tape = original_bytes.clone();
     changed_tape.extend_from_slice(b"changed-tape\n");
     let variants = [

@@ -1,11 +1,10 @@
 //! Actual source/native diagnostic roots; no linked executable or old Session.
 use hirsel_driver::native;
 use hirsel_driver::resident::ObservedSession;
-use hirsel_engine::{
-    CompileConfig,
-    runtime::ProcessBudget,
-    store::{MemStore, ResultStore},
-};
+use hirsel_engine::CompileConfig;
+use hirsel_engine::store::MemStore;
+use hirsel_engine::store::ResultStore;
+
 use hirsel_front_phases::COMPILER;
 use hirsel_lir::ownership_trace::Kind;
 use hirsel_lir::ownership_trace::native::LeafPlan;
@@ -41,7 +40,7 @@ fn source_request(explicit_manifest: bool) {
             hold_bytes: 0,
             ..Default::default()
         };
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let compiler = COMPILER.with_config(config.clone()).with_owned_engines();
         let selector = CompilerRequests::new(
             compiler.clone(),

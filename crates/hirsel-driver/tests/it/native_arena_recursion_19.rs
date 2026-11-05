@@ -53,7 +53,7 @@ fn selected(name: &str) -> bool {
 }
 
 fn observe(store: Arc<dyn ResultStore>, text: &str, fresh: bool, jobs: usize) -> Observed {
-    let transport = ProcessBudget::new(24 << 20);
+    let transport = hirsel_engine_admission::ProcessBudget::new(24 << 20);
     let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
         store,
         transport.reserve(24 << 20).unwrap(),
@@ -84,7 +84,7 @@ fn observe(store: Arc<dyn ResultStore>, text: &str, fresh: bool, jobs: usize) ->
     drop(engine);
     assert!(originals.iter().all(|body| body.upgrade().is_none()));
     let runtime_bytes = hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + (64 << 20);
-    let budget = ProcessBudget::new(runtime_bytes + (32 << 20));
+    let budget = hirsel_engine_admission::ProcessBudget::new(runtime_bytes + (32 << 20));
     let trace = hirsel_lir::construction::ValueTrace::default();
     let _observe = trace.enter();
     let weight = MemoryWeight {

@@ -25,17 +25,17 @@ const OUTPUT: Domain = Domain {
 struct Completed {
     product: ProductRef,
     artifacts: BTreeMap<String, Vec<u8>>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 pub(super) struct NativeArtifacts {
     query: QueryId,
     pub assembly: Arc<NativeAssembly>,
     export: Arc<ProofExport>,
-    budget: Arc<ProcessBudget>,
+    budget: Arc<hirsel_engine_admission::ProcessBudget>,
     store: Arc<dyn ResultStore>,
     errors: RuntimeErrors,
     weight: MemoryWeight,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
     completed: Mutex<Option<Completed>>,
     failure: Mutex<Option<(Reference, String)>>,
 }
@@ -43,11 +43,11 @@ impl NativeArtifacts {
     pub fn new(
         assembly: Arc<NativeAssembly>,
         export: Arc<ProofExport>,
-        budget: Arc<ProcessBudget>,
+        budget: Arc<hirsel_engine_admission::ProcessBudget>,
         store: Arc<dyn ResultStore>,
         errors: RuntimeErrors,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Arc<Self> {
         Arc::new(Self {
             query: QueryId {

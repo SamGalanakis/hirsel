@@ -48,7 +48,7 @@ fn precompute_libraries_on_fresh_request_graphs_preserves_complete_source_produc
                 .find(|path| path.0.name == "ANSWER")
                 .unwrap();
             let bound = sources.source_product_bytes(answer).unwrap().unwrap();
-            let budget = hirsel_engine::runtime::ProcessBudget::new(bound);
+            let budget = hirsel_engine_admission::ProcessBudget::new(bound);
             let products = sources
                 .source_products(answer, budget.reserve(bound).unwrap())
                 .unwrap()
@@ -96,7 +96,8 @@ fn precompute_rejects_disabled_verification_before_package_loading() {
 
 #[test]
 fn precomputed_dependency_readers_preserve_order_admission_and_owner_lifetime() {
-    use hirsel_engine::{QueryKind, runtime::ProcessBudget};
+    use hirsel_engine::QueryKind;
+
     with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let manifest = directory.path().join("hirsel.json");
@@ -127,7 +128,7 @@ fn precomputed_dependency_readers_preserve_order_admission_and_owner_lifetime() 
                 .unwrap()
                 .clone();
             let bound = sources.dependency_decode_bytes(&path).unwrap();
-            let budget = ProcessBudget::new(bound);
+            let budget = hirsel_engine_admission::ProcessBudget::new(bound);
             let dependencies = sources
                 .dependencies(&path, budget.reserve(bound).unwrap())
                 .unwrap();
@@ -166,7 +167,7 @@ fn precomputed_dependency_readers_preserve_order_admission_and_owner_lifetime() 
         };
         let before = inspect(&mut requests);
         let bound = sources.dependency_decode_bytes(&path).unwrap();
-        let budget = ProcessBudget::new(bound);
+        let budget = hirsel_engine_admission::ProcessBudget::new(bound);
         assert!(matches!(
             sources.dependencies(&path, budget.reserve(bound - 1).unwrap()),
             Err(QueryError::Operational(_))

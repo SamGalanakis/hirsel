@@ -126,7 +126,7 @@ struct AdmissionGate {
     release: Mutex<mpsc::Receiver<()>>,
 }
 struct LowerAdmission {
-    pool: Arc<MemoryReservationPool>,
+    pool: Arc<hirsel_engine_admission::MemoryReservationPool>,
     gate: Option<Arc<AdmissionGate>>,
 }
 impl LocalQueryFactory for LowerAdmission {
@@ -186,10 +186,10 @@ fn lower_admission_waits_for_another_body_to_release_its_partition() {
             }
         }
     }
-    let total = MemoryReservationPool::metadata_bytes() + 10;
-    let budget = ProcessBudget::new(total);
+    let total = hirsel_engine_admission::MemoryReservationPool::metadata_bytes() + 10;
+    let budget = hirsel_engine_admission::ProcessBudget::new(total);
     let pool = Arc::new(
-        MemoryReservationPool::new(budget.reserve(total).unwrap())
+        hirsel_engine_admission::MemoryReservationPool::new(budget.reserve(total).unwrap())
             .ok()
             .unwrap(),
     );
@@ -219,10 +219,10 @@ fn lower_admission_waits_for_another_body_to_release_its_partition() {
 }
 #[test]
 fn lower_admission_refuses_when_its_own_body_is_the_only_holder() {
-    let total = MemoryReservationPool::metadata_bytes() + 10;
-    let budget = ProcessBudget::new(total);
+    let total = hirsel_engine_admission::MemoryReservationPool::metadata_bytes() + 10;
+    let budget = hirsel_engine_admission::ProcessBudget::new(total);
     let pool = Arc::new(
-        MemoryReservationPool::new(budget.reserve(total).unwrap())
+        hirsel_engine_admission::MemoryReservationPool::new(budget.reserve(total).unwrap())
             .ok()
             .unwrap(),
     );
@@ -610,7 +610,7 @@ fn dispatch_is_frozen_and_unknown_kind_cannot_fabricate_a_product() {
 
 #[test]
 fn simultaneous_revisions_and_observed_inputs_share_one_process_allowance() {
-    let budget = ProcessBudget::new(16 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(16 << 20);
     let observed = budget.reserve(1 << 20).unwrap();
     let mut runtimes = Vec::new();
     for _ in 0..15 {
@@ -912,7 +912,7 @@ fn affine_wait_releases_single_worker_and_resumes_rc_state_without_replay() {
 #[test]
 fn compiler_caller_drives_affine_dependencies_and_destroys_them_before_returning() {
     let exercise = |on_compiler: bool| {
-        let budget = ProcessBudget::new(4 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(4 << 20);
         let mut rt = AdmittedRuntime::with_metadata(
             Jobs::ONE,
             budget.reserve(4 << 20).unwrap(),
@@ -1391,14 +1391,14 @@ fn new_request_during_cancelled_local_destruction_keeps_the_replacement_claim() 
 }
 
 struct FrameFactory {
-    owner: Arc<MemoryReservation>,
+    owner: Arc<hirsel_engine_admission::MemoryReservation>,
     drops: Arc<AtomicUsize>,
 }
 struct FrameTask {
     id: QueryId,
     next: u64,
     allocation: Vec<u8>,
-    _owner: Arc<MemoryReservation>,
+    _owner: Arc<hirsel_engine_admission::MemoryReservation>,
     drops: Arc<AtomicUsize>,
 }
 impl QueryFactory for FrameFactory {
@@ -1449,7 +1449,7 @@ impl QueryTask for FrameTask {
 }
 #[test]
 fn continuation_frames_retire_after_drop_without_retiring_shared_output_owners() {
-    let process = ProcessBudget::new(5 << 20);
+    let process = hirsel_engine_admission::ProcessBudget::new(5 << 20);
     let owner = Arc::new(process.reserve(1 << 20).unwrap());
     let drops = Arc::new(AtomicUsize::new(0));
     let factory = Arc::new(FrameFactory {
@@ -1491,13 +1491,13 @@ fn continuation_frames_retire_after_drop_without_retiring_shared_output_owners()
 }
 
 struct LocalFrameFactory {
-    owner: Arc<MemoryReservation>,
+    owner: Arc<hirsel_engine_admission::MemoryReservation>,
     drops: Arc<AtomicUsize>,
 }
 struct LocalFrame {
     id: QueryId,
     allocation: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
-    _owner: Arc<MemoryReservation>,
+    _owner: Arc<hirsel_engine_admission::MemoryReservation>,
     drops: Arc<AtomicUsize>,
     home: std::thread::ThreadId,
 }
@@ -1546,7 +1546,7 @@ impl LocalQueryTask for LocalFrame {
 }
 #[test]
 fn local_continuation_frame_charge_retires_only_after_home_destruction() {
-    let process = ProcessBudget::new(5 << 20);
+    let process = hirsel_engine_admission::ProcessBudget::new(5 << 20);
     let owner = Arc::new(process.reserve(1 << 20).unwrap());
     let drops = Arc::new(AtomicUsize::new(0));
     let factory = Arc::new(LocalFrameFactory {
@@ -1584,14 +1584,14 @@ impl RuntimeObserver for FrameWaiting {
     }
 }
 struct CancelFrameFactory {
-    owner: Arc<MemoryReservation>,
+    owner: Arc<hirsel_engine_admission::MemoryReservation>,
     dropping: mpsc::Sender<(std::thread::ThreadId, std::thread::ThreadId)>,
     release: Mutex<Option<mpsc::Receiver<()>>>,
 }
 struct CancelFrame {
     id: QueryId,
     allocation: std::rc::Rc<Vec<u8>>,
-    _owner: Arc<MemoryReservation>,
+    _owner: Arc<hirsel_engine_admission::MemoryReservation>,
     home: std::thread::ThreadId,
     dropping: mpsc::Sender<(std::thread::ThreadId, std::thread::ThreadId)>,
     release: mpsc::Receiver<()>,
@@ -1648,7 +1648,7 @@ impl Drop for CancelFrame {
 }
 #[test]
 fn local_continuation_frame_cancellation_keeps_charge_until_home_drop_finishes() {
-    let process = ProcessBudget::new(9 << 20);
+    let process = hirsel_engine_admission::ProcessBudget::new(9 << 20);
     let owner = Arc::new(process.reserve(1 << 20).unwrap());
     let (dropping, drop_started) = mpsc::channel();
     let (release_drop, release) = mpsc::channel();
@@ -1718,7 +1718,7 @@ fn local_continuation_frame_cancellation_keeps_charge_until_home_drop_finishes()
 #[test]
 fn explicit_query_inventory_uses_the_same_grant_beyond_the_default_partition() {
     let bytes = STACK as u64 + 32 * ENTRY_BYTES;
-    let budget = ProcessBudget::new(bytes);
+    let budget = hirsel_engine_admission::ProcessBudget::new(bytes);
     let reservation = budget.reserve(bytes).unwrap();
     let mut rt =
         AdmittedRuntime::with_metadata(Jobs::ONE, reservation, errors(), STACK, Some(3), false)
@@ -1746,7 +1746,7 @@ fn explicit_query_inventory_uses_the_same_grant_beyond_the_default_partition() {
 #[test]
 fn explicit_query_inventory_refuses_empty_overflow_and_insufficient_grants() {
     let bytes = STACK as u64 + 32 * ENTRY_BYTES;
-    let budget = ProcessBudget::new(bytes);
+    let budget = hirsel_engine_admission::ProcessBudget::new(bytes);
     for entries in [0, 33, usize::MAX] {
         assert!(
             AdmittedRuntime::with_metadata(
@@ -1780,7 +1780,9 @@ fn public_default_capacity_matches_effective_worker_stack_admission() {
             let working = AdmittedRuntime::working_bytes(jobs, bytes);
             let actual = AdmittedRuntime::new(
                 jobs,
-                ProcessBudget::new(bytes).reserve(bytes).unwrap(),
+                hirsel_engine_admission::ProcessBudget::new(bytes)
+                    .reserve(bytes)
+                    .unwrap(),
                 errors(),
             );
             match (predicted, actual) {
@@ -1806,7 +1808,7 @@ fn public_default_capacity_matches_effective_worker_stack_admission() {
 #[test]
 fn shutdown_returns_one_charge_after_cleanup_and_reuses_it_across_admitted_rounds() {
     for jobs in [1, 2] {
-        let budget = ProcessBudget::new(8 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(8 << 20);
         let mut parent = budget.reserve(8 << 20).unwrap();
         for round in 0..3 {
             let grant = parent.split(6 << 20).unwrap();
@@ -2298,7 +2300,7 @@ fn consumed_stream_reopens_fresh_generations_with_pinned_request_roots() {
 #[test]
 fn node_pressure_spills_results_without_persistence_and_preserves_root_delivery() {
     let bytes = STACK as u64 + 32 * ENTRY_BYTES;
-    let budget = ProcessBudget::new(bytes);
+    let budget = hirsel_engine_admission::ProcessBudget::new(bytes);
     let mut rt = AdmittedRuntime::with_metadata(
         Jobs::ONE,
         budget.reserve(bytes).unwrap(),
@@ -2489,7 +2491,7 @@ fn consumed_records_reuse_slot_bookkeeping_before_debiting_working_memory() {
         }
     }
     let bytes = STACK as u64 + 8 * ENTRY_BYTES + (16 << 10) + 2 * 4096;
-    let budget = ProcessBudget::new(bytes);
+    let budget = hirsel_engine_admission::ProcessBudget::new(bytes);
     let mut rt = AdmittedRuntime::with_metadata(
         Jobs::ONE,
         budget.reserve(bytes).unwrap(),

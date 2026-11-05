@@ -126,7 +126,7 @@ pub struct FrontCheckQueries {
     weight: MemoryWeight,
     errors: RuntimeErrors,
     retention: Arc<Mutex<u64>>,
-    _allowance: Arc<MemoryReservation>,
+    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 impl FrontCheckQueries {
     pub(super) fn matches_inputs(
@@ -178,7 +178,7 @@ impl FrontCheckQueries {
             )?
             .checked_add(
                 (std::mem::size_of::<Mutex<u64>>()
-                    + std::mem::size_of::<MemoryReservation>()
+                    + std::mem::size_of::<hirsel_engine_admission::MemoryReservation>()
                     + 4 * std::mem::size_of::<usize>()) as u64,
             )?;
         definitions.iter().try_fold(base, |total, path| {
@@ -1105,7 +1105,7 @@ impl QueryEngine {
         &mut self,
         plan: FrontCheckPlan,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontCheckQueries>, QueryError> {
         let capture = plan.front.namespace().clone();

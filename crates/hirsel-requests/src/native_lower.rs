@@ -128,7 +128,7 @@ mod tests {
                 protocol: diagnostic(b"protocol"),
                 panicked: diagnostic(b"panicked"),
             };
-            let budget = ProcessBudget::new(256 << 20);
+            let budget = hirsel_engine_admission::ProcessBudget::new(256 << 20);
             let weight = MemoryWeight {
                 retained: 1 << 20,
                 scratch: 1 << 20,

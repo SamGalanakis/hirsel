@@ -1,11 +1,16 @@
 //! Bounded physical-work metadata across immutable source views. This ledger
 //! holds counters only; it cannot validate, reuse or invalidate compiler work.
 use super::{CompileInspection, DefinitionWork, RequestWork};
-use hirsel_engine::{
-    FrontBodyQueries, FrontLowerQueries, QueryKind, Reads, ToolError,
-    memo::{MemoKey, MemoStats},
-    runtime::{MemoryReservation, ProcessBudget, RuntimeEvent, RuntimeObserver},
-};
+use hirsel_engine::FrontBodyQueries;
+use hirsel_engine::FrontLowerQueries;
+use hirsel_engine::QueryKind;
+use hirsel_engine::Reads;
+use hirsel_engine::ToolError;
+use hirsel_engine::memo::MemoKey;
+use hirsel_engine::memo::MemoStats;
+use hirsel_engine::runtime::RuntimeEvent;
+use hirsel_engine::runtime::RuntimeObserver;
+
 use hirsel_syntax::DefPath;
 use std::{
     collections::BTreeMap,
@@ -49,18 +54,18 @@ impl Counters {
     }
 }
 struct State {
-    memory: Option<MemoryReservation>,
+    memory: Option<hirsel_engine_admission::MemoryReservation>,
     counts: BTreeMap<DefPath, Counters>,
     stats: MemoStats,
     complete: bool,
 }
 pub(super) struct InspectionLedger {
-    budget: Arc<ProcessBudget>,
+    budget: Arc<hirsel_engine_admission::ProcessBudget>,
     capacity: u64,
     state: Mutex<State>,
 }
 impl InspectionLedger {
-    pub fn new(budget: Arc<ProcessBudget>, capacity: u64) -> Arc<Self> {
+    pub fn new(budget: Arc<hirsel_engine_admission::ProcessBudget>, capacity: u64) -> Arc<Self> {
         Arc::new(Self {
             budget,
             capacity,
@@ -205,7 +210,7 @@ pub(super) struct SourceInspection {
     pub memos: Vec<(MemoKey, Arc<Reads>)>,
     pub stats: MemoStats,
     pub initial: RequestWork,
-    pub owner: Arc<MemoryReservation>,
+    pub owner: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 struct Previous {
     store_adoptions: u64,
@@ -223,10 +228,10 @@ pub(super) struct GraphMeter {
     memos: Vec<(MemoKey, Arc<Reads>)>,
     previous: Mutex<Previous>,
     hold_bytes: u64,
-    _source: Arc<MemoryReservation>,
+    _source: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 impl GraphMeter {
-    pub fn source_owner(&self) -> Arc<MemoryReservation> {
+    pub fn source_owner(&self) -> Arc<hirsel_engine_admission::MemoryReservation> {
         self._source.clone()
     }
     /// Current/S0 counters and flush temporaries have a fixed, known namespace.

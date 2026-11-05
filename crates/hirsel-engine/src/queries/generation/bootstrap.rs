@@ -1,9 +1,12 @@
 //! Ordered acceptance of generator text before capturing the final immutable
 //! front. All bootstrap work uses explicit parts of the caller's existing grant.
 use super::*;
-use crate::runtime::{
-    AdmittedRuntime, MemoryReservation, MemoryWeight, QueryRuntime, RuntimeErrors, RuntimeStats,
-};
+use crate::runtime::AdmittedRuntime;
+use crate::runtime::MemoryWeight;
+use crate::runtime::QueryRuntime;
+use crate::runtime::RuntimeErrors;
+use crate::runtime::RuntimeStats;
+
 use hirsel_intern::jobs::Jobs;
 
 /// Explicit ownership partitions. No process budget is created or enlarged by
@@ -12,19 +15,19 @@ pub struct FrontRegistrationBootstrapAdmission {
     pub jobs: Jobs,
     pub weight: MemoryWeight,
     pub max_reads: usize,
-    pub runtime: MemoryReservation,
-    pub front: MemoryReservation,
-    pub lower: MemoryReservation,
-    pub text: MemoryReservation,
-    pub syntax: Vec<MemoryReservation>,
-    pub metadata: MemoryReservation,
+    pub runtime: hirsel_engine_admission::MemoryReservation,
+    pub front: hirsel_engine_admission::MemoryReservation,
+    pub lower: hirsel_engine_admission::MemoryReservation,
+    pub text: hirsel_engine_admission::MemoryReservation,
+    pub syntax: Vec<hirsel_engine_admission::MemoryReservation>,
+    pub metadata: hirsel_engine_admission::MemoryReservation,
 }
 
 pub struct FrontRegistrationBootstrap {
     registrations: Vec<Arc<AcceptedFrontRegistration>>,
     stats: RuntimeStats,
     query_capacity: usize,
-    _metadata: MemoryReservation,
+    _metadata: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontRegistrationBootstrap {
     pub fn registrations(&self) -> &[Arc<AcceptedFrontRegistration>] {
@@ -55,7 +58,8 @@ impl FrontRegistrationBootstrap {
             weight.path(path);
         }
         weight.add(generators.checked_mul(size_of::<Arc<AcceptedFrontRegistration>>())?);
-        weight.add(generators.checked_mul(size_of::<MemoryReservation>())?);
+        weight
+            .add(generators.checked_mul(size_of::<hirsel_engine_admission::MemoryReservation>())?);
         Some(weight.bytes())
     }
 }
@@ -127,7 +131,10 @@ impl QueryEngine {
         let required = FrontRegistrationBootstrap::input_bytes(definitions, generators.len())
             .and_then(|bytes| {
                 let spare = admission.syntax.capacity().checked_sub(generators.len())?;
-                bytes.checked_add(spare.checked_mul(size_of::<MemoryReservation>())? as u64)
+                bytes.checked_add(
+                    spare.checked_mul(size_of::<hirsel_engine_admission::MemoryReservation>())?
+                        as u64,
+                )
             })
             .ok_or_else(|| refused("bootstrap input inventory overflow"))?;
         if required > admission.metadata.bytes() || admission.syntax.len() != generators.len() {

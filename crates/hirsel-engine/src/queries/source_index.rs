@@ -2,7 +2,6 @@
 //! heads, private proofs and reverse reads; never retain a LoadedProgram, body memo or
 //! an S1 coordinator. A fresh engine supplies the current adapters and policy.
 use super::*;
-use crate::runtime::MemoryReservation;
 
 pub struct SourceIndexState {
     sources: SourceMap,
@@ -36,7 +35,7 @@ pub struct SourceIndexState {
     snapshot_epoch: crate::Revision,
     snapshot_inputs_revision: u64,
     // The SourceMap also owns this token, including its detached output clones.
-    allowance: Arc<MemoryReservation>,
+    allowance: Arc<hirsel_engine_admission::MemoryReservation>,
     pending_headers: std::sync::Weak<header_products::HeaderProducts>,
     completed_generation: u64,
 }
@@ -207,7 +206,9 @@ impl QueryEngine {
         }
         let mut weight = crate::NativeMetadataWeight::default();
         weight.add(
-            size_of::<SourceIndexState>() + 4 * size_of::<usize>() + size_of::<MemoryReservation>(),
+            size_of::<SourceIndexState>()
+                + 4 * size_of::<usize>()
+                + size_of::<hirsel_engine_admission::MemoryReservation>(),
         );
         weight.add(
             self.signatures
@@ -411,13 +412,13 @@ impl QueryEngine {
     /// replacing source owners; the original immutable inputs can be retried.
     pub fn into_source_index(
         self,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<SourceIndexState, QueryError> {
         self.into_source_index_owner(Arc::new(allowance))
     }
     fn into_source_index_owner(
         mut self,
-        allowance: Arc<MemoryReservation>,
+        allowance: Arc<hirsel_engine_admission::MemoryReservation>,
     ) -> Result<SourceIndexState, QueryError> {
         self.adopt_completed_headers();
         let types = self.source_types()?;
@@ -696,7 +697,7 @@ impl SourceIndexState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::ProcessBudget;
+
     fn environment() -> QueryEnvironment {
         QueryEnvironment {
             interface_version: 1,
@@ -837,7 +838,7 @@ mod tests {
                 if width == 1 {
                     drop(engine(&paths));
                 }
-                let budget = ProcessBudget::new(64 << 20);
+                let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
                 let ((state, required), actual) = crate::test_alloc::measured(|| {
                     let mut engine = engine(&paths);
                     let (required, inspection) = crate::test_alloc::measured_independent(|| {
@@ -959,7 +960,7 @@ mod tests {
             drop(parsed);
             let required = prior.source_index_bytes().unwrap();
             assert!(required < prior.indexed_syntax_bytes().unwrap());
-            let budget = ProcessBudget::new(required);
+            let budget = hirsel_engine_admission::ProcessBudget::new(required);
             let carry = prior
                 .into_source_index(budget.reserve(required).unwrap())
                 .unwrap();
@@ -1025,7 +1026,7 @@ mod tests {
                     .insert(id, Arc::downgrade(prior.signatures.get(&id).unwrap()));
                 let held_reads = prior.signatures[&id].memo.reads.clone();
                 let required = prior.source_index_bytes().unwrap();
-                let budget = ProcessBudget::new(required);
+                let budget = hirsel_engine_admission::ProcessBudget::new(required);
                 let carry = prior
                     .into_source_index(budget.reserve(required).unwrap())
                     .unwrap();
@@ -1060,7 +1061,7 @@ mod tests {
             let path = DefPath::core("source.refused");
             let mut prior = engine(&[path.clone()]);
             let required = prior.source_index_bytes().unwrap();
-            let budget = ProcessBudget::new(required);
+            let budget = hirsel_engine_admission::ProcessBudget::new(required);
             let state = prior
                 .into_source_index(budget.reserve(required).unwrap())
                 .unwrap();

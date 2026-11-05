@@ -38,7 +38,7 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
                 .load_program(&manifest)
                 .unwrap();
             let definitions = program.engine.front_source_roots();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
                 retained: 64 << 10,
@@ -428,7 +428,7 @@ fn native_catalogue_allows_lower_pressure_eviction_and_scoped_cold_reads() {
                 .engine
                 .front_native_definition_inputs(&definitions, 8 << 20)
                 .unwrap();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
                 retained: 1 << 20,

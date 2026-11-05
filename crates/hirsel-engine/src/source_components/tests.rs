@@ -13,9 +13,9 @@ fn output(product: &SourceGrowthIdentity) -> ContentHash {
     product.output
 }
 
-fn output_pool() -> crate::runtime::MemoryReservationPool {
-    let budget = crate::runtime::ProcessBudget::new(64 << 20);
-    crate::runtime::MemoryReservationPool::new(budget.reserve(64 << 20).unwrap())
+fn output_pool() -> hirsel_engine_admission::MemoryReservationPool {
+    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
+    hirsel_engine_admission::MemoryReservationPool::new(budget.reserve(64 << 20).unwrap())
         .ok()
         .unwrap()
 }

@@ -32,7 +32,7 @@ fn admitted_staged_declarations_match_scalar_without_executing_or_publishing() {
                     .find(|p| p.0.name == "scaled")
                     .unwrap()
                     .clone();
-                let budget = ProcessBudget::new(1 << 30);
+                let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
                 let errors = crate::scheduled_front::errors();
                 let weight = MemoryWeight {
                     retained: 64 << 10,
@@ -144,7 +144,7 @@ fn staged_acceptance_checks_all_reads_and_admits_the_installed_copy() {
             .iter()
             .find(|path| path.0.name == "scaled")
             .unwrap();
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let errors = crate::scheduled_front::errors();
         let weight = MemoryWeight {
             retained: 64 << 10,

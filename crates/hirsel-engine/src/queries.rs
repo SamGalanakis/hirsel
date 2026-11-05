@@ -83,7 +83,7 @@ pub(crate) trait AdmittedProofInput {
 pub(crate) struct OwnedProofInput {
     input: hirsel_proof_export::ExportInput,
     source: OwnedProofSource,
-    allowance: crate::runtime::MemoryReservation,
+    allowance: hirsel_engine_admission::MemoryReservation,
 }
 pub(crate) struct OwnedProofSource {
     _proof: Option<Arc<FrontProofExport>>,
@@ -424,7 +424,8 @@ pub struct QueryEngine {
     private_summary_active: bool,
     private_bootstrap_active: bool,
     private_inference_hosted: bool,
-    private_inference_allowance: Option<Result<crate::runtime::MemoryReservation, QueryError>>,
+    private_inference_allowance:
+        Option<Result<hirsel_engine_admission::MemoryReservation, QueryError>>,
     private_signature_publications: BTreeSet<DefId>,
     private_summary_failure: Option<(crate::memo::Revision, QueryError)>,
     signature_stack: Vec<DefPath>,

@@ -75,7 +75,10 @@ impl CaptureDelta {
             .unadmitted_bytes()
             .saturating_add(self.private_sources.unadmitted_bytes())
     }
-    fn admit(&self, allowance: &mut crate::runtime::MemoryReservation) -> Result<(), QueryError> {
+    fn admit(
+        &self,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
+    ) -> Result<(), QueryError> {
         self.registrations.admit(allowance)?;
         self.private_sources.admit(allowance)
     }
@@ -222,7 +225,7 @@ impl CaptureInputs {
 pub(crate) struct DiagnosticSources {
     pub(crate) definition: DefId,
     pub(crate) sources: SourceMap,
-    pub(crate) _allowance: Arc<crate::runtime::MemoryReservation>,
+    pub(crate) _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 impl DiagnosticSources {
     pub(crate) fn owner(&self, anchor: hirsel_span::Anchor) -> Option<(DefPath, u32)> {
@@ -265,7 +268,7 @@ impl crate::NativeRecordSource for DiagnosticRecordSource<'_> {
 }
 
 struct NamespaceAdmission {
-    _reservation: crate::runtime::MemoryReservation,
+    _reservation: hirsel_engine_admission::MemoryReservation,
     _sources: SourceMap,
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -410,7 +413,7 @@ impl NamespaceCapture {
 
     pub(crate) fn admit(
         &self,
-        allowance: &mut crate::runtime::MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
         sources: SourceMap,
     ) -> Result<(), QueryError> {
         if self.admission.get().is_none() {
@@ -1401,10 +1404,12 @@ mod tests {
     fn successor_views_charge_fixed_operation_inputs_once_until_the_last_lease() {
         crate::with_compiler_stack(|| {
             let (mut engine, definitions) = indexed(Arc::new(MemStore::default()));
-            let budget = crate::runtime::ProcessBudget::new(8 << 20);
-            let pool = crate::runtime::MemoryReservationPool::new(budget.reserve(8 << 20).unwrap())
-                .ok()
-                .unwrap();
+            let budget = hirsel_engine_admission::ProcessBudget::new(8 << 20);
+            let pool = hirsel_engine_admission::MemoryReservationPool::new(
+                budget.reserve(8 << 20).unwrap(),
+            )
+            .ok()
+            .unwrap();
             let before = pool.available_bytes();
             let mut views = Vec::new();
             let mut view_bytes = 0;
@@ -1483,9 +1488,12 @@ mod tests {
     #[test]
     fn demanded_syntax_keeps_its_charge_after_the_front_partition_ends() {
         use hirsel_validate::SignatureLookup;
-        struct Allowance(Arc<crate::runtime::MemoryReservationPool>);
+        struct Allowance(Arc<hirsel_engine_admission::MemoryReservationPool>);
         impl header_products::HeaderAllowance for Allowance {
-            fn take_header(&self, bytes: u64) -> Option<crate::runtime::MemoryReservation> {
+            fn take_header(
+                &self,
+                bytes: u64,
+            ) -> Option<hirsel_engine_admission::MemoryReservation> {
                 self.0.take(bytes)
             }
         }
@@ -1503,11 +1511,13 @@ mod tests {
             let headers = capture.snapshot.header_products().unwrap().clone();
             let definition = DefId::intern(&definitions[0]);
             let package = definitions[0].0.package.clone();
-            let budget = crate::runtime::ProcessBudget::new(8 << 20);
+            let budget = hirsel_engine_admission::ProcessBudget::new(8 << 20);
             let pool = Arc::new(
-                crate::runtime::MemoryReservationPool::new(budget.reserve(8 << 20).unwrap())
-                    .ok()
-                    .unwrap(),
+                hirsel_engine_admission::MemoryReservationPool::new(
+                    budget.reserve(8 << 20).unwrap(),
+                )
+                .ok()
+                .unwrap(),
             );
             let before = pool.available_bytes();
             let partition = headers.configure_source_backing(

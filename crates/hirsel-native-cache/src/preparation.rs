@@ -29,7 +29,7 @@ pub struct NativePreparedSource {
     declaration: Option<SourceDeclaration>,
     anchors: Vec<hirsel_span::Anchor>,
     requirements: Vec<Requirement>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl NativePreparedSource {
     pub fn product(&self) -> ProductRef {
@@ -72,8 +72,8 @@ pub struct NativePreparationQueries {
     store: Arc<dyn ResultStore>,
     weight: MemoryWeight,
     errors: RuntimeErrors,
-    allowance: Mutex<MemoryReservation>,
-    _owner: MemoryReservation,
+    allowance: Mutex<hirsel_engine_admission::MemoryReservation>,
+    _owner: hirsel_engine_admission::MemoryReservation,
 }
 impl NativePreparationQueries {
     pub fn new(
@@ -81,7 +81,7 @@ impl NativePreparationQueries {
         definitions: &[DefPath],
         store: Arc<dyn ResultStore>,
         weight: MemoryWeight,
-        mut allowance: MemoryReservation,
+        mut allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<Self>, String> {
         if weight.retained < size_of::<Task>() as u64 {

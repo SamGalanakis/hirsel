@@ -27,7 +27,7 @@ fn admitted_lower_retains_actual_metadata_and_refuses_an_insufficient_output_gra
                     .load_program(&manifest)
                     .unwrap();
                 let definitions = program.engine.front_source_roots();
-                let budget = ProcessBudget::new(1 << 30);
+                let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
                 let errors = crate::scheduled_front::errors();
                 let weight = MemoryWeight {
                     retained: 1 << 20,
@@ -134,7 +134,7 @@ fn admitted_lower_consumes_many_constant_dependencies_with_original_mailbox_boun
                 })
                 .unwrap()
                 .clone();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
                 retained: 64 << 10,
@@ -275,7 +275,7 @@ fn original_body_decode_admission_precedes_provider_reads_and_preserves_scalar_t
                 .load_program(&manifest)
                 .unwrap();
             let definitions = program.engine.front_source_roots();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
                 retained: 2 << 20,

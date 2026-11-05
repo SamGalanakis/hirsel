@@ -6,6 +6,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+hirsel-engine-admission = { path = "../hirsel-engine-admission" }
 hirsel-registry = { path = "../hirsel-registry" }
 hirsel-product-codec = { path = "../hirsel-product-codec" }
 hirsel-artifact-store = { path = "../hirsel-artifact-store" }

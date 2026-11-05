@@ -1,8 +1,11 @@
 //! Install native query kinds before the runtime's first request. The selected
 //! source continuation attaches one complete factory set after its Run read;
 //! routing itself can neither compile nor reconstruct a source controller.
-use hirsel_engine::runtime::{MemoryReservation, QueryFactory, QueryId, QueryTask};
+use hirsel_engine::runtime::QueryFactory;
+use hirsel_engine::runtime::QueryId;
+use hirsel_engine::runtime::QueryTask;
 use hirsel_engine::store::Reference;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, OnceLock},
@@ -12,13 +15,13 @@ pub(super) struct NativeRouting {
     kinds: BTreeSet<u32>,
     bound: OnceLock<BTreeMap<u32, Arc<dyn QueryFactory>>>,
     failure: Reference,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl NativeRouting {
     pub fn new(
         kinds: &[u32],
         failure: Reference,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Arc<Self>, &'static str> {
         // Includes both indexes, Arc factory slots and their tree nodes. The
         // factories own their independently admitted compiler product scopes.
@@ -170,7 +173,7 @@ mod tests {
     }
     #[test]
     fn native_routing_attaches_only_after_source_dependency_and_before_child_creation() {
-        let budget = ProcessBudget::new(256 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(256 << 20);
         let failure = Domain { kind: 1, schema: 1 }
             .reference(b"protocol")
             .unwrap();

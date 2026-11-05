@@ -49,10 +49,12 @@ fn index_bytes(entries: usize, subscriptions: usize) -> u64 {
 /// Optional host-owned carry, independently bounded from ordinary storage.
 pub struct LowerCarry {
     rows: Mutex<Rows>,
-    allowance: MemoryReservation,
+    allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl LowerCarry {
-    pub fn new(allowance: MemoryReservation) -> Result<Arc<Self>, MemoryReservation> {
+    pub fn new(
+        allowance: hirsel_engine_admission::MemoryReservation,
+    ) -> Result<Arc<Self>, hirsel_engine_admission::MemoryReservation> {
         let header = size_of::<Self>() as u64 + 2 * size_of::<usize>() as u64;
         if allowance.bytes() < header {
             return Err(allowance);

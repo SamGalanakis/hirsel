@@ -75,21 +75,21 @@ pub(super) struct OwnershipBootstrap {
     completed: OnceLock<(ProductRef, ProductRef)>,
     failure: Mutex<Option<(Reference, String)>>,
     errors: RuntimeErrors,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
     output_allowance: Arc<OutputAllowance>,
 }
 /// One bounded original grant, reusable after a diagnostic consumer drops its
 /// objects. Dropping a lease returns capacity to this owner, not a larger cap.
 struct OutputAllowance {
     available: Mutex<u64>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 pub(super) struct OutputReservation {
     owner: Arc<OutputAllowance>,
     bytes: u64,
 }
 impl OutputAllowance {
-    fn new(allowance: MemoryReservation) -> Arc<Self> {
+    fn new(allowance: hirsel_engine_admission::MemoryReservation) -> Arc<Self> {
         Arc::new(Self {
             available: Mutex::new(allowance.bytes()),
             _allowance: allowance,
@@ -131,7 +131,7 @@ impl OwnershipBootstrap {
         mut plan: Plan,
         routing: Arc<NativeRouting>,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<Self>, String> {
         if !plan.options.discharge.0.is_empty() {
@@ -482,7 +482,7 @@ mod output_tests {
     use super::*;
     #[test]
     fn diagnostic_output_grant_recycles_released_objects_without_raising_admission() {
-        let budget = ProcessBudget::new(64);
+        let budget = hirsel_engine_admission::ProcessBudget::new(64);
         let owner = OutputAllowance::new(budget.reserve(64).unwrap());
         let first = owner.reserve(48).unwrap();
         assert!(

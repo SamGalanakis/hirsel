@@ -32,10 +32,12 @@ pub(super) struct CarryChanges {
 /// adoption; Lower/Run still demand bodies and their ordinary authority.
 pub struct FrontCarry {
     rows: Mutex<Rows>,
-    allowance: MemoryReservation,
+    allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontCarry {
-    pub fn new(allowance: MemoryReservation) -> Result<Arc<Self>, MemoryReservation> {
+    pub fn new(
+        allowance: hirsel_engine_admission::MemoryReservation,
+    ) -> Result<Arc<Self>, hirsel_engine_admission::MemoryReservation> {
         let header = size_of::<Self>() as u64 + 2 * size_of::<usize>() as u64;
         if allowance.bytes() < header.saturating_add(index_bytes(0, 0)) {
             return Err(allowance);
@@ -783,7 +785,7 @@ mod tests {
         for width in [1, 4, 16] {
             let keys: Vec<_> = (0..width).map(|i| ContentHash::of_bytes(&[i])).collect();
             let reference = Domain { kind: 1, schema: 1 }.reference(b"body").unwrap();
-            let budget = ProcessBudget::new(1 << 20);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
             let (carry, allocations) = crate::test_alloc::measured(|| {
                 let carry = FrontCarry::new(budget.reserve(1 << 20).unwrap())
                     .ok()
@@ -834,7 +836,7 @@ mod tests {
             assert_eq!(budget.reserved(), 0);
         }
         let header = (size_of::<FrontCarry>() + 2 * size_of::<usize>()) as u64;
-        let budget = ProcessBudget::new(header);
+        let budget = hirsel_engine_admission::ProcessBudget::new(header);
         let (refused, allocations) = crate::test_alloc::measured(|| {
             FrontCarry::new(budget.reserve(header - 1).unwrap())
                 .err()

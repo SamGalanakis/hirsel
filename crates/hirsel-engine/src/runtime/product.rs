@@ -1,6 +1,6 @@
 //! Admitted typed values. Producers retain their existing snapshot reservation;
 //! this owner additionally admits every value allocation it keeps alive.
-use super::MemoryReservation;
+
 use crate::memo::{
     DepthEvidence,
     retained::{Weight, retained_arc_bytes},
@@ -29,7 +29,7 @@ pub const LIVE_LOWER: Domain = Domain {
 pub enum ArchiveAdmission<'a> {
     Retained,
     Materialize {
-        scratch: &'a mut MemoryReservation,
+        scratch: &'a mut hirsel_engine_admission::MemoryReservation,
         working_bytes: u64,
     },
 }
@@ -66,7 +66,7 @@ impl ProductSource {
     pub(crate) fn admit_shared(
         context: NativeRecordContext,
         records: NativeRecords,
-        allowance: &mut MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
     ) -> Option<SharedProductSource> {
         if !records.uses_types(context.record_types()) {
             return None;
@@ -107,7 +107,10 @@ impl ProductSourceInput {
             Self::Shared(shared, _) => shared.0.context.record_types(),
         }
     }
-    fn admit(self, allowance: &mut MemoryReservation) -> Option<ProductSource> {
+    fn admit(
+        self,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
+    ) -> Option<ProductSource> {
         let (shared, backing) = match self {
             Self::Owned(context, records, backing) => (
                 ProductSource::admit_shared(context, records, allowance)?,
@@ -132,7 +135,7 @@ struct Owner<T> {
     _reservation: ValueAdmission,
 }
 enum ValueAdmission {
-    Owned(MemoryReservation),
+    Owned(hirsel_engine_admission::MemoryReservation),
     Retained {
         bytes: u64,
         _owner: Arc<RetainedArchiveLease>,
@@ -150,9 +153,13 @@ impl<T> Owner<T> {
     #[cfg(test)]
     fn archive(
         &self,
-        scratch: &mut MemoryReservation,
+        scratch: &mut hirsel_engine_admission::MemoryReservation,
         required: u64,
-        publish: impl FnOnce(&T, &ProductSource, &MemoryReservation) -> io::Result<Vec<u8>>,
+        publish: impl FnOnce(
+            &T,
+            &ProductSource,
+            &hirsel_engine_admission::MemoryReservation,
+        ) -> io::Result<Vec<u8>>,
     ) -> io::Result<ProductArchive> {
         self.archive_with(
             ArchiveAdmission::Materialize {
@@ -165,7 +172,11 @@ impl<T> Owner<T> {
     fn archive_with(
         &self,
         admission: ArchiveAdmission<'_>,
-        publish: impl FnOnce(&T, &ProductSource, &MemoryReservation) -> io::Result<Vec<u8>>,
+        publish: impl FnOnce(
+            &T,
+            &ProductSource,
+            &hirsel_engine_admission::MemoryReservation,
+        ) -> io::Result<Vec<u8>>,
     ) -> io::Result<ProductArchive> {
         let mut archive = self.archive.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(archive) = &*archive {
@@ -182,7 +193,7 @@ impl<T> Owner<T> {
 pub(super) fn materialize_archive(
     domain: Domain,
     admission: ArchiveAdmission<'_>,
-    publish: impl FnOnce(&MemoryReservation) -> io::Result<Vec<u8>>,
+    publish: impl FnOnce(&hirsel_engine_admission::MemoryReservation) -> io::Result<Vec<u8>>,
 ) -> io::Result<ProductArchive> {
     let ArchiveAdmission::Materialize {
         scratch,
@@ -239,7 +250,7 @@ struct ImportedArchive {
     admission: ImportedAdmission,
 }
 enum ImportedAdmission {
-    Owned(MemoryReservation),
+    Owned(hirsel_engine_admission::MemoryReservation),
     Shared {
         bytes: u64,
         _owner: Arc<dyn Send + Sync>,
@@ -256,10 +267,10 @@ impl ImportedAdmission {
 struct ArchiveOwner {
     bytes: Box<[u8]>,
     reference: Reference,
-    _reservation: MemoryReservation,
+    _reservation: hirsel_engine_admission::MemoryReservation,
 }
 struct RetainedArchiveLease {
-    _allowance: Arc<MemoryReservation>,
+    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
     remaining: Arc<Mutex<u64>>,
     bytes: u64,
 }
@@ -275,7 +286,7 @@ impl ProductArchive {
     pub fn materialize(
         domain: Domain,
         admission: ArchiveAdmission<'_>,
-        encode: impl FnOnce(&MemoryReservation) -> io::Result<Vec<u8>>,
+        encode: impl FnOnce(&hirsel_engine_admission::MemoryReservation) -> io::Result<Vec<u8>>,
     ) -> io::Result<Self> {
         materialize_archive(domain, admission, encode)
     }
@@ -285,7 +296,7 @@ impl ProductArchive {
     pub fn open_retained(
         store: &dyn crate::store::ResultStore,
         reference: Reference,
-        allowance: Arc<MemoryReservation>,
+        allowance: Arc<hirsel_engine_admission::MemoryReservation>,
         remaining: Arc<Mutex<u64>>,
     ) -> io::Result<Self> {
         let bytes = store
@@ -305,7 +316,7 @@ impl ProductArchive {
     pub(crate) fn from_retained_bytes(
         reference: Reference,
         bytes: Bytes,
-        allowance: Arc<MemoryReservation>,
+        allowance: Arc<hirsel_engine_admission::MemoryReservation>,
         remaining: Arc<Mutex<u64>>,
     ) -> io::Result<Self> {
         let charge = Self::retained_required_bytes(reference, &bytes)?;
@@ -333,7 +344,7 @@ impl ProductArchive {
     pub fn open_in(
         store: &dyn crate::store::ResultStore,
         reference: Reference,
-        allowance: &super::MemoryReservationPool,
+        allowance: &hirsel_engine_admission::MemoryReservationPool,
     ) -> io::Result<Self> {
         let bytes = store
             .get_content(reference)
@@ -351,7 +362,7 @@ impl ProductArchive {
     pub(crate) fn from_encoded_in(
         reference: Reference,
         bytes: Vec<u8>,
-        allowance: &super::MemoryReservationPool,
+        allowance: &hirsel_engine_admission::MemoryReservationPool,
     ) -> io::Result<Self> {
         if reference.domain.reference(&bytes) != Some(reference) {
             return Err(io::Error::other(
@@ -393,7 +404,7 @@ impl ProductArchive {
     pub fn open(
         store: &dyn crate::store::ResultStore,
         reference: Reference,
-        allowance: &mut MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
     ) -> io::Result<Self> {
         let bytes = store
             .get_content(reference)
@@ -522,7 +533,7 @@ impl LiveSummaryProduct {
         identity: (Address, Action),
         value: Arc<PublishedSummary>,
         source: ProductSourceInput,
-        allowance: &mut MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
     ) -> Option<Self> {
         let required = Self::shared_value_bytes(&value)?.checked_add(source.metadata_bytes())?;
         let mut reservation = allowance.split(required)?;
@@ -549,7 +560,7 @@ impl LiveSummaryProduct {
         identity: (Address, Action),
         value: Arc<PublishedSummary>,
         source: ProductSourceInput,
-        allowance: &mut MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
     ) -> Option<Self> {
         let mut reservation =
             allowance.split(Self::shared_owner_bytes().checked_add(source.metadata_bytes())?)?;
@@ -630,7 +641,7 @@ impl LiveSummaryProduct {
     /// separately and bind their complete computation associations as before.
     pub fn archive(
         &self,
-        scratch: &mut MemoryReservation,
+        scratch: &mut hirsel_engine_admission::MemoryReservation,
         required: u64,
     ) -> io::Result<ProductArchive> {
         self.archive_with(ArchiveAdmission::Materialize {
@@ -684,7 +695,7 @@ impl LiveGrowthProduct {
         identity: (Address, Action),
         value: Arc<crate::source_components::SourceGrowthData>,
         source: ProductSourceInput,
-        allowance: &mut MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
     ) -> Option<Self> {
         let mut reservation = allowance.split(Self::value_bytes(&value)?)?;
         let source = source.admit(&mut reservation)?;
@@ -751,7 +762,7 @@ pub(crate) struct GrowthPublicationSource {
     source: ProductSource,
     pub(crate) store: Arc<dyn crate::store::ResultStore>,
     pub(crate) scratch: u64,
-    _reservation: MemoryReservation,
+    _reservation: hirsel_engine_admission::MemoryReservation,
 }
 pub(crate) struct SourceGrowthPublication {
     pub(crate) reads: Arc<crate::queries::ArchivedReader>,
@@ -780,7 +791,7 @@ impl LiveSourceGrowthProduct {
         source: ProductSourceInput,
         store: Arc<dyn crate::store::ResultStore>,
         scratch: u64,
-        allowance: &mut MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
     ) -> Option<Arc<GrowthPublicationSource>> {
         let mut reservation = allowance.split(Self::source_bytes())?;
         let source = source.admit(&mut reservation)?;
@@ -1019,7 +1030,7 @@ impl LiveLowerProduct {
         identity: (Address, Action),
         output: crate::FrontLowerOutput,
         source: ProductSourceInput,
-        allowance: &mut MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
     ) -> Option<Self> {
         let required =
             Self::shared_required_bytes(&output)?.checked_add(source.metadata_bytes())?;
@@ -1045,7 +1056,7 @@ impl LiveLowerProduct {
         context: NativeRecordContext,
         records: NativeRecords,
         backing: Arc<dyn Send + Sync>,
-        allowance: Arc<MemoryReservation>,
+        allowance: Arc<hirsel_engine_admission::MemoryReservation>,
         remaining: Arc<Mutex<u64>>,
     ) -> LiveAdmission {
         if !records.uses_types(context.record_types()) {
@@ -1123,7 +1134,7 @@ impl LiveLowerProduct {
     }
     pub fn archive(
         &self,
-        scratch: &mut MemoryReservation,
+        scratch: &mut hirsel_engine_admission::MemoryReservation,
         required: u64,
     ) -> io::Result<ProductArchive> {
         self.archive_with(ArchiveAdmission::Materialize {
@@ -1210,7 +1221,7 @@ impl LiveAnalyzedProduct {
         outcome: crate::ModeResult,
         summary: LiveSummaryProduct,
         source: ProductSourceInput,
-        allowance: &mut MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
     ) -> Option<Self> {
         if summary.value().definition.path() != &outcome.definition
             || summary.reads() != outcome.reads.as_ref()
@@ -1267,7 +1278,7 @@ impl LiveAnalyzedProduct {
     }
     pub fn archive(
         &self,
-        scratch: &mut MemoryReservation,
+        scratch: &mut hirsel_engine_admission::MemoryReservation,
         required: u64,
     ) -> io::Result<ProductArchive> {
         self.archive_with(ArchiveAdmission::Materialize {
@@ -1306,8 +1317,8 @@ fn owner_bytes<T>() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::ProcessBudget;
     use crate::{CheckedSummary, DefinitionSummary, ParameterGrowth, PhaseAdapters, QueryEngine};
+
     use hirsel_syntax::{ContentHash, DefId, DefPath};
 
     fn fixture() -> (Arc<PublishedSummary>, NativeRecordContext) {
@@ -1355,10 +1366,11 @@ mod tests {
         let store = Arc::new(crate::store::MemStore::default());
         let records = NativeRecords::new(context.record_types().clone(), store.clone());
         let source = ProductSource::prepare(context.clone(), records, Arc::new(())).unwrap();
-        let budget = ProcessBudget::new(1 << 20);
-        let pool = super::super::MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
-            .ok()
-            .unwrap();
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
+        let pool =
+            hirsel_engine_admission::MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
+                .ok()
+                .unwrap();
         let mut allowance = pool.take(LiveSourceGrowthProduct::source_bytes()).unwrap();
         let source =
             LiveSourceGrowthProduct::admit_source(source, store, 64 << 10, &mut allowance).unwrap();
@@ -1369,11 +1381,12 @@ mod tests {
         NativeRecordContext,
     ) {
         let (_, source) = fixture();
-        let budget = ProcessBudget::new(1 << 20);
-        let pool =
-            crate::runtime::MemoryReservationPool::new(budget.reserve(budget.limit()).unwrap())
-                .ok()
-                .unwrap();
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
+        let pool = hirsel_engine_admission::MemoryReservationPool::new(
+            budget.reserve(budget.limit()).unwrap(),
+        )
+        .ok()
+        .unwrap();
         let facets = crate::SourceGrowthProducer {
             source: &source,
             output_pool: &pool,
@@ -1402,7 +1415,7 @@ mod tests {
     fn live_summary_exact_admission_keeps_the_producer_until_eviction_and_last_view_drop() {
         let (value, source) = fixture();
         let bytes = LiveSummaryProduct::value_bytes(&value).unwrap();
-        let budget = ProcessBudget::new(bytes * 2 + 17);
+        let budget = hirsel_engine_admission::ProcessBudget::new(bytes * 2 + 17);
         let backing = Arc::new(budget.reserve(17).unwrap());
         let producer = Arc::downgrade(&backing);
         let mut short = budget.reserve(bytes - 1).unwrap();
@@ -1442,7 +1455,7 @@ mod tests {
 
         let (value, source) = growth_fixture();
         let bytes = LiveGrowthProduct::value_bytes(&value).unwrap();
-        let budget = ProcessBudget::new(bytes * 2 + 17);
+        let budget = hirsel_engine_admission::ProcessBudget::new(bytes * 2 + 17);
         let backing = Arc::new(budget.reserve(17).unwrap());
         let producer = Arc::downgrade(&backing);
         let mut short = budget.reserve(bytes - 1).unwrap();
@@ -1479,7 +1492,7 @@ mod tests {
     #[test]
     fn live_archive_refusal_and_materialization_failure_do_not_cache_success() {
         let (value, source) = fixture();
-        let budget = ProcessBudget::new(32 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(32 << 20);
         let backing = Arc::new(budget.reserve(1).unwrap());
         let mut allowance = budget
             .reserve(LiveSummaryProduct::value_bytes(&value).unwrap())
@@ -1573,7 +1586,7 @@ mod tests {
         assert_eq!(budget.reserved(), 0);
 
         let (value, source) = growth_fixture();
-        let budget = ProcessBudget::new(1 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
         let backing = Arc::new(budget.reserve(1).unwrap());
         let mut allowance = budget
             .reserve(LiveGrowthProduct::value_bytes(&value).unwrap())
@@ -1647,7 +1660,7 @@ mod tests {
     fn summary_archive_pins_its_codec_and_refuses_foreign_source_binding() {
         let (value, source) = fixture();
         let (_, foreign) = fixture();
-        let budget = ProcessBudget::new(2 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(2 << 20);
         let backing = Arc::new(budget.reserve(17).unwrap());
         let mut allowance = budget
             .reserve(LiveSummaryProduct::value_bytes(&value).unwrap())
@@ -1770,7 +1783,7 @@ mod tests {
                 .unwrap()
                 .summary = changed.summary.clone();
             let (_, foreign) = fixture();
-            let budget = ProcessBudget::new(2 << 20);
+            let budget = hirsel_engine_admission::ProcessBudget::new(2 << 20);
             let backing = Arc::new(budget.reserve(17).unwrap());
             let mut allowance = budget
                 .reserve(LiveSummaryProduct::value_bytes(&value).unwrap())
@@ -1847,7 +1860,7 @@ mod tests {
         let reference = LIVE_ANALYZED.reference(&bytes).unwrap();
         let required = ProductArchive::checked_import_charge(reference, &bytes).unwrap()
             + retained_arc_bytes(&std::mem::MaybeUninit::<RetainedArchiveLease>::uninit());
-        let budget = ProcessBudget::new(required);
+        let budget = hirsel_engine_admission::ProcessBudget::new(required);
         let allowance = Arc::new(budget.reserve(required).unwrap());
         let source = Arc::downgrade(&allowance);
         let remaining = Arc::new(Mutex::new(required - 1));
@@ -1898,10 +1911,11 @@ mod tests {
 
     #[test]
     fn encoded_archive_pool_covers_spare_capacity_and_detached_views() {
-        let budget = ProcessBudget::new(1 << 20);
-        let pool = crate::runtime::MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
-            .ok()
-            .unwrap();
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
+        let pool =
+            hirsel_engine_admission::MemoryReservationPool::new(budget.reserve(1 << 20).unwrap())
+                .ok()
+                .unwrap();
         let before = pool.available_bytes();
         let (archive, allocation) = crate::test_alloc::measured(|| {
             let mut bytes = Vec::with_capacity(4096);
@@ -1948,7 +1962,7 @@ mod tests {
         let mut charge = retained_arc_bytes(&std::mem::MaybeUninit::<ImportedArchive>::uninit());
         bytes.visit_retained_allocations(|_, bytes| charge += bytes as u64);
         assert!(charge > 4096);
-        let budget = ProcessBudget::new(charge);
+        let budget = hirsel_engine_admission::ProcessBudget::new(charge);
         let mut short = budget.reserve(charge - 1).unwrap();
         assert!(ProductArchive::open(&Store(bytes.clone()), reference, &mut short).is_err());
         assert_eq!(short.bytes(), charge - 1);
@@ -1982,7 +1996,7 @@ mod tests {
 
         let charge =
             charge + retained_arc_bytes(&std::mem::MaybeUninit::<RetainedArchiveLease>::uninit());
-        let budget = ProcessBudget::new(charge);
+        let budget = hirsel_engine_admission::ProcessBudget::new(charge);
         let allowance = Arc::new(budget.reserve(charge).unwrap());
         let remaining = Arc::new(Mutex::new(charge));
         let store = Store(bytes);
@@ -2013,7 +2027,7 @@ mod tests {
     #[test]
     fn equal_live_summary_keeps_the_old_facet_and_new_action_and_observations() {
         let (value, source) = fixture();
-        let budget = ProcessBudget::new(1 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
         let old_backing = Arc::new(budget.reserve(17).unwrap());
         let old_producer = Arc::downgrade(&old_backing);
         let new_backing = Arc::new(budget.reserve(19).unwrap());
@@ -2072,18 +2086,19 @@ mod tests {
 #[cfg(test)]
 mod source_component_tests {
     use super::*;
-    use crate::runtime::{MemoryReservationPool, ProcessBudget};
     use crate::{PhaseAdapters, QueryEngine, SourceGrowthProducer};
+
     use hirsel_syntax::{ContentHash, DefId, DefPath};
 
     #[test]
     fn equal_component_facet_retains_the_old_owner_and_current_observations() {
         let engine = QueryEngine::new(crate::default_environment(), PhaseAdapters::default());
         let context = engine.source_records();
-        let budget = ProcessBudget::new(1 << 20);
-        let pool = MemoryReservationPool::new(budget.reserve(512 << 10).unwrap())
-            .ok()
-            .unwrap();
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
+        let pool =
+            hirsel_engine_admission::MemoryReservationPool::new(budget.reserve(512 << 10).unwrap())
+                .ok()
+                .unwrap();
         let producer = SourceGrowthProducer {
             source: &context,
             output_pool: &pool,

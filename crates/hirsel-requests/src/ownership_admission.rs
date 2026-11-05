@@ -1,8 +1,12 @@
 //! Charged inputs for the explicitly selected ownership diagnostic graph.
-use hirsel_engine::{
-    FrontBodyQueries, FrontLowerQueries, FrontNativeDefinitionInputs, FrontNativeDefinitionQueries,
-    FrontNativeQueries, FrontRunQueries, runtime::MemoryReservation, store::ResultStore,
-};
+use hirsel_engine::FrontBodyQueries;
+use hirsel_engine::FrontLowerQueries;
+use hirsel_engine::FrontNativeDefinitionInputs;
+use hirsel_engine::FrontNativeDefinitionQueries;
+use hirsel_engine::FrontNativeQueries;
+use hirsel_engine::FrontRunQueries;
+use hirsel_engine::store::ResultStore;
+
 use hirsel_syntax::DefPath;
 use std::sync::Arc;
 
@@ -16,9 +20,9 @@ pub(super) struct SourceInputs {
     pub store: Arc<dyn ResultStore>,
 }
 pub(super) struct Admission {
-    pub instances: MemoryReservation,
-    pub arena: MemoryReservation,
-    pub compilation: MemoryReservation,
+    pub instances: hirsel_engine_admission::MemoryReservation,
+    pub arena: hirsel_engine_admission::MemoryReservation,
+    pub compilation: hirsel_engine_admission::MemoryReservation,
 }
 
 /// These bytes are split out of the existing snapshot partition. Constructors

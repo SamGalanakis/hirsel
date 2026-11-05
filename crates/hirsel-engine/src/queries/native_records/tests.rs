@@ -553,7 +553,7 @@ fn lazy_rows_fixture() -> LazyRowsFixture {
 fn lazy_archive_rows_equal_eager_bytes_and_values_without_publishing_shared_rows() {
     use std::sync::atomic::Ordering;
     let f = lazy_rows_fixture();
-    let budget = crate::runtime::ProcessBudget::new(16 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(16 << 20);
     let grant = budget.reserve(16 << 20).unwrap();
     let value = &f.ids[..3];
     let mut reader = f
@@ -613,7 +613,7 @@ fn lazy_archive_corruption_is_checked_on_demand_and_failure_does_not_poison_read
     use hirsel_product_codec::ArchiveRowRefusal;
     use std::sync::atomic::Ordering;
     let f = lazy_rows_fixture();
-    let budget = crate::runtime::ProcessBudget::new(16 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(16 << 20);
     let grant = budget.reserve(16 << 20).unwrap();
     *f.store.corrupt.lock().unwrap() = Some(f.references[1].reference());
     let mut reader = f
@@ -657,7 +657,7 @@ fn lazy_archive_row_over_reservation_refuses_without_allocation_or_io_and_reader
     use hirsel_product_codec::ArchiveRowRefusal;
     use std::sync::atomic::Ordering;
     let f = lazy_rows_fixture();
-    let budget = crate::runtime::ProcessBudget::new(16 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(16 << 20);
     let grant = budget.reserve(16 << 20).unwrap();
     let mut reader = f
         .records
@@ -686,12 +686,11 @@ fn lazy_archive_row_over_reservation_refuses_without_allocation_or_io_and_reader
 
 #[test]
 fn lazy_archive_reader_drop_releases_rows_and_returns_exact_borrowed_partition() {
-    use crate::runtime::{MemoryReservationPool, ProcessBudget};
     use std::sync::atomic::Ordering;
     let f = lazy_rows_fixture();
-    let bytes = (16 << 20) + MemoryReservationPool::metadata_bytes();
-    let budget = ProcessBudget::new(bytes);
-    let pool = MemoryReservationPool::new(budget.reserve(bytes).unwrap())
+    let bytes = (16 << 20) + hirsel_engine_admission::MemoryReservationPool::metadata_bytes();
+    let budget = hirsel_engine_admission::ProcessBudget::new(bytes);
+    let pool = hirsel_engine_admission::MemoryReservationPool::new(budget.reserve(bytes).unwrap())
         .ok()
         .unwrap();
     let grant = pool.take(16 << 20).unwrap();

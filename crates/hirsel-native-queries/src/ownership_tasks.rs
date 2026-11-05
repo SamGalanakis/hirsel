@@ -62,7 +62,7 @@ pub struct OwnershipTasks {
     root: QueryId,
     weight: MemoryWeight,
     completed: OnceLock<ProductRef>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
     pub transformations: AtomicU64,
 }
 impl OwnershipTasks {
@@ -82,7 +82,7 @@ impl OwnershipTasks {
     pub fn new(
         native: Arc<NativeTasks>,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Arc<Self>, String> {
         Self::new_selected(
             native,
@@ -95,7 +95,7 @@ impl OwnershipTasks {
         native: Arc<NativeTasks>,
         selection: hirsel_lir::ownership_trace::Selection,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Arc<Self>, String> {
         let mut requests = BTreeMap::new();
         for (key, owner) in &native.snapshot.owners {

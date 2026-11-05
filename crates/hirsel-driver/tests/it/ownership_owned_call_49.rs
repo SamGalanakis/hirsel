@@ -1,7 +1,9 @@
 //! Original Value plans across graph-owned source, call transport and execution.
 use hirsel_driver::native;
 use hirsel_driver::resident::ObservedSession;
-use hirsel_engine::{CompileConfig, runtime::ProcessBudget, store::MemStore};
+use hirsel_engine::CompileConfig;
+use hirsel_engine::store::MemStore;
+
 use hirsel_front_phases::COMPILER;
 use hirsel_requests::*;
 use hirsel_run_schema::ownership_trace::{Action, Trace};
@@ -104,7 +106,7 @@ fn source_calls_selected(
             hold_bytes: 0,
             ..Default::default()
         };
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let compiler = COMPILER.with_config(config.clone()).with_owned_engines();
         let selector = CompilerRequests::new(
             compiler.clone(),

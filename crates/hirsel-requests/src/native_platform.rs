@@ -5,7 +5,9 @@ use super::NativeRequest;
 use super::native_bootstrap::NativePlan;
 use super::native_link::FrozenPlatform;
 use super::native_link::LinkInputs;
-use hirsel_engine::{LinkInput, runtime::MemoryReservation, store::ResultStore};
+use hirsel_engine::LinkInput;
+use hirsel_engine::store::ResultStore;
+
 use hirsel_native::NativeError;
 use hirsel_native::StageName;
 use hirsel_native::Toolchain;
@@ -106,7 +108,7 @@ impl NativePlatformSelection {
         inputs: NativePlatformInputs<'_>,
         limits: CaptureLimits,
         runtime_limits: RuntimeLimits,
-        allowance: impl Into<Arc<MemoryReservation>>,
+        allowance: impl Into<Arc<hirsel_engine_admission::MemoryReservation>>,
     ) -> Result<Self, NativeError> {
         let request = inputs.request;
         let options = &request.options;

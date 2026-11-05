@@ -12,7 +12,7 @@ pub struct FrontCheckedInput {
     input: ExportInput,
     _scope: Arc<FrontCheckScope>,
     _headers: Arc<FrontCheckedSignatures>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontCheckedInput {
     pub fn input(&self) -> &ExportInput {
@@ -23,7 +23,7 @@ impl FrontCheckedInput {
     }
     pub fn capture_types_with_allowance(
         self: Rc<Self>,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<FrontPreparedProof, QueryError> {
         FrontPreparedProof::capture(self, allowance)
     }
@@ -132,7 +132,7 @@ impl FrontCheckScope {
         self: &Arc<Self>,
         headers: Arc<FrontCheckedSignatures>,
         entry: &DefPath,
-        mut allowance: MemoryReservation,
+        mut allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<FrontCheckedInput, QueryError> {
         let layout = self.checked_product_input_layout(&headers, entry)?;
         if layout.total().ok_or(QueryError::NotImplemented)? > allowance.bytes() {
@@ -369,7 +369,7 @@ fn receipt_owner_bytes() -> Option<usize> {
     }
     arc::<CheckedProducts>()?
         .checked_add(arc::<()>()?)?
-        .checked_add(arc::<MemoryReservation>()?)?
+        .checked_add(arc::<hirsel_engine_admission::MemoryReservation>()?)?
         .checked_add(arc::<(Arc<dyn Send + Sync>, Arc<dyn Send + Sync>)>()?.checked_mul(2)?)
 }
 impl CheckedProducts {

@@ -35,7 +35,7 @@ pub struct ArenaTasks {
     plan: OnceLock<Plan>,
     completed: OnceLock<(ProductRef, SettledArenaGraph)>,
     weight: MemoryWeight,
-    allowance: Arc<MemoryReservation>,
+    allowance: Arc<hirsel_engine_admission::MemoryReservation>,
     charged: AtomicU64,
     fallback: Reference,
     pub hits: AtomicU64,
@@ -56,7 +56,7 @@ impl ArenaTasks {
         store: Arc<dyn ResultStore>,
         facet: u32,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Arc<Self>, String> {
         if weight.retained < std::mem::size_of::<ArenaTask>() as u64 {
             return Err("arena continuation exceeds retained allowance".into());
@@ -85,7 +85,7 @@ impl ArenaTasks {
             solves: AtomicU64::new(0),
         }))
     }
-    pub fn retained_allowance(&self) -> Arc<MemoryReservation> {
+    pub fn retained_allowance(&self) -> Arc<hirsel_engine_admission::MemoryReservation> {
         self.allowance.clone()
     }
     pub fn query_id(&self) -> QueryId {

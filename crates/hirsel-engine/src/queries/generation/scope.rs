@@ -9,13 +9,13 @@ pub struct FrontDemandAdmission {
     pub jobs: Jobs,
     pub weight: MemoryWeight,
     pub max_reads: usize,
-    pub runtime: MemoryReservation,
-    pub front: MemoryReservation,
-    pub lower: MemoryReservation,
-    pub text: MemoryReservation,
-    pub syntax: MemoryReservation,
-    pub discovery: MemoryReservation,
-    pub metadata: MemoryReservation,
+    pub runtime: hirsel_engine_admission::MemoryReservation,
+    pub front: hirsel_engine_admission::MemoryReservation,
+    pub lower: hirsel_engine_admission::MemoryReservation,
+    pub text: hirsel_engine_admission::MemoryReservation,
+    pub syntax: hirsel_engine_admission::MemoryReservation,
+    pub discovery: hirsel_engine_admission::MemoryReservation,
+    pub metadata: hirsel_engine_admission::MemoryReservation,
 }
 
 pub enum FrontDemandError {
@@ -57,7 +57,7 @@ pub struct FrontDemandScope {
     rounds: usize,
     stats: RuntimeStats,
     failure: Option<FrontDemandError>,
-    _metadata: MemoryReservation,
+    _metadata: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontDemandScope {
     pub(crate) fn carry(&self) -> Option<&Arc<FrontCarry>> {

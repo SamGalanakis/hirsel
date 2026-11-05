@@ -9,7 +9,7 @@ use hirsel_lir::layout_types::TargetSpec;
 use std::cell::Cell;
 
 fn admitted(backend: Arc<dyn ResultStore>) -> hirsel_engine::store::RequestStore {
-    let budget = hirsel_engine::runtime::ProcessBudget::new(64 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     hirsel_engine::store::RequestStore::new(backend, budget.reserve(64 << 20).unwrap())
 }
 

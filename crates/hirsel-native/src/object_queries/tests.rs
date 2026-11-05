@@ -9,7 +9,7 @@ use hirsel_lir::layout_types::TargetSpec;
 use std::cell::Cell;
 
 fn admitted(backend: Arc<dyn ResultStore>) -> hirsel_engine::store::RequestStore {
-    let budget = hirsel_engine::runtime::ProcessBudget::new(64 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     hirsel_engine::store::RequestStore::new(backend, budget.reserve(64 << 20).unwrap())
 }
 
@@ -1040,7 +1040,7 @@ fn fixture_product(
     action: hirsel_engine::store::Action,
     reference: hirsel_engine::store::Reference,
 ) -> hirsel_engine::runtime::ProductRef {
-    let budget = hirsel_engine::runtime::ProcessBudget::new(64 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let mut allowance = budget.reserve(64 << 20).unwrap();
     let archive =
         hirsel_engine::runtime::ProductArchive::open(store, reference, &mut allowance).unwrap();

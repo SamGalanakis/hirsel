@@ -41,11 +41,12 @@ impl ResultStore for ReadScopes {
 
 #[test]
 fn selected_request_keeps_one_read_epoch_and_releases_it_before_retained_outputs() {
-    use hirsel_engine::{
-        LoweringPolicy,
-        requests::{OutputReadiness, RequestEngine, observe_inputs},
-        runtime::{ProcessBudget, QueryRuntime},
-    };
+    use hirsel_engine::LoweringPolicy;
+    use hirsel_engine::requests::OutputReadiness;
+    use hirsel_engine::requests::RequestEngine;
+    use hirsel_engine::requests::observe_inputs;
+    use hirsel_engine::runtime::QueryRuntime;
+
     use hirsel_requests::CompileOperation;
     use hirsel_requests::CompileRequest;
     use hirsel_requests::CompilerRequests;
@@ -78,7 +79,7 @@ fn selected_request_keeps_one_read_epoch_and_releases_it_before_retained_outputs
         let mut engine = CompilerRequests::new(
             compiler,
             config,
-            ProcessBudget::new(1 << 30),
+            hirsel_engine_admission::ProcessBudget::new(1 << 30),
             RequestLimits {
                 runtime_bytes: 256 << 20,
                 snapshot_bytes: 64 << 20,
@@ -191,11 +192,12 @@ fn directory_request_products_reuse_unchanged_bodies_across_sessions_and_edits()
 
 #[test]
 fn unfinished_equal_requests_have_independent_abort_owners_and_completed_graphs_reuse() {
-    use hirsel_engine::{
-        LoweringPolicy,
-        requests::{OutputReadiness, RequestEngine, observe_inputs},
-        runtime::{ProcessBudget, QueryRuntime},
-    };
+    use hirsel_engine::LoweringPolicy;
+    use hirsel_engine::requests::OutputReadiness;
+    use hirsel_engine::requests::RequestEngine;
+    use hirsel_engine::requests::observe_inputs;
+    use hirsel_engine::runtime::QueryRuntime;
+
     use hirsel_requests::CompileOperation;
     use hirsel_requests::CompileRequest;
     use hirsel_requests::CompilerRequests;
@@ -231,7 +233,7 @@ fn unfinished_equal_requests_have_independent_abort_owners_and_completed_graphs_
         let mut engine = CompilerRequests::new(
             compiler,
             config,
-            ProcessBudget::new(1 << 30),
+            hirsel_engine_admission::ProcessBudget::new(1 << 30),
             RequestLimits {
                 runtime_bytes: 256 << 20,
                 snapshot_bytes: 64 << 20,

@@ -50,7 +50,7 @@ fn native_emit_only_bootstrap_completes_actual_codegen_without_link_after_loader
 }
 
 fn fixture_store() -> Arc<dyn ResultStore> {
-    let budget = ProcessBudget::new(64 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     Arc::new(hirsel_engine::store::RequestStore::new(
         Arc::new(MemStore::default()),
         budget.reserve(64 << 20).unwrap(),
@@ -86,7 +86,7 @@ fn bootstrap_link_refusal(test_table: bool, emit_only: bool) {
                 .unwrap();
             let paths = program.engine.front_source_roots();
             let entry = program.entry.clone();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let diagnostic = |message: &[u8]| {
                 store
                     .put_content(
@@ -414,7 +414,7 @@ fn actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop()
                 .unwrap();
             let paths = program.engine.front_source_roots();
             let entry = program.entry.clone();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let diagnostic = |message: &[u8]| {
                 store
                     .put_content(
@@ -784,7 +784,7 @@ fn native_bootstrap_policy_case(bind_run: bool) {
             std::fs::write(&path, "pub fn main()->Result[(),u64]{Ok(())}\n").unwrap();
             std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"bootstrap","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
             let store = fixture_store();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let launch = crate::HostLaunch::empty();
             let mut bound = if bind_run {
                 let config = CompileConfig {
@@ -1279,7 +1279,7 @@ struct ProofGraph {
 fn proof_graph(
     manifest: &std::path::Path,
     store: &Arc<dyn ResultStore>,
-    budget: &Arc<ProcessBudget>,
+    budget: &Arc<hirsel_engine_admission::ProcessBudget>,
     errors: RuntimeErrors,
     weight: MemoryWeight,
 ) -> ProofGraph {
@@ -1468,7 +1468,7 @@ fn native_bootstrap_assesses_evidence_against_its_settled_source_root_before_ins
         std::fs::write(directory.path().join("main.hir"), PROOF_SOURCE).unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"proof_bootstrap","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
         let store = fixture_store();
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let diagnostic = |message: &[u8]| {
             store
                 .put_content(
@@ -1659,7 +1659,7 @@ fn original_plan_inputs_bind_source_edits_membership_options_and_foreign_bytes()
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("plan.hir");
         let store = fixture_store();
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let diagnostic = |message: &[u8]| {
             store
                 .put_content(

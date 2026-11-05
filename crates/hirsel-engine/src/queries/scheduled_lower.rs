@@ -381,11 +381,11 @@ pub struct FrontLowerOutput {
     owner: Arc<LowerSource>,
 }
 pub(crate) struct LowerPartition {
-    allowance: Arc<MemoryReservation>,
+    allowance: Arc<hirsel_engine_admission::MemoryReservation>,
     remaining: Arc<Mutex<u64>>,
 }
 impl LowerPartition {
-    pub(crate) fn new(allowance: MemoryReservation) -> Self {
+    pub(crate) fn new(allowance: hirsel_engine_admission::MemoryReservation) -> Self {
         Self {
             remaining: Arc::new(Mutex::new(allowance.bytes())),
             allowance: Arc::new(allowance),
@@ -407,7 +407,7 @@ struct LowerSource {
     records: crate::NativeRecords,
     store: Arc<dyn ResultStore>,
     _sources: SourceMap,
-    _allowance: Arc<MemoryReservation>,
+    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 impl FrontLowerOutput {
     /// Move the typed ordinary result into an admitted live owner. Verifier
@@ -415,7 +415,7 @@ impl FrontLowerOutput {
     pub fn into_live(
         self,
         product: ProductRef,
-        allowance: &mut MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
     ) -> Option<crate::runtime::LiveLowerProduct> {
         let source = ProductSource::prepare(
             self.owner.anchors.clone(),
@@ -472,7 +472,7 @@ pub struct FrontLowerQueries {
     max_reads: usize,
     errors: RuntimeErrors,
     retention: Arc<Mutex<u64>>,
-    _allowance: Arc<MemoryReservation>,
+    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
     source: Arc<LowerSource>,
 }
 impl FrontLowerQueries {
@@ -514,7 +514,9 @@ impl FrontLowerQueries {
         indexes.tree::<(u32, ContentHash), DefId>(definitions.len().checked_mul(2)?);
         indexes.add(size_of::<Self>());
         indexes.add(
-            size_of::<LowerSource>() + size_of::<MemoryReservation>() + 4 * size_of::<usize>(),
+            size_of::<LowerSource>()
+                + size_of::<hirsel_engine_admission::MemoryReservation>()
+                + 4 * size_of::<usize>(),
         );
         indexes.add(size_of::<Mutex<u64>>() + 2 * size_of::<usize>());
         definitions.iter().try_fold(indexes.bytes(), |total, path| {
@@ -741,7 +743,7 @@ impl FrontLowerQueries {
     pub fn settled_definition_with_allowance(
         self: &Arc<Self>,
         path: &DefPath,
-        allowance: &MemoryReservation,
+        allowance: &hirsel_engine_admission::MemoryReservation,
     ) -> Result<DefinitionRef, QueryError> {
         if self.settled_definition_decode_bytes(path)? > allowance.bytes() {
             return Err(QueryError::Operational(hirsel_types::OperationalFailure {
@@ -3071,7 +3073,7 @@ impl QueryEngine {
         front: Arc<FrontBodyQueries>,
         weight: MemoryWeight,
         max_reads: usize,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontLowerQueries>, QueryError> {
         self.front_lower_queries_in_generator(
@@ -3091,7 +3093,7 @@ impl QueryEngine {
         front: Arc<FrontBodyQueries>,
         weight: MemoryWeight,
         max_reads: usize,
-        mut allowance: MemoryReservation,
+        mut allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
         generator: Option<(DefId, Span)>,
     ) -> Result<Arc<FrontLowerQueries>, QueryError> {

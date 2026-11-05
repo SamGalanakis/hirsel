@@ -1,7 +1,9 @@
 //! Explicit grants and tape selection preserve checked diagnostic source binding.
 use hirsel_driver::native;
 use hirsel_driver::resident::ObservedSession;
-use hirsel_engine::{CompileConfig, runtime::ProcessBudget, store::MemStore};
+use hirsel_engine::CompileConfig;
+use hirsel_engine::store::MemStore;
+
 use hirsel_front_phases::COMPILER;
 use hirsel_requests::*;
 use std::sync::Arc;
@@ -21,7 +23,7 @@ fn ownership_native_granted_args_record_and_replay_keep_the_selected_resource_li
             hold_bytes: 0,
             ..Default::default()
         };
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let compiler = COMPILER.with_config(config.clone()).with_owned_engines();
         let selector = CompilerRequests::new(
             compiler.clone(),

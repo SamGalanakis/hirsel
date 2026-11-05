@@ -4,7 +4,7 @@ use super::*;
 pub struct FrontLowerDependencies {
     dependencies: Vec<SignatureDependency>,
     _owner: Arc<FrontLowerQueries>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontLowerDependencies {
     pub fn dependencies(&self) -> &[SignatureDependency] {
@@ -36,7 +36,7 @@ impl FrontLowerQueries {
     pub fn settled_tir(
         self: &Arc<Self>,
         path: &DefPath,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<crate::NativeOriginalValue, QueryError> {
         let id = self.query(path).ok_or(QueryError::NotImplemented)?;
         let outcomes = self
@@ -113,7 +113,7 @@ impl FrontLowerQueries {
     pub fn settled_dependencies(
         self: &Arc<Self>,
         path: &DefPath,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<FrontLowerDependencies, QueryError> {
         let id = self.query(path).ok_or(QueryError::NotImplemented)?;
         let outcomes = self
@@ -188,7 +188,7 @@ impl FrontLowerQueries {
     pub fn settled_checked_dependencies(
         self: &Arc<Self>,
         path: &DefPath,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<FrontLowerDependencies, QueryError> {
         if self.settled_checked_dependency_decode_bytes(path)? > allowance.bytes() {
             return Err(QueryError::Operational(hirsel_types::OperationalFailure {

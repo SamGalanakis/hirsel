@@ -27,17 +27,21 @@ pub(crate) struct HeaderProduct {
     accounted: AtomicBool,
 }
 pub(crate) trait HeaderAllowance: Send + Sync {
-    fn take_header(&self, bytes: u64) -> Option<crate::runtime::MemoryReservation>;
+    fn take_header(&self, bytes: u64) -> Option<hirsel_engine_admission::MemoryReservation>;
 }
 /// What one settled header row or module proof holds against a budget.
 enum HeaderCharge {
     /// Charged to the shared standalone source-inference budget.
     Standalone(
-        #[expect(dead_code, reason = "held for its drop")] crate::runtime::MemoryReservation,
+        #[expect(dead_code, reason = "held for its drop")]
+        hirsel_engine_admission::MemoryReservation,
     ),
     /// Owned by shared syntax until its last source owner drops. It may use
     /// a Front allowance, but is not a row of the portable Front facts cache.
-    Source(#[expect(dead_code, reason = "held for its drop")] crate::runtime::MemoryReservation),
+    Source(
+        #[expect(dead_code, reason = "held for its drop")]
+        hirsel_engine_admission::MemoryReservation,
+    ),
     /// Lent by a live Front partition; evictable while unpinned.
     Front(FrontCharge),
 }
@@ -47,7 +51,7 @@ struct FrontCharge {
     credit: Arc<std::sync::Mutex<u64>>,
     bytes: u64,
     #[expect(dead_code, reason = "held for its drop")]
-    allowance: crate::runtime::MemoryReservation,
+    allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl Drop for FrontCharge {
     fn drop(&mut self) {

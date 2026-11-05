@@ -21,7 +21,7 @@ pub struct EmissionFacts {
 pub struct InlineInstances(Option<Arc<InlineOwner>>);
 struct InlineOwner {
     values: Box<[ContentHash]>,
-    _grant: Option<Arc<hirsel_engine::runtime::MemoryReservation>>,
+    _grant: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
     archive: OnceLock<Result<InlineArchive, String>>,
 }
 struct InlineArchive {
@@ -37,7 +37,7 @@ const INLINE_SELECTION: hirsel_engine::store::Domain = hirsel_engine::store::Dom
 impl InlineInstances {
     pub fn new(
         values: impl IntoIterator<Item = ContentHash>,
-        grant: Option<Arc<hirsel_engine::runtime::MemoryReservation>>,
+        grant: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
     ) -> Self {
         let values = values.into_iter().collect::<Box<[_]>>();
         if values.is_empty() {
@@ -50,7 +50,10 @@ impl InlineInstances {
             })))
         }
     }
-    pub fn with_grant(self, grant: Option<Arc<hirsel_engine::runtime::MemoryReservation>>) -> Self {
+    pub fn with_grant(
+        self,
+        grant: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
+    ) -> Self {
         match &self.0 {
             Some(owner) if owner._grant.is_none() && grant.is_some() => {
                 Self::new(owner.values.iter().copied(), grant)
@@ -120,7 +123,7 @@ impl InlineInstances {
     fn read(
         reference: Reference,
         store: &dyn hirsel_engine::store::ResultStore,
-        grant: Option<Arc<hirsel_engine::runtime::MemoryReservation>>,
+        grant: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
     ) -> Result<Self, String> {
         // A JSON hash array has at most 129 bytes per member plus its
         // separating comma, with one extra outer bracket byte.
@@ -188,7 +191,7 @@ impl EmissionRecord {
         self,
         store: &dyn hirsel_engine::store::ResultStore,
         cached: &InlineInstances,
-        grant: Option<Arc<hirsel_engine::runtime::MemoryReservation>>,
+        grant: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
     ) -> Result<EmissionFacts, String> {
         if !self.canonical() {
             return Err("noncanonical emission component".into());
@@ -324,7 +327,7 @@ mod component_tests {
     #[test]
     fn inline_child_is_archived_once_and_fresh_readers_refuse_corruption_and_noncanonical_members()
     {
-        let budget = hirsel_engine::runtime::ProcessBudget::new(1 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
         let grant = Arc::new(budget.reserve(1 << 20).unwrap());
         let values = [
             ContentHash::of_bytes(b"first"),

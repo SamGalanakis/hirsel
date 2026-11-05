@@ -132,7 +132,7 @@ fn check_case(
             .unwrap();
         assert_eq!(program.files.len(), 1, "the complete local source vector");
         let definitions = program.engine.front_source_roots();
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let errors = crate::scheduled_front::errors();
         let weight = MemoryWeight {
             retained: 64 << 10,

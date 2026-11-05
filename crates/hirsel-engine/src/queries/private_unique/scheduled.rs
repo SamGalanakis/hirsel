@@ -6,9 +6,10 @@ use crate::store::{Entry as StoredEntry, EntryKey, VariantRef};
 use std::sync::{OnceLock, RwLock};
 
 const KIND: u32 = 0x4602_0001;
-pub(in crate::queries) fn standalone_budget() -> &'static Arc<ProcessBudget> {
-    static BUDGET: OnceLock<Arc<ProcessBudget>> = OnceLock::new();
-    BUDGET.get_or_init(|| ProcessBudget::new(512 << 20))
+pub(in crate::queries) fn standalone_budget() -> &'static Arc<hirsel_engine_admission::ProcessBudget>
+{
+    static BUDGET: OnceLock<Arc<hirsel_engine_admission::ProcessBudget>> = OnceLock::new();
+    BUDGET.get_or_init(|| hirsel_engine_admission::ProcessBudget::new(512 << 20))
 }
 type Proofs = Vec<(DefId, UniqueInference)>;
 #[derive(serde::Serialize, serde::Deserialize, Clone, Eq, PartialEq)]
@@ -366,8 +367,8 @@ impl QueryEngine {
     /// the caller's existing process partition. No runtime is constructed.
     pub fn prepare_private_inference(
         &mut self,
-        reservation: MemoryReservation,
-    ) -> Result<MemoryReservation, QueryError> {
+        reservation: hirsel_engine_admission::MemoryReservation,
+    ) -> Result<hirsel_engine_admission::MemoryReservation, QueryError> {
         self.private_inference_hosted = true;
         self.prepare_private_inference_with_registrations(reservation, &[])
     }
@@ -375,9 +376,9 @@ impl QueryEngine {
     /// Before bootstrap, only written bodies can contribute provisional facts.
     pub fn prepare_private_inference_with_registrations(
         &mut self,
-        reservation: MemoryReservation,
+        reservation: hirsel_engine_admission::MemoryReservation,
         registrations: &[Arc<AcceptedFrontRegistration>],
-    ) -> Result<MemoryReservation, QueryError> {
+    ) -> Result<hirsel_engine_admission::MemoryReservation, QueryError> {
         self.note_environment();
         if self.private_summary_active
             || (registrations.is_empty()
@@ -462,9 +463,9 @@ impl QueryEngine {
     }
     fn infer_private(
         &mut self,
-        reservation: MemoryReservation,
+        reservation: hirsel_engine_admission::MemoryReservation,
         registrations: &[Arc<AcceptedFrontRegistration>],
-    ) -> Result<MemoryReservation, QueryError> {
+    ) -> Result<hirsel_engine_admission::MemoryReservation, QueryError> {
         self.infer_private_modules(
             reservation
                 .bytes()
@@ -927,8 +928,8 @@ impl QueryEngine {
     }
     fn standalone_inference(
         &mut self,
-        reservation: MemoryReservation,
-    ) -> Result<Option<MemoryReservation>, QueryError> {
+        reservation: hirsel_engine_admission::MemoryReservation,
+    ) -> Result<Option<hirsel_engine_admission::MemoryReservation>, QueryError> {
         let reservation = self.prepare_private_inference_with_registrations(reservation, &[])?;
         if self.private_inference_hosted {
             return Ok(None);
@@ -946,7 +947,10 @@ impl QueryEngine {
         }
         Ok(None)
     }
-    fn standalone_demand(&mut self, mut reservation: MemoryReservation) -> Result<(), QueryError> {
+    fn standalone_demand(
+        &mut self,
+        mut reservation: hirsel_engine_admission::MemoryReservation,
+    ) -> Result<(), QueryError> {
         let definitions = self.front_source_roots();
         let generators = self.front_generator_roots(&definitions)?;
         let refused = || {

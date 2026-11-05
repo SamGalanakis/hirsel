@@ -13,7 +13,7 @@ fn fixture_product(
     action: hirsel_engine::store::Action,
     reference: hirsel_engine::store::Reference,
 ) -> hirsel_engine::runtime::ProductRef {
-    let budget = hirsel_engine::runtime::ProcessBudget::new(64 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let mut allowance = budget.reserve(64 << 20).unwrap();
     let archive =
         hirsel_engine::runtime::ProductArchive::open(store, reference, &mut allowance).unwrap();
@@ -269,10 +269,11 @@ pub fn run_file(path: &Path, stdout: &mut dyn Write) -> Result<RunOutcome, NotIm
 /// Io selects stdout only; no directory or other projection is implied.
 pub fn entry_grants_hint(path: &Path, policy: session::Policy) -> Result<String, ToolError> {
     let input = request_tir(path, policy, None)?;
-    let launch = hirsel_engine::entry_launch_kind(&input.runtime.types, &input.signature)
+    let launch = hirsel_engine_admission::entry_launch_kind(&input.runtime.types, &input.signature)
         .map_err(ToolError::Launch)?;
-    let roots = hirsel_engine::entry_roots(&input.runtime.types, &input.signature, launch)
-        .map_err(ToolError::Launch)?;
+    let roots =
+        hirsel_engine_admission::entry_roots(&input.runtime.types, &input.signature, launch)
+            .map_err(ToolError::Launch)?;
     let mut grants = serde_json::Map::new();
     for root in roots {
         use hirsel_run_config::Root;
@@ -294,7 +295,7 @@ pub fn entry_grants_hint(path: &Path, policy: session::Policy) -> Result<String,
 /// Export the semantic binding and denial defaults; callers explicitly select grants.
 pub fn export_run_path(path: &Path) -> Result<Vec<u8>, ToolError> {
     let input = request_tir(path, session::Policy::default(), None)?;
-    let launch = hirsel_engine::entry_launch_kind(&input.runtime.types, &input.signature)
+    let launch = hirsel_engine_admission::entry_launch_kind(&input.runtime.types, &input.signature)
         .map_err(ToolError::Launch)?;
     let revision = &input.revision;
     Ok(hirsel_run_config::RunConfig::for_program(revision, launch)

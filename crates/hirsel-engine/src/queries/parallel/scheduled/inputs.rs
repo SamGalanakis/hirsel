@@ -62,7 +62,10 @@ impl Inputs {
             .unadmitted_bytes()
             .saturating_add(self.addresses.unadmitted_bytes())
     }
-    pub(super) fn admit(&self, allowance: &mut MemoryReservation) -> Result<(), QueryError> {
+    pub(super) fn admit(
+        &self,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
+    ) -> Result<(), QueryError> {
         self.rows.admit(allowance)?;
         self.addresses.admit(allowance)
     }
@@ -99,7 +102,10 @@ impl OperationFrontInputs {
             .saturating_add(self.candidates.unadmitted_bytes())
             .saturating_add(self.arm_fixes.unadmitted_bytes())
     }
-    pub(super) fn admit(&self, allowance: &mut MemoryReservation) -> Result<(), QueryError> {
+    pub(super) fn admit(
+        &self,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
+    ) -> Result<(), QueryError> {
         self.inputs.admit(allowance)?;
         self.by_definition.admit(allowance)?;
         self.body_demands.admit(allowance)?;

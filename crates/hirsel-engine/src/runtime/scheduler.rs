@@ -219,7 +219,7 @@ struct Shared {
 pub struct AdmittedRuntime {
     shared: Arc<Shared>,
     workers: Vec<JoinHandle<()>>,
-    reservation: Option<MemoryReservation>,
+    reservation: Option<hirsel_engine_admission::MemoryReservation>,
     caller_stack: Option<u64>,
 }
 
@@ -267,7 +267,7 @@ fn runtime_layout(jobs: Jobs, budget: u64, stack: usize) -> Option<(usize, u64)>
 impl AdmittedRuntime {
     pub fn new(
         jobs: Jobs,
-        reservation: MemoryReservation,
+        reservation: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> std::io::Result<Self> {
         Self::with_reservation(jobs, reservation, errors, COMPILER_STACK_BYTES)
@@ -279,7 +279,7 @@ impl AdmittedRuntime {
     /// start, completion waits drive the same admitted graph on the caller.
     pub fn with_query_capacity(
         jobs: Jobs,
-        reservation: MemoryReservation,
+        reservation: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
         entries: usize,
     ) -> std::io::Result<Self> {
@@ -319,7 +319,7 @@ impl AdmittedRuntime {
     ) -> std::io::Result<Self> {
         Self::with_reservation(
             jobs,
-            ProcessBudget::new(budget).reserve(budget)?,
+            hirsel_engine_admission::ProcessBudget::new(budget).reserve(budget)?,
             errors,
             stack,
         )
@@ -329,7 +329,7 @@ impl AdmittedRuntime {
     /// ordinary compiler callers use `new` and its compiler-stack default.
     pub fn with_reservation(
         jobs: Jobs,
-        reservation: MemoryReservation,
+        reservation: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
         stack: usize,
     ) -> std::io::Result<Self> {
@@ -337,7 +337,7 @@ impl AdmittedRuntime {
     }
     fn with_metadata(
         jobs: Jobs,
-        reservation: MemoryReservation,
+        reservation: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
         stack: usize,
         entries: Option<usize>,
@@ -545,7 +545,9 @@ impl AdmittedRuntime {
     /// original process charge. A staged caller may join it into its parent
     /// reservation and lend it to another round without a second admission.
     /// Subsequent shutdown calls return None and never release that charge.
-    pub fn shutdown_with_reservation(&mut self) -> Option<MemoryReservation> {
+    pub fn shutdown_with_reservation(
+        &mut self,
+    ) -> Option<hirsel_engine_admission::MemoryReservation> {
         {
             let mut state = self.shared.lock();
             state.stopped = true;

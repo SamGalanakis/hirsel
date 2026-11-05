@@ -16,7 +16,7 @@ fn actual_root_rejects_changed_owner_policy_and_c_bound_ready_summary() {
         let directory = tempfile::tempdir().unwrap();
         let selected: Arc<dyn ResultStore> =
             Arc::new(store::DirStore::new(directory.path().join("products")));
-        let transport = ProcessBudget::new(24 << 20);
+        let transport = hirsel_engine_admission::ProcessBudget::new(24 << 20);
         let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
             selected,
             transport.reserve(24 << 20).unwrap(),

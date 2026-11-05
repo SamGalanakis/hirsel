@@ -82,7 +82,7 @@ fn one_byte_short_refuses_with_resource_error_and_exact_need_executes() {
         + weight.retained
         + weight.scratch;
     for bytes in [need - 1, need] {
-        let budget = ProcessBudget::new(need);
+        let budget = hirsel_engine_admission::ProcessBudget::new(need);
         let polls = Arc::new(AtomicUsize::new(0));
         let mut runtime = AdmittedRuntime::with_query_capacity(
             Jobs::ONE,

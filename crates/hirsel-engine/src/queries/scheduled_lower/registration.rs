@@ -42,7 +42,7 @@ pub(in crate::queries) struct Data {
     depth: DepthEvidence<Span>,
     acceptance: Option<hirsel_validate::ExecutionReceipt>,
     decode_bytes: u64,
-    _allowance: Option<MemoryReservation>,
+    _allowance: Option<hirsel_engine_admission::MemoryReservation>,
 }
 type Completed = (ProductRef, Arc<Data>);
 /// Text and evidence retain their immutable consumption capture. Normalization
@@ -110,14 +110,14 @@ pub struct FrontRegistrationQueries {
     outcomes: Mutex<BTreeMap<ContentHash, Completed>>,
     weight: MemoryWeight,
     errors: RuntimeErrors,
-    output_pool: Arc<MemoryReservationPool>,
-    _inputs: MemoryReservation,
+    output_pool: Arc<hirsel_engine_admission::MemoryReservationPool>,
+    _inputs: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontRegistrationQueries {
     pub fn input_bytes(definitions: &[DefPath]) -> u64 {
         let mut weight = crate::NativeMetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
-        weight.add(MemoryReservationPool::metadata_bytes() as usize);
+        weight.add(hirsel_engine_admission::MemoryReservationPool::metadata_bytes() as usize);
         weight.tree::<ContentHash, Input>(definitions.len());
         weight.tree::<ContentHash, Completed>(definitions.len());
         weight.bytes()
@@ -140,7 +140,11 @@ impl FrontRegistrationQueries {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .values()
-                .map(|(_, data)| data._allowance.as_ref().map_or(0, MemoryReservation::bytes))
+                .map(|(_, data)| {
+                    data._allowance
+                        .as_ref()
+                        .map_or(0, hirsel_engine_admission::MemoryReservation::bytes)
+                })
                 .sum::<u64>()
     }
     pub fn outcome(self: &Arc<Self>, product: ProductRef) -> Option<FrontRegistrationOutput> {
@@ -681,10 +685,11 @@ impl QueryEngine {
         definitions: &[DefPath],
         lower: Arc<FrontLowerQueries>,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontRegistrationQueries>, QueryError> {
-        let pool = MemoryReservationPool::new(allowance).map_err(|_| QueryError::NotImplemented)?;
+        let pool = hirsel_engine_admission::MemoryReservationPool::new(allowance)
+            .map_err(|_| QueryError::NotImplemented)?;
         self.front_registration_queries_in_pool(definitions, lower, weight, Arc::new(pool), errors)
     }
     pub(crate) fn front_registration_queries_in_pool(
@@ -692,7 +697,7 @@ impl QueryEngine {
         definitions: &[DefPath],
         lower: Arc<FrontLowerQueries>,
         weight: MemoryWeight,
-        output_pool: Arc<MemoryReservationPool>,
+        output_pool: Arc<hirsel_engine_admission::MemoryReservationPool>,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontRegistrationQueries>, QueryError> {
         let available = output_pool.available_bytes();

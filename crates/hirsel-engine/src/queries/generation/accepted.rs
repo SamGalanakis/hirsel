@@ -1,7 +1,6 @@
 //! Accepted CT-5 syntax. The private generator output and its admission owner
 //! survive every front that consumes the normalized declaration.
 use super::*;
-use crate::runtime::{MemoryReservation, MemoryReservationPool};
 
 /// A rejected registration retains the sources its diagnostics cite without
 /// publishing generated syntax into the engine's accepted namespace.
@@ -10,7 +9,7 @@ pub struct FrontRegistrationFailure {
     pub span: Option<Span>,
     pub error: QueryError,
     pub sources: SourceMap,
-    pub(super) _allowance: Arc<MemoryReservation>,
+    pub(super) _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 impl std::fmt::Debug for FrontRegistrationFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -29,15 +28,15 @@ pub struct AcceptedFrontRegistration {
     generated: (FileId, Span),
     schema_origins: Vec<(std::ops::Range<usize>, hirsel_diag::Label)>,
     checked_prefix: Vec<SignatureDependency>,
-    _allowance: Arc<MemoryReservation>,
-    _refresh: Option<Arc<MemoryReservation>>,
+    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
+    _refresh: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
     retained: u64,
 }
 impl AcceptedFrontRegistration {
     pub(crate) fn in_engine(
         self: &Arc<Self>,
         engine: &mut QueryEngine,
-        pool: &MemoryReservationPool,
+        pool: &hirsel_engine_admission::MemoryReservationPool,
     ) -> Result<Arc<Self>, QueryError> {
         let (reads, execution) = self.validate_engine_inputs(engine)?;
         if reads == *self.reads {
@@ -48,7 +47,7 @@ impl AcceptedFrontRegistration {
             size_of::<Self>()
                 + size_of::<Reads>()
                 + 6 * size_of::<usize>()
-                + size_of::<MemoryReservation>(),
+                + size_of::<hirsel_engine_admission::MemoryReservation>(),
         );
         weight.vec(&self.schema_origins, |weight, (_, label)| {
             weight.add(label.message.capacity())
@@ -357,7 +356,7 @@ fn source_weight(
     previous_payload: u64,
 ) -> crate::NativeMetadataWeight {
     let mut weight = crate::NativeMetadataWeight::default();
-    weight.add(size_of::<MemoryReservation>() + 2 * size_of::<usize>());
+    weight.add(size_of::<hirsel_engine_admission::MemoryReservation>() + 2 * size_of::<usize>());
     weight.tree::<DefPath, GeneratedSource>(1);
     if let Some(source) = generated {
         weight.add(source.text.capacity());
@@ -378,7 +377,7 @@ impl AcceptanceInputs {
     fn accept(
         self,
         output: FrontRegistrationOutput,
-        mut allowance: MemoryReservation,
+        mut allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<(Arc<AcceptedFrontRegistration>, SourceMap), FrontRegistrationFailure> {
         let definition = output.definition().clone();
         let source_before = self.sources.retained_payload_bytes();
@@ -604,7 +603,7 @@ impl QueryEngine {
     pub fn accept_front_registration(
         &mut self,
         output: FrontRegistrationOutput,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Arc<AcceptedFrontRegistration>, FrontRegistrationFailure> {
         let definition = output.definition().clone();
         let captured = (|| {

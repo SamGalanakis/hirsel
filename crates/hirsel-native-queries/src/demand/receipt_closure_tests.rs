@@ -15,7 +15,7 @@ fn demanded_closure_rechecks_current_lexical_source_before_cache_replay() {
 
 fn bind(captured: bool) {
     with_compiler_stack(|| {
-        let budget = runtime::ProcessBudget::new(64 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
         let store: Arc<dyn store::ResultStore> = Arc::new(store::RequestStore::new(
             Arc::new(store::MemStore::default()),
             budget.reserve(64 << 20).unwrap(),

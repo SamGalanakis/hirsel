@@ -31,7 +31,7 @@ fn admitted_native_roots_preserve_selection_constants_and_detached_metadata_owne
                     Vec::new()
                 };
                 let entry = program.entry.clone();
-                let budget = ProcessBudget::new(1 << 30);
+                let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
                 let errors = crate::scheduled_front::errors();
                 let weight = MemoryWeight {
                     retained: 1 << 20,

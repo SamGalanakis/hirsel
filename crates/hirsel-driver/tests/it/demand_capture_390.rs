@@ -71,7 +71,7 @@ fn lower_captures_only_its_demand_and_full_check_still_rejects_unused_body() {
         let definitions = program.engine.front_source_roots();
         let mut unused = program.entry.clone();
         unused.0.name = "unused".into();
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let weight = MemoryWeight {
             retained: 2 << 20,
             scratch: 8 << 20,
@@ -195,7 +195,7 @@ fn full_check_agrees_cold_resident_restarted_store_off_and_remote_restore() {
 fn native_catalogue_is_lazy_and_store_off_archives_require_export() {
     with_compiler_stack(|| {
         let (_directory, manifest) = fixture();
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let backend = Arc::new(Observed {
             inner: Arc::new(NoneStore),
             syntax_writes: Mutex::default(),

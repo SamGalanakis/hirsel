@@ -1,12 +1,12 @@
 //! Snapshot-local sharing of exact immutable read observations.
 use super::*;
-use crate::runtime::MemoryReservation;
+
 use std::{borrow::Borrow, collections::BTreeSet, sync::Arc};
 type Row = (ReadKey, ContentHash);
 
 pub(super) struct ChargedRow {
     pub(super) value: Row,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl std::fmt::Debug for ChargedRow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -126,7 +126,7 @@ impl ReadPool {
     pub(crate) fn intern_tracked(
         &mut self,
         reads: &Reads,
-        allowance: &mut MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
         remaining: &mut u64,
         credit: Arc<std::sync::Mutex<u64>>,
     ) -> Option<Reads> {
@@ -135,7 +135,7 @@ impl ReadPool {
     pub(crate) fn intern(
         &mut self,
         reads: &Reads,
-        allowance: &mut MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
         remaining: &mut u64,
     ) -> Option<Reads> {
         self.intern_inner(reads, allowance, remaining, None)
@@ -143,7 +143,7 @@ impl ReadPool {
     fn intern_inner(
         &mut self,
         reads: &Reads,
-        allowance: &mut MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
         remaining: &mut u64,
         credit: Option<Arc<std::sync::Mutex<u64>>>,
     ) -> Option<Reads> {
@@ -210,7 +210,7 @@ impl Drop for ReadCredit {
 }
 pub(super) struct SharedRows {
     values: Box<[Arc<ChargedRow>]>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
     _credit: Option<ReadCredit>,
 }
 
@@ -297,7 +297,6 @@ impl std::ops::Index<usize> for Rows {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::ProcessBudget;
 
     #[test]
     fn pooled_observations_keep_exact_hashes_and_charge_physical_storage_until_last_owner() {
@@ -326,7 +325,7 @@ mod tests {
                 reads
             })
             .collect::<Vec<_>>();
-        let budget = ProcessBudget::new(1 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
         let mut allowance = budget.reserve(1 << 20).unwrap();
         let mut remaining = allowance.bytes();
         let ((pool, pooled), measured) = crate::test_alloc::measured(|| {
@@ -408,7 +407,7 @@ mod tests {
                 .collect(),
         )
         .unwrap();
-        let budget = ProcessBudget::new(1 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
         let mut held = Vec::with_capacity(32);
         let (_, actual) = crate::test_alloc::measured(|| {
             let mut allowance = budget.reserve(1 << 20).unwrap();
@@ -436,7 +435,7 @@ mod tests {
 
     #[test]
     fn pooled_refusal_does_not_allocate_or_replace_a_previous_fingerprint() {
-        let budget = ProcessBudget::new(4096);
+        let budget = hirsel_engine_admission::ProcessBudget::new(4096);
         let mut allowance = budget.reserve(4096).unwrap();
         let key = ReadKey::Environment;
         let first = Reads::from_vec(vec![(key, ContentHash::of_bytes(b"first"))]).unwrap();
@@ -472,7 +471,7 @@ mod tests {
         );
         let reads = Reads::from_vec(vec![environment, signature]).unwrap();
         let canonical = Reads::from_vec(vec![signature, environment]).unwrap();
-        let budget = ProcessBudget::new(1 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
         let mut allowance = budget.reserve(1 << 20).unwrap();
         let mut pool = ReadPool::default();
         let ordered_required = pool.required_bytes(&reads).unwrap();

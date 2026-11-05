@@ -1,7 +1,7 @@
 //! Immutable operation indexes. A successor owns only changed rows and removals;
 //! its parent lease keeps the original rows and their admission alive.
 use super::*;
-use crate::runtime::MemoryReservation;
+
 use std::sync::{Mutex, OnceLock, Weak};
 
 type HeaderProjection = (
@@ -38,7 +38,7 @@ struct Rows<K, V> {
     removed: Box<[K]>,
     len: usize,
     bytes: u64,
-    admission: OnceLock<MemoryReservation>,
+    admission: OnceLock<hirsel_engine_admission::MemoryReservation>,
 }
 impl<K, V> Clone for InputIndex<K, V> {
     fn clone(&self) -> Self {
@@ -174,7 +174,10 @@ impl<K: Ord, V> InputIndex<K, V> {
                 self.0.bytes
             })
     }
-    pub(crate) fn admit(&self, allowance: &mut MemoryReservation) -> Result<(), QueryError> {
+    pub(crate) fn admit(
+        &self,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
+    ) -> Result<(), QueryError> {
         if let Some(parent) = &self.0.parent {
             parent.admit(allowance)?;
         }

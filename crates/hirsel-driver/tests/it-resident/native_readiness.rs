@@ -38,7 +38,7 @@ impl NativeProducts for NoNative {
 }
 const SCRIPT: &[u8] = b"#!/bin/sh\nprintf 'ready\\n'\nexit 0\n";
 fn fixture(store: Arc<dyn ResultStore>) -> LinkedProduct {
-    let budget = hirsel_engine::runtime::ProcessBudget::new(64 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine::store::RequestStore::new(
         store,
         budget.reserve(64 << 20).unwrap(),

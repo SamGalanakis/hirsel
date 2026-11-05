@@ -143,7 +143,7 @@ pub struct InstanceFacts {
     pub source: Arc<InstanceSourceFacts>,
     pub body: Arc<InstanceBodyFacts>,
     pub emission: super::emission::EmissionFacts,
-    _owner: Option<Arc<hirsel_engine::runtime::MemoryReservation>>,
+    _owner: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
 }
 
 /// Complete body-derived facts, shared when only request-wide emission changes.
@@ -155,7 +155,7 @@ pub struct InstanceBodyFacts {
     pub dependencies: Vec<InstanceAddress>,
     pub templates: super::optimizer::TemplateFacts,
     pub operation_freedom: hirsel_rc::closure_calls::OperationFreedom,
-    _owner: Option<Arc<hirsel_engine::runtime::MemoryReservation>>,
+    _owner: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
 }
 impl InstanceBodyFacts {
     fn packed(mut self) -> Self {
@@ -220,7 +220,7 @@ pub struct InstanceSourceFacts {
     pub discharge: super::discharge::NativeDischargeFacts,
     /// Independent original plan selections, re-derived before C on every hit.
     pub adapters: Vec<hirsel_lir::ir::Symbol>,
-    _owner: Option<Arc<hirsel_engine::runtime::MemoryReservation>>,
+    _owner: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
 }
 
 impl PartialEq for InstanceFacts {
@@ -373,7 +373,7 @@ pub struct DemandInstances {
     roots: Vec<InstanceAddress>,
     receipt_sources: super::receipt_requests::Sources,
     seal_inventory: super::seal_inventory::Sources,
-    retained_owner: Option<Arc<hirsel_engine::runtime::MemoryReservation>>,
+    retained_owner: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
     pub imports: u64,
     pub recipe_decodes: u64,
 }
@@ -429,7 +429,7 @@ impl DemandInstances {
     }
     pub fn with_retained_owner(
         mut self,
-        owner: Arc<hirsel_engine::runtime::MemoryReservation>,
+        owner: Arc<hirsel_engine_admission::MemoryReservation>,
     ) -> Self {
         self.retained_owner = Some(owner);
         self

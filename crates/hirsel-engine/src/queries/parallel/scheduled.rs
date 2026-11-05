@@ -196,12 +196,12 @@ struct Input {
 struct FrontSourceBacking {
     products: SharedProductSource,
     admitted: u64,
-    allowance: Arc<MemoryReservationPool>,
-    _inputs: MemoryReservation,
+    allowance: Arc<hirsel_engine_admission::MemoryReservationPool>,
+    _inputs: hirsel_engine_admission::MemoryReservation,
     _sources: SourceMap,
 }
 impl header_products::HeaderAllowance for FrontSourceBacking {
-    fn take_header(&self, bytes: u64) -> Option<MemoryReservation> {
+    fn take_header(&self, bytes: u64) -> Option<hirsel_engine_admission::MemoryReservation> {
         self.allowance.take(bytes)
     }
 }
@@ -212,11 +212,11 @@ struct LiveSourceBacking {
 }
 struct FrontDebit {
     charge: u64,
-    allowance: MemoryReservation,
+    allowance: hirsel_engine_admission::MemoryReservation,
     observation: Option<Arc<LiveSourceBacking>>,
 }
 impl LiveSourceBacking {
-    fn add(&self, allowance: MemoryReservation) -> Option<()> {
+    fn add(&self, allowance: hirsel_engine_admission::MemoryReservation) -> Option<()> {
         self.debit
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -414,7 +414,7 @@ impl FrontBodyQueries {
     pub fn live_summary(
         self: &Arc<Self>,
         product: ProductRef,
-        allowance: &mut MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
     ) -> Option<crate::runtime::LiveSummaryProduct> {
         let query = QueryId {
             kind: FRONT_BODY_KIND,
@@ -598,7 +598,7 @@ impl FrontBodyQueries {
                     + 104 // Frozen source backing planning budget.
                     + std::mem::size_of::<Mutex<u64>>()
                     + 4 * std::mem::size_of::<usize>()) as u64
-                    + MemoryReservationPool::metadata_bytes()
+                    + hirsel_engine_admission::MemoryReservationPool::metadata_bytes()
                     + ProductSource::metadata_bytes(),
             )
     }
@@ -932,7 +932,10 @@ impl FrontBodyQueries {
         cx: &mut dyn QueryContext,
         value_bytes: u64,
         owner: &'static str,
-    ) -> Option<(MemoryReservation, Arc<LiveSourceBacking>)> {
+    ) -> Option<(
+        hirsel_engine_admission::MemoryReservation,
+        Arc<LiveSourceBacking>,
+    )> {
         let backing_bytes =
             crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<LiveSourceBacking>::uninit());
         let charge = value_bytes.checked_add(backing_bytes)?;
@@ -2904,7 +2907,7 @@ impl QueryEngine {
         &mut self,
         definitions: &[DefPath],
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
         self.front_body_queries_with_registrations(definitions, &[], weight, allowance, errors)
@@ -2915,7 +2918,7 @@ impl QueryEngine {
         definitions: &[DefPath],
         registrations: &[Arc<AcceptedFrontRegistration>],
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
         let capture = self.capture_namespace(definitions, registrations, allowance.bytes())?;
@@ -2941,10 +2944,11 @@ impl QueryEngine {
         definitions: &[DefPath],
         namespace: Arc<NamespaceCapture>,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
-        let pool = MemoryReservationPool::new(allowance).map_err(|_| QueryError::NotImplemented)?;
+        let pool = hirsel_engine_admission::MemoryReservationPool::new(allowance)
+            .map_err(|_| QueryError::NotImplemented)?;
         self.front_body_queries_in_pool(
             definitions,
             namespace,
@@ -2959,7 +2963,7 @@ impl QueryEngine {
         definitions: &[DefPath],
         namespace: Arc<NamespaceCapture>,
         weight: MemoryWeight,
-        allowance: Arc<MemoryReservationPool>,
+        allowance: Arc<hirsel_engine_admission::MemoryReservationPool>,
         errors: RuntimeErrors,
         _previous: Option<&FrontBodyQueries>,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
@@ -3166,7 +3170,7 @@ impl QueryEngine {
         // Include the pool owner as well as the bytes it lends. Reserving
         // this reported live set again must cover construction of its pool.
         let admitted = available
-            .checked_add(MemoryReservationPool::metadata_bytes())
+            .checked_add(hirsel_engine_admission::MemoryReservationPool::metadata_bytes())
             .ok_or_else(|| refusal("pool size overflow"))?;
         let mut inputs_allowance = allowance
             .take(required)

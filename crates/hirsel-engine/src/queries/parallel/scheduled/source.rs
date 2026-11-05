@@ -299,7 +299,7 @@ mod tests {
         let namespace = engine
             .capture_namespace(&definitions, &[], 8 << 20)
             .unwrap();
-        let budget = ProcessBudget::new(8 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(8 << 20);
         let mut allowance = budget.reserve(8 << 20).unwrap();
         let products =
             ProductSource::admit_shared((*owners).clone(), records.clone(), &mut allowance)
@@ -309,7 +309,11 @@ mod tests {
             products,
             admitted: allowance.bytes(),
             _inputs: allowance.split(0).unwrap(),
-            allowance: Arc::new(MemoryReservationPool::new(allowance).ok().unwrap()),
+            allowance: Arc::new(
+                hirsel_engine_admission::MemoryReservationPool::new(allowance)
+                    .ok()
+                    .unwrap(),
+            ),
             _sources: engine.sources.clone(),
         });
         (

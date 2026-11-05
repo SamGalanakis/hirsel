@@ -1,6 +1,7 @@
 //! Fresh request loading from admitted source-only carry.
 use hirsel_driver::*;
-use hirsel_engine::{runtime::ProcessBudget, *};
+use hirsel_engine::*;
+
 use hirsel_front_phases::*;
 use hirsel_host_io::launch::*;
 use hirsel_syntax::{DefId, DefPath, ItemPath, PackageId};
@@ -50,7 +51,7 @@ fn source_index_loader_preserves_headers_and_retires_removed_sources() {
                 name: name.into(),
             })
         };
-        let budget = ProcessBudget::new(512 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
         let carry = |mut program: LoadedProgram| {
             let bytes = program.engine.source_index_bytes().unwrap();
             program
@@ -210,7 +211,7 @@ fn source_index_loader_rekeys_a_source_when_its_manifest_context_changes() {
             jobs: hirsel_intern::jobs::Jobs::new(1),
             ..CompileConfig::for_memory_cap(None)
         });
-        let budget = ProcessBudget::new(512 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
         write_manifest(false);
         let mut program = compiler.load_check_package(&manifest).unwrap();
         for nested in [true, false, true] {

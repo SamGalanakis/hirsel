@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 #[test]
 fn checked_dependency_readers_preserve_the_complete_generated_signature_sequence() {
-    use hirsel_engine::{DefinitionQueries, runtime::ProcessBudget};
+    use hirsel_engine::DefinitionQueries;
+
     with_compiler_stack(|| {
         let source = "type Seed {x:u32}\nfn body_text()->String{\"fn()->u32 uses {}{11u32}\"}\nfn make(s:TypeShape[Seed])->Result[Body[fn()->u32 uses {}],String]{Ok(codegen.body(body_text()))}\nfn chosen()->u32 uses {}=comptime make(shape(Seed))\nconst A:u32=comptime chosen()\nconst B:u32=comptime chosen()\n";
         let directory = tempfile::tempdir().unwrap();
@@ -70,7 +71,7 @@ fn checked_dependency_readers_preserve_the_complete_generated_signature_sequence
                 drop(output);
                 drop(requests);
                 let bytes = sources.checked_dependency_decode_bytes(&path).unwrap();
-                let budget = ProcessBudget::new(bytes);
+                let budget = hirsel_engine_admission::ProcessBudget::new(bytes);
                 assert!(
                     sources
                         .checked_dependencies(&path, budget.reserve(bytes - 1).unwrap())

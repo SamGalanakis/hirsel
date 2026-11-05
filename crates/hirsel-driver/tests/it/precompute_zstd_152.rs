@@ -76,7 +76,7 @@ fn precomputed_zstd_zeros_preserves_the_cold_body_and_hash() {
         let expected = precompute(&mut cold);
         let bound = actual.definition_decode_bytes(&path).unwrap()
             + expected.definition_decode_bytes(&path).unwrap();
-        let budget = hirsel_engine::runtime::ProcessBudget::new(bound);
+        let budget = hirsel_engine_admission::ProcessBudget::new(bound);
         let actual_allowance = budget
             .reserve(actual.definition_decode_bytes(&path).unwrap())
             .unwrap();
@@ -100,7 +100,7 @@ fn precomputed_zstd_zeros_preserves_the_cold_body_and_hash() {
         assert_eq!(actual_text, expected_text);
         let bound = actual.dependency_decode_bytes(&path).unwrap()
             + expected.dependency_decode_bytes(&path).unwrap();
-        let budget = hirsel_engine::runtime::ProcessBudget::new(bound);
+        let budget = hirsel_engine_admission::ProcessBudget::new(bound);
         let actual_dependencies = actual
             .dependencies(
                 &path,

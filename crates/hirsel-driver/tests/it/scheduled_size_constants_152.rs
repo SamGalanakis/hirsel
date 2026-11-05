@@ -48,7 +48,7 @@ fn check_size_instances(nested: bool) {
                     .unwrap();
                 let a = definitions.iter().find(|path| path.0.name == "A").unwrap();
                 let b = definitions.iter().find(|path| path.0.name == "B").unwrap();
-                let budget = ProcessBudget::new(1 << 30);
+                let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
                 let errors = crate::scheduled_front::errors();
                 let weight = MemoryWeight {
                     retained: 2 << 20,

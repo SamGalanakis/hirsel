@@ -339,7 +339,7 @@ fn compile_settled<R>(
         .checked_mul(hirsel_intern::jobs::COMPILER_STACK_BYTES as u64)
         .unwrap()
         + (64 << 20);
-    let budget = ProcessBudget::new(runtime_bytes + (192 << 20));
+    let budget = hirsel_engine_admission::ProcessBudget::new(runtime_bytes + (192 << 20));
     // Source/registry products retain their own measured grants. Continuation
     // constructors bound the descriptor frame within this separate allowance.
     let weight = MemoryWeight {

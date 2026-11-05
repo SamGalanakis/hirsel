@@ -343,7 +343,7 @@ fn refusal_controls(root: &std::path::Path) {
     canonical["io"]["stdout"] = Value::Null;
     let config_path = out.join("changed-run.json");
     fs::write(&config_path, canonical.to_string()).unwrap();
-    let validated = hirsel_engine::read_run_record(&config_path).unwrap();
+    let validated = hirsel_engine_admission::read_run_record(&config_path).unwrap();
     assert_ne!(validated.identity(), recording.run_identity);
     changed_config.binding.as_mut().unwrap().canonical = validated.canonical().to_vec();
     let configs = out.join("config.tape");

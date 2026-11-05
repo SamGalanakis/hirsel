@@ -21,7 +21,7 @@ fn scope_case(source: &str, failed_front: bool, failed_lower: bool) {
                 .load_program(&manifest)
                 .unwrap();
             let definitions = program.engine.front_source_roots();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
                 retained: 2 << 20,
@@ -343,7 +343,7 @@ fn registered_capture(
     let indexed = program.engine.indexed_definitions();
     program.engine.register_specializations(&indexed);
     let roots = program.engine.front_source_roots();
-    let budget = ProcessBudget::new(1 << 30);
+    let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
     let weight = MemoryWeight {
         retained: 2 << 20,
         scratch: 8 << 20,
@@ -422,7 +422,7 @@ fn source_requests_discover_closed_instances_from_lazy_declarations() {
             let mut requests = CompilerRequests::new(
                 COMPILER.with_config(config.clone()).with_owned_engines(),
                 config,
-                ProcessBudget::new(512 << 20),
+                hirsel_engine_admission::ProcessBudget::new(512 << 20),
                 RequestLimits {
                     runtime_bytes: 256 << 20,
                     snapshot_bytes: 128 << 20,

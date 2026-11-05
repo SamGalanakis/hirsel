@@ -129,8 +129,8 @@ fn request_objects(
             facts: facts.clone(),
         }
     });
-    let budget = ProcessBudget::new(768 << 20);
-    let transport = ProcessBudget::new(24 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(768 << 20);
+    let transport = hirsel_engine_admission::ProcessBudget::new(24 << 20);
     let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
         fixture.store.clone(),
         transport.reserve(24 << 20).unwrap(),

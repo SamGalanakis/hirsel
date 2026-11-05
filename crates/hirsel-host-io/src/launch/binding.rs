@@ -111,7 +111,8 @@ impl LaunchSelection {
         let kind = match (&self.replay, launch) {
             (Some((_, run)), _) if run.record().launch == LaunchKind::Call => LaunchKind::Call,
             (_, HostLaunch::Callee { .. }) => LaunchKind::Call,
-            _ => hirsel_engine::entry_launch_kind(types, signature).map_err(ToolError::Launch)?,
+            _ => hirsel_engine_admission::entry_launch_kind(types, signature)
+                .map_err(ToolError::Launch)?,
         };
         match (launch, self.replay) {
             (HostLaunch::Live { config, .. }, _) => {
@@ -120,7 +121,7 @@ impl LaunchSelection {
                     None => config.read(revision, kind),
                 }
                 .map_err(|e| ToolError::Runtime(e.to_string()))?;
-                let bound = hirsel_engine::bind_run(
+                let bound = hirsel_engine_admission::bind_run(
                     types,
                     signature,
                     revision,
@@ -132,13 +133,20 @@ impl LaunchSelection {
                 Ok(BoundHostRun::live(bound))
             }
             (HostLaunch::Callee { run, .. }, _) => {
-                let bound =
-                    hirsel_engine::bind_run(types, signature, revision, kind, Some(run), code)
-                        .map_err(ToolError::Launch)?;
+                let bound = hirsel_engine_admission::bind_run(
+                    types,
+                    signature,
+                    revision,
+                    kind,
+                    Some(run),
+                    code,
+                )
+                .map_err(ToolError::Launch)?;
                 Ok(BoundHostRun::live(bound))
             }
             (HostLaunch::Replay(_), Some((io, run))) => {
-                let roots = hirsel_engine::entry_roots(types, signature, kind).map_err(refused)?;
+                let roots = hirsel_engine_admission::entry_roots(types, signature, kind)
+                    .map_err(refused)?;
                 let run = run
                     .bind(&hirsel_run_config::ProgramFacts::of(
                         revision, kind, roots, code,

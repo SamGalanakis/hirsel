@@ -86,7 +86,7 @@ fn native_demand_tasks_import_and_reuse_actual_settled_source_without_a_controll
             crate::native_front_fixture::release_host();
             assert!(originals.iter().all(|body| body.upgrade().is_some()));
             let runtime_bytes = hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + (64 << 20);
-            let budget = ProcessBudget::new(runtime_bytes + (16 << 20));
+            let budget = hirsel_engine_admission::ProcessBudget::new(runtime_bytes + (16 << 20));
             let trace = hirsel_lir::construction::ValueTrace::default();
             let _observe = trace.enter();
             // This control exercises production hit admission; EveryStage
@@ -225,7 +225,7 @@ fn native_source_metadata_debits_one_grant_and_outlives_the_instance_registry() 
         drop(engine);
         let copied = inputs.retained_metadata_bytes();
         assert!(copied > 0);
-        let budget = ProcessBudget::new(16 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(16 << 20);
         let make = |grant| {
             InstanceTasks::new(
                 inputs.clone(),

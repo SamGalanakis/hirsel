@@ -21,7 +21,7 @@ pub struct FrontProofExport {
     signature_edges: std::sync::OnceLock<Result<SignatureEdges, QueryError>>,
     input_metadata_bytes: u64,
     metadata_bytes: u64,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 struct SignatureEdges {
     edges: BTreeMap<DefId, Vec<DefId>>,
@@ -33,30 +33,30 @@ struct SignatureEdges {
 pub struct FrontProofInput {
     input: ExportInput,
     _owner: Arc<FrontProofExport>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 /// The exact selected type closure and its admitted inspection workspace.
 /// This owns no decoded output beyond the ordinary complete input.
 pub struct FrontPreparedProof {
     input: Rc<dyn AdmittedProofInput>,
     types: hirsel_proof_export::CapturedTypes,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 /// A complete canonical export with construction working admission retained.
 /// It borrows no mutable compiler and cannot request another source product.
 pub struct FrontBuiltProof {
     export: hirsel_proof_export::Export,
     input: BuiltProofInput,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 enum BuiltProofInput {
     Borrowed(Rc<FrontPreparedProof>),
     Owned {
         locator: Locator,
         source: OwnedProofSource,
-        _input_allowance: MemoryReservation,
+        _input_allowance: hirsel_engine_admission::MemoryReservation,
         _types: hirsel_proof_export::CapturedTypes,
-        _capture_allowance: MemoryReservation,
+        _capture_allowance: hirsel_engine_admission::MemoryReservation,
     },
 }
 impl BuiltProofInput {
@@ -82,7 +82,7 @@ impl BuiltProofInput {
 #[derive(Clone)]
 pub struct FrontProofText {
     text: Arc<str>,
-    owner: Arc<MemoryReservation>,
+    owner: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 impl FrontProofText {
     pub fn text(&self) -> &str {
@@ -115,7 +115,7 @@ impl FrontProofInput {
     }
     pub fn capture_types_with_allowance(
         self: Rc<Self>,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<FrontPreparedProof, QueryError> {
         FrontPreparedProof::capture(self, allowance)
     }
@@ -161,7 +161,7 @@ impl FrontPreparedProof {
     }
     pub(crate) fn capture(
         input: Rc<dyn AdmittedProofInput>,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Self, QueryError> {
         if Self::capture_bytes(&*input)? > allowance.bytes() {
             return Err(operational(
@@ -195,7 +195,7 @@ impl FrontPreparedProof {
     }
     pub fn build_with_allowance(
         self: Rc<Self>,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<FrontBuiltProof, QueryError> {
         if self.build_bytes()? > allowance.bytes() {
             return Err(operational("PS9 construction buffers exceed admission"));
@@ -239,7 +239,7 @@ impl FrontPreparedProof {
     /// and input owners until their last inspection/encoding consumer drops.
     pub fn build_owned_with_allowance(
         self,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<FrontBuiltProof, QueryError> {
         if self.owned_build_bytes()? > allowance.bytes() {
             return Err(operational(
@@ -280,8 +280,8 @@ impl FrontBuiltProof {
     }
     pub fn checked_products_with_allowances(
         &self,
-        output: MemoryReservation,
-        mut receipt: MemoryReservation,
+        output: hirsel_engine_admission::MemoryReservation,
+        mut receipt: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Arc<CheckedProducts>, QueryError> {
         let needed = self.checked_products_bytes()?;
         if needed > receipt.bytes() {
@@ -323,7 +323,8 @@ impl FrontBuiltProof {
     pub fn output_bytes(&self) -> Result<u64, QueryError> {
         let bytes = self.encoded_bytes()?;
         let metadata = 2 * size_of::<usize>()
-            + arc_layout::<MemoryReservation>().ok_or(QueryError::NotImplemented)?
+            + arc_layout::<hirsel_engine_admission::MemoryReservation>()
+                .ok_or(QueryError::NotImplemented)?
             + size_of::<FrontProofText>();
         bytes
             .checked_add(metadata)
@@ -332,7 +333,7 @@ impl FrontBuiltProof {
     }
     pub fn encode_with_allowance(
         &self,
-        mut allowance: MemoryReservation,
+        mut allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<FrontProofText, QueryError> {
         let needed = self.output_bytes()?;
         if needed > allowance.bytes() {
@@ -457,7 +458,7 @@ impl FrontProofExport {
     pub fn input_with_allowance(
         self: &Arc<Self>,
         product: ProductRef,
-        mut allowance: MemoryReservation,
+        mut allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<FrontProofInput, QueryError> {
         let layout = self.input_layout(product.clone())?;
         if layout.total().ok_or(QueryError::NotImplemented)? > allowance.bytes() {
@@ -688,7 +689,7 @@ impl QueryEngine {
         entry: &DefPath,
         run: Arc<FrontRunQueries>,
         headers: Arc<FrontCheckedSignatures>,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Arc<FrontProofExport>, QueryError> {
         let roots: BTreeSet<_> = self
             .item_paths()
@@ -705,7 +706,7 @@ impl QueryEngine {
         entry: &DefPath,
         native: &Arc<FrontNativeQueries>,
         headers: Arc<FrontCheckedSignatures>,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Arc<FrontProofExport>, QueryError> {
         let run = native.export_run(entry).ok_or(QueryError::NotImplemented)?;
         let roots: BTreeSet<_> = self
@@ -724,7 +725,7 @@ impl QueryEngine {
         run: Arc<FrontRunQueries>,
         headers: Arc<FrontCheckedSignatures>,
         roots: BTreeSet<DefPath>,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Arc<FrontProofExport>, QueryError> {
         if !headers.matches(&run.front)
             || !Arc::ptr_eq(&run.lower.signatures(), &self.signature_inputs())

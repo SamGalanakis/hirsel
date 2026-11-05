@@ -3,7 +3,6 @@
 //! of scalar front_summary demands. Missing bodies are returned to the caller;
 //! neither discovery nor syntax registration checks or executes a body.
 use super::*;
-use crate::runtime::MemoryReservation;
 
 #[derive(Clone, Debug)]
 pub struct FrontInstanceRequest {
@@ -16,7 +15,7 @@ pub struct FrontInstanceRequest {
 pub struct FrontInstanceSyntax {
     definition: DefPath,
     retained: u64,
-    _allowance: Arc<MemoryReservation>,
+    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 impl FrontInstanceSyntax {
     pub fn definition(&self) -> &DefPath {
@@ -34,7 +33,7 @@ pub struct FrontInstanceDiscovery {
     requests: Vec<FrontInstanceRequest>,
     pending_bodies: Vec<DefPath>,
     retained: u64,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontInstanceDiscovery {
     pub fn requests(&self) -> &[FrontInstanceRequest] {
@@ -60,7 +59,7 @@ impl QueryEngine {
     pub fn register_front_instance(
         &mut self,
         request: &FrontInstanceRequest,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Arc<FrontInstanceSyntax>, FrontRegistrationFailure> {
         let mut allowance = allowance;
         let previous_sources = self.sources.clone();
@@ -115,7 +114,9 @@ impl QueryEngine {
             )?;
             let mut weight = crate::NativeMetadataWeight::default();
             weight.add(size_of::<FrontInstanceSyntax>() + 2 * size_of::<usize>());
-            weight.add(size_of::<MemoryReservation>() + 2 * size_of::<usize>());
+            weight.add(
+                size_of::<hirsel_engine_admission::MemoryReservation>() + 2 * size_of::<usize>(),
+            );
             weight.path(&definition);
             if fresh {
                 weight.add(
@@ -165,7 +166,10 @@ impl QueryEngine {
             Err(mut error) => {
                 let allowance = Arc::new(allowance);
                 let mut weight = crate::NativeMetadataWeight::default();
-                weight.add(size_of::<MemoryReservation>() + 2 * size_of::<usize>());
+                weight.add(
+                    size_of::<hirsel_engine_admission::MemoryReservation>()
+                        + 2 * size_of::<usize>(),
+                );
                 weight.source_snapshot(&self.sources);
                 weight.add(
                     crate::memo::retained::retained_query_error_bytes(&error)
@@ -271,7 +275,7 @@ impl QueryEngine {
         &mut self,
         roots: &[DefPath],
         fronts: &[Arc<FrontBodyQueries>],
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<FrontInstanceDiscovery, QueryError> {
         let mut pending: Vec<_> = roots
             .iter()

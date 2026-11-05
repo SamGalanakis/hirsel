@@ -26,7 +26,7 @@ fn arena_query_graph_settles_local_equations_and_reuses_unchanged_components() {
         operations: &operations,
         discharge: Some(&lowered.native_discharge),
     };
-    let budget = hirsel_engine::runtime::ProcessBudget::new(64 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let store = hirsel_engine::store::RequestStore::new(
         std::sync::Arc::new(MemStore::default()),
         budget.reserve(64 << 20).unwrap(),

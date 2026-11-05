@@ -394,7 +394,7 @@ fn ordinary_read_only_executed_helper_keeps_its_check_product() {
         for name in ["alphabet_bytes", "decode_words", "DECODE"] {
             root.0.name = name.into();
             reader.engine.semantic_program_revision(&root).unwrap();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let mut runtime = AdmittedRuntime::new(
                 hirsel_intern::jobs::Jobs::new(1),
                 budget.reserve(512 << 20).unwrap(),

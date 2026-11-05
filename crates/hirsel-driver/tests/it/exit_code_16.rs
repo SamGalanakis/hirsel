@@ -104,7 +104,7 @@ fn exit_code_16_entry_admission_rejects_u8_and_nominal_lookalikes() {
             program.check_for_execution().unwrap();
             let signature = program.engine.item_signature(&program.entry).unwrap().value;
             assert!(
-                hirsel_engine::entry_roots(
+                hirsel_engine_admission::entry_roots(
                     program.engine.types(),
                     &signature,
                     hirsel_run_schema::LaunchKind::Main

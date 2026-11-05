@@ -28,7 +28,6 @@ pub fn main(rt: Io) -> Result[(), AppError] {
 mod canonical_debug;
 use canonical_debug::{canonical_ids, placed};
 
-use hirsel_engine::runtime::ProcessBudget;
 use hirsel_requests::*;
 use std::{path::Path, sync::Arc};
 
@@ -134,7 +133,7 @@ fn ordinary_std_complete_products_equal_fresh_ones() {
             .collect::<Vec<_>>();
         let graph_bytes = prechecked.semantic_graph_decode_bytes().unwrap()
             + reference.semantic_graph_decode_bytes().unwrap();
-        let graph_budget = ProcessBudget::new(graph_bytes);
+        let graph_budget = hirsel_engine_admission::ProcessBudget::new(graph_bytes);
         let actual_graph = prechecked
             .semantic_graph(
                 graph_budget
@@ -179,14 +178,16 @@ fn ordinary_std_complete_products_equal_fresh_ones() {
                 continue;
             };
             let actual_bytes = prechecked.definition_decode_bytes(path).unwrap();
-            let body_budget = ProcessBudget::new(expected_bytes + actual_bytes);
+            let body_budget =
+                hirsel_engine_admission::ProcessBudget::new(expected_bytes + actual_bytes);
             let actual_allowance = body_budget.reserve(actual_bytes).unwrap();
             let expected_allowance = body_budget.reserve(expected_bytes).unwrap();
             let actual = prechecked.definition(path, &actual_allowance).unwrap();
             let expected = reference.definition(path, &expected_allowance).unwrap();
             let actual_bytes = prechecked.source_product_bytes(path).unwrap().unwrap();
             let expected_bytes = reference.source_product_bytes(path).unwrap().unwrap();
-            let source_budget = ProcessBudget::new(actual_bytes + expected_bytes);
+            let source_budget =
+                hirsel_engine_admission::ProcessBudget::new(actual_bytes + expected_bytes);
             let actual_source = prechecked
                 .source_products(path, source_budget.reserve(actual_bytes).unwrap())
                 .unwrap()
@@ -203,7 +204,8 @@ fn ordinary_std_complete_products_equal_fresh_ones() {
             );
             let actual_bytes = prechecked.dependency_decode_bytes(path).unwrap();
             let expected_bytes = reference.dependency_decode_bytes(path).unwrap();
-            let dependency_budget = ProcessBudget::new(actual_bytes + expected_bytes);
+            let dependency_budget =
+                hirsel_engine_admission::ProcessBudget::new(actual_bytes + expected_bytes);
             let actual_dependencies = prechecked
                 .dependencies(path, dependency_budget.reserve(actual_bytes).unwrap())
                 .unwrap();

@@ -48,7 +48,7 @@ fn native_discovery_cache_reuses_requirements_without_demanding_source_bodies() 
         serde_json::to_vec(&(table.finish(), payload)).unwrap()
     }
     with_compiler_stack(|| {
-        let budget = hirsel_engine::runtime::ProcessBudget::new(64 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
         let store = Arc::new(store::RequestStore::new(
             Arc::new(store::MemStore::default()),
             budget.reserve(64 << 20).unwrap(),
@@ -161,7 +161,7 @@ fn native_discovery_cache_reuses_requirements_without_demanding_source_bodies() 
 fn native_discovery_cache_type_only_respects_forced_recomputation() {
     use std::sync::Arc;
     with_compiler_stack(|| {
-        let budget = hirsel_engine::runtime::ProcessBudget::new(64 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
         let store = Arc::new(store::RequestStore::new(
             Arc::new(store::MemStore::default()),
             budget.reserve(64 << 20).unwrap(),
@@ -222,7 +222,7 @@ fn native_discovery_cache_type_only_respects_forced_recomputation() {
 fn native_discovery_cache_forced_lower_uses_fresh_verifier_output() {
     use std::sync::Arc;
     with_compiler_stack(|| {
-        let budget = hirsel_engine::runtime::ProcessBudget::new(64 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
         let store = Arc::new(store::RequestStore::new(
             Arc::new(store::MemStore::default()),
             budget.reserve(64 << 20).unwrap(),

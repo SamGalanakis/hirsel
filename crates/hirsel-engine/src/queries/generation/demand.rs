@@ -1,27 +1,28 @@
 //! One ordered publication owner for instance demand. Execution suspends through
 //! the existing query graph; no publication lock crosses a dependency wait.
 use super::*;
-use crate::runtime::{
-    MemoryReservation, MemoryReservationPool, MemoryWeight, QueryReads, RuntimeErrors,
-};
+use crate::runtime::MemoryWeight;
+use crate::runtime::QueryReads;
+use crate::runtime::RuntimeErrors;
+
 use std::sync::{Mutex, Weak};
 
 pub(crate) struct DemandAdmission {
     pub carry: Option<Arc<FrontCarry>>,
-    pub front: MemoryReservation,
-    pub lower: MemoryReservation,
-    pub text: MemoryReservation,
-    pub syntax: MemoryReservation,
+    pub front: hirsel_engine_admission::MemoryReservation,
+    pub lower: hirsel_engine_admission::MemoryReservation,
+    pub text: hirsel_engine_admission::MemoryReservation,
+    pub syntax: hirsel_engine_admission::MemoryReservation,
 }
 
 pub(crate) struct DemandProducer {
     carry: Option<Arc<FrontCarry>>,
     adapters: SourcePhases,
     state: Mutex<State>,
-    front: Arc<MemoryReservationPool>,
+    front: Arc<hirsel_engine_admission::MemoryReservationPool>,
     lower: scheduled_lower::LowerPartition,
-    text: Arc<MemoryReservationPool>,
-    syntax: MemoryReservationPool,
+    text: Arc<hirsel_engine_admission::MemoryReservationPool>,
+    syntax: hirsel_engine_admission::MemoryReservationPool,
     weight: MemoryWeight,
     max_reads: usize,
     errors: RuntimeErrors,
@@ -30,7 +31,7 @@ pub(crate) struct DemandProducer {
     failure: Mutex<Option<FrontRegistrationBootstrapError>>,
     rounds: std::sync::atomic::AtomicUsize,
     staged: Mutex<BTreeSet<(DefId, ContentHash)>>,
-    _metadata: MemoryReservation,
+    _metadata: hirsel_engine_admission::MemoryReservation,
 }
 struct ScopeRequest {
     previous: Arc<NamespaceCapture>,
@@ -38,7 +39,7 @@ struct ScopeRequest {
     policy: LoweringPolicy,
     stop_on_error: bool,
     result: Mutex<Option<Result<scheduled_lower::SuccessorCapture, QueryError>>>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 struct DemandRequest {
     previous: Arc<NamespaceCapture>,
@@ -46,7 +47,7 @@ struct DemandRequest {
     site: Span,
     result: Mutex<Option<Result<scheduled_lower::SuccessorCapture, QueryError>>>,
     failure: Mutex<Option<DemandFailure>>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 #[derive(Clone)]
 pub(crate) struct DemandFailure {
@@ -58,9 +59,9 @@ struct State {
     current: Weak<FrontLowerQueries>,
     views: Vec<Arc<FrontLowerQueries>>,
     trace: Vec<(DefId, Vec<hirsel_types::GenericArgument>)>,
-    charges: Vec<MemoryReservation>,
+    charges: Vec<hirsel_engine_admission::MemoryReservation>,
     selected: Vec<(DefId, hirsel_types::GeneratedActualKey)>,
-    producing: BTreeMap<DefId, (usize, MemoryReservation)>,
+    producing: BTreeMap<DefId, (usize, hirsel_engine_admission::MemoryReservation)>,
     staged_log: Vec<(DefId, ContentHash)>,
 }
 struct Production {
@@ -170,7 +171,7 @@ impl DemandProducer {
         errors: RuntimeErrors,
     ) -> Result<Arc<Self>, QueryError> {
         let pool = |grant| {
-            MemoryReservationPool::new(grant)
+            hirsel_engine_admission::MemoryReservationPool::new(grant)
                 .map_err(|_| refused("pool metadata exceeds admission"))
         };
         let mut syntax = admission.syntax;
@@ -264,7 +265,7 @@ impl DemandProducer {
         let charge = Self::take(
             &self.syntax,
             (3 * (size_of::<(DefId, hirsel_types::GeneratedActualKey)>()
-                + size_of::<MemoryReservation>())) as u64,
+                + size_of::<hirsel_engine_admission::MemoryReservation>())) as u64,
         )?;
         state.selected.push((id, key));
         state.charges.push(charge);
@@ -778,8 +779,8 @@ impl DemandProducer {
             Self::take(
                 &self.syntax,
                 next.bytes().saturating_sub(previous.bytes())
-                    + (3 * (size_of::<MemoryReservation>() + size_of::<(DefId, ContentHash)>()))
-                        as u64,
+                    + (3 * (size_of::<hirsel_engine_admission::MemoryReservation>()
+                        + size_of::<(DefId, ContentHash)>())) as u64,
             )?
         };
         let mut engine = owner.capture().assembly(&self.adapters)?;
@@ -1117,7 +1118,10 @@ impl DemandProducer {
     pub(crate) fn task_weight(&self) -> MemoryWeight {
         self.weight
     }
-    fn take(pool: &MemoryReservationPool, bytes: u64) -> Result<MemoryReservation, QueryError> {
+    fn take(
+        pool: &hirsel_engine_admission::MemoryReservationPool,
+        bytes: u64,
+    ) -> Result<hirsel_engine_admission::MemoryReservation, QueryError> {
         pool.take(bytes).ok_or_else(|| refused(&format!(
             "producer inputs require {bytes} bytes; available {} bytes in their existing partition",
             pool.available_bytes()
@@ -1197,7 +1201,8 @@ impl DemandProducer {
         lower.bind_demand(self);
         let charge = Self::take(
             &self.syntax,
-            (3 * (size_of::<Arc<FrontLowerQueries>>() + size_of::<MemoryReservation>())) as u64,
+            (3 * (size_of::<Arc<FrontLowerQueries>>()
+                + size_of::<hirsel_engine_admission::MemoryReservation>())) as u64,
         )?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.charges.push(charge);
@@ -1375,7 +1380,8 @@ impl DemandProducer {
                             .ok_or_else(|| refused("producer depth overflow"))?;
                     } else {
                         let mut weight = crate::NativeMetadataWeight::default();
-                        weight.tree::<DefId, (usize, MemoryReservation)>(1);
+                        weight
+                            .tree::<DefId, (usize, hirsel_engine_admission::MemoryReservation)>(1);
                         state
                             .producing
                             .insert(definition, (1, Self::take(&self.syntax, weight.bytes())?));
@@ -1454,7 +1460,7 @@ impl DemandProducer {
                 let metadata = Self::take(
                     &self.syntax,
                     (3 * (size_of::<(DefId, Vec<hirsel_types::GenericArgument>)>()
-                        + size_of::<MemoryReservation>())
+                        + size_of::<hirsel_engine_admission::MemoryReservation>())
                         + size_of_val(arguments)) as u64,
                 )?;
                 let observed = output.reads().clone();

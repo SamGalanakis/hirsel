@@ -24,7 +24,7 @@ struct Data {
     result: Result<Vec<StagedRegistration>, QueryError>,
     reads: Arc<Reads>,
     sites: Vec<Span>,
-    _allowance: Option<MemoryReservation>,
+    _allowance: Option<hirsel_engine_admission::MemoryReservation>,
 }
 type Completed = (Result<ProductRef, Reference>, Arc<Data>);
 /// Clones retain the original source and declaration admission. A declaration
@@ -51,7 +51,8 @@ impl FrontStageOutput {
                 .map_err(|_| QueryError::NotImplemented)?,
         );
         weight.tree::<DefPath, crate::comptime::StagedConstant>(registrations.len());
-        weight.add(size_of::<MemoryReservation>() + 2 * size_of::<usize>());
+        weight
+            .add(size_of::<hirsel_engine_admission::MemoryReservation>() + 2 * size_of::<usize>());
         Ok(weight.bytes())
     }
     pub fn declarations(&self) -> Result<impl Iterator<Item = (&DefPath, &Signature)>, QueryError> {
@@ -79,18 +80,18 @@ pub struct FrontStageQueries {
     anchors: Arc<crate::NativeRecordContext>,
     store: Arc<dyn ResultStore>,
     outcomes: Mutex<BTreeMap<ContentHash, Completed>>,
-    output_pool: MemoryReservationPool,
+    output_pool: hirsel_engine_admission::MemoryReservationPool,
     weight: MemoryWeight,
     errors: RuntimeErrors,
     total: u64,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontStageQueries {
     /// Fixed query/owner rows; output allocations are debited only on demand.
     pub fn input_bytes(definitions: &[DefPath]) -> u64 {
         let mut weight = crate::NativeMetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
-        weight.add(MemoryReservationPool::metadata_bytes() as usize);
+        weight.add(hirsel_engine_admission::MemoryReservationPool::metadata_bytes() as usize);
         weight.tree::<ContentHash, Input>(definitions.len());
         weight.tree::<DefPath, QueryId>(definitions.len());
         for path in definitions {
@@ -372,7 +373,7 @@ impl FrontStageQueries {
         definitions: &[DefPath],
         front: Arc<FrontBodyQueries>,
         weight: MemoryWeight,
-        mut allowance: MemoryReservation,
+        mut allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<Self>, QueryError> {
         let refused = || {
@@ -387,11 +388,12 @@ impl FrontStageQueries {
         let output = allowance
             .split(
                 remaining
-                    .checked_add(MemoryReservationPool::metadata_bytes())
+                    .checked_add(hirsel_engine_admission::MemoryReservationPool::metadata_bytes())
                     .ok_or_else(refused)?,
             )
             .ok_or_else(refused)?;
-        let output_pool = MemoryReservationPool::new(output).map_err(|_| refused())?;
+        let output_pool =
+            hirsel_engine_admission::MemoryReservationPool::new(output).map_err(|_| refused())?;
         let mut inputs = BTreeMap::new();
         let mut ids = BTreeMap::new();
         for owner in definitions {
@@ -477,7 +479,7 @@ impl QueryEngine {
     pub fn accept_front_staged(
         &mut self,
         output: &FrontStageOutput,
-        mut allowance: MemoryReservation,
+        mut allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<(), QueryError> {
         let refused = |message: String| {
             QueryError::Operational(hirsel_types::OperationalFailure {

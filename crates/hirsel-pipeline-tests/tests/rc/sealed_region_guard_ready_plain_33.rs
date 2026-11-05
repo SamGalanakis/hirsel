@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 #[test]
 fn original_scalar_selected_guard_reaches_every_production_ready_unit() {
-    let budget = hirsel_engine::runtime::ProcessBudget::new(64 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine::store::RequestStore::new(
         Arc::new(MemStore::default()),
         budget.reserve(64 << 20).unwrap(),
@@ -145,7 +145,7 @@ fn original_scalar_selected_guard_reaches_every_production_ready_unit() {
 
 #[test]
 fn original_scalar_ready_refuses_foreign_or_malformed_guard_inputs_before_lowering() {
-    let budget = hirsel_engine::runtime::ProcessBudget::new(64 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine::store::RequestStore::new(
         Arc::new(MemStore::default()),
         budget.reserve(64 << 20).unwrap(),

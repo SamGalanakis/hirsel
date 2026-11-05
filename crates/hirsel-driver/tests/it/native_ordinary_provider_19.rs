@@ -63,7 +63,7 @@ fn ordinary_provider(backend: Backend) {
         let cache = root.join("objects");
         let open_store = || -> Arc<dyn ResultStore> { Arc::new(DirStore::new(cache.clone())) };
         let donor = {
-            let budget = runtime::ProcessBudget::new(24 << 20);
+            let budget = hirsel_engine_admission::ProcessBudget::new(24 << 20);
             let store: Arc<dyn ResultStore> = Arc::new(RequestStore::new(
                 open_store(),
                 budget.reserve(24 << 20).unwrap(),
@@ -96,7 +96,7 @@ fn ordinary_provider(backend: Backend) {
         };
         assert!(!donor.objects.is_empty());
         let application_compile = |store: Arc<dyn ResultStore>, verification| {
-            let transport_budget = runtime::ProcessBudget::new(24 << 20);
+            let transport_budget = hirsel_engine_admission::ProcessBudget::new(24 << 20);
             let store: Arc<dyn ResultStore> = Arc::new(RequestStore::new(
                 store,
                 transport_budget.reserve(24 << 20).unwrap(),

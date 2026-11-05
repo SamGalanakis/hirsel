@@ -744,10 +744,10 @@ pub fn launch_kind(
     signature: &hirsel_types::Signature,
 ) -> Option<LaunchKind> {
     use hirsel_run_schema::LaunchKind as Kind;
-    if hirsel_engine::entry_launch_kind(types, signature).ok()? == Kind::Test {
+    if hirsel_engine_admission::entry_launch_kind(types, signature).ok()? == Kind::Test {
         return Some(LaunchKind::Test);
     }
-    let roots = hirsel_engine::entry_roots(types, signature, Kind::Main).ok()?;
+    let roots = hirsel_engine_admission::entry_roots(types, signature, Kind::Main).ok()?;
     Some(if roots.is_empty() {
         LaunchKind::Zero
     } else {

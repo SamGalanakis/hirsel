@@ -12,7 +12,7 @@ fn admitted_private_facts_reuse_unchanged_inputs_and_refuse_body_and_membership_
         let manifest = directory.path().join("hirsel.json");
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"private_facts","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
         let store = Arc::new(MemStore::default());
-        let budget = ProcessBudget::new(512 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
         let source = "fn value(take data: unique Bytes)->Bytes { let _ = data[0]; data }\npub fn main()->u8 { 1u8 }\n";
         let check = |text: &str, expected: usize| {
             std::fs::write(&path, text).unwrap();
@@ -88,7 +88,7 @@ fn private_facts_without_persistence_reuse_reads_after_an_unrelated_body_edit() 
         let context = default_context();
         let mut value = entry_path(&context);
         value.0.name = "value".into();
-        let budget = ProcessBudget::new(512 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
         for (source, count) in [
             (
                 "fn value(take data: unique Bytes)->Bytes { let _ = data[0]; data }\npub fn main()->u8 { 1u8 }\n",
@@ -123,7 +123,7 @@ fn private_facts_without_persistence_reuse_reads_after_an_unrelated_body_edit() 
 fn verify_cache_waits_for_all_module_proofs_before_comparing_signatures() {
     with_compiler_stack(|| {
         let store = Arc::new(MemStore::default());
-        let budget = ProcessBudget::new(512 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
         for verify in [store::VerifyStore::Off, store::VerifyStore::Recompute] {
             let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
                 .with_result_store(store.clone())
@@ -174,7 +174,7 @@ fn changing_the_root_does_not_reinfer_unchanged_dependency_modules() {
             );
             let file = engine.sources.add("root-proof.hir", source).unwrap();
             engine.parse_file(file, &context).unwrap();
-            let budget = ProcessBudget::new(256 << 20);
+            let budget = hirsel_engine_admission::ProcessBudget::new(256 << 20);
             let root_before = engine.recompute_count(&root, QueryKind::PrivateInference);
             let reservation = engine
                 .prepare_private_inference(budget.reserve(256 << 20).unwrap())
@@ -225,7 +225,7 @@ fn generated()->Bytes uses {} = comptime make()
             scalar.check_for_execution().unwrap();
             let config = config();
             let compiler = COMPILER.with_config(config.clone()).with_owned_engines();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let selector = CompilerRequests::new(
                 compiler.clone(),
                 config.clone(),
@@ -312,7 +312,7 @@ fn a_changed_registration_reinfers_only_the_modules_that_read_it() {
         let selector = CompilerRequests::new(
             compiler.clone(),
             config.clone(),
-            ProcessBudget::new(1 << 30),
+            hirsel_engine_admission::ProcessBudget::new(1 << 30),
             RequestLimits {
                 runtime_bytes: 512 << 20,
                 snapshot_bytes: 128 << 20,
@@ -428,7 +428,7 @@ fn a_warm_check_materializes_only_the_edited_definitions_source() {
             let selector = CompilerRequests::new(
                 compiler.clone(),
                 config.clone(),
-                ProcessBudget::new(1 << 30),
+                hirsel_engine_admission::ProcessBudget::new(1 << 30),
                 RequestLimits {
                     runtime_bytes: 512 << 20,
                     snapshot_bytes: 128 << 20,
@@ -610,7 +610,7 @@ fn failed_private_inference_cannot_reuse_a_successful_signature_snapshot() {
             )
             .unwrap();
         engine.parse_file(file, &context).unwrap();
-        let budget = ProcessBudget::new(256 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(256 << 20);
         assert!(
             engine
                 .prepare_private_inference(budget.reserve(256 << 20).unwrap())
@@ -672,7 +672,7 @@ fn conservative_headers_and_settled_proofs_have_distinct_verified_cache_inputs()
                 .is_empty()
         );
 
-        let budget = ProcessBudget::new(256 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(256 << 20);
         let mut checked = QueryEngine::new(default_environment(), compiler_adapters())
             .with_result_store(store.clone())
             .with_verify_store(store::VerifyStore::Recompute);
@@ -739,7 +739,7 @@ pub fn main() -> u8 { 0u8 }
             .add("nonretention.hir", source.into())
             .unwrap();
         engine.parse_file(file, &context).unwrap();
-        let budget = ProcessBudget::new(512 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
         let reservation = engine
             .prepare_private_inference(budget.reserve(256 << 20).unwrap())
             .unwrap();
@@ -819,7 +819,7 @@ fn rejected_representation_retracts_leaf_and_caller_proofs_and_records_the_priva
         let source = "pub opaque type Secret: data uses {} { level:u64 }\nfn view(x:Secret)->u64{x.level}\nfn relay(x:Secret)->u64{view(x)}\npub fn main()->u64{1}\n";
         let mut engine = QueryEngine::new(default_environment(), compiler_adapters())
             .with_result_store(Arc::new(MemStore::default()));
-        let budget = ProcessBudget::new(512 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
         let mut representation = entry_path(&context);
         representation.0.name = "Secret".into();
         let representation = hirsel_syntax::DefId::intern(&representation);
@@ -869,7 +869,7 @@ fn cross_module_declared_reads_reuse_proofs_before_private_headers_are_demanded(
         )
         .unwrap();
         let store = Arc::new(MemStore::default());
-        let budget = ProcessBudget::new(512 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
         for (source, a_count, b_count) in [
             (a.to_owned(), 1, 1),
             (a.to_owned(), 0, 0),
@@ -986,7 +986,7 @@ fn demanded_private_headers_preserve_canonical_records_under_cache_verification(
             let selector = CompilerRequests::new(
                 compiler.clone(),
                 config.clone(),
-                ProcessBudget::new(1 << 30),
+                hirsel_engine_admission::ProcessBudget::new(1 << 30),
                 RequestLimits {
                     runtime_bytes: 512 << 20,
                     snapshot_bytes: 128 << 20,

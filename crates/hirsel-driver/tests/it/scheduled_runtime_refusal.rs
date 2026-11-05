@@ -55,7 +55,7 @@ fn refusal_case(refused_kind: u32) {
                     .load_program(&manifest)
                     .unwrap();
                 let definitions = program.engine.front_source_roots();
-                let budget = ProcessBudget::new(1 << 30);
+                let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
                 let weight = MemoryWeight {
                     retained: 2 << 20,
                     scratch: 8 << 20,

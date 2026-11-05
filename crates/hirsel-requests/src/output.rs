@@ -219,7 +219,7 @@ impl PrecomputedSources {
     }
     pub fn semantic_graph(
         &self,
-        allowance: hirsel_engine::runtime::MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<hirsel_engine::FrontSemanticGraph, QueryError> {
         self.run.semantic_graph(allowance)
     }
@@ -230,7 +230,7 @@ impl PrecomputedSources {
     pub fn source_products(
         &self,
         path: &DefPath,
-        allowance: hirsel_engine::runtime::MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Option<hirsel_engine::FrontSourceProducts>, QueryError> {
         self.run
             .source_products_with_allowance(self.product(path)?, allowance)
@@ -241,7 +241,7 @@ impl PrecomputedSources {
     pub fn dependencies(
         &self,
         path: &DefPath,
-        allowance: hirsel_engine::runtime::MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<hirsel_engine::FrontLowerDependencies, QueryError> {
         self.lower.settled_dependencies(path, allowance)
     }
@@ -251,7 +251,7 @@ impl PrecomputedSources {
     pub fn checked_dependencies(
         &self,
         path: &DefPath,
-        allowance: hirsel_engine::runtime::MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<hirsel_engine::FrontLowerDependencies, QueryError> {
         self.lower.settled_checked_dependencies(path, allowance)
     }
@@ -261,7 +261,7 @@ impl PrecomputedSources {
     pub fn definition(
         &self,
         path: &DefPath,
-        allowance: &hirsel_engine::runtime::MemoryReservation,
+        allowance: &hirsel_engine_admission::MemoryReservation,
     ) -> Result<DefinitionRef, QueryError> {
         self.lower
             .settled_definition_with_allowance(path, allowance)

@@ -1,7 +1,9 @@
 //! Explicit host policy and one process allowance for compiler request graphs.
 use super::*;
+use hirsel_engine::CompileConfig;
+use hirsel_engine::Compiler;
 use hirsel_engine::loader_inputs::InputLimits;
-use hirsel_engine::{CompileConfig, Compiler, runtime::ProcessBudget};
+
 use std::sync::Arc;
 
 pub use hirsel_engine::requests::source_graph::RequestLimits;
@@ -16,7 +18,7 @@ pub struct CompilerRequests {
     ledger: Arc<super::inspection::InspectionLedger>,
     pub(super) graphs: super::host_selector::GraphSelections,
     config: CompileConfig,
-    budget: Arc<ProcessBudget>,
+    budget: Arc<hirsel_engine_admission::ProcessBudget>,
     limits: RequestLimits,
     /// Accepted front facts and Lower outcomes carried from one source
     /// revision's graph to the next.
@@ -155,7 +157,7 @@ impl CompilerRequests {
     pub fn new(
         compiler: Compiler,
         config: CompileConfig,
-        budget: Arc<ProcessBudget>,
+        budget: Arc<hirsel_engine_admission::ProcessBudget>,
         limits: RequestLimits,
     ) -> Self {
         // Every provider can evict ordinary products. Compact front and Lower
@@ -213,7 +215,7 @@ impl CompilerRequests {
     pub fn config(&self) -> &CompileConfig {
         &self.config
     }
-    pub fn budget(&self) -> &Arc<ProcessBudget> {
+    pub fn budget(&self) -> &Arc<hirsel_engine_admission::ProcessBudget> {
         &self.budget
     }
     pub fn limits(&self) -> RequestLimits {
@@ -250,7 +252,11 @@ mod tests {
         }
         let zero = host_limits(0, 2);
         assert_eq!(zero.snapshot_bytes + zero.transport_bytes, 0);
-        assert!(ProcessBudget::new(0).reserve(zero.runtime_bytes).is_err());
+        assert!(
+            hirsel_engine_admission::ProcessBudget::new(0)
+                .reserve(zero.runtime_bytes)
+                .is_err()
+        );
         assert_eq!(first.capture_attempts(), 3);
         assert!(first.input_limits().bytes <= 16 << 20);
         let (budget, cap) = host_budget();

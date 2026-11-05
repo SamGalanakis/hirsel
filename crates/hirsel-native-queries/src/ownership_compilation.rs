@@ -34,7 +34,7 @@ pub struct OwnershipCompilation {
     selection: hirsel_lir::ownership_trace::Selection,
     query: QueryId,
     weight: MemoryWeight,
-    allowance: Mutex<Option<MemoryReservation>>,
+    allowance: Mutex<Option<hirsel_engine_admission::MemoryReservation>>,
     verify_store: hirsel_engine::store::VerifyStore,
     dispatch: OnceLock<Dispatch>,
     completed: OnceLock<(ProductRef, ProductRef)>,
@@ -45,7 +45,7 @@ impl OwnershipCompilation {
         arena: Arc<ArenaTasks>,
         emission: EmissionOptions,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         verify_store: hirsel_engine::store::VerifyStore,
     ) -> Result<Arc<Self>, String> {
         Self::new_selected(
@@ -64,7 +64,7 @@ impl OwnershipCompilation {
         selection: hirsel_lir::ownership_trace::Selection,
         emission: EmissionOptions,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         verify_store: hirsel_engine::store::VerifyStore,
     ) -> Result<Arc<Self>, String> {
         let mut query = QueryId {
@@ -201,7 +201,8 @@ impl OwnershipCompilation {
         let mut copied = hirsel_engine::NativeMetadataWeight::default();
         copied.add(size_of::<Self>() + 2 * size_of::<usize>());
         metadata::emission(&mut copied, &self.emission);
-        copied.add(size_of::<MemoryReservation>() + 2 * size_of::<usize>());
+        copied
+            .add(size_of::<hirsel_engine_admission::MemoryReservation>() + 2 * size_of::<usize>());
         copied
             .add(size_of::<super::instance_tasks::InstanceTaskFactory>() + 2 * size_of::<usize>());
         copied.add(size_of::<super::arena_tasks::ArenaTaskFactory>() + 2 * size_of::<usize>());

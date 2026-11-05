@@ -381,7 +381,7 @@ fn run_program_case_with_frame(
     let directory = tempfile::tempdir().unwrap();
     // The same admitted transport is selected before source or native work.
     // Its 24 MiB comes from dispatch's former 96 MiB; total stays 768 MiB.
-    let budget = ProcessBudget::new(768 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(768 << 20);
     let backend = Arc::new(DiagnosedStore(store::DirStore::new(
         directory.path().join("products"),
     )));

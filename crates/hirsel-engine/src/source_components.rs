@@ -1,12 +1,13 @@
 //! Source-only call SCCs and independently addressed settled GEN-5 facets.
 //! Membership uses hirsel-graph's iterative Tarjan walk, also used by the
 //! scalar source oracle. Native instance/layout graphs never select roots.
+use crate::CheckedSummary;
+use crate::NativeRecordContext;
+use crate::NativeRecordSource;
+use crate::memo::Reads;
+use crate::runtime::ProductRef;
 use crate::store::{Action, Address, Reference};
-use crate::{
-    CheckedSummary, NativeRecordContext, NativeRecordSource,
-    memo::Reads,
-    runtime::{MemoryReservation, ProductRef},
-};
+
 use hirsel_span::Span;
 use hirsel_syntax::{ContentHash, DefId};
 use std::{
@@ -52,13 +53,13 @@ pub struct SourceGrowthComponent {
     #[serde(skip)]
     pub(crate) publication: Option<crate::runtime::SourceGrowthPublication>,
     #[serde(skip)]
-    _reservation: MemoryReservation,
+    _reservation: hirsel_engine_admission::MemoryReservation,
 }
 
 pub struct SourceGrowthFacets {
     pub membership: SourceGrowthIdentity,
     pub components: SourceGrowthComponents,
-    _reservation: MemoryReservation,
+    _reservation: hirsel_engine_admission::MemoryReservation,
 }
 /// Admitted pages retain SCC values independently of scheduler execution slots.
 /// Each page owns its backing and directory charge before allocation.
@@ -66,11 +67,11 @@ pub struct SourceGrowthFacets {
 pub struct SourceGrowthComponents {
     pages: Vec<SourceGrowthPage>,
     len: usize,
-    _directory: Option<MemoryReservation>,
+    _directory: Option<hirsel_engine_admission::MemoryReservation>,
 }
 struct SourceGrowthPage {
     values: Vec<Arc<SourceGrowthComponent>>,
-    _reservation: MemoryReservation,
+    _reservation: hirsel_engine_admission::MemoryReservation,
 }
 impl SourceGrowthComponents {
     const PAGE: usize = 128;
@@ -99,7 +100,7 @@ impl SourceGrowthComponents {
     pub(crate) fn push(
         &mut self,
         value: Arc<SourceGrowthComponent>,
-        pool: &crate::runtime::MemoryReservationPool,
+        pool: &hirsel_engine_admission::MemoryReservationPool,
         remaining: usize,
     ) -> Option<()> {
         if self
@@ -192,7 +193,7 @@ pub(crate) struct SourceMembership {
     #[serde(skip)]
     address_order: Box<[u32]>,
     #[serde(skip)]
-    _reservation: MemoryReservation,
+    _reservation: hirsel_engine_admission::MemoryReservation,
 }
 
 impl SourceMembership {
@@ -268,7 +269,7 @@ impl SourceGrowthFact {
 /// a settled checked summary before the final acceptance reduction.
 pub struct SourceGrowthProducer<'a> {
     pub source: &'a NativeRecordContext,
-    pub output_pool: &'a crate::runtime::MemoryReservationPool,
+    pub output_pool: &'a hirsel_engine_admission::MemoryReservationPool,
     pub namespace: Address,
     pub scratch: u64,
 }

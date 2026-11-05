@@ -31,15 +31,18 @@ pub struct RequestLimits {
 // Every host in a process shares one allowance, including different
 // sessions and the engine's own checks. Capturing the guard policy once
 // prevents each source revision from creating a new full-cap budget.
-static HOST: OnceLock<(Arc<ProcessBudget>, u64)> = OnceLock::new();
-pub fn host_budget() -> (&'static Arc<ProcessBudget>, u64) {
+static HOST: OnceLock<(Arc<hirsel_engine_admission::ProcessBudget>, u64)> = OnceLock::new();
+pub fn host_budget() -> (&'static Arc<hirsel_engine_admission::ProcessBudget>, u64) {
     let (budget, cap) = HOST.get_or_init(|| {
         let cap = std::env::var("HIRSEL_MEMORY_LIMIT")
             .ok()
             .and_then(|text| hirsel_guard::parse_limit(text.as_bytes()))
             .unwrap_or(hirsel_guard::DEFAULT_LIMIT);
         // Keep a quarter for the host, source loader and native libraries.
-        (ProcessBudget::new(cap.saturating_sub(cap / 4)), cap)
+        (
+            hirsel_engine_admission::ProcessBudget::new(cap.saturating_sub(cap / 4)),
+            cap,
+        )
     });
     (budget, *cap)
 }
@@ -65,19 +68,19 @@ pub struct SnapshotPlan {
     pub run: u64,
 }
 pub struct GraphAdmission {
-    pub runtime: MemoryReservation,
-    pub source: MemoryReservation,
-    pub front: MemoryReservation,
-    pub lower: MemoryReservation,
-    pub check: MemoryReservation,
-    pub growth: MemoryReservation,
-    pub run: MemoryReservation,
-    pub transport: MemoryReservation,
-    pub native_transport: MemoryReservation,
+    pub runtime: hirsel_engine_admission::MemoryReservation,
+    pub source: hirsel_engine_admission::MemoryReservation,
+    pub front: hirsel_engine_admission::MemoryReservation,
+    pub lower: hirsel_engine_admission::MemoryReservation,
+    pub check: hirsel_engine_admission::MemoryReservation,
+    pub growth: hirsel_engine_admission::MemoryReservation,
+    pub run: hirsel_engine_admission::MemoryReservation,
+    pub transport: hirsel_engine_admission::MemoryReservation,
+    pub native_transport: hirsel_engine_admission::MemoryReservation,
 }
 impl GraphAdmission {
     pub fn reserve(
-        budget: &Arc<ProcessBudget>,
+        budget: &Arc<hirsel_engine_admission::ProcessBudget>,
         limits: RequestLimits,
         plan: SnapshotPlan,
     ) -> Result<Self, ToolError> {
@@ -85,7 +88,7 @@ impl GraphAdmission {
     }
     /// Let the host reclaim idle owners after every partial grant has dropped.
     pub fn reserve_once(
-        budget: &Arc<ProcessBudget>,
+        budget: &Arc<hirsel_engine_admission::ProcessBudget>,
         limits: RequestLimits,
         plan: SnapshotPlan,
     ) -> Result<Self, ToolError> {
@@ -94,7 +97,7 @@ impl GraphAdmission {
     fn reserve_with(
         limits: RequestLimits,
         plan: SnapshotPlan,
-        reserve: impl Fn(u64) -> std::io::Result<MemoryReservation>,
+        reserve: impl Fn(u64) -> std::io::Result<hirsel_engine_admission::MemoryReservation>,
     ) -> Result<Self, ToolError> {
         let snapshot = plan
             .source
@@ -128,14 +131,14 @@ impl GraphAdmission {
 /// view. Partitioning transfers that existing charge to immutable producers;
 /// source maps returned on a loader failure keep their own charge as well.
 pub struct LoadingAdmission {
-    runtime: MemoryReservation,
-    snapshot: MemoryReservation,
-    transport: MemoryReservation,
-    native_transport: MemoryReservation,
+    runtime: hirsel_engine_admission::MemoryReservation,
+    snapshot: hirsel_engine_admission::MemoryReservation,
+    transport: hirsel_engine_admission::MemoryReservation,
+    native_transport: hirsel_engine_admission::MemoryReservation,
 }
 impl LoadingAdmission {
     pub fn reserve(
-        budget: &Arc<ProcessBudget>,
+        budget: &Arc<hirsel_engine_admission::ProcessBudget>,
         limits: RequestLimits,
         native_transport: u64,
     ) -> Result<Self, ToolError> {
@@ -143,7 +146,7 @@ impl LoadingAdmission {
     }
     /// Let the host reclaim idle owners after every partial grant has dropped.
     pub fn reserve_once(
-        budget: &Arc<ProcessBudget>,
+        budget: &Arc<hirsel_engine_admission::ProcessBudget>,
         limits: RequestLimits,
         native_transport: u64,
     ) -> Result<Self, ToolError> {
@@ -152,7 +155,7 @@ impl LoadingAdmission {
     fn reserve_with(
         limits: RequestLimits,
         native_transport: u64,
-        reserve: impl Fn(u64) -> std::io::Result<MemoryReservation>,
+        reserve: impl Fn(u64) -> std::io::Result<hirsel_engine_admission::MemoryReservation>,
     ) -> Result<Self, ToolError> {
         Ok(Self {
             runtime: reserve(limits.runtime_bytes).map_err(ToolError::Io)?,
@@ -163,13 +166,13 @@ impl LoadingAdmission {
     }
     /// Transfer the already admitted transport before S0 uses the provider.
     /// The remaining zero-sized reservation keeps finish's ownership shape.
-    pub fn take_transport(&mut self) -> MemoryReservation {
+    pub fn take_transport(&mut self) -> hirsel_engine_admission::MemoryReservation {
         self.transport.split(self.transport.bytes()).unwrap()
     }
-    pub fn lend_runtime(&mut self) -> MemoryReservation {
+    pub fn lend_runtime(&mut self) -> hirsel_engine_admission::MemoryReservation {
         self.runtime.split(self.runtime.bytes()).unwrap()
     }
-    pub fn return_runtime(&mut self, reservation: MemoryReservation) {
+    pub fn return_runtime(&mut self, reservation: hirsel_engine_admission::MemoryReservation) {
         self.runtime
             .join(reservation)
             .ok()
@@ -177,14 +180,23 @@ impl LoadingAdmission {
     }
     /// Lend the whole runtime and snapshot charge to work that finishes and
     /// releases it before any final producer takes a partition.
-    pub fn lend(&mut self) -> (MemoryReservation, MemoryReservation) {
+    pub fn lend(
+        &mut self,
+    ) -> (
+        hirsel_engine_admission::MemoryReservation,
+        hirsel_engine_admission::MemoryReservation,
+    ) {
         (
             self.runtime.split(self.runtime.bytes()).unwrap(),
             self.snapshot.split(self.snapshot.bytes()).unwrap(),
         )
     }
     /// Adopt charges a host reserved again from this loading's own budget.
-    pub fn join(&mut self, runtime: MemoryReservation, snapshot: MemoryReservation) {
+    pub fn join(
+        &mut self,
+        runtime: hirsel_engine_admission::MemoryReservation,
+        snapshot: hirsel_engine_admission::MemoryReservation,
+    ) {
         let _ = self.runtime.join(runtime);
         let _ = self.snapshot.join(snapshot);
     }
@@ -293,7 +305,7 @@ pub trait SourceHost {
 }
 
 /// A host whose charge comes directly from a process budget.
-pub struct BudgetHost<'a>(pub &'a Arc<ProcessBudget>);
+pub struct BudgetHost<'a>(pub &'a Arc<hirsel_engine_admission::ProcessBudget>);
 impl SourceHost for BudgetHost<'_> {
     fn readmit(
         &self,
@@ -680,17 +692,17 @@ pub struct InstalledSource {
     pub growth: Arc<FrontGrowthQueries>,
     pub storage: Option<(Arc<FrontStorageQueries>, Arc<FrontStorageGraphQueries>)>,
     /// The Check partition, consumed by [`InstalledSource::check`].
-    pub check: MemoryReservation,
-    pub run: MemoryReservation,
-    pub native_transport: MemoryReservation,
+    pub check: hirsel_engine_admission::MemoryReservation,
+    pub run: hirsel_engine_admission::MemoryReservation,
+    pub native_transport: hirsel_engine_admission::MemoryReservation,
     pub run_inputs: Option<FrontRunInputs>,
     /// A Run-only preparation failure does not reject an ordinary source Check.
     pub run_error: Option<QueryError>,
     pub catalogue: Option<FrontNativeDefinitionInputs>,
     pub operation: crate::OperationLease,
     /// The admitted source owner every product source view retains.
-    pub source: Arc<MemoryReservation>,
-    pub source_index: MemoryReservation,
+    pub source: Arc<hirsel_engine_admission::MemoryReservation>,
+    pub source_index: hirsel_engine_admission::MemoryReservation,
     /// The source map before the admitted owner, for retained diagnostics.
     pub sources: SourceMap,
     pub errors: RuntimeErrors,
@@ -924,7 +936,8 @@ pub fn prepare_source_scope(
         FrontDemandScope::input_bytes(&definitions, &generators).ok_or_else(|| uninstalled())?;
     let (runtime, snapshot) = loading.lend();
     let lent = (runtime.bytes(), snapshot.bytes());
-    let snapshot = MemoryReservationPool::new(snapshot).map_err(|_| uninstalled())?;
+    let snapshot =
+        hirsel_engine_admission::MemoryReservationPool::new(snapshot).map_err(|_| uninstalled())?;
     let split = |bytes| snapshot.take(bytes).ok_or_else(|| uninstalled());
     let front = split(plan.snapshots.front)?;
     let lower = split(plan.snapshots.lower)?;
@@ -932,7 +945,9 @@ pub fn prepare_source_scope(
         .1
         .checked_sub(plan.snapshots.front)
         .and_then(|bytes| bytes.checked_sub(plan.snapshots.lower))
-        .and_then(|bytes| bytes.checked_sub(MemoryReservationPool::metadata_bytes()))
+        .and_then(|bytes| {
+            bytes.checked_sub(hirsel_engine_admission::MemoryReservationPool::metadata_bytes())
+        })
         .ok_or_else(|| uninstalled())?;
     let metadata = metadata.max(rest / 8);
     let reserved = split(metadata)?;
@@ -1400,7 +1415,7 @@ impl QueryEngine {
         selection: &SourceSelection,
         jobs: Jobs,
         limits: RequestLimits,
-        budget: &Arc<ProcessBudget>,
+        budget: &Arc<hirsel_engine_admission::ProcessBudget>,
         mut loading: LoadingAdmission,
         store: &Arc<RequestStore>,
     ) -> Result<CheckOutput, ToolError> {

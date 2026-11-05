@@ -4,13 +4,12 @@
 use hirsel_artifact_store::Action;
 use hirsel_artifact_store::{Address, Reference};
 use std::task::Poll;
-mod budget;
 mod future_task;
 mod product;
 pub mod profile;
 mod scheduler;
-pub use budget::{MemoryReservation, MemoryReservationPool, ProcessBudget};
 pub use future_task::{LocalFutureTask, QueryReads};
+
 pub use product::{
     ArchiveAdmission, LIVE_ANALYZED, LIVE_GROWTH, LIVE_LOWER, LIVE_SOURCE_COMPONENT,
     LIVE_SOURCE_MEMBERSHIP, LIVE_SUMMARY, LiveAnalyzedProduct, LiveGrowthProduct, LiveLowerProduct,
@@ -51,7 +50,8 @@ pub(crate) fn test_product(
     use crate::store::ResultStore;
     let store = crate::store::MemStore::default();
     let reference = store.put_content(domain, bytes).unwrap();
-    let budget = ProcessBudget::new((bytes.len() as u64).saturating_add(4096));
+    let budget =
+        hirsel_engine_admission::ProcessBudget::new((bytes.len() as u64).saturating_add(4096));
     let mut allowance = budget.reserve(budget.limit()).unwrap();
     let archive = ProductArchive::open(&store, reference, &mut allowance).unwrap();
     ProductRef::import_archive(address, action, archive)

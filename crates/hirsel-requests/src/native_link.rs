@@ -1,7 +1,8 @@
 //! Host Link executor over a selected stored tool, pre-codegen kit snapshot and
 //! ordinary archive references. The shared native planner owns launcher/glue,
 //! manifest and ABI checks; this adapter owns neither compiler bodies nor caches.
-use hirsel_engine::{runtime::MemoryReservation, store::ResultStore};
+use hirsel_engine::store::ResultStore;
+
 use hirsel_native::Backend;
 use hirsel_native::object_queries::capture::CaptureLimits;
 use hirsel_native::object_queries::platform::CapturedPlatform;
@@ -39,7 +40,7 @@ pub(crate) struct FrozenPlatform {
     target: hirsel_native::TargetSpec,
     requested: Option<Arc<hirsel_run_config::ValidatedRun>>,
     linker_options: ContentHash,
-    _allowance: Arc<MemoryReservation>,
+    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 impl FrozenPlatform {
     pub fn new(
@@ -50,7 +51,7 @@ impl FrozenPlatform {
         partition: hirsel_native::Partition,
         target: hirsel_native::TargetSpec,
         requested: Option<Arc<hirsel_run_config::ValidatedRun>>,
-        allowance: impl Into<Arc<MemoryReservation>>,
+        allowance: impl Into<Arc<hirsel_engine_admission::MemoryReservation>>,
     ) -> Result<Arc<Self>, String> {
         let allowance = allowance.into();
         if inputs.limits.archive_bytes == 0 || inputs.limits.files == 0 {

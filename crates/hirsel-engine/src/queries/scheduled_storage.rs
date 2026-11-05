@@ -50,7 +50,7 @@ pub struct FrontStorageGraphQueries {
     weight: MemoryWeight,
     errors: RuntimeErrors,
     output_budget: u64,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontStorageGraphQueries {
     pub(crate) fn matches(
@@ -569,7 +569,7 @@ impl QueryEngine {
         recipes: Arc<FrontStorageQueries>,
         lower: Arc<FrontLowerQueries>,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontStorageGraphQueries>, QueryError> {
         if !recipes.fits_poll(weight) {

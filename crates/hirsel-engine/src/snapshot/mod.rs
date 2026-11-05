@@ -2156,7 +2156,7 @@ extern "unused" fn unused()"#
             before,
             "settled observation reads the snapshot, not phase memos"
         );
-        let budget = crate::runtime::ProcessBudget::new(64 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
         let bytes = engine.source_index_bytes().unwrap();
         let state = engine
             .into_source_index(budget.reserve(bytes).unwrap())

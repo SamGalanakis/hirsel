@@ -80,7 +80,7 @@ impl ResultStore for Faults {
 fn compile(faults: Arc<Faults>, verify: Verify) -> crate::native_object_products_19::Objects {
     let physical = faults.disk.local_product_store().unwrap();
     let publication = physical.request();
-    let budget = ProcessBudget::new(24 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(24 << 20);
     let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
         faults,
         budget.reserve(24 << 20).unwrap(),

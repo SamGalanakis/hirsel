@@ -6,11 +6,11 @@ pub(super) struct StagedProducts {
     pub runtime: AdmittedRuntime,
     pub front: Arc<FrontBodyQueries>,
     pub lower: Arc<FrontLowerQueries>,
-    pub budget: Arc<ProcessBudget>,
+    pub budget: Arc<hirsel_engine_admission::ProcessBudget>,
 }
 impl StagedProducts {
     pub fn capture(engine: &mut QueryEngine, jobs: usize) -> Result<Self, QueryError> {
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let errors = errors();
         let weight = MemoryWeight {
             retained: 2 << 20,

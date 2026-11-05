@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 /// headers, and the one grant its staged construction is admitted from.
 struct CheckedReceipt {
     headers: Arc<hirsel_engine::FrontCheckedSignatures>,
-    allowance: Mutex<Option<MemoryReservation>>,
+    allowance: Mutex<Option<hirsel_engine_admission::MemoryReservation>>,
     products: std::sync::OnceLock<Arc<hirsel_engine::CheckedProducts>>,
     /// The digest-only view, charged once to what the stages left.
     digest_view: std::sync::OnceLock<Arc<hirsel_engine::CheckedProducts>>,
@@ -137,7 +137,7 @@ impl CheckedReceipt {
 
 struct Expansion {
     text: Arc<str>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 
 #[derive(Default)]

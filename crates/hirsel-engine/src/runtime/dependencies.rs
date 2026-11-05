@@ -99,10 +99,11 @@ impl LiveDependencyProduct {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        runtime::ProcessBudget,
-        store::{Bytes, EntryKey, Reference, RequestStore},
-    };
+    use crate::store::Bytes;
+    use crate::store::EntryKey;
+    use crate::store::Reference;
+    use crate::store::RequestStore;
+
     use hirsel_syntax::ContentHash;
 
     struct NoTransport;
@@ -136,7 +137,7 @@ mod tests {
 
     #[test]
     fn live_edges_need_no_transport_and_release_only_after_the_last_consumer() {
-        let budget = ProcessBudget::new(64 << 10);
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
         let store = Arc::new(RequestStore::new(
             Arc::new(NoTransport),
             budget.reserve(64 << 10).unwrap(),
@@ -178,7 +179,7 @@ mod tests {
 
     #[test]
     fn live_edges_refuse_exhaustion_and_archive_only_with_explicit_working_admission() {
-        let tiny = ProcessBudget::new(1);
+        let tiny = hirsel_engine_admission::ProcessBudget::new(1);
         let store = RequestStore::new(Arc::new(NoTransport), tiny.reserve(1).unwrap());
         assert!(
             LiveDependencyProduct::new(
@@ -195,7 +196,7 @@ mod tests {
         drop(store);
         assert_eq!(tiny.reserved(), 0);
 
-        let budget = ProcessBudget::new(64 << 10);
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
         let store = RequestStore::new(Arc::new(NoTransport), budget.reserve(64 << 10).unwrap());
         let child = super::super::test_product(
             Address(ContentHash::of_bytes(b"child")),
@@ -210,7 +211,7 @@ mod tests {
         let product = ProductRef::dependencies(value(&store, vec![child]));
         let live = product.dependency_value().unwrap();
         assert!(product.archive(ArchiveAdmission::Retained).is_err());
-        let archive_budget = ProcessBudget::new(64 << 10);
+        let archive_budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
         let mut scratch = archive_budget.reserve(64 << 10).unwrap();
         assert!(
             product

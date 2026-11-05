@@ -48,7 +48,7 @@ struct Fixture {
     source: Arc<FrontNativeDefinitionQueries>,
     paths: Vec<DefPath>,
     store: Arc<FaultStore>,
-    budget: Arc<ProcessBudget>,
+    budget: Arc<hirsel_engine_admission::ProcessBudget>,
     errors: RuntimeErrors,
     weight: MemoryWeight,
 }
@@ -70,7 +70,7 @@ fn fixture(text: &str, verify: Verify, jobs: usize) -> Fixture {
         .load_program(&manifest)
         .unwrap();
     let paths = program.engine.front_source_roots();
-    let budget = ProcessBudget::new(512 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(512 << 20);
     let errors = crate::scheduled_front::errors();
     let weight = MemoryWeight {
         retained: 1 << 20,

@@ -41,8 +41,8 @@ pub struct FrontGrowthQueries {
     failure: Mutex<Option<(Reference, QueryError)>>,
     weight: MemoryWeight,
     errors: RuntimeErrors,
-    output_pool: MemoryReservationPool,
-    _allowance: MemoryReservation,
+    output_pool: hirsel_engine_admission::MemoryReservationPool,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 #[derive(Clone)]
 pub struct FrontGrowthOutput {
@@ -62,7 +62,7 @@ impl FrontGrowthQueries {
             .unwrap_or(0);
         (std::mem::size_of::<Self>() as u64)
             .checked_add((2 * std::mem::size_of::<usize>()) as u64)?
-            .checked_add(MemoryReservationPool::metadata_bytes())?
+            .checked_add(hirsel_engine_admission::MemoryReservationPool::metadata_bytes())?
             .checked_add(package as u64)?
             .checked_add(
                 (definitions.len() as u64).checked_mul(std::mem::size_of::<QueryId>() as u64)?,
@@ -260,7 +260,7 @@ struct FactTask {
     facts: Vec<SourceGrowthFact>,
     reads: Vec<Arc<ArchivedReader>>,
     terminal: Option<Result<ProductRef, Reference>>,
-    admission: MemoryReservation,
+    admission: hirsel_engine_admission::MemoryReservation,
 }
 impl FactTask {
     fn input(&self, i: usize) -> QueryId {
@@ -862,7 +862,7 @@ impl QueryEngine {
         root: &DefPath,
         front: Arc<FrontBodyQueries>,
         weight: MemoryWeight,
-        mut allowance: MemoryReservation,
+        mut allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontGrowthQueries>, QueryError> {
         let refusal = || {
@@ -907,7 +907,8 @@ impl QueryEngine {
             .checked_sub(retained.bytes())
             .ok_or_else(refusal)?;
         let output = allowance.split(output_budget).ok_or_else(refusal)?;
-        let output_pool = MemoryReservationPool::new(output).map_err(|_| refusal())?;
+        let output_pool =
+            hirsel_engine_admission::MemoryReservationPool::new(output).map_err(|_| refusal())?;
         let query = QueryId {
             kind: FRONT_GROWTH_KIND,
             address: hirsel_artifact_store::Address(ContentHash::of_parts(

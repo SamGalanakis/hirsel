@@ -26,7 +26,7 @@ pub struct FrontStorageQueries {
     errors: RuntimeErrors,
     retention: Arc<Mutex<u64>>,
     executions: std::sync::atomic::AtomicU64,
-    _allowance: Arc<MemoryReservation>,
+    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 #[derive(Clone)]
 pub struct FrontStorageOutput {
@@ -41,7 +41,7 @@ impl FrontStorageQueries {
         Some(
             (std::mem::size_of::<Self>()
                 + std::mem::size_of::<Mutex<u64>>()
-                + std::mem::size_of::<MemoryReservation>()
+                + std::mem::size_of::<hirsel_engine_admission::MemoryReservation>()
                 + 4 * std::mem::size_of::<usize>()) as u64,
         )
     }
@@ -52,7 +52,7 @@ impl FrontStorageQueries {
         Some(
             (std::mem::size_of::<Self>()
                 + std::mem::size_of::<Mutex<u64>>()
-                + std::mem::size_of::<MemoryReservation>()
+                + std::mem::size_of::<hirsel_engine_admission::MemoryReservation>()
                 + 4 * std::mem::size_of::<usize>()) as u64,
         )
     }
@@ -354,7 +354,7 @@ impl QueryEngine {
         &mut self,
         front: Arc<FrontBodyQueries>,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontStorageQueries>, QueryError> {
         let inventory =

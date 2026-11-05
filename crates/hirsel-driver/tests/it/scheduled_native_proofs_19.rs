@@ -20,7 +20,7 @@ pub fn main()->Result[(),()] {let n=bump([1u32,2u32],1u64,3u32);Ok(())}
         )
         .unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"proof_native","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
-        let transport = ProcessBudget::new(64 << 20);
+        let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
         let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
             Arc::new(store::DirStore::new(directory.path().join("products"))),
             transport.reserve(64 << 20).unwrap(),
@@ -36,7 +36,7 @@ pub fn main()->Result[(),()] {let n=bump([1u32,2u32],1u64,3u32);Ok(())}
             .load_program(&manifest)
             .unwrap();
         let definitions = program.engine.front_source_roots();
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let errors = crate::scheduled_front::errors();
         let weight = MemoryWeight {
             retained: 2 << 20,

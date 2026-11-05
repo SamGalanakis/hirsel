@@ -73,21 +73,24 @@ fn lease_output(leases: &OutputLeases, owner: Arc<dyn Send + Sync>) -> Arc<dyn S
 /// graph drops its runtime/stacks outside the index lock. Live leases and
 /// externally held source products keep their independent admitted owners.
 pub(super) struct GraphBudget {
-    budget: Arc<ProcessBudget>,
+    budget: Arc<hirsel_engine_admission::ProcessBudget>,
     reclaim: Arc<dyn Fn() + Send + Sync>,
     hot: Mutex<Vec<Arc<InstalledGraph>>>,
     metadata: Mutex<Vec<Arc<InstalledMetadata>>>,
 }
-type BudgetIndex = Vec<(Weak<ProcessBudget>, Weak<GraphBudget>)>;
+type BudgetIndex = Vec<(
+    Weak<hirsel_engine_admission::ProcessBudget>,
+    Weak<GraphBudget>,
+)>;
 static BUDGETS: OnceLock<Mutex<BudgetIndex>> = OnceLock::new();
 impl GraphBudget {
-    pub fn process_budget(&self) -> Arc<ProcessBudget> {
+    pub fn process_budget(&self) -> Arc<hirsel_engine_admission::ProcessBudget> {
         self.budget.clone()
     }
     pub fn reserve_product(
-        budget: &Arc<ProcessBudget>,
+        budget: &Arc<hirsel_engine_admission::ProcessBudget>,
         bytes: u64,
-    ) -> std::io::Result<MemoryReservation> {
+    ) -> std::io::Result<hirsel_engine_admission::MemoryReservation> {
         let owner = Self::shared(budget);
         match budget.reserve_once(bytes) {
             Ok(reservation) => Ok(reservation),
@@ -97,7 +100,7 @@ impl GraphBudget {
             }
         }
     }
-    fn shared(budget: &Arc<ProcessBudget>) -> Arc<Self> {
+    fn shared(budget: &Arc<hirsel_engine_admission::ProcessBudget>) -> Arc<Self> {
         let mut budgets = BUDGETS
             .get_or_init(Mutex::default)
             .lock()
@@ -281,7 +284,7 @@ impl Drop for GraphSelections {
     }
 }
 impl GraphSelections {
-    pub fn new(budget: &Arc<ProcessBudget>, retain_idle: bool) -> Self {
+    pub fn new(budget: &Arc<hirsel_engine_admission::ProcessBudget>, retain_idle: bool) -> Self {
         Self {
             retention: GraphBudget::shared(budget),
             retain_idle,
@@ -508,7 +511,7 @@ mod tests {
     use super::*;
     #[test]
     fn zero_hold_metadata_outputs_keep_their_index_owner_and_share_pending_runtime() {
-        struct Metadata(MemoryReservation);
+        struct Metadata(hirsel_engine_admission::MemoryReservation);
         impl GraphProducts for Metadata {
             fn accepts(&self, operation: &CompileOperation) -> bool {
                 matches!(operation, CompileOperation::RecomputeCounts { .. })
@@ -567,7 +570,9 @@ mod tests {
         }
         .reference(b"fixture error")
         .unwrap();
-        let budget = ProcessBudget::new(2 * hirsel_intern::jobs::COMPILER_STACK_BYTES as u64);
+        let budget = hirsel_engine_admission::ProcessBudget::new(
+            2 * hirsel_intern::jobs::COMPILER_STACK_BYTES as u64,
+        );
         let mut selector = GraphSelections::new(&budget, false);
         let metadata = Arc::new(InstalledMetadata {
             path: request.path.clone(),
@@ -616,7 +621,7 @@ mod tests {
     #[test]
     fn loading_transport_transfer_keeps_one_shared_charge_before_s0() {
         use hirsel_engine::store::{Domain, NoneStore, RequestStore, ResultStore};
-        let budget = ProcessBudget::new(8320);
+        let budget = hirsel_engine_admission::ProcessBudget::new(8320);
         let limits = RequestLimits {
             runtime_bytes: 64,
             snapshot_bytes: 64,
@@ -663,7 +668,7 @@ mod tests {
             snapshot_bytes: 40,
             transport_bytes: 20,
         };
-        let budget = ProcessBudget::new(100);
+        let budget = hirsel_engine_admission::ProcessBudget::new(100);
         let loading = LoadingAdmission::reserve(&budget, limits, 0).unwrap();
         assert_eq!(budget.reserved(), 100);
         assert!(budget.reserve(1).is_err());
@@ -741,10 +746,10 @@ mod tests {
             growth: 0,
             run: 0,
         };
-        let budget = ProcessBudget::new(99);
+        let budget = hirsel_engine_admission::ProcessBudget::new(99);
         assert!(GraphAdmission::reserve(&budget, limits, plan).is_err());
         assert_eq!(budget.reserved(), 0);
-        let budget = ProcessBudget::new(100);
+        let budget = hirsel_engine_admission::ProcessBudget::new(100);
         let admitted = GraphAdmission::reserve(&budget, limits, plan).unwrap();
         assert_eq!(budget.reserved(), 100);
         assert!(GraphAdmission::reserve(&budget, limits, plan).is_err());
@@ -767,9 +772,9 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
 
         struct Observed {
-            budget: Arc<ProcessBudget>,
+            budget: Arc<hirsel_engine_admission::ProcessBudget>,
             dropped_at: Arc<AtomicU64>,
-            _reservation: MemoryReservation,
+            _reservation: hirsel_engine_admission::MemoryReservation,
         }
         impl Drop for Observed {
             fn drop(&mut self) {
@@ -800,7 +805,7 @@ mod tests {
         }
         .reference(b"fixture error")
         .unwrap();
-        let budget = ProcessBudget::new(100);
+        let budget = hirsel_engine_admission::ProcessBudget::new(100);
         let owner = GraphBudget::shared(&budget);
         let dropped_at = Arc::new(AtomicU64::new(u64::MAX));
         owner
@@ -847,8 +852,8 @@ mod tests {
     #[test]
     fn shared_graph_budget_evicts_idle_views_but_refuses_to_overcommit_live_leases() {
         struct Empty {
-            source: Arc<MemoryReservation>,
-            _producer: MemoryReservation,
+            source: Arc<hirsel_engine_admission::MemoryReservation>,
+            _producer: hirsel_engine_admission::MemoryReservation,
         }
         impl GraphProducts for Empty {
             fn check_source_owner(&self) -> Option<Arc<dyn Send + Sync>> {
@@ -901,7 +906,7 @@ mod tests {
             },
         };
         let bytes = hirsel_intern::jobs::COMPILER_STACK_BYTES as u64 + 4096;
-        let budget = ProcessBudget::new(bytes + 3);
+        let budget = hirsel_engine_admission::ProcessBudget::new(bytes + 3);
         let mut first = GraphSelections::new(&budget, true);
         let mut second = GraphSelections::new(&budget, true);
         assert!(Arc::ptr_eq(&first.retention, &second.retention));
@@ -995,7 +1000,7 @@ mod tests {
         // The source-only output survives after the idle runtime is reclaimed.
         // A later request by this same selector must refuse admission instead
         // of waiting for the output its own caller is holding.
-        let budget = ProcessBudget::new(bytes + 2);
+        let budget = hirsel_engine_admission::ProcessBudget::new(bytes + 2);
         let mut selector = GraphSelections::new(&budget, true);
         let active = selector
             .select(&request, |owner, _| create(owner, &request))
@@ -1083,7 +1088,7 @@ mod tests {
 }
 #[test]
 fn native_transport_is_admitted_before_source_work_and_transfers_without_a_second_reservation() {
-    let budget = ProcessBudget::new(100);
+    let budget = hirsel_engine_admission::ProcessBudget::new(100);
     let owner = GraphBudget::shared(&budget);
     let limits = RequestLimits {
         runtime_bytes: 10,

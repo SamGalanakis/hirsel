@@ -40,7 +40,7 @@ fn admitted_generator_text_waits_on_lower_with_one_worker_and_keeps_detached_evi
             let paths = program.engine.front_source_roots();
             let ordinary: Vec<_> = paths.into_iter().filter(|p| p != &program.entry).collect();
             let generators = vec![program.entry.clone()];
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
                 retained: 2 << 20,
@@ -177,7 +177,7 @@ fn generator_refusal_control(zero_depth: bool) {
                 .into_iter()
                 .filter(|p| p != &program.entry)
                 .collect();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
                 retained: 2 << 20,
@@ -301,7 +301,7 @@ fn accepted_generator_view_checks_and_lowers_the_literal_without_changing_raw_so
             let paths = program.engine.front_source_roots();
             let ordinary: Vec<_> = paths.into_iter().filter(|p| p != &program.entry).collect();
             let generators = vec![program.entry.clone()];
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
                 retained: 2 << 20,
@@ -466,7 +466,7 @@ fn accepted_output_control(
     jobs: usize,
     run: impl FnOnce(
         &mut hirsel_engine::LoadedProgram,
-        &std::sync::Arc<hirsel_engine::runtime::ProcessBudget>,
+        &std::sync::Arc<hirsel_engine_admission::ProcessBudget>,
         hirsel_engine::FrontRegistrationOutput,
     ),
 ) {
@@ -479,7 +479,7 @@ fn accepted_output_control_with(
     source: &str,
     run: impl FnOnce(
         &mut hirsel_engine::LoadedProgram,
-        &std::sync::Arc<hirsel_engine::runtime::ProcessBudget>,
+        &std::sync::Arc<hirsel_engine_admission::ProcessBudget>,
         hirsel_engine::FrontRegistrationOutput,
     ),
 ) {
@@ -505,7 +505,7 @@ fn accepted_output_control_with(
         .into_iter()
         .filter(|path| path != &program.entry)
         .collect();
-    let budget = ProcessBudget::new(1 << 30);
+    let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
     let errors = crate::scheduled_front::errors();
     let weight = MemoryWeight {
         retained: 2 << 20,
@@ -886,7 +886,7 @@ fn generator_bootstrap_finishes_before_final_admitted_check_and_preserves_its_sc
             let definitions = program.engine.front_source_roots();
             let generators = program.engine.front_generator_roots(&definitions).unwrap();
             assert_eq!(generators, vec![program.entry.clone()]);
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
                 retained: 2 << 20,
@@ -1085,7 +1085,7 @@ fn bootstrap_refusal_control(zero_depth: bool, spare_grants: bool) {
                     .collect::<Vec<_>>(),
                 ["a_ok", "b_fail", "c_later"]
             );
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let metadata =
                 FrontRegistrationBootstrap::input_bytes(&definitions, generators.len()).unwrap();
             let mut syntax = Vec::with_capacity(if spare_grants { 32 } else { generators.len() });

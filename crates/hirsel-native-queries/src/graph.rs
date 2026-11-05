@@ -22,7 +22,7 @@ pub struct ArenaComponentKeys(Arc<ComponentKeysData>);
 #[derive(Clone)]
 struct ComponentKeysData {
     values: Vec<ComponentKey>,
-    owner: Option<Arc<hirsel_engine::runtime::MemoryReservation>>,
+    owner: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
 }
 impl std::fmt::Debug for ArenaComponentKeys {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -52,7 +52,7 @@ impl ArenaComponentKeys {
         );
         w.bytes()
     }
-    fn with_owner(&mut self, owner: Arc<hirsel_engine::runtime::MemoryReservation>) {
+    fn with_owner(&mut self, owner: Arc<hirsel_engine_admission::MemoryReservation>) {
         Arc::make_mut(&mut self.0).owner = Some(owner);
     }
 }
@@ -267,7 +267,7 @@ impl ArenaQueryPlan {
                 }
         })
     }
-    pub fn retain_owner(&mut self, owner: Arc<hirsel_engine::runtime::MemoryReservation>) {
+    pub fn retain_owner(&mut self, owner: Arc<hirsel_engine_admission::MemoryReservation>) {
         self.component_keys.with_owner(owner);
     }
     pub fn retained_storage_bytes(&mut self) -> u64 {
@@ -478,7 +478,7 @@ mod retained_tests {
             plan.component_keys[0].address().unwrap(),
             plan.component_keys[1].address().unwrap()
         );
-        let budget = hirsel_engine::runtime::ProcessBudget::new(1 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
         let grant = Arc::new(budget.reserve(1 << 20).unwrap());
         plan.retain_owner(grant.clone());
         let keys = plan.component_keys.clone();

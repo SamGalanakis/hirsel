@@ -169,7 +169,7 @@ pub struct NativeInstanceInputs {
     lower: NativeOriginalReader,
     codec: Arc<NativeRecordContext>,
     metadata_bytes: u64,
-    metadata_owner: Mutex<Option<Arc<hirsel_engine::runtime::MemoryReservation>>>,
+    metadata_owner: Mutex<Option<Arc<hirsel_engine_admission::MemoryReservation>>>,
 }
 fn check_binding(
     declarations: &NativeDeclarations,
@@ -229,7 +229,7 @@ impl NativeInstanceInputs {
     /// allowance. The last input owner releases it, independently of task life.
     pub fn retain_metadata(
         &self,
-        allowance: &mut hirsel_engine::runtime::MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
     ) -> Result<(), String> {
         let mut owner = self
             .metadata_owner
@@ -243,7 +243,7 @@ impl NativeInstanceInputs {
         }
         Ok(())
     }
-    pub fn metadata_allowance(&self) -> Option<Arc<hirsel_engine::runtime::MemoryReservation>> {
+    pub fn metadata_allowance(&self) -> Option<Arc<hirsel_engine_admission::MemoryReservation>> {
         self.metadata_owner
             .lock()
             .unwrap_or_else(|e| e.into_inner())

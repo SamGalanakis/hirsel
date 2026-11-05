@@ -36,7 +36,7 @@ fn admitted_source_storage_root_matches_scalar_and_rejects_root_escape() {
             std::fs::write(&path, source).unwrap();
             std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"storage","version":"1"},"sources":[{"path":"main.hir","module":[]}],"dependencies":[],"entry":{"module":[],"name":"main"}}"#).unwrap();
             for jobs in [1, 2] {
-                let budget = ProcessBudget::new(1 << 30);
+                let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
                 let store = Arc::new(store::RequestStore::new(
                     Arc::new(MemStore::default()),
                     budget.reserve(16 << 20).unwrap(),

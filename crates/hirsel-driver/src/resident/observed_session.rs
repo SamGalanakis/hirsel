@@ -532,7 +532,7 @@ mod tests {
     /// computes on every call so a host-side check cache cannot hide in tests.
     struct Checker {
         compiler: Compiler,
-        budget: Arc<ProcessBudget>,
+        budget: Arc<hirsel_engine_admission::ProcessBudget>,
         calls: Arc<AtomicUsize>,
         failure: Option<QueryError>,
     }
@@ -639,7 +639,7 @@ mod tests {
             config,
             Checker {
                 compiler,
-                budget: ProcessBudget::new(1 << 30),
+                budget: hirsel_engine_admission::ProcessBudget::new(1 << 30),
                 calls,
                 failure,
             },

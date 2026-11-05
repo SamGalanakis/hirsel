@@ -76,7 +76,7 @@ pub struct CompilationTasks {
     verify_store: hirsel_engine::store::VerifyStore,
     output: CompilationOutput,
     weight: MemoryWeight,
-    allowance: Arc<MemoryReservation>,
+    allowance: Arc<hirsel_engine_admission::MemoryReservation>,
     dispatch: OnceLock<Dispatch>,
     completed: OnceLock<(ProductRef, Vec<ProductRef>)>,
     fallback: Reference,
@@ -90,7 +90,7 @@ impl CompilationTasks {
         emission: EmissionOptions,
         backends: Vec<CompilationBackend>,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Arc<Self>, String> {
         Self::new_with_store_verification(
             instances,
@@ -114,7 +114,7 @@ impl CompilationTasks {
         emission: EmissionOptions,
         backends: Vec<CompilationBackend>,
         weight: MemoryWeight,
-        mut allowance: MemoryReservation,
+        mut allowance: hirsel_engine_admission::MemoryReservation,
         verify_store: hirsel_engine::store::VerifyStore,
     ) -> Result<Arc<Self>, String> {
         if root.target_abi != instances.options().target.digest()

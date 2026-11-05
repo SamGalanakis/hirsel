@@ -20,7 +20,7 @@ fn checked_signature_inputs_keep_exact_coverage_private_views_and_source_owner()
             .load_program(&manifest)
             .unwrap();
         let definitions = program.engine.front_source_roots();
-        let budget = ProcessBudget::new(32 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(32 << 20);
         let weight = MemoryWeight {
             retained: 64 << 10,
             scratch: 8 << 20,

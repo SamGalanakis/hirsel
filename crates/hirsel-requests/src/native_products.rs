@@ -12,7 +12,7 @@ use hirsel_syntax::{ContentHash, DefId};
 use std::sync::{Arc, Mutex};
 
 struct OutputOwner {
-    _allowance: hirsel_engine::runtime::MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
     _directory: tempfile::TempDir,
     _bootstrap: Arc<NativeBootstrap>,
     _compilation: Arc<hirsel_native_queries::compilation_tasks::CompilationTasks>,

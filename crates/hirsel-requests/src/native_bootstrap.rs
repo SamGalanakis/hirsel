@@ -56,9 +56,9 @@ pub(super) struct NativeProofs {
     pub export: Arc<FrontProofExport>,
 }
 pub(super) struct NativeAdmission {
-    pub instances: MemoryReservation,
-    pub arena: MemoryReservation,
-    pub compilation: MemoryReservation,
+    pub instances: hirsel_engine_admission::MemoryReservation,
+    pub arena: hirsel_engine_admission::MemoryReservation,
+    pub compilation: hirsel_engine_admission::MemoryReservation,
 }
 struct Prepared {
     source: ProductRef,
@@ -86,8 +86,8 @@ pub(super) struct NativeBootstrap {
     completed: OnceLock<Completed>,
     failure: Mutex<Option<(Reference, String)>>,
     errors: RuntimeErrors,
-    _allowance: MemoryReservation,
-    output_allowance: Mutex<MemoryReservation>,
+    _allowance: hirsel_engine_admission::MemoryReservation,
+    output_allowance: Mutex<hirsel_engine_admission::MemoryReservation>,
 }
 impl NativeBootstrap {
     pub fn new(
@@ -100,7 +100,7 @@ impl NativeBootstrap {
         mut admission: NativeAdmission,
         proofs: Option<NativeProofs>,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<Self>, String> {
         // Evidence selects its discharge only after the source root settles;
@@ -214,7 +214,10 @@ impl NativeBootstrap {
             output_allowance: Mutex::new(output_allowance),
         }))
     }
-    pub fn reserve_output(&self, bytes: u64) -> Result<MemoryReservation, String> {
+    pub fn reserve_output(
+        &self,
+        bytes: u64,
+    ) -> Result<hirsel_engine_admission::MemoryReservation, String> {
         self.output_allowance
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -380,7 +383,7 @@ impl NativeBootstrap {
                 .entries
                 .get(&facts.run.entry.to_string())
                 .ok_or("native call has no checked Run entry")?;
-            let roots = hirsel_engine::entry_roots(
+            let roots = hirsel_engine_admission::entry_roots(
                 &declarations.program.types,
                 &declarations.program.signatures[&facts.run.entry],
                 hirsel_run_schema::LaunchKind::Call,

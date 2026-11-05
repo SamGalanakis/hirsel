@@ -30,7 +30,7 @@ pub(super) struct SafeCheck {
     store: Arc<dyn ResultStore>,
     errors: RuntimeErrors,
     completed: Mutex<Option<Settled>>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl SafeCheck {
     pub fn new(
@@ -39,7 +39,7 @@ impl SafeCheck {
         entry: Option<DefPath>,
         store: Arc<dyn ResultStore>,
         errors: RuntimeErrors,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Arc<Self>, ToolError> {
         if allowance.bytes() < BYTES {
             return Err(ToolError::Runtime(

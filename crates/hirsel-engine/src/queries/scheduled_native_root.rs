@@ -66,7 +66,7 @@ pub struct FrontNativeQueries {
 struct Ownership {
     _run: Arc<FrontRunQueries>,
     _definitions: Arc<FrontNativeDefinitionQueries>,
-    _allowance: Arc<MemoryReservation>,
+    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
 }
 fn constant_bytes<'a>(mut paths: impl Iterator<Item = &'a DefPath>) -> Option<u64> {
     paths.try_fold(0u64, |total, path| {
@@ -132,7 +132,7 @@ impl FrontNativeQueries {
             (std::mem::size_of::<Self>()
                 + std::mem::size_of::<Ownership>()
                 + std::mem::size_of::<Mutex<u64>>()
-                + std::mem::size_of::<MemoryReservation>()
+                + std::mem::size_of::<hirsel_engine_admission::MemoryReservation>()
                 + 6 * std::mem::size_of::<usize>()) as u64,
             |total, path| {
                 total
@@ -683,7 +683,7 @@ impl QueryEngine {
         &mut self,
         plan: FrontNativePlan,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontNativeQueries>, QueryError> {
         if !self.staged_values.is_empty() {

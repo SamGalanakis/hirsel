@@ -17,7 +17,7 @@ const FAILURE: Domain = Domain {
     schema: 1,
 };
 struct SourceOwnership {
-    _allowance: Arc<MemoryReservation>,
+    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
     _operation: OperationLease,
     _front: Arc<FrontBodyQueries>,
     _lower: Arc<FrontLowerQueries>,
@@ -284,7 +284,7 @@ impl FrontNativeDefinitionQueries {
             (std::mem::size_of::<Self>()
                 + std::mem::size_of::<SourceOwnership>()
                 + std::mem::size_of::<Mutex<u64>>()
-                + std::mem::size_of::<MemoryReservation>()
+                + std::mem::size_of::<hirsel_engine_admission::MemoryReservation>()
                 + 4 * std::mem::size_of::<usize>()) as u64,
             |total, path| {
                 total
@@ -816,7 +816,7 @@ impl QueryEngine {
         front: Arc<FrontBodyQueries>,
         lower: Arc<FrontLowerQueries>,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontNativeDefinitionQueries>, QueryError> {
         let inputs = self.front_native_definition_inputs_in(
@@ -970,7 +970,7 @@ impl QueryEngine {
         lower: Arc<FrontLowerQueries>,
         inputs: FrontNativeDefinitionInputs,
         weight: MemoryWeight,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontNativeDefinitionQueries>, QueryError> {
         inputs.operation.capture().require_consistent(front.namespace()).map_err(|_| native_selection_error("native catalogue and front use different accepted registrations or namespace captures"))?;

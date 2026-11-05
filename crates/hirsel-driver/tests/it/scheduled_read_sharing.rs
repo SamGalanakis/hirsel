@@ -20,7 +20,7 @@ fn front_complete_reads_share_equal_phase_allocations_without_merging_phase_keys
             .load_program(&manifest)
             .unwrap();
         let definitions = program.engine.front_source_roots();
-        let budget = ProcessBudget::new(64 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
         let errors = crate::scheduled_front::errors();
         let front = program
             .engine

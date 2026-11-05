@@ -186,7 +186,7 @@ fn cached_front_retains_no_more_metadata_than_the_same_cold_front() {
                 .filter(|p| p.0.package.name == "compact_source")
                 .collect::<Vec<_>>();
             assert_eq!(paths.len(), 2);
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let front = program
                 .engine

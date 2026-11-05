@@ -355,7 +355,7 @@ fn refusals(root: &Path, binaries: &Path) {
     canonical["io"]["stdout"] = Value::Null;
     let run_path = root.join("changed-run.json");
     fs::write(&run_path, canonical.to_string()).unwrap();
-    let run = hirsel_engine::read_run_record(&run_path).unwrap();
+    let run = hirsel_engine_admission::read_run_record(&run_path).unwrap();
     assert_ne!(run.identity(), recording.run_identity);
     config.binding.as_mut().unwrap().canonical = run.canonical().to_vec();
     let changed_config = root.join("changed-config.tape");

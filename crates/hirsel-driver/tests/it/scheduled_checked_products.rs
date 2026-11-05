@@ -97,7 +97,7 @@ fn products_case_with_decode_layout(
                 .load_program(&manifest)
                 .unwrap();
             let definitions = program.engine.front_source_roots();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
                 retained: 2 << 20,

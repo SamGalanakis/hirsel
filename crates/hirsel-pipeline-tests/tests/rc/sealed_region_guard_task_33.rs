@@ -33,7 +33,7 @@ impl QueryContext for Context {
 
 #[test]
 fn original_guard_task_waits_for_dependencies_and_keeps_its_existing_grant_with_output() {
-    let transport = ProcessBudget::new(64 << 20);
+    let transport = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let store: Arc<dyn ResultStore> = Arc::new(hirsel_engine::store::RequestStore::new(
         Arc::new(MemStore::default()),
         transport.reserve(64 << 20).unwrap(),
@@ -64,7 +64,7 @@ fn original_guard_task_waits_for_dependencies_and_keeps_its_existing_grant_with_
                     .unwrap();
                 locals.sort_by(|a, b| a.owner().cmp(b.owner()));
                 let bytes = Plan::admission_bytes(&locals);
-                let budget = ProcessBudget::new(bytes);
+                let budget = hirsel_engine_admission::ProcessBudget::new(bytes);
                 let allowance = Arc::new(budget.reserve(bytes).unwrap());
                 let mut context = Context {
                     inputs: BTreeMap::new(),

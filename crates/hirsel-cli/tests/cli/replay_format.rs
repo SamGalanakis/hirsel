@@ -155,7 +155,7 @@ fn body_callee_finalizer_manifest_and_run_binding_edits_refuse_before_effects() 
         record["io"][name] = value;
         let run_file = source.with_extension("run.json");
         std::fs::write(&run_file, serde_json::to_vec(&record).unwrap()).unwrap();
-        let run = hirsel_engine::read_run_record(&run_file).unwrap();
+        let run = hirsel_engine_admission::read_run_record(&run_file).unwrap();
         std::fs::remove_file(run_file).unwrap();
         assert_ne!(run.identity(), recording.run_identity);
         changed.binding.as_mut().unwrap().canonical = run.canonical().to_vec();

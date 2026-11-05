@@ -11,11 +11,16 @@ use super::native_platform::NativePlatformPolicy;
 use super::native_platform::NativePlatformSelection;
 use super::native_platform::NativePurpose;
 use super::native_products::NativeBuildReadiness;
-use hirsel_engine::{
-    FrontNativeDefinitionQueries, FrontNativeQueries, LinkInput, LoadedProgram, ToolError,
-    runtime::{MemoryReservation, MemoryWeight, QueryId, RuntimeErrors},
-    store::ResultStore,
-};
+use hirsel_engine::FrontNativeDefinitionQueries;
+use hirsel_engine::FrontNativeQueries;
+use hirsel_engine::LinkInput;
+use hirsel_engine::LoadedProgram;
+use hirsel_engine::ToolError;
+use hirsel_engine::runtime::MemoryWeight;
+use hirsel_engine::runtime::QueryId;
+use hirsel_engine::runtime::RuntimeErrors;
+use hirsel_engine::store::ResultStore;
+
 use hirsel_native::NativeError;
 use hirsel_native::object_queries;
 use hirsel_syntax::{ContentHash, DefPath};
@@ -84,7 +89,7 @@ impl Footprint {
 pub(super) struct NativeSelection {
     pub assembly: Arc<NativeAssembly>,
     pub readiness: Arc<NativeBuildReadiness>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
     key: ContentHash,
     request: NativeRequest,
     purpose: NativePurpose,
@@ -94,7 +99,7 @@ pub(super) struct NativeSelection {
     links: Vec<LinkInput>,
     policy: Option<NativePlatformPolicy>,
     platform: Option<Arc<super::native_link::FrozenPlatform>>,
-    validation: Arc<MemoryReservation>,
+    validation: Arc<hirsel_engine_admission::MemoryReservation>,
     store: Arc<dyn ResultStore>,
     limits: object_queries::capture::CaptureLimits,
     runtime_limits: object_queries::runtime::RuntimeLimits,
@@ -111,7 +116,7 @@ impl NativeSelection {
         verify_store: hirsel_engine::store::VerifyStore,
         tools: Arc<hirsel_native::Toolchain>,
         footprint: &Footprint,
-        allowance: &mut MemoryReservation,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
         weight: MemoryWeight,
         root_weight: MemoryWeight,
         errors: RuntimeErrors,
@@ -313,12 +318,18 @@ pub(super) fn artifacts(
     program: &mut LoadedProgram,
     source: NativeSourceInputs,
     footprint: &Footprint,
-    allowance: &mut MemoryReservation,
+    allowance: &mut hirsel_engine_admission::MemoryReservation,
     weight: MemoryWeight,
     root_weight: MemoryWeight,
     errors: RuntimeErrors,
     verify_store: hirsel_engine::store::VerifyStore,
-) -> Result<(Arc<NativeAssembly>, MemoryReservation), ToolError> {
+) -> Result<
+    (
+        Arc<NativeAssembly>,
+        hirsel_engine_admission::MemoryReservation,
+    ),
+    ToolError,
+> {
     let mut split = |bytes| {
         allowance.split(bytes).ok_or_else(|| {
             ToolError::Runtime("native artifacts exceed their snapshot partition".into())

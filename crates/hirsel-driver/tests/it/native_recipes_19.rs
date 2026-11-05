@@ -636,7 +636,7 @@ fn synthesized_cursor_finalizer_recipes_share_erased_actual_modes() {
 fn keyed_value_import_retains_the_original_pretransfer_cleanup() {
     use hirsel_engine::store::ResultStore;
     with_compiler_stack(|| {
-        let budget = runtime::ProcessBudget::new(64 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
         let store: Arc<dyn store::ResultStore> = Arc::new(store::RequestStore::new(
             Arc::new(store::MemStore::default()),
             budget.reserve(64 << 20).unwrap(),

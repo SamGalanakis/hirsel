@@ -14,7 +14,7 @@ struct Fixture {
     front: Arc<FrontBodyQueries>,
     lower: Arc<FrontLowerQueries>,
     check: Arc<FrontCheckQueries>,
-    budget: Arc<ProcessBudget>,
+    budget: Arc<hirsel_engine_admission::ProcessBudget>,
     weight: MemoryWeight,
     errors: RuntimeErrors,
     store: Arc<MemStore>,
@@ -47,7 +47,7 @@ impl Fixture {
             .load_program(&manifest)
             .unwrap();
         let paths = program.engine.front_source_roots();
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let weight = MemoryWeight {
             retained: 2 << 20,
             scratch: 8 << 20,

@@ -35,7 +35,10 @@ impl CheckedProducts {
     /// The same receipt without canonical text. Its copied read maps are
     /// split from `grant` before the copy and stay charged while any clone
     /// of the view is held; None leaves `grant` unchanged.
-    pub fn digest_view(&self, grant: &mut crate::runtime::MemoryReservation) -> Option<Arc<Self>> {
+    pub fn digest_view(
+        &self,
+        grant: &mut hirsel_engine_admission::MemoryReservation,
+    ) -> Option<Arc<Self>> {
         let charge = grant.split(self.digest_view_bytes()?)?;
         let view = Self {
             digest: self.digest,
@@ -63,7 +66,7 @@ impl CheckedProducts {
         let mut weight = crate::NativeMetadataWeight::default();
         weight.add(arc::<Self>()?);
         weight.add(arc::<(Arc<dyn Send + Sync>, Arc<dyn Send + Sync>)>()?);
-        weight.add(arc::<crate::runtime::MemoryReservation>()?);
+        weight.add(arc::<hirsel_engine_admission::MemoryReservation>()?);
         weight.tree::<DefPath, BTreeMap<Vec<u8>, ContentHash>>(self.reads.len());
         for (path, reads) in &self.reads {
             weight.path(path);
@@ -229,7 +232,7 @@ mod registration_tests {
 
     #[test]
     fn detached_checked_product_clones_keep_all_output_reservations() {
-        let budget = crate::runtime::ProcessBudget::new(96);
+        let budget = hirsel_engine_admission::ProcessBudget::new(96);
         let products = CheckedProducts {
             digest: ContentHash::of_bytes(b"receipt"),
             canonical: Some("canonical receipt".into()),
@@ -253,7 +256,7 @@ mod registration_tests {
 
     #[test]
     fn digest_views_charge_their_copied_read_maps_until_the_last_clone_drops() {
-        let budget = crate::runtime::ProcessBudget::new(1 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
         let mut reads = BTreeMap::new();
         reads.insert(
             DefPath::core("main"),

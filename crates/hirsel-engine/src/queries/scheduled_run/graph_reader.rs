@@ -4,7 +4,7 @@ use super::*;
 pub struct FrontSemanticGraph {
     graph: hirsel_run_schema::ProgramGraph,
     _owner: Arc<FrontRunQueries>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontSemanticGraph {
     pub fn revision(
@@ -70,7 +70,7 @@ impl FrontRunQueries {
     }
     pub fn semantic_graph(
         self: &Arc<Self>,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<FrontSemanticGraph, QueryError> {
         if self.semantic_graph_decode_bytes()? > allowance.bytes() {
             return Err(operational(

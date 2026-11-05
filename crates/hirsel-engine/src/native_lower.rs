@@ -69,7 +69,7 @@ struct BoundOriginal {
 }
 #[derive(Clone)]
 pub(crate) struct OriginalAdmission {
-    pub _allowance: Arc<crate::runtime::MemoryReservation>,
+    pub _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
     pub remaining: Arc<Mutex<u64>>,
 }
 struct OriginalLease {

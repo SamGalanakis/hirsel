@@ -34,7 +34,7 @@ pub struct Plan {
 pub struct Selection {
     pub product: ProductRef,
     units: Vec<UnitDemand>,
-    allowances: Vec<Arc<hirsel_engine::runtime::MemoryReservation>>,
+    allowances: Vec<Arc<hirsel_engine_admission::MemoryReservation>>,
 }
 impl Selection {
     pub fn unit(&self, owner: &Function) -> Option<&UnitDemand> {
@@ -297,7 +297,7 @@ pub struct GuardTasks {
     weight: hirsel_engine::runtime::MemoryWeight,
     output: std::sync::OnceLock<Arc<Selection>>,
     failure: Reference,
-    _allowances: Vec<Arc<hirsel_engine::runtime::MemoryReservation>>,
+    _allowances: Vec<Arc<hirsel_engine_admission::MemoryReservation>>,
 }
 
 impl GuardTasks {
@@ -306,7 +306,7 @@ impl GuardTasks {
         plan: Plan,
         weight: hirsel_engine::runtime::MemoryWeight,
         admitted_bytes: u64,
-        allowances: Vec<Arc<hirsel_engine::runtime::MemoryReservation>>,
+        allowances: Vec<Arc<hirsel_engine_admission::MemoryReservation>>,
     ) -> Result<Arc<Self>, String> {
         if (std::mem::size_of::<GuardTask>() + plan.inputs.len() * size_of::<QueryId>()) as u64
             > weight.retained

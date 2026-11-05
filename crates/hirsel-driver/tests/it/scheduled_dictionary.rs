@@ -25,7 +25,7 @@ fn admitted_dictionary_matches_scalar_named_callables_and_resumes_data_dependenc
             let paths = program.engine.front_source_roots();
             let dictionary = paths.iter().find(|p| p.0.name == "OP").unwrap().clone();
             let seed = paths.iter().find(|p| p.0.name == "seed").unwrap().clone();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
                 retained: 64 << 10,

@@ -361,7 +361,7 @@ fn evaluate_on_compiler_thread(
     if matches!(expect, Expect::RefuseEntry) {
         use hirsel_engine::DefinitionQueries;
         let refused = engine.item_signature(&entry).is_ok_and(|signature| {
-            matches!(hirsel_engine::entry_launch_kind(engine.types(), &signature.value),
+            matches!(hirsel_engine_admission::entry_launch_kind(engine.types(), &signature.value),
                 Err(hirsel_run_schema::RunRefusal::Invalid { field, .. }) if field == "entry")
         });
         observation.phase = "entry admission".into();

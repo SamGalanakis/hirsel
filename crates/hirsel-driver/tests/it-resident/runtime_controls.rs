@@ -4,11 +4,17 @@ use hirsel_artifact_store::{Action, Address, Domain};
 use hirsel_driver::resident::{Host, RequestError};
 use hirsel_engine::loader_inputs::{FrozenInputs, InputLimits, LoaderInputs};
 use hirsel_engine::requests::{OutputReadiness, RequestEngine, SelectedRequest, observe_inputs};
-use hirsel_engine::runtime::{
-    AdmittedRuntime, MemoryWeight, ProcessBudget, ProductRef, QueryContext, QueryFactory, QueryId,
-    QueryPoll, QueryTask, RuntimeErrors,
-};
+use hirsel_engine::runtime::AdmittedRuntime;
+use hirsel_engine::runtime::MemoryWeight;
+use hirsel_engine::runtime::ProductRef;
+use hirsel_engine::runtime::QueryContext;
+use hirsel_engine::runtime::QueryFactory;
+use hirsel_engine::runtime::QueryId;
+use hirsel_engine::runtime::QueryPoll;
+use hirsel_engine::runtime::QueryTask;
+use hirsel_engine::runtime::RuntimeErrors;
 use hirsel_engine::store::{MemStore, ResultStore};
+
 use hirsel_intern::jobs::Jobs;
 use hirsel_syntax::ContentHash;
 use std::path::PathBuf;
@@ -95,7 +101,7 @@ impl OutputReadiness for Readiness {
 }
 struct Engine {
     store: Arc<dyn ResultStore>,
-    budget: Arc<ProcessBudget>,
+    budget: Arc<hirsel_engine_admission::ProcessBudget>,
     polls: Arc<AtomicUsize>,
     current: Option<(FrozenInputs, u8, Arc<Mutex<AdmittedRuntime>>)>,
 }
@@ -167,7 +173,7 @@ impl RequestEngine for Engine {
     }
 }
 fn engine(
-    budget: Arc<ProcessBudget>,
+    budget: Arc<hirsel_engine_admission::ProcessBudget>,
     store: Arc<dyn ResultStore>,
     polls: Arc<AtomicUsize>,
 ) -> Engine {
@@ -200,7 +206,7 @@ fn actual_runtime_coalesces_sixteen_identical_requests_and_cancel_preserves_live
     let tree = tempfile::tempdir().unwrap();
     let source = tree.path().join("main.hir");
     std::fs::write(&source, b"snapshot").unwrap();
-    let budget = ProcessBudget::new(2 * ALLOWANCE);
+    let budget = hirsel_engine_admission::ProcessBudget::new(2 * ALLOWANCE);
     let store = Arc::new(MemStore::default());
     let polls = Arc::new(AtomicUsize::new(0));
     let mut host = Host::new(engine(budget.clone(), store, polls.clone()));
@@ -221,7 +227,7 @@ fn actual_runtime_keeps_old_revision_and_refuses_cap_multiplication() {
     let tree = tempfile::tempdir().unwrap();
     let source = tree.path().join("main.hir");
     std::fs::write(&source, b"before").unwrap();
-    let budget = ProcessBudget::new(2 * ALLOWANCE);
+    let budget = hirsel_engine_admission::ProcessBudget::new(2 * ALLOWANCE);
     let store = Arc::new(MemStore::default());
     let polls = Arc::new(AtomicUsize::new(0));
     let mut host = Host::new(engine(budget.clone(), store, polls));
@@ -243,7 +249,7 @@ fn actual_runtime_policy_change_restart_and_zero_retention_use_ordinary_products
     let tree = tempfile::tempdir().unwrap();
     let source = tree.path().join("main.hir");
     std::fs::write(&source, b"payload").unwrap();
-    let budget = ProcessBudget::new(2 * ALLOWANCE);
+    let budget = hirsel_engine_admission::ProcessBudget::new(2 * ALLOWANCE);
     let store = Arc::new(MemStore::default());
     let polls = Arc::new(AtomicUsize::new(0));
     let mut host = Host::new(engine(budget.clone(), store.clone(), polls.clone()));
@@ -270,7 +276,7 @@ fn blocking_completion_preserves_coalescing_and_checks_ordinary_output() {
     let tree = tempfile::tempdir().unwrap();
     let source = tree.path().join("main.hir");
     std::fs::write(&source, b"shared output").unwrap();
-    let budget = ProcessBudget::new(2 * ALLOWANCE);
+    let budget = hirsel_engine_admission::ProcessBudget::new(2 * ALLOWANCE);
     let store = Arc::new(MemStore::default());
     let polls = Arc::new(AtomicUsize::new(0));
     let mut host = Host::new(engine(budget.clone(), store, polls.clone()));
@@ -288,7 +294,7 @@ fn blocking_completion_after_host_shutdown_reports_cancelled() {
     let tree = tempfile::tempdir().unwrap();
     let source = tree.path().join("main.hir");
     std::fs::write(&source, b"cancelled output").unwrap();
-    let budget = ProcessBudget::new(2 * ALLOWANCE);
+    let budget = hirsel_engine_admission::ProcessBudget::new(2 * ALLOWANCE);
     let store = Arc::new(MemStore::default());
     let mut host = Host::new(engine(budget.clone(), store, Arc::new(AtomicUsize::new(0))));
     let request = host.request(&(source, 0)).unwrap();
@@ -300,7 +306,7 @@ fn blocking_completion_after_host_shutdown_reports_cancelled() {
 /// Test-only immutable selector: reads the descriptor, never mutable disk.
 struct FrozenEngine {
     store: Arc<dyn ResultStore>,
-    budget: Arc<ProcessBudget>,
+    budget: Arc<hirsel_engine_admission::ProcessBudget>,
 }
 impl RequestEngine for FrozenEngine {
     type Request = hirsel_requests::CompileRequest;
@@ -383,7 +389,7 @@ fn compilation_session_delivers_explicit_bytes_without_mutating_live_requests_or
         |capture| capture.read(&source),
     )
     .unwrap();
-    let budget = ProcessBudget::new(2 * ALLOWANCE);
+    let budget = hirsel_engine_admission::ProcessBudget::new(2 * ALLOWANCE);
     let mut session = CompilationSession::new(
         FrozenEngine {
             store: Arc::new(MemStore::default()),
@@ -442,7 +448,7 @@ fn compilation_session_replaces_complete_observations_and_keeps_missing_inputs_w
         Ok(())
     })
     .unwrap();
-    let budget = ProcessBudget::new(2 * ALLOWANCE);
+    let budget = hirsel_engine_admission::ProcessBudget::new(2 * ALLOWANCE);
     let mut session = CompilationSession::new(
         FrozenEngine {
             store: Arc::new(MemStore::default()),

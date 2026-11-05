@@ -52,7 +52,7 @@ fn no_record_denies_roots_before_host_admission_and_empty_record_is_admitted() {
             let (signature, revision) = fixture(parameters);
             let mut host = Host::default();
             assert!(matches!(
-                admit_run(
+                hirsel_engine_admission::admit_run(
                     types(),
                     &signature,
                     &revision,
@@ -72,7 +72,7 @@ fn no_record_denies_roots_before_host_admission_and_empty_record_is_admitted() {
             record.unsafe_root = true;
             let record = record.validated().unwrap();
             assert!(
-                admit_run(
+                hirsel_engine_admission::admit_run(
                     types(),
                     &signature,
                     &revision,
@@ -88,7 +88,7 @@ fn no_record_denies_roots_before_host_admission_and_empty_record_is_admitted() {
         }
         let (signature, revision) = fixture("");
         assert!(
-            admit_run(
+            hirsel_engine_admission::admit_run(
                 types(),
                 &signature,
                 &revision,
@@ -124,7 +124,7 @@ fn wrong_program_entry_kind_and_expired_admission_have_no_host_effects() {
             }
             let mut host = Host::default();
             assert!(
-                admit_run(
+                hirsel_engine_admission::admit_run(
                     types(),
                     &signature,
                     &revision,
@@ -142,7 +142,7 @@ fn wrong_program_entry_kind_and_expired_admission_have_no_host_effects() {
             .validated()
             .unwrap();
         assert!(
-            admit_run(
+            hirsel_engine_admission::admit_run(
                 types(),
                 &signature,
                 &revision,
@@ -162,7 +162,7 @@ fn nominal_root_and_result_checks_refuse_lookalikes() {
     with_compiler_stack(|| {
         let (signature, _) = fixture("rt: Io");
         assert_eq!(
-            entry_roots(types(), &signature, LaunchKind::Main).unwrap(),
+            hirsel_engine_admission::entry_roots(types(), &signature, LaunchKind::Main).unwrap(),
             [Root::Io]
         );
         for name in ["Io", "Result"] {
@@ -191,7 +191,9 @@ fn nominal_root_and_result_checks_refuse_lookalikes() {
             } else {
                 function.result = replacement;
             }
-            assert!(entry_roots(types(), &forged, LaunchKind::Main).is_err());
+            assert!(
+                hirsel_engine_admission::entry_roots(types(), &forged, LaunchKind::Main).is_err()
+            );
         }
     });
 }
@@ -204,11 +206,14 @@ fn record_path_must_be_absolute() {
         .unwrap();
     std::fs::write(file.path(), record.canonical()).unwrap();
     let absolute = std::fs::canonicalize(file.path()).unwrap();
-    assert_eq!(read_run_record(&absolute).unwrap(), record);
+    assert_eq!(
+        hirsel_engine_admission::read_run_record(&absolute).unwrap(),
+        record
+    );
     let relative = std::path::Path::new(file.path().file_name().unwrap());
     assert!(relative.is_file());
     assert!(
-        matches!(read_run_record(relative), Err(RunRefusal::Invalid { field, .. }) if field == "--hirsel-run")
+        matches!(hirsel_engine_admission::read_run_record(relative), Err(RunRefusal::Invalid { field, .. }) if field == "--hirsel-run")
     );
 }
 
@@ -222,11 +227,11 @@ fn unrelated_signature_refuses_before_authorizing_the_selected_program() {
         wrong.definition = hirsel_syntax::DefId::intern(&other);
         let mut host = Host::default();
         assert!(
-            matches!(admit_run(types(), &wrong, &revision, LaunchKind::Main, None, CodeReach::Safe, &mut host, 0), Err(RunRefusal::Binding { field }) if field == "entry.signature")
+            matches!(hirsel_engine_admission::admit_run(types(), &wrong, &revision, LaunchKind::Main, None, CodeReach::Safe, &mut host, 0), Err(RunRefusal::Binding { field }) if field == "entry.signature")
         );
         assert_eq!(host.0, 0);
         assert!(
-            admit_run(
+            hirsel_engine_admission::admit_run(
                 types(),
                 &signature,
                 &revision,

@@ -23,7 +23,7 @@ const FINALIZER_GROWING: &str = "resource type Holder[T: copyable] { v: T }\ndro
 fn native_declarations_match_snapshot_inputs_and_refuse_implicit_growth() {
     use std::sync::Arc;
     with_compiler_stack(|| {
-        let budget = runtime::ProcessBudget::new(64 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
         let store = Arc::new(store::RequestStore::new(
             Arc::new(store::MemStore::default()),
             budget.reserve(64 << 20).unwrap(),

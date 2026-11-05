@@ -1,7 +1,9 @@
 //! Captured resources transfer at the actual committed child creation.
 use hirsel_driver::native;
 use hirsel_driver::resident::ObservedSession;
-use hirsel_engine::{CompileConfig, runtime::ProcessBudget, store::MemStore};
+use hirsel_engine::CompileConfig;
+use hirsel_engine::store::MemStore;
+
 use hirsel_front_phases::COMPILER;
 use hirsel_requests::*;
 use std::sync::Arc;
@@ -83,7 +85,7 @@ fn capture_with_tasks(source_text: &str, expected_exit: i32, tasks: &str) {
             hold_bytes: 0,
             ..Default::default()
         };
-        let budget = ProcessBudget::new(1 << 30);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
         let compiler = COMPILER.with_config(config.clone()).with_owned_engines();
         let selector = CompilerRequests::new(
             compiler.clone(),

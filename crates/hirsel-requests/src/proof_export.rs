@@ -20,14 +20,14 @@ struct Settled {
     product: ProductRef,
     check: CheckOutput,
     text: Result<FrontProofText, String>,
-    _copy: Option<MemoryReservation>,
+    _copy: Option<hirsel_engine_admission::MemoryReservation>,
 }
 pub(super) struct ProofExport {
     query: QueryId,
     safe: Arc<SafeCheck>,
     capture: Arc<FrontProofExport>,
-    budget: Arc<ProcessBudget>,
-    _allowance: MemoryReservation,
+    budget: Arc<hirsel_engine_admission::ProcessBudget>,
+    _allowance: hirsel_engine_admission::MemoryReservation,
     completed: Mutex<Option<Arc<Settled>>>,
     store: Arc<dyn ResultStore>,
     errors: RuntimeErrors,
@@ -36,8 +36,8 @@ impl ProofExport {
     pub fn new(
         safe: Arc<SafeCheck>,
         capture: Arc<FrontProofExport>,
-        allowance: MemoryReservation,
-        budget: Arc<ProcessBudget>,
+        allowance: hirsel_engine_admission::MemoryReservation,
+        budget: Arc<hirsel_engine_admission::ProcessBudget>,
         store: Arc<dyn ResultStore>,
         errors: RuntimeErrors,
     ) -> Arc<Self> {
@@ -103,7 +103,10 @@ impl ProofExport {
                 .map_err(Clone::clone),
         ))
     }
-    fn build(&self, product: ProductRef) -> Result<(FrontProofText, MemoryReservation), String> {
+    fn build(
+        &self,
+        product: ProductRef,
+    ) -> Result<(FrontProofText, hirsel_engine_admission::MemoryReservation), String> {
         let stage = |bytes, name| {
             super::host_selector::GraphBudget::reserve_product(&self.budget, bytes).map_err(|error| {
                 format!("proof export {name} needs {bytes} bytes from the shared process budget: {error}")

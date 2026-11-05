@@ -19,7 +19,7 @@ fn bodyless_keyed_inventory_survives_cross_open_and_refuses_missing_metadata() {
         for warm in [false, true] {
             let selected = Arc::new(store::DirStore::new(directory.path().join("products")));
             let publication = selected.local_product_store().unwrap().request();
-            let budget = ProcessBudget::new(24 << 20);
+            let budget = hirsel_engine_admission::ProcessBudget::new(24 << 20);
             let store: Arc<dyn ResultStore> = Arc::new(store::RequestStore::new(
                 selected,
                 budget.reserve(24 << 20).unwrap(),

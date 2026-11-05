@@ -22,7 +22,7 @@ fn ordinary_and_opaque_constants_publish_original_lower_and_evaluate_products() 
                 .load_program(&manifest)
                 .unwrap();
             let definitions = program.engine.front_source_roots();
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
                 retained: 2 << 20,
@@ -117,7 +117,7 @@ fn std_opaque_constant_publishes_original_lower_and_evaluate_products() {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(definitions.len(), 1);
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
                 retained: 2 << 20,
@@ -211,7 +211,7 @@ fn std_constant_publishes_after_full_namespace_capture_and_body_eviction() {
                 .cloned()
                 .collect::<Vec<_>>();
             assert_eq!(selected.len(), 1);
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
                 retained: 2 << 20,
@@ -326,7 +326,7 @@ fn immutable_check_loader_std_constant_keeps_lower_and_evaluate_bindings() {
                 .cloned()
                 .collect::<Vec<_>>();
             assert_eq!(selected.len(), 1);
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
                 retained: 2 << 20,

@@ -1,7 +1,7 @@
 //! The S0 signature inventory needed by checked-product encoding. Fingerprint
 //! coverage is captured explicitly; an inherited body read log is not coverage.
 use super::*;
-use crate::runtime::MemoryReservation;
+
 use hirsel_proof_export::SignatureSection;
 
 struct Input {
@@ -17,7 +17,7 @@ pub struct FrontCheckedSignatures {
     front: Arc<FrontBodyQueries>,
     environment: hirsel_proof_export::Environment,
     registrations: Vec<Vec<u8>>,
-    _allowance: MemoryReservation,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontCheckedSignatures {
     /// Canonical records of the accepted S0 namespace bound to this producer.
@@ -213,7 +213,7 @@ impl QueryEngine {
     pub fn front_checked_signatures(
         &mut self,
         front: Arc<FrontBodyQueries>,
-        allowance: MemoryReservation,
+        allowance: hirsel_engine_admission::MemoryReservation,
     ) -> Result<Arc<FrontCheckedSignatures>, QueryError> {
         let invalid = || {
             QueryError::Operational(hirsel_types::OperationalFailure {

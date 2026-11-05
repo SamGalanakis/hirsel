@@ -87,7 +87,7 @@ fn check_case(
                 .map(|syntax| syntax.item.definition.clone()),
         );
     }
-    let budget = ProcessBudget::new(1 << 30);
+    let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
     let errors = crate::scheduled_front::errors();
     let weight = MemoryWeight {
         retained: 2 << 20,
@@ -338,7 +338,7 @@ fn check_settled_front_eviction(
         )
         .unwrap();
         let store = Arc::new(EvictModes::default());
-        let carry_budget = ProcessBudget::new(8 << 20);
+        let carry_budget = hirsel_engine_admission::ProcessBudget::new(8 << 20);
         let carry = carry_across_graphs.then(|| {
             FrontCarry::new(carry_budget.reserve(8 << 20).unwrap())
                 .ok()
@@ -370,7 +370,7 @@ fn check_settled_front_eviction(
             } else {
                 vec![program.entry.clone()]
             };
-            let budget = ProcessBudget::new(1 << 30);
+            let budget = hirsel_engine_admission::ProcessBudget::new(1 << 30);
             let errors = crate::scheduled_front::errors();
             let weight = MemoryWeight {
                 retained: 2 << 20,

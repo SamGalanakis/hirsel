@@ -1,0 +1,15 @@
+[package]
+name = "hirsel-engine-admission"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hirsel-run-config = { path = "../hirsel-run-config" }
+hirsel-run-schema = { path = "../hirsel-run-schema" }
+hirsel-syntax = { path = "../hirsel-syntax" }
+hirsel-types = { path = "../hirsel-types" }
+
+[dev-dependencies]
+hirsel-guard = { path = "../hirsel-guard" }

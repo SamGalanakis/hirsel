@@ -184,7 +184,7 @@ mod tests {
             schema: 1,
         };
         let reference = store.put_content(domain, b"observed root").unwrap();
-        let budget = ProcessBudget::new(4096);
+        let budget = hirsel_engine_admission::ProcessBudget::new(4096);
         let mut scratch = budget.reserve(4096).unwrap();
         ProductRef::import_archive(
             Address(hash(b"root")),
@@ -231,7 +231,7 @@ mod tests {
     }
     #[test]
     fn local_plan_retains_observations_and_admission_without_transport() {
-        let budget = ProcessBudget::new(1 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
         let store =
             store::RequestStore::new(Arc::new(NoTransport), budget.reserve(1 << 20).unwrap());
         let owner = plan(&store, context());
@@ -260,11 +260,11 @@ mod tests {
     }
     #[test]
     fn explicit_plan_archive_round_trip_preserves_identity_without_native_authority() {
-        let budget = ProcessBudget::new(1 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
         let store =
             store::RequestStore::new(Arc::new(NoTransport), budget.reserve(1 << 20).unwrap());
         let live = product(plan(&store, context()));
-        let archive_budget = ProcessBudget::new(64 << 10);
+        let archive_budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
         let mut scratch = archive_budget.reserve(64 << 10).unwrap();
         assert!(
             live.archive(ArchiveAdmission::Materialize {
@@ -353,7 +353,7 @@ mod tests {
                 "corrupted-plan-import"
             }
         }
-        let budget = ProcessBudget::new(64 << 10);
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
         let mut scratch = budget.reserve(64 << 10).unwrap();
         let expected = PLAN.reference(b"original descriptor").unwrap();
         assert!(ProductArchive::open(&Corrupt, expected, &mut scratch).is_err());
@@ -387,7 +387,7 @@ mod tests {
 #[cfg(test)]
 #[test]
 fn plan_admission_refuses_retained_capacity_before_publication() {
-    let budget = ProcessBudget::new(64 << 10);
+    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
     let store = hirsel_engine::store::RequestStore::new(
         Arc::new(hirsel_engine::store::MemStore::default()),
         budget.reserve(64 << 10).unwrap(),

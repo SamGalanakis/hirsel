@@ -690,7 +690,7 @@ mod tests {
 
         // Integrity ownership uses the existing transport grant once, and
         // source snapshots cannot keep that grant alive after the request.
-        let budget = crate::runtime::ProcessBudget::new(1 << 20);
+        let budget = hirsel_engine_admission::ProcessBudget::new(1 << 20);
         let request = super::super::RequestStore::new(
             Arc::new(provider.clone()),
             budget.reserve(1 << 20).unwrap(),
@@ -854,7 +854,7 @@ mod tests {
             let reader = DirStore::new(local.clone()).with_read_only_root(installed);
             let statistics = reader.read_only[0].enable_statistics();
             let reader: std::sync::Arc<dyn ResultStore> = std::sync::Arc::new(reader);
-            let budget = crate::runtime::ProcessBudget::new(4096);
+            let budget = hirsel_engine_admission::ProcessBudget::new(4096);
             let reader: std::sync::Arc<dyn ResultStore> = if forwarded == 2 {
                 std::sync::Arc::new(
                     crate::store::RequestStore::with_scratch(
@@ -920,7 +920,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = std::sync::Arc::new(DirStore::new(directory.path().join("products")));
         let statistics = store.physical.as_ref().unwrap().enable_statistics();
-        let budget = crate::runtime::ProcessBudget::new(64 << 10);
+        let budget = hirsel_engine_admission::ProcessBudget::new(64 << 10);
         let request = crate::store::RequestStore::with_scratch(
             store.clone(),
             budget.reserve(64 << 10).unwrap(),

@@ -1028,7 +1028,7 @@ mod tests {
         );
         assert!(store.lookup_product(identity("key").0).is_none());
         assert!(!cache.path().join("key.a").exists());
-        let budget = hirsel_engine::runtime::ProcessBudget::new(0);
+        let budget = hirsel_engine_admission::ProcessBudget::new(0);
         let denied = hirsel_engine::store::RequestStore::new(
             std::sync::Arc::new(hirsel_engine::store::NoneStore),
             budget.reserve(0).unwrap(),

@@ -10,7 +10,7 @@ use std::sync::Arc;
 const SOURCE: &str = "fn id[T](take value:T)->T {take value}\npub fn main()->u64 {7u64}";
 
 fn engine(verify: Verify) -> (NativeOriginalReader, hirsel_syntax::DefPath) {
-    let budget = runtime::ProcessBudget::new(64 << 20);
+    let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
     let store: Arc<dyn store::ResultStore> = Arc::new(store::RequestStore::new(
         Arc::new(store::MemStore::default()),
         budget.reserve(64 << 20).unwrap(),
@@ -218,7 +218,7 @@ fn sealed_callback_capture_129_original_graph_declares_owning_complete_profiles(
                 .engine
                 .product_store()
                 .unwrap_or_else(|| Arc::new(store::MemStore::default()));
-            let budget = runtime::ProcessBudget::new(64 << 20);
+            let budget = hirsel_engine_admission::ProcessBudget::new(64 << 20);
             let store = Arc::new(store::RequestStore::new(
                 store,
                 budget.reserve(64 << 20).unwrap(),

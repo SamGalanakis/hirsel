@@ -744,7 +744,9 @@ mod tests {
     }
     #[test]
     fn validated_private_evaluation_suspends_on_s5_with_one_worker_and_complete_failure_reads() {
-        use crate::runtime::{AdmittedRuntime, ProcessBudget, QueryRuntime};
+        use crate::runtime::AdmittedRuntime;
+        use crate::runtime::QueryRuntime;
+
         crate::with_compiler_stack(|| {
             for fail in [false, true] {
                 let types = hirsel_types::TypeInterner::new(None);
@@ -761,7 +763,7 @@ mod tests {
                     None,
                 ));
                 let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                let budget = ProcessBudget::new(256 << 20);
+                let budget = hirsel_engine_admission::ProcessBudget::new(256 << 20);
                 let mut runtime = AdmittedRuntime::new(
                     hirsel_intern::jobs::Jobs::new(1),
                     budget.reserve(256 << 20).unwrap(),

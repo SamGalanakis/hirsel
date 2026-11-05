@@ -39,7 +39,7 @@ struct SourceBindings {
     anchors: Box<[((RecordOwner, u32), Anchor)]>,
     source_definitions: Box<[(Anchor, DefId)]>,
     parent: Option<Arc<SourceBindings>>,
-    admission: std::sync::OnceLock<crate::runtime::MemoryReservation>,
+    admission: std::sync::OnceLock<hirsel_engine_admission::MemoryReservation>,
     cache: std::sync::Weak<SourceOwnership>,
 }
 impl SourceBindings {
@@ -145,7 +145,7 @@ impl SourceBindings {
         self.admission.get().is_some()
             || self.parent.as_ref().is_some_and(|parent| parent.admitted())
     }
-    fn admit(&self, allowance: &mut crate::runtime::MemoryReservation) -> Option<()> {
+    fn admit(&self, allowance: &mut hirsel_engine_admission::MemoryReservation) -> Option<()> {
         if let Some(parent) = &self.parent {
             parent.admit(allowance)?;
         }
@@ -440,7 +440,10 @@ impl NativeRecordContext {
     pub(crate) fn unadmitted_bytes(&self) -> Option<u64> {
         self.bindings.unadmitted_bytes()
     }
-    pub(crate) fn admit(&self, allowance: &mut crate::runtime::MemoryReservation) -> Option<()> {
+    pub(crate) fn admit(
+        &self,
+        allowance: &mut hirsel_engine_admission::MemoryReservation,
+    ) -> Option<()> {
         self.bindings.admit(allowance)
     }
     pub(crate) fn planning_bytes(&self) -> Option<u64> {
@@ -644,7 +647,7 @@ pub struct NativeRecords {
 
 pub(crate) struct NativeRecordEncoder<'a> {
     encoding: hirsel_product_codec::RecordEncoding<'a>,
-    _admission: &'a crate::runtime::MemoryReservation,
+    _admission: &'a hirsel_engine_admission::MemoryReservation,
 }
 impl NativeRecordEncoder<'_> {
     pub(crate) fn capture<T>(
@@ -666,7 +669,7 @@ impl NativeRecords {
         &'a self,
         source: &NativeRecordContext,
         value: &T,
-        admission: &'a crate::runtime::MemoryReservation,
+        admission: &'a hirsel_engine_admission::MemoryReservation,
         serialization_working: u64,
     ) -> Option<NativeRecordEncoder<'a>> {
         if !Arc::ptr_eq(&self.types, source.record_types()) {
@@ -687,7 +690,7 @@ impl NativeRecords {
         &self,
         source: &NativeRecordContext,
         value: &T,
-        admission: &crate::runtime::MemoryReservation,
+        admission: &hirsel_engine_admission::MemoryReservation,
         serialization_working: u64,
     ) -> Option<Vec<u8>> {
         self.prepare_encoding(source, value, admission, serialization_working)?

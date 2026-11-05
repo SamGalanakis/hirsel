@@ -1016,7 +1016,7 @@ impl SignatureSnapshot {
         let lease = self
             .headers
             .as_ref()
-            .and_then(|headers| headers.validation_lease(weight.bytes()).ok());
+            .and_then(|headers| headers.try_validation_lease(weight.bytes()).ok());
         let retained = self.headers.is_none() || lease.is_some();
         let membership = Arc::new(SnapshotMembership {
             definitions,
@@ -1239,7 +1239,7 @@ impl SignatureSnapshot {
                             }),
                         })?;
                     let lease = match &self.headers {
-                        Some(headers) => match headers.validation_lease(bytes) {
+                        Some(headers) => match headers.try_validation_lease(bytes) {
                             Ok(lease) => lease,
                             Err(_) => {
                                 // The exact transient result is already computed. A
@@ -1293,7 +1293,7 @@ impl SignatureSnapshot {
     }
     fn validation_fact_lease(&self, bytes: u64) -> Result<Arc<dyn Send + Sync>, QueryError> {
         match &self.headers {
-            Some(headers) => headers.validation_lease(bytes),
+            Some(headers) => headers.try_validation_lease(bytes),
             None => Ok(Arc::new(())),
         }
     }
@@ -1390,7 +1390,7 @@ impl SignatureSnapshot {
                         weight.add(package.name.capacity() + package.version.capacity());
                         bytes = bytes.checked_add(weight.bytes()).ok_or_else(refusal)?;
                         let lease = match &self.headers {
-                            Some(headers) => match headers.validation_lease(bytes) {
+                            Some(headers) => match headers.try_validation_lease(bytes) {
                                 Ok(lease) => lease,
                                 Err(_) => {
                                     validation_retention_refused();

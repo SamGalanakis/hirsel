@@ -846,17 +846,36 @@ impl HeaderProducts {
         Ok(Charge::retained(HeaderCharge::Source(allowance)))
     }
     pub(crate) fn validation_lease(&self, bytes: u64) -> Result<Arc<dyn Send + Sync>, QueryError> {
+        self.validation_lease_with(bytes, true)
+    }
+    /// Optional cache publication must not discard existing source owners to
+    /// attempt retention. A refusal leaves the exact caller-owned result live.
+    pub(crate) fn try_validation_lease(
+        &self,
+        bytes: u64,
+    ) -> Result<Arc<dyn Send + Sync>, QueryError> {
+        self.validation_lease_with(bytes, false)
+    }
+    fn validation_lease_with(
+        &self,
+        bytes: u64,
+        reclaim: bool,
+    ) -> Result<Arc<dyn Send + Sync>, QueryError> {
         Ok(Arc::new(
-            self.admit(
+            self.admit_with_eviction(
                 bytes
                     .checked_add((size_of::<Charge>() + 2 * size_of::<usize>()) as u64)
                     .ok_or_else(|| sources::source_refusal("validation size overflow"))?,
+                reclaim,
             )?,
         ))
     }
     /// Charge one settled row or proof to the front's header grant, evicting
     /// unpinned entries first. A refusal is a resource failure, never a verdict.
     fn admit(&self, bytes: u64) -> Result<Charge, QueryError> {
+        self.admit_with_eviction(bytes, true)
+    }
+    fn admit_with_eviction(&self, bytes: u64, reclaim: bool) -> Result<Charge, QueryError> {
         let admission = self
             .scope()
             .admission
@@ -894,7 +913,7 @@ impl HeaderProducts {
             // Syntax and other source owners share the backing pool without
             // debiting this row grant. Reclaim optional facts on either limit.
             drop(grant);
-            if !self.evict() {
+            if !reclaim || !self.evict() {
                 if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
                     let payloads = self
                         .operation

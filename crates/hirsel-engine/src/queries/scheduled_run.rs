@@ -66,6 +66,7 @@ struct Input {
     owner_signature: SignatureRef,
     content: Reference,
     content_decode_bytes: u64,
+    owned_header_bytes: u64,
     specializations: Option<Arc<crate::store::InstalledSpecializations>>,
     dependencies: BTreeSet<DefPath>,
     source: bool,
@@ -79,7 +80,7 @@ struct Input {
 pub struct FrontRunInputs {
     namespace: Arc<NamespaceCapture>,
     source_paths: Vec<DefPath>,
-    inputs: BTreeMap<DefPath, std::sync::OnceLock<Result<Input, QueryError>>>,
+    inputs: BTreeMap<DefPath, std::sync::OnceLock<Result<Arc<Input>, QueryError>>>,
     specializations: BTreeMap<DefPath, Arc<crate::store::InstalledSpecializations>>,
     operation: OperationLease,
     store: Arc<dyn ResultStore>,
@@ -107,7 +108,7 @@ pub struct FrontRunQueries {
     export_hashes: bool,
     source_products: bool,
     native_roots: Vec<DefPath>,
-    inputs: BTreeMap<DefPath, std::sync::OnceLock<Result<Input, QueryError>>>,
+    inputs: BTreeMap<DefPath, std::sync::OnceLock<Result<Arc<Input>, QueryError>>>,
     specializations: BTreeMap<DefPath, Arc<crate::store::InstalledSpecializations>>,
     operation: OperationLease,
     ids: BTreeMap<DefPath, QueryId>,
@@ -274,7 +275,7 @@ impl FrontRunQueries {
             |n, path| {
                 n.checked_add(bincode::serialized_size(path).ok()?.checked_mul(5)?)?
                     .checked_add(
-                        (std::mem::size_of::<std::sync::OnceLock<Result<Input, QueryError>>>()
+                        (std::mem::size_of::<std::sync::OnceLock<Result<Arc<Input>, QueryError>>>()
                             + std::mem::size_of::<QueryId>()
                             + 32 * std::mem::size_of::<usize>()) as u64,
                     )

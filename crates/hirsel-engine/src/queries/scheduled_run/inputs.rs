@@ -7,22 +7,16 @@ impl FrontRunQueries {
             .get(path)
             .ok_or_else(|| operational(format!("missing signature input for {path}")))?;
         slot.get_or_init(|| {
-            let input = self.prepare_input(path)?;
+            let input = Arc::new(self.prepare_input(path)?);
             let mut weight = crate::NativeMetadataWeight::default();
+            weight.arc(&input);
             weight.tree::<DefPath, ()>(input.dependencies.len());
             for dependency in &input.dependencies {
                 weight.path(dependency);
             }
             let charge = weight
                 .bytes()
-                .checked_add(crate::memo::retained::retained_signature_payload_bytes(
-                    &input.signature,
-                ))
-                .and_then(|bytes| {
-                    bytes.checked_add(crate::memo::retained::retained_signature_payload_bytes(
-                        &input.owner_signature,
-                    ))
-                })
+                .checked_add(input.owned_header_bytes)
                 .ok_or_else(|| operational("Run input size overflow"))?;
             let mut remaining = self
                 .retention
@@ -34,6 +28,7 @@ impl FrontRunQueries {
             Ok(input)
         })
         .as_ref()
+        .map(AsRef::as_ref)
         .map_err(Clone::clone)
     }
     fn prepare_input(&self, path: &DefPath) -> Result<Input, QueryError> {
@@ -63,11 +58,16 @@ impl FrontRunQueries {
             {
                 return Err(operational("installed header exceeds ownership descriptor"));
             }
+            let owned_header_bytes =
+                crate::memo::retained::retained_signature_payload_bytes(&signature).saturating_add(
+                    crate::memo::retained::retained_signature_payload_bytes(&owner_signature),
+                );
             return Ok(Input {
                 signature,
                 owner_signature,
                 content: record.ownership.semantic,
                 content_decode_bytes: record.ownership.semantic_decode_bytes,
+                owned_header_bytes,
                 specializations: None,
                 dependencies: record.semantic_dependencies.into_iter().collect(),
                 source: true,
@@ -153,6 +153,7 @@ impl FrontRunQueries {
             owner_signature,
             content,
             content_decode_bytes,
+            owned_header_bytes: 0,
             specializations,
             dependencies,
             source,

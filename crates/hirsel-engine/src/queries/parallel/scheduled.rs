@@ -638,7 +638,8 @@ impl FrontBodyQueries {
                 .unwrap_or_else(|e| e.into_inner())
                 .required_tracked_bytes(reads)?;
             if self.make_room(cx, charge).is_none() {
-                let available = *self.retention.lock().unwrap_or_else(|e| e.into_inner());
+                let available = (*self.retention.lock().unwrap_or_else(|e| e.into_inner()))
+                    .min(self._allowance.allowance.available_bytes());
                 self.record_refusal("read observations", charge, available);
                 return None;
             }
@@ -962,7 +963,8 @@ impl FrontBodyQueries {
             crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<LiveSourceBacking>::uninit());
         let charge = value_bytes.checked_add(backing_bytes)?;
         if self.make_room(cx, charge).is_none() {
-            let available = *self.retention.lock().unwrap_or_else(|e| e.into_inner());
+            let available = (*self.retention.lock().unwrap_or_else(|e| e.into_inner()))
+                .min(self._allowance.allowance.available_bytes());
             self.record_refusal(owner, charge, available);
             return None;
         }

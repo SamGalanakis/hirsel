@@ -571,7 +571,7 @@ pub fn replay_history(
     }
     let matrix = hirsel_native_testing::full_matrix();
     let toolchain =
-        hirsel_native_testing::toolchain_for_matrix(&hirsel_native::runtime_cache()?, &matrix)
+        hirsel_native_testing::toolchain_for_matrix(&crate::native::runtime_cache()?, &matrix)
             .map_err(|e| e.to_string())?;
     // Each case names itself as it finishes, so a shard stopped by its pool
     // timeout still shows which sources it completed and how long each took.

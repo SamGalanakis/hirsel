@@ -46,18 +46,15 @@ fn primitive_formats_share_the_reserved_output_allocation() {
         let mut loaded = crate::source_std::load_program_source(&path, Some(source)).unwrap();
         loaded.check_for_execution().unwrap();
         let input = loaded.engine.export_native_input().unwrap();
-        let sources = hirsel_driver::native::profile_sources(&input);
+        let sources = hirsel_native::profile_sources(&input);
         let validated = loaded.engine.import_native_input(input).unwrap();
-        let sites = hirsel_driver::native::Sites::new(validated.snapshot());
-        let ready = hirsel_driver::native::build(
-            &validated,
-            &hirsel_driver::native::Options::new(target()),
-        )
-        .unwrap();
-        let run = hirsel_driver::native::run_heap(&ready, &loaded.entry, &sites).unwrap();
+        let sites = hirsel_native::Sites::new(validated.snapshot());
+        let ready =
+            hirsel_native_batch::build(&validated, &hirsel_native::Options::new(target())).unwrap();
+        let run = hirsel_native_testing::run_heap(&ready, &loaded.entry, &sites).unwrap();
         assert_eq!(run.observation.exit_code, Some(0));
         assert!(run.observation.failures.is_empty(), "{:?}", run.observation);
-        use hirsel_driver::native::{OptLevel, Partition, RuntimeBuild, Toolchain};
+        use hirsel_native::{OptLevel, Partition, RuntimeBuild, Toolchain};
         let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join(format!("fstring-append-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -71,7 +68,7 @@ fn primitive_formats_share_the_reserved_output_allocation() {
             },
         )
         .unwrap();
-        let exe = hirsel_driver::native::link_profile(
+        let exe = hirsel_native::link_profile(
             &ready,
             &loaded.entry,
             OptLevel::Speed,

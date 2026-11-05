@@ -244,7 +244,7 @@ fn split_export(text: &str) -> Result<(String, String, Vec<DefPath>), String> {
 fn native_runs(path: &Path) -> String {
     use crate::native;
     let matrix = native::cranelift::matrix(hirsel_native::TargetSpec::x86_64_unknown_linux_gnu());
-    let toolchain = match hirsel_native::runtime_cache().and_then(|cache| {
+    let toolchain = match crate::native::runtime_cache().and_then(|cache| {
         hirsel_native_testing::toolchain_for_matrix(&cache, &matrix).map_err(|e| e.to_string())
     }) {
         Ok(toolchain) => toolchain,

@@ -7,8 +7,9 @@ use hirsel_engine::{
     store::{DirStore, ResultStore},
 };
 use hirsel_native::object_queries::*;
-use hirsel_native_cache::*;
-use hirsel_native_queries::*;
+use hirsel_native::query_model::{
+    ArenaSummary, ComponentKey, InstanceAddress, InstanceProduct, NativeProducts, ReadyProduct,
+};
 use hirsel_syntax::ContentHash;
 use std::path::Path;
 use std::sync::Arc;

@@ -350,6 +350,9 @@ fn a_changed_registration_reinfers_only_the_modules_that_read_it() {
                 panic!("check result")
             };
             assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+            // Reachable Check can use declared headers. Demand the complete
+            // inferred signature inventory before measuring module proofs.
+            session.checked_products(true).unwrap();
             session
                 .recompute_counts(queries.clone())
                 .unwrap()

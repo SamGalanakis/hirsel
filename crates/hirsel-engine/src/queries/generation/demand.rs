@@ -292,6 +292,34 @@ impl DemandProducer {
         }
         Ok(())
     }
+    /// Private work in earlier namespace views is absent from the final Front's
+    /// meter. Count each header owner once; its settled proofs may have already
+    /// supplied facts that the successor reuses without recomputation.
+    pub(crate) fn previous_private_work(
+        &self,
+        initial: &FrontBodyQueries,
+        current: &Arc<SignatureSnapshot>,
+    ) -> Vec<(DefPath, QueryKind, u64)> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut seen = BTreeSet::new();
+        if let Some(headers) = current.header_products() {
+            seen.insert(Arc::as_ptr(headers));
+        }
+        let mut work = Vec::new();
+        for snapshot in std::iter::once(initial.signatures()).chain(
+            state
+                .views
+                .iter()
+                .map(|view| view.body_front().signatures()),
+        ) {
+            if let Some(headers) = snapshot.header_products()
+                && seen.insert(Arc::as_ptr(headers))
+            {
+                headers.private_work(&mut work);
+            }
+        }
+        work
+    }
     pub(crate) fn front_failure(&self, roots: &[DefPath]) -> Option<scope::FrontDemandError> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let initial = state.current.upgrade()?;

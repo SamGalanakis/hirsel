@@ -1138,22 +1138,8 @@ impl QueryEngine {
         self.retire_snapshot();
     }
     pub(crate) fn materialize(&mut self, path: &DefPath) -> Result<(), QueryError> {
-        if let Some(inputs) = self.source_inputs.clone()
-            && inputs.materialize(self, path)?
+        if !self.items.contains_key(path) && self.declared(path) && self.installed_definition(path)
         {
-            return Ok(());
-        }
-        if let Some(headers) = self.header_products.clone()
-            && headers.materialize(self, path)?
-        {
-            return Ok(());
-        }
-        if !self.items.contains_key(path)
-            && let Some(owner) = hirsel_check_protocol::fact::fact_owner(path)
-        {
-            return self.materialize(&owner);
-        }
-        if !self.items.contains_key(path) && self.installed_definition(path) {
             let record = self
                 .installed_semantic_input(path, crate::store::MAX_RECORD as u64)?
                 .ok_or(QueryError::NotImplemented)?;
@@ -1187,9 +1173,22 @@ impl QueryEngine {
                 return Err(QueryError::NotImplemented);
             }
             self.items.insert(path.clone(), vec![syntax]);
-            self.note_inputs([path.clone()]);
-            self.retire_snapshot();
             return Ok(());
+        }
+        if let Some(inputs) = self.source_inputs.clone()
+            && inputs.materialize(self, path)?
+        {
+            return Ok(());
+        }
+        if let Some(headers) = self.header_products.clone()
+            && headers.materialize(self, path)?
+        {
+            return Ok(());
+        }
+        if !self.items.contains_key(path)
+            && let Some(owner) = hirsel_check_protocol::fact::fact_owner(path)
+        {
+            return self.materialize(&owner);
         }
         if !self.items.contains_key(path)
             && let Some((base, bindings)) = hirsel_types::specialization_parts(path)

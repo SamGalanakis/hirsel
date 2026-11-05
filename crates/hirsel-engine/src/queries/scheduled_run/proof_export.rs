@@ -1,6 +1,6 @@
 //! PS9 source export from Run's complete settled package semantic closure.
 //! Ports proof_export::QueryEngine::proof_export_input's selection/formatting;
-//! construction captures source metadata, and Run performs all body demands.
+//! source metadata is inspected only for the completed export closure.
 use super::*;
 use hirsel_proof_export::{Anchor, Annotation, ExportInput, Header, Location, Locator};
 use hirsel_syntax::{AnalysisSite, ItemKind, TypeBody};
@@ -13,15 +13,18 @@ pub struct FrontProofExport {
     headers: Arc<FrontCheckedSignatures>,
     entry: DefPath,
     roots: BTreeSet<DefPath>,
+    sources: SourceMap,
+    metadata: std::sync::OnceLock<Result<ProofSourceMetadata, QueryError>>,
+    signature_edges: std::sync::OnceLock<Result<SignatureEdges, QueryError>>,
+    _allowance: hirsel_engine_admission::MemoryReservation,
+}
+struct ProofSourceMetadata {
     executable: BTreeSet<DefPath>,
     annotations: BTreeMap<DefPath, Vec<Annotation>>,
     modules: BTreeMap<FileId, String>,
     files: BTreeMap<DefPath, Vec<FileId>>,
-    sources: SourceMap,
-    signature_edges: std::sync::OnceLock<Result<SignatureEdges, QueryError>>,
     input_metadata_bytes: u64,
     metadata_bytes: u64,
-    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 struct SignatureEdges {
     edges: BTreeMap<DefId, Vec<DefId>>,
@@ -126,6 +129,10 @@ impl AdmittedProofInput for FrontProofInput {
     }
     fn export_module_bytes(&self) -> usize {
         self._owner
+            .metadata
+            .get()
+            .and_then(|metadata| metadata.as_ref().ok())
+            .expect("proof input has selected source metadata")
             .modules
             .values()
             .map(String::len)
@@ -359,9 +366,165 @@ impl FrontBuiltProof {
     }
 }
 impl FrontProofExport {
-    fn signature_edges(&self) -> Result<&SignatureEdges, QueryError> {
+    fn source_metadata(
+        &self,
+        closure: &BTreeSet<DefPath>,
+    ) -> Result<&ProofSourceMetadata, QueryError> {
+        self.metadata
+            .get_or_init(|| self.capture_source_metadata(closure))
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+    /// Inspect source metadata only after Run has selected its exact closure.
+    /// Capturing an export factory must not demand unused installed syntax.
+    fn capture_source_metadata(
+        &self,
+        closure: &BTreeSet<DefPath>,
+    ) -> Result<ProofSourceMetadata, QueryError> {
+        let mut executable = BTreeSet::new();
+        let mut annotations = BTreeMap::new();
+        let mut modules = BTreeMap::new();
+        let mut files = BTreeMap::new();
+        let namespace = self.run.lower.capture();
+        for path in closure {
+            let owner =
+                hirsel_check_protocol::fact::fact_owner(path).unwrap_or_else(|| path.clone());
+            if !namespace.source_paths.contains(&DefId::intern(&owner)) {
+                continue;
+            }
+            let syntax = namespace.syntax(&owner)?;
+            let mut module = format!("{}@{}", path.0.package.name, path.0.package.version);
+            for part in &path.0.modules {
+                module.push('/');
+                module.push_str(part);
+            }
+            let file = self
+                .sources
+                .anchor(syntax.anchor)
+                .ok_or(QueryError::NotImplemented)?
+                .0;
+            modules.insert(file, module);
+            files
+                .entry(path.clone())
+                .or_insert_with(Vec::new)
+                .push(file);
+            let own = hirsel_check_protocol::fact::fact_owner(path).is_none();
+            let rows = annotations.entry(path.clone()).or_insert_with(Vec::new);
+            for a in syntax.tree.analyses.iter().filter(|_| own) {
+                let anchor = match a.site {
+                    AnalysisSite::Item => Anchor::Item,
+                    AnalysisSite::Parameter(i) => Anchor::Parameter(i),
+                    AnalysisSite::Field(i) => Anchor::Field(i),
+                    AnalysisSite::Payload { variant, field } => Anchor::Payload { variant, field },
+                };
+                rows.push((anchor, a.clone()));
+            }
+            match &syntax.item.kind {
+                _ if generation::executable(&syntax) => {
+                    executable.insert(path.clone());
+                }
+                ItemKind::Type {
+                    body: TypeBody::Distinct { fact: Some(_), .. },
+                    ..
+                } => {
+                    executable.insert(hirsel_check_protocol::fact::fact_path(&owner));
+                }
+                _ => {}
+            }
+        }
+        let sources = self.sources.clone();
+        let annotations: BTreeMap<_, Vec<_>> = annotations
+            .into_iter()
+            .map(|(path, rows)| {
+                let rows = rows
+                    .into_iter()
+                    .map(|(anchor, a)| Annotation {
+                        path: path.clone(),
+                        anchor,
+                        name: a.name,
+                        payload: a.payload,
+                        location: location(&sources, &modules, a.origin.span),
+                    })
+                    .collect();
+                (path, rows)
+            })
+            .collect();
+        // The captured headers and their type snapshot are immutable. Export
+        // derives their closure once, only when its input is requested.
+        let mut input_weight = crate::NativeMetadataWeight::default();
+        input_weight
+            .add(size_of::<FrontProofInput>() + size_of::<SourceMap>() + 8 * size_of::<usize>());
+        input_weight.add(hirsel_proof_export::FORMAT.len());
+        input_weight.add(self.headers.environment().compiler_version.capacity());
+        input_weight.path(&self.entry);
+        input_weight.source_snapshot(&sources);
+        input_weight.tree::<FileId, ()>(modules.len());
+        input_weight.map(&modules, |w, _, module| w.add(module.capacity()));
+        let annotation_count: usize = annotations.values().map(Vec::len).sum();
+        input_weight.add(
+            annotation_count
+                .saturating_mul(2)
+                .max(4)
+                .saturating_mul(size_of::<Annotation>()),
+        );
+        for rows in annotations.values() {
+            for a in rows {
+                input_weight.path(&a.path);
+                input_weight.add(a.name.capacity());
+                input_weight.add(a.location.module.capacity());
+                input_weight.vec(&a.payload, |w, token| w.add(token.capacity()));
+            }
+        }
+        let input_metadata_bytes = input_weight
+            .bytes()
+            .checked_add(
+                self.headers
+                    .sections_clone_bytes()
+                    .ok_or(QueryError::NotImplemented)?,
+            )
+            .ok_or(QueryError::NotImplemented)?;
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(
+            size_of::<FrontProofExport>()
+                + size_of::<ProofSourceMetadata>()
+                + 2 * size_of::<usize>(),
+        );
+        weight.path(&self.entry);
+        weight.source_snapshot(&sources);
+        weight.tree::<DefPath, ()>(self.roots.len() + executable.len());
+        for path in self.roots.iter().chain(&executable) {
+            weight.path(path);
+        }
+        weight.map(&modules, |w, _, module| w.add(module.capacity()));
+        weight.map(&files, |w, path, files| {
+            w.path(path);
+            w.flat_vec(files);
+        });
+        weight.map(&annotations, |w, path, rows| {
+            w.path(path);
+            w.vec(rows, |w, a| {
+                w.path(&a.path);
+                w.add(a.name.capacity());
+                w.add(a.location.module.capacity());
+                w.vec(&a.payload, |w, token| w.add(token.capacity()));
+            });
+        });
+        if weight.bytes() > self._allowance.bytes() {
+            return Err(operational("PS9 source metadata exceeds admission"));
+        }
+        Ok(ProofSourceMetadata {
+            executable,
+            annotations,
+            modules,
+            files,
+            input_metadata_bytes,
+            metadata_bytes: weight.bytes(),
+        })
+    }
+    fn signature_edges(&self, closure: &BTreeSet<DefPath>) -> Result<&SignatureEdges, QueryError> {
         self.signature_edges
             .get_or_init(|| {
+                let metadata = self.source_metadata(closure)?;
                 let types = self.run.lower.signatures().types().clone();
                 let mut edges = BTreeMap::new();
                 for (path, _) in self.headers.signatures() {
@@ -377,7 +540,7 @@ impl FrontProofExport {
                 }
                 let mut weight = crate::NativeMetadataWeight::default();
                 weight.map(&edges, |weight, _, edges| weight.flat_vec(edges));
-                if self
+                if metadata
                     .metadata_bytes
                     .checked_add(weight.bytes())
                     .is_none_or(|bytes| bytes > self._allowance.bytes())
@@ -389,7 +552,7 @@ impl FrontProofExport {
                     .saturating_mul(2)
                     .max(4)
                     .saturating_mul(size_of::<DefId>()) as u64;
-                let input_metadata_bytes = self
+                let input_metadata_bytes = metadata
                     .input_metadata_bytes
                     .checked_add(bytes)
                     .ok_or(QueryError::NotImplemented)?;
@@ -421,7 +584,8 @@ impl FrontProofExport {
         if !self.roots.is_subset(closure) {
             return Err(QueryError::NotImplemented);
         }
-        let mut required = self.signature_edges()?.input_metadata_bytes;
+        let metadata = self.source_metadata(closure)?;
+        let mut required = self.signature_edges(closure)?.input_metadata_bytes;
         let mut transient = 0u64;
         let mut maps = crate::NativeMetadataWeight::default();
         maps.tree::<DefPath, hirsel_tir::DefinitionRef>(closure.len());
@@ -438,7 +602,7 @@ impl FrontProofExport {
                     .checked_add(self.run.lower.settled_constant_clone_bytes(path)?)
                     .ok_or(QueryError::NotImplemented)?;
             }
-            if self.executable.contains(path) {
+            if metadata.executable.contains(path) {
                 let layout = self.run.lower.settled_definition_decode_layout(path)?;
                 required = required
                     .checked_add(layout.retained)
@@ -574,6 +738,7 @@ impl FrontProofExport {
         if !self.roots.is_subset(closure) {
             return Err(QueryError::NotImplemented);
         }
+        let metadata = self.source_metadata(closure)?;
         let mut signatures = BTreeMap::new();
         let mut definitions = BTreeMap::new();
         let mut constants = BTreeMap::new();
@@ -590,12 +755,12 @@ impl FrontProofExport {
                 );
             }
             signatures.insert(path.clone(), section);
-            if self.executable.contains(path) {
+            if metadata.executable.contains(path) {
                 let definition = self.run.lower.settled_definition(path)?;
                 // The input grant covers a copy that PS9 consumes while Lower keeps its original.
                 definitions.insert(path.clone(), Arc::new(Arc::unwrap_or_clone(definition)));
             }
-            if let Some(rows) = self.annotations.get(path) {
+            if let Some(rows) = metadata.annotations.get(path) {
                 annotations.extend(rows.iter().cloned());
             }
         }
@@ -605,7 +770,7 @@ impl FrontProofExport {
         let mut pending = Vec::new();
         for path in signatures.keys() {
             pending.extend(
-                self.signature_edges()?
+                self.signature_edges(closure)?
                     .edges
                     .get(&DefId::intern(path))
                     .ok_or(QueryError::NotImplemented)?
@@ -623,7 +788,7 @@ impl FrontProofExport {
                 .section(path)
                 .ok_or(QueryError::NotImplemented)?;
             pending.extend(
-                self.signature_edges()?
+                self.signature_edges(closure)?
                     .edges
                     .get(&id)
                     .ok_or(QueryError::NotImplemented)?
@@ -635,10 +800,10 @@ impl FrontProofExport {
         let sources = Rc::new(self.sources.clone());
         let selected_files: BTreeSet<_> = closure
             .iter()
-            .filter_map(|path| self.files.get(path))
+            .filter_map(|path| metadata.files.get(path))
             .flat_map(|files| files.iter().copied())
             .collect();
-        let modules = self
+        let modules = metadata
             .modules
             .iter()
             .filter(|(file, _)| selected_files.contains(file))
@@ -733,143 +898,14 @@ impl QueryEngine {
         {
             return Err(QueryError::NotImplemented);
         }
-        let mut executable = BTreeSet::new();
-        let mut annotations = BTreeMap::new();
-        let mut modules = BTreeMap::new();
-        let mut files = BTreeMap::new();
-        for path in self.source_paths() {
-            self.materialize(&path)?;
-            let Ok(items) = self.definition_items(&path) else {
-                continue;
-            };
-            for syntax in items {
-                let mut module = format!("{}@{}", path.0.package.name, path.0.package.version);
-                for part in &path.0.modules {
-                    module.push('/');
-                    module.push_str(part);
-                }
-                let file = self.item_file(&syntax);
-                modules.insert(file, module);
-                files
-                    .entry(path.clone())
-                    .or_insert_with(Vec::new)
-                    .push(file);
-                let own = hirsel_check_protocol::fact::fact_owner(&path).is_none();
-                let rows = annotations.entry(path.clone()).or_insert_with(Vec::new);
-                for a in syntax.tree.analyses.iter().filter(|_| own) {
-                    let anchor = match a.site {
-                        AnalysisSite::Item => Anchor::Item,
-                        AnalysisSite::Parameter(i) => Anchor::Parameter(i),
-                        AnalysisSite::Field(i) => Anchor::Field(i),
-                        AnalysisSite::Payload { variant, field } => {
-                            Anchor::Payload { variant, field }
-                        }
-                    };
-                    rows.push((anchor, a.clone()));
-                }
-                match &syntax.item.kind {
-                    _ if generation::executable(&syntax) => {
-                        executable.insert(path.clone());
-                    }
-                    ItemKind::Type {
-                        body: TypeBody::Distinct { fact: Some(_), .. },
-                        ..
-                    } => {
-                        executable.insert(hirsel_check_protocol::fact::fact_path(&path));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let sources = self.sources.clone();
-        let annotations: BTreeMap<_, Vec<_>> = annotations
-            .into_iter()
-            .map(|(path, rows)| {
-                let rows = rows
-                    .into_iter()
-                    .map(|(anchor, a)| Annotation {
-                        path: path.clone(),
-                        anchor,
-                        name: a.name,
-                        payload: a.payload,
-                        location: location(&sources, &modules, a.origin.span),
-                    })
-                    .collect();
-                (path, rows)
-            })
-            .collect();
-        // The captured headers and their type snapshot are immutable. Export
-        // derives their closure once, only when its input is requested.
-        let mut input_weight = crate::NativeMetadataWeight::default();
-        input_weight
-            .add(size_of::<FrontProofInput>() + size_of::<SourceMap>() + 8 * size_of::<usize>());
-        input_weight.add(hirsel_proof_export::FORMAT.len());
-        input_weight.add(headers.environment().compiler_version.capacity());
-        input_weight.path(entry);
-        input_weight.source_snapshot(&sources);
-        input_weight.tree::<FileId, ()>(modules.len());
-        input_weight.map(&modules, |w, _, module| w.add(module.capacity()));
-        let annotation_count: usize = annotations.values().map(Vec::len).sum();
-        input_weight.add(
-            annotation_count
-                .saturating_mul(2)
-                .max(4)
-                .saturating_mul(size_of::<Annotation>()),
-        );
-        for rows in annotations.values() {
-            for a in rows {
-                input_weight.path(&a.path);
-                input_weight.add(a.name.capacity());
-                input_weight.add(a.location.module.capacity());
-                input_weight.vec(&a.payload, |w, token| w.add(token.capacity()));
-            }
-        }
-        let input_metadata_bytes = input_weight
-            .bytes()
-            .checked_add(
-                headers
-                    .sections_clone_bytes()
-                    .ok_or(QueryError::NotImplemented)?,
-            )
-            .ok_or(QueryError::NotImplemented)?;
-        let mut weight = crate::NativeMetadataWeight::default();
-        weight.add(size_of::<FrontProofExport>() + 2 * size_of::<usize>());
-        weight.path(entry);
-        weight.source_snapshot(&sources);
-        weight.tree::<DefPath, ()>(roots.len() + executable.len());
-        for path in roots.iter().chain(&executable) {
-            weight.path(path);
-        }
-        weight.map(&modules, |w, _, module| w.add(module.capacity()));
-        weight.map(&files, |w, path, files| {
-            w.path(path);
-            w.flat_vec(files);
-        });
-        weight.map(&annotations, |w, path, rows| {
-            w.path(path);
-            w.vec(rows, |w, a| {
-                w.path(&a.path);
-                w.add(a.name.capacity());
-                w.add(a.location.module.capacity());
-                w.vec(&a.payload, |w, token| w.add(token.capacity()));
-            });
-        });
-        if weight.bytes() > allowance.bytes() {
-            return Err(operational("PS9 source metadata exceeds admission"));
-        }
         Ok(Arc::new(FrontProofExport {
             run,
             headers,
             entry: entry.clone(),
             roots,
-            executable,
-            annotations,
-            modules,
-            files,
-            sources,
+            sources: self.sources.clone(),
+            metadata: std::sync::OnceLock::new(),
             signature_edges: std::sync::OnceLock::new(),
-            input_metadata_bytes,
-            metadata_bytes: weight.bytes(),
             _allowance: allowance,
         }))
     }

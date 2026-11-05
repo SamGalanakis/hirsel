@@ -633,10 +633,14 @@ impl InstalledPackage {
     /// Audit the complete published installation, including unused products.
     pub fn verify_store(root: &Path) -> Result<(), String> {
         let store = hirsel_artifact_store::Store::new(root.to_owned());
+        Self::audit(&store).map(|_| ())
+    }
+    pub(super) fn audit(
+        store: &hirsel_artifact_store::Store,
+    ) -> Result<hirsel_artifact_store::VerifiedRecords, String> {
         let _scope = store.batch();
-        let installed = Self::read(&store)?;
-        installed.check_records(&store)?;
-        Ok(())
+        let installed = Self::read(store)?;
+        installed.check_records(store)
     }
     fn read(store: &hirsel_artifact_store::Store) -> Result<Self, String> {
         let row = store

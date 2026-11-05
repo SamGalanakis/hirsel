@@ -581,7 +581,7 @@ mod tests {
     use crate::store::{Domain, ResultStore};
 
     #[test]
-    fn installed_closure_checks_unique_references_once_and_reuses_all_read_paths() {
+    fn installed_audit_checks_unique_references_once_and_reads_verify_on_demand() {
         use crate::store::{
             Action, Address, InstalledPackage, InstalledSource, installed::InstallationRecords,
         };
@@ -656,13 +656,39 @@ mod tests {
         batch.finish().unwrap();
         let local_statistics = local.enable_statistics();
         let statistics = provider.read_only[0].enable_statistics();
-        let operation = provider.for_operation().unwrap();
-        let _scope = operation.read_scope();
-        let package_owner = operation.installed_package(&package, compiler).unwrap();
-        // Exactly one complete content check per product plus the interface.
+        let audit = InstalledPackage::audit(&provider.read_only[0]).unwrap();
+        // The whole-store audit retains the existing full-closure work law.
         let checks = inputs.len() as u64 + 1;
         assert_eq!(statistics.snapshot().counters["ContentChecks"], checks);
         let opened = statistics.snapshot();
+        for _ in 0..2 {
+            for (_, _, reference, expected) in &inputs {
+                let content = audit.get(*reference).unwrap();
+                assert_eq!(&*content, expected);
+                assert!(content.matches_reference(*reference));
+            }
+        }
+        let consumed = statistics.snapshot();
+        for counter in ["ContentChecks", "SegmentOpens", "StandaloneOpens"] {
+            assert_eq!(
+                consumed.counters[counter], opened.counters[counter],
+                "{counter}"
+            );
+        }
+        assert!(consumed.counters["RetainedRegionPeakCount"] <= 64);
+        assert!(consumed.counters["RetainedRegionPeakBytes"] <= 32 << 20);
+        InstalledPackage::audit(&provider.read_only[0]).unwrap();
+        assert_eq!(statistics.snapshot().counters["ContentChecks"], 2 * checks);
+
+        let before = statistics.snapshot();
+        let operation = provider.for_operation().unwrap();
+        let _scope = operation.read_scope();
+        let package_owner = operation.installed_package(&package, compiler).unwrap();
+        assert_eq!(
+            statistics.snapshot().counters["ContentChecks"],
+            before.counters["ContentChecks"] + 1,
+            "opening verifies the interface, not the unused closure"
+        );
         let source = package_owner.source_records().unwrap();
         assert!(source.metadata_bytes() >= inputs.len() * size_of::<crate::store::Reference>());
         #[cfg(unix)]
@@ -687,29 +713,15 @@ mod tests {
                 );
             }
         }
-        let consumed = statistics.snapshot();
-        eprintln!(
-            "INSTALLED_INTEGRITY unique={} open={} consumed={} local={} total={}",
-            checks,
-            opened.counters["ContentChecks"],
-            consumed.counters["ContentChecks"],
-            local_statistics.snapshot().counters["ContentChecks"],
-            consumed.counters["ContentChecks"]
-                + local_statistics.snapshot().counters["ContentChecks"]
-        );
-        for counter in ["ContentChecks", "SegmentOpens", "StandaloneOpens"] {
-            assert_eq!(
-                consumed.counters[counter], opened.counters[counter],
-                "{counter}"
-            );
-        }
-        assert!(consumed.counters["RetainedRegionPeakCount"] <= 64);
-        assert!(consumed.counters["RetainedRegionPeakBytes"] <= 32 << 20);
         assert_eq!(local_statistics.snapshot().counters["ContentChecks"], 0);
-        // An independent operation rechecks even while old handles stay alive.
+        // An independent operation verifies its interface before demand too.
+        let consumed = statistics.snapshot();
         let next = provider.for_operation().unwrap();
         next.installed_package(&package, compiler).unwrap();
-        assert_eq!(statistics.snapshot().counters["ContentChecks"], 2 * checks);
+        assert_eq!(
+            statistics.snapshot().counters["ContentChecks"],
+            consumed.counters["ContentChecks"] + 1
+        );
 
         // Integrity ownership uses the existing transport grant once, and
         // source snapshots cannot keep that grant alive after the request.

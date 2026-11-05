@@ -19,7 +19,7 @@ fn object_requests_emit_generic_helpers_without_link_or_launch() {
     hirsel_engine::with_compiler_stack(|| {
         let directory = tempfile::tempdir().unwrap();
         let manifest = directory.path().join("hirsel.json");
-        std::fs::write(directory.path().join("sample.hir"), "pub fn keep[T](name take value:T)->T uses {value} {value}\npub fn empty[T]()->List[T] uses {} {[]}\nfn unused_make()->Result[Body[fn()->u64 uses {}],String]{Error(\"unselected generator must stay idle\")}\nfn unused()->u64 uses {} = comptime unused_make()\n").unwrap();
+        std::fs::write(directory.path().join("sample.hir"), "pub fn keep[T](name take value:T)->T uses {value} {value}\npub fn empty[T]()->List[T] uses {} {[]}\nfn unused_make()->Result[Body[fn()->u64 uses {}],String]{Error(\"unselected generator must stay idle\")}\nfn unused[T]()->u64 uses {} = comptime unused_make()\n").unwrap();
         std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"object_helpers","version":"1"},"sources":[{"path":"sample.hir","module":["sample"]}],"dependencies":[]}"#).unwrap();
         let compiler = hirsel_front_phases::COMPILER.with_owned_engines();
         let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();

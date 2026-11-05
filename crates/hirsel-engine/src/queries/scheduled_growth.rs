@@ -41,7 +41,7 @@ pub struct FrontGrowthQueries {
     failure: Mutex<Option<(Reference, QueryError)>>,
     weight: MemoryWeight,
     errors: RuntimeErrors,
-    output_pool: hirsel_engine_admission::MemoryReservationPool,
+    output_pool: Arc<OutputPartition>,
     _allowance: hirsel_engine_admission::MemoryReservation,
 }
 #[derive(Clone)]
@@ -71,7 +71,7 @@ impl FrontGrowthQueries {
     fn producer(&self) -> SourceGrowthProducer<'_> {
         SourceGrowthProducer {
             source: &self.items,
-            output_pool: &self.output_pool,
+            output_pool: &self.output_pool.pool,
             namespace: self.query.address,
             scratch: self.weight.scratch,
         }
@@ -205,6 +205,7 @@ impl QueryFactory for Factory {
             .ok_or(queries.errors.resource)?;
         let admission = queries
             .output_pool
+            .pool
             .take(bytes)
             .ok_or(queries.errors.resource)?;
         Ok(Box::new(FactTask {
@@ -309,7 +310,7 @@ impl FactTask {
                     return Poll::Ready(Err(self.queries.errors.resource));
                 };
                 let bytes = fact.input_bytes() - std::mem::size_of::<SourceGrowthFact>() as u64;
-                let Some(charge) = self.queries.output_pool.take(bytes) else {
+                let Some(charge) = self.queries.output_pool.pool.take(bytes) else {
                     return Poll::Ready(Err(self.queries.errors.resource));
                 };
                 if self.admission.join(charge).is_err() {
@@ -339,6 +340,7 @@ impl FactTask {
             &mut self.admission,
             self.queries
                 .output_pool
+                .pool
                 .take(0)
                 .ok_or(self.queries.errors.resource)?,
         );
@@ -510,6 +512,7 @@ impl FrontGrowthQueries {
         .ok_or(self.errors.protocol)?;
         let mut allowance = self
             .output_pool
+            .pool
             .take(LiveSourceGrowthProduct::source_bytes())
             .ok_or(self.errors.resource)?;
         let admitted = LiveSourceGrowthProduct::admit_source(
@@ -633,7 +636,7 @@ impl Task {
                 if components
                     .push(
                         value.clone(),
-                        &queries.output_pool,
+                        &queries.output_pool.pool,
                         membership.components.len() - self.component_cursor,
                     )
                     .is_none()
@@ -809,7 +812,7 @@ impl Task {
                 ArchivedReader::capture_owned(
                     queries.publication_source()?,
                     &reads,
-                    &queries.output_pool,
+                    &queries.output_pool.pool,
                 )
                 .ok_or(queries.errors.resource)?
             };
@@ -821,6 +824,7 @@ impl Task {
         let required = LiveGrowthProduct::value_bytes(&data).ok_or(queries.errors.resource)?;
         let mut allowance = queries
             .output_pool
+            .pool
             .take(required)
             .ok_or(queries.errors.resource)?;
         let source = ProductSource::prepare(
@@ -870,9 +874,10 @@ impl QueryEngine {
         root: &DefPath,
         front: Arc<FrontBodyQueries>,
         weight: MemoryWeight,
-        mut allowance: hirsel_engine_admission::MemoryReservation,
+        allowance: impl Into<ProducerAdmission>,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontGrowthQueries>, QueryError> {
+        let allowance = allowance.into();
         let refusal = || {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "source growth admission".into(),
@@ -910,13 +915,7 @@ impl QueryEngine {
         retained.add(std::mem::size_of::<FrontGrowthQueries>() + 2 * std::mem::size_of::<usize>());
         retained.flat_vec(&roots);
         retained.add(package.name.capacity() + package.version.capacity());
-        let output_budget = allowance
-            .bytes()
-            .checked_sub(retained.bytes())
-            .ok_or_else(refusal)?;
-        let output = allowance.split(output_budget).ok_or_else(refusal)?;
-        let output_pool =
-            hirsel_engine_admission::MemoryReservationPool::new(output).map_err(|_| refusal())?;
+        let (allowance, output_pool) = allowance.partition(retained.bytes()).ok_or_else(refusal)?;
         let query = QueryId {
             kind: FRONT_GROWTH_KIND,
             address: hirsel_artifact_store::Address(ContentHash::of_parts(

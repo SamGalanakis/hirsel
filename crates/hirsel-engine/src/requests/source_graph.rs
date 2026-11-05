@@ -1187,36 +1187,35 @@ pub fn install(
             .install_carry(carry.lower.clone())
             .map_err(|_| uninstalled())?;
     }
-    let storage_allowance = if shape.storage {
-        // Each producer keeps its fixed input inventory. Only the remaining
-        // output grant is shared; splitting the whole grant steals Growth's
-        // already admitted source roots on large source scopes.
+    let (growth_admission, storage_allowance) = if shape.storage {
         let recipe_inputs =
             FrontStorageQueries::input_bytes(&front).ok_or_else(|| uninstalled())?;
         let graph_inputs =
             FrontStorageGraphQueries::input_bytes(&definitions).ok_or_else(|| uninstalled())?;
         let growth_inputs = FrontGrowthQueries::input_bytes(&definitions, plan.root)
             .ok_or_else(|| uninstalled())?;
-        let share = growth
-            .bytes()
-            .checked_sub(recipe_inputs)
-            .and_then(|bytes| bytes.checked_sub(graph_inputs))
-            .and_then(|bytes| bytes.checked_sub(growth_inputs))
-            .ok_or_else(|| uninstalled())?
-            / 3;
-        Some((
-            growth
-                .split(recipe_inputs + share)
-                .ok_or_else(|| uninstalled())?,
-            growth
-                .split(graph_inputs + share)
-                .ok_or_else(|| uninstalled())?,
-        ))
+        let recipe = growth.split(recipe_inputs).ok_or_else(|| uninstalled())?;
+        let graph = growth.split(graph_inputs).ok_or_else(|| uninstalled())?;
+        let roots = growth.split(growth_inputs).ok_or_else(|| uninstalled())?;
+        let outputs = OutputPartition::new(growth).ok_or_else(|| uninstalled())?;
+        (
+            ProducerAdmission::shared(roots, outputs.clone()),
+            Some((
+                ProducerAdmission::shared(recipe, outputs.clone()),
+                ProducerAdmission::shared(graph, outputs),
+            )),
+        )
     } else {
-        None
+        (growth.into(), None)
     };
     let growth = engine
-        .front_growth_queries(&selection.entry, front.clone(), plan.root, growth, errors)
+        .front_growth_queries(
+            &selection.entry,
+            front.clone(),
+            plan.root,
+            growth_admission,
+            errors,
+        )
         .map_err(query_error)?;
     let storage = storage_allowance
         .map(|(recipe_allowance, graph_allowance)| {

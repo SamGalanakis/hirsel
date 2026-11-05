@@ -16,45 +16,68 @@ const FAILURE: Domain = Domain {
 struct Outcome {
     result: Result<(ProductRef, Arc<QueryOutput<StorageDefinition>>), (Reference, QueryError)>,
     reads: Arc<Reads>,
+    _reservation: hirsel_engine_admission::MemoryReservation,
+    _source: Arc<FrontBodyQueries>,
+}
+#[derive(Default)]
+struct Outcomes {
+    values: BTreeMap<Key, Arc<Outcome>>,
+    directory: Option<hirsel_engine_admission::MemoryReservation>,
+}
+impl Outcomes {
+    fn get(&self, key: &Key) -> Option<&Arc<Outcome>> {
+        self.values.get(key)
+    }
+    fn values(&self) -> impl Iterator<Item = &Arc<Outcome>> {
+        self.values.values()
+    }
+    fn insert(&mut self, key: Key, outcome: Arc<Outcome>, outputs: &OutputPartition) -> Option<()> {
+        let len = self
+            .values
+            .len()
+            .checked_add(usize::from(!self.values.contains_key(&key)))?;
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.tree::<Key, Arc<Outcome>>(len);
+        let current = self.directory.as_ref().map_or(0, |grant| grant.bytes());
+        let extra = outputs.pool.take(weight.bytes().checked_sub(current)?)?;
+        if let Some(directory) = &mut self.directory {
+            directory.join(extra).ok()?;
+        } else {
+            self.directory = Some(extra);
+        }
+        self.values.insert(key, outcome);
+        Some(())
+    }
 }
 pub struct FrontStorageQueries {
     front: Arc<FrontBodyQueries>,
-    completed: Mutex<BTreeMap<Key, Outcome>>,
+    completed: Mutex<Outcomes>,
     anchors: Arc<crate::NativeRecordContext>,
     records: crate::NativeRecords,
     weight: MemoryWeight,
     errors: RuntimeErrors,
-    retention: Arc<Mutex<u64>>,
+    outputs: Arc<OutputPartition>,
     executions: std::sync::atomic::AtomicU64,
-    _allowance: Arc<hirsel_engine_admission::MemoryReservation>,
+    _allowance: hirsel_engine_admission::MemoryReservation,
 }
 #[derive(Clone)]
 pub struct FrontStorageOutput {
-    pub output: Arc<QueryOutput<StorageDefinition>>,
-    pub reads: Arc<Reads>,
-    _owner: Arc<FrontStorageQueries>,
+    pub output: RetainedView<QueryOutput<StorageDefinition>>,
+    pub reads: RetainedView<Reads>,
 }
 impl FrontStorageQueries {
     /// The immutable front already owns the address/definition index. Only
     /// demanded recipes need a task or a completed output in this owner.
     pub fn input_bytes(_front: &FrontBodyQueries) -> Option<u64> {
-        Some(
-            (std::mem::size_of::<Self>()
-                + std::mem::size_of::<Mutex<u64>>()
-                + std::mem::size_of::<hirsel_engine_admission::MemoryReservation>()
-                + 4 * std::mem::size_of::<usize>()) as u64,
-        )
+        Self::input_bytes_for_definitions(std::iter::empty())
     }
     /// The same shared-index owner before front construction.
     pub fn input_bytes_for_definitions<'a>(
         _definitions: impl IntoIterator<Item = &'a DefPath>,
     ) -> Option<u64> {
-        Some(
-            (std::mem::size_of::<Self>()
-                + std::mem::size_of::<Mutex<u64>>()
-                + std::mem::size_of::<hirsel_engine_admission::MemoryReservation>()
-                + 4 * std::mem::size_of::<usize>()) as u64,
-        )
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(size_of::<Self>() + 2 * size_of::<usize>());
+        Some(weight.bytes())
     }
     fn address(input: Key) -> Key {
         ContentHash::of_parts("hirsel.front.storage.address.v1", [input.0.as_slice()])
@@ -90,9 +113,8 @@ impl FrontStorageQueries {
             Ok((_, _)) | Err((_, _)) => return None,
         };
         Some(FrontStorageOutput {
-            output: output.clone(),
-            reads: selected.reads.clone(),
-            _owner: self.clone(),
+            output: RetainedView::new(output.clone(), selected.clone()),
+            reads: RetainedView::new(selected.reads.clone(), selected.clone()),
         })
     }
     pub fn failure(&self, reference: Reference) -> Option<QueryError> {
@@ -128,7 +150,6 @@ impl QueryFactory for StorageFactory {
             owner: self.0.clone(),
             id,
             definition,
-            admitted: false,
             body: None,
             terminal,
         }))
@@ -138,7 +159,6 @@ struct StorageTask {
     owner: Arc<FrontStorageQueries>,
     id: QueryId,
     definition: DefId,
-    admitted: bool,
     body: Option<Box<dyn QueryTask>>,
     terminal: Option<Result<ProductRef, Reference>>,
 }
@@ -158,25 +178,6 @@ impl QueryTask for StorageTask {
     fn poll(&mut self, cx: &mut dyn QueryContext) -> QueryPoll {
         if let Some(terminal) = self.terminal.clone() {
             return finish(terminal);
-        }
-        if !self.admitted {
-            let bound = self
-                .owner
-                .weight
-                .retained
-                .saturating_mul(2)
-                .saturating_add(512);
-            let mut retention = self
-                .owner
-                .retention
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if *retention < bound {
-                self.terminal = Some(Err(self.owner.errors.resource));
-                return finish(self.terminal.clone().unwrap());
-            }
-            *retention -= bound;
-            self.admitted = true;
         }
         let path = self.definition.path();
         let Some(front) = self.owner.front.query(path) else {
@@ -322,18 +323,33 @@ impl StorageTask {
                 let product = ProductRef::import_archive(
                     self.id.address,
                     action,
-                    ProductArchive::from_retained_bytes(
-                        record,
-                        bytes.into(),
-                        owner._allowance.clone(),
-                        owner.retention.clone(),
-                    )
-                    .map_err(|_| owner.errors.resource)?,
+                    ProductArchive::from_encoded_in(record, bytes, &owner.outputs.pool)
+                        .map_err(|_| owner.errors.resource)?,
                 );
                 associated = Some((product.address, product.action, record));
                 Ok((product, output))
             }
         };
+        let mut weight = crate::memo::retained::Weight::default();
+        weight.add(
+            crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<Outcome>::uninit()) as usize,
+        );
+        weight.reads(&reads);
+        match &result {
+            Ok((_, output)) => weight.arc(output, |w, output| {
+                w.storage_definition(&output.value);
+                w.vec(&output.diagnostics, |w, diagnostic| {
+                    w.diagnostic(diagnostic)
+                });
+                w.flat_vec(&output.dependencies);
+            }),
+            Err((_, error)) => weight.error(error),
+        }
+        let reservation = owner
+            .outputs
+            .pool
+            .take(weight.bytes)
+            .ok_or(owner.errors.resource)?;
         let terminal = match &result {
             Ok((product, _)) => Ok(product.clone()),
             Err((reference, _)) => Err(*reference),
@@ -342,7 +358,17 @@ impl StorageTask {
             .completed
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(self.id.address.0, Outcome { result, reads });
+            .insert(
+                self.id.address.0,
+                Arc::new(Outcome {
+                    result,
+                    reads,
+                    _reservation: reservation,
+                    _source: owner.front.clone(),
+                }),
+                &owner.outputs,
+            )
+            .ok_or(owner.errors.resource)?;
         if let Some((address, action, record)) = associated {
             owner.front.store.associate_product(address, action, record);
         }
@@ -354,25 +380,26 @@ impl QueryEngine {
         &mut self,
         front: Arc<FrontBodyQueries>,
         weight: MemoryWeight,
-        allowance: hirsel_engine_admission::MemoryReservation,
+        allowance: impl Into<ProducerAdmission>,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontStorageQueries>, QueryError> {
         let inventory =
             FrontStorageQueries::input_bytes(&front).ok_or(QueryError::NotImplemented)?;
-        if inventory > allowance.bytes() {
-            return Err(QueryError::NotImplemented);
-        }
+        let (allowance, outputs) = allowance
+            .into()
+            .partition(inventory)
+            .ok_or(QueryError::NotImplemented)?;
         let source = front.stage_source();
         Ok(Arc::new(FrontStorageQueries {
             front,
-            completed: Mutex::new(BTreeMap::new()),
+            completed: Mutex::new(Outcomes::default()),
             anchors: source.anchors,
             records: source.records,
             weight,
             errors,
-            retention: Arc::new(Mutex::new(allowance.bytes() - inventory)),
+            outputs,
             executions: std::sync::atomic::AtomicU64::new(0),
-            _allowance: Arc::new(allowance),
+            _allowance: allowance,
         }))
     }
 }

@@ -26,12 +26,13 @@ struct Data {
     profiles: Arc<Vec<CallableStorageProfile>>,
     diagnostics: Arc<Vec<Diagnostic>>,
     reads: Arc<Reads>,
+    _reservation: hirsel_engine_admission::MemoryReservation,
+    _source: Arc<FrontBodyQueries>,
 }
 pub struct FrontStorageGraphOutput {
-    pub profiles: Arc<Vec<CallableStorageProfile>>,
-    pub diagnostics: Arc<Vec<Diagnostic>>,
-    pub reads: Arc<Reads>,
-    _owner: Arc<FrontStorageGraphQueries>,
+    pub profiles: RetainedView<Vec<CallableStorageProfile>>,
+    pub diagnostics: RetainedView<Vec<Diagnostic>>,
+    pub reads: RetainedView<Reads>,
 }
 pub struct FrontStorageGraphQueries {
     query: QueryId,
@@ -45,11 +46,17 @@ pub struct FrontStorageGraphQueries {
     anchors: Arc<crate::NativeRecordContext>,
     store: Arc<dyn ResultStore>,
     completed: Mutex<Option<(ProductRef, Arc<Data>)>>,
-    failure: Mutex<Option<(Reference, QueryError)>>,
+    failure: Mutex<
+        Option<(
+            Reference,
+            QueryError,
+            hirsel_engine_admission::MemoryReservation,
+        )>,
+    >,
     executions: AtomicU64,
     weight: MemoryWeight,
     errors: RuntimeErrors,
-    output_budget: u64,
+    outputs: Arc<OutputPartition>,
     _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontStorageGraphQueries {
@@ -65,7 +72,7 @@ impl FrontStorageGraphQueries {
     }
     pub fn input_bytes(definitions: &[DefPath]) -> Option<u64> {
         let mut weight = crate::NativeMetadataWeight::default();
-        weight.add(std::mem::size_of::<Self>());
+        weight.add(std::mem::size_of::<Self>() + 2 * size_of::<usize>());
         weight.add(
             definitions
                 .len()
@@ -87,10 +94,9 @@ impl FrontStorageGraphQueries {
         let completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
         let (selected, data) = completed.as_ref()?;
         (*selected == product).then(|| FrontStorageGraphOutput {
-            profiles: data.profiles.clone(),
-            diagnostics: data.diagnostics.clone(),
-            reads: data.reads.clone(),
-            _owner: self.clone(),
+            profiles: RetainedView::new(data.profiles.clone(), data.clone()),
+            diagnostics: RetainedView::new(data.diagnostics.clone(), data.clone()),
+            reads: RetainedView::new(data.reads.clone(), data.clone()),
         })
     }
     pub fn failure(&self, reference: Reference) -> Option<QueryError> {
@@ -99,7 +105,7 @@ impl FrontStorageGraphQueries {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-            .and_then(|(selected, error)| (*selected == reference).then(|| error.clone()));
+            .and_then(|(selected, error, _)| (*selected == reference).then(|| error.clone()));
         own.or_else(|| self.recipes.failure(reference))
             .or_else(|| self.lower.failure(reference))
             .or_else(|| self.growth.failure(reference))
@@ -116,13 +122,16 @@ impl FrontStorageGraphQueries {
         let Some(bytes) = self.records.encode(&*self.anchors, &error) else {
             return self.errors.resource;
         };
-        if bytes.len() as u64 > self.output_budget {
+        let mut weight = crate::memo::retained::Weight::default();
+        weight.error(&error);
+        let Some(reservation) = self.outputs.pool.take(weight.bytes) else {
             return self.errors.resource;
-        }
+        };
         let Some(reference) = self.store.put_content(FAILURE, &bytes) else {
             return self.errors.resource;
         };
-        *self.failure.lock().unwrap_or_else(|e| e.into_inner()) = Some((reference, error));
+        *self.failure.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((reference, error, reservation));
         reference
     }
 }
@@ -444,7 +453,7 @@ impl Task {
                 current.node = 0;
             }
             let bytes = owner.records.encode(&*owner.anchors, &self.bodies);
-            if bytes.is_none_or(|bytes| bytes.len() as u64 > owner.output_budget) {
+            if bytes.is_none_or(|bytes| bytes.len() as u64 > owner.weight.retained) {
                 return Poll::Ready(Err(owner.errors.resource));
             }
         }
@@ -519,9 +528,23 @@ impl Task {
             .records
             .encode(&*owner.anchors, &(&profiles, &diagnostics, &reads))
             .ok_or(QueryError::NotImplemented)?;
-        if bytes.len() as u64 > owner.output_budget {
-            return Err(invalid("storage graph output exceeds admission"));
-        }
+        let profiles = Arc::new(profiles);
+        let diagnostics = Arc::new(diagnostics);
+        let reads = Arc::new(reads);
+        let mut weight = crate::memo::retained::Weight::default();
+        weight.add(
+            crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<Data>::uninit()) as usize,
+        );
+        weight.arc(&profiles, |w, profiles| w.storage_profiles(profiles));
+        weight.arc(&diagnostics, |w, diagnostics| {
+            w.vec(diagnostics, |w, diagnostic| w.diagnostic(diagnostic))
+        });
+        weight.reads(&reads);
+        let reservation = owner
+            .outputs
+            .pool
+            .take(weight.bytes)
+            .ok_or_else(|| invalid("storage graph output exceeds admission"))?;
         let record = owner
             .store
             .put_content(OUTPUT, &bytes)
@@ -542,9 +565,11 @@ impl Task {
         *owner.completed.lock().unwrap_or_else(|e| e.into_inner()) = Some((
             product.clone(),
             Arc::new(Data {
-                profiles: Arc::new(profiles),
-                diagnostics: Arc::new(diagnostics),
-                reads: Arc::new(reads),
+                profiles,
+                diagnostics,
+                reads,
+                _reservation: reservation,
+                _source: owner.front.clone(),
             }),
         ));
         owner
@@ -569,7 +594,7 @@ impl QueryEngine {
         recipes: Arc<FrontStorageQueries>,
         lower: Arc<FrontLowerQueries>,
         weight: MemoryWeight,
-        allowance: hirsel_engine_admission::MemoryReservation,
+        allowance: impl Into<ProducerAdmission>,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontStorageGraphQueries>, QueryError> {
         if !recipes.fits_poll(weight) {
@@ -586,9 +611,9 @@ impl QueryEngine {
             .collect::<Vec<_>>();
         let inventory = FrontStorageGraphQueries::input_bytes(&definitions)
             .ok_or(QueryError::NotImplemented)?;
-        let output_budget = allowance
-            .bytes()
-            .checked_sub(inventory)
+        let (allowance, outputs) = allowance
+            .into()
+            .partition(inventory)
             .ok_or_else(|| invalid("source storage inventory exceeds admission"))?;
         let instances = definitions
             .iter()
@@ -633,7 +658,7 @@ impl QueryEngine {
             executions: AtomicU64::new(0),
             weight,
             errors,
-            output_budget,
+            outputs,
             _allowance: allowance,
         }))
     }

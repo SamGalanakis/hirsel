@@ -223,6 +223,8 @@ fn admitted_source_storage_root_matches_scalar_and_rejects_root_escape() {
                 let again = runtime.request(&[graph.query()]);
                 let graph_product = runtime.wait(again).unwrap()[0].clone();
                 let held = graph.outcome(graph_product).unwrap();
+                let profiles = held.profiles.clone();
+                let reads = held.reads.clone();
                 assert_eq!(graph.executions(), 1, "settled root coalesces");
                 if !reject {
                     assert!(!held.profiles.is_empty());
@@ -244,6 +246,12 @@ fn admitted_source_storage_root_matches_scalar_and_rejects_root_escape() {
                 drop(store);
                 assert!(budget.reserved() > 0, "held storage output owns admission");
                 drop(held);
+                assert!(
+                    budget.reserved() > 0,
+                    "detached storage views own admission"
+                );
+                drop(profiles);
+                drop(reads);
                 assert_eq!(budget.reserved(), 0);
             }
         }

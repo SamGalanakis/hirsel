@@ -7,6 +7,7 @@ pub(crate) use front::{
 };
 mod signature;
 mod source_entry;
+mod storage;
 pub(crate) use signature::retained_signature_payload_bytes;
 pub(crate) use source_entry::{
     retained_signature_entry_bytes, source_projection, source_shared_products,

@@ -97,6 +97,15 @@ versioned directories keeps those links intact. `-o` also accepts JSON output.
 Std's manifest publishes core registry entries and std declarations together
 through this same renderer.
 
+## Audit installed products
+
+`hirsel store verify <directory>` verifies the complete published installation,
+including unused records. Installation also verifies the full closure before
+publishing its manifest. Compilation pins one manifest and index generation,
+then verifies each demanded action row and complete content reference before
+use. Demanded bytes are owned immutable snapshots; later file writes cannot
+change a checked input.
+
 ## The resident compiler
 
 `check`, `build` and `run` start a compiler server for the workspace on demand.

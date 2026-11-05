@@ -128,3 +128,51 @@ fn a_store_recording_replays_every_read_without_its_directory() {
         "replay",
     );
 }
+
+#[test]
+fn installed_store_audit_rejects_corrupted_published_records() {
+    let directory = tempfile::tempdir().unwrap();
+    let manifest = directory.path().join("hirsel.json");
+    std::fs::write(
+        directory.path().join("library.hir"),
+        "pub fn unused()->u8{7u8}\n",
+    )
+    .unwrap();
+    std::fs::write(&manifest, r#"{"schema":1,"package":{"name":"audit","version":"1"},"sources":[{"path":"library.hir","module":[]}],"dependencies":[]}"#).unwrap();
+    let products = directory.path().join("products");
+    let precompute = Command::new(env!("CARGO_BIN_EXE_hirsel"))
+        .env("HIRSEL_DAEMON", "off")
+        .arg("precompute")
+        .arg(&manifest)
+        .arg("-o")
+        .arg(&products)
+        .output()
+        .unwrap();
+    assert!(precompute.status.success(), "{precompute:?}");
+    let audit = || {
+        Command::new(env!("CARGO_BIN_EXE_hirsel"))
+            .env("HIRSEL_DAEMON", "off")
+            .args(["store", "verify"])
+            .arg(&products)
+            .output()
+            .unwrap()
+    };
+    assert!(audit().status.success());
+    // Alter a byte in every published pack, without asking the decoder to
+    // fabricate the invalid input or its expected outcome.
+    let mut damaged = 0;
+    for prefix in std::fs::read_dir(products.join("packs")).unwrap() {
+        for entry in std::fs::read_dir(prefix.unwrap().path()).unwrap() {
+            let path = entry.unwrap().path();
+            let mut bytes = std::fs::read(&path).unwrap();
+            let last = bytes.len() - 1;
+            bytes[last] ^= 1;
+            std::fs::write(path, bytes).unwrap();
+            damaged += 1;
+        }
+    }
+    assert!(damaged > 0);
+    let rejected = audit();
+    assert_eq!(rejected.status.code(), Some(1), "{rejected:?}");
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("store verify"));
+}

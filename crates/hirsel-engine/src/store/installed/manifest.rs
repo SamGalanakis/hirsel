@@ -78,6 +78,7 @@ pub(super) fn decode(bytes: &[u8]) -> bincode::Result<InstalledPackage> {
     }
     Ok(InstalledPackage {
         compiler: header.compiler,
+        identity: ContentHash::default(),
         package: header.package,
         manifest: header.manifest,
         sources: header.sources,

@@ -130,7 +130,7 @@ impl InstalledPackage {
         self.definitions.clear();
         for reference in references {
             let bytes = store
-                .get(reference)
+                .get_owned(reference)
                 .ok_or_else(|| std::io::Error::other("missing installed semantic input"))?;
             let record = InstalledSemanticInput::decode(&bytes).map_err(std::io::Error::other)?;
             if record.definition.0.package != self.package {
@@ -270,7 +270,7 @@ impl InstalledSourceRecords {
         }
         let bytes = match self.operation.upgrade() {
             Some(operation) => operation.content(reference),
-            None => self.store.get(reference),
+            None => self.store.get_owned(reference),
         }
         .ok_or_else(|| "missing installed semantic content".to_owned())?;
         if reference.domain.reference(&bytes) != Some(reference) {

@@ -253,6 +253,15 @@ impl Catalog {
         self.installed.get(&path.0.package)
     }
 
+    pub(super) fn installation_identity(&self) -> ContentHash {
+        ContentHash::of_parts(
+            "hirsel.catalog.installations.v1",
+            self.installed
+                .values()
+                .map(|owner| owner.installation.0.as_slice()),
+        )
+    }
+
     pub(super) fn identity(&self) -> CatalogIdentity {
         CatalogIdentity {
             files: self.files.owner(),

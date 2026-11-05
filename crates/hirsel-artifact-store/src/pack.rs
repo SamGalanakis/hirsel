@@ -116,6 +116,7 @@ fn index_key(tag: u8, digest: ContentHash) -> Option<Key> {
 }
 /// A bounded publication transaction. Drop commits its last batch; callers that
 /// need an I/O result use `finish`. Failed publication supplies no durable hit.
+#[derive(Debug)]
 pub struct Batch {
     store: Option<Store>,
 }

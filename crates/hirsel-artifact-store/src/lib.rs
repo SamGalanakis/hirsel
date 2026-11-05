@@ -927,6 +927,15 @@ impl Store {
     pub fn lookup(&self, address: Address) -> Option<Association> {
         self.lookup_open(address).map(|opened| opened.association)
     }
+    /// Check an owned association snapshot. Its output is demanded separately
+    /// by complete reference, so no mutable output view crosses this boundary.
+    pub fn lookup_owned(&self, address: Address) -> Option<Association> {
+        let bytes = self.packed_get(1, address.0)?;
+        if bytes.len() != ROOT_LEN {
+            return None;
+        }
+        checked_association(&bytes.to_vec(), address)
+    }
     /// Carry the same opened output through action checking to consumption,
     /// avoiding an output reopen between association lookup and validation.
     pub fn lookup_open(&self, address: Address) -> Option<OpenedAssociation> {

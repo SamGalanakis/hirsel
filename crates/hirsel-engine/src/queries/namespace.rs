@@ -59,6 +59,7 @@ pub struct NamespaceCapture {
     pub(crate) manifest: Reference,
     manifest_inputs: Manifest,
     identity: ContentHash,
+    installation: ContentHash,
     retained: u64,
     admission: std::sync::OnceLock<NamespaceAdmission>,
     capture_inputs: CaptureInputs,
@@ -326,6 +327,7 @@ impl NamespaceCapture {
     pub(crate) fn admits_successor(&self, successor: &Self) -> bool {
         successor.admission.get().is_some()
             && self.environment == successor.environment
+            && self.installation == successor.installation
             && self.verify == successor.verify
             && self.anchors.bindings_hold(&successor.anchors)
             && self.bodies.iter().all(|(id, previous)| {
@@ -989,10 +991,12 @@ impl QueryEngine {
         let staged = records
             .encode(&*anchors, &staged)
             .ok_or_else(|| refused("staged header identity encoding"))?;
+        let installation = self.catalog.installation_identity();
         let identity = ContentHash::of_parts(
             "hirsel.namespace.capture.v1",
             [
                 base.0.as_slice(),
+                installation.0.as_slice(),
                 manifest.output.0.0.as_slice(),
                 body_bytes.as_slice(),
                 staged.as_slice(),
@@ -1116,6 +1120,7 @@ impl QueryEngine {
             manifest,
             manifest_inputs,
             identity,
+            installation,
             retained,
             admission: std::sync::OnceLock::new(),
             capture_inputs,

@@ -397,7 +397,11 @@ impl ResultStore for DirStore {
             {
                 return records.lookup(address);
             }
-            store.lookup(address)
+            if local {
+                store.lookup(address)
+            } else {
+                store.lookup_owned(address)
+            }
         })?;
         self.record_row(address, row.action, row.reference);
         Some(row)
@@ -448,7 +452,11 @@ impl ResultStore for DirStore {
             {
                 continue;
             }
-            if let Some(bytes) = store.get(reference) {
+            if let Some(bytes) = if local {
+                store.get(reference)
+            } else {
+                store.get_owned(reference)
+            } {
                 if local {
                     store.touch(
                         hirsel_artifact_store::Address(reference.output.0),
@@ -480,6 +488,21 @@ impl ResultStore for DirStore {
                     continue;
                 }
                 let bytes = records.content(row.reference)?;
+                self.record_row(
+                    hirsel_artifact_store::Address(key.0),
+                    row.action,
+                    row.reference,
+                );
+                return Some(bytes);
+            }
+            if !local {
+                let Some(row) = store.lookup_owned(hirsel_artifact_store::Address(key.0)) else {
+                    continue;
+                };
+                if row.reference.domain != super::entry_domain(key.2) {
+                    continue;
+                }
+                let bytes = store.get_owned(row.reference)?;
                 self.record_row(
                     hirsel_artifact_store::Address(key.0),
                     row.action,

@@ -19,7 +19,9 @@ mod retained;
 use carry::CarryChanges;
 pub use carry::FrontCarry;
 use lint_facts::LintFacts;
+mod inputs;
 mod source;
+use inputs::Inputs;
 mod storage;
 pub use source::FrontInputFootprint;
 use source::{SiblingFile, SiblingSources};
@@ -192,15 +194,6 @@ struct FrontSourceBacking {
     allowance: Arc<MemoryReservationPool>,
     _inputs: MemoryReservation,
     _sources: SourceMap,
-    headers: Option<std::sync::Weak<header_products::HeaderProducts>>,
-}
-impl Drop for FrontSourceBacking {
-    fn drop(&mut self) {
-        // No header charge this partition lent outlives it.
-        if let Some(headers) = self.headers.as_ref().and_then(std::sync::Weak::upgrade) {
-            headers.release_ended_partition();
-        }
-    }
 }
 impl header_products::HeaderAllowance for FrontSourceBacking {
     fn take_header(&self, bytes: u64) -> Option<MemoryReservation> {
@@ -266,7 +259,7 @@ struct Forwarded {
 pub struct FrontBodyQueries {
     demand: std::sync::OnceLock<std::sync::Weak<generation::demand::DemandProducer>>,
     forwarded: Mutex<BTreeMap<Key, Forwarded>>,
-    inputs: BTreeMap<Key, Input>,
+    inputs: Inputs,
     by_definition: Box<[(DefId, Key)]>,
     body_demands: Box<[(Key, Key)]>,
     types: Arc<hirsel_types::TypeInterner>,
@@ -292,6 +285,7 @@ pub struct FrontBodyQueries {
     memo_operations: AtomicU64,
     verify_store: crate::store::VerifyStore,
     slots: Mutex<BTreeMap<Key, FrontSlot>>,
+    input_slots: Mutex<(BTreeSet<DefId>, Vec<Arc<LiveSourceBacking>>)>,
     /// Transfer the latest computed body to its immediate consumer. The next
     /// body computation drops it before running a phase; compact facts never
     /// keep a growing collection of analyzed bodies.
@@ -739,6 +733,31 @@ impl FrontBodyQueries {
         for (_, reads) in memos {
             intern(reads)?;
         }
+        Some(())
+    }
+    fn admit_input_slot(&self, cx: &mut dyn QueryContext, definition: DefId) -> Option<()> {
+        let mut slots = self.input_slots.lock().unwrap_or_else(|e| e.into_inner());
+        if slots.0.contains(&definition) {
+            return Some(());
+        }
+        let inventory = |len| {
+            let mut weight = crate::NativeMetadataWeight::default();
+            weight.tree::<Key, FrontSlot>(len);
+            weight.tree::<DefId, ()>(len);
+            weight.add(
+                len * (3 * size_of::<(crate::memo::MemoKey, Arc<Reads>)>()
+                    + 8 * size_of::<crate::memo::MemoKey>()
+                    + 32 * size_of::<usize>()
+                    + 2 * size_of::<Arc<LiveSourceBacking>>()),
+            );
+            weight.bytes()
+        };
+        let len = slots.0.len();
+        let bytes = inventory(len + 1).checked_sub(if len == 0 { 0 } else { inventory(len) })?;
+        let (allowance, backing) = self.owner_grant(cx, bytes, "Front demand slots")?;
+        backing.add(allowance)?;
+        slots.0.insert(definition);
+        slots.1.push(backing);
         Some(())
     }
     fn retain(
@@ -2041,6 +2060,9 @@ impl QueryTask for BodyTask {
             return finish(result);
         }
         let definition = self.queries.inputs[&self.input].definition;
+        if self.queries.admit_input_slot(cx, definition).is_none() {
+            return finish(Err(self.queries.errors.resource));
+        }
         let pending = self
             .queries
             .namespace
@@ -2896,7 +2918,14 @@ impl QueryEngine {
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
         let pool = MemoryReservationPool::new(allowance).map_err(|_| QueryError::NotImplemented)?;
-        self.front_body_queries_in_pool(definitions, namespace, weight, Arc::new(pool), errors)
+        self.front_body_queries_in_pool(
+            definitions,
+            namespace,
+            weight,
+            Arc::new(pool),
+            errors,
+            None,
+        )
     }
     pub(crate) fn front_body_queries_in_pool(
         &mut self,
@@ -2905,6 +2934,7 @@ impl QueryEngine {
         weight: MemoryWeight,
         allowance: Arc<MemoryReservationPool>,
         errors: RuntimeErrors,
+        previous: Option<&FrontBodyQueries>,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
         let available = allowance.available_bytes();
         namespace.require_environment(self)?;
@@ -2931,7 +2961,15 @@ impl QueryEngine {
         };
         // The pool has already reserved its metadata before exposing available
         // bytes. The public footprint includes that owner exactly once.
-        let mut required = FrontBodyQueries::input_bytes(definitions)
+        let mut required = FrontBodyQueries::input_bytes(&[])
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    (definitions.len()
+                        * (size_of::<(Key, DefId)>()
+                            + size_of::<(DefId, Key)>()
+                            + size_of::<(Key, Key)>())) as u64,
+                )
+            })
             .and_then(|bytes| bytes.checked_sub(MemoryReservationPool::metadata_bytes()))
             .ok_or_else(|| refusal("input size overflow"))?;
         if required > available {
@@ -2957,7 +2995,7 @@ impl QueryEngine {
         required = required
             .checked_add(
                 namespace.retained_bytes().saturating_sub(
-                    NamespaceCapture::input_bytes(definitions)
+                    NamespaceCapture::input_bytes(&[])
                         .ok_or_else(|| refusal("capture size overflow"))?,
                 ),
             )
@@ -3019,7 +3057,6 @@ impl QueryEngine {
             ));
         }
         let snapshot = namespace.snapshot.clone();
-        let retention = Arc::new(Mutex::new(available - required));
         if let Some(headers) = snapshot.header_products() {
             headers.configure_private(weight.scratch, registrations);
         }
@@ -3038,6 +3075,25 @@ impl QueryEngine {
                 },
             );
         }
+        let inputs = Inputs::new(inputs, previous.map(|previous| &previous.inputs))?;
+        required = required
+            .checked_add(inputs.unadmitted_bytes())
+            .ok_or_else(|| refusal("input size overflow"))?;
+        if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
+            eprintln!(
+                "OWNER FRONT fixed={} namespace={} rows_pending={} required={} available={} definitions={}",
+                FrontBodyQueries::input_bytes(&[]).unwrap_or(u64::MAX),
+                namespace.retained_bytes(),
+                inputs.unadmitted_bytes(),
+                required,
+                available,
+                definitions.len()
+            );
+        }
+        if required > available {
+            return Err(refused_inputs(required));
+        }
+        let retention = Arc::new(Mutex::new(available - required));
         let arm_fixes = arm_fixes::capture(&self.sources, &self.items);
         let items = Arc::new(BTreeMap::new());
         let cited = self
@@ -3078,6 +3134,7 @@ impl QueryEngine {
             .take(required)
             .ok_or_else(|| refusal("shared Front input partition"))?;
         namespace.admit(&mut inputs_allowance, self.sources.clone())?;
+        inputs.admit(&mut inputs_allowance)?;
         let products = ProductSource::admit_shared(
             anchors.as_ref().clone(),
             input_records.clone(),
@@ -3090,7 +3147,6 @@ impl QueryEngine {
             allowance,
             _inputs: inputs_allowance,
             _sources: self.sources.clone(),
-            headers: snapshot.header_products().map(Arc::downgrade),
         });
         let sibling_sources = Arc::new(SiblingSources {
             files: siblings,
@@ -3131,6 +3187,7 @@ impl QueryEngine {
             input_records,
             store,
             slots: Mutex::new(BTreeMap::new()),
+            input_slots: Mutex::new((BTreeSet::new(), Vec::new())),
             handoff: Mutex::new(None),
             handoff_limit: self.hold_bytes,
             carry: Mutex::new(None),

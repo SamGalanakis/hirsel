@@ -615,6 +615,7 @@ fn normalize_inner(
     };
     let mut signature = Signature {
         metadata: SignatureMetadata {
+            retention: Default::default(),
             inferred_unique: Default::default(),
             constant_alias,
             track_caller: attrs.track_caller,

@@ -95,6 +95,20 @@ pub(super) struct PrivateProducts {
     modules: BTreeMap<Module, ModuleSlot>,
 }
 impl PrivateProducts {
+    pub(super) fn trace(&self) -> (usize, u64, usize) {
+        let mut totals = (0, 0, 0);
+        for slot in self.modules.values() {
+            if let Some(Ok(product)) = slot.current() {
+                let charge = product.charge.0.lock().unwrap_or_else(|e| e.into_inner());
+                if let HeaderCharge::Front(charge) = &*charge {
+                    totals.0 += 1;
+                    totals.1 += charge.bytes;
+                    totals.2 += usize::from(Arc::strong_count(&product) > 2);
+                }
+            }
+        }
+        totals
+    }
     fn publish(&self, slot: &ModuleSlot, next: ProofState) {
         let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
         *state = next;
@@ -671,6 +685,7 @@ impl HeaderProducts {
             standalone: false,
             failure: None,
             syntax: self.syntax.clone(),
+            inputs: self.inputs.clone(),
             declarations: self.declarations.clone(),
             catalog: self.catalog.clone(),
             installed_sources: self.installed_sources.clone(),

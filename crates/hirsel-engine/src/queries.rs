@@ -41,7 +41,8 @@ pub use scheduled_storage::{
     FRONT_STORAGE_GRAPH_KIND, FrontStorageGraphOutput, FrontStorageGraphQueries,
 };
 mod namespace;
-pub use namespace::NamespaceCapture;
+mod operation_inputs;
+pub use namespace::{NamespaceCapture, OperationLease};
 mod scheduled_lower;
 mod scheduled_stage;
 pub use scheduled_check::{

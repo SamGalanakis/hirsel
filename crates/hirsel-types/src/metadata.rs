@@ -67,9 +67,47 @@ impl Metadata {
         }
     }
 }
+/// Nonsemantic admission carried by every alias of an immutable payload.
+/// Raw payload aliases retain the lease; portable codecs omit it.
+#[derive(Default)]
+pub struct PayloadLease(std::sync::OnceLock<std::sync::Arc<dyn std::any::Any + Send + Sync>>);
+impl Clone for PayloadLease {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+impl PayloadLease {
+    pub fn get<T: std::any::Any + Send + Sync>(&self) -> Option<std::sync::Arc<T>> {
+        self.0.get()?.clone().downcast().ok()
+    }
+    pub fn retain<T: std::any::Any + Send + Sync>(
+        &self,
+        lease: std::sync::Arc<T>,
+    ) -> std::sync::Arc<T> {
+        self.0
+            .get_or_init(|| lease)
+            .clone()
+            .downcast()
+            .expect("payload lease owner type")
+    }
+}
+impl std::fmt::Debug for PayloadLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PayloadLease")
+    }
+}
+impl PartialEq for PayloadLease {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for PayloadLease {}
 /// Persistent semantic declaration metadata. Locations/build manifest maps stay outside.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct SignatureMetadata {
+    /// The in-process owner; it grants no verifier or replay authority.
+    #[serde(skip)]
+    pub retention: PayloadLease,
     /// Private body facts, never part of FunctionType or indirect-call evidence.
     pub inferred_unique: UniqueSummary,
     pub visibility: ast::Visibility,
@@ -106,6 +144,7 @@ pub struct ImplementationBinder {
 impl Default for SignatureMetadata {
     fn default() -> Self {
         Self {
+            retention: Default::default(),
             inferred_unique: UniqueSummary::default(),
             visibility: ast::Visibility::Private,
             alias: false,

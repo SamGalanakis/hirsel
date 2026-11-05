@@ -14,6 +14,7 @@ const MANIFEST: Domain = Domain {
     schema: 1,
 };
 
+#[derive(PartialEq)]
 pub(crate) struct BodyKeys {
     pub implementation: ContentHash,
     pub site: Span,
@@ -21,6 +22,7 @@ pub(crate) struct BodyKeys {
     pub lower: EntryKey,
     pub evaluate: EntryKey,
 }
+#[derive(PartialEq)]
 pub(crate) struct BodyInput {
     pub syntax: ContentHash,
     pub implementation: ContentHash,
@@ -46,7 +48,7 @@ pub struct NamespaceCapture {
     pub(crate) anchors: Arc<NativeRecordContext>,
     store: Arc<dyn crate::store::ResultStore>,
     pub(crate) instances: Arc<hirsel_tir::InstanceBodies>,
-    pub(crate) bodies: BTreeMap<DefId, Arc<BodyInput>>,
+    pub(crate) bodies: operation_inputs::InputIndex<DefId, Arc<BodyInput>>,
     pub(crate) registrations: BTreeMap<DefId, Arc<AcceptedFrontRegistration>>,
     private_sources: BTreeMap<(DefId, u32), hirsel_span::Anchor>,
     pub(crate) records: crate::NativeRecords,
@@ -59,6 +61,19 @@ pub struct NamespaceCapture {
     retained: u64,
     admission: std::sync::OnceLock<NamespaceAdmission>,
     capture_inputs: CaptureInputs,
+}
+
+/// A retained holder's lease over exact operation inputs and header bindings.
+/// It has no reader-completion action. Dropping the final lease releases the
+/// captured owners only when their other payload leases have also ended.
+#[derive(Clone)]
+pub struct OperationLease {
+    capture: Arc<NamespaceCapture>,
+}
+impl OperationLease {
+    pub fn capture(&self) -> &NamespaceCapture {
+        &self.capture
+    }
 }
 
 /// Exact immutable source owners and complete mutable selection inputs of a
@@ -343,6 +358,18 @@ impl NamespaceCapture {
         Some(weight.bytes())
     }
 
+    pub(crate) fn view_bytes(registrations: usize, private_sources: usize) -> Option<u64> {
+        let mut weight = crate::NativeMetadataWeight::default();
+        weight.add(
+            size_of::<NamespaceCapture>()
+                + size_of::<crate::snapshot::Declarations>()
+                + 2 * size_of::<usize>(),
+        );
+        weight.tree::<DefId, Arc<AcceptedFrontRegistration>>(registrations);
+        weight.tree::<(DefId, u32), hirsel_span::Anchor>(private_sources);
+        Some(weight.bytes())
+    }
+
     pub(crate) fn admit(
         &self,
         allowance: &mut crate::runtime::MemoryReservation,
@@ -361,6 +388,8 @@ impl NamespaceCapture {
                     .map_err(|_| refused("capture reservation partition"))?;
             }
         }
+        self.inputs.admit(allowance)?;
+        self.bodies.admit(allowance)?;
         Ok(())
     }
     pub(crate) fn require_environment(&self, engine: &QueryEngine) -> Result<(), QueryError> {
@@ -396,6 +425,11 @@ impl NamespaceCapture {
     pub fn identity(&self) -> ContentHash {
         self.identity
     }
+    pub fn lease(self: &Arc<Self>) -> OperationLease {
+        OperationLease {
+            capture: self.clone(),
+        }
+    }
     pub fn generation_manifest(&self) -> Reference {
         self.manifest
     }
@@ -422,6 +456,7 @@ impl NamespaceCapture {
             .ok_or_else(|| refused("missing captured source owner"))?;
         let mut engine = headers.execution();
         self.inputs.install(&mut engine);
+        engine.sources = self.sources.clone();
         engine.materialize(path)?;
         Ok(engine)
     }
@@ -482,6 +517,8 @@ impl NamespaceCapture {
     }
     pub(crate) fn retained_bytes(&self) -> u64 {
         self.retained
+            .saturating_add(self.inputs.unadmitted_bytes())
+            .saturating_add(self.bodies.unadmitted_bytes())
     }
     pub(crate) fn consistent(&self, other: &Self) -> bool {
         self.identity == other.identity
@@ -814,6 +851,28 @@ impl QueryEngine {
         if store.persistence().retains() && store.put_content(MANIFEST, &bytes) != Some(manifest) {
             return Err(refused("manifest publication"));
         }
+        let previous = self
+            .namespace_captures
+            .iter()
+            .rev()
+            .filter_map(std::sync::Weak::upgrade)
+            .find(|previous| {
+                Arc::ptr_eq(&previous.inputs, &inputs)
+                    && previous.environment == self.environment_value()
+                    && previous.verify == self.verify
+            });
+        let bodies = operation_inputs::InputIndex::capture(
+            bodies,
+            previous.as_ref().map(|previous| &previous.bodies),
+            |len| {
+                let mut weight = crate::NativeMetadataWeight::default();
+                weight.tree::<DefId, Arc<BodyInput>>(len);
+                weight.add(len.checked_mul(
+                    size_of::<BodyInput>() + size_of::<BodyKeys>() + 4 * size_of::<usize>(),
+                )?);
+                Some(weight.bytes())
+            },
+        )?;
         let body_identities = bodies
             .iter()
             .map(|(id, body)| {
@@ -888,18 +947,33 @@ impl QueryEngine {
         let capture_bytes = capture_inputs
             .retained_bytes()
             .ok_or_else(|| refused("capture input size overflow"))?;
-        let retained = NamespaceCapture::input_bytes(definitions)
+        let retained = NamespaceCapture::view_bytes(registrations.len(), private_sources.len())
             .and_then(|bytes| bytes.checked_add(capture_bytes))
             .and_then(|bytes| bytes.checked_add(weight.bytes()))
             .and_then(|bytes| bytes.checked_add(instance_weight.bytes()))
-            .and_then(|bytes| {
-                bytes.checked_add(header_products::HeaderProducts::written_source_bytes(self))
-            })
-            .and_then(|bytes| {
-                bytes.checked_add(header_products::SourceInputs::metadata_bytes(self)?)
-            })
             .ok_or_else(|| refused("capture size overflow"))?;
-        if retained > limit {
+        if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
+            eprintln!(
+                "OWNER CAPTURE fixed={:p} body={:p} view={} selection={} paths={} instances={} source_total={} source_pending={} bodies_pending={} definitions={} registrations={} limit={}",
+                Arc::as_ptr(&inputs),
+                &bodies,
+                retained,
+                capture_bytes,
+                weight.bytes(),
+                instance_weight.bytes(),
+                inputs.retained_bytes(),
+                inputs.unadmitted_bytes(),
+                bodies.unadmitted_bytes(),
+                definitions.len(),
+                registrations.len(),
+                limit
+            );
+        }
+        if retained
+            .checked_add(inputs.unadmitted_bytes())
+            .and_then(|bytes| bytes.checked_add(bodies.unadmitted_bytes()))
+            .is_none_or(|bytes| bytes > limit)
+        {
             return Err(refused("capture exceeds admission"));
         }
         let capture = Arc::new(NamespaceCapture {
@@ -1201,6 +1275,77 @@ mod tests {
         });
     }
     #[test]
+    fn successor_views_charge_fixed_operation_inputs_once_until_the_last_lease() {
+        crate::with_compiler_stack(|| {
+            let (mut engine, definitions) = indexed(Arc::new(MemStore::default()));
+            let budget = crate::runtime::ProcessBudget::new(8 << 20);
+            let pool = crate::runtime::MemoryReservationPool::new(budget.reserve(8 << 20).unwrap())
+                .ok()
+                .unwrap();
+            let before = pool.available_bytes();
+            let mut views = Vec::new();
+            let mut view_bytes = 0;
+            let mut fixed = None;
+            for successor in 0..8 {
+                let capture = engine
+                    .capture_namespace(&definitions, &[], (8 << 20) - successor)
+                    .unwrap();
+                let required = capture.retained_bytes();
+                if let Some((inputs, bodies)) = fixed {
+                    assert_eq!(capture.inputs.unadmitted_bytes(), 0);
+                    assert_eq!(capture.bodies.unadmitted_bytes(), 0);
+                    assert_eq!(required, capture.retained);
+                    assert_eq!(
+                        before - pool.available_bytes(),
+                        inputs + bodies + view_bytes
+                    );
+                } else {
+                    fixed = Some((
+                        capture.inputs.unadmitted_bytes(),
+                        capture.bodies.unadmitted_bytes(),
+                    ));
+                }
+                let mut allowance = pool.take(required).unwrap();
+                capture
+                    .admit(&mut allowance, engine.sources.clone())
+                    .unwrap();
+                assert_eq!(allowance.bytes(), 0);
+                view_bytes += capture.retained;
+                for definition in &definitions {
+                    assert_eq!(
+                        capture.bodies[&DefId::intern(definition)].implementation,
+                        engine.implementation_hash(definition).unwrap()
+                    );
+                }
+                views.push(capture);
+                // Distinct admission selections retain the same exact written
+                // inputs and query keys, just as a registration successor does.
+            }
+            let last = views.pop().unwrap();
+            drop(views);
+            drop(engine);
+            assert!(
+                pool.available_bytes() < before,
+                "the last reader keeps fixed inputs admitted"
+            );
+            assert_eq!(last.inputs.unadmitted_bytes(), 0);
+            assert_eq!(last.bodies.unadmitted_bytes(), 0);
+            let retained_slot = last.lease();
+            drop(last);
+            assert!(
+                pool.available_bytes() < before,
+                "a retained holder keeps the payload admitted after all readers finish"
+            );
+            assert_eq!(retained_slot.capture().inputs.unadmitted_bytes(), 0);
+            drop(retained_slot);
+            assert_eq!(
+                pool.available_bytes(),
+                before,
+                "the last lease returns all input bytes"
+            );
+        });
+    }
+    #[test]
     fn demanded_syntax_keeps_its_charge_after_the_front_partition_ends() {
         use hirsel_validate::SignatureLookup;
         struct Allowance(Arc<crate::runtime::MemoryReservationPool>);
@@ -1273,18 +1418,21 @@ mod tests {
                 drop(held);
             }
             drop(partition);
-            headers.release_ended_partition();
-            assert_eq!(
-                pool.available_bytes(),
-                retained,
-                "a live syntax owner keeps its reservation"
+            assert!(
+                pool.available_bytes() < retained,
+                "live syntax and signature leases keep their reservations"
             );
             drop(capture);
             drop(headers);
+            assert!(
+                pool.available_bytes() < before,
+                "the raw signature retains its payload lease"
+            );
+            drop(signature);
             assert_eq!(
                 pool.available_bytes(),
                 before,
-                "the final source owner releases the reservation"
+                "the final payload lease releases its reservation"
             );
         });
     }

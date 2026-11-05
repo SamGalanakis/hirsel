@@ -1124,6 +1124,15 @@ impl DemandProducer {
             .iter()
             .map(|registration| registration.in_engine(engine, &self.syntax))
             .collect::<Result<Vec<_>, _>>()?;
+        if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            eprintln!(
+                "OWNER VIEWS count={} registrations={} pool_available={}",
+                state.views.len(),
+                registrations.len(),
+                self.front.available_bytes()
+            );
+        }
         let namespace =
             engine.capture_namespace(definitions, &refreshed, self.front.available_bytes())?;
         {
@@ -1148,12 +1157,19 @@ impl DemandProducer {
             })
             .cloned()
             .collect::<Vec<_>>();
+        let previous = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .current
+            .upgrade();
         let front = engine.front_body_queries_in_pool(
             &ready,
             namespace,
             self.weight,
             self.front.clone(),
             self.errors,
+            previous.as_ref().map(|previous| &**previous.body_front()),
         )?;
         if let Some(carry) = &self.carry {
             // An optional carry miss leaves ordinary production active.

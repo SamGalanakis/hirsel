@@ -11,6 +11,7 @@ mod sources;
 pub(crate) use private::AdoptedPrivate;
 pub use private::ModuleProof;
 use sources::HeaderSources;
+pub(super) use sources::source_refusal;
 pub(crate) use sources::{CapturedText, SourceInputs};
 
 type SignatureOutput = Result<Arc<QueryOutput<hirsel_types::SignatureRef>>, QueryError>;
@@ -45,7 +46,6 @@ enum HeaderCharge {
 /// A charge a Front partition lent. Dropping it returns the bytes to the
 /// partition's grant and the reservation to its allowance, exactly once.
 struct FrontCharge {
-    partition: Weak<dyn HeaderAllowance>,
     credit: Arc<std::sync::Mutex<u64>>,
     bytes: u64,
     #[expect(dead_code, reason = "held for its drop")]
@@ -56,19 +56,17 @@ impl Drop for FrontCharge {
         *self.credit.lock().unwrap_or_else(|e| e.into_inner()) += self.bytes;
     }
 }
-/// The charge cell of one row or proof. The partition that lent a `Front`
-/// charge keeps a weak handle to the cell and turns it to `Engine` when the
-/// partition ends.
+/// One admitted payload, shared by its row, entry and raw signature readers.
+#[derive(Clone)]
 struct Charge(Arc<std::sync::Mutex<HeaderCharge>>);
 impl Charge {
     fn engine() -> Self {
         Self(Arc::new(std::sync::Mutex::new(HeaderCharge::Engine)))
     }
-    /// Admission may evict only what a live partition lent.
     fn evictable(&self) -> bool {
         matches!(
             &*self.0.lock().unwrap_or_else(|e| e.into_inner()),
-            HeaderCharge::Front(charge) if charge.partition.strong_count() != 0
+            HeaderCharge::Front(_)
         )
     }
 }
@@ -79,30 +77,11 @@ struct HeaderAdmission {
     validation_caches: ValidationCaches,
     remaining: Arc<std::sync::Mutex<u64>>,
     partition: Weak<dyn HeaderAllowance>,
-    /// Every charge cell this partition lent, rows and proofs alike.
-    lent: Arc<std::sync::Mutex<Vec<Weak<std::sync::Mutex<HeaderCharge>>>>>,
+    tables: Arc<std::sync::Mutex<Vec<Weak<HeaderProducts>>>>,
 }
 impl HeaderAdmission {
     fn lend(&self, charge: FrontCharge) -> Charge {
-        let cell = Arc::new(std::sync::Mutex::new(HeaderCharge::Front(charge)));
-        let mut lent = self.lent.lock().unwrap_or_else(|e| e.into_inner());
-        if lent.len() == lent.capacity() {
-            lent.retain(|cell| cell.strong_count() != 0);
-        }
-        lent.push(Arc::downgrade(&cell));
-        Charge(cell)
-    }
-    /// The partition ended: every charge it lent returns now, and the entry
-    /// stays as an uncharged engine row whose later eviction credits nothing.
-    fn release(&self) {
-        let lent = std::mem::take(&mut *self.lent.lock().unwrap_or_else(|e| e.into_inner()));
-        for cell in lent.iter().filter_map(Weak::upgrade) {
-            let charge = std::mem::replace(
-                &mut *cell.lock().unwrap_or_else(|e| e.into_inner()),
-                HeaderCharge::Engine,
-            );
-            drop(charge);
-        }
+        Charge(Arc::new(std::sync::Mutex::new(HeaderCharge::Front(charge))))
     }
 }
 #[derive(Default)]
@@ -179,6 +158,7 @@ pub(crate) struct HeaderProducts {
     standalone: bool,
     failure: Option<QueryError>,
     syntax: Arc<HeaderSources>,
+    inputs: Arc<SourceInputs>,
     private: Option<private::PrivateProducts>,
     private_working: AtomicU64,
     private_registrations: OnceLock<Vec<Arc<AcceptedFrontRegistration>>>,
@@ -212,6 +192,7 @@ impl HeaderProducts {
         &self.staged
     }
     pub(crate) fn capture(engine: &QueryEngine) -> Arc<Self> {
+        let inputs = SourceInputs::capture(engine);
         let private = private::PrivateProducts::capture(engine);
         let declarations = engine.declarations.frozen();
         let rows = engine
@@ -269,15 +250,13 @@ impl HeaderProducts {
             provisional: engine.private_summary_active,
             standalone: !engine.private_inference_hosted && !engine.private_summary_active,
             failure: engine.current_private_summary_failure().cloned(),
-            syntax: Arc::new(HeaderSources::capture(engine)),
+            syntax: inputs.syntax.clone(),
+            inputs: inputs.clone(),
             private,
             private_working: AtomicU64::new(0),
             private_registrations: Default::default(),
             declarations: engine.declarations.header_inputs(),
-            catalog: engine
-                .catalog
-                .source_carry(&engine.sources, &engine.items, &engine.indexed_sources)
-                .restore(),
+            catalog: inputs.catalog.clone(),
             installed_sources: engine.installed_sources.clone(),
             types: engine.types.clone(),
             memo: engine.memo.clone(),
@@ -353,6 +332,7 @@ impl HeaderProducts {
         engine.verify = self.verify;
         engine.comptime_limits = self.limits;
         engine.staged_constants = self.staged.clone();
+        engine.source_inputs = Some(self.inputs.clone());
         engine.header_products = Some(self.clone());
         engine.inherit_source_records((*self.owners).clone());
         engine
@@ -620,7 +600,7 @@ impl HeaderProducts {
             .saturating_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
                 HeaderProduct,
             >::uninit()));
-        let (charge, transient) = match self.admit(bytes) {
+        let (charge, transient) = match self.admit_signature(entry.as_ref(), bytes) {
             Ok(charge) => (charge, false),
             Err(_)
                 if working.as_ref().is_some_and(|(_, scratch)| {
@@ -735,12 +715,10 @@ impl HeaderProducts {
                 Charge::engine()
             });
         };
-        // An ended Front returns its lent charges and leaves this table with
-        // the engine. Later rows and proofs have that same engine owner; the
-        // ended source pool cannot lend another reservation.
         let Some(partition) = admission.partition.upgrade() else {
-            admission.release();
-            return Ok(Charge::engine());
+            return Ok(Charge(Arc::new(std::sync::Mutex::new(
+                HeaderCharge::Standalone(self.reserve_standalone(bytes)?),
+            ))));
         };
         // The charge cell itself is part of what the partition retains.
         let bytes =
@@ -762,6 +740,57 @@ impl HeaderProducts {
             // debiting this row grant. Reclaim optional facts on either limit.
             drop(grant);
             if !self.evict() {
+                if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
+                    let tables = admission
+                        .tables
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .iter()
+                        .filter_map(Weak::upgrade)
+                        .collect::<Vec<_>>();
+                    let mut seen = BTreeSet::new();
+                    for table in tables {
+                        let proofs = table.private.as_ref().map(|private| private.trace());
+                        let mut rows = 0;
+                        let mut charged = 0;
+                        let mut aliases = 0;
+                        for cell in table.rows.values() {
+                            if let Some(product) = cell.get() {
+                                let charge =
+                                    product.charge.0.lock().unwrap_or_else(|e| e.into_inner());
+                                if let HeaderCharge::Front(charge) = &*charge {
+                                    rows += 1;
+                                    if seen.insert(Arc::as_ptr(&product.charge.0) as usize) {
+                                        charged += charge.bytes;
+                                    }
+                                    aliases += product
+                                        .result
+                                        .as_ref()
+                                        .map_or(0, |output| Arc::strong_count(&output.value));
+                                }
+                            }
+                        }
+                        eprintln!(
+                            "OWNER HEADERS table={:p} rows={} unique_bytes={} signature_aliases={}",
+                            Arc::as_ptr(&table),
+                            rows,
+                            charged,
+                            aliases
+                        );
+                        eprintln!(
+                            "OWNER PROOFS table={:p} counts={proofs:?}",
+                            Arc::as_ptr(&table)
+                        );
+                    }
+                    eprintln!(
+                        "OWNER HEADER REFUSAL required={} credit={}",
+                        bytes,
+                        *admission
+                            .remaining
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                    );
+                }
                 return Err(QueryError::Operational(hirsel_types::OperationalFailure {
                     operation: "header admission".into(),
                     message: format!("header source allowance cannot retain {bytes} bytes"),
@@ -769,10 +798,33 @@ impl HeaderProducts {
             }
         };
         Ok(admission.lend(FrontCharge {
-            partition: admission.partition.clone(),
             credit: admission.remaining.clone(),
             bytes,
             allowance,
+        }))
+    }
+    fn admit_signature(
+        &self,
+        entry: Option<&Arc<Entry<hirsel_types::SignatureRef>>>,
+        bytes: u64,
+    ) -> Result<Charge, QueryError> {
+        let signature = entry
+            .and_then(|entry| entry.memo.value.as_ref().ok())
+            .map(|output| &output.value);
+        if let Some(lease) =
+            signature.and_then(|signature| signature.metadata.retention.get::<Charge>())
+        {
+            return Ok((*lease).clone());
+        }
+        let charge = self.admit(bytes)?;
+        if matches!(
+            &*charge.0.lock().unwrap_or_else(|e| e.into_inner()),
+            HeaderCharge::Engine
+        ) {
+            return Ok(charge);
+        }
+        Ok(signature.map_or(charge.clone(), |signature| {
+            (*signature.metadata.retention.retain(Arc::new(charge))).clone()
         }))
     }
     /// Retain a payload a module proof settled, when the header grant admits it.
@@ -790,7 +842,7 @@ impl HeaderProducts {
             bytes.saturating_add(crate::memo::retained_arc_bytes(&std::mem::MaybeUninit::<
                 HeaderProduct,
             >::uninit()));
-        let Ok(charge) = self.admit(bytes) else {
+        let Ok(charge) = self.admit_signature(Some(&entry), bytes) else {
             return;
         };
         self.publish(
@@ -811,7 +863,7 @@ impl HeaderProducts {
         self.rows.get(&id)?.get()
     }
     pub(crate) fn configure_source_backing(
-        &self,
+        self: &Arc<Self>,
         backing: Arc<dyn HeaderAllowance>,
         remaining: Arc<std::sync::Mutex<u64>>,
     ) -> Arc<dyn HeaderAllowance> {
@@ -822,21 +874,29 @@ impl HeaderProducts {
         {
             return partition;
         }
-        if let Some(ended) = admission.take() {
-            ended.release();
-        }
         *admission = Some(HeaderAdmission {
             validation_caches: self.validation_caches.clone(),
             remaining,
             partition: Arc::downgrade(&backing),
-            lent: Arc::default(),
+            tables: Arc::default(),
         });
+        admission
+            .as_ref()
+            .unwrap()
+            .tables
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Arc::downgrade(self));
         backing
     }
     /// Headers a later snapshot of the same request captured are charged to
     /// the Front partition, and prove private modules in its working space,
     /// exactly as the Front producer's own headers are.
-    pub(crate) fn inherit_snapshot_scope(&self, front: &Self, inputs: &[[ContentHash; 3]]) {
+    pub(crate) fn inherit_snapshot_scope(
+        self: &Arc<Self>,
+        front: &Self,
+        inputs: &[[ContentHash; 3]],
+    ) {
         let shared = front
             .admission
             .lock()
@@ -844,13 +904,18 @@ impl HeaderProducts {
             .clone();
         let mut admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
         if admission.is_none() {
+            if let Some(shared) = &shared {
+                let mut tables = shared.tables.lock().unwrap_or_else(|e| e.into_inner());
+                tables.retain(|table| table.strong_count() != 0);
+                tables.push(Arc::downgrade(self));
+            }
             *admission = shared;
         }
         drop(admission);
         self.inherit_private_snapshot(front, inputs);
     }
     pub(crate) fn inherit_registration_scope(
-        &self,
+        self: &Arc<Self>,
         previous: &Self,
         registrations: &[Arc<AcceptedFrontRegistration>],
     ) {
@@ -861,6 +926,11 @@ impl HeaderProducts {
             .clone();
         let mut admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
         if admission.is_none() {
+            if let Some(shared) = &shared {
+                let mut tables = shared.tables.lock().unwrap_or_else(|e| e.into_inner());
+                tables.retain(|table| table.strong_count() != 0);
+                tables.push(Arc::downgrade(self));
+            }
             *admission = shared;
         }
         drop(admission);
@@ -921,7 +991,28 @@ impl HeaderProducts {
     }
     /// Evict one unpinned settled entry: a header row, else a module proof.
     pub(crate) fn evict(&self) -> bool {
-        self.evict_validation_cache() || self.evict_row() || self.evict_proof()
+        if self.evict_validation_cache() || self.evict_row() || self.evict_proof() {
+            return true;
+        }
+        let tables = self
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|admission| admission.tables.clone());
+        let Some(tables) = tables else {
+            return false;
+        };
+        let tables = tables
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
+        tables
+            .iter()
+            .filter(|table| !std::ptr::eq(self, &***table))
+            .any(|table| table.evict_row() || table.evict_proof())
     }
     fn evict_row(&self) -> bool {
         for cell in self.rows.values() {
@@ -961,17 +1052,6 @@ impl HeaderProducts {
         }
         false
     }
-    /// A Front partition ended: no charge it lent, to a row or a proof,
-    /// outlives it. The entries stay as engine-retained signatures did.
-    pub(crate) fn release_ended_partition(&self) {
-        let admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ended) = admission
-            .as_ref()
-            .filter(|admission| admission.partition.strong_count() == 0)
-        {
-            ended.release();
-        }
-    }
     pub(crate) fn pending_recomputes(&self, id: DefId) -> usize {
         self.ready(id)
             .filter(|p| !p.accounted.load(Ordering::Relaxed))
@@ -1010,7 +1090,10 @@ impl QueryEngine {
             .as_ref()
             .and_then(|headers| headers.declared_inputs(self))
     }
-    pub(crate) fn inherit_demand_header_scope(&self, headers: &header_products::HeaderProducts) {
+    pub(crate) fn inherit_demand_header_scope(
+        &self,
+        headers: &Arc<header_products::HeaderProducts>,
+    ) {
         if self.private_bootstrap_active
             && let Some(previous) = self
                 .snapshot

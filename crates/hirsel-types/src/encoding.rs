@@ -60,6 +60,7 @@ fn encode_signature(
         fingerprint: _,
     } = signature;
     let SignatureMetadata {
+        retention: _,
         inferred_unique,
         visibility,
         alias,

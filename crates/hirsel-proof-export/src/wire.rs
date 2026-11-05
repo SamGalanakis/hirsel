@@ -888,6 +888,7 @@ impl Snapshot<Cx> for SignatureMetadata {
     fn read(r: &mut Reader<'_, Cx>) -> Result<Self, DecodeError> {
         r.open("SignatureMetadata")?;
         let value = SignatureMetadata {
+            retention: Default::default(),
             inferred_unique: Snapshot::read(r)?,
             track_caller: Snapshot::read(r)?,
             visibility: Snapshot::read(r)?,

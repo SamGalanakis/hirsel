@@ -22,10 +22,12 @@ pub(super) struct HeaderSources {
 }
 pub(crate) struct SourceInputs {
     sources: SourceMap,
-    catalog: catalog::Catalog,
-    syntax: Arc<HeaderSources>,
+    pub(super) catalog: catalog::Catalog,
+    pub(super) syntax: Arc<HeaderSources>,
     declarations: crate::DeclarationIndex,
     installed: BTreeSet<FileId>,
+    retained: u64,
+    admission: OnceLock<crate::runtime::MemoryReservation>,
 }
 type SyntaxBinding = (DefId, ContentHash, hirsel_span::Anchor, u32);
 struct SyntaxOwner {
@@ -62,7 +64,7 @@ impl LiveSyntax {
         })
     }
 }
-pub(super) fn source_refusal(message: impl ToString) -> QueryError {
+pub(in crate::queries) fn source_refusal(message: impl ToString) -> QueryError {
     QueryError::Operational(hirsel_types::OperationalFailure {
         operation: "source syntax admission".into(),
         message: message.to_string(),
@@ -83,7 +85,79 @@ fn standalone_syntax(bytes: u64) -> Result<Charge, QueryError> {
 }
 
 impl SourceInputs {
+    pub(crate) fn retained_bytes(&self) -> u64 {
+        self.retained
+    }
+    pub(super) fn reusable(engine: &QueryEngine) -> Option<Arc<Self>> {
+        engine
+            .source_inputs
+            .iter()
+            .chain(engine.header_products.iter().map(|headers| &headers.inputs))
+            .chain(engine.snapshot.iter().filter_map(|(_, snapshot)| {
+                snapshot.header_products().map(|headers| &headers.inputs)
+            }))
+            .find(|inputs| inputs.matches(engine))
+            .cloned()
+    }
+    fn matches(&self, engine: &QueryEngine) -> bool {
+        if self.declarations.revision() != engine.declarations.revision()
+            || self.installed != engine.installed_sources
+        {
+            return false;
+        }
+        let mut observed = BTreeSet::new();
+        let mut binding = |id, file, body, anchor, occurrence| {
+            let matches = self.syntax.files.get(&file).is_some_and(|owner| {
+                owner
+                    .bindings
+                    .binary_search(&(id, body, anchor, occurrence))
+                    .is_ok()
+            }) && self.sources.anchor(anchor) == engine.sources.anchor(anchor)
+                && self
+                    .sources
+                    .file(file)
+                    .zip(engine.sources.file(file))
+                    .is_some_and(|(previous, current)| {
+                        std::ptr::eq(previous, current)
+                            || (previous.logical_path() == current.logical_path()
+                                && previous.anchor == current.anchor
+                                && previous.text() == current.text())
+                    });
+            if matches {
+                observed.insert((id, file, body, anchor, occurrence));
+            }
+            matches
+        };
+        for (id, file, body, anchor, occurrence) in engine.catalog.syntax_bindings() {
+            if !binding(id, file, body, anchor, occurrence) {
+                return false;
+            }
+        }
+        for (path, syntaxes) in &engine.items {
+            for syntax in syntaxes {
+                if !binding(
+                    DefId::intern(path),
+                    engine.item_file(syntax),
+                    syntax.text_hash,
+                    syntax.anchor,
+                    syntax.occurrence,
+                ) {
+                    return false;
+                }
+            }
+        }
+        observed.len()
+            == self
+                .syntax
+                .files
+                .values()
+                .map(|owner| owner.bindings.len())
+                .sum::<usize>()
+    }
     pub(crate) fn capture(engine: &QueryEngine) -> Arc<Self> {
+        if let Some(inputs) = Self::reusable(engine) {
+            return inputs;
+        }
         Arc::new(Self {
             sources: engine.sources.clone(),
             catalog: engine
@@ -112,6 +186,10 @@ impl SourceInputs {
             )),
             declarations: engine.declarations.header_inputs(),
             installed: engine.installed_sources.clone(),
+            retained: Self::metadata_bytes(engine)
+                .unwrap_or(u64::MAX)
+                .saturating_add(HeaderSources::written_bytes(engine)),
+            admission: OnceLock::new(),
         })
     }
     pub(crate) fn metadata_bytes(engine: &QueryEngine) -> Option<u64> {
@@ -123,6 +201,29 @@ impl SourceInputs {
             ))?
             .checked_add(engine.declarations.observation_bytes()?)?
             .checked_add((size_of::<Self>() + 2 * size_of::<usize>()) as u64)
+    }
+    pub(crate) fn unadmitted_bytes(&self) -> u64 {
+        if self.admission.get().is_some() {
+            0
+        } else {
+            self.retained
+        }
+    }
+    pub(crate) fn admit(
+        &self,
+        allowance: &mut crate::runtime::MemoryReservation,
+    ) -> Result<(), QueryError> {
+        if self.admission.get().is_none() {
+            let reservation = allowance
+                .split(self.retained)
+                .ok_or_else(|| source_refusal("operation input reservation"))?;
+            if let Err(reservation) = self.admission.set(reservation) {
+                allowance
+                    .join(reservation)
+                    .map_err(|_| source_refusal("operation input partition"))?;
+            }
+        }
+        Ok(())
     }
     pub(crate) fn install(self: &Arc<Self>, engine: &mut QueryEngine) {
         engine.source_inputs = Some(self.clone());

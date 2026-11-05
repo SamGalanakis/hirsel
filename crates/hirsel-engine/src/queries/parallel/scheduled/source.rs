@@ -307,7 +307,6 @@ mod tests {
             _inputs: allowance.split(0).unwrap(),
             allowance: Arc::new(MemoryReservationPool::new(allowance).ok().unwrap()),
             _sources: engine.sources.clone(),
-            headers: None,
         });
         (
             SiblingSources {

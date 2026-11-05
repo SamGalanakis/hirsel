@@ -599,6 +599,7 @@ impl Weight<'_> {
             fingerprint: _,
         } = &**value;
         let hirsel_types::SignatureMetadata {
+            retention: _,
             inferred_unique,
             visibility: _,
             alias: _,

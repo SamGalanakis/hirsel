@@ -40,6 +40,7 @@ struct SourceBindings {
     source_definitions: Box<[(Anchor, DefId)]>,
     parent: Option<Arc<SourceBindings>>,
     admission: std::sync::OnceLock<crate::runtime::MemoryReservation>,
+    cache: std::sync::Weak<SourceOwnership>,
 }
 impl SourceBindings {
     fn owner(&self, anchor: Anchor) -> Option<&(RecordOwner, u32)> {
@@ -140,6 +141,10 @@ impl SourceBindings {
                 .map_or(Some(0), |parent| parent.unadmitted_bytes())?,
         )
     }
+    fn admitted(&self) -> bool {
+        self.admission.get().is_some()
+            || self.parent.as_ref().is_some_and(|parent| parent.admitted())
+    }
     fn admit(&self, allowance: &mut crate::runtime::MemoryReservation) -> Option<()> {
         if let Some(parent) = &self.parent {
             parent.admit(allowance)?;
@@ -148,6 +153,15 @@ impl SourceBindings {
             let reservation = allowance.split(self.bytes()?)?;
             if let Err(reservation) = self.admission.set(reservation) {
                 allowance.join(reservation).ok()?;
+            }
+            if let Some(cache) = self.cache.upgrade()
+                && let Some(current) = cache
+                    .current
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_mut()
+            {
+                current.scalar = None;
             }
         }
         Some(())
@@ -188,15 +202,15 @@ impl Ord for RecordOwner {
 /// Recomputable projections of current source products, never semantic read
 /// observations. Mutating a source table drops this one product; detached
 /// workers retain their immutable generation through NativeRecordContext.
+struct SourceProjection {
+    placement: u64,
+    types: std::sync::Weak<hirsel_types::TypeInterner>,
+    bindings: std::sync::Weak<SourceBindings>,
+    scalar: Option<NativeRecordContext>,
+}
 #[derive(Default)]
 pub(crate) struct SourceOwnership {
-    current: std::sync::Mutex<
-        Option<(
-            u64,
-            std::sync::Weak<hirsel_types::TypeInterner>,
-            std::sync::Weak<SourceBindings>,
-        )>,
-    >,
+    current: std::sync::Mutex<Option<SourceProjection>>,
     // Execution assemblies retain the complete admitted source base while
     // registrations add bindings. Ordinary edited engines have no inherited base.
     inherited: std::sync::Mutex<Option<NativeRecordContext>>,
@@ -290,10 +304,10 @@ impl QueryEngine {
             .current
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some((placement, types, bindings)) = &*current
-            && *placement == self.sources.placement_revision()
-            && types.ptr_eq(&Arc::downgrade(self.types()))
-            && let Some(bindings) = bindings.upgrade()
+        if let Some(projection) = &*current
+            && projection.placement == self.sources.placement_revision()
+            && projection.types.ptr_eq(&Arc::downgrade(self.types()))
+            && let Some(bindings) = projection.bindings.upgrade()
         {
             return NativeRecordContext {
                 types: self.types.clone(),
@@ -310,11 +324,12 @@ impl QueryEngine {
         {
             context = context.extend(inherited, &self.sources);
         }
-        *current = Some((
-            self.sources.placement_revision(),
-            Arc::downgrade(&context.types),
-            Arc::downgrade(&context.bindings),
-        ));
+        *current = Some(SourceProjection {
+            placement: self.sources.placement_revision(),
+            types: Arc::downgrade(&context.types),
+            bindings: Arc::downgrade(&context.bindings),
+            scalar: (!context.bindings.admitted()).then(|| context.clone()),
+        });
         context
     }
 }
@@ -374,6 +389,7 @@ impl NativeRecordContext {
             bindings: Arc::new(SourceBindings {
                 parent: Some(inherited.bindings.clone()),
                 admission: Default::default(),
+                cache: self.bindings.cache.clone(),
                 owners: owners.into_iter().collect(),
                 anchors: anchors.into_iter().collect(),
                 source_definitions: definitions.into_iter().collect(),
@@ -563,6 +579,7 @@ impl NativeRecordContext {
             bindings: Arc::new(SourceBindings {
                 parent: None,
                 admission: Default::default(),
+                cache: Arc::downgrade(&engine.source_ownership),
                 owners: owners
                     .into_iter()
                     .map(|(anchor, (owner, occurrence))| {

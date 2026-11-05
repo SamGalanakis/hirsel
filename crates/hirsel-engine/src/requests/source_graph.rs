@@ -1483,6 +1483,9 @@ impl QueryEngine {
             }),
         };
         runtime.shutdown();
+        // The installed graph is the last reader of its admitted snapshot.
+        // Adopt its completed private facts before those reader leases end.
+        self.adopt_completed_headers();
         record_front_work(self, &installed.front, &front_before);
         record_lower_work(self, &installed.lower, &lower_before);
         checked

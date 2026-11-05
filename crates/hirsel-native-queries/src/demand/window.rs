@@ -141,7 +141,7 @@ impl StoredInstance {
         instances: &DemandInstances,
         key: &InstanceAddress,
     ) -> Result<Arc<DiscoveredInstance>, String> {
-        let lease = instances
+        let mut lease = instances
             .window
             .as_ref()
             .map(|window| window.read(self.bytes))
@@ -158,12 +158,15 @@ impl StoredInstance {
             hirsel_codec::from_text(std::str::from_utf8(&bytes).map_err(|e| e.to_string())?)
                 .map_err(|e| format!("native adapter facts: {e:?}"))?;
         let mut output = instances.decode_completed(key, self.product.clone(), adapters)?;
-        if output.retained_metadata_bytes() > self.bytes {
-            return Err(format!(
-                "native descriptor exceeds declared window: {} > {} B",
-                output.retained_metadata_bytes(),
-                self.bytes
-            ));
+        // Decode uses the consumer's scratch. Reopening may change allocation
+        // capacities and structural sharing without changing any content.
+        // Transfer the actual retained representation into the same quota
+        // before a fact or reader can escape this consumer.
+        if let Some(lease) = &mut lease {
+            Arc::get_mut(lease)
+                .ok_or("unpublished native reader is shared")?
+                .resize(output.retained_metadata_bytes())
+                .map_err(|e| format!("native facts for {}: {e}", key.instance.definition()))?;
         }
         Arc::make_mut(&mut output.facts)._window = lease.clone();
         Arc::make_mut(&mut Arc::make_mut(&mut output.facts).source)._window = lease.clone();

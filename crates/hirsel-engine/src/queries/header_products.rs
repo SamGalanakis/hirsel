@@ -101,6 +101,32 @@ struct HeaderAdmission {
     partition: Weak<dyn HeaderAllowance>,
     tables: Arc<std::sync::Mutex<Vec<Weak<HeaderProducts>>>>,
 }
+/// Exact inference inputs and admission identity, retained by the operation.
+/// Every payload reference is weak; this value owns no reservation.
+#[derive(Default)]
+pub(crate) struct PrivateInferenceScope {
+    inputs: Box<[[ContentHash; 3]]>,
+    working: AtomicU64,
+    registrations: Vec<Weak<AcceptedFrontRegistration>>,
+    admission: std::sync::Mutex<Option<HeaderAdmission>>,
+}
+impl operation_inputs::OperationOwner {
+    fn inference_scope(&self, inputs: &[[ContentHash; 3]]) -> Arc<PrivateInferenceScope> {
+        self.inference
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .rev()
+            .find(|scope| scope.inputs.as_ref() == inputs)
+            .cloned()
+            .unwrap_or_else(|| {
+                Arc::new(PrivateInferenceScope {
+                    inputs: inputs.into(),
+                    ..Default::default()
+                })
+            })
+    }
+}
 impl HeaderAdmission {
     fn lend(&self, charge: FrontCharge) -> Charge {
         Charge::retained(HeaderCharge::Front(charge))
@@ -173,7 +199,7 @@ pub(crate) struct HeaderProducts {
     /// Bumped by every row this table publishes after construction. An engine
     /// adopts the completed rows once per revision, not once per read.
     revision: AtomicU64,
-    admission: std::sync::Mutex<Option<HeaderAdmission>>,
+    scope: std::sync::Mutex<Arc<PrivateInferenceScope>>,
     validation_caches: ValidationCaches,
     environment: QueryEnvironment,
     adapters: HeaderPhases,
@@ -185,8 +211,6 @@ pub(crate) struct HeaderProducts {
     syntax: Arc<HeaderSources>,
     inputs: Arc<SourceInputs>,
     private: Option<private::PrivateProducts>,
-    private_working: AtomicU64,
-    private_registrations: OnceLock<Vec<Arc<AcceptedFrontRegistration>>>,
     declarations: crate::DeclarationIndex,
     catalog: catalog::Catalog,
     installed_sources: BTreeSet<FileId>,
@@ -210,6 +234,27 @@ pub(crate) struct HeaderProducts {
     failures: BTreeMap<DefId, Vec<hirsel_types::UniqueFailure>>,
 }
 impl HeaderProducts {
+    fn scope(&self) -> Arc<PrivateInferenceScope> {
+        self.scope.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+    fn track_scope(self: &Arc<Self>) {
+        if let Some(admission) = self
+            .scope()
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            let mut tables = admission.tables.lock().unwrap_or_else(|e| e.into_inner());
+            tables.retain(|table| table.strong_count() != 0);
+            if !tables
+                .iter()
+                .any(|table| table.ptr_eq(&Arc::downgrade(self)))
+            {
+                tables.push(Arc::downgrade(self));
+            }
+        }
+    }
     pub(crate) fn operation_owned(&self) -> bool {
         self.inputs.unadmitted_bytes() == 0
     }
@@ -273,12 +318,23 @@ impl HeaderProducts {
             })
             .map(|(id, summary)| (*id, summary.clone()))
             .collect();
-        Arc::new(Self {
+        let headers = Arc::new(Self {
             operation: engine.operation.clone(),
             rows,
             generation: AtomicU64::new(0),
             revision: AtomicU64::new(0),
-            admission: std::sync::Mutex::new(None),
+            scope: std::sync::Mutex::new(
+                engine
+                    .header_products
+                    .as_ref()
+                    .map(|headers| headers.scope())
+                    .filter(|scope| scope.inputs == engine.private_summary_inputs)
+                    .unwrap_or_else(|| {
+                        engine
+                            .operation
+                            .inference_scope(&engine.private_summary_inputs)
+                    }),
+            ),
             validation_caches: Default::default(),
             environment: engine.environment.clone(),
             adapters: HeaderPhases::capture(&engine.adapters),
@@ -290,8 +346,6 @@ impl HeaderProducts {
             syntax: inputs.syntax.clone(),
             inputs: inputs.clone(),
             private,
-            private_working: AtomicU64::new(0),
-            private_registrations: Default::default(),
             declarations: engine.declarations.header_inputs(),
             catalog: inputs.catalog.clone(),
             installed_sources: engine.installed_sources.clone(),
@@ -316,7 +370,9 @@ impl HeaderProducts {
             ),
             summaries: Arc::new(summaries),
             failures: engine.private_unique_failures.clone(),
-        })
+        });
+        headers.track_scope();
+        headers
     }
     fn declared_inputs(self: &Arc<Self>, engine: &QueryEngine) -> Option<Arc<Self>> {
         (self.provisional
@@ -343,6 +399,7 @@ impl HeaderProducts {
         let mut engine =
             QueryEngine::new_with_hold_bytes(self.environment.clone(), self.adapters.adapters(), 0);
         engine.operation = self.operation.clone();
+        engine.private_summary_inputs = self.scope().inputs.clone();
         engine.sources = self.sources.clone();
         engine.source_ownership = Arc::default();
         engine.private_summary_active = self.provisional;
@@ -539,7 +596,8 @@ impl HeaderProducts {
         }
     }
     fn admitted(&self) -> bool {
-        self.admission
+        self.scope()
+            .admission
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_some()
@@ -744,6 +802,7 @@ impl HeaderProducts {
             >::uninit()))
             .ok_or_else(|| sources::source_refusal("syntax size overflow"))?;
         let partition = self
+            .scope()
             .admission
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -777,6 +836,7 @@ impl HeaderProducts {
     /// unpinned entries first. A refusal is a resource failure, never a verdict.
     fn admit(&self, bytes: u64) -> Result<Charge, QueryError> {
         let admission = self
+            .scope()
             .admission
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1029,7 +1089,8 @@ impl HeaderProducts {
         backing: Arc<dyn HeaderAllowance>,
         remaining: Arc<std::sync::Mutex<u64>>,
     ) -> Arc<dyn HeaderAllowance> {
-        let mut admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
+        let scope = self.scope();
+        let mut admission = scope.admission.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(partition) = admission
             .as_ref()
             .and_then(|admission| admission.partition.upgrade())
@@ -1060,11 +1121,13 @@ impl HeaderProducts {
         inputs: &[[ContentHash; 3]],
     ) {
         let shared = front
+            .scope()
             .admission
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let mut admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
+        let scope = self.scope();
+        let mut admission = scope.admission.lock().unwrap_or_else(|e| e.into_inner());
         if admission.is_none() {
             if let Some(shared) = &shared {
                 let mut tables = shared.tables.lock().unwrap_or_else(|e| e.into_inner());
@@ -1082,11 +1145,13 @@ impl HeaderProducts {
         registrations: &[Arc<AcceptedFrontRegistration>],
     ) {
         let shared = previous
+            .scope()
             .admission
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let mut admission = self.admission.lock().unwrap_or_else(|e| e.into_inner());
+        let scope = self.scope();
+        let mut admission = scope.admission.lock().unwrap_or_else(|e| e.into_inner());
         if admission.is_none() {
             if let Some(shared) = &shared {
                 let mut tables = shared.tables.lock().unwrap_or_else(|e| e.into_inner());
@@ -1130,7 +1195,8 @@ impl HeaderProducts {
         Ok(())
     }
     fn validation_cache_registry(&self) -> ValidationCaches {
-        self.admission
+        self.scope()
+            .admission
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
@@ -1162,6 +1228,7 @@ impl HeaderProducts {
             return true;
         }
         let tables = self
+            .scope()
             .admission
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1236,6 +1303,7 @@ impl HeaderProducts {
                 continue;
             }
             let tables = self
+                .scope()
                 .admission
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -1395,45 +1463,23 @@ impl QueryEngine {
         let Some(entry) = &product.entry else {
             return;
         };
-        let detach = self.header_products.is_none() && product.charge.evictable();
-        if self.signatures.get(&id).is_some_and(|current| {
-            if detach {
-                self.operation
-                    .projections
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&(Arc::as_ptr(current) as usize))
-                    .is_some_and(|(source, reader)| {
-                        source
-                            .upgrade()
-                            .is_some_and(|source| Arc::ptr_eq(&source, current))
-                            && reader
-                                .upgrade()
-                                .is_some_and(|reader| Arc::ptr_eq(&reader, entry))
-                    })
-            } else {
-                Arc::ptr_eq(current, entry)
-                    || product
-                        .origin
-                        .upgrade()
-                        .is_some_and(|origin| Arc::ptr_eq(current, &origin))
-            }
-        }) {
-            return;
-        }
-        if detach
-            && let Some(current) = self.signatures.get(&id)
-            && (Arc::ptr_eq(current, entry)
+        let same = self.signatures.get(&id).is_some_and(|current| {
+            Arc::ptr_eq(current, entry)
                 || product
                     .origin
                     .upgrade()
-                    .is_some_and(|origin| Arc::ptr_eq(current, &origin)))
-        {
-            // This memo is already published here. Detaching its payload lease
-            // does not re-adopt its graph record or publication provenance.
-            let cached = self.operation.cache_header(current, entry);
-            self.snapshot_sources.insert(id, Arc::downgrade(&cached));
-            self.signatures.insert(id, cached);
+                    .is_some_and(|origin| Arc::ptr_eq(current, &origin))
+        });
+        // The scalar memo cache is optional. It must not pin an admitted
+        // reader's payload after that reader finishes.
+        if self.header_products.is_none() && product.charge.evictable() {
+            if same {
+                self.signatures.remove(&id);
+                self.snapshot_sources.remove(&id);
+            }
+            return;
+        }
+        if same {
             return;
         }
         self.graph.adopt(
@@ -1441,22 +1487,7 @@ impl QueryEngine {
             entry.memo.reads.clone(),
             entry.memo.durability,
         );
-        let cached = if detach {
-            let source = self
-                .signatures
-                .get(&id)
-                .filter(|source| {
-                    product
-                        .origin
-                        .upgrade()
-                        .is_some_and(|origin| Arc::ptr_eq(source, &origin))
-                })
-                .unwrap_or(entry);
-            self.operation.cache_header(source, entry)
-        } else {
-            entry.clone()
-        };
-        self.signatures.insert(id, cached.clone());
+        self.signatures.insert(id, entry.clone());
         if self.private_summary_active {
             if product.publication {
                 self.private_signature_publications.insert(id);
@@ -1464,7 +1495,7 @@ impl QueryEngine {
         } else {
             self.private_signature_publications.remove(&id);
         }
-        self.snapshot_sources.insert(id, Arc::downgrade(&cached));
+        self.snapshot_sources.insert(id, Arc::downgrade(entry));
     }
 }
 
@@ -1530,35 +1561,6 @@ impl operation_inputs::OperationOwner {
                         .as_ref()
                         .is_some_and(|old| Arc::ptr_eq(old, entry))
             })
-    }
-    fn cache_header(
-        &self,
-        source: &Arc<Entry<hirsel_types::SignatureRef>>,
-        reader: &Arc<Entry<hirsel_types::SignatureRef>>,
-    ) -> Arc<Entry<hirsel_types::SignatureRef>> {
-        let cached = Arc::new(Entry {
-            memo: source.memo.map_value(|output| QueryOutput {
-                value: Arc::new((*output.value).clone()),
-                diagnostics: output.diagnostics.clone(),
-                dependencies: output.dependencies.clone(),
-            }),
-            detail: source.detail.clone(),
-            products: source.products.clone(),
-            covered: source.covered.clone(),
-            depth: source.depth.clone(),
-            acceptance: source.acceptance.clone(),
-            verification: std::sync::Mutex::new(source.verification.lock().unwrap().clone()),
-            selections: source.selections.clone(),
-            consistent: source.consistent,
-        });
-        self.projections
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                Arc::as_ptr(&cached) as usize,
-                (Arc::downgrade(&cached), Arc::downgrade(reader)),
-            );
-        cached
     }
     fn project_header(
         &self,

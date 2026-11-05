@@ -12,6 +12,7 @@ type HeaderProjection = (
 /// Shared across every metadata assembler belonging to this operation.
 #[derive(Default)]
 pub(crate) struct OperationOwner {
+    pub(crate) inference: Mutex<Vec<Arc<header_products::PrivateInferenceScope>>>,
     pub(crate) captures: Mutex<Vec<Weak<NamespaceCapture>>>,
     pub(crate) inputs: Mutex<Option<Weak<header_products::SourceInputs>>>,
     pub(crate) payloads: Mutex<Vec<Weak<header_products::HeaderPayload>>>,

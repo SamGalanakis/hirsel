@@ -190,7 +190,13 @@ impl Ord for RecordOwner {
 /// workers retain their immutable generation through NativeRecordContext.
 #[derive(Default)]
 pub(crate) struct SourceOwnership {
-    current: std::sync::Mutex<Option<(u64, NativeRecordContext)>>,
+    current: std::sync::Mutex<
+        Option<(
+            u64,
+            std::sync::Weak<hirsel_types::TypeInterner>,
+            std::sync::Weak<SourceBindings>,
+        )>,
+    >,
     // Execution assemblies retain the complete admitted source base while
     // registrations add bindings. Ordinary edited engines have no inherited base.
     inherited: std::sync::Mutex<Option<NativeRecordContext>>,
@@ -284,11 +290,15 @@ impl QueryEngine {
             .current
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some((placement, context)) = &*current
+        if let Some((placement, types, bindings)) = &*current
             && *placement == self.sources.placement_revision()
-            && Arc::ptr_eq(&context.types, self.types())
+            && types.ptr_eq(&Arc::downgrade(self.types()))
+            && let Some(bindings) = bindings.upgrade()
         {
-            return context.clone();
+            return NativeRecordContext {
+                types: self.types.clone(),
+                bindings,
+            };
         }
         let mut context = NativeRecordContext::build(self);
         if let Some(inherited) = self
@@ -300,7 +310,11 @@ impl QueryEngine {
         {
             context = context.extend(inherited, &self.sources);
         }
-        *current = Some((self.sources.placement_revision(), context.clone()));
+        *current = Some((
+            self.sources.placement_revision(),
+            Arc::downgrade(&context.types),
+            Arc::downgrade(&context.bindings),
+        ));
         context
     }
 }

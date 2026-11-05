@@ -2069,6 +2069,17 @@ impl QueryTask for BodyTask {
         if pending {
             let Some(producer) = self.queries.demand.get().and_then(std::sync::Weak::upgrade)
             else {
+                if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
+                    eprintln!(
+                        "OWNER PROTOCOL BodyTask::poll generated={} registration=false demand_installed={} demand_strong={}",
+                        definition.path(),
+                        self.queries.demand.get().is_some(),
+                        self.queries
+                            .demand
+                            .get()
+                            .map_or(0, std::sync::Weak::strong_count)
+                    );
+                }
                 return finish(Err(self.queries.errors.protocol));
             };
             let demand = match producer.query(

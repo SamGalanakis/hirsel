@@ -236,20 +236,46 @@ impl HeaderProducts {
         working: u64,
         registrations: &[Arc<AcceptedFrontRegistration>],
     ) {
-        self.private_working.store(working, Ordering::Relaxed);
-        let _ = self.private_registrations.set(registrations.to_vec());
-    }
-    /// Preserve the working grant even when the previous snapshot needed no
-    /// private proof rows. Registration inputs still select their exact view.
-    pub(super) fn inherit_private_snapshot(&self, front: &Self, inputs: &[[ContentHash; 3]]) {
-        self.private_working.store(
-            front.private_working.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
-        if let Some(registrations) = front.private_registrations.get()
-            && private_unique::registration_inputs(registrations).as_ref() == inputs
+        let inputs = private_unique::registration_inputs(registrations);
+        let previous = self.scope();
+        let scope = if previous.inputs == inputs
+            && previous.working.load(Ordering::Relaxed) == working
+            && previous.registrations.len() == registrations.len()
+            && previous
+                .registrations
+                .iter()
+                .zip(registrations)
+                .all(|(old, current)| old.ptr_eq(&Arc::downgrade(current)))
         {
-            let _ = self.private_registrations.set(registrations.clone());
+            previous
+        } else {
+            Arc::new(PrivateInferenceScope {
+                inputs,
+                working: AtomicU64::new(working),
+                registrations: registrations.iter().map(Arc::downgrade).collect(),
+                admission: Mutex::new(
+                    previous
+                        .admission
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone(),
+                ),
+            })
+        };
+        *self.scope.lock().unwrap_or_else(|e| e.into_inner()) = scope.clone();
+        let mut scopes = self
+            .operation
+            .inference
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !scopes.iter().any(|old| Arc::ptr_eq(old, &scope)) {
+            scopes.push(scope);
+        }
+    }
+    pub(super) fn inherit_private_snapshot(&self, front: &Self, inputs: &[[ContentHash; 3]]) {
+        let previous = front.scope();
+        if previous.inputs.as_ref() == inputs {
+            *self.scope.lock().unwrap_or_else(|e| e.into_inner()) = previous;
         }
     }
     pub(super) fn inherit_private_scope(
@@ -258,7 +284,7 @@ impl HeaderProducts {
         registrations: &[Arc<AcceptedFrontRegistration>],
     ) {
         self.configure_private(
-            previous.private_working.load(Ordering::Relaxed),
+            previous.scope().working.load(Ordering::Relaxed),
             registrations,
         );
     }
@@ -322,7 +348,8 @@ impl HeaderProducts {
                 ),
             })
         };
-        let working = self.private_working.load(Ordering::Relaxed);
+        let scope = self.scope();
+        let working = scope.working.load(Ordering::Relaxed);
         if working == 0 {
             return Err(refusal("private working partition is not configured"));
         }
@@ -348,11 +375,13 @@ impl HeaderProducts {
         }
         // Counted before inference: a refused proof was still inferred.
         slot.inferences.fetch_add(1, Ordering::Relaxed);
-        let (facts, complete) = match engine.infer_private_module(
-            working,
-            self.private_registrations.get().map_or(&[], Vec::as_slice),
-            id,
-        ) {
+        let registrations = scope
+            .registrations
+            .iter()
+            .map(Weak::upgrade)
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| refusal("accepted inference input lease has ended"))?;
+        let (facts, complete) = match engine.infer_private_module(working, &registrations, id) {
             Ok(result) => result,
             Err(error @ QueryError::Operational(_)) => return Err(error),
             Err(error) => {
@@ -679,7 +708,7 @@ impl HeaderProducts {
             rows,
             generation: AtomicU64::new(0),
             revision: AtomicU64::new(0),
-            admission: Mutex::new(None),
+            scope: Mutex::new(self.scope()),
             validation_caches: Default::default(),
             environment: self.environment.clone(),
             adapters: self.adapters.clone(),
@@ -710,8 +739,6 @@ impl HeaderProducts {
             summary_reads: self.summary_reads.clone(),
             failures: Default::default(),
             private: None,
-            private_working: AtomicU64::new(self.private_working.load(Ordering::Relaxed)),
-            private_registrations: Default::default(),
         })
     }
 }

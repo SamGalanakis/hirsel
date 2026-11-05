@@ -69,15 +69,16 @@ def compiler():
     subprocess.run(['python3', 'tools/buck2/sync.py', '--if-stale'], cwd=ROOT, check=True)
     result = subprocess.run([str(ROOT / '.buck2/bin/buck2'), 'build',
                              '--target-platforms', '//tools/buck2:release',
-                             '//:hirsel-cli-bin-hirsel', '--show-json-output'],
+                             '//:hirsel-toolchain', '--show-json-output'],
                             cwd=ROOT, text=True, stdout=subprocess.PIPE, check=True)
     outputs = json.loads(result.stdout)
-    return ROOT / next(iter(outputs.values()))
+    return ROOT / next(iter(outputs.values())) / 'hirsel'
 
 
 def native_environment():
-    """Use the same declared LLVM/link inputs as bench/native/suite.py:159-173."""
-    targets = ['//tools/buck2/native-toolchain:' + name for name in ('llvm', 'kit', 'glibc_floor')]
+    """Use the pinned native link inputs from tools/buck2/native-toolchain/environment.tsv."""
+    targets = ['//tools/buck2/native-toolchain:' + name
+               for name in ('llvm', 'kit', 'glibc_floor', 'linker', 'runtime-auditor')]
     targets.append('//:hirsel-rt-archives')
     result = subprocess.run([str(ROOT / '.buck2/bin/buck2'), 'build', *targets,
                              '--show-json-output'], cwd=ROOT, text=True,
@@ -87,6 +88,7 @@ def native_environment():
     env = os.environ.copy()
     env.update(LLVM_SYS_231_PREFIX=paths['llvm'], HIRSEL_RUNTIME_ARCHIVES=paths['hirsel-rt-archives'],
                HIRSEL_LINK_KIT=paths['kit'], HIRSEL_GLIBC_FLOOR=paths['glibc_floor'],
+               HIRSEL_CAPTURE_LINKER=paths['linker'], HIRSEL_AUDITOR_PACKAGE=paths['runtime-auditor'],
                PATH=paths['llvm'] + '/bin:' + env.get('PATH', '/usr/bin:/bin'),
                LD_LIBRARY_PATH=paths['llvm'] + '/lib:' + env.get('LD_LIBRARY_PATH', ''))
     return env

@@ -1081,7 +1081,7 @@ def first_party(meta: dict) -> str:
                             data=["tools/core-broker", "tools/tests/core_broker.py"]))
     out.append("\n" + call("hirsel_script_test", name="gate-langarena", script="bench/langarena/tests.py",
                             full=False, production=True, bin_exes={"hirsel": "//:hirsel-cli-bin-hirsel"},
-                            runtime_archives=RUNTIME_ARCHIVES,
+                            products=PRODUCTS, runtime_archives=RUNTIME_ARCHIVES,
                             data=Raw('glob(["bench/langarena/*.hir", "bench/langarena/*.py", "bench/langarena/*.js", "bench/micro/measure.py", "stdlib/**"])')))
     for suite, case in (("bwt", "BwtOracles"), ("crc32", "CRC32Recurrence")):
         for engine in ("interpreter", "llvm", "cranelift"):

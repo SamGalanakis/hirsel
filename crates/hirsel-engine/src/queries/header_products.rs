@@ -809,7 +809,15 @@ impl HeaderProducts {
                 entry.memo.reads.clone(),
                 entry.memo.durability,
             );
-            engine.signatures.insert(id, entry.clone());
+            if product.charge.evictable()
+                && !engine.private_summary_active
+                && product.result.is_ok()
+            {
+                engine.signatures.remove(&id);
+                engine.snapshot_sources.remove(&id);
+            } else {
+                engine.signatures.insert(id, entry.clone());
+            }
             engine.adopted_headers = None;
         }
         product.result.clone()
@@ -1512,7 +1520,10 @@ impl QueryEngine {
         });
         // The scalar memo cache is optional. It must not pin an admitted
         // reader's payload after that reader finishes.
-        if self.header_products.is_none() && product.charge.evictable() {
+        if product.charge.evictable()
+            && (self.header_products.is_none()
+                || (!self.private_summary_active && product.result.is_ok()))
+        {
             if same {
                 self.signatures.remove(&id);
                 self.snapshot_sources.remove(&id);

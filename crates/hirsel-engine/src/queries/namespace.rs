@@ -1524,6 +1524,20 @@ mod tests {
                 Arc::new(Allowance(pool.clone())),
                 Arc::new(std::sync::Mutex::new(before)),
             );
+            let mut adapters = crate::phases::engine_only_adapters();
+            adapters.signature = Some(Arc::new(Header));
+            let mut consumer = capture.assembly(&adapters.source_phases()).unwrap();
+            let read = consumer.item_signature(&definitions[0]).unwrap();
+            let row = Arc::downgrade(headers.ready(definition).unwrap().entry.as_ref().unwrap());
+            drop(read);
+            consumer.adopt_completed_headers();
+            while headers.evict() {}
+            assert_eq!(
+                row.strong_count(),
+                0,
+                "a finished header reader must not leave its memo pinned in the consumer"
+            );
+            drop(consumer);
             for definition in &definitions {
                 drop(capture.syntax(definition).unwrap());
             }

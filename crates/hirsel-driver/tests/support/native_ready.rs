@@ -25,6 +25,19 @@ pub fn supplier(
     ToolError,
 > {
     let compiler = hirsel_front_phases::COMPILER;
+    supplier_with_compiler(path, replacement, entry, toolchain, compiler)
+}
+
+fn supplier_with_compiler(
+    path: &Path,
+    replacement: Option<&str>,
+    entry: &hirsel_engine::DefPath,
+    toolchain: &Toolchain,
+    compiler: hirsel_engine::Compiler,
+) -> Result<
+    impl FnMut(&Options) -> Result<Arc<NativeReady>, NativeError> + 'static + use<>,
+    ToolError,
+> {
     let mut requests = CompilerRequests::for_host(compiler.clone(), compiler.configuration())
         .with_toolchain(Arc::new(toolchain.clone()));
     let path = path.to_path_buf();
@@ -93,6 +106,18 @@ pub fn source_supplier(
     impl FnMut(&Options) -> Result<Arc<NativeReady>, NativeError> + 'static + use<>,
     ToolError,
 > {
+    source_supplier_with_compiler(source, entry, toolchain, hirsel_front_phases::COMPILER)
+}
+
+pub fn source_supplier_with_compiler(
+    source: &str,
+    entry: &hirsel_engine::DefPath,
+    toolchain: &Toolchain,
+    compiler: hirsel_engine::Compiler,
+) -> Result<
+    impl FnMut(&Options) -> Result<Arc<NativeReady>, NativeError> + 'static + use<>,
+    ToolError,
+> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("main.hir");
     std::fs::write(&path, source)?;
@@ -105,7 +130,7 @@ pub fn source_supplier(
         })
         .to_string(),
     )?;
-    let mut ready = supplier(&path, None, entry, toolchain)?;
+    let mut ready = supplier_with_compiler(&path, None, entry, toolchain, compiler)?;
     Ok(move |options: &Options| {
         let _source_owner = &directory;
         ready(options)

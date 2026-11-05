@@ -85,6 +85,7 @@ use hirsel_intern::jobs::{with_compiler_stack};
         let mut tools =
             hirsel_native_testing::toolchain_for_matrix(&root.path().join("runtime"), &matrix).unwrap();
         tools.execution = hirsel_native::Execution::Executable;
+        let mut cases = Vec::new();
         for &free in policies {
             let fixture = hirsel_native::Fixture {
                 cpu: Some(hirsel_run_schema::CpuGrant {
@@ -110,7 +111,25 @@ use hirsel_intern::jobs::{with_compiler_stack};
                 hirsel_native::Observation::of_reference(checked.observation.as_ref().unwrap()),
                 reference,
             );
-            let mut ready = native_ready::source_supplier(&source, &entry, &tools).unwrap();
+            cases.push((free, fixture, reference));
+        }
+        // The observations own the oracle. Release the reference compiler's
+        // process allowance before admitting the independent native compiler.
+        drop(checked);
+        drop(engine);
+        for (free, fixture, reference) in cases {
+            // Match cpu_compiler's transport fan-out. The program's CPU grant
+            // still exercises every requested physical worker width.
+            let compiler = hirsel_front_phases::COMPILER;
+            let mut config = compiler.configuration();
+            config.jobs = hirsel_intern::jobs::Jobs::new(config.jobs.get().min(4));
+            let mut ready = native_ready::source_supplier_with_compiler(
+                &source,
+                &entry,
+                &tools,
+                compiler.with_config(config),
+            )
+            .unwrap();
             let dir = root.path().join(if free { "free" } else { "ordered" });
             std::fs::create_dir_all(&dir).unwrap();
             let outcomes = hirsel_native_testing::differential_ready(

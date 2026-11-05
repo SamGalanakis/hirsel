@@ -65,7 +65,8 @@ struct LiveDefinition {
     original: Option<(ContentHash, ContentHash)>,
     records: crate::NativeRecords,
     anchors: crate::NativeRecordContext,
-    archive: Mutex<Option<ProductArchive>>,
+    archive: Mutex<Option<Reference>>,
+    store: Arc<dyn ResultStore>,
     remaining: Arc<Mutex<u64>>,
     charge: u64,
     _ownership: Arc<SourceOwnership>,
@@ -124,11 +125,17 @@ impl LiveProductValue for LiveDefinition {
         OUTPUT
     }
     fn archive(&self, admission: ArchiveAdmission<'_>) -> std::io::Result<ProductArchive> {
-        let mut cached = self.archive.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(archive) = &*cached {
-            return Ok(archive.clone());
+        let cached = self.archive.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(reference) = *cached {
+            return ProductArchive::open_retained(
+                &*self.store,
+                reference,
+                self._ownership._allowance.clone(),
+                self.remaining.clone(),
+            );
         }
-        let archive = ProductArchive::materialize(OUTPUT, admission, |grant| {
+        drop(cached);
+        ProductArchive::materialize(OUTPUT, admission, |grant| {
             if grant.bytes() < self.charge {
                 return Err(std::io::ErrorKind::OutOfMemory.into());
             }
@@ -139,9 +146,7 @@ impl LiveProductValue for LiveDefinition {
                 return Err(std::io::ErrorKind::OutOfMemory.into());
             }
             Ok(bytes)
-        })?;
-        *cached = Some(archive.clone());
-        Ok(archive)
+        })
     }
 }
 fn live_bytes(
@@ -208,6 +213,11 @@ pub struct FrontNativeDefinitionQueries {
     _ownership: Arc<SourceOwnership>,
 }
 impl FrontNativeDefinitionQueries {
+    /// Fixed inputs and currently held output or archive-reader charges.
+    pub fn retained_bytes(&self) -> u64 {
+        self._ownership._allowance.bytes()
+            - *self.remaining.lock().unwrap_or_else(|e| e.into_inner())
+    }
     fn input(&self, path: &DefPath) -> Result<DemandedInput<'_>, QueryError> {
         let namespace = self.front.namespace();
         let signature = namespace.header(path)?.output.value.clone();
@@ -329,8 +339,14 @@ impl FrontNativeDefinitionQueries {
             .live_value::<LiveDefinition>()
             .ok_or(QueryError::NotImplemented)?;
         let mut cached = live.archive.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(archive) = &*cached {
-            return Ok(archive.clone());
+        if let Some(reference) = *cached {
+            return ProductArchive::open_retained(
+                &*self.store,
+                reference,
+                self._ownership._allowance.clone(),
+                self.remaining.clone(),
+            )
+            .map_err(|_| native_selection_error("native export exceeds retained admission"));
         }
         if live.charge > scratch {
             return Err(native_selection_error(
@@ -363,7 +379,7 @@ impl FrontNativeDefinitionQueries {
             self.store
                 .associate_product(product.address, product.action, record);
         }
-        *cached = Some(archive.clone());
+        *cached = Some(record);
         Ok(archive)
     }
     pub fn failure(&self, reference: Reference) -> Option<QueryError> {
@@ -645,6 +661,7 @@ impl Task {
                 records: owner.records.clone(),
                 anchors: owner.anchors.clone(),
                 archive: Mutex::new(None),
+                store: owner.store.clone(),
                 remaining: owner.remaining.clone(),
                 charge,
                 _ownership: owner._ownership.clone(),
@@ -658,14 +675,9 @@ impl Task {
                     .store
                     .put_content(OUTPUT, &bytes)
                     .ok_or(owner.errors.resource)?;
-                let archive = ProductArchive::from_retained_bytes(
-                    record,
-                    bytes.into(),
-                    owner._ownership._allowance.clone(),
-                    owner.remaining.clone(),
-                )
-                .map_err(|_| owner.errors.resource)?;
-                *live.archive.lock().unwrap_or_else(|e| e.into_inner()) = Some(archive);
+                // Publication keeps the content identity. Only an archive reader
+                // retains a decoded buffer and its producer-partition lease.
+                *live.archive.lock().unwrap_or_else(|e| e.into_inner()) = Some(record);
                 owner
                     .store
                     .associate_product(self.id.address, action, record);

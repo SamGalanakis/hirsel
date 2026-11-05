@@ -106,14 +106,27 @@ fn admitted_native_definition_products_match_independent_scalar_products() {
                 .collect::<Vec<_>>();
             for output in &outputs {
                 let product = (output.product.product).clone().unwrap();
-                let bytes = store
-                    .get_content(
-                        product
-                            .archive(ArchiveAdmission::Retained)
-                            .unwrap()
-                            .reference(),
-                    )
-                    .unwrap();
+                let before = native.retained_bytes();
+                let archive = product.archive(ArchiveAdmission::Retained).unwrap();
+                let held = native.retained_bytes();
+                assert!(
+                    held > before,
+                    "the archive reader holds its backing admission"
+                );
+                let alias = archive.clone();
+                drop(archive);
+                assert_eq!(
+                    native.retained_bytes(),
+                    held,
+                    "an active alias retains admission"
+                );
+                let bytes = store.get_content(alias.reference()).unwrap();
+                drop(alias);
+                assert_eq!(
+                    native.retained_bytes(),
+                    before,
+                    "the final reader returns admission while the product remains cached"
+                );
                 if let Some(previous) = previous_products.insert(
                     (
                         verify == Verify::On,

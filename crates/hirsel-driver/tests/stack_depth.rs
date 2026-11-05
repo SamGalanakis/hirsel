@@ -1,10 +1,8 @@
 //! Measure live debug stacks at allocation sites in each real recursive phase.
 //! It keeps its own test binary: its global allocator observes every allocation.
-use hirsel_driver::*;
 use hirsel_engine::*;
 use hirsel_front_phases::*;
-use hirsel_host_io::launch::*;
-use hirsel_intern::jobs::with_compiler_stack;
+use hirsel_intern::jobs::{COMPILER_STACK_BYTES, with_compiler_stack};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,

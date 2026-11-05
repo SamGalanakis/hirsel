@@ -7,7 +7,6 @@ rust-version.workspace = true
 default-run = "hirsel-conformance"
 
 [dependencies]
-hirsel-query-products = { path = "../hirsel-query-products" }
 hirsel-engine-admission = { path = "../hirsel-engine-admission" }
 hirsel-requests = { path = "../hirsel-requests" }
 hirsel-compiler-identity = { path = "../hirsel-compiler-identity" }

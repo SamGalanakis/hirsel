@@ -668,7 +668,6 @@ dependencies = [
  "hirsel-native-queries",
  "hirsel-native-testing",
  "hirsel-proof-export",
- "hirsel-query-products",
  "hirsel-requests",
  "hirsel-run-config",
  "hirsel-run-schema",

@@ -1738,7 +1738,7 @@ mod dependency_tests {
     use crate::store::Reference;
     use crate::store::RequestStore;
     use crate::store::ResultStore;
-    use hirsel_artifact_store::{Action, Address, Domain, Reference};
+    use hirsel_artifact_store::{Action, Address, Domain};
     use hirsel_engine_runtime::{ArchiveAdmission, LiveDependencyProduct, ProductRef};
     use std::sync::Arc;
 

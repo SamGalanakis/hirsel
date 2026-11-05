@@ -1,18 +1,24 @@
 //! An installed package binds its discovery inputs and complete product closure.
 //! This is ordinary untrusted content. It never imports verifier authority.
 use super::*;
+mod semantic;
 use bincode::Options;
 use hirsel_syntax::{FileContext, PackageId};
+pub use semantic::{InstalledDefinition, InstalledDefinitionKey, InstalledDefinitionOwnership};
+pub(crate) use semantic::{
+    InstalledSemanticInput, InstalledSpecializations, SEMANTIC_BODY, SEMANTIC_HEADER,
+    SEMANTIC_INPUT, SEMANTIC_SOURCE,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 const PACKAGE: Domain = Domain {
     kind: 0x4600_0039,
-    schema: 1,
+    schema: 2,
 };
 fn address() -> Address {
-    Address(ContentHash::of_bytes(b"hirsel.installed-package.v1"))
+    Address(ContentHash::of_bytes(b"hirsel.installed-package.v2"))
 }
 
 #[cfg(test)]
@@ -323,6 +329,7 @@ pub struct InstalledPackage {
     pub manifest: Vec<u8>,
     pub sources: Vec<InstalledSource>,
     pub dependencies: Vec<PackageId>,
+    definitions: BTreeMap<DefPath, InstalledDefinition>,
     /// Physical action rows and content required by the completed Precompute.
     rows: Vec<(ContentHash, ContentHash, Reference)>,
     contents: Vec<Reference>,
@@ -338,7 +345,7 @@ pub(super) struct OpenedInstallation {
     pub(super) records: Arc<InstalledRecords>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct InstallationRecords {
     pub rows: BTreeMap<ContentHash, (Action, Reference)>,
     pub contents: BTreeMap<ContentHash, Reference>,
@@ -357,6 +364,16 @@ impl InstalledPackage {
             self.rows.capacity() * std::mem::size_of::<(ContentHash, ContentHash, Reference)>(),
         );
         weight.add(self.contents.capacity() * std::mem::size_of::<Reference>());
+        weight.tree::<DefPath, InstalledDefinition>(self.definitions.len());
+        for (path, definition) in &self.definitions {
+            weight.path(path);
+            weight.path(&definition.key.definition);
+            weight.vec(&definition.key.specialization, |weight, (name, path)| {
+                weight.add(name.capacity());
+                weight.path(path);
+            });
+            weight.add(definition.ownership.source_logical.as_os_str().len());
+        }
         weight.add(self.sources.capacity() * std::mem::size_of::<InstalledSource>());
         for source in &self.sources {
             weight.add(source.path.as_os_str().len() + source.logical.as_os_str().len());
@@ -390,6 +407,7 @@ impl InstalledPackage {
             manifest,
             sources,
             dependencies,
+            definitions: BTreeMap::new(),
             rows: vec![],
             contents: vec![],
             records: Default::default(),
@@ -401,6 +419,8 @@ impl InstalledPackage {
         store: &hirsel_artifact_store::Store,
         records: &InstallationRecords,
     ) -> std::io::Result<()> {
+        let mut records = records.clone();
+        self.index_definitions(store, &mut records)?;
         self.rows = records
             .rows
             .iter()
@@ -413,6 +433,7 @@ impl InstalledPackage {
             ));
         }
         // Publish last, after fresh reads prove the complete installation exists.
+        self.check_definitions().map_err(std::io::Error::other)?;
         self.check_records(store).map_err(std::io::Error::other)?;
         let bytes = bincode::serialize(&self).map_err(std::io::Error::other)?;
         let reference = store.put(PACKAGE, &bytes)?;
@@ -482,6 +503,7 @@ impl InstalledPackage {
             if !installed.dependencies.is_empty() {
                 return Err("installed package dependency products are unavailable".into());
             }
+            installed.check_definitions()?;
             let contents = installed.check_records(store)?;
             let rows: BTreeMap<_, _> = installed
                 .rows

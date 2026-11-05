@@ -139,6 +139,10 @@ impl ScratchStore {
     }
 }
 impl ResultStore for ScratchStore {
+    fn installation_output(&self) -> Option<Arc<dyn ResultStore>> {
+        self.selected.installation_output()
+    }
+
     fn installed_package(
         &self,
         package: &hirsel_syntax::PackageId,

@@ -3,6 +3,7 @@ use super::*;
 mod acceptance;
 mod content;
 mod graph_reader;
+mod installed_inputs;
 mod precompute;
 mod proof_export;
 mod semantic;
@@ -63,6 +64,8 @@ struct Input {
     signature: SignatureRef,
     owner_signature: SignatureRef,
     content: Reference,
+    content_decode_bytes: u64,
+    specializations: Option<Arc<crate::store::InstalledSpecializations>>,
     dependencies: BTreeSet<DefPath>,
     source: bool,
     executable: bool,
@@ -1401,7 +1404,7 @@ impl QueryEngine {
                 .map(|id| id.path().clone()),
         );
         let mut inputs = BTreeMap::new();
-        let required = FrontRunQueries::input_bytes(&paths.iter().cloned().collect::<Vec<_>>())
+        let mut required = FrontRunQueries::input_bytes(&paths.iter().cloned().collect::<Vec<_>>())
             .ok_or_else(|| operational("Run input inventory overflow"))?;
         for path in paths {
             let source = source_paths.binary_search(&path).is_ok();
@@ -1459,11 +1462,47 @@ impl QueryEngine {
                     dependencies.insert(check.function.clone());
                 }
             }
+            let specializations = if source
+                && self
+                    .source_facts(&path)
+                    .is_some_and(|facts| facts.specializes)
+            {
+                let definitions = self.specialization_dependencies(&path).ok_or_else(|| {
+                    operational("installed specialization discovery is unavailable")
+                })?;
+                let mut reads = Vec::new();
+                self.specialization_dependencies
+                    .get(&DefId::intern(&path))
+                    .ok_or_else(|| operational("installed specialization receipt is unavailable"))?
+                    .reads
+                    .encode(&mut reads);
+                let specializations =
+                    Arc::new(crate::store::InstalledSpecializations { reads, definitions });
+                let mut weight = crate::NativeMetadataWeight::default();
+                weight.arc(&specializations);
+                weight.flat_vec(&specializations.reads);
+                weight.vec(&specializations.definitions, |weight, path| {
+                    weight.path(path)
+                });
+                required = required
+                    .checked_add(weight.bytes())
+                    .ok_or_else(|| operational("Run specialization inputs overflow"))?;
+                Some(specializations)
+            } else {
+                None
+            };
             if required > limit {
                 return Err(operational("Run inputs exceed admission"));
             }
             let bytes = bincode::serialize(&content)
                 .map_err(|_| operational("Run input content encoding"))?;
+            let mut content_weight = crate::NativeMetadataWeight::default();
+            content_weight.add(std::mem::size_of::<Vec<Vec<u8>>>());
+            content_weight.vec(&content, |weight, field| weight.flat_vec(field));
+            let content_decode_bytes = content_weight
+                .bytes()
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| operational("Run input content size overflow"))?;
             let content = store
                 .put_content(INPUT_CONTENT, &bytes)
                 .filter(|reference| INPUT_CONTENT.reference(&bytes) == Some(*reference))
@@ -1474,6 +1513,8 @@ impl QueryEngine {
                     signature,
                     owner_signature,
                     content,
+                    content_decode_bytes,
+                    specializations,
                     dependencies,
                     source,
                     executable,

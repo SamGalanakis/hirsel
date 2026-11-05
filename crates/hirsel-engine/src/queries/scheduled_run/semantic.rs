@@ -111,6 +111,9 @@ impl SemanticTask {
         source: Option<source_products::Body>,
     ) -> Result<ProductRef, QueryError> {
         let queries = &self.node.queries;
+        if queries.precompute.is_some() {
+            queries.publish_installed_input(&self.node.root)?;
+        }
         let source = source
             .map(|source| source_products::Packed::new(queries, source))
             .transpose()?;

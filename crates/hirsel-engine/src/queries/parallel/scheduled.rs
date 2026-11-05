@@ -2799,7 +2799,10 @@ pub(in crate::queries) struct SpecializationDependencies {
     pub(in crate::queries) paths: Vec<DefPath>,
 }
 impl QueryEngine {
-    fn specialization_dependencies(&mut self, definition: &DefPath) -> Option<Vec<DefPath>> {
+    pub(in crate::queries) fn specialization_dependencies(
+        &mut self,
+        definition: &DefPath,
+    ) -> Option<Vec<DefPath>> {
         let id = DefId::intern(definition);
         let text = self.key_text(definition, QueryKind::Resolve).ok()?;
         if let Some(kept) = self.specialization_dependencies.remove(&id) {

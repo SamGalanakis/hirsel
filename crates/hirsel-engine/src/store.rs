@@ -21,7 +21,14 @@ mod remote;
 mod request;
 pub use dir::{DirStore, FORMAT, GcReport};
 pub(crate) use installed::InstalledSourceRecords;
-pub use installed::{InstalledPackage, InstalledSource};
+pub use installed::{
+    InstalledDefinition, InstalledDefinitionKey, InstalledDefinitionOwnership, InstalledPackage,
+    InstalledSource,
+};
+pub(crate) use installed::{
+    InstalledSemanticInput, InstalledSpecializations, SEMANTIC_BODY, SEMANTIC_HEADER,
+    SEMANTIC_INPUT, SEMANTIC_SOURCE,
+};
 pub use remote::RemoteStore;
 pub use request::RequestStore;
 
@@ -70,6 +77,12 @@ pub trait ResultStore: Send + Sync {
             "installed products for {}@{} are not configured",
             package.name, package.version
         ))
+    }
+    /// Explicit durable installation output. Installation-only records do not
+    /// need a second copy in the request's temporary source transport. The
+    /// manifest is still published only after the completed Precompute root.
+    fn installation_output(&self) -> Option<Arc<dyn ResultStore>> {
+        None
     }
     /// Retain an immutable live value in this request's existing partition.
     /// Its charge survives the producer and returns after the final reader.

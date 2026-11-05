@@ -293,6 +293,10 @@ impl hirsel_validate::VerifierRows for RequestVerifierRows {
     }
 }
 impl ResultStore for RequestStore {
+    fn installation_output(&self) -> Option<Arc<dyn ResultStore>> {
+        self.backend.installation_output()
+    }
+
     fn installed_package(
         &self,
         package: &hirsel_syntax::PackageId,

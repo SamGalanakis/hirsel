@@ -272,6 +272,12 @@ impl DirStore {
 }
 
 impl ResultStore for DirStore {
+    fn installation_output(&self) -> Option<Arc<dyn ResultStore>> {
+        self.installation
+            .as_ref()
+            .map(|_| Arc::new(self.clone()) as Arc<dyn ResultStore>)
+    }
+
     fn installed_package(
         &self,
         package: &hirsel_syntax::PackageId,

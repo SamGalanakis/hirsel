@@ -288,9 +288,9 @@ impl LocalFutureTask {
             let composed = std::mem::take(&mut self.reads.0.borrow_mut().composed);
             let composed = match composed {
                 Composed::Requested(mut task) => match task.poll(cx) {
-                    QueryPoll::Waiting(dependencies) => {
+                    waiting @ (QueryPoll::Waiting(_) | QueryPoll::WaitingAny(_)) => {
                         self.reads.0.borrow_mut().composed = Composed::Requested(task);
-                        return QueryPoll::Waiting(dependencies);
+                        return waiting;
                     }
                     QueryPoll::Complete(product) => Composed::Completed(Ok(product)),
                     QueryPoll::Failed(error) => Composed::Completed(Err(error)),
@@ -535,7 +535,7 @@ mod tests {
             assert_eq!(task.reads.0.borrow().limit, slots.min(namespace));
             loop {
                 match task.poll(&mut Completed) {
-                    QueryPoll::Waiting(_) => (),
+                    QueryPoll::Waiting(_) | QueryPoll::WaitingAny(_) => (),
                     QueryPoll::Complete(value) => {
                         assert!(accepted);
                         assert_eq!(value, product(query(0)));

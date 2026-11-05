@@ -1866,6 +1866,7 @@ fn bare_node() -> super::Node {
     }
     super::Node {
         state: NodeState::Ready(Box::new(ParkedExecution {
+            wait_for: WaitFor::All,
             task: ParkedTask::Send(Box::new(EmptyTask)),
             charge: Charge {
                 weight: MemoryWeight::default(),

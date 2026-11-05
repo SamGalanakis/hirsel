@@ -167,7 +167,13 @@ impl Charge {
         bytes
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WaitFor {
+    All,
+    Any,
+}
 struct ParkedExecution {
+    wait_for: WaitFor,
     task: ParkedTask,
     charge: Charge,
 }
@@ -228,12 +234,13 @@ impl ParkedExecution {
     }
 }
 impl InFlightExecution {
-    fn wait(self, returned_task: ParkedTask, ready: bool) -> NodeState {
+    fn wait(self, returned_task: ParkedTask, ready: bool, wait_for: WaitFor) -> NodeState {
         let task = match self.dispatch {
             Dispatch::Send => returned_task,
             Dispatch::Local { factory, home } => ParkedTask::LocalBound { factory, home },
         };
         let execution = Box::new(ParkedExecution {
+            wait_for,
             task,
             charge: self.charge,
         });
@@ -989,6 +996,7 @@ impl State {
                         return Err(self.errors.protocol);
                     }
                     Ok(ParkedExecution {
+                        wait_for: WaitFor::All,
                         task: ParkedTask::Send(task),
                         charge: Charge {
                             weight,
@@ -999,6 +1007,7 @@ impl State {
                 Some(Factory::Local(factory)) => {
                     let weight = factory.weight(id(query))?;
                     Ok(ParkedExecution {
+                        wait_for: WaitFor::All,
                         task: ParkedTask::LocalUnbound(factory),
                         charge: Charge {
                             weight,
@@ -1766,7 +1775,10 @@ fn run_worker(shared: Arc<Shared>, worker: usize, stack: u64, caller: bool) {
         };
         // Terminal task frames are destroyed before their charge is retired.
         // Suspended Send/local continuations keep their full admitted weight.
-        let keep_local = matches!(outcome, Ok(QueryPoll::Waiting(_)));
+        let keep_local = matches!(
+            outcome,
+            Ok(QueryPoll::Waiting(_) | QueryPoll::WaitingAny(_))
+        );
         if !keep_local
             && let Err(panic) = catch_unwind(AssertUnwindSafe(|| {
                 drop(returned_task.take());
@@ -1813,6 +1825,11 @@ fn run_worker(shared: Arc<Shared>, worker: usize, stack: u64, caller: bool) {
             }
             state.advance_progress();
         } else {
+            let wait_for = if matches!(&outcome, Ok(QueryPoll::WaitingAny(_))) {
+                WaitFor::Any
+            } else {
+                WaitFor::All
+            };
             match outcome {
                 Ok(QueryPoll::Complete(product))
                     if cx.pending.is_empty() && product.address == Address(query.1) =>
@@ -1820,7 +1837,7 @@ fn run_worker(shared: Arc<Shared>, worker: usize, stack: u64, caller: bool) {
                     state.settle(query, Ok(product))
                 }
                 Ok(QueryPoll::Failed(error)) => state.settle(query, Err(error)),
-                Ok(QueryPoll::Waiting(waits))
+                Ok(QueryPoll::Waiting(waits) | QueryPoll::WaitingAny(waits))
                     if (!cx.pending.is_empty()
                         && waits.iter().all(|q| state.nodes.node_id(key(*q)).is_some())
                         && waits
@@ -1835,14 +1852,20 @@ fn run_worker(shared: Arc<Shared>, worker: usize, stack: u64, caller: bool) {
                 {
                     let progress_revision = state.progress_revision;
                     let parked = state.admission_waiters.get(&query).copied();
-                    let node = state.nodes.get_mut(&query).unwrap();
-                    let ready = node.unsatisfied == 0
+                    let unsatisfied = state.nodes[&query].unsatisfied;
+                    let dependency_ready = unsatisfied == 0
+                        || (wait_for == WaitFor::Any
+                            && waits
+                                .iter()
+                                .any(|dependency| state.result(key(*dependency)).is_some()));
+                    let ready = dependency_ready
                         && (!cx.admission_wait
                             || parked.is_some_and(|revision| progress_revision > revision));
+                    let node = state.nodes.get_mut(&query).unwrap();
                     if let (NodeState::Running(execution), Some(task)) =
                         (std::mem::take(&mut node.state), returned_task)
                     {
-                        node.state = execution.wait(task, ready);
+                        node.state = execution.wait(task, ready, wait_for);
                     }
                     state.stats.waits += 1;
                     let elapsed_ns = state.elapsed();

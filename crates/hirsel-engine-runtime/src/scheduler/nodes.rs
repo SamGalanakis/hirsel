@@ -642,7 +642,8 @@ impl Nodes {
             .unsatisfied
             .checked_sub(1)
             .expect("one pending token");
-        if waiter.unsatisfied == 0 && matches!(waiter.state, NodeState::Waiting(_)) {
+        if matches!(&waiter.state, NodeState::Waiting(execution) if waiter.unsatisfied == 0 || execution.wait_for == WaitFor::Any)
+        {
             waiter.state = std::mem::take(&mut waiter.state).wake();
             Some(self.key_at(subscription.waiter.slot))
         } else {

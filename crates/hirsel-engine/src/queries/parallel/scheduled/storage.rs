@@ -219,8 +219,8 @@ impl QueryTask for StorageTask {
                     // frame and working grant, just as the storage graph owns
                     // one recipe. Its actual P read remains the dependency.
                     match self.body.as_mut().unwrap().poll(cx) {
-                        QueryPoll::Waiting(dependencies) => {
-                            return QueryPoll::Waiting(dependencies);
+                        waiting @ (QueryPoll::Waiting(_) | QueryPoll::WaitingAny(_)) => {
+                            return waiting;
                         }
                         QueryPoll::Failed(error) => Err(error),
                         QueryPoll::Complete(product) => self.run(product),

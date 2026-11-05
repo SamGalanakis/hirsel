@@ -315,7 +315,7 @@ impl Task {
                 // actual runtime reads; Pending releases this root's execution
                 // grant instead of allocating a scheduler node per definition.
                 let product = match recipe.poll(cx) {
-                    QueryPoll::Waiting(dependencies) => {
+                    QueryPoll::Waiting(dependencies) | QueryPoll::WaitingAny(dependencies) => {
                         let [dependency] = dependencies.as_slice() else {
                             return Poll::Ready(Err(owner.errors.protocol));
                         };

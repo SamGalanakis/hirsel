@@ -79,6 +79,9 @@ pub struct MemoryWeight {
 #[derive(Clone, Debug)]
 pub enum QueryPoll {
     Waiting(Vec<QueryId>),
+    /// Resume when any dependency settles, so a bounded producer can release
+    /// completed body claims before its remaining dependencies finish.
+    WaitingAny(Vec<QueryId>),
     Complete(ProductRef),
     /// Immutable diagnostics, including phase/source-order metadata.
     Failed(Reference),
